@@ -82,9 +82,8 @@ fn build_registry(cfg: &Config) -> DriverRegistry {
         builder = builder.register(sift_driver_postgres::PgDriver::new());
     }
 
-    // Always register the SQL Server stub so the registry lists it as a
-    // known engine (returns UnsupportedForEngine on actual use). Real
-    // tiberius impl lands at PHASE0 step 15.
+    // Register SQL Server via tiberius. Connections still open lazily per
+    // OpenConnection request.
     builder = builder.register(sift_driver_sqlserver::MssqlDriver::new());
 
     builder.build()

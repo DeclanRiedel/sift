@@ -407,7 +407,7 @@ async fn execute_returns_drained_rows_and_affected_count() {
 }
 
 #[tokio::test]
-async fn unsupported_engine_yields_422() {
+async fn unregistered_engine_yields_422() {
     let app = app(test_state());
 
     let session: sift_protocol::SessionInfo = body_json(
@@ -420,7 +420,6 @@ async fn unsupported_engine_yields_422() {
     .await;
     let sid = session.id;
 
-    // SQL Server is registered but is the stub that returns UnsupportedForEngine.
     let res = app
         .oneshot(post_json(
             format!("/v1/sessions/{sid}/connections"),
@@ -432,8 +431,8 @@ async fn unsupported_engine_yields_422() {
         ))
         .await
         .unwrap();
-    // The MssqlDriver stub returns UnsupportedForEngine on `open`, so the
-    // server maps it to 422.
+    // This app registers only the mock Postgres driver; SQL Server is
+    // therefore rejected at registry lookup and mapped to 422.
     assert_eq!(res.status(), StatusCode::UNPROCESSABLE_ENTITY);
 }
 
