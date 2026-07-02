@@ -15,7 +15,7 @@ use sift_protocol::{
     ObjectInfo, ObjectKind, PrimitiveType, Row, SchemaScope, SchemaSnapshot, SchemaTree,
     ServerInfo, TxId, TxMode, TypeCategory, TypeRef, Value,
 };
-use tiberius::{AuthMethod, Client, ColumnType, Config, EncryptionLevel, QueryItem};
+use tiberius::{AuthMethod, Client, ColumnType, Config, EncryptionLevel, QueryItem, ToSql};
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 use tokio::sync::Mutex;
@@ -280,13 +280,12 @@ async fn run_query(
     tx: mpsc::Sender<sift_protocol::Page>,
 ) {
     let result = async {
-        if !req.params.is_empty() {
-            return Err(DriverError::new(
-                Code::UnsupportedForEngine,
-                "SQL Server dynamic parameters not wired yet",
-            ));
-        }
-        let mut stream = conn.query(req.sql, &[]).await.map_err(ms_err)?;
+        let param_boxes = params_to_mssql(req.params)?;
+        let param_refs: Vec<&dyn ToSql> = param_boxes
+            .iter()
+            .map(|p| p.as_ref() as &dyn ToSql)
+            .collect();
+        let mut stream = conn.query(req.sql, &param_refs).await.map_err(ms_err)?;
         let mut batch = Vec::with_capacity(ROW_BATCH_SIZE);
         while let Some(item) = stream.next().await {
             match item.map_err(ms_err)? {
@@ -476,6 +475,39 @@ fn ms_value(row: &tiberius::Row, idx: usize) -> Value {
             .map(|v| Value::Text(v.to_string())),
     }
     .unwrap_or(Value::Null)
+}
+
+fn params_to_mssql(params: Vec<Value>) -> Result<Vec<Box<dyn ToSql>>, DriverError> {
+    let mut out: Vec<Box<dyn ToSql>> = Vec::with_capacity(params.len());
+    for value in params {
+        let param: Box<dyn ToSql> = match value {
+            Value::Null => Box::new(None::<String>),
+            Value::Bool(v) => Box::new(v),
+            Value::Int16(v) => Box::new(v),
+            Value::Int32(v) => Box::new(v),
+            Value::Int64(v) => Box::new(v),
+            Value::Float32(v) => Box::new(v),
+            Value::Float64(v) => Box::new(v),
+            Value::Decimal(v) => Box::new(v),
+            Value::Text(v) => Box::new(v),
+            Value::Blob(v) => Box::new(v),
+            Value::Date(v) => Box::new(v),
+            Value::Time(v) => Box::new(v),
+            Value::Timestamp(v) => Box::new(v),
+            Value::TimestampTz(v) => Box::new(v),
+            Value::Uuid(v) => Box::new(v),
+            Value::Json(v) => Box::new(v.to_string()),
+            Value::Interval(_) | Value::Engine { .. } => {
+                return Err(DriverError::new(
+                    Code::UnsupportedForEngine,
+                    "parameter type is not supported by SQL Server driver yet",
+                )
+                .with_engine(Engine::SqlServer));
+            }
+        };
+        out.push(param);
+    }
+    Ok(out)
 }
 
 fn ms_type_ref(ty: ColumnType) -> TypeRef {

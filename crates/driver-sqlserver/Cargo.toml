@@ -6,6 +6,9 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[features]
+live-mssql = []
+
 [dependencies]
 sift-protocol = { workspace = true }
 sift-driver-api = { workspace = true }
