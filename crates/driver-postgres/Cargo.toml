@@ -27,3 +27,9 @@ uuid = { workspace = true }
 [dev-dependencies]
 tokio = { workspace = true }
 sift-driver-api = { workspace = true, features = ["mock"] }
+futures = { workspace = true }
+
+[[example]]
+name = "bench"
+path = "examples/bench.rs"
+required-features = ["live-pg"]
