@@ -1830,6 +1830,7 @@ dependencies = [
  "futures",
  "serde",
  "serde_json",
+ "sift-client-sdk",
  "sift-core",
  "sift-driver-api",
  "sift-driver-postgres",
