@@ -12,7 +12,8 @@ build a UI against Postgres and SQL Server without private guidance.
 - Headless axum server with sessions, connections, auth hook, audit rows, and
   protocol-version response header.
 - HTTP v1 surface for health, sessions, connections, schema, execute, cancel,
-  transactions, HTTP audit, replayable operation log, and generated OpenAPI.
+  transactions, HTTP audit, durable replayable operation log, and generated
+  OpenAPI.
 - WebSocket streaming with ACK-gated backpressure and SDK E2E proof.
 - Rust SDK covering HTTP and WS, including bearer auth propagation.
 - Postgres driver with pooled connections, streaming, params, schema,
@@ -32,8 +33,8 @@ build a UI against Postgres and SQL Server without private guidance.
 ## Remaining Phase 0 Gaps
 
 - OpenAPI is published with generated protocol schemas.
-- Operation audit is replayable from `/v1/operations`, but still bounded
-  in-memory rather than durable.
+- Operation audit is replayable from `/v1/operations` and can be persisted as
+  JSONL via `SIFT_AUDIT__OPERATION_LOG_PATH`.
 - SQL Server cancel uses task abort/drop-connection semantics with session
   cleanup, not TDS ATTENTION.
 - SQL Server MARS and bulk insert extension methods are declared but unsupported.

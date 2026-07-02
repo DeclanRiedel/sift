@@ -16,6 +16,8 @@ pub struct Config {
     pub timeouts: TimeoutConfig,
     /// Minimal Phase 0 auth hook.
     pub auth: AuthConfig,
+    /// Audit/replay log configuration.
+    pub audit: AuditConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -51,6 +53,13 @@ pub struct AuthConfig {
     pub bearer_token: Option<String>,
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AuditConfig {
+    /// Optional JSONL path for replayable operation audit rows.
+    pub operation_log_path: Option<String>,
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
@@ -59,6 +68,7 @@ impl Default for Config {
             drivers: DriversConfig::default(),
             timeouts: TimeoutConfig::default(),
             auth: AuthConfig::default(),
+            audit: AuditConfig::default(),
         }
     }
 }

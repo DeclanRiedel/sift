@@ -86,6 +86,17 @@ fn test_state_with_token(token: &str) -> AppState {
     }
 }
 
+fn test_state_with_operation_log(path: &std::path::Path) -> AppState {
+    let registry = DriverRegistry::builder()
+        .register(mock_postgres_driver())
+        .build();
+    AppState {
+        sessions: SessionStore::new_with_operation_log_path(registry, path)
+            .expect("operation log opens"),
+        auth: AuthState::default(),
+    }
+}
+
 fn pg_spec() -> ConnectionSpec {
     ConnectionSpec {
         host: "mock.invalid".into(),
@@ -214,6 +225,35 @@ async fn operation_log_records_replayable_operations() {
         sift_protocol::Operation::OpenSession { request }
             if request.tag.as_deref() == Some("ops")
     )));
+}
+
+#[tokio::test]
+async fn operation_log_replays_from_disk() {
+    let path = std::env::temp_dir().join(format!(
+        "sift-operation-log-{}.jsonl",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+
+    let app = app(test_state_with_operation_log(&path));
+    let res = app
+        .oneshot(post_json_str("/v1/sessions", r#"{"tag":"durable"}"#))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+
+    let replayed = test_state_with_operation_log(&path)
+        .sessions
+        .list_operations();
+    assert!(replayed.iter().any(|row| matches!(
+        &row.operation,
+        sift_protocol::Operation::OpenSession { request }
+            if request.tag.as_deref() == Some("durable")
+    )));
+
+    let _ = std::fs::remove_file(path);
 }
 
 #[tokio::test]

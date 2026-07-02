@@ -21,7 +21,12 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!(version = sift_server::VERSION, bind = %cfg.bind, "sift-server starting");
 
     let registry = build_registry(&cfg);
-    let sessions = SessionStore::new(registry);
+    let sessions = if let Some(path) = &cfg.audit.operation_log_path {
+        SessionStore::new_with_operation_log_path(registry, path)
+            .with_context(|| format!("opening operation audit log: {path}"))?
+    } else {
+        SessionStore::new(registry)
+    };
     let state = AppState {
         sessions,
         auth: sift_server::http::AuthState {

@@ -3,6 +3,9 @@
 //! `Arc<dyn Driver>` directly. A session is a logical workspace (ADR-002);
 //! it holds zero or more open connections.
 
+use std::fs::{File, OpenOptions};
+use std::io::{BufRead, BufReader, Write};
+use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -31,9 +34,14 @@ pub struct SessionStore {
 struct SessionStoreInner {
     sessions: DashMap<SessionId, Session>,
     audit: Mutex<Vec<AuditEntry>>,
-    operations: Mutex<Vec<OperationAuditEntry>>,
+    operations: Mutex<OperationLog>,
     next_id: AtomicU64,
     registry: DriverRegistry,
+}
+
+struct OperationLog {
+    entries: Vec<OperationAuditEntry>,
+    writer: Option<File>,
 }
 
 impl SessionStore {
@@ -42,11 +50,38 @@ impl SessionStore {
             inner: Arc::new(SessionStoreInner {
                 sessions: DashMap::new(),
                 audit: Mutex::new(Vec::new()),
-                operations: Mutex::new(Vec::new()),
+                operations: Mutex::new(OperationLog {
+                    entries: Vec::new(),
+                    writer: None,
+                }),
                 next_id: AtomicU64::new(1),
                 registry,
             }),
         }
+    }
+
+    pub fn new_with_operation_log_path(
+        registry: DriverRegistry,
+        path: impl AsRef<Path>,
+    ) -> std::io::Result<Self> {
+        let path = path.as_ref();
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let entries = read_operation_log(path)?;
+        let writer = OpenOptions::new().create(true).append(true).open(path)?;
+        Ok(Self {
+            inner: Arc::new(SessionStoreInner {
+                sessions: DashMap::new(),
+                audit: Mutex::new(Vec::new()),
+                operations: Mutex::new(OperationLog {
+                    entries,
+                    writer: Some(writer),
+                }),
+                next_id: AtomicU64::new(1),
+                registry,
+            }),
+        })
     }
 
     pub fn registry(&self) -> &DriverRegistry {
@@ -90,20 +125,30 @@ impl SessionStore {
 
     pub fn push_operation(&self, operation: Operation, status: OperationStatus) {
         const MAX_OPERATION_ROWS: usize = 10_000;
-        let mut operations = self.inner.operations.lock().unwrap();
-        operations.push(OperationAuditEntry {
+        let mut log = self.inner.operations.lock().unwrap();
+        let entry = OperationAuditEntry {
             at: chrono::Utc::now(),
             operation,
             status,
-        });
-        if operations.len() > MAX_OPERATION_ROWS {
-            let overflow = operations.len() - MAX_OPERATION_ROWS;
-            operations.drain(0..overflow);
+        };
+        if let Some(writer) = &mut log.writer {
+            match serde_json::to_writer(&mut *writer, &entry)
+                .and_then(|_| writer.write_all(b"\n").map_err(serde_json::Error::io))
+                .and_then(|_| writer.flush().map_err(serde_json::Error::io))
+            {
+                Ok(()) => {}
+                Err(error) => tracing::error!(%error, "operation audit append failed"),
+            }
+        }
+        log.entries.push(entry);
+        if log.entries.len() > MAX_OPERATION_ROWS {
+            let overflow = log.entries.len() - MAX_OPERATION_ROWS;
+            log.entries.drain(0..overflow);
         }
     }
 
     pub fn list_operations(&self) -> Vec<OperationAuditEntry> {
-        self.inner.operations.lock().unwrap().clone()
+        self.inner.operations.lock().unwrap().entries.clone()
     }
 
     pub fn close_session(&self, id: SessionId) -> ApiResult<()> {
@@ -518,6 +563,29 @@ fn drain_connection_transactions(s: &Session, conn_id: ConnectionId) -> Vec<Tran
         .into_iter()
         .filter_map(|id| s.transactions.remove(&id).map(|(_, tx)| tx))
         .collect()
+}
+
+fn read_operation_log(path: &Path) -> std::io::Result<Vec<OperationAuditEntry>> {
+    match File::open(path) {
+        Ok(file) => {
+            let mut entries = Vec::new();
+            for line in BufReader::new(file).lines() {
+                let line = line?;
+                if line.trim().is_empty() {
+                    continue;
+                }
+                match serde_json::from_str::<OperationAuditEntry>(&line) {
+                    Ok(entry) => entries.push(entry),
+                    Err(error) => {
+                        tracing::warn!(%error, path = %path.display(), "skipping corrupt operation audit row");
+                    }
+                }
+            }
+            Ok(entries)
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
+        Err(error) => Err(error),
+    }
 }
 
 /// Result type returned by the HTTP execute handler. Public so the WS
