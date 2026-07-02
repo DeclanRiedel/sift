@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 
 /// Opaque id by which the server references a server-side cursor. The
 /// driver maps it to its own cursor / cancel token / row stream state.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct CursorId(pub u64);
 
 impl CursorId {
@@ -25,7 +25,7 @@ impl std::fmt::Display for CursorId {
 
 /// A single row of values, positional (matched against the column layout
 /// of the current result set as declared by the preceding `Page::NextResult`).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct Row {
     pub values: Vec<Value>,
 }
@@ -52,7 +52,7 @@ impl Row {
 /// - `Rows` carries a backpressure-bounded batch of rows.
 /// - `Done` ends the stream (or the current result set in a multi-result
 ///   batch — followed by another `NextResult` if more result sets remain).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Page {
     Rows {
@@ -74,7 +74,7 @@ pub enum Page {
 /// Execute query request. SQL string + bind parameters (empty for now —
 /// parameterized queries are FEATURES.md Tier 2 #33; the trait carries
 /// the slot so adding them later is not a breaking change).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ExecuteRequest {
     pub sql: String,
     #[serde(default)]

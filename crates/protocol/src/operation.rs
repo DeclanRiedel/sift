@@ -9,7 +9,7 @@ use crate::{
     ExecuteRequestHttp, OpenConnectionRequest, OpenSessionRequest, SchemaScope, SessionId,
 };
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum Operation {
     OpenSession {

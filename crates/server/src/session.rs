@@ -13,9 +13,9 @@ use sift_driver_api::{ConnHandle, Driver, ResultSetStream, TxHandle};
 use sift_protocol::{
     AuditEntry, BeginTransactionRequest, ColumnMetadata, ConnectionId, ConnectionInfo,
     ConnectionSpec, CursorId, DriverError, DriverWarning, EndTransactionRequest, Engine,
-    ExecuteRequest, ExecuteRequestHttp, ExecuteResponse, OpenSessionRequest, Page, Row,
-    SchemaScope, SchemaSnapshot, ServerInfo, SessionId, SessionInfo, TransactionInfo, TxHandleRef,
-    TxId,
+    ExecuteRequest, ExecuteRequestHttp, ExecuteResponse, OpenSessionRequest, Operation,
+    OperationAuditEntry, OperationStatus, Page, Row, SchemaScope, SchemaSnapshot, ServerInfo,
+    SessionId, SessionInfo, TransactionInfo, TxHandleRef, TxId,
 };
 
 use crate::error::{ApiError, ApiResult};
@@ -31,6 +31,7 @@ pub struct SessionStore {
 struct SessionStoreInner {
     sessions: DashMap<SessionId, Session>,
     audit: Mutex<Vec<AuditEntry>>,
+    operations: Mutex<Vec<OperationAuditEntry>>,
     next_id: AtomicU64,
     registry: DriverRegistry,
 }
@@ -41,6 +42,7 @@ impl SessionStore {
             inner: Arc::new(SessionStoreInner {
                 sessions: DashMap::new(),
                 audit: Mutex::new(Vec::new()),
+                operations: Mutex::new(Vec::new()),
                 next_id: AtomicU64::new(1),
                 registry,
             }),
@@ -84,6 +86,24 @@ impl SessionStore {
 
     pub fn list_audit(&self) -> Vec<AuditEntry> {
         self.inner.audit.lock().unwrap().clone()
+    }
+
+    pub fn push_operation(&self, operation: Operation, status: OperationStatus) {
+        const MAX_OPERATION_ROWS: usize = 10_000;
+        let mut operations = self.inner.operations.lock().unwrap();
+        operations.push(OperationAuditEntry {
+            at: chrono::Utc::now(),
+            operation,
+            status,
+        });
+        if operations.len() > MAX_OPERATION_ROWS {
+            let overflow = operations.len() - MAX_OPERATION_ROWS;
+            operations.drain(0..overflow);
+        }
+    }
+
+    pub fn list_operations(&self) -> Vec<OperationAuditEntry> {
+        self.inner.operations.lock().unwrap().clone()
     }
 
     pub fn close_session(&self, id: SessionId) -> ApiResult<()> {

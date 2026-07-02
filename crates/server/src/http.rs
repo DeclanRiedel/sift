@@ -10,14 +10,15 @@ use axum::response::Response;
 use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use futures::{SinkExt, StreamExt};
+use schemars::{schema_for, JsonSchema};
 use serde::Deserialize;
 use serde_json::json;
 use std::time::Instant;
 
 use sift_protocol::{
     AuditEntry, BeginTransactionRequest, CancelRequest, EndTransactionRequest, ExecuteRequest,
-    ExecuteRequestHttp, Health, ObjectPath, OpenConnectionRequest, OpenSessionRequest,
-    SchemaFilter, SchemaScope, WsClientMessage, WsServerMessage, PROTOCOL_VERSION,
+    ExecuteRequestHttp, Health, ObjectPath, OpenConnectionRequest, OpenSessionRequest, Operation,
+    OperationStatus, SchemaFilter, SchemaScope, WsClientMessage, WsServerMessage, PROTOCOL_VERSION,
 };
 
 use crate::error::{ApiError, ApiResult};
@@ -39,6 +40,7 @@ pub fn app(state: AppState) -> Router {
     Router::new()
         .route("/v1/health", get(health))
         .route("/v1/audit", get(list_audit))
+        .route("/v1/operations", get(list_operations))
         .route("/v1/openapi.json", get(openapi))
         .route("/v1/sessions", post(create_session).get(list_sessions))
         .route("/v1/sessions/:id", get(get_session).delete(close_session))
@@ -141,6 +143,12 @@ async fn list_audit(State(state): State<AppState>) -> Json<Vec<AuditEntry>> {
     Json(state.sessions.list_audit())
 }
 
+async fn list_operations(
+    State(state): State<AppState>,
+) -> Json<Vec<sift_protocol::OperationAuditEntry>> {
+    Json(state.sessions.list_operations())
+}
+
 async fn openapi() -> Json<serde_json::Value> {
     Json(json!({
         "openapi": "3.1.0",
@@ -163,6 +171,13 @@ async fn openapi() -> Json<serde_json::Value> {
                     "operationId": "listAudit",
                     "summary": "List in-memory operation audit rows",
                     "responses": { "200": { "description": "Audit rows", "content": json_array_content("AuditEntry") } }
+                }
+            },
+            "/v1/operations": {
+                "get": {
+                    "operationId": "listOperations",
+                    "summary": "List replayable operation audit rows",
+                    "responses": { "200": { "description": "Operation rows", "content": json_array_content("OperationAuditEntry") } }
                 }
             },
             "/v1/sessions": {
@@ -333,38 +348,41 @@ fn json_object_content() -> serde_json::Value {
 }
 
 fn protocol_schema_refs() -> serde_json::Value {
-    let names = [
-        "AuditEntry",
-        "BeginTransactionRequest",
-        "CancelRequest",
-        "ConnectionInfo",
-        "EndTransactionRequest",
-        "ExecuteRequestHttp",
-        "ExecuteResponse",
-        "Health",
-        "OpenConnectionRequest",
-        "OpenSessionRequest",
-        "SchemaSnapshot",
-        "ServerInfo",
-        "SessionInfo",
-        "TransactionInfo",
-        "WsClientMessage",
-        "WsServerMessage",
-    ];
-    serde_json::Value::Object(
-        names
-            .into_iter()
-            .map(|name| {
-                (
-                    name.to_string(),
-                    json!({
-                        "type": "object",
-                        "description": format!("Serde JSON shape from sift-protocol::{name}")
-                    }),
-                )
-            })
-            .collect(),
-    )
+    let mut schemas = serde_json::Map::new();
+    add_schema::<sift_protocol::AuditEntry>("AuditEntry", &mut schemas);
+    add_schema::<sift_protocol::BeginTransactionRequest>("BeginTransactionRequest", &mut schemas);
+    add_schema::<sift_protocol::CancelRequest>("CancelRequest", &mut schemas);
+    add_schema::<sift_protocol::ConnectionInfo>("ConnectionInfo", &mut schemas);
+    add_schema::<sift_protocol::EndTransactionRequest>("EndTransactionRequest", &mut schemas);
+    add_schema::<sift_protocol::ExecuteRequestHttp>("ExecuteRequestHttp", &mut schemas);
+    add_schema::<sift_protocol::ExecuteResponse>("ExecuteResponse", &mut schemas);
+    add_schema::<sift_protocol::Health>("Health", &mut schemas);
+    add_schema::<sift_protocol::OpenConnectionRequest>("OpenConnectionRequest", &mut schemas);
+    add_schema::<sift_protocol::OpenSessionRequest>("OpenSessionRequest", &mut schemas);
+    add_schema::<sift_protocol::OperationAuditEntry>("OperationAuditEntry", &mut schemas);
+    add_schema::<sift_protocol::SchemaSnapshot>("SchemaSnapshot", &mut schemas);
+    add_schema::<sift_protocol::ServerInfo>("ServerInfo", &mut schemas);
+    add_schema::<sift_protocol::SessionInfo>("SessionInfo", &mut schemas);
+    add_schema::<sift_protocol::TransactionInfo>("TransactionInfo", &mut schemas);
+    add_schema::<sift_protocol::WsClientMessage>("WsClientMessage", &mut schemas);
+    add_schema::<sift_protocol::WsServerMessage>("WsServerMessage", &mut schemas);
+    serde_json::Value::Object(schemas)
+}
+
+fn add_schema<T: JsonSchema>(
+    name: &'static str,
+    schemas: &mut serde_json::Map<String, serde_json::Value>,
+) {
+    let root = schema_for!(T);
+    for (def_name, schema) in root.definitions {
+        schemas
+            .entry(def_name)
+            .or_insert_with(|| serde_json::to_value(schema).expect("schema serializes"));
+    }
+    schemas.insert(
+        name.to_string(),
+        serde_json::to_value(root.schema).expect("schema serializes"),
+    );
 }
 
 async fn create_session(
@@ -375,13 +393,22 @@ async fn create_session(
         Some(Json(b)) => b,
         None => OpenSessionRequest { tag: None },
     };
-    Ok(Json(state.sessions.open_session(req)))
+    let info = state.sessions.open_session(req.clone());
+    state.sessions.push_operation(
+        Operation::OpenSession { request: req },
+        OperationStatus::Succeeded,
+    );
+    Ok(Json(info))
 }
 
 async fn list_sessions(
     State(state): State<AppState>,
 ) -> ApiResult<Json<Vec<sift_protocol::SessionInfo>>> {
-    Ok(Json(state.sessions.list_sessions()))
+    let sessions = state.sessions.list_sessions();
+    state
+        .sessions
+        .push_operation(Operation::ListSessions, OperationStatus::Succeeded);
+    Ok(Json(sessions))
 }
 
 async fn get_session(
@@ -396,6 +423,10 @@ async fn close_session(
     Path(id): Path<sift_protocol::SessionId>,
 ) -> ApiResult<Json<serde_json::Value>> {
     state.sessions.close_session(id)?;
+    state.sessions.push_operation(
+        Operation::CloseSession { session: id },
+        OperationStatus::Succeeded,
+    );
     Ok(Json(json!({"ok": true})))
 }
 
@@ -405,8 +436,15 @@ async fn open_connection(
     Json(req): Json<OpenConnectionRequest>,
 ) -> ApiResult<Json<sift_protocol::ConnectionInfo>> {
     let engine = req.engine;
+    let operation = Operation::OpenConnection {
+        session: id,
+        request: req.clone(),
+    };
     let spec = req.spec;
     let info = state.sessions.open_connection(id, engine, spec).await?;
+    state
+        .sessions
+        .push_operation(operation, OperationStatus::Succeeded);
     Ok(Json(info))
 }
 
@@ -422,6 +460,13 @@ async fn close_connection(
     Path((id, conn_id)): Path<(sift_protocol::SessionId, sift_protocol::ConnectionId)>,
 ) -> ApiResult<Json<serde_json::Value>> {
     state.sessions.close_connection(id, conn_id).await?;
+    state.sessions.push_operation(
+        Operation::CloseConnection {
+            session: id,
+            connection: conn_id,
+        },
+        OperationStatus::Succeeded,
+    );
     Ok(Json(json!({"ok": true})))
 }
 
@@ -448,7 +493,16 @@ async fn get_schema(
     Query(q): Query<SchemaQuery>,
 ) -> ApiResult<Json<sift_protocol::SchemaSnapshot>> {
     let scope = build_scope(q)?;
-    Ok(Json(state.sessions.schema(id, conn_id, scope).await?))
+    let snap = state.sessions.schema(id, conn_id, scope.clone()).await?;
+    state.sessions.push_operation(
+        Operation::RefreshSchema {
+            session: id,
+            connection: conn_id,
+            scope,
+        },
+        OperationStatus::Succeeded,
+    );
+    Ok(Json(snap))
 }
 
 fn build_scope(q: SchemaQuery) -> ApiResult<SchemaScope> {
@@ -490,7 +544,14 @@ async fn execute_query(
     Path(id): Path<sift_protocol::SessionId>,
     Json(req): Json<ExecuteRequestHttp>,
 ) -> ApiResult<Json<sift_protocol::ExecuteResponse>> {
+    let operation = Operation::ExecuteQuery {
+        session: id,
+        request: req.clone(),
+    };
     let resp = state.sessions.execute_http(id, req).await?;
+    state
+        .sessions
+        .push_operation(operation, OperationStatus::Succeeded);
     Ok(Json(resp))
 }
 
@@ -499,7 +560,15 @@ async fn begin_transaction(
     Path(id): Path<sift_protocol::SessionId>,
     Json(req): Json<BeginTransactionRequest>,
 ) -> ApiResult<Json<sift_protocol::TransactionInfo>> {
-    Ok(Json(state.sessions.begin_transaction(id, req).await?))
+    let operation = Operation::BeginTransaction {
+        session: id,
+        request: req.clone(),
+    };
+    let tx = state.sessions.begin_transaction(id, req).await?;
+    state
+        .sessions
+        .push_operation(operation, OperationStatus::Succeeded);
+    Ok(Json(tx))
 }
 
 async fn commit_transaction(
@@ -512,7 +581,14 @@ async fn commit_transaction(
             "`tx_id` body value must match tx id in path".into(),
         ));
     }
-    state.sessions.commit_transaction(id, req).await?;
+    state.sessions.commit_transaction(id, req.clone()).await?;
+    state.sessions.push_operation(
+        Operation::CommitTransaction {
+            session: id,
+            request: req,
+        },
+        OperationStatus::Succeeded,
+    );
     Ok(Json(json!({"ok": true})))
 }
 
@@ -526,7 +602,14 @@ async fn rollback_transaction(
             "`tx_id` body value must match tx id in path".into(),
         ));
     }
-    state.sessions.rollback_transaction(id, req).await?;
+    state.sessions.rollback_transaction(id, req.clone()).await?;
+    state.sessions.push_operation(
+        Operation::RollbackTransaction {
+            session: id,
+            request: req,
+        },
+        OperationStatus::Succeeded,
+    );
     Ok(Json(json!({"ok": true})))
 }
 
@@ -541,6 +624,13 @@ async fn cancel_query(
         ));
     }
     state.sessions.cancel(id, req.connection, cursor_id).await?;
+    state.sessions.push_operation(
+        Operation::CancelQuery {
+            session: id,
+            request: req,
+        },
+        OperationStatus::Succeeded,
+    );
     Ok(Json(json!({"ok": true})))
 }
 

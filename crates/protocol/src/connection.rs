@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 /// engine. Carrying `engine` here collided with `OpenConnectionRequest`'s
 /// `#[serde(flatten)]` of the spec; the envelope is the single source of
 /// truth for engine selection.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ConnectionSpec {
     pub host: String,
     pub port: Option<u16>,
@@ -22,7 +22,7 @@ pub struct ConnectionSpec {
     pub engine_specific: Option<EngineConnectionSpec>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum SslMode {
     Disable,
@@ -32,14 +32,14 @@ pub enum SslMode {
     VerifyFull,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(tag = "engine", rename_all = "snake_case")]
 pub enum EngineConnectionSpec {
     Postgres(PgConnectionSpec),
     SqlServer(MssqlConnectionSpec),
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct PgConnectionSpec {
     /// PostgreSQL `search_path` to set on connect.
     pub search_path: Option<Vec<String>>,
@@ -49,7 +49,7 @@ pub struct PgConnectionSpec {
     pub connect_timeout_secs: Option<u32>,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct MssqlConnectionSpec {
     /// Enable Multiple Active Result Sets on the connection.
     pub mars: bool,
@@ -62,7 +62,7 @@ pub struct MssqlConnectionSpec {
 }
 
 /// Reported by `Driver::ping` after a successful round-trip.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ServerInfo {
     pub engine: Engine,
     pub server_version: String,
@@ -72,7 +72,7 @@ pub struct ServerInfo {
 
 /// Connection access mode at open time (read-only vs read-write). Distinct
 /// from transaction access mode (which can be stricter per-tx).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum AccessMode {
     ReadWrite,

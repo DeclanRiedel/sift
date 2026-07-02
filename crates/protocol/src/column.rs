@@ -9,7 +9,7 @@
 use crate::Engine;
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ColumnMetadata {
     pub name: String,
     pub type_ref: TypeRef,
@@ -35,7 +35,7 @@ impl ColumnMetadata {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum Nullability {
     Nullable,
@@ -52,7 +52,7 @@ pub enum Nullability {
 ///   `tsvector`, `sql_variant`, `xml`, `hstore`, `jsonb`, `citext`, etc.
 ///   The native name is carried verbatim; the client renders it as opaque
 ///   text with the engine as a hint, using `category` to pick a renderer.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(tag = "kind", content = "value", rename_all = "snake_case")]
 pub enum TypeRef {
     Primitive(PrimitiveType),
@@ -63,7 +63,7 @@ pub enum TypeRef {
     },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum PrimitiveType {
     Int16,
@@ -85,7 +85,7 @@ pub enum PrimitiveType {
     Jsonb,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum TypeCategory {
     Numeric,
@@ -106,7 +106,7 @@ pub enum TypeCategory {
     Other,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct EngineColumnFacets {
     #[serde(default)]
     pub postgres: Option<PgColumnFacets>,
@@ -114,7 +114,7 @@ pub struct EngineColumnFacets {
     pub sql_server: Option<MssqlColumnFacets>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct PgColumnFacets {
     /// PG type OID (e.g. `int4` = 23). Useful for clients that want to
     /// dispatch on the engine's native classification.
@@ -127,7 +127,7 @@ pub struct PgColumnFacets {
     pub enum_values: Option<Vec<String>>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct MssqlColumnFacets {
     /// TDS column type name (e.g. `SQLVARCHAR`, `SQLBIT`).
     pub tds_type: Option<String>,

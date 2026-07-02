@@ -193,6 +193,10 @@ impl Client {
         self.get("/v1/audit").await
     }
 
+    pub async fn operations(&self) -> Result<Vec<sift_protocol::OperationAuditEntry>> {
+        self.get("/v1/operations").await
+    }
+
     pub async fn stream_query(
         &self,
         session: SessionId,

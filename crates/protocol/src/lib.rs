@@ -42,8 +42,8 @@ pub use schema::{
 pub use session::{
     Ack, AuditEntry, BeginTransactionRequest, CancelRequest, ConnectionId, ConnectionInfo,
     EndTransactionRequest, ExecuteRequestHttp, ExecuteResponse, Health, OpenConnectionRequest,
-    OpenSessionRequest, SessionId, SessionInfo, TransactionInfo, TxHandleRef, WsClientMessage,
-    WsServerMessage,
+    OpenSessionRequest, OperationAuditEntry, OperationStatus, SessionId, SessionInfo,
+    TransactionInfo, TxHandleRef, WsClientMessage, WsServerMessage,
 };
 pub use tx::{AccessMode as TxAccessMode, IsolationLevel, TxId, TxMode};
 

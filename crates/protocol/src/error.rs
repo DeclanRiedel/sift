@@ -7,7 +7,9 @@ use serde::{Deserialize, Serialize};
 
 /// Stable error codes. Grows as implementation surfaces real cases; existing
 /// codes never change meaning. Wire-stable from v0.1.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema, thiserror::Error,
+)]
 #[serde(tag = "code", rename_all = "snake_case")]
 pub enum Code {
     #[error("connection failed")]
@@ -56,7 +58,7 @@ pub enum Code {
 /// Error returned by every [`crate::Driver`] method. Serializes flat for the
 /// wire; never carries raw driver strings (those go into `message` cleaned,
 /// or into `engine_sqlstate` for codes that map cleanly).
-#[derive(Debug, Clone, Serialize, Deserialize, thiserror::Error)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema, thiserror::Error)]
 #[error("{code}: {message}")]
 pub struct DriverError {
     pub code: Code,
@@ -96,7 +98,7 @@ impl From<std::io::Error> for DriverError {
 }
 
 /// Non-fatal advisory carried alongside a result stream.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct DriverWarning {
     pub message: String,
     /// Engine-specific code if any (PG SQLSTATE, tiberius error number).

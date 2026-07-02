@@ -4,7 +4,7 @@
 use crate::Engine;
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(tag = "kind", content = "value", rename_all = "snake_case")]
 pub enum Value {
     Null,
@@ -19,6 +19,7 @@ pub enum Value {
     Decimal(String),
     Text(String),
     /// Binary data; base64 over JSON, raw over binary protocols.
+    #[schemars(with = "Vec<u8>")]
     #[serde(with = "serde_bytes")]
     Blob(Vec<u8>),
     Date(chrono::NaiveDate),
@@ -28,6 +29,7 @@ pub enum Value {
     /// Time interval. chrono::Duration doesn't capture PG's month-aware
     /// intervals (e.g. "1 month 3 days"); for those, fall through to
     /// [`Value::Engine`]. Duration is fine for day/microsecond intervals.
+    #[schemars(with = "String")]
     Interval(chrono::Duration),
     Uuid(uuid::Uuid),
     Json(serde_json::Value),

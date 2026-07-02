@@ -5,7 +5,7 @@
 use crate::ColumnMetadata;
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct SchemaScope {
     pub depth: SchemaDepth,
     #[serde(default)]
@@ -28,7 +28,7 @@ impl SchemaScope {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(tag = "depth", rename_all = "snake_case")]
 pub enum SchemaDepth {
     /// Names only: catalogs → databases → schemas → object names + kinds.
@@ -37,7 +37,7 @@ pub enum SchemaDepth {
     Deep { object: ObjectPath },
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct SchemaFilter {
     #[serde(default)]
     pub catalogs: Option<Vec<String>>,
@@ -50,7 +50,7 @@ pub struct SchemaFilter {
     pub name_pattern: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ObjectPath {
     /// Catalog / database name. `None` for engines with a single catalog.
     #[serde(default)]
@@ -74,7 +74,7 @@ impl ObjectPath {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ObjectKind {
     Table,
@@ -94,7 +94,7 @@ pub enum ObjectKind {
     Extension,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ConstraintKind {
     PrimaryKey,
@@ -107,7 +107,7 @@ pub enum ConstraintKind {
     Other,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ConstraintInfo {
     pub name: String,
     pub kind: ConstraintKind,
@@ -124,7 +124,7 @@ pub struct ConstraintInfo {
     pub references: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum IndexKind {
     Btree,
@@ -136,7 +136,7 @@ pub enum IndexKind {
     Other,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct IndexInfo {
     pub name: String,
     /// Columns covered by the index, in index order. Expressions (computed
@@ -152,7 +152,7 @@ pub struct IndexInfo {
     pub partial_predicate: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum TriggerTiming {
     Before,
@@ -160,7 +160,7 @@ pub enum TriggerTiming {
     InsteadOf,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum TriggerEvent {
     Insert,
@@ -169,7 +169,7 @@ pub enum TriggerEvent {
     Truncate,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct TriggerInfo {
     pub name: String,
     pub timing: TriggerTiming,
@@ -181,7 +181,7 @@ pub struct TriggerInfo {
     pub definition: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct SchemaSnapshot {
     pub trees: Vec<CatalogTree>,
     pub fetched_at: chrono::DateTime<chrono::Utc>,
@@ -202,13 +202,13 @@ impl SchemaSnapshot {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct CatalogTree {
     pub name: String,
     pub schemas: Vec<SchemaTree>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct SchemaTree {
     pub name: String,
     /// Populated only when `SchemaScope` requested objects in this schema.
@@ -217,7 +217,7 @@ pub struct SchemaTree {
     pub objects: Vec<ObjectInfo>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ObjectInfo {
     pub name: String,
     pub kind: ObjectKind,

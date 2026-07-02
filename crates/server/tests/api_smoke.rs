@@ -159,8 +159,17 @@ async fn openapi_is_published() {
     assert!(body["paths"]["/v1/sessions/{id}/ws"].is_object());
     assert!(body["paths"]["/v1/sessions/{id}/transactions"].is_object());
     assert!(body["paths"]["/v1/audit"].is_object());
+    assert!(body["paths"]["/v1/operations"].is_object());
     assert!(body["components"]["securitySchemes"]["bearerAuth"].is_object());
     assert!(body["components"]["schemas"]["ExecuteResponse"].is_object());
+    assert!(body["components"]["schemas"]["ExecuteResponse"]["properties"]["rows"].is_object());
+    assert!(
+        body["components"]["schemas"]["OpenConnectionRequest"]["properties"]["engine"].is_object()
+    );
+    assert!(body["components"]["schemas"]["Page"].is_object());
+    assert!(
+        body["components"]["schemas"]["OperationAuditEntry"]["properties"]["operation"].is_object()
+    );
 }
 
 #[tokio::test]
@@ -182,6 +191,29 @@ async fn audit_records_http_operations() {
     assert!(rows
         .iter()
         .any(|r| r.method == "GET" && r.path == "/v1/health"));
+}
+
+#[tokio::test]
+async fn operation_log_records_replayable_operations() {
+    let app = app(test_state());
+    let res = app
+        .clone()
+        .oneshot(post_json_str("/v1/sessions", r#"{"tag":"ops"}"#))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+
+    let res = app
+        .oneshot(Request::get("/v1/operations").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let rows: Vec<sift_protocol::OperationAuditEntry> = body_json(res.into_body()).await;
+    assert!(rows.iter().any(|row| matches!(
+        &row.operation,
+        sift_protocol::Operation::OpenSession { request }
+            if request.tag.as_deref() == Some("ops")
+    )));
 }
 
 #[tokio::test]
