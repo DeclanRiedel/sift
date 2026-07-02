@@ -12,11 +12,12 @@ use axum::{Json, Router};
 use futures::{SinkExt, StreamExt};
 use serde::Deserialize;
 use serde_json::json;
+use std::time::Instant;
 
 use sift_protocol::{
-    CancelRequest, ExecuteRequest, ExecuteRequestHttp, Health, ObjectPath, OpenConnectionRequest,
-    OpenSessionRequest, SchemaFilter, SchemaScope, WsClientMessage, WsServerMessage,
-    PROTOCOL_VERSION,
+    AuditEntry, CancelRequest, ExecuteRequest, ExecuteRequestHttp, Health, ObjectPath,
+    OpenConnectionRequest, OpenSessionRequest, SchemaFilter, SchemaScope, WsClientMessage,
+    WsServerMessage, PROTOCOL_VERSION,
 };
 
 use crate::error::{ApiError, ApiResult};
@@ -37,6 +38,7 @@ pub struct AuthState {
 pub fn app(state: AppState) -> Router {
     Router::new()
         .route("/v1/health", get(health))
+        .route("/v1/audit", get(list_audit))
         .route("/v1/openapi.json", get(openapi))
         .route("/v1/sessions", post(create_session).get(list_sessions))
         .route("/v1/sessions/:id", get(get_session).delete(close_session))
@@ -63,6 +65,7 @@ pub fn app(state: AppState) -> Router {
             post(cancel_query),
         )
         .layer(from_fn_with_state(state.auth.clone(), auth_middleware))
+        .layer(from_fn_with_state(state.sessions.clone(), audit_middleware))
         .layer(from_fn(protocol_version_header))
         .with_state(state)
 }
@@ -73,6 +76,26 @@ async fn protocol_version_header(req: Request<Body>, next: Next) -> Response {
         HeaderName::from_static("x-sift-protocol-version"),
         HeaderValue::from_static(PROTOCOL_VERSION),
     );
+    response
+}
+
+async fn audit_middleware(
+    State(sessions): State<SessionStore>,
+    req: Request<Body>,
+    next: Next,
+) -> Response {
+    let method = req.method().to_string();
+    let path = req.uri().path().to_string();
+    let start = Instant::now();
+    let response = next.run(req).await;
+    let status = response.status().as_u16();
+    sessions.push_audit(AuditEntry {
+        at: chrono::Utc::now(),
+        method,
+        path,
+        status,
+        duration_ms: start.elapsed().as_millis(),
+    });
     response
 }
 
@@ -105,6 +128,10 @@ async fn health(State(state): State<AppState>) -> Json<Health> {
     })
 }
 
+async fn list_audit(State(state): State<AppState>) -> Json<Vec<AuditEntry>> {
+    Json(state.sessions.list_audit())
+}
+
 async fn openapi() -> Json<serde_json::Value> {
     Json(json!({
         "openapi": "3.1.0",
@@ -114,6 +141,7 @@ async fn openapi() -> Json<serde_json::Value> {
         },
         "paths": {
             "/v1/health": { "get": { "summary": "Health and registered engines" } },
+            "/v1/audit": { "get": { "summary": "List in-memory operation audit rows" } },
             "/v1/sessions": {
                 "get": { "summary": "List sessions" },
                 "post": { "summary": "Create session" }

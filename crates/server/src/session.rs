@@ -5,14 +5,15 @@
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::time::Duration;
 
 use dashmap::DashMap;
 use sift_driver_api::{ConnHandle, Driver, ResultSetStream};
 use sift_protocol::{
-    ColumnMetadata, ConnectionId, ConnectionInfo, ConnectionSpec, CursorId, DriverError,
-    DriverWarning, Engine, ExecuteRequest, ExecuteResponse, OpenSessionRequest, Page, Row,
-    SchemaScope, SchemaSnapshot, ServerInfo, SessionId, SessionInfo,
+    AuditEntry, ColumnMetadata, ConnectionId, ConnectionInfo, ConnectionSpec, CursorId,
+    DriverError, DriverWarning, Engine, ExecuteRequest, ExecuteResponse, OpenSessionRequest, Page,
+    Row, SchemaScope, SchemaSnapshot, ServerInfo, SessionId, SessionInfo,
 };
 
 use crate::error::{ApiError, ApiResult};
@@ -27,6 +28,7 @@ pub struct SessionStore {
 
 struct SessionStoreInner {
     sessions: DashMap<SessionId, Session>,
+    audit: Mutex<Vec<AuditEntry>>,
     next_id: AtomicU64,
     registry: DriverRegistry,
 }
@@ -36,6 +38,7 @@ impl SessionStore {
         Self {
             inner: Arc::new(SessionStoreInner {
                 sessions: DashMap::new(),
+                audit: Mutex::new(Vec::new()),
                 next_id: AtomicU64::new(1),
                 registry,
             }),
@@ -64,6 +67,20 @@ impl SessionStore {
 
     pub fn list_sessions(&self) -> Vec<SessionInfo> {
         self.inner.sessions.iter().map(|s| s.info()).collect()
+    }
+
+    pub fn push_audit(&self, entry: AuditEntry) {
+        const MAX_AUDIT_ROWS: usize = 10_000;
+        let mut audit = self.inner.audit.lock().unwrap();
+        audit.push(entry);
+        if audit.len() > MAX_AUDIT_ROWS {
+            let overflow = audit.len() - MAX_AUDIT_ROWS;
+            audit.drain(0..overflow);
+        }
+    }
+
+    pub fn list_audit(&self) -> Vec<AuditEntry> {
+        self.inner.audit.lock().unwrap().clone()
     }
 
     pub fn close_session(&self, id: SessionId) -> ApiResult<()> {

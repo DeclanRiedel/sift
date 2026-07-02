@@ -121,6 +121,15 @@ pub struct Health {
     pub engines: Vec<Engine>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AuditEntry {
+    pub at: chrono::DateTime<chrono::Utc>,
+    pub method: String,
+    pub path: String,
+    pub status: u16,
+    pub duration_ms: u128,
+}
+
 /// WebSocket client → server messages. The streaming surface is intentionally
 /// protocol-owned: external clients can consume it without importing server
 /// internals.

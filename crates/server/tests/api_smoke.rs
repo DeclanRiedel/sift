@@ -153,6 +153,28 @@ async fn openapi_is_published() {
     let body: serde_json::Value = body_json(res.into_body()).await;
     assert_eq!(body["openapi"], "3.1.0");
     assert!(body["paths"]["/v1/sessions/{id}/ws"].is_object());
+    assert!(body["paths"]["/v1/audit"].is_object());
+}
+
+#[tokio::test]
+async fn audit_records_http_operations() {
+    let app = app(test_state());
+    let res = app
+        .clone()
+        .oneshot(Request::get("/v1/health").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+
+    let res = app
+        .oneshot(Request::get("/v1/audit").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let rows: Vec<sift_protocol::AuditEntry> = body_json(res.into_body()).await;
+    assert!(rows
+        .iter()
+        .any(|r| r.method == "GET" && r.path == "/v1/health"));
 }
 
 #[tokio::test]

@@ -40,9 +40,9 @@ pub use schema::{
     TriggerInfo, TriggerTiming,
 };
 pub use session::{
-    Ack, CancelRequest, ConnectionId, ConnectionInfo, ExecuteRequestHttp, ExecuteResponse, Health,
-    OpenConnectionRequest, OpenSessionRequest, SessionId, SessionInfo, TxHandleRef,
-    WsClientMessage, WsServerMessage,
+    Ack, AuditEntry, CancelRequest, ConnectionId, ConnectionInfo, ExecuteRequestHttp,
+    ExecuteResponse, Health, OpenConnectionRequest, OpenSessionRequest, SessionId, SessionInfo,
+    TxHandleRef, WsClientMessage, WsServerMessage,
 };
 pub use tx::{AccessMode as TxAccessMode, IsolationLevel, TxId, TxMode};
 
