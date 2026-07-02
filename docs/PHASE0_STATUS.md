@@ -19,6 +19,7 @@ build a UI against Postgres and SQL Server without private guidance.
   transactions, cancel, and live container tests.
 - SQL Server driver via `tiberius` with params, streaming, schema, transactions,
   savepoints, cancel-by-abort isolation, and live container tests.
+- Postgres binary decoding for numeric/decimal and month-free intervals.
 
 ## Verified
 
@@ -38,4 +39,5 @@ build a UI against Postgres and SQL Server without private guidance.
   TLS connector is wired.
 - Postgres native extension ops (`LISTEN/NOTIFY`, `COPY`, advisory locks) are
   declared but unsupported.
-- PG numeric/interval decoding is not native yet for all wire types.
+- Month-aware Postgres intervals intentionally surface as engine-native values
+  because `chrono::Duration` cannot represent calendar months.
