@@ -267,6 +267,14 @@ impl SessionStore {
     ) -> ApiResult<()> {
         let entry = self.get_conn_entry(session_id, conn_id)?;
         entry.driver.cancel(entry.handle.clone(), cursor).await?;
+        if entry.driver.engine() == Engine::SqlServer {
+            self.with_session(&session_id, |s| s.connections.remove(&conn_id))?;
+            tracing::info!(
+                session_id = %session_id,
+                conn_id = %conn_id,
+                "removed sqlserver connection after cancel abort"
+            );
+        }
         Ok(())
     }
 

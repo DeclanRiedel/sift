@@ -36,7 +36,7 @@ struct MssqlInner {
     conn_id: IdCounter,
     tx_id: IdCounter,
     cursor_id: IdCounter,
-    cursors: DashMap<u64, tokio::task::JoinHandle<()>>,
+    cursors: DashMap<u64, (u64, tokio::task::JoinHandle<()>)>,
 }
 
 impl MssqlDriver {
@@ -207,15 +207,16 @@ impl Driver for MssqlDriver {
         let (tx, rx) = mpsc::channel(1);
         let inner = Arc::clone(&self.inner);
         let cursor_key = cursor_id.0;
+        let conn_id = c.id();
         let task = tokio::spawn(async move {
-            run_query(inner, c.id(), conn, cursor_id, req, tx).await;
+            run_query(inner, conn_id, conn, cursor_id, req, tx).await;
         });
-        self.inner.cursors.insert(cursor_key, task);
+        self.inner.cursors.insert(cursor_key, (conn_id, task));
         Ok(ResultSetStream::with_cursor_mode(cursor_id, rx, false))
     }
 
     async fn cancel(&self, _c: ConnHandle, _cursor: CursorId) -> Result<(), DriverError> {
-        let Some((_, task)) = self.inner.cursors.remove(&_cursor.0) else {
+        let Some((_, (_, task))) = self.inner.cursors.remove(&_cursor.0) else {
             return Err(DriverError::new(Code::CursorNotFound, "cursor not active")
                 .with_engine(Engine::SqlServer));
         };
@@ -225,6 +226,23 @@ impl Driver for MssqlDriver {
 
     async fn close(&self, c: ConnHandle) -> Result<(), DriverError> {
         self.inner.conns.lock().await.remove(&c.id());
+        let cursors: Vec<u64> = self
+            .inner
+            .cursors
+            .iter()
+            .filter_map(|entry| {
+                if entry.value().0 == c.id() {
+                    Some(*entry.key())
+                } else {
+                    None
+                }
+            })
+            .collect();
+        for cursor_id in cursors {
+            if let Some((_, (_, task))) = self.inner.cursors.remove(&cursor_id) {
+                task.abort();
+            }
+        }
         Ok(())
     }
 

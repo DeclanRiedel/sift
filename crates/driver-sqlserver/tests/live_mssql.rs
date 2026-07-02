@@ -120,6 +120,29 @@ async fn cancel_long_query() {
 }
 
 #[tokio::test]
+async fn close_mid_query_drops_cursor_and_connection() {
+    let driver = MssqlDriver::new();
+    let conn = driver.open(&spec()).await.expect("open succeeds");
+    let _stream = driver
+        .execute(
+            conn.clone(),
+            ExecuteRequest {
+                sql: "WAITFOR DELAY '00:00:05'; SELECT 1 AS done".into(),
+                params: Vec::new(),
+            },
+        )
+        .await
+        .expect("execute starts");
+
+    driver.close(conn.clone()).await.expect("close succeeds");
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    assert!(
+        driver.ping(conn).await.is_err(),
+        "closed connection must not be resurrected by query task"
+    );
+}
+
+#[tokio::test]
 async fn schema_deep_and_transactions() {
     let driver = MssqlDriver::new();
     let conn = driver.open(&spec()).await.expect("open succeeds");
