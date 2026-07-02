@@ -28,8 +28,9 @@ pub use engine::Engine;
 pub use error::{Code, DriverError, DriverWarning};
 pub use result::{CursorId, ExecuteRequest, Page, Row};
 pub use schema::{
-    CatalogTree, ObjectInfo, ObjectKind, ObjectPath, SchemaDepth, SchemaFilter, SchemaScope,
-    SchemaSnapshot, SchemaTree,
+    CatalogTree, ConstraintInfo, ConstraintKind, IndexInfo, IndexKind, ObjectInfo, ObjectKind,
+    ObjectPath, SchemaDepth, SchemaFilter, SchemaScope, SchemaSnapshot, SchemaTree, TriggerEvent,
+    TriggerInfo, TriggerTiming,
 };
 pub use tx::{AccessMode as TxAccessMode, IsolationLevel, TxId, TxMode};
 

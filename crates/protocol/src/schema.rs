@@ -80,6 +80,10 @@ pub enum ObjectKind {
     Table,
     View,
     MaterializedView,
+    /// PG foreign table (relkind 'f').
+    ForeignTable,
+    /// PG partitioned table (relkind 'p').
+    PartitionedTable,
     TableValuedFunction,
     ScalarFunction,
     Procedure,
@@ -88,6 +92,93 @@ pub enum ObjectKind {
     Trigger,
     Type,
     Extension,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConstraintKind {
+    PrimaryKey,
+    ForeignKey,
+    Unique,
+    Check,
+    Exclusion,
+    /// Engine-native constraint not in the union above (e.g. PG `NOT VALID`,
+    /// SQL Server `DEFAULT` bound to a rule).
+    Other,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConstraintInfo {
+    pub name: String,
+    pub kind: ConstraintKind,
+    /// Column names participating in the constraint. Empty for table-level
+    /// constraints that don't reference columns (rare).
+    #[serde(default)]
+    pub columns: Vec<String>,
+    /// The constraint definition as the engine reports it (e.g. the CHECK
+    /// expression, the FK references). Rendered verbatim by the client.
+    #[serde(default)]
+    pub definition: Option<String>,
+    /// For FKs: the referenced table.
+    #[serde(default)]
+    pub references: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IndexKind {
+    Btree,
+    Hash,
+    Gist,
+    Gin,
+    Brin,
+    Spgist,
+    Other,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IndexInfo {
+    pub name: String,
+    /// Columns covered by the index, in index order. Expressions (computed
+    /// indexes) surface as the engine's textual form rather than a column
+    /// name.
+    #[serde(default)]
+    pub columns: Vec<String>,
+    pub unique: bool,
+    pub primary_key: bool,
+    pub kind: IndexKind,
+    /// Partial-index predicate (PG `WHERE ...`), if any.
+    #[serde(default)]
+    pub partial_predicate: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TriggerTiming {
+    Before,
+    After,
+    InsteadOf,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TriggerEvent {
+    Insert,
+    Update,
+    Delete,
+    Truncate,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TriggerInfo {
+    pub name: String,
+    pub timing: TriggerTiming,
+    pub events: Vec<TriggerEvent>,
+    /// Per-column triggers (e.g. UPDATE OF col1, col2). Empty if not scoped.
+    #[serde(default)]
+    pub columns: Vec<String>,
+    #[serde(default)]
+    pub definition: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -133,4 +224,26 @@ pub struct ObjectInfo {
     /// Populated only for `SchemaDepth::Deep` requests targeting this object.
     #[serde(default)]
     pub columns: Vec<ColumnMetadata>,
+    /// Populated only for `SchemaDepth::Deep` requests on tables/views.
+    #[serde(default)]
+    pub indexes: Vec<IndexInfo>,
+    /// Populated only for `SchemaDepth::Deep` requests on tables/views.
+    #[serde(default)]
+    pub constraints: Vec<ConstraintInfo>,
+    /// Populated only for `SchemaDepth::Deep` requests on tables/views.
+    #[serde(default)]
+    pub triggers: Vec<TriggerInfo>,
+}
+
+impl ObjectInfo {
+    pub fn new(name: impl Into<String>, kind: ObjectKind) -> Self {
+        Self {
+            name: name.into(),
+            kind,
+            columns: Vec::new(),
+            indexes: Vec::new(),
+            constraints: Vec::new(),
+            triggers: Vec::new(),
+        }
+    }
 }

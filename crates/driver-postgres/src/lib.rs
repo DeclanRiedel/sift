@@ -107,12 +107,14 @@ impl Driver for PgDriver {
     }
 
     async fn cancel(&self, _c: ConnHandle, cursor: CursorId) -> Result<(), DriverError> {
-        let token = self
-            .inner
-            .cursors
-            .get(&cursor.0)
-            .ok_or_else(|| DriverError::new(Code::CursorNotFound, "cursor not active"))?
-            .clone();
+        let token = {
+            let entry = self
+                .inner
+                .cursors
+                .get(&cursor.0)
+                .ok_or_else(|| DriverError::new(Code::CursorNotFound, "cursor not active"))?;
+            entry.1.clone()
+        };
         token
             .cancel_query(tokio_postgres::NoTls)
             .await

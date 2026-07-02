@@ -25,6 +25,10 @@ pub enum Value {
     Time(chrono::NaiveTime),
     Timestamp(chrono::NaiveDateTime),
     TimestampTz(chrono::DateTime<chrono::Utc>),
+    /// Time interval. chrono::Duration doesn't capture PG's month-aware
+    /// intervals (e.g. "1 month 3 days"); for those, fall through to
+    /// [`Value::Engine`]. Duration is fine for day/microsecond intervals.
+    Interval(chrono::Duration),
     Uuid(uuid::Uuid),
     Json(serde_json::Value),
     /// Engine-native type we didn't decode. Carries the engine, the native
@@ -55,6 +59,7 @@ impl Value {
             Value::Time(_) => "time",
             Value::Timestamp(_) => "timestamp",
             Value::TimestampTz(_) => "timestamptz",
+            Value::Interval(_) => "interval",
             Value::Uuid(_) => "uuid",
             Value::Json(_) => "json",
             Value::Engine { .. } => "engine",

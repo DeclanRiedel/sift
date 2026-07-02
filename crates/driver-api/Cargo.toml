@@ -6,6 +6,9 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[features]
+mock = []
+
 [dependencies]
 sift-protocol = { workspace = true }
 async-trait = { workspace = true }

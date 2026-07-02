@@ -1,7 +1,8 @@
-//! PgDriver — fat struct holding pool + per-conn state, plus the inner
-//! state that spawned query tasks share.
+//! PgDriver — fat struct holding cached pools + per-conn state, plus the
+//! inner state that spawned query tasks share.
 
 use std::collections::HashMap;
+use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
 use dashmap::DashMap;
@@ -9,7 +10,7 @@ use sift_driver_api::{ConnHandle, IdCounter};
 use sift_protocol::{Code, ConnectionSpec, DriverError, SslMode, TxId};
 use tokio::sync::Mutex;
 
-use deadpool_postgres::Runtime;
+use deadpool_postgres::{Pool, Runtime};
 
 pub(crate) type PooledConn = deadpool_postgres::Object;
 
@@ -21,16 +22,18 @@ pub struct PgDriver {
 }
 
 pub(crate) struct PgDriverInner {
-    /// conn_id → state. Single mutex guards the map; ops take a conn out
-    /// (state becomes `Taken`) for the duration of an async op, restoring
-    /// it when the op finishes. Concurrent ops on the same conn return
-    /// "conn busy" — sequential-per-conn is the assumed access pattern.
+    /// conn_id → state. **Single** mutex; no side index. The previous design
+    /// had a separate `tx_index` map producing a two-lock window between
+    /// `tx_index.remove` and `conns.lock`. Now `ConnState::InTx` carries the
+    /// `tx_id` inline, and `find_conn_in_tx` iterates the map. Acceptable at
+    /// Phase 0 connection counts; revisit only if profiling shows contention.
     pub(crate) conns: Mutex<HashMap<u64, ConnState>>,
-    /// tx_id → conn_id index, for fast lookup when the caller has a
-    /// `TxHandle` (which carries `tx_id`, not `conn_id`).
-    pub(crate) tx_index: Mutex<HashMap<u64, u64>>,
-    /// cursor_id → cancel token. Read by `cancel` from any task.
-    pub(crate) cursors: DashMap<u64, tokio_postgres::CancelToken>,
+    /// cursor_id → (owning conn_id, cancel token). `conn_id` is carried so
+    /// `close` can drain live cursors belonging to the conn.
+    pub(crate) cursors: DashMap<u64, (u64, tokio_postgres::CancelToken)>,
+    /// Cached pools by connection-spec hash. `open()` of an already-seen
+    /// spec reuses the pool; identical connections share warm capacity.
+    pub(crate) pools: DashMap<u64, Arc<Pool>>,
     pub(crate) conn_id: IdCounter,
     pub(crate) tx_id: IdCounter,
     pub(crate) cursor_id: IdCounter,
@@ -69,18 +72,25 @@ impl PgDriverInner {
     fn new() -> Self {
         Self {
             conns: Mutex::new(HashMap::new()),
-            tx_index: Mutex::new(HashMap::new()),
             cursors: DashMap::new(),
+            pools: DashMap::new(),
             conn_id: IdCounter::new(),
             tx_id: IdCounter::new(),
             cursor_id: IdCounter::new(),
         }
     }
 
-    /// Open a connection from a fresh ad-hoc pool built from `spec`. Phase 0
-    /// simplification: each `open()` builds its own pool of size 8; future
-    /// passes cache pools by spec hash (BACKEND.md Tier 0 #15 / Tier 1 #14).
-    pub(crate) async fn open_conn(spec: &ConnectionSpec) -> Result<PooledConn, DriverError> {
+    /// Borrow or build a pool for the spec. Hashing is on the canonical
+    /// (serde-JSON) form of `ConnectionSpec` so two opens of equivalent specs
+    /// hit the same pool.
+    pub(crate) async fn pool_for(
+        &self,
+        spec: &ConnectionSpec,
+    ) -> Result<(u64, Arc<Pool>), DriverError> {
+        let hash = spec_hash(spec);
+        if let Some(pool) = self.pools.get(&hash) {
+            return Ok((hash, Arc::clone(&pool)));
+        }
         let mut cfg = deadpool_postgres::Config::new();
         cfg.host = Some(spec.host.clone());
         cfg.port = spec.port;
@@ -112,11 +122,10 @@ impl PgDriverInner {
         let pool = cfg
             .create_pool(Some(Runtime::Tokio1), tokio_postgres::NoTls)
             .map_err(|e| DriverError::new(Code::ConnectionFailed, e.to_string()))?;
-
-        pool.get().await.map_err(|e| match e {
-            deadpool_postgres::PoolError::Backend(backend) => crate::pg_err(backend),
-            other => DriverError::new(Code::PoolExhausted, other.to_string()),
-        })
+        let arc = Arc::new(pool);
+        // Another opener may have raced us; keep whichever landed first.
+        self.pools.entry(hash).or_insert_with(|| Arc::clone(&arc));
+        Ok((hash, arc))
     }
 
     pub(crate) async fn put_free(&self, id: u64, conn: PooledConn) {
@@ -128,13 +137,11 @@ impl PgDriverInner {
             .lock()
             .await
             .insert(conn_id, ConnState::InTx { conn, tx_id });
-        self.tx_index.lock().await.insert(tx_id, conn_id);
     }
 
     /// Take a conn out for an op, marking the slot `Taken`. Returns the conn
     /// plus a `SlotKind` so the caller (or the spawned task) knows how to
-    /// restore it. Caller is responsible for `restore_after_op` /
-    /// `restore_after_query` / `put_free` / `put_in_tx`.
+    /// restore it. Caller restores via `restore`.
     pub(crate) async fn take_for_op(
         &self,
         c: &ConnHandle,
@@ -154,17 +161,20 @@ impl PgDriverInner {
         }
     }
 
-    /// Take a conn out of an InTx slot by `tx_id`. Used by savepoint /
-    /// rollback_to / commit / rollback. Caller restores via `put_in_tx` or
-    /// `put_free`.
+    /// Find and take the conn bound to a transaction. Single-lock iteration
+    /// of the map (was a two-map dance before). Caller restores via
+    /// `put_in_tx` or `put_free`.
     pub(crate) async fn take_in_tx(&self, tx_id: &TxId) -> Option<(u64, PooledConn)> {
-        let conn_id = self.tx_index.lock().await.remove(&tx_id.0)?;
         let mut guard = self.conns.lock().await;
+        let conn_id = guard.iter().find_map(|(id, state)| match state {
+            ConnState::InTx { tx_id: t, .. } if *t == tx_id.0 => Some(*id),
+            _ => None,
+        })?;
         let entry = guard.get_mut(&conn_id)?;
         let slot = std::mem::replace(entry, ConnState::Taken);
         match slot {
-            ConnState::InTx { conn, tx_id: _ } => Some((conn_id, conn)),
-            // Slot wasn't actually in tx — leave it Taken; caller can debug.
+            ConnState::InTx { conn, .. } => Some((conn_id, conn)),
+            // Slot wasn't actually InTx — put it back how we found it.
             other => {
                 tracing::error!(conn_id, "expected InTx slot, got {:?}", other);
                 *entry = other;
@@ -173,31 +183,37 @@ impl PgDriverInner {
         }
     }
 
-    /// Restore a conn to whatever state it was in before the op. Used by
-    /// ping/schema/execute-on-free and execute-on-tx paths.
+    /// Restore a conn to whatever state it was in before the op.
     pub(crate) async fn restore(&self, conn_id: u64, kind: SlotKind, conn: PooledConn) {
-        match kind {
-            SlotKind::Free => {
-                self.conns
-                    .lock()
-                    .await
-                    .insert(conn_id, ConnState::Free(conn));
-            }
-            SlotKind::InTx(tx_id) => {
-                self.conns
-                    .lock()
-                    .await
-                    .insert(conn_id, ConnState::InTx { conn, tx_id });
-                self.tx_index.lock().await.insert(tx_id, conn_id);
-            }
-        }
+        let state = match kind {
+            SlotKind::Free => ConnState::Free(conn),
+            SlotKind::InTx(tx_id) => ConnState::InTx { conn, tx_id },
+        };
+        self.conns.lock().await.insert(conn_id, state);
     }
 
     pub(crate) async fn remove_conn(&self, c: &ConnHandle) {
-        // Drop from whichever map holds it.
-        let mut guard = self.conns.lock().await;
-        if let Some(ConnState::InTx { tx_id, .. }) = guard.remove(&c.id()) {
-            self.tx_index.lock().await.remove(&tx_id);
+        // Drop the slot.
+        if let Some(ConnState::InTx { .. }) = self.conns.lock().await.remove(&c.id()) {
+            // The tx is implicitly aborted by connection close; surface as
+            // tracing only — caller decides whether that's an error.
+            tracing::warn!(conn_id = c.id(), "closing conn with open transaction");
+        }
+        // Drain live cursors belonging to this conn. The spawned query tasks
+        // will observe socket close and finish their Page::Done themselves.
+        let to_remove: Vec<u64> = self
+            .cursors
+            .iter()
+            .filter_map(|entry| {
+                if entry.value().0 == c.id() {
+                    Some(*entry.key())
+                } else {
+                    None
+                }
+            })
+            .collect();
+        for cursor_id in to_remove {
+            self.cursors.remove(&cursor_id);
         }
     }
 }
@@ -207,7 +223,11 @@ impl PgDriver {
         &self,
         spec: &ConnectionSpec,
     ) -> Result<PooledConn, DriverError> {
-        PgDriverInner::open_conn(spec).await
+        let (_hash, pool) = self.inner.pool_for(spec).await?;
+        pool.get().await.map_err(|e| match e {
+            deadpool_postgres::PoolError::Backend(backend) => crate::pg_err(backend),
+            other => DriverError::new(Code::PoolExhausted, other.to_string()),
+        })
     }
 
     pub(crate) async fn take_for_op(&self, c: &ConnHandle) -> Result<PooledConn, DriverError> {
@@ -228,10 +248,20 @@ fn map_ssl_mode(m: SslMode) -> deadpool_postgres::SslMode {
         SslMode::Disable => deadpool_postgres::SslMode::Disable,
         SslMode::Prefer => deadpool_postgres::SslMode::Prefer,
         // VerifyCa/VerifyFull need deadpool-postgres TLS features (rustls /
-        // native-tls) enabled; for Phase 0 we fall back to Require without
-        // certificate verification. Tier 1 hardens this (BACKEND.md #12).
+        // native-tls) wired through `create_pool`'s second arg — currently
+        // `tokio_postgres::NoTls`. Adding a real TLS connector is its own
+        // focused change (BACKEND.md #12); for now downgrade to Require.
         SslMode::Require | SslMode::VerifyCa | SslMode::VerifyFull => {
             deadpool_postgres::SslMode::Require
         }
     }
+}
+
+/// Canonical hash of a `ConnectionSpec`. JSON-serialises first so the hash
+/// is stable across struct field reordering (within serde-rustc compat).
+fn spec_hash(spec: &ConnectionSpec) -> u64 {
+    let json = serde_json::to_string(spec).unwrap_or_default();
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    json.hash(&mut h);
+    h.finish()
 }

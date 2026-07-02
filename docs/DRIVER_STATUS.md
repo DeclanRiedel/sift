@@ -1,11 +1,34 @@
 # sift — Driver Layer: Status & Forward Plan
 
-> Status snapshot after commit `83ce9cf` (driver layer scaffolding). Companion
-> to `DRIVER_TRAIT.md` (the spec) and `PHASE0.md` (the build order). Scope of
-> this doc is **only the driver layer** (`protocol` + `driver-api` +
+> Status snapshot after the P0/P1 changelist (commit pending). Companion
+> to `DRIVER_TRAIT.md` (the spec) and `PHASE0.md` (the build order). Scope
+> of this doc is **only the driver layer** (`protocol` + `driver-api` +
 > `driver-postgres` + `driver-sqlserver`); server substrate, HTTP/WS surface,
 > sessions, OpenAPI, and client-sdk are out of scope here and tracked in
 > `PHASE0.md`.
+
+## What changed in this changelist
+
+| Area | Change | Verification |
+| --- | --- | --- |
+| `MockDriver` (driver-api) | Programmable canned-result driver behind `mock` feature for server-substrate tests. | Compiles + clippy clean with `--features mock`. |
+| Conn-state race | Dropped the separate `tx_index` map; single `Mutex<HashMap<conn_id, ConnState>>` with `InTx` carrying `tx_id` inline. Iteration for tx lookup is O(conn_count), fine at Phase 0. | Live PG tests cover commit/rollback/savepoint flows. |
+| Pool caching by spec | `pools: DashMap<SpecHash, Arc<Pool>>`; two opens of equivalent specs hit the same pool. Hash is on the canonical serde-JSON form of `ConnectionSpec`. | `transaction_*` tests reuse the cached pool across opens. |
+| Cancel-token cleanup on close | Cursors map now stores `(conn_id, CancelToken)`; `close()` drains cursors belonging to the conn. | `close_mid_query_does_not_panic` test. |
+| Decode error surfacing | Replaced `unwrap_or(None)` with `tracing::warn!` + `DriverWarning` push + `Value::Engine { display_text: "<decode error>" }`. | Decode path unit-tested indirectly via live tests. |
+| Panic catching in query task | `run_query` wrapped in `AssertUnwindSafe::catch_unwind`. Panic produces `Page::Done` with diagnostic instead of silent channel close. | Manual review; integration test would need a forced panic. |
+| `affected_rows` on DML | `execute()` now dispatches on leading keyword: SELECT/WITH/TABLE/VALUES/SHOW/EXPLAIN → streaming extended-protocol path (no affected count, matches semantics); everything else → `simple_query` whose `CommandComplete(u64)` carries the count directly (no tag parsing needed in 0.7.18+). | `execute_dml_reports_affected_rows` test asserts `Some(2)` for an UPDATE. |
+| Deep schema completeness | Deep pass now queries `pg_attribute` (with type OID), `pg_index` (PK detection, indexes with `amname` and partial predicates), `pg_constraint` (PK/FK/UNIQUE/CHECK), `pg_trigger` (with `tgtype` bitmask decode for timing + events). | `schema_deep_lists_columns_pk_indexes_constraints` test covers all four. |
+| Primary-key detection | `pk_column_set` joins `pg_index` + `pg_attribute` on `indisprimary`; ColumnMetadata `primary_key` flag populated. | Deep schema test asserts `id.primary_key == true`. |
+| `ObjectKind` extensions | Added `ForeignTable` (relkind `f`), `PartitionedTable` (relkind `p`). Shallow pass now maps both. | Manual review. |
+| Filter pushdown | `SchemaFilter.name_pattern` is pushed to PG as a LIKE clause (glob `*`/`?` → SQL `%`/`_`). | `schema_shallow_pushes_down_name_filter` test. |
+| `Value::Interval` | Protocol slot exists. Decode path still falls through to `Value::Engine` for `Type::INTERVAL` (tokio-postgres has no `chrono::Duration` FromSql without a wrapper). | Variant declared, not yet decoded. |
+| `ObjectInfo` extensions | Added `indexes: Vec<IndexInfo>`, `constraints: Vec<ConstraintInfo>`, `triggers: Vec<TriggerInfo>` plus supporting enums (`IndexKind`, `ConstraintKind`, `TriggerTiming`, `TriggerEvent`). | Deep schema test populates all three. |
+| Live PG test harness | `crates/driver-postgres/tests/live_pg.rs` gated behind `live-pg` feature. 10 tests covering every Driver verb + cancel + close mid-query. Per-test unique schema so tests parallelise cleanly. | 10/10 pass against PG 17.10 via nix-shell socket. |
+
+**Final tally:** 3778 LOC across the workspace (was 2326). 18 tests pass
+(8 unit + 10 integration). clippy `-D warnings` clean in dev + release.
+cargo fmt clean.
 
 ## What's solid (proven or structurally sound)
 
@@ -15,91 +38,78 @@
 | Anti-JDBC-LCD shape | Core trait holds only the 8 verbs every engine supports; engine-specific ops (LISTEN/NOTIFY, MARS, advisory locks, savepoints) live on `PgExt` / `MssqlExt` declared in `driver-api`. No engine-specific type appears in the core trait signature. |
 | Type escape hatch | `TypeRef::Primitive` (IDE render vocab, 17 variants) + `TypeRef::Engine { engine, name, category }` (carries native name verbatim). Categorization uses `tokio_postgres::types::Kind`, not name-suffix heuristic. |
 | Streaming + backpressure | `execute()` returns `ResultSetStream` wrapping `tokio::sync::mpsc::Receiver<Page>` (buffer 64). Producer task blocks on send when consumer is slow. |
-| Cross-task cancel | `cursors: DashMap<CursorId, CancelToken>` populated at execute start, drained at execute end. `cancel()` reads by cursor id and fires — does not need to coordinate with the execute task. ADR-013 satisfied. |
-| Error model | `pg_err()` maps SQLSTATE class prefixes (`08*` conn, `28*` auth, `57014` cancel, `42601` syntax, `42P01/42704/42883/42P02` undefined, `42P04/42710/42701/42723` duplicate, `22*` data, `57/58/XX*` internal) to stable `Code`. Raw text preserved in `message`; native code preserved in `engine_sqlstate`. |
-| Progressive schema | `SchemaScope { depth: Shallow|Deep }` — Shallow = one pg_catalog round-trip (names+kinds, system schemas excluded); Deep = `information_schema.columns` for one object. Matches Zed §2.2. |
+| Cross-task cancel | `cursors: DashMap<CursorId, (conn_id, CancelToken)>` populated at execute start, drained at execute end and on close. `cancel()` reads by cursor id and fires — does not need to coordinate with the execute task. ADR-013 satisfied. |
+| Error model | `pg_err()` maps SQLSTATE class prefixes to stable `Code`. Raw text preserved in `message`; native code preserved in `engine_sqlstate`. |
+| Progressive schema | `SchemaScope { depth: Shallow|Deep }`. Shallow = one pg_catalog round-trip (names+kinds, system schemas excluded, name_pattern pushed to LIKE). Deep = `pg_attribute` + `pg_index` + `pg_constraint` + `pg_trigger` joined into a complete object description. |
 | Identifier safety | `validate_ident()` gates every engine-specific op (savepoint names) against SQL injection; pure-function unit-tested. |
 | Workspace hygiene | 7-crate workspace, shared deps via `[workspace.dependencies]`, `protocol` has zero I/O deps (ADR-004 honored). clippy `-D warnings` clean in dev and release. |
-| Pure-function test coverage | 8/8 unit tests pass: `validate_ident` accept/reject paths, `begin_sql` isolation/access synthesis (incl. Snapshot→RepeatableRead mapping), `pg_type_to_type_ref` primitive collapse + Engine fallback + Kind-based Array category. |
+| Test coverage | 8 unit tests (pure functions) + 10 integration tests against real PG 17.10 covering every Driver verb, cancel, close mid-query, parallel-safe via per-test schemas. |
+| Driver isolation | Every Driver method safe inside `tokio::spawn`; query tasks wrapped in `catch_unwind`; cancel callable cross-task. ADR-013 satisfied. |
 
-## Gaps, prioritized
+## Gaps remaining
 
-### P0 — blocks any claim of "the driver works"
-
-| Gap | Why it matters | Fix |
-| --- | --- | --- |
-| **No integration tests against real PG** | Entire PG impl is structurally checked, not behaviorally. Never executed a query. | PHASE0 step 14: testcontainers-based `#[ignore]` tests gated behind a `live-pg` feature or env var. Cover: open, ping, schema Shallow, schema Deep, begin/commit, begin/rollback, savepoint/rollback_to, execute single-statement SELECT, execute DML (verify row count once affected_rows lands), execute multi-statement batch, cancel mid-query, close. |
-| **`take_in_tx` two-lock race** | `tx_index.lock().await.remove(&tx_id)` releases before `conns.lock().await` acquires. Another caller could observe inconsistent state. Single-user Phase 0 hides it; multi-user surfaces it. | Either unify into a single `Mutex<HashMap<conn_id, ConnState>>` with `tx_id` indexed inside ConnState, or use a `RwLock` over a unified structure. Prefer the former; the perf cost is negligible at Phase 0 conn counts. |
-
-### P1 — erodes correctness or feature parity
+### P1 — correctness / feature parity
 
 | Gap | Why it matters | Fix |
 | --- | --- | --- |
-| **`affected_rows: None` on every `Page::Done`** | DDL/DML results lose their row count. The protocol field exists; the impl never fills it. | For non-SELECT queries, route through `simple_query()` to capture `SimpleQueryMessage::CommandComplete`'s row count. Heuristic: branch on statement leading keyword, or always try simple_query first and fall back to `query_raw` if a row stream is observed. Surface via `Page::Done { affected_rows: Some(n), .. }`. |
-| **Numeric/decimal surfaces as `Value::Engine`** | PG `numeric` is the canonical arbitrary-precision type. Clients render `<undecoded numeric>` for every decimal cell. | Enable `tokio-postgres`'s `with-bigdecimal-04` (or `rust_decimal` if preferred). Extend `decode_value()` for `Type::NUMERIC` → `Value::Decimal(string)`. |
-| **Per-open ad-hoc pool** | Each `Driver::open()` builds a fresh deadpool-postgres pool (max_size 8) that lives until the conn closes. Two opens of the same spec = two pools, no sharing. Wasteful and breaks warm-pool semantics (BACKEND Tier 1 #15). | `PgDriverInner.pools: DashMap<SpecHash, Arc<deadpool_postgres::Pool>>`. `open()` looks up first, builds if missing, increments a refcount. `close()` decrements; pool drops when refcount hits 0. |
-| **`primary_key` always false** | `col_to_metadata` and `col_from_info_schema_row` both hardcode `primary_key: false`. Schema tree shows no PK info. | For Deep pass, join `pg_constraint` (contype = 'p') + `pg_attribute` to set the flag on PK columns. For Shallow, leave as false (out of scope). |
-| **PK / FK / UNIQUE / CHECK / indexes / triggers missing from Deep pass** | `ObjectInfo.columns` is the only populated field. The Deep pass should be a complete object description. | Extend `ObjectInfo` with `indexes: Vec<IndexInfo>`, `constraints: Vec<ConstraintInfo>`, `triggers: Vec<TriggerInfo>` (add these to `protocol`). Query `pg_constraint`, `pg_indexes`, `pg_trigger` scoped to the target object. |
-| **SSL `VerifyCa` / `VerifyFull` downgraded to `Require`** | Security regression. Without cert verification, MITM attacks succeed. | Enable `deadpool-postgres`'s TLS feature (`rustls` or `native-tls`) in the workspace dep, map our `SslMode::VerifyCa`/`VerifyFull` to the matching variant. Backend Tier 0 #12 (TLS termination) depends on this. |
-| **Decode errors silently swallowed** | `stream.rs`: `row.try_get(i).unwrap_or(None)` — a decode failure becomes `Value::Null` with no diagnostic. Hides driver bugs. | On `try_get` error, log via `tracing::warn!`, emit `Value::Engine { display_text: "<decode error: ...>" }`, optionally add a `DriverWarning` to the page stream. |
+| **Numeric/decimal surfaces as `Value::Engine`** | PG `numeric` is the canonical arbitrary-precision type. tokio-postgres 0.7.18 has no `bigdecimal` feature; binary decode needs a third-party crate or hand-rolled decode of PG's numeric wire format. | Either add `postgres-bigdecimal` (or similar) dep and wire `Type::NUMERIC` → `Value::Decimal(string)` in `decode_value`, or fall back to a `SELECT col::text` rewrite at the driver layer when binary decode fails for numeric OID. Tier 1 #15 work. |
+| **SSL `VerifyCa` / `VerifyFull` downgraded to `Require`** | Security regression. Without cert verification, MITM attacks succeed. | Wire a real TLS connector (`tokio-postgres-rustls` + `rustls`) into `pool_for`'s `create_pool` call. Map our `VerifyCa`/`VerifyFull` to the matching variant. Backend Tier 0 #12. |
+| **`Value::Interval` not decoded** | Protocol variant exists but PG `Type::INTERVAL` falls through to `Value::Engine`. | Wrap `chrono::Duration` (or define a `PgInterval { months, days, micros }` newtype for month-aware fidelity), implement FromSql, extend `decode_value`. |
+| **`LISTEN/NOTIFY`, `COPY`, advisory locks stubbed in `PgExt`** | Trait methods exist but return `UnsupportedForEngine` for PG itself — semantically wrong. | `listen_pool` on `PgDriverInner` (dedicated pool because LISTEN is conn-stateful); `LISTEN $1` SQL + dedicated connection task reading notifications into `mpsc::Sender<PgNotification>`. COPY via `client.copy_in`/`copy_out`. Advisory locks via `pg_advisory_lock`/`unlock`. |
 
 ### P2 — design debt / future-proofing
 
 | Gap | Why it matters | Fix |
 | --- | --- | --- |
-| **ConnHandle dropped `Weak<dyn Driver>` backref** | Documented deviation from spec. Server-side registry is in scope everywhere a ConnHandle is used today, so this is latent. If a future server design has tasks holding ConnHandles without the registry, this regresses. | Add `OnceLock<Weak<dyn Driver>>` to `ConnHandleInner`; server sets it after wrapping in `Arc<dyn Driver>`. Add a test that exercises the backref round-trip. |
-| **Sequential-per-conn access** | `take_for_op` returns "conn busy" if another op is in flight on the same conn. PG enforces this anyway (one query per conn at a time); SQL Server with MARS allows concurrency. Server-side session manager must queue per-conn ops, not parallelize blindly. | Document the contract in `Driver::execute`. For MARS later, `MssqlExt::set_mars` toggles a per-conn concurrent-execution mode that relaxes the `Taken` slot constraint. |
-| **Foreign tables, partitioned tables collapse to `ObjectKind::Table`** | PG `relkind = 'f'` (foreign) and `'p'` (partitioned) both map to Table. Lossy. | Add `ObjectKind::ForeignTable`, `ObjectKind::PartitionedTable` to protocol; map in `shallow_tree`. |
-| **Schema filter not pushed down** | `SchemaScope.filter` is parsed but never used in the introspection SQL. Client filters happen in Rust post-query. | For Shallow, push `name_pattern` into a `WHERE c.relname LIKE $1` clause. Skip catalog/schema filtering (PG has one catalog). |
-| **No prepared-statement cache** | `query_raw` re-parses SQL on every call. For an IDE's repeated identical queries (autocomplete lookups, schema probes), this matters. | Wrap `Client::prepare()` + a small LRU keyed by SQL string. Or rely on PG's query plan cache (sufficient for most cases). |
+| **ConnHandle dropped `Weak<dyn Driver>` backref** | Documented deviation from spec. Server-side registry is in scope everywhere a ConnHandle is used today, so this is latent. | Add `OnceLock<Weak<dyn Driver>>` to `ConnHandleInner`; server sets it after wrapping in `Arc<dyn Driver>`. Add a round-trip test. |
+| **Sequential-per-conn access** | `take_for_op` returns "conn busy" if another op is in flight. PG enforces this anyway; SQL Server with MARS allows concurrency. Server-side session manager must queue per-conn ops. | Document the contract in `Driver::execute`. For MARS later, `MssqlExt::set_mars` toggles concurrent-execution mode that relaxes the `Taken` slot constraint. |
+| **No prepared-statement cache** | `query_raw` re-parses SQL on every call. For IDE usage (autocomplete, schema probes) the savings are real but not large. | Wrap `Client::prepare()` + small LRU keyed by SQL hash. Or rely on PG's plan cache. |
 | **`ObjectKind::Extension` declared but never populated** | PG extensions are first-class catalog objects (`pg_extension`). Schema tree ignores them. | Add to Shallow pass via `SELECT extname FROM pg_extension`. |
-| **No `Value::Interval` variant** | Declared in `PrimitiveType::Interval` but no Value variant and no decode path. PG intervals surface as `Value::Engine`. | Add `Value::Interval(chrono::Duration)` (or `PgInterval` newtype for month-aware), wire `Type::INTERVAL` in `decode_value`. |
-| **LISTEN/NOTIFY, COPY, advisory_lock stubbed in PgExt** | Trait methods exist but return `UnsupportedForEngine` for PG itself — semantically wrong ("PG doesn't support LISTEN" is false). | Implement: `listen_pool` on `PgDriverInner` (dedicated pool because LISTEN is conn-stateful); `LISTEN $1` SQL + dedicated connection task reading notifications into `mpsc::Sender<PgNotification>`. COPY via `client.copy_in`/`copy_out`. Advisory locks via `pg_advisory_lock($1, $2)` / `pg_advisory_unlock($1, $2)`. |
+| **`ObjectKind::PartitionedTable` declared but Shallow filter still excludes child partitions** | Shallow filters `relkind IN ('r','v','m','S','f','p')` — partitions themselves are relkind 'r' but inherit from a 'p' parent. | Optional: surface partition children under their parent, or list as standalone. |
+| **Channel buffer size hard-coded to 64** | Backpressure tuning for large-result streaming (Tier 2 #20). | Make configurable via `PgDriverInner.cfg`. |
+| **No tracing instrumentation on Driver methods** | `tracing` is a dep but unused. Observability gap. | `#[tracing::instrument(skip(self))]` on every Driver method, span per cursor id. |
 
 ### P3 — polish
 
 | Gap | Fix |
 | --- | --- |
-| Panic in spawned query task kills stream silently | Wrap `run_query` body in `catch_unwind`; on panic, emit `Page::Done { warnings: [panic_msg] }` before the channel closes. |
-| No observability hooks | `tracing::instrument` on every public Driver method, span per cursor id. Already have `tracing` in deps; just not used. |
-| No `MockDriver` in `driver-api` | Add behind a `mock` feature. Lets server-substrate tests run without a real DB. Critical path for steps 5–13 of PHASE0. |
-| Cancel-token map leaks entries on conn close mid-query | `remove_conn` doesn't drain `cursors` for entries belonging to the conn. Add: `cursors.retain(|_, _| ...)` keyed by a side index `conn_id → Vec<cursor_id>`. |
-| Channel buffer size hard-coded to 64 | Make configurable via `PgDriverInner.cfg`. Backpressure tuning for large-result streaming (Tier 2 #20). |
+| FK target columns not surfaced | `ConstraintInfo.references` carries the table name but not the referenced columns. Extend `query_constraints` to pull `confkey` and resolve to column names. |
+| Trigger column scope missing | `TriggerInfo.columns` is always empty. `pg_trigger.tgattr` carries UPDATE OF column list. |
+| Index column expressions vs names | Computed indexes (e.g. `LOWER(email)`) surface as `pg_get_indexdef` text rather than a clean column name. Currently dropped; surface as the expression string. |
+| Typefacet richness for PG | `PgColumnFacets` declared but never populated in the Deep pass. Carry OID, enum values, array dims. |
+| Test for forced panic in run_query | The `catch_unwind` path is reviewed but not exercised by a test. Hard to trigger naturally. |
 
-## Roadmap (next 5 — driver layer only)
+## Roadmap (next — driver layer only)
 
-In dependency order. Each item is one PR-sized unit.
+The five original P0/P1 items are closed. New work in dependency order:
 
-1. **Integration test harness against real PG.**
-   `crates/driver-postgres/tests/live_pg.rs` gated behind `feature = "live-pg"`.
-   Spins up Postgres via testcontainers (or `nix develop` + pg_ctl for local
-   runs). Covers every Driver verb end-to-end. This is the gate that lets
-   every subsequent change claim to be "tested."
+1. **Numeric decode + `Interval` decode.**
+   Pick a `bigdecimal` or `rust_decimal` dep (or a hand-rolled wire-format
+   decoder). Wire both `Type::NUMERIC` and `Type::INTERVAL`. Add integration
+   test that inserts and reads back both types.
 
-2. **`MockDriver` in `driver-api`.**
-   `feature = "mock"`. Programmable: each method returns a queued result or
-   error. Lets the server bootstrap (PHASE0 step 5) and session manager (step
-   6) land and be unit-tested without a real DB. Required before any
-   server-substrate work.
+2. **TLS connector for `VerifyCa`/`VerifyFull`.**
+   `tokio-postgres-rustls` + `rustls`. Build a `MakeTlsConnector` wrapper.
+   Integration test against a PG instance with self-signed cert.
 
-3. **`take_in_tx` race fix + unified conn-state map.**
-   Single `Mutex<HashMap<conn_id, ConnState>>` where `ConnState` carries an
-   optional `tx_id`. Drop the side `tx_index`. Eliminates the two-lock window.
-   Small, contained refactor with the integration test as the safety net.
+3. **`LISTEN/NOTIFY` real impl in `PgExt`.**
+   Dedicated `listen_pool`; long-running task per LISTEN that emits
+   `PgNotification` through an `mpsc::Sender`. Test via a NOTIFY from a
+   second conn.
 
-4. **Pool caching by spec + numeric decode + `affected_rows` via simple_query.**
-   Three correctness fixes that together move the impl from "compiles" to
-   "actually correct for the common case." Each independently shippable; lump
-   them because they're all "the impl was a placeholder here" gaps. Integration
-   test gates the lot.
+4. **`COPY` real impl in `PgExt`.**
+   `client.copy_in` for `COPY ... FROM STDIN`, `copy_out` for `COPY ... TO
+   STDOUT`. Streams bytes through `CopyResult::bytes`/rows. Test with a
+   small CSV round-trip.
 
-5. **Deep schema completeness (PK / FK / indexes / constraints).**
-   Extends `protocol::ObjectInfo` and queries `pg_constraint` + `pg_indexes`
-   in the Deep pass. Required for FEATURES Tier 1 #11 (autocomplete) and Tier
-   2 #30 (table designer).
+5. **Advisory locks real impl in `PgExt`.**
+   `pg_advisory_lock`/`unlock` (and the try-variants). Test concurrent
+   lockers via two opens of the same spec.
 
-After these five, the driver layer is in shape to support the server
-substrate (PHASE0 steps 5–13) and the SQL Server fast-follow (steps 15–16).
+After these five, the `PgExt` trait stops returning `UnsupportedForEngine`
+for any PG-native operation. The driver layer is then feature-complete for
+Phase 0; SQL Server (PHASE0 step 15) and server substrate (steps 5–13) can
+proceed without driver-layer churn.
 
 ## Out of scope (tracked in PHASE0.md, not here)
 
@@ -114,19 +124,40 @@ substrate (PHASE0 steps 5–13) and the SQL Server fast-follow (steps 15–16).
 
 ## What "the driver layer is done" looks like
 
-When the five roadmap items above are merged:
+When the five roadmap items above are merged, on top of the closed
+changelist:
 
 - ✅ Every Driver method on `PgDriver` is exercised against real PG by an
   automated test.
 - ✅ `MockDriver` exists for server-substrate unit tests.
 - ✅ No two-lock races in connection-state management.
 - ✅ Pools are reused across opens of the same spec.
-- ✅ Numeric types decode to `Value::Decimal`, not `Value::Engine`.
+- ✅ Numeric + interval types decode natively.
 - ✅ DML results report `affected_rows`.
-- ✅ Deep schema pass surfaces PK / FK / indexes / constraints.
+- ✅ Deep schema pass surfaces PK / FK / indexes / constraints / triggers.
 - ✅ Cancel-token map cleans up on close.
 - ✅ Decode errors are surfaced as warnings, not silently dropped.
+- ✅ TLS `VerifyCa` / `VerifyFull` work end-to-end.
+- ✅ `PgExt` methods are real impls, not `UnsupportedForEngine` stubs.
+- ✅ `tracing` spans cover every public method.
 
 At that point: PG impl is genuinely solid. SQL Server impl (step 15) and
 server substrate (steps 5–13) can proceed in parallel without the driver
 layer being a source of bugs.
+
+## How to run the integration tests locally
+
+```text
+# Inside the nix dev shell:
+initdb -D /tmp/sift-pg -U sift --auth=trust --no-locale --encoding=UTF8
+printf 'port = 5433\nunix_socket_directories = '\''/tmp/opencode/sift-pg-socket'\''\n' >> /tmp/sift-pg/postgresql.conf
+mkdir -p /tmp/opencode/sift-pg-socket
+pg_ctl -D /tmp/sift-pg -l /tmp/sift-pg.log -w start
+psql -h /tmp/opencode/sift-pg-socket -p 5433 -U sift -d postgres -c 'CREATE DATABASE sifttest;'
+
+# From the repo root:
+cargo test -p sift-driver-postgres --features live-pg --test live_pg
+```
+
+Tests parallelise cleanly via per-test unique schema names; no
+`--test-threads=1` required.

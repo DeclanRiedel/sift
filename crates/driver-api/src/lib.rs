@@ -184,6 +184,12 @@ pub trait Driver: Send + Sync {
     }
 }
 
+#[cfg(feature = "mock")]
+pub mod mock;
+
+#[cfg(feature = "mock")]
+pub use mock::{MockDriver, MockDriverBuilder};
+
 // ----------------------------------------------------------------------------
 // Extension traits. Declared here so `as_pg` / `as_mssql` can name them.
 // Implementations live in the driver crates.

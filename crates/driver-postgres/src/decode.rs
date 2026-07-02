@@ -10,7 +10,7 @@ use sift_protocol::{
     ColumnMetadata, Engine, Nullability, PrimitiveType, TypeCategory, TypeRef, Value,
 };
 use tokio_postgres::types::{FromSql, Kind, Type};
-use tokio_postgres::Column;
+use tokio_postgres::{Column, SimpleQueryRow};
 
 /// Newtype wrapper enabling `impl FromSql`. Unwrap via `.0` at the call site.
 pub(crate) struct PgValue(pub Value);
@@ -135,6 +135,24 @@ pub(crate) fn col_to_metadata(col: &Column) -> ColumnMetadata {
         primary_key: false,
         facets: Default::default(),
     }
+}
+
+/// Build column metadata from a `simple_query` row. tokio-postgres 0.7.18's
+/// `SimpleColumn` carries only the name (no type OID), so we default the
+/// type to Text — clients that need richer typing should re-issue via the
+/// extended-query path or via the Deep schema pass.
+pub(crate) fn simple_query_columns(row: &SimpleQueryRow) -> Vec<ColumnMetadata> {
+    row.columns()
+        .iter()
+        .map(|c| ColumnMetadata {
+            name: c.name().to_string(),
+            type_ref: TypeRef::Primitive(PrimitiveType::Text),
+            nullable: Nullability::Unknown,
+            auto_increment: false,
+            primary_key: false,
+            facets: Default::default(),
+        })
+        .collect()
 }
 
 #[cfg(test)]
