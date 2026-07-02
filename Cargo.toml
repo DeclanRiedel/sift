@@ -34,7 +34,7 @@ thiserror = "1.0"
 anyhow = "1.0"
 async-trait = "0.1"
 tokio = { version = "1", features = ["full"] }
-tokio-util = "0.7"
+tokio-util = { version = "0.7", features = ["compat"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 dashmap = "6"
@@ -52,6 +52,7 @@ hyper = { version = "1", features = ["http1", "server"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
 http-body-util = "0.1"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+tiberius = { version = "0.12", default-features = false, features = ["rustls", "tds73", "chrono"] }
 
 [profile.dev]
 split-debuginfo = "unpacked"

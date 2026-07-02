@@ -296,6 +296,7 @@ pub struct PgSavepoint {
 #[derive(Debug, Clone)]
 pub struct MssqlSavepoint {
     pub tx: TxId,
+    pub conn: ConnHandle,
     pub name: String,
 }
 
