@@ -3,6 +3,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::Once;
 
 use dashmap::DashMap;
 use sift_driver_api::{ConnHandle, IdCounter};
@@ -98,7 +99,8 @@ impl PgDriverInner {
         cfg.user = Some(spec.user.clone());
         cfg.password = spec.password.clone();
         cfg.application_name = Some("sift".to_string());
-        cfg.ssl_mode = Some(map_ssl_mode(spec.ssl_mode.unwrap_or(SslMode::Prefer))?);
+        let ssl_mode = spec.ssl_mode.unwrap_or(SslMode::Prefer);
+        cfg.ssl_mode = Some(map_ssl_mode(ssl_mode));
 
         if let Some(sift_protocol::EngineConnectionSpec::Postgres(p)) = &spec.engine_specific {
             if let Some(s) = &p.search_path {
@@ -119,9 +121,13 @@ impl PgDriverInner {
             ..Default::default()
         });
 
-        let pool = cfg
-            .create_pool(Some(Runtime::Tokio1), tokio_postgres::NoTls)
-            .map_err(|e| DriverError::new(Code::ConnectionFailed, e.to_string()))?;
+        let pool = if matches!(ssl_mode, SslMode::VerifyCa | SslMode::VerifyFull) {
+            let tls = native_tls_connector()?;
+            cfg.create_pool(Some(Runtime::Tokio1), tls)
+        } else {
+            cfg.create_pool(Some(Runtime::Tokio1), tokio_postgres::NoTls)
+        }
+        .map_err(|e| DriverError::new(Code::ConnectionFailed, e.to_string()))?;
         let arc = Arc::new(pool);
         // Another opener may have raced us; keep whichever landed first.
         self.pools
@@ -245,16 +251,34 @@ impl PgDriver {
     }
 }
 
-fn map_ssl_mode(m: SslMode) -> Result<deadpool_postgres::SslMode, DriverError> {
+fn map_ssl_mode(m: SslMode) -> deadpool_postgres::SslMode {
     match m {
-        SslMode::Disable => Ok(deadpool_postgres::SslMode::Disable),
-        SslMode::Prefer => Ok(deadpool_postgres::SslMode::Prefer),
-        SslMode::Require => Ok(deadpool_postgres::SslMode::Require),
-        SslMode::VerifyCa | SslMode::VerifyFull => Err(DriverError::new(
-            Code::UnsupportedForEngine,
-            "Postgres TLS certificate verification is not wired yet",
-        )),
+        SslMode::Disable => deadpool_postgres::SslMode::Disable,
+        SslMode::Prefer => deadpool_postgres::SslMode::Prefer,
+        SslMode::Require => deadpool_postgres::SslMode::Require,
+        SslMode::VerifyCa | SslMode::VerifyFull => deadpool_postgres::SslMode::Require,
     }
+}
+
+fn native_tls_connector() -> Result<tokio_postgres_rustls::MakeRustlsConnect, DriverError> {
+    static INSTALL_PROVIDER: Once = Once::new();
+    INSTALL_PROVIDER.call_once(|| {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+    });
+    tokio_postgres_rustls::MakeRustlsConnect::with_native_certs()
+        .map(|(tls, errors)| {
+            for error in errors {
+                tracing::warn!(%error, "error loading a native certificate");
+            }
+            tls
+        })
+        .map_err(|errors| {
+            DriverError::new(
+                Code::ConnectionFailed,
+                format!("failed to load native TLS roots: {errors:?}"),
+            )
+            .with_engine(sift_protocol::Engine::Postgres)
+        })
 }
 
 /// Canonical pool key. Serialization failure is an internal error because

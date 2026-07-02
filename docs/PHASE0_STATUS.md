@@ -19,6 +19,8 @@ build a UI against Postgres and SQL Server without private guidance.
 - Postgres driver with pooled connections, streaming, params, schema,
   transactions, cancel, advisory locks, COPY import/export, and live container
   tests.
+- Postgres `VerifyCa` / `VerifyFull` TLS modes use rustls with native trust
+  roots. `VerifyCa` is intentionally strict and performs hostname verification.
 - SQL Server driver via `tiberius` with params, streaming, schema, transactions,
   savepoints, cancel-by-abort isolation, close/cancel cleanup, and live
   container tests.
@@ -39,8 +41,6 @@ build a UI against Postgres and SQL Server without private guidance.
 - SQL Server cancel uses task abort/drop-connection semantics with session
   cleanup, not TDS ATTENTION.
 - SQL Server MARS and bulk insert extension methods are declared but unsupported.
-- Postgres `VerifyCa` / `VerifyFull` TLS modes are rejected until a verifying
-  TLS connector is wired.
 - Postgres native extension op `LISTEN/NOTIFY` is declared but unsupported.
 - Month-aware Postgres intervals intentionally surface as engine-native values
   because `chrono::Duration` cannot represent calendar months.
