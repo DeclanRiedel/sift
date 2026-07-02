@@ -144,6 +144,11 @@ impl MockDriverBuilder {
         self
     }
 
+    pub fn begin_err(mut self, err: DriverError) -> Self {
+        self.state.begin.push_back(Box::new(move || Err(err)));
+        self
+    }
+
     pub fn build(self) -> MockDriver {
         MockDriver {
             engine: self.engine,
@@ -189,7 +194,9 @@ impl Driver for MockDriver {
     async fn begin(&self, c: ConnHandle, mode: TxMode) -> Result<TxHandle, DriverError> {
         self.record("begin");
         let mut guard = self.state.lock().unwrap();
-        let _ = MockDriver::pop::<TxHandle>(&mut guard.begin, "begin");
+        if let Some(result) = MockDriver::pop_optional::<TxHandle>(&mut guard.begin) {
+            result?;
+        }
         let tx_id = sift_protocol::TxId::new(self.tx_id.next());
         Ok(TxHandle::new(tx_id, c, mode))
     }

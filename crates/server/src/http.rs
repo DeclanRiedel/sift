@@ -15,9 +15,9 @@ use serde_json::json;
 use std::time::Instant;
 
 use sift_protocol::{
-    AuditEntry, CancelRequest, ExecuteRequest, ExecuteRequestHttp, Health, ObjectPath,
-    OpenConnectionRequest, OpenSessionRequest, SchemaFilter, SchemaScope, WsClientMessage,
-    WsServerMessage, PROTOCOL_VERSION,
+    AuditEntry, BeginTransactionRequest, CancelRequest, EndTransactionRequest, ExecuteRequest,
+    ExecuteRequestHttp, Health, ObjectPath, OpenConnectionRequest, OpenSessionRequest,
+    SchemaFilter, SchemaScope, WsClientMessage, WsServerMessage, PROTOCOL_VERSION,
 };
 
 use crate::error::{ApiError, ApiResult};
@@ -59,6 +59,15 @@ pub fn app(state: AppState) -> Router {
             get(get_schema),
         )
         .route("/v1/sessions/:id/queries", post(execute_query))
+        .route("/v1/sessions/:id/transactions", post(begin_transaction))
+        .route(
+            "/v1/sessions/:id/transactions/:tx_id/commit",
+            post(commit_transaction),
+        )
+        .route(
+            "/v1/sessions/:id/transactions/:tx_id/rollback",
+            post(rollback_transaction),
+        )
         .route("/v1/sessions/:id/ws", get(ws_session))
         .route(
             "/v1/sessions/:id/queries/:cursor_id/cancel",
@@ -165,6 +174,15 @@ async fn openapi() -> Json<serde_json::Value> {
             },
             "/v1/sessions/{id}/queries": {
                 "post": { "summary": "Execute query over synchronous HTTP" }
+            },
+            "/v1/sessions/{id}/transactions": {
+                "post": { "summary": "Begin transaction" }
+            },
+            "/v1/sessions/{id}/transactions/{tx_id}/commit": {
+                "post": { "summary": "Commit transaction" }
+            },
+            "/v1/sessions/{id}/transactions/{tx_id}/rollback": {
+                "post": { "summary": "Rollback transaction" }
             },
             "/v1/sessions/{id}/queries/{cursor_id}/cancel": {
                 "post": { "summary": "Cancel query" }
@@ -300,12 +318,44 @@ async fn execute_query(
     Path(id): Path<sift_protocol::SessionId>,
     Json(req): Json<ExecuteRequestHttp>,
 ) -> ApiResult<Json<sift_protocol::ExecuteResponse>> {
-    let inner = ExecuteRequest::new(req.sql);
-    // tx handle is part of the protocol surface but the transactions
-    // endpoint is TBD; for now the sync execute path is autocommit only.
-    let _ = req.tx;
-    let resp = state.sessions.execute(id, req.connection, inner).await?;
+    let resp = state.sessions.execute_http(id, req).await?;
     Ok(Json(resp))
+}
+
+async fn begin_transaction(
+    State(state): State<AppState>,
+    Path(id): Path<sift_protocol::SessionId>,
+    Json(req): Json<BeginTransactionRequest>,
+) -> ApiResult<Json<sift_protocol::TransactionInfo>> {
+    Ok(Json(state.sessions.begin_transaction(id, req).await?))
+}
+
+async fn commit_transaction(
+    State(state): State<AppState>,
+    Path((id, tx_id)): Path<(sift_protocol::SessionId, sift_protocol::TxId)>,
+    Json(req): Json<EndTransactionRequest>,
+) -> ApiResult<Json<serde_json::Value>> {
+    if req.tx_id != tx_id {
+        return Err(ApiError::BadRequest(
+            "`tx_id` body value must match tx id in path".into(),
+        ));
+    }
+    state.sessions.commit_transaction(id, req).await?;
+    Ok(Json(json!({"ok": true})))
+}
+
+async fn rollback_transaction(
+    State(state): State<AppState>,
+    Path((id, tx_id)): Path<(sift_protocol::SessionId, sift_protocol::TxId)>,
+    Json(req): Json<EndTransactionRequest>,
+) -> ApiResult<Json<serde_json::Value>> {
+    if req.tx_id != tx_id {
+        return Err(ApiError::BadRequest(
+            "`tx_id` body value must match tx id in path".into(),
+        ));
+    }
+    state.sessions.rollback_transaction(id, req).await?;
+    Ok(Json(json!({"ok": true})))
 }
 
 async fn cancel_query(

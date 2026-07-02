@@ -9,11 +9,13 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use dashmap::DashMap;
-use sift_driver_api::{ConnHandle, Driver, ResultSetStream};
+use sift_driver_api::{ConnHandle, Driver, ResultSetStream, TxHandle};
 use sift_protocol::{
-    AuditEntry, ColumnMetadata, ConnectionId, ConnectionInfo, ConnectionSpec, CursorId,
-    DriverError, DriverWarning, Engine, ExecuteRequest, ExecuteResponse, OpenSessionRequest, Page,
-    Row, SchemaScope, SchemaSnapshot, ServerInfo, SessionId, SessionInfo,
+    AuditEntry, BeginTransactionRequest, ColumnMetadata, ConnectionId, ConnectionInfo,
+    ConnectionSpec, CursorId, DriverError, DriverWarning, EndTransactionRequest, Engine,
+    ExecuteRequest, ExecuteRequestHttp, ExecuteResponse, OpenSessionRequest, Page, Row,
+    SchemaScope, SchemaSnapshot, ServerInfo, SessionId, SessionInfo, TransactionInfo, TxHandleRef,
+    TxId,
 };
 
 use crate::error::{ApiError, ApiResult};
@@ -57,6 +59,7 @@ impl SessionStore {
             created_at: now,
             tag: req.tag.clone(),
             connections: DashMap::new(),
+            transactions: DashMap::new(),
             next_conn_id: AtomicU64::new(1),
         };
         let info = session.info();
@@ -159,9 +162,19 @@ impl SessionStore {
         session_id: SessionId,
         conn_id: ConnectionId,
     ) -> ApiResult<()> {
-        let (_, entry) = self
-            .with_session(&session_id, |s| s.connections.remove(&conn_id))?
+        let (txs, entry) = self
+            .with_session(&session_id, |s| {
+                let txs = drain_connection_transactions(s, conn_id);
+                s.connections
+                    .remove(&conn_id)
+                    .map(|(_, entry)| (txs, entry))
+            })?
             .ok_or(ApiError::ConnectionNotFound(conn_id))?;
+        for tx in txs {
+            if let Err(error) = entry.driver.rollback(tx.handle).await {
+                tracing::warn!(session_id = %session_id, conn_id = %conn_id, error = %error, "rollback during connection close failed");
+            }
+        }
         entry.driver.close(entry.handle).await?;
         tracing::info!(session_id = %session_id, conn_id = %conn_id, "connection closed");
         Ok(())
@@ -200,12 +213,17 @@ impl SessionStore {
     /// Synchronous execute: drains the entire page stream into the response.
     /// Suitable for small/medium results. The WS streaming surface (PHASE0
     /// step 10) replaces this for large results.
-    pub async fn execute(
+    pub async fn execute_http(
         &self,
         session_id: SessionId,
-        conn_id: ConnectionId,
-        req: ExecuteRequest,
+        req: ExecuteRequestHttp,
     ) -> ApiResult<ExecuteResponse> {
+        let conn_id = req.connection;
+        self.validate_execute_tx(session_id, conn_id, req.tx.as_ref())?;
+        let req = ExecuteRequest {
+            sql: req.sql,
+            params: Vec::new(),
+        };
         let entry = self.get_conn_entry(session_id, conn_id)?;
         let stream = entry.driver.execute(entry.handle.clone(), req).await?;
         drain_stream(stream).await.map_err(ApiError::Driver)
@@ -230,6 +248,130 @@ impl SessionStore {
         let entry = self.get_conn_entry(session_id, conn_id)?;
         entry.driver.cancel(entry.handle.clone(), cursor).await?;
         Ok(())
+    }
+
+    pub async fn begin_transaction(
+        &self,
+        session_id: SessionId,
+        req: BeginTransactionRequest,
+    ) -> ApiResult<TransactionInfo> {
+        let entry = self.get_conn_entry(session_id, req.connection)?;
+        self.reject_if_connection_has_tx(session_id, req.connection, None)?;
+        let handle = entry.driver.begin(entry.handle.clone(), req.mode).await?;
+        let info = TransactionInfo {
+            tx_id: handle.tx_id,
+            connection: req.connection,
+            mode: handle.mode,
+            opened_at: chrono::Utc::now(),
+        };
+        let tx = TransactionEntry {
+            info: info.clone(),
+            handle,
+        };
+        let session = self
+            .inner
+            .sessions
+            .get(&session_id)
+            .ok_or(ApiError::SessionNotFound(session_id))?;
+        session.transactions.insert(info.tx_id, tx);
+        Ok(info)
+    }
+
+    pub async fn commit_transaction(
+        &self,
+        session_id: SessionId,
+        req: EndTransactionRequest,
+    ) -> ApiResult<()> {
+        let tx = self.remove_tx(session_id, req.connection, req.tx_id)?;
+        let entry = self.get_conn_entry(session_id, req.connection)?;
+        entry.driver.commit(tx.handle).await?;
+        Ok(())
+    }
+
+    pub async fn rollback_transaction(
+        &self,
+        session_id: SessionId,
+        req: EndTransactionRequest,
+    ) -> ApiResult<()> {
+        let tx = self.remove_tx(session_id, req.connection, req.tx_id)?;
+        let entry = self.get_conn_entry(session_id, req.connection)?;
+        entry.driver.rollback(tx.handle).await?;
+        Ok(())
+    }
+
+    fn validate_execute_tx(
+        &self,
+        session_id: SessionId,
+        conn_id: ConnectionId,
+        tx: Option<&TxHandleRef>,
+    ) -> ApiResult<()> {
+        match tx {
+            Some(tx) => {
+                if tx.connection != conn_id {
+                    return Err(ApiError::BadRequest(
+                        "`tx.connection` must match request connection".into(),
+                    ));
+                }
+                self.reject_if_connection_has_tx(session_id, conn_id, Some(tx.tx_id))?;
+                Ok(())
+            }
+            None => self.reject_if_connection_has_tx(session_id, conn_id, None),
+        }
+    }
+
+    fn reject_if_connection_has_tx(
+        &self,
+        session_id: SessionId,
+        conn_id: ConnectionId,
+        expected: Option<TxId>,
+    ) -> ApiResult<()> {
+        let session = self
+            .inner
+            .sessions
+            .get(&session_id)
+            .ok_or(ApiError::SessionNotFound(session_id))?;
+        let active = session
+            .transactions
+            .iter()
+            .find(|tx| tx.info.connection == conn_id)
+            .map(|tx| tx.info.tx_id);
+        match (active, expected) {
+            (Some(active), Some(expected)) if active == expected => Ok(()),
+            (Some(_), Some(_)) => Err(ApiError::BadRequest(
+                "transaction id is not active on this connection".into(),
+            )),
+            (Some(_), None) => Err(ApiError::BadRequest(
+                "connection has an active transaction; pass `tx` explicitly".into(),
+            )),
+            (None, Some(_)) => Err(ApiError::BadRequest("transaction is not active".into())),
+            (None, None) => Ok(()),
+        }
+    }
+
+    fn remove_tx(
+        &self,
+        session_id: SessionId,
+        conn_id: ConnectionId,
+        tx_id: TxId,
+    ) -> ApiResult<TransactionEntry> {
+        let session = self
+            .inner
+            .sessions
+            .get(&session_id)
+            .ok_or(ApiError::SessionNotFound(session_id))?;
+        let (_, tx) = session.transactions.remove(&tx_id).ok_or_else(|| {
+            ApiError::Driver(DriverError::new(
+                sift_protocol::Code::TransactionNotFound,
+                "transaction not active",
+            ))
+        })?;
+        if tx.info.connection != conn_id {
+            session.transactions.insert(tx_id, tx);
+            return Err(ApiError::BadRequest(
+                "`connection` must match transaction connection".into(),
+            ));
+        }
+        Ok(tx)
     }
 
     fn get_conn_entry(
@@ -303,6 +445,7 @@ pub struct Session {
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub tag: Option<String>,
     pub connections: DashMap<ConnectionId, ConnectionEntry>,
+    pub transactions: DashMap<TxId, TransactionEntry>,
     pub next_conn_id: AtomicU64,
 }
 
@@ -324,6 +467,29 @@ pub struct ConnectionEntry {
     pub handle: ConnHandle,
     pub driver: Arc<dyn Driver>,
     pub info: ConnectionInfo,
+}
+
+pub struct TransactionEntry {
+    pub info: TransactionInfo,
+    pub handle: TxHandle,
+}
+
+fn drain_connection_transactions(s: &Session, conn_id: ConnectionId) -> Vec<TransactionEntry> {
+    let tx_ids: Vec<TxId> = s
+        .transactions
+        .iter()
+        .filter_map(|tx| {
+            if tx.info.connection == conn_id {
+                Some(tx.info.tx_id)
+            } else {
+                None
+            }
+        })
+        .collect();
+    tx_ids
+        .into_iter()
+        .filter_map(|id| s.transactions.remove(&id).map(|(_, tx)| tx))
+        .collect()
 }
 
 /// Result type returned by the HTTP execute handler. Public so the WS
@@ -380,8 +546,3 @@ fn display_name_for(spec: &ConnectionSpec) -> String {
     };
     format!("{}@{}", spec.user, host)
 }
-
-// Trait import marker — kept for the (TBD) transactions endpoint that needs
-// TxMode as part of its body shape.
-#[allow(unused_imports)]
-use sift_protocol::TxMode as _TxModeImportMarker;

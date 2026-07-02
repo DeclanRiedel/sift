@@ -2,9 +2,10 @@
 //! buildable-against from outside the server crate.
 
 use sift_protocol::{
-    CancelRequest, ConnectionId, ConnectionInfo, CursorId, Engine, ExecuteRequestHttp,
-    ExecuteResponse, Health, OpenConnectionRequest, OpenSessionRequest, Page, SchemaSnapshot,
-    ServerInfo, SessionId, SessionInfo, WsClientMessage, WsServerMessage,
+    BeginTransactionRequest, CancelRequest, ConnectionId, ConnectionInfo, CursorId,
+    EndTransactionRequest, Engine, ExecuteRequestHttp, ExecuteResponse, Health,
+    OpenConnectionRequest, OpenSessionRequest, Page, SchemaSnapshot, ServerInfo, SessionId,
+    SessionInfo, TransactionInfo, TxHandleRef, TxId, TxMode, WsClientMessage, WsServerMessage,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -107,6 +108,66 @@ impl Client {
                 sql: sql.into(),
                 tx: None,
             },
+        )
+        .await
+    }
+
+    pub async fn execute_in_tx(
+        &self,
+        session: SessionId,
+        tx: &TransactionInfo,
+        sql: impl Into<String>,
+    ) -> Result<ExecuteResponse> {
+        self.post(
+            &format!("/v1/sessions/{session}/queries"),
+            &ExecuteRequestHttp {
+                connection: tx.connection,
+                sql: sql.into(),
+                tx: Some(TxHandleRef {
+                    tx_id: tx.tx_id,
+                    connection: tx.connection,
+                    mode: tx.mode,
+                }),
+            },
+        )
+        .await
+    }
+
+    pub async fn begin_transaction(
+        &self,
+        session: SessionId,
+        connection: ConnectionId,
+        mode: TxMode,
+    ) -> Result<TransactionInfo> {
+        self.post(
+            &format!("/v1/sessions/{session}/transactions"),
+            &BeginTransactionRequest { connection, mode },
+        )
+        .await
+    }
+
+    pub async fn commit_transaction(
+        &self,
+        session: SessionId,
+        connection: ConnectionId,
+        tx_id: TxId,
+    ) -> Result<()> {
+        self.post_empty_body(
+            &format!("/v1/sessions/{session}/transactions/{tx_id}/commit"),
+            &EndTransactionRequest { connection, tx_id },
+        )
+        .await
+    }
+
+    pub async fn rollback_transaction(
+        &self,
+        session: SessionId,
+        connection: ConnectionId,
+        tx_id: TxId,
+    ) -> Result<()> {
+        self.post_empty_body(
+            &format!("/v1/sessions/{session}/transactions/{tx_id}/rollback"),
+            &EndTransactionRequest { connection, tx_id },
         )
         .await
     }

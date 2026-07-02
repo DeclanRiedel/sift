@@ -465,6 +465,100 @@ async fn execute_returns_drained_rows_and_affected_count() {
 }
 
 #[tokio::test]
+async fn transaction_flow_requires_explicit_tx_ref() {
+    let app = app(test_state());
+
+    let session: sift_protocol::SessionInfo = body_json(
+        app.clone()
+            .oneshot(post_json_str("/v1/sessions", "{}"))
+            .await
+            .unwrap()
+            .into_body(),
+    )
+    .await;
+    let sid = session.id;
+
+    let conn: sift_protocol::ConnectionInfo = body_json(
+        app.clone()
+            .oneshot(post_json(
+                format!("/v1/sessions/{sid}/connections"),
+                serde_json::json!({
+                    "engine": "postgres",
+                    "host": "mock.invalid",
+                    "port": 5432,
+                    "database": "mock",
+                    "user": "mock",
+                    "ssl_mode": "disable",
+                }),
+            ))
+            .await
+            .unwrap()
+            .into_body(),
+    )
+    .await;
+
+    let tx: sift_protocol::TransactionInfo = body_json(
+        app.clone()
+            .oneshot(post_json(
+                format!("/v1/sessions/{sid}/transactions"),
+                sift_protocol::BeginTransactionRequest {
+                    connection: conn.id,
+                    mode: sift_protocol::TxMode::default(),
+                },
+            ))
+            .await
+            .unwrap()
+            .into_body(),
+    )
+    .await;
+    assert_eq!(tx.connection, conn.id);
+
+    let res = app
+        .clone()
+        .oneshot(post_json(
+            format!("/v1/sessions/{sid}/queries"),
+            ExecuteRequestHttp {
+                connection: conn.id,
+                sql: "SELECT id, name FROM users".into(),
+                tx: None,
+            },
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+
+    let res = app
+        .clone()
+        .oneshot(post_json(
+            format!("/v1/sessions/{sid}/queries"),
+            ExecuteRequestHttp {
+                connection: conn.id,
+                sql: "SELECT id, name FROM users".into(),
+                tx: Some(sift_protocol::TxHandleRef {
+                    tx_id: tx.tx_id,
+                    connection: conn.id,
+                    mode: tx.mode,
+                }),
+            },
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+
+    let res = app
+        .oneshot(post_json(
+            format!("/v1/sessions/{sid}/transactions/{}/commit", tx.tx_id),
+            sift_protocol::EndTransactionRequest {
+                connection: conn.id,
+                tx_id: tx.tx_id,
+            },
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+}
+
+#[tokio::test]
 async fn unregistered_engine_yields_422() {
     let app = app(test_state());
 

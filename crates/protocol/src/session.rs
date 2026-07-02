@@ -6,7 +6,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    ColumnMetadata, ConnectionSpec, CursorId, DriverWarning, Engine, Page, Row, TxMode, Value,
+    ColumnMetadata, ConnectionSpec, CursorId, DriverWarning, Engine, Page, Row, TxId, TxMode, Value,
 };
 
 /// Opaque session id. Stable for the lifetime of the session.
@@ -82,9 +82,33 @@ pub struct ExecuteRequestHttp {
 /// endpoint; carried back by the client on subsequent queries.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TxHandleRef {
-    pub tx_id: crate::TxId,
+    pub tx_id: TxId,
     pub connection: ConnectionId,
     pub mode: TxMode,
+}
+
+/// Body of `POST /v1/sessions/:id/transactions`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BeginTransactionRequest {
+    pub connection: ConnectionId,
+    #[serde(default)]
+    pub mode: TxMode,
+}
+
+/// Body of transaction-ending endpoints.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EndTransactionRequest {
+    pub connection: ConnectionId,
+    pub tx_id: TxId,
+}
+
+/// Server-visible transaction metadata.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TransactionInfo {
+    pub tx_id: TxId,
+    pub connection: ConnectionId,
+    pub mode: TxMode,
+    pub opened_at: chrono::DateTime<chrono::Utc>,
 }
 
 /// Sync execute response. The HTTP surface drains the driver's page stream
