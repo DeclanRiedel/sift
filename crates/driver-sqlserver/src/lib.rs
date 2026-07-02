@@ -12,8 +12,9 @@ use dashmap::DashMap;
 use futures::StreamExt;
 use sift_driver_api::{ConnHandle, Driver, IdCounter, MssqlExt, ResultSetStream, TxHandle};
 use sift_protocol::{
-    Code, ColumnMetadata, ConnectionSpec, CursorId, DriverError, Engine, ExecuteRequest,
-    ObjectInfo, ObjectKind, PrimitiveType, Row, SchemaScope, SchemaSnapshot, SchemaTree,
+    Code, ColumnMetadata, ConnectionSpec, ConstraintInfo, ConstraintKind, CursorId, DriverError,
+    Engine, ExecuteRequest, IndexInfo, IndexKind, Nullability, ObjectInfo, ObjectKind,
+    PrimitiveType, Row, SchemaDepth, SchemaFilter, SchemaScope, SchemaSnapshot, SchemaTree,
     ServerInfo, TxId, TxMode, TypeCategory, TypeRef, Value,
 };
 use tiberius::{AuthMethod, Client, ColumnType, Config, EncryptionLevel, QueryItem, ToSql};
@@ -156,7 +157,7 @@ impl Driver for MssqlDriver {
 
     async fn begin(&self, c: ConnHandle, mode: TxMode) -> Result<TxHandle, DriverError> {
         let mut conn = self.take_conn(&c).await?;
-        conn.execute("BEGIN TRANSACTION", &[])
+        conn.simple_query("BEGIN TRANSACTION")
             .await
             .map_err(ms_err)?;
         let tx_id = TxId::new(self.inner.tx_id.next());
@@ -166,22 +167,34 @@ impl Driver for MssqlDriver {
 
     async fn commit(&self, t: TxHandle) -> Result<(), DriverError> {
         let mut conn = self.take_conn(&t.conn).await?;
-        let result = conn
-            .execute("COMMIT TRANSACTION", &[])
-            .await
-            .map_err(ms_err);
+        let result = async {
+            conn.simple_query("COMMIT TRANSACTION")
+                .await
+                .map_err(ms_err)?
+                .into_results()
+                .await
+                .map_err(ms_err)?;
+            Ok::<_, DriverError>(())
+        }
+        .await;
         self.put_conn(&t.conn, conn).await;
-        result.map(|_| ())
+        result
     }
 
     async fn rollback(&self, t: TxHandle) -> Result<(), DriverError> {
         let mut conn = self.take_conn(&t.conn).await?;
-        let result = conn
-            .execute("ROLLBACK TRANSACTION", &[])
-            .await
-            .map_err(ms_err);
+        let result = async {
+            conn.simple_query("ROLLBACK TRANSACTION")
+                .await
+                .map_err(ms_err)?
+                .into_results()
+                .await
+                .map_err(ms_err)?;
+            Ok::<_, DriverError>(())
+        }
+        .await;
         self.put_conn(&t.conn, conn).await;
-        result.map(|_| ())
+        result
     }
 
     async fn execute(
@@ -257,7 +270,16 @@ impl MssqlExt for MssqlDriver {
         validate_ident(name)?;
         let mut conn = self.take_conn(&t.conn).await?;
         let sql = format!("SAVE TRANSACTION [{name}]");
-        let result = conn.execute(sql, &[]).await.map_err(ms_err);
+        let result = async {
+            conn.simple_query(sql)
+                .await
+                .map_err(ms_err)?
+                .into_results()
+                .await
+                .map_err(ms_err)?;
+            Ok::<_, DriverError>(())
+        }
+        .await;
         self.put_conn(&t.conn, conn).await;
         result?;
         Ok(sift_driver_api::MssqlSavepoint {
@@ -271,9 +293,18 @@ impl MssqlExt for MssqlDriver {
         validate_ident(&sp.name)?;
         let mut conn = self.take_conn(&sp.conn).await?;
         let sql = format!("ROLLBACK TRANSACTION [{}]", sp.name);
-        let result = conn.execute(sql, &[]).await.map_err(ms_err);
+        let result = async {
+            conn.simple_query(sql)
+                .await
+                .map_err(ms_err)?
+                .into_results()
+                .await
+                .map_err(ms_err)?;
+            Ok::<_, DriverError>(())
+        }
+        .await;
         self.put_conn(&sp.conn, conn).await;
-        result.map(|_| ())
+        result
     }
 }
 
@@ -348,10 +379,110 @@ async fn mssql_schema(
     scope: SchemaScope,
 ) -> Result<SchemaSnapshot, DriverError> {
     let mut snapshot = SchemaSnapshot::empty(scope.clone());
+
+    match &scope.depth {
+        SchemaDepth::Shallow => {
+            let rows = conn
+                .query(
+                    "SELECT TABLE_SCHEMA, TABLE_NAME, TABLE_TYPE FROM INFORMATION_SCHEMA.TABLES ORDER BY TABLE_SCHEMA, TABLE_NAME",
+                    &[],
+                )
+                .await
+                .map_err(ms_err)?
+                .into_first_result()
+                .await
+                .map_err(ms_err)?;
+
+            let mut by_schema: std::collections::BTreeMap<String, Vec<ObjectInfo>> =
+                Default::default();
+            for row in rows {
+                let schema = row
+                    .try_get::<&str, _>(0)
+                    .map_err(ms_err)?
+                    .unwrap_or("dbo")
+                    .to_string();
+                let name = row
+                    .try_get::<&str, _>(1)
+                    .map_err(ms_err)?
+                    .unwrap_or_default()
+                    .to_string();
+                let table_type = row
+                    .try_get::<&str, _>(2)
+                    .map_err(ms_err)?
+                    .unwrap_or_default();
+                let kind = mssql_object_kind(table_type);
+                if !schema_filter_matches(scope.filter.as_ref(), &schema, &name, kind) {
+                    continue;
+                }
+                by_schema
+                    .entry(schema)
+                    .or_default()
+                    .push(ObjectInfo::new(name, kind));
+            }
+            snapshot.trees.push(sift_protocol::CatalogTree {
+                name: "default".to_string(),
+                schemas: by_schema
+                    .into_iter()
+                    .map(|(name, objects)| SchemaTree { name, objects })
+                    .collect(),
+            });
+        }
+        SchemaDepth::Deep { object } => {
+            let schema = object.schema.as_deref().unwrap_or("dbo");
+            let mut obj = ObjectInfo::new(
+                object.name.clone(),
+                object.kind.unwrap_or(ObjectKind::Table),
+            );
+            obj.columns = mssql_columns(conn, schema, &object.name).await?;
+            obj.indexes = mssql_indexes(conn, schema, &object.name).await?;
+            obj.constraints = mssql_constraints(conn, schema, &object.name).await?;
+            snapshot.trees.push(sift_protocol::CatalogTree {
+                name: object
+                    .catalog
+                    .clone()
+                    .unwrap_or_else(|| "default".to_string()),
+                schemas: vec![SchemaTree {
+                    name: schema.to_string(),
+                    objects: vec![obj],
+                }],
+            });
+        }
+    }
+    Ok(snapshot)
+}
+
+async fn mssql_columns(
+    conn: &mut MssqlConn,
+    schema: &str,
+    object: &str,
+) -> Result<Vec<ColumnMetadata>, DriverError> {
     let rows = conn
         .query(
-            "SELECT TABLE_SCHEMA, TABLE_NAME, TABLE_TYPE FROM INFORMATION_SCHEMA.TABLES ORDER BY TABLE_SCHEMA, TABLE_NAME",
-            &[],
+            r#"
+SELECT
+  c.COLUMN_NAME,
+  c.DATA_TYPE,
+  c.IS_NULLABLE,
+  COLUMNPROPERTY(OBJECT_ID(QUOTENAME(c.TABLE_SCHEMA) + '.' + QUOTENAME(c.TABLE_NAME)), c.COLUMN_NAME, 'IsIdentity') AS IS_IDENTITY,
+  CASE WHEN pk.COLUMN_NAME IS NULL THEN CAST(0 AS bit) ELSE CAST(1 AS bit) END AS IS_PK,
+  c.CHARACTER_MAXIMUM_LENGTH,
+  c.COLLATION_NAME
+FROM INFORMATION_SCHEMA.COLUMNS c
+LEFT JOIN (
+  SELECT ku.TABLE_SCHEMA, ku.TABLE_NAME, ku.COLUMN_NAME
+  FROM INFORMATION_SCHEMA.TABLE_CONSTRAINTS tc
+  JOIN INFORMATION_SCHEMA.KEY_COLUMN_USAGE ku
+    ON ku.CONSTRAINT_SCHEMA = tc.CONSTRAINT_SCHEMA
+   AND ku.CONSTRAINT_NAME = tc.CONSTRAINT_NAME
+  WHERE tc.CONSTRAINT_TYPE = 'PRIMARY KEY'
+) pk
+  ON pk.TABLE_SCHEMA = c.TABLE_SCHEMA
+ AND pk.TABLE_NAME = c.TABLE_NAME
+ AND pk.COLUMN_NAME = c.COLUMN_NAME
+WHERE c.TABLE_SCHEMA = @P1 AND c.TABLE_NAME = @P2
+ORDER BY c.ORDINAL_POSITION
+"#,
+            &[&schema, &object],
         )
         .await
         .map_err(ms_err)?
@@ -359,40 +490,165 @@ async fn mssql_schema(
         .await
         .map_err(ms_err)?;
 
-    let mut by_schema: std::collections::BTreeMap<String, Vec<ObjectInfo>> = Default::default();
+    rows.into_iter()
+        .map(|row| {
+            let name = row
+                .try_get::<&str, _>(0)
+                .map_err(ms_err)?
+                .unwrap_or_default()
+                .to_string();
+            let type_name = row
+                .try_get::<&str, _>(1)
+                .map_err(ms_err)?
+                .unwrap_or_default();
+            let nullable = match row.try_get::<&str, _>(2).map_err(ms_err)?.unwrap_or("YES") {
+                "NO" => Nullability::NotNullable,
+                "YES" => Nullability::Nullable,
+                _ => Nullability::Unknown,
+            };
+            let auto_increment = row.try_get::<i32, _>(3).map_err(ms_err)?.unwrap_or(0) == 1;
+            let primary_key = row.try_get::<bool, _>(4).map_err(ms_err)?.unwrap_or(false);
+            let max_length = row
+                .try_get::<i32, _>(5)
+                .map_err(ms_err)?
+                .and_then(|v| u32::try_from(v).ok());
+            let collation = row
+                .try_get::<&str, _>(6)
+                .map_err(ms_err)?
+                .map(str::to_string);
+            Ok(ColumnMetadata {
+                name,
+                type_ref: mssql_type_name_ref(type_name),
+                nullable,
+                auto_increment,
+                primary_key,
+                facets: sift_protocol::EngineColumnFacets {
+                    postgres: None,
+                    sql_server: Some(sift_protocol::MssqlColumnFacets {
+                        tds_type: Some(type_name.to_string()),
+                        collation,
+                        max_length,
+                    }),
+                },
+            })
+        })
+        .collect()
+}
+
+async fn mssql_indexes(
+    conn: &mut MssqlConn,
+    schema: &str,
+    object: &str,
+) -> Result<Vec<IndexInfo>, DriverError> {
+    let rows = conn
+        .query(
+            r#"
+SELECT i.name, i.is_unique, i.is_primary_key, c.name
+FROM sys.indexes i
+JOIN sys.objects o ON o.object_id = i.object_id
+JOIN sys.schemas s ON s.schema_id = o.schema_id
+JOIN sys.index_columns ic ON ic.object_id = i.object_id AND ic.index_id = i.index_id
+JOIN sys.columns c ON c.object_id = i.object_id AND c.column_id = ic.column_id
+WHERE s.name = @P1 AND o.name = @P2 AND i.name IS NOT NULL AND i.is_hypothetical = 0
+ORDER BY i.index_id, ic.key_ordinal
+"#,
+            &[&schema, &object],
+        )
+        .await
+        .map_err(ms_err)?
+        .into_first_result()
+        .await
+        .map_err(ms_err)?;
+
+    let mut map: std::collections::BTreeMap<String, IndexInfo> = Default::default();
     for row in rows {
-        let schema = row
-            .try_get::<&str, _>(0)
-            .map_err(ms_err)?
-            .unwrap_or("dbo")
-            .to_string();
         let name = row
-            .try_get::<&str, _>(1)
+            .try_get::<&str, _>(0)
             .map_err(ms_err)?
             .unwrap_or_default()
             .to_string();
-        let table_type = row
+        let unique = row.try_get::<bool, _>(1).map_err(ms_err)?.unwrap_or(false);
+        let primary_key = row.try_get::<bool, _>(2).map_err(ms_err)?.unwrap_or(false);
+        let column = row
+            .try_get::<&str, _>(3)
+            .map_err(ms_err)?
+            .unwrap_or_default()
+            .to_string();
+        map.entry(name.clone())
+            .and_modify(|idx| idx.columns.push(column.clone()))
+            .or_insert_with(|| IndexInfo {
+                name,
+                columns: vec![column],
+                unique,
+                primary_key,
+                kind: IndexKind::Other,
+                partial_predicate: None,
+            });
+    }
+    Ok(map.into_values().collect())
+}
+
+async fn mssql_constraints(
+    conn: &mut MssqlConn,
+    schema: &str,
+    object: &str,
+) -> Result<Vec<ConstraintInfo>, DriverError> {
+    let rows = conn
+        .query(
+            r#"
+SELECT tc.CONSTRAINT_NAME, tc.CONSTRAINT_TYPE, ku.COLUMN_NAME
+FROM INFORMATION_SCHEMA.TABLE_CONSTRAINTS tc
+LEFT JOIN INFORMATION_SCHEMA.KEY_COLUMN_USAGE ku
+  ON ku.CONSTRAINT_SCHEMA = tc.CONSTRAINT_SCHEMA
+ AND ku.CONSTRAINT_NAME = tc.CONSTRAINT_NAME
+WHERE tc.TABLE_SCHEMA = @P1 AND tc.TABLE_NAME = @P2
+ORDER BY tc.CONSTRAINT_NAME, ku.ORDINAL_POSITION
+"#,
+            &[&schema, &object],
+        )
+        .await
+        .map_err(ms_err)?
+        .into_first_result()
+        .await
+        .map_err(ms_err)?;
+
+    let mut map: std::collections::BTreeMap<String, ConstraintInfo> = Default::default();
+    for row in rows {
+        let name = row
+            .try_get::<&str, _>(0)
+            .map_err(ms_err)?
+            .unwrap_or_default()
+            .to_string();
+        let kind = match row
+            .try_get::<&str, _>(1)
+            .map_err(ms_err)?
+            .unwrap_or_default()
+        {
+            "PRIMARY KEY" => ConstraintKind::PrimaryKey,
+            "FOREIGN KEY" => ConstraintKind::ForeignKey,
+            "UNIQUE" => ConstraintKind::Unique,
+            "CHECK" => ConstraintKind::Check,
+            _ => ConstraintKind::Other,
+        };
+        let column = row
             .try_get::<&str, _>(2)
             .map_err(ms_err)?
-            .unwrap_or_default();
-        let kind = if table_type == "VIEW" {
-            ObjectKind::View
-        } else {
-            ObjectKind::Table
-        };
-        by_schema
-            .entry(schema)
-            .or_default()
-            .push(ObjectInfo::new(name, kind));
+            .map(str::to_string);
+        map.entry(name.clone())
+            .and_modify(|constraint| {
+                if let Some(column) = &column {
+                    constraint.columns.push(column.clone());
+                }
+            })
+            .or_insert_with(|| ConstraintInfo {
+                name,
+                kind,
+                columns: column.into_iter().collect(),
+                definition: None,
+                references: None,
+            });
     }
-    snapshot.trees.push(sift_protocol::CatalogTree {
-        name: "default".to_string(),
-        schemas: by_schema
-            .into_iter()
-            .map(|(name, objects)| SchemaTree { name, objects })
-            .collect(),
-    });
-    Ok(snapshot)
+    Ok(map.into_values().collect())
 }
 
 fn ms_col(col: &tiberius::Column) -> ColumnMetadata {
@@ -554,6 +810,84 @@ fn ms_type_ref(ty: ColumnType) -> TypeRef {
             name: format!("{ty:?}"),
             category: TypeCategory::Other,
         })
+}
+
+fn mssql_type_name_ref(type_name: &str) -> TypeRef {
+    let primitive = match type_name.to_ascii_lowercase().as_str() {
+        "bit" => Some(PrimitiveType::Bool),
+        "tinyint" | "smallint" => Some(PrimitiveType::Int16),
+        "int" => Some(PrimitiveType::Int32),
+        "bigint" => Some(PrimitiveType::Int64),
+        "real" => Some(PrimitiveType::Float32),
+        "float" => Some(PrimitiveType::Float64),
+        "decimal" | "numeric" | "money" | "smallmoney" => Some(PrimitiveType::Decimal),
+        "binary" | "varbinary" | "image" => Some(PrimitiveType::Blob),
+        "date" => Some(PrimitiveType::Date),
+        "time" => Some(PrimitiveType::Time),
+        "datetime" | "datetime2" | "smalldatetime" => Some(PrimitiveType::Timestamp),
+        "datetimeoffset" => Some(PrimitiveType::TimestampTz),
+        "uniqueidentifier" => Some(PrimitiveType::Uuid),
+        "char" | "varchar" | "text" | "nchar" | "nvarchar" | "ntext" | "xml" => {
+            Some(PrimitiveType::Text)
+        }
+        _ => None,
+    };
+    primitive
+        .map(TypeRef::Primitive)
+        .unwrap_or_else(|| TypeRef::Engine {
+            engine: Engine::SqlServer,
+            name: type_name.to_string(),
+            category: TypeCategory::Other,
+        })
+}
+
+fn mssql_object_kind(table_type: &str) -> ObjectKind {
+    if table_type == "VIEW" {
+        ObjectKind::View
+    } else {
+        ObjectKind::Table
+    }
+}
+
+fn schema_filter_matches(
+    filter: Option<&SchemaFilter>,
+    schema: &str,
+    name: &str,
+    kind: ObjectKind,
+) -> bool {
+    let Some(filter) = filter else {
+        return true;
+    };
+    if let Some(schemas) = &filter.schemas {
+        if !schemas.iter().any(|s| s == schema) {
+            return false;
+        }
+    }
+    if let Some(kinds) = &filter.kinds {
+        if !kinds.contains(&kind) {
+            return false;
+        }
+    }
+    if let Some(pattern) = &filter.name_pattern {
+        if !glob_match(pattern, name) {
+            return false;
+        }
+    }
+    true
+}
+
+fn glob_match(pattern: &str, value: &str) -> bool {
+    fn inner(pattern: &[u8], value: &[u8]) -> bool {
+        match pattern.split_first() {
+            None => value.is_empty(),
+            Some((&b'*', rest)) => {
+                inner(rest, value) || (!value.is_empty() && inner(pattern, &value[1..]))
+            }
+            Some((&b'?', rest)) => !value.is_empty() && inner(rest, &value[1..]),
+            Some((&p, rest)) => value.first().is_some_and(|v| *v == p) && inner(rest, &value[1..]),
+        }
+    }
+    inner(pattern.as_bytes(), value.as_bytes())
 }
 
 fn validate_ident(name: &str) -> Result<(), DriverError> {

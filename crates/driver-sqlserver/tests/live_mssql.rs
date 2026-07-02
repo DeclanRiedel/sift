@@ -13,8 +13,8 @@
 use sift_driver_api::Driver;
 use sift_driver_sqlserver::MssqlDriver;
 use sift_protocol::{
-    ConnectionSpec, Engine, EngineConnectionSpec, ExecuteRequest, MssqlConnectionSpec, Page,
-    PrimitiveType, SslMode, TypeRef, Value,
+    ConnectionSpec, Engine, EngineConnectionSpec, ExecuteRequest, MssqlConnectionSpec, ObjectPath,
+    Page, PrimitiveType, SchemaScope, SslMode, TxMode, TypeRef, Value,
 };
 
 fn spec() -> ConnectionSpec {
@@ -117,4 +117,107 @@ async fn cancel_long_query() {
         .await
         .expect("cancel succeeds");
     driver.close(conn).await.expect("close is idempotent");
+}
+
+#[tokio::test]
+async fn schema_deep_and_transactions() {
+    let driver = MssqlDriver::new();
+    let conn = driver.open(&spec()).await.expect("open succeeds");
+    let table = format!(
+        "sift_phase0_{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos()
+    );
+
+    let setup =
+        format!("CREATE TABLE dbo.[{table}] (id int NOT NULL PRIMARY KEY, name nvarchar(64) NULL)");
+    drain(
+        driver
+            .execute(conn.clone(), ExecuteRequest::new(setup))
+            .await
+            .expect("create table"),
+    )
+    .await;
+
+    let shallow = driver
+        .schema(conn.clone(), SchemaScope::shallow())
+        .await
+        .expect("shallow schema");
+    assert!(shallow
+        .trees
+        .iter()
+        .flat_map(|tree| &tree.schemas)
+        .flat_map(|schema| &schema.objects)
+        .any(|object| object.name == table));
+
+    let deep = driver
+        .schema(
+            conn.clone(),
+            SchemaScope::deep(ObjectPath {
+                catalog: None,
+                schema: Some("dbo".into()),
+                name: table.clone(),
+                kind: None,
+            }),
+        )
+        .await
+        .expect("deep schema");
+    let object = &deep.trees[0].schemas[0].objects[0];
+    assert!(object
+        .columns
+        .iter()
+        .any(|c| c.name == "id" && c.primary_key));
+    assert!(object.indexes.iter().any(|idx| idx.primary_key));
+    assert!(object
+        .constraints
+        .iter()
+        .any(|constraint| constraint.columns.iter().any(|c| c == "id")));
+
+    let tx = driver
+        .begin(conn.clone(), TxMode::default())
+        .await
+        .expect("begin");
+    drain(
+        driver
+            .execute(
+                conn.clone(),
+                ExecuteRequest::new(format!(
+                    "INSERT INTO dbo.[{table}] (id, name) VALUES (1, N'a')"
+                )),
+            )
+            .await
+            .expect("insert in tx"),
+    )
+    .await;
+    driver.rollback(tx).await.expect("rollback");
+
+    let pages = drain(
+        driver
+            .execute(
+                conn.clone(),
+                ExecuteRequest::new(format!("SELECT COUNT(*) AS ct FROM dbo.[{table}]")),
+            )
+            .await
+            .expect("count after rollback"),
+    )
+    .await;
+    let count = pages.iter().find_map(|p| match p {
+        Page::Rows(rows) => rows.first().and_then(|row| row.values.first()),
+        _ => None,
+    });
+    assert!(matches!(count, Some(Value::Int32(0))));
+
+    drain(
+        driver
+            .execute(
+                conn.clone(),
+                ExecuteRequest::new(format!("DROP TABLE dbo.[{table}]")),
+            )
+            .await
+            .expect("drop table"),
+    )
+    .await;
+    driver.close(conn).await.expect("close succeeds");
 }
