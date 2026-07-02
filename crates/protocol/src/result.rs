@@ -17,6 +17,12 @@ impl CursorId {
     }
 }
 
+impl std::fmt::Display for CursorId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
 /// A single row of values, positional (matched against the column layout
 /// of the current result set as declared by the preceding `Page::NextResult`).
 #[derive(Debug, Clone, Serialize, Deserialize)]

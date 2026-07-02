@@ -8,7 +8,7 @@ use sift_protocol::{
     ColumnMetadata, ConnectionSpec, Engine, ExecuteRequestHttp, Health, Nullability, Page,
     PrimitiveType, Row, SchemaScope, SchemaSnapshot, ServerInfo, SslMode, TypeRef, Value,
 };
-use sift_server::http::{app, AppState};
+use sift_server::http::{app, AppState, AuthState};
 use sift_server::registry::DriverRegistry;
 use sift_server::session::SessionStore;
 use tower::ServiceExt;
@@ -62,6 +62,7 @@ fn test_state() -> AppState {
         .build();
     AppState {
         sessions: SessionStore::new(registry),
+        auth: AuthState::default(),
     }
 }
 
@@ -69,6 +70,19 @@ fn test_state_with_driver(driver: MockDriver) -> AppState {
     let registry = DriverRegistry::builder().register(driver).build();
     AppState {
         sessions: SessionStore::new(registry),
+        auth: AuthState::default(),
+    }
+}
+
+fn test_state_with_token(token: &str) -> AppState {
+    let registry = DriverRegistry::builder()
+        .register(mock_postgres_driver())
+        .build();
+    AppState {
+        sessions: SessionStore::new(registry),
+        auth: AuthState {
+            bearer_token: Some(token.to_string()),
+        },
     }
 }
 
@@ -122,6 +136,45 @@ async fn health_lists_registered_engines() {
     let health: Health = body_json(res.into_body()).await;
     assert_eq!(health.status, "ok");
     assert!(health.engines.contains(&Engine::Postgres));
+}
+
+#[tokio::test]
+async fn openapi_is_published() {
+    let app = app(test_state());
+    let res = app
+        .oneshot(
+            Request::get("/v1/openapi.json")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let body: serde_json::Value = body_json(res.into_body()).await;
+    assert_eq!(body["openapi"], "3.1.0");
+    assert!(body["paths"]["/v1/sessions/{id}/ws"].is_object());
+}
+
+#[tokio::test]
+async fn bearer_token_auth_is_enforced_when_configured() {
+    let app = app(test_state_with_token("secret"));
+    let res = app
+        .clone()
+        .oneshot(Request::get("/v1/health").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+
+    let res = app
+        .oneshot(
+            Request::get("/v1/health")
+                .header("authorization", "Bearer secret")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
 }
 
 #[tokio::test]

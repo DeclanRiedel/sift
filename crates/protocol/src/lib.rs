@@ -15,6 +15,7 @@ pub mod column;
 pub mod connection;
 pub mod engine;
 pub mod error;
+pub mod operation;
 pub mod result;
 pub mod schema;
 pub mod session;
@@ -31,6 +32,7 @@ pub use connection::{
 };
 pub use engine::Engine;
 pub use error::{Code, DriverError, DriverWarning};
+pub use operation::Operation;
 pub use result::{CursorId, ExecuteRequest, Page, Row};
 pub use schema::{
     CatalogTree, ConstraintInfo, ConstraintKind, IndexInfo, IndexKind, ObjectInfo, ObjectKind,
@@ -40,6 +42,7 @@ pub use schema::{
 pub use session::{
     Ack, CancelRequest, ConnectionId, ConnectionInfo, ExecuteRequestHttp, ExecuteResponse, Health,
     OpenConnectionRequest, OpenSessionRequest, SessionId, SessionInfo, TxHandleRef,
+    WsClientMessage, WsServerMessage,
 };
 pub use tx::{AccessMode as TxAccessMode, IsolationLevel, TxId, TxMode};
 

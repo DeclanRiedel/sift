@@ -14,6 +14,8 @@ pub struct Config {
     pub drivers: DriversConfig,
     /// Operational timeouts.
     pub timeouts: TimeoutConfig,
+    /// Minimal Phase 0 auth hook.
+    pub auth: AuthConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -41,6 +43,14 @@ pub struct TimeoutConfig {
     pub request_secs: u64,
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AuthConfig {
+    /// If set, non-loopback clients must send `Authorization: Bearer <token>`.
+    /// Empty by default for local-first development.
+    pub bearer_token: Option<String>,
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
@@ -48,6 +58,7 @@ impl Default for Config {
             log: LogConfig::default(),
             drivers: DriversConfig::default(),
             timeouts: TimeoutConfig::default(),
+            auth: AuthConfig::default(),
         }
     }
 }

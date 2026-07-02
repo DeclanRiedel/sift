@@ -5,7 +5,9 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::{ColumnMetadata, ConnectionSpec, CursorId, DriverWarning, Engine, Row, TxMode};
+use crate::{
+    ColumnMetadata, ConnectionSpec, CursorId, DriverWarning, Engine, Page, Row, TxMode, Value,
+};
 
 /// Opaque session id. Stable for the lifetime of the session.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -117,4 +119,48 @@ pub struct Health {
     pub status: String,
     pub version: String,
     pub engines: Vec<Engine>,
+}
+
+/// WebSocket client → server messages. The streaming surface is intentionally
+/// protocol-owned: external clients can consume it without importing server
+/// internals.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum WsClientMessage {
+    Execute {
+        request_id: String,
+        connection: ConnectionId,
+        sql: String,
+        #[serde(default)]
+        params: Vec<Value>,
+    },
+    Ack {
+        cursor_id: CursorId,
+        seq: u64,
+    },
+    Cancel {
+        connection: ConnectionId,
+        cursor_id: CursorId,
+    },
+}
+
+/// WebSocket server → client messages. Each `Page` must be acked by
+/// `(cursor_id, seq)` before the server sends the next page, providing the
+/// Phase 0 backpressure contract.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum WsServerMessage {
+    Started {
+        request_id: String,
+        cursor_id: CursorId,
+    },
+    Page {
+        cursor_id: CursorId,
+        seq: u64,
+        page: Page,
+    },
+    Error {
+        request_id: Option<String>,
+        message: String,
+    },
 }

@@ -2,18 +2,21 @@
 //! carries the `SessionStore` (which in turn carries the `DriverRegistry`).
 
 use axum::body::Body;
+use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Path, Query, State};
-use axum::http::{header::HeaderName, HeaderValue, Request};
-use axum::middleware::{from_fn, Next};
+use axum::http::{header, header::HeaderName, HeaderValue, Request, StatusCode};
+use axum::middleware::{from_fn, from_fn_with_state, Next};
 use axum::response::Response;
 use axum::routing::{delete, get, post};
 use axum::{Json, Router};
+use futures::{SinkExt, StreamExt};
 use serde::Deserialize;
 use serde_json::json;
 
 use sift_protocol::{
     CancelRequest, ExecuteRequest, ExecuteRequestHttp, Health, ObjectPath, OpenConnectionRequest,
-    OpenSessionRequest, SchemaFilter, SchemaScope, PROTOCOL_VERSION,
+    OpenSessionRequest, SchemaFilter, SchemaScope, WsClientMessage, WsServerMessage,
+    PROTOCOL_VERSION,
 };
 
 use crate::error::{ApiError, ApiResult};
@@ -23,11 +26,18 @@ use crate::VERSION;
 #[derive(Clone)]
 pub struct AppState {
     pub sessions: SessionStore,
+    pub auth: AuthState,
+}
+
+#[derive(Clone, Default)]
+pub struct AuthState {
+    pub bearer_token: Option<String>,
 }
 
 pub fn app(state: AppState) -> Router {
     Router::new()
         .route("/v1/health", get(health))
+        .route("/v1/openapi.json", get(openapi))
         .route("/v1/sessions", post(create_session).get(list_sessions))
         .route("/v1/sessions/:id", get(get_session).delete(close_session))
         .route(
@@ -47,10 +57,12 @@ pub fn app(state: AppState) -> Router {
             get(get_schema),
         )
         .route("/v1/sessions/:id/queries", post(execute_query))
+        .route("/v1/sessions/:id/ws", get(ws_session))
         .route(
             "/v1/sessions/:id/queries/:cursor_id/cancel",
             post(cancel_query),
         )
+        .layer(from_fn_with_state(state.auth.clone(), auth_middleware))
         .layer(from_fn(protocol_version_header))
         .with_state(state)
 }
@@ -64,12 +76,77 @@ async fn protocol_version_header(req: Request<Body>, next: Next) -> Response {
     response
 }
 
+async fn auth_middleware(
+    State(auth): State<AuthState>,
+    req: Request<Body>,
+    next: Next,
+) -> Result<Response, StatusCode> {
+    let Some(expected) = auth.bearer_token.as_deref() else {
+        return Ok(next.run(req).await);
+    };
+    let valid = req
+        .headers()
+        .get(header::AUTHORIZATION)
+        .and_then(|h| h.to_str().ok())
+        .and_then(|h| h.strip_prefix("Bearer "))
+        .is_some_and(|actual| actual == expected);
+    if valid {
+        Ok(next.run(req).await)
+    } else {
+        Err(StatusCode::UNAUTHORIZED)
+    }
+}
+
 async fn health(State(state): State<AppState>) -> Json<Health> {
     Json(Health {
         status: "ok".to_string(),
         version: VERSION.to_string(),
         engines: state.sessions.registry().engines(),
     })
+}
+
+async fn openapi() -> Json<serde_json::Value> {
+    Json(json!({
+        "openapi": "3.1.0",
+        "info": {
+            "title": "sift API",
+            "version": VERSION
+        },
+        "paths": {
+            "/v1/health": { "get": { "summary": "Health and registered engines" } },
+            "/v1/sessions": {
+                "get": { "summary": "List sessions" },
+                "post": { "summary": "Create session" }
+            },
+            "/v1/sessions/{id}": {
+                "get": { "summary": "Get session" },
+                "delete": { "summary": "Close session" }
+            },
+            "/v1/sessions/{id}/connections": {
+                "get": { "summary": "List connections" },
+                "post": { "summary": "Open connection" }
+            },
+            "/v1/sessions/{id}/connections/{conn_id}": {
+                "delete": { "summary": "Close connection" }
+            },
+            "/v1/sessions/{id}/connections/{conn_id}/ping": {
+                "post": { "summary": "Ping connection" }
+            },
+            "/v1/sessions/{id}/connections/{conn_id}/schema": {
+                "get": { "summary": "Fetch schema" }
+            },
+            "/v1/sessions/{id}/queries": {
+                "post": { "summary": "Execute query over synchronous HTTP" }
+            },
+            "/v1/sessions/{id}/queries/{cursor_id}/cancel": {
+                "post": { "summary": "Cancel query" }
+            },
+            "/v1/sessions/{id}/ws": {
+                "get": { "summary": "WebSocket query stream; protocol uses WsClientMessage/WsServerMessage" }
+            },
+            "/v1/openapi.json": { "get": { "summary": "OpenAPI document" } }
+        }
+    }))
 }
 
 async fn create_session(
@@ -215,4 +292,156 @@ async fn cancel_query(
     }
     state.sessions.cancel(id, req.connection, cursor_id).await?;
     Ok(Json(json!({"ok": true})))
+}
+
+async fn ws_session(
+    State(state): State<AppState>,
+    Path(session_id): Path<sift_protocol::SessionId>,
+    ws: WebSocketUpgrade,
+) -> Response {
+    ws.on_upgrade(move |socket| async move {
+        if let Err(error) = handle_ws(state.sessions, session_id, socket).await {
+            tracing::warn!(%session_id, error = %error, "websocket session ended with error");
+        }
+    })
+}
+
+async fn handle_ws(
+    sessions: SessionStore,
+    session_id: sift_protocol::SessionId,
+    socket: WebSocket,
+) -> ApiResult<()> {
+    let (mut sender, mut receiver) = socket.split();
+    while let Some(message) = receiver.next().await {
+        let message = message.map_err(|e| ApiError::BadRequest(e.to_string()))?;
+        match message {
+            Message::Text(text) => {
+                let msg: WsClientMessage =
+                    serde_json::from_str(&text).map_err(|e| ApiError::BadRequest(e.to_string()))?;
+                match msg {
+                    WsClientMessage::Execute {
+                        request_id,
+                        connection,
+                        sql,
+                        params,
+                    } => {
+                        let stream = sessions
+                            .execute_stream(session_id, connection, ExecuteRequest { sql, params })
+                            .await?;
+                        send_json(
+                            &mut sender,
+                            &WsServerMessage::Started {
+                                request_id: request_id.clone(),
+                                cursor_id: stream.cursor_id,
+                            },
+                        )
+                        .await?;
+                        stream_pages_with_ack(
+                            &mut sender,
+                            &mut receiver,
+                            stream.cursor_id,
+                            stream.rows,
+                        )
+                        .await?;
+                    }
+                    WsClientMessage::Cancel {
+                        connection,
+                        cursor_id,
+                    } => sessions.cancel(session_id, connection, cursor_id).await?,
+                    WsClientMessage::Ack { .. } => {
+                        send_json(
+                            &mut sender,
+                            &WsServerMessage::Error {
+                                request_id: None,
+                                message: "unexpected ack without active stream".to_string(),
+                            },
+                        )
+                        .await?;
+                    }
+                }
+            }
+            Message::Close(_) => break,
+            Message::Ping(bytes) => sender
+                .send(Message::Pong(bytes))
+                .await
+                .map_err(|e| ApiError::BadRequest(e.to_string()))?,
+            Message::Pong(_) | Message::Binary(_) => {}
+        }
+    }
+    Ok(())
+}
+
+async fn stream_pages_with_ack(
+    sender: &mut futures::stream::SplitSink<WebSocket, Message>,
+    receiver: &mut futures::stream::SplitStream<WebSocket>,
+    cursor_id: sift_protocol::CursorId,
+    mut rows: tokio::sync::mpsc::Receiver<sift_protocol::Page>,
+) -> ApiResult<()> {
+    let mut seq = 0_u64;
+    while let Some(page) = rows.recv().await {
+        send_json(
+            sender,
+            &WsServerMessage::Page {
+                cursor_id,
+                seq,
+                page,
+            },
+        )
+        .await?;
+        wait_for_ack(receiver, cursor_id, seq).await?;
+        seq += 1;
+    }
+    Ok(())
+}
+
+async fn wait_for_ack(
+    receiver: &mut futures::stream::SplitStream<WebSocket>,
+    cursor_id: sift_protocol::CursorId,
+    seq: u64,
+) -> ApiResult<()> {
+    loop {
+        let Some(message) = receiver.next().await else {
+            return Err(ApiError::BadRequest("websocket closed before ack".into()));
+        };
+        let message = message.map_err(|e| ApiError::BadRequest(e.to_string()))?;
+        match message {
+            Message::Text(text) => match serde_json::from_str::<WsClientMessage>(&text)
+                .map_err(|e| ApiError::BadRequest(e.to_string()))?
+            {
+                WsClientMessage::Ack {
+                    cursor_id: ack_cursor,
+                    seq: ack_seq,
+                } if ack_cursor == cursor_id && ack_seq == seq => return Ok(()),
+                WsClientMessage::Ack { .. } => {
+                    return Err(ApiError::BadRequest("ack cursor or seq mismatch".into()));
+                }
+                WsClientMessage::Cancel {
+                    connection: _,
+                    cursor_id: _,
+                } => {
+                    return Err(ApiError::BadRequest(
+                        "cancel during active stream must use HTTP cancel endpoint".into(),
+                    ));
+                }
+                WsClientMessage::Execute { .. } => {
+                    return Err(ApiError::BadRequest(
+                        "concurrent execute on one websocket is not supported".into(),
+                    ));
+                }
+            },
+            Message::Close(_) => return Err(ApiError::BadRequest("websocket closed".into())),
+            Message::Ping(_) | Message::Pong(_) | Message::Binary(_) => {}
+        }
+    }
+}
+
+async fn send_json<T: serde::Serialize>(
+    sender: &mut futures::stream::SplitSink<WebSocket, Message>,
+    value: &T,
+) -> ApiResult<()> {
+    let text = serde_json::to_string(value).map_err(|e| ApiError::Internal(e.to_string()))?;
+    sender
+        .send(Message::Text(text))
+        .await
+        .map_err(|e| ApiError::BadRequest(e.to_string()))
 }

@@ -39,7 +39,10 @@ pub(crate) async fn execute_query(
 
     let cursor_id_num = driver.inner.cursor_id.next();
     let cursor_id = CursorId::new(cursor_id_num);
-    let (page_tx, page_rx) = mpsc::channel::<Page>(64);
+    // Keep one page ahead at most. Combined with batched rows this ties
+    // driver-side production to HTTP/WS consumption without buffering large
+    // result sets in memory.
+    let (page_tx, page_rx) = mpsc::channel::<Page>(1);
 
     // Register the (conn_id, cancel token) tuple before spawning so cancel()
     // racing the query's start still finds the entry, and so close() can

@@ -194,6 +194,16 @@ impl SessionStore {
         drain_stream(stream).await.map_err(ApiError::Driver)
     }
 
+    pub async fn execute_stream(
+        &self,
+        session_id: SessionId,
+        conn_id: ConnectionId,
+        req: ExecuteRequest,
+    ) -> ApiResult<ResultSetStream> {
+        let entry = self.get_conn_entry(session_id, conn_id)?;
+        Ok(entry.driver.execute(entry.handle.clone(), req).await?)
+    }
+
     pub async fn cancel(
         &self,
         session_id: SessionId,

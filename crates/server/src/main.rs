@@ -22,7 +22,12 @@ async fn main() -> anyhow::Result<()> {
 
     let registry = build_registry(&cfg);
     let sessions = SessionStore::new(registry);
-    let state = AppState { sessions };
+    let state = AppState {
+        sessions,
+        auth: sift_server::http::AuthState {
+            bearer_token: cfg.auth.bearer_token.clone(),
+        },
+    };
 
     let app = app(state);
 
