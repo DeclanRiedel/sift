@@ -1,0 +1,43 @@
+//! `sift-protocol` — pure serde types, no I/O (ADR-004).
+//!
+//! The public contract consumed by the server, the desktop binary, and the
+//! future wasm web client. Holds operation enums, request/response structs,
+//! error codes, and serde models — and nothing else. No `tokio`, no
+//! networking, no filesystem.
+//!
+//! See `docs/DRIVER_TRAIT.md` for the design these types serve.
+
+pub mod column;
+pub mod connection;
+pub mod engine;
+pub mod error;
+pub mod result;
+pub mod schema;
+pub mod tx;
+pub mod value;
+
+pub use column::{
+    EngineColumnFacets, MssqlColumnFacets, Nullability, PgColumnFacets, PrimitiveType,
+    TypeCategory, TypeRef,
+};
+pub use connection::{
+    AccessMode as ConnAccessMode, EngineConnectionSpec, MssqlConnectionSpec, PgConnectionSpec,
+    ServerInfo, SslMode,
+};
+pub use engine::Engine;
+pub use error::{Code, DriverError, DriverWarning};
+pub use result::{CursorId, ExecuteRequest, Page, Row};
+pub use schema::{
+    CatalogTree, ObjectInfo, ObjectKind, ObjectPath, SchemaDepth, SchemaFilter, SchemaScope,
+    SchemaSnapshot, SchemaTree,
+};
+pub use tx::{AccessMode as TxAccessMode, IsolationLevel, TxId, TxMode};
+
+/// Re-export of [`ConnectionSpec`].
+pub use connection::ConnectionSpec;
+
+/// Re-export of [`ColumnMetadata`].
+pub use column::ColumnMetadata;
+
+/// Re-export of [`Value`].
+pub use value::Value;

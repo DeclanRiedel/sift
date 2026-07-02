@@ -1,0 +1,53 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/protocol",
+    "crates/core",
+    "crates/driver-api",
+    "crates/driver-postgres",
+    "crates/driver-sqlserver",
+    "crates/server",
+    "crates/client-sdk",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.80"
+license = "AGPL-3.0-only"
+repository = "https://github.com/declan/sift"
+
+[workspace.dependencies]
+# Internal crates
+sift-protocol = { path = "crates/protocol", version = "0.1.0" }
+sift-core = { path = "crates/core", version = "0.1.0" }
+sift-driver-api = { path = "crates/driver-api", version = "0.1.0" }
+sift-driver-postgres = { path = "crates/driver-postgres", version = "0.1.0" }
+sift-driver-sqlserver = { path = "crates/driver-sqlserver", version = "0.1.0" }
+sift-server = { path = "crates/server", version = "0.1.0" }
+sift-client-sdk = { path = "crates/client-sdk", version = "0.1.0" }
+
+# External
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "1.0"
+anyhow = "1.0"
+async-trait = "0.1"
+tokio = { version = "1", features = ["full"] }
+tokio-util = "0.7"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+dashmap = "6"
+futures = "0.3"
+chrono = { version = "0.4", default-features = false, features = ["std", "serde", "clock"] }
+serde_bytes = "0.11"
+uuid = { version = "1", features = ["v4", "serde"] }
+tokio-postgres = { version = "0.7", features = ["with-chrono-0_4", "with-uuid-1", "with-serde_json-1"] }
+deadpool-postgres = "0.14"
+
+[profile.dev]
+split-debuginfo = "unpacked"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
