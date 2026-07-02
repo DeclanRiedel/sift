@@ -65,6 +65,13 @@ fn test_state() -> AppState {
     }
 }
 
+fn test_state_with_driver(driver: MockDriver) -> AppState {
+    let registry = DriverRegistry::builder().register(driver).build();
+    AppState {
+        sessions: SessionStore::new(registry),
+    }
+}
+
 fn pg_spec() -> ConnectionSpec {
     ConnectionSpec {
         host: "mock.invalid".into(),
@@ -106,6 +113,12 @@ async fn health_lists_registered_engines() {
         .await
         .unwrap();
     assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(
+        res.headers()
+            .get("x-sift-protocol-version")
+            .and_then(|h| h.to_str().ok()),
+        Some(sift_protocol::PROTOCOL_VERSION)
+    );
     let health: Health = body_json(res.into_body()).await;
     assert_eq!(health.status, "ok");
     assert!(health.engines.contains(&Engine::Postgres));
@@ -369,6 +382,76 @@ async fn unsupported_engine_yields_422() {
     // The MssqlDriver stub returns UnsupportedForEngine on `open`, so the
     // server maps it to 422.
     assert_eq!(res.status(), StatusCode::UNPROCESSABLE_ENTITY);
+}
+
+#[tokio::test]
+async fn cancel_rejects_cursor_body_path_mismatch() {
+    let app = app(test_state());
+
+    let res = app
+        .oneshot(post_json(
+            "/v1/sessions/1/queries/10/cancel",
+            serde_json::json!({
+                "connection": 1,
+                "cursor": 11,
+            }),
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn execute_stream_error_maps_to_http_error() {
+    let driver = MockDriver::builder()
+        .engine(Engine::Postgres)
+        .execute_err(sift_protocol::DriverError::new(
+            sift_protocol::Code::SyntaxError,
+            "bad sql",
+        ))
+        .build();
+    let app = app(test_state_with_driver(driver));
+
+    let session: sift_protocol::SessionInfo = body_json(
+        app.clone()
+            .oneshot(post_json_str("/v1/sessions", "{}"))
+            .await
+            .unwrap()
+            .into_body(),
+    )
+    .await;
+    let sid = session.id;
+
+    let conn: sift_protocol::ConnectionInfo = body_json(
+        app.clone()
+            .oneshot(post_json(
+                format!("/v1/sessions/{sid}/connections"),
+                serde_json::json!({
+                    "engine": "postgres",
+                    "host": "mock.invalid",
+                    "user": "mock",
+                }),
+            ))
+            .await
+            .unwrap()
+            .into_body(),
+    )
+    .await;
+
+    let res = app
+        .oneshot(post_json(
+            format!("/v1/sessions/{sid}/queries"),
+            ExecuteRequestHttp {
+                connection: conn.id,
+                sql: "BAD".into(),
+                tx: None,
+            },
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
 }
 
 // Silence unused imports for the spec helper (used only when test wants a

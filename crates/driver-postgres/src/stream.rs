@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use futures::{FutureExt, StreamExt};
 use sift_driver_api::{ConnHandle, ResultSetStream};
-use sift_protocol::{CursorId, DriverError, DriverWarning, ExecuteRequest, Page, Row, Value};
+use sift_protocol::{Code, CursorId, DriverError, DriverWarning, ExecuteRequest, Page, Row, Value};
 use tokio::sync::mpsc;
 use tokio_postgres::types::ToSql;
 use tokio_postgres::SimpleQueryMessage;
@@ -14,6 +14,19 @@ use tokio_postgres::SimpleQueryMessage;
 use crate::conn::{PgDriverInner, PooledConn, SlotKind};
 use crate::decode::{col_to_metadata, PgValue};
 use crate::{pg_err, PgDriver};
+
+const ROW_BATCH_SIZE: usize = 128;
+
+struct QueryJob {
+    inner: Arc<PgDriverInner>,
+    conn_id: u64,
+    slot_kind: SlotKind,
+    conn: PooledConn,
+    cursor_id_num: u64,
+    page_tx: mpsc::Sender<Page>,
+    sql: String,
+    params: Vec<Value>,
+}
 
 /// Set up the streaming query: take conn, register cancel token, spawn the
 /// row-pump task, return the [`ResultSetStream`] immediately.
@@ -39,9 +52,9 @@ pub(crate) async fn execute_query(
         .insert(cursor_id_num, (conn_id, cancel_token));
 
     let inner = Arc::clone(&driver.inner);
-    let sql = req.sql;
+    let ExecuteRequest { sql, params } = req;
 
-    tokio::spawn(run_query(
+    tokio::spawn(run_query(QueryJob {
         inner,
         conn_id,
         slot_kind,
@@ -49,90 +62,80 @@ pub(crate) async fn execute_query(
         cursor_id_num,
         page_tx,
         sql,
-    ));
+        params,
+    }));
 
-    Ok(ResultSetStream::new(cursor_id, page_rx))
+    Ok(ResultSetStream::with_cursor_mode(cursor_id, page_rx, false))
 }
 
-async fn run_query(
-    inner: Arc<PgDriverInner>,
-    conn_id: u64,
-    slot_kind: SlotKind,
-    conn: PooledConn,
-    cursor_id_num: u64,
-    page_tx: mpsc::Sender<Page>,
-    sql: String,
-) {
+async fn run_query(job: QueryJob) {
     // Catch panics so a panicking decode path produces a Page::Done with a
     // diagnostic instead of silently dropping the channel.
-    let fut = AssertUnwindSafe(run_query_inner(
-        &inner,
-        conn_id,
-        slot_kind,
-        conn,
-        cursor_id_num,
-        page_tx.clone(),
-        sql,
-    ));
+    let cursor_id_num = job.cursor_id_num;
+    let page_tx = job.page_tx.clone();
+    let fut = AssertUnwindSafe(run_query_inner(job));
     match fut.catch_unwind().await {
         Ok(()) => {}
         Err(panic) => {
             let msg = panic_message(panic);
             tracing::error!(cursor_id_num, "query task panicked: {msg}");
             let _ = page_tx
-                .send(Page::Done {
-                    affected_rows: None,
-                    warnings: vec![DriverWarning::new(format!("query task panicked: {msg}"))],
+                .send(Page::Error {
+                    error: DriverError::new(
+                        Code::DriverInternal,
+                        format!("query task panicked: {msg}"),
+                    ),
                 })
                 .await;
         }
     }
 }
 
-async fn run_query_inner(
-    inner: &Arc<PgDriverInner>,
-    conn_id: u64,
-    slot_kind: SlotKind,
-    conn: PooledConn,
-    cursor_id_num: u64,
-    page_tx: mpsc::Sender<Page>,
-    sql: String,
-) {
+async fn run_query_inner(job: QueryJob) {
     // Dispatch on leading keyword. SELECT/WITH/TABLE/VALUES/SHOW/EXPLAIN are
     // the row-producing statements in PG; route them through the streaming
     // extended-protocol path. Everything else (INSERT/UPDATE/DELETE/DDL/
     // utility) goes through `simple_query`, which gives us the affected-row
     // count via `CommandComplete` at the cost of materialising text-format
     // rows — acceptable because these statements rarely return large rowsets.
-    if is_row_producing(&sql) {
-        run_streaming(inner, conn_id, slot_kind, conn, cursor_id_num, page_tx, sql).await;
+    if !job.params.is_empty() || is_row_producing(&job.sql) {
+        run_streaming(job).await;
     } else {
-        run_simple(inner, conn_id, slot_kind, conn, cursor_id_num, page_tx, sql).await;
+        run_simple(job).await;
     }
 }
 
 /// Stream rows via `query_raw`. Used for SELECT-class statements.
-async fn run_streaming(
-    inner: &Arc<PgDriverInner>,
-    conn_id: u64,
-    slot_kind: SlotKind,
-    conn: PooledConn,
-    cursor_id_num: u64,
-    page_tx: mpsc::Sender<Page>,
-    sql: String,
-) {
-    let params: [&(dyn ToSql + Sync); 0] = [];
-    let stream = match conn.query_raw(&sql, params).await {
+async fn run_streaming(job: QueryJob) {
+    let QueryJob {
+        inner,
+        conn_id,
+        slot_kind,
+        conn,
+        cursor_id_num,
+        page_tx,
+        sql,
+        params,
+    } = job;
+
+    let param_boxes = match params_to_pg(params) {
+        Ok(p) => p,
+        Err(error) => {
+            let _ = page_tx.send(Page::Error { error }).await;
+            finish(&inner, conn_id, slot_kind, conn, cursor_id_num).await;
+            return;
+        }
+    };
+    let param_refs: Vec<&(dyn ToSql + Sync)> = param_boxes
+        .iter()
+        .map(|p| p.as_ref() as &(dyn ToSql + Sync))
+        .collect();
+    let stream = match conn.query_raw(&sql, param_refs).await {
         Ok(s) => s,
         Err(e) => {
             let err = pg_err(e);
-            let _ = page_tx
-                .send(Page::Done {
-                    affected_rows: None,
-                    warnings: vec![DriverWarning::new(err.to_string())],
-                })
-                .await;
-            finish(inner, conn_id, slot_kind, conn, cursor_id_num).await;
+            let _ = page_tx.send(Page::Error { error: err }).await;
+            finish(&inner, conn_id, slot_kind, conn, cursor_id_num).await;
             return;
         }
     };
@@ -141,6 +144,7 @@ async fn run_streaming(
 
     let mut warnings = Vec::new();
     let mut columns_sent = false;
+    let mut row_batch = Vec::with_capacity(ROW_BATCH_SIZE);
 
     while let Some(row_result) = stream.next().await {
         match row_result {
@@ -155,12 +159,23 @@ async fn run_streaming(
                 for i in 0..n {
                     values.push(decode_cell(&row, i, cursor_id_num, &mut warnings));
                 }
-                let _ = page_tx.send(Page::Rows(vec![Row::new(values)])).await;
+                row_batch.push(Row::new(values));
+                if row_batch.len() >= ROW_BATCH_SIZE {
+                    let batch = std::mem::take(&mut row_batch);
+                    if page_tx.send(Page::Rows(batch)).await.is_err() {
+                        finish(&inner, conn_id, slot_kind, conn, cursor_id_num).await;
+                        return;
+                    }
+                }
             }
             Err(e) => {
                 warnings.push(DriverWarning::new(e.to_string()));
             }
         }
+    }
+
+    if !row_batch.is_empty() {
+        let _ = page_tx.send(Page::Rows(row_batch)).await;
     }
 
     let _ = page_tx
@@ -173,30 +188,28 @@ async fn run_streaming(
         })
         .await;
 
-    finish(inner, conn_id, slot_kind, conn, cursor_id_num).await;
+    finish(&inner, conn_id, slot_kind, conn, cursor_id_num).await;
 }
 
 /// Run via `simple_query` to capture affected-row counts. Used for DML/DDL.
-async fn run_simple(
-    inner: &Arc<PgDriverInner>,
-    conn_id: u64,
-    slot_kind: SlotKind,
-    conn: PooledConn,
-    cursor_id_num: u64,
-    page_tx: mpsc::Sender<Page>,
-    sql: String,
-) {
+async fn run_simple(job: QueryJob) {
+    let QueryJob {
+        inner,
+        conn_id,
+        slot_kind,
+        conn,
+        cursor_id_num,
+        page_tx,
+        sql,
+        params: _,
+    } = job;
+
     let messages = match conn.simple_query(&sql).await {
         Ok(m) => m,
         Err(e) => {
             let err = pg_err(e);
-            let _ = page_tx
-                .send(Page::Done {
-                    affected_rows: None,
-                    warnings: vec![DriverWarning::new(err.to_string())],
-                })
-                .await;
-            finish(inner, conn_id, slot_kind, conn, cursor_id_num).await;
+            let _ = page_tx.send(Page::Error { error: err }).await;
+            finish(&inner, conn_id, slot_kind, conn, cursor_id_num).await;
             return;
         }
     };
@@ -216,8 +229,11 @@ async fn run_simple(
                 let n = row.len();
                 let mut values = Vec::with_capacity(n);
                 for i in 0..n {
-                    let v = row.get(i).map(str::to_owned).unwrap_or_default();
-                    values.push(Value::Text(v));
+                    let value = row
+                        .get(i)
+                        .map(|v| Value::Text(v.to_owned()))
+                        .unwrap_or(Value::Null);
+                    values.push(value);
                 }
                 let _ = page_tx.send(Page::Rows(vec![Row::new(values)])).await;
             }
@@ -235,7 +251,40 @@ async fn run_simple(
         })
         .await;
 
-    finish(inner, conn_id, slot_kind, conn, cursor_id_num).await;
+    finish(&inner, conn_id, slot_kind, conn, cursor_id_num).await;
+}
+
+fn params_to_pg(params: Vec<Value>) -> Result<Vec<Box<dyn ToSql + Sync + Send>>, DriverError> {
+    let mut out: Vec<Box<dyn ToSql + Sync + Send>> = Vec::with_capacity(params.len());
+    for value in params {
+        let param: Box<dyn ToSql + Sync + Send> = match value {
+            Value::Null => Box::new(None::<String>),
+            Value::Bool(v) => Box::new(v),
+            Value::Int16(v) => Box::new(v),
+            Value::Int32(v) => Box::new(v),
+            Value::Int64(v) => Box::new(v),
+            Value::Float32(v) => Box::new(v),
+            Value::Float64(v) => Box::new(v),
+            Value::Decimal(v) => Box::new(v),
+            Value::Text(v) => Box::new(v),
+            Value::Blob(v) => Box::new(v),
+            Value::Date(v) => Box::new(v),
+            Value::Time(v) => Box::new(v),
+            Value::Timestamp(v) => Box::new(v),
+            Value::TimestampTz(v) => Box::new(v),
+            Value::Uuid(v) => Box::new(v),
+            Value::Json(v) => Box::new(v),
+            Value::Interval(_) | Value::Engine { .. } => {
+                return Err(DriverError::new(
+                    Code::UnsupportedForEngine,
+                    "parameter type is not supported by Postgres driver yet",
+                )
+                .with_engine(sift_protocol::Engine::Postgres));
+            }
+        };
+        out.push(param);
+    }
+    Ok(out)
 }
 
 /// Decode a single cell, surfacing decode errors as warnings + a placeholder

@@ -89,6 +89,12 @@ impl MockDriver {
             None => Ok(()),
         }
     }
+
+    fn pop_optional<T: Send + 'static>(
+        queue: &mut VecDeque<Boxed<Result<T, DriverError>>>,
+    ) -> Option<Result<T, DriverError>> {
+        queue.pop_front().map(|f| f())
+    }
 }
 
 /// Builder for [`MockDriver`].
@@ -157,9 +163,11 @@ impl Driver for MockDriver {
 
     async fn open(&self, _spec: &ConnectionSpec) -> Result<ConnHandle, DriverError> {
         self.record("open");
-        // Always succeed with a fresh handle; the queued result is exposed
-        // via ping() (the cheaper way to surface connect-time metadata).
-        let _ = MockDriver::pop::<ServerInfo>(&mut self.state.lock().unwrap().open, "open");
+        if let Some(result) =
+            MockDriver::pop_optional::<ServerInfo>(&mut self.state.lock().unwrap().open)
+        {
+            result?;
+        }
         let id = self.conn_id.next();
         Ok(ConnHandle::new(id, self.engine))
     }
@@ -219,17 +227,10 @@ impl Driver for MockDriver {
                 });
                 Ok(ResultSetStream::new(cursor_id, rx))
             }
-            // Surface the error as a one-message stream so the caller still
-            // gets a cursor id + Done page rather than an immediate error.
             Err(e) => {
                 let (tx, rx) = mpsc::channel(1);
                 tokio::spawn(async move {
-                    let _ = tx
-                        .send(sift_protocol::Page::Done {
-                            affected_rows: None,
-                            warnings: vec![sift_protocol::DriverWarning::new(e.to_string())],
-                        })
-                        .await;
+                    let _ = tx.send(sift_protocol::Page::Error { error: e }).await;
                 });
                 let _ = c;
                 Ok(ResultSetStream::new(cursor_id, rx))

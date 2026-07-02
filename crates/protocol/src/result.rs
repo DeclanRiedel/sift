@@ -53,6 +53,9 @@ pub enum Page {
     NextResult {
         columns: Vec<ColumnMetadata>,
     },
+    Error {
+        error: crate::DriverError,
+    },
     Done {
         /// Cumulative affected-row count for the whole batch, when known.
         affected_rows: Option<u64>,

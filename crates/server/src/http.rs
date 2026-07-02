@@ -1,16 +1,19 @@
 //! axum router + handlers. Routes versioned under `/v1`. The `AppState`
 //! carries the `SessionStore` (which in turn carries the `DriverRegistry`).
 
+use axum::body::Body;
 use axum::extract::{Path, Query, State};
-use axum::response::IntoResponse;
+use axum::http::{header::HeaderName, HeaderValue, Request};
+use axum::middleware::{from_fn, Next};
+use axum::response::Response;
 use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use serde::Deserialize;
 use serde_json::json;
 
 use sift_protocol::{
-    CancelRequest, Engine, ExecuteRequest, ExecuteRequestHttp, Health, ObjectPath,
-    OpenConnectionRequest, OpenSessionRequest, SchemaFilter, SchemaScope,
+    CancelRequest, ExecuteRequest, ExecuteRequestHttp, Health, ObjectPath, OpenConnectionRequest,
+    OpenSessionRequest, SchemaFilter, SchemaScope, PROTOCOL_VERSION,
 };
 
 use crate::error::{ApiError, ApiResult};
@@ -48,7 +51,17 @@ pub fn app(state: AppState) -> Router {
             "/v1/sessions/:id/queries/:cursor_id/cancel",
             post(cancel_query),
         )
+        .layer(from_fn(protocol_version_header))
         .with_state(state)
+}
+
+async fn protocol_version_header(req: Request<Body>, next: Next) -> Response {
+    let mut response = next.run(req).await;
+    response.headers_mut().insert(
+        HeaderName::from_static("x-sift-protocol-version"),
+        HeaderValue::from_static(PROTOCOL_VERSION),
+    );
+    response
 }
 
 async fn health(State(state): State<AppState>) -> Json<Health> {
@@ -58,9 +71,6 @@ async fn health(State(state): State<AppState>) -> Json<Health> {
         engines: state.sessions.registry().engines(),
     })
 }
-
-#[derive(Deserialize)]
-struct EmptyBody {}
 
 async fn create_session(
     State(state): State<AppState>,
@@ -198,21 +208,11 @@ async fn cancel_query(
     Path((id, cursor_id)): Path<(sift_protocol::SessionId, sift_protocol::CursorId)>,
     Json(req): Json<CancelRequest>,
 ) -> ApiResult<Json<serde_json::Value>> {
+    if req.cursor != cursor_id {
+        return Err(ApiError::BadRequest(
+            "`cursor` body value must match cursor id in path".into(),
+        ));
+    }
     state.sessions.cancel(id, req.connection, cursor_id).await?;
     Ok(Json(json!({"ok": true})))
 }
-
-// Marker to keep `Engine` import live for future `/v1/engines` route.
-#[allow(dead_code)]
-fn _engine_marker() -> Engine {
-    Engine::Postgres
-}
-
-// Suppress unused-import on EmptyBody — currently a placeholder for future
-// endpoints that accept an empty body.
-#[allow(dead_code)]
-type _EmptyBody = EmptyBody;
-
-// Suppress IntoResponse import marker.
-#[allow(dead_code)]
-fn _into_response_marker<R: IntoResponse>(_r: R) {}

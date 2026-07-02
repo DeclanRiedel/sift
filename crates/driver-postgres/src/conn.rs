@@ -2,7 +2,6 @@
 //! inner state that spawned query tasks share.
 
 use std::collections::HashMap;
-use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
 use dashmap::DashMap;
@@ -31,9 +30,10 @@ pub(crate) struct PgDriverInner {
     /// cursor_id → (owning conn_id, cancel token). `conn_id` is carried so
     /// `close` can drain live cursors belonging to the conn.
     pub(crate) cursors: DashMap<u64, (u64, tokio_postgres::CancelToken)>,
-    /// Cached pools by connection-spec hash. `open()` of an already-seen
-    /// spec reuses the pool; identical connections share warm capacity.
-    pub(crate) pools: DashMap<u64, Arc<Pool>>,
+    /// Cached pools by canonical connection-spec key. `open()` of an
+    /// already-seen spec reuses the pool; identical connections share warm
+    /// capacity. String key avoids silent hash-collision pool reuse.
+    pub(crate) pools: DashMap<String, Arc<Pool>>,
     pub(crate) conn_id: IdCounter,
     pub(crate) tx_id: IdCounter,
     pub(crate) cursor_id: IdCounter,
@@ -80,16 +80,16 @@ impl PgDriverInner {
         }
     }
 
-    /// Borrow or build a pool for the spec. Hashing is on the canonical
-    /// (serde-JSON) form of `ConnectionSpec` so two opens of equivalent specs
-    /// hit the same pool.
+    /// Borrow or build a pool for the spec. Key is the canonical serde-JSON
+    /// form of `ConnectionSpec` so two opens of equivalent specs hit the same
+    /// pool without lossy hashing.
     pub(crate) async fn pool_for(
         &self,
         spec: &ConnectionSpec,
-    ) -> Result<(u64, Arc<Pool>), DriverError> {
-        let hash = spec_hash(spec);
-        if let Some(pool) = self.pools.get(&hash) {
-            return Ok((hash, Arc::clone(&pool)));
+    ) -> Result<(String, Arc<Pool>), DriverError> {
+        let key = spec_key(spec)?;
+        if let Some(pool) = self.pools.get(&key) {
+            return Ok((key, Arc::clone(&pool)));
         }
         let mut cfg = deadpool_postgres::Config::new();
         cfg.host = Some(spec.host.clone());
@@ -98,7 +98,7 @@ impl PgDriverInner {
         cfg.user = Some(spec.user.clone());
         cfg.password = spec.password.clone();
         cfg.application_name = Some("sift".to_string());
-        cfg.ssl_mode = Some(map_ssl_mode(spec.ssl_mode.unwrap_or(SslMode::Prefer)));
+        cfg.ssl_mode = Some(map_ssl_mode(spec.ssl_mode.unwrap_or(SslMode::Prefer))?);
 
         if let Some(sift_protocol::EngineConnectionSpec::Postgres(p)) = &spec.engine_specific {
             if let Some(s) = &p.search_path {
@@ -124,8 +124,10 @@ impl PgDriverInner {
             .map_err(|e| DriverError::new(Code::ConnectionFailed, e.to_string()))?;
         let arc = Arc::new(pool);
         // Another opener may have raced us; keep whichever landed first.
-        self.pools.entry(hash).or_insert_with(|| Arc::clone(&arc));
-        Ok((hash, arc))
+        self.pools
+            .entry(key.clone())
+            .or_insert_with(|| Arc::clone(&arc));
+        Ok((key, arc))
     }
 
     pub(crate) async fn put_free(&self, id: u64, conn: PooledConn) {
@@ -243,25 +245,20 @@ impl PgDriver {
     }
 }
 
-fn map_ssl_mode(m: SslMode) -> deadpool_postgres::SslMode {
+fn map_ssl_mode(m: SslMode) -> Result<deadpool_postgres::SslMode, DriverError> {
     match m {
-        SslMode::Disable => deadpool_postgres::SslMode::Disable,
-        SslMode::Prefer => deadpool_postgres::SslMode::Prefer,
-        // VerifyCa/VerifyFull need deadpool-postgres TLS features (rustls /
-        // native-tls) wired through `create_pool`'s second arg — currently
-        // `tokio_postgres::NoTls`. Adding a real TLS connector is its own
-        // focused change (BACKEND.md #12); for now downgrade to Require.
-        SslMode::Require | SslMode::VerifyCa | SslMode::VerifyFull => {
-            deadpool_postgres::SslMode::Require
-        }
+        SslMode::Disable => Ok(deadpool_postgres::SslMode::Disable),
+        SslMode::Prefer => Ok(deadpool_postgres::SslMode::Prefer),
+        SslMode::Require => Ok(deadpool_postgres::SslMode::Require),
+        SslMode::VerifyCa | SslMode::VerifyFull => Err(DriverError::new(
+            Code::UnsupportedForEngine,
+            "Postgres TLS certificate verification is not wired yet",
+        )),
     }
 }
 
-/// Canonical hash of a `ConnectionSpec`. JSON-serialises first so the hash
-/// is stable across struct field reordering (within serde-rustc compat).
-fn spec_hash(spec: &ConnectionSpec) -> u64 {
-    let json = serde_json::to_string(spec).unwrap_or_default();
-    let mut h = std::collections::hash_map::DefaultHasher::new();
-    json.hash(&mut h);
-    h.finish()
+/// Canonical pool key. Serialization failure is an internal error because
+/// `ConnectionSpec` is a protocol type with derived Serialize.
+fn spec_key(spec: &ConnectionSpec) -> Result<String, DriverError> {
+    serde_json::to_string(spec).map_err(|e| DriverError::new(Code::DriverInternal, e.to_string()))
 }

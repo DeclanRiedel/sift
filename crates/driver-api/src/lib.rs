@@ -102,13 +102,21 @@ pub struct ResultSetStream {
 
 impl ResultSetStream {
     pub fn new(cursor_id: CursorId, rows: mpsc::Receiver<Page>) -> Self {
+        Self::with_cursor_mode(cursor_id, rows, true)
+    }
+
+    pub fn with_cursor_mode(
+        cursor_id: CursorId,
+        rows: mpsc::Receiver<Page>,
+        server_side_cursor: bool,
+    ) -> Self {
         Self {
             cursor_id,
             columns: Vec::new(),
             rows,
             warnings: Vec::new(),
             affected_rows: None,
-            server_side_cursor: true,
+            server_side_cursor,
         }
     }
 }

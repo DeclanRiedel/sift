@@ -108,9 +108,9 @@ async fn deep_tree(
     let (indexes, constraints, triggers) = if is_introspectable(&kind) {
         let oid = resolve_oid(conn, schema_name, object_name).await?;
         if let Some(oid) = oid {
-            let indexes = query_indexes(conn, oid).await.unwrap_or_default();
-            let constraints = query_constraints(conn, oid).await.unwrap_or_default();
-            let triggers = query_triggers(conn, oid).await.unwrap_or_default();
+            let indexes = query_indexes(conn, oid).await?;
+            let constraints = query_constraints(conn, oid).await?;
+            let triggers = query_triggers(conn, oid).await?;
             (indexes, constraints, triggers)
         } else {
             Default::default()
@@ -197,7 +197,7 @@ async fn query_columns(
         .map_err(pg_err)?;
 
     // PK column set for primary_key flag.
-    let pk_columns = pk_column_set(conn, schema, name).await.unwrap_or_default();
+    let pk_columns = pk_column_set(conn, schema, name).await?;
 
     let mut out = Vec::with_capacity(rows.len());
     for row in rows {

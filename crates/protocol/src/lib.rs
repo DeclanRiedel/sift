@@ -7,6 +7,10 @@
 //!
 //! See `docs/DRIVER_TRAIT.md` for the design these types serve.
 
+/// Current wire protocol version. Sent by the server as
+/// `X-Sift-Protocol-Version` on every HTTP response.
+pub const PROTOCOL_VERSION: &str = "1";
+
 pub mod column;
 pub mod connection;
 pub mod engine;

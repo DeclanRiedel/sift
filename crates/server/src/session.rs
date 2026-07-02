@@ -10,9 +10,9 @@ use std::time::Duration;
 use dashmap::DashMap;
 use sift_driver_api::{ConnHandle, Driver, ResultSetStream};
 use sift_protocol::{
-    ColumnMetadata, ConnectionId, ConnectionInfo, ConnectionSpec, CursorId, DriverWarning, Engine,
-    ExecuteRequest, ExecuteResponse, OpenSessionRequest, Page, Row, SchemaScope, SchemaSnapshot,
-    ServerInfo, SessionId, SessionInfo,
+    ColumnMetadata, ConnectionId, ConnectionInfo, ConnectionSpec, CursorId, DriverError,
+    DriverWarning, Engine, ExecuteRequest, ExecuteResponse, OpenSessionRequest, Page, Row,
+    SchemaScope, SchemaSnapshot, ServerInfo, SessionId, SessionInfo,
 };
 
 use crate::error::{ApiError, ApiResult};
@@ -102,14 +102,17 @@ impl SessionStore {
         engine: Engine,
         spec: ConnectionSpec,
     ) -> ApiResult<ConnectionInfo> {
+        if !self.inner.sessions.contains_key(&session_id) {
+            return Err(ApiError::SessionNotFound(session_id));
+        }
+
         let driver = self.inner.registry.get(engine)?;
         let handle = driver.open(&spec).await?;
         let info = {
-            let session = self
-                .inner
-                .sessions
-                .get(&session_id)
-                .ok_or(ApiError::SessionNotFound(session_id))?;
+            let Some(session) = self.inner.sessions.get(&session_id) else {
+                driver.close(handle).await?;
+                return Err(ApiError::SessionNotFound(session_id));
+            };
             let id = ConnectionId(session.next_conn_id.fetch_add(1, Ordering::Relaxed));
             let display_name = display_name_for(&spec);
             let info = ConnectionInfo {
@@ -188,39 +191,7 @@ impl SessionStore {
     ) -> ApiResult<ExecuteResponse> {
         let entry = self.get_conn_entry(session_id, conn_id)?;
         let stream = entry.driver.execute(entry.handle.clone(), req).await?;
-        let cursor_id = stream.cursor_id;
-        let rx = stream.rows;
-        tokio::pin!(rx);
-
-        let mut columns: Vec<ColumnMetadata> = Vec::new();
-        let mut rows: Vec<Row> = Vec::new();
-        let mut affected_rows: Option<u64> = None;
-        let mut warnings: Vec<DriverWarning> = Vec::new();
-
-        while let Some(page) = rx.recv().await {
-            match page {
-                Page::NextResult { columns: cols } => {
-                    columns = cols;
-                }
-                Page::Rows(r) => rows.extend(r),
-                Page::Done {
-                    affected_rows: a,
-                    warnings: w,
-                } => {
-                    affected_rows = a;
-                    warnings = w;
-                }
-            }
-        }
-
-        Ok(ExecuteResponse {
-            cursor_id,
-            columns,
-            rows,
-            affected_rows,
-            warnings,
-            has_more: false,
-        })
+        drain_stream(stream).await.map_err(ApiError::Driver)
     }
 
     pub async fn cancel(
@@ -330,7 +301,7 @@ pub struct ConnectionEntry {
 
 /// Result type returned by the HTTP execute handler. Public so the WS
 /// streaming layer (PHASE0 step 10) can re-use the drain logic.
-pub async fn drain_stream(stream: ResultSetStream) -> ExecuteResponse {
+pub async fn drain_stream(stream: ResultSetStream) -> Result<ExecuteResponse, DriverError> {
     let cursor_id = stream.cursor_id;
     let rx = stream.rows;
     tokio::pin!(rx);
@@ -344,6 +315,7 @@ pub async fn drain_stream(stream: ResultSetStream) -> ExecuteResponse {
         match page {
             Page::NextResult { columns: cols } => columns = cols,
             Page::Rows(r) => rows.extend(r),
+            Page::Error { error } => return Err(error),
             Page::Done {
                 affected_rows: a,
                 warnings: w,
@@ -354,14 +326,14 @@ pub async fn drain_stream(stream: ResultSetStream) -> ExecuteResponse {
         }
     }
 
-    ExecuteResponse {
+    Ok(ExecuteResponse {
         cursor_id,
         columns,
         rows,
         affected_rows,
         warnings,
         has_more: false,
-    }
+    })
 }
 
 /// Human-readable label for a connection spec. Used in `ConnectionInfo`
