@@ -8,6 +8,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use dashmap::DashMap;
 use futures::StreamExt;
 use sift_driver_api::{ConnHandle, Driver, IdCounter, MssqlExt, ResultSetStream, TxHandle};
 use sift_protocol::{
@@ -34,6 +35,7 @@ struct MssqlInner {
     conn_id: IdCounter,
     tx_id: IdCounter,
     cursor_id: IdCounter,
+    cursors: DashMap<u64, tokio::task::JoinHandle<()>>,
 }
 
 impl MssqlDriver {
@@ -44,6 +46,7 @@ impl MssqlDriver {
                 conn_id: IdCounter::new(),
                 tx_id: IdCounter::new(),
                 cursor_id: IdCounter::new(),
+                cursors: DashMap::new(),
             }),
         }
     }
@@ -190,18 +193,21 @@ impl Driver for MssqlDriver {
         let cursor_id = CursorId::new(self.inner.cursor_id.next());
         let (tx, rx) = mpsc::channel(1);
         let inner = Arc::clone(&self.inner);
-        tokio::spawn(async move {
+        let cursor_key = cursor_id.0;
+        let task = tokio::spawn(async move {
             run_query(inner, c.id(), conn, cursor_id, req, tx).await;
         });
+        self.inner.cursors.insert(cursor_key, task);
         Ok(ResultSetStream::with_cursor_mode(cursor_id, rx, false))
     }
 
     async fn cancel(&self, _c: ConnHandle, _cursor: CursorId) -> Result<(), DriverError> {
-        Err(DriverError::new(
-            Code::UnsupportedForEngine,
-            "SQL Server cancel/attention is not wired yet",
-        )
-        .with_engine(Engine::SqlServer))
+        let Some((_, task)) = self.inner.cursors.remove(&_cursor.0) else {
+            return Err(DriverError::new(Code::CursorNotFound, "cursor not active")
+                .with_engine(Engine::SqlServer));
+        };
+        task.abort();
+        Ok(())
     }
 
     async fn close(&self, c: ConnHandle) -> Result<(), DriverError> {
@@ -332,6 +338,7 @@ async fn run_query(
     if let Err(error) = result {
         let _ = tx.send(sift_protocol::Page::Error { error }).await;
     }
+    inner.cursors.remove(&cursor_id.0);
     inner.conns.lock().await.insert(conn_id, conn);
     tracing::debug!(%cursor_id, conn_id, "sqlserver query finished");
 }
