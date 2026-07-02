@@ -78,6 +78,17 @@ impl MockDriver {
             )),
         }
     }
+
+    /// Like `pop` but returns `Ok(())` when the queue is empty. Use for
+    /// unit-returning methods (`commit`, `rollback`, `cancel`, `close`)
+    /// where requiring an explicit canned Ok for every call would burden
+    /// every test setup unnecessarily.
+    fn pop_or_ok(queue: &mut VecDeque<Boxed<Result<(), DriverError>>>) -> Result<(), DriverError> {
+        match queue.pop_front() {
+            Some(f) => f(),
+            None => Ok(()),
+        }
+    }
 }
 
 /// Builder for [`MockDriver`].
@@ -177,12 +188,12 @@ impl Driver for MockDriver {
 
     async fn commit(&self, _t: TxHandle) -> Result<(), DriverError> {
         self.record("commit");
-        MockDriver::pop(&mut self.state.lock().unwrap().commit, "commit")
+        MockDriver::pop_or_ok(&mut self.state.lock().unwrap().commit)
     }
 
     async fn rollback(&self, _t: TxHandle) -> Result<(), DriverError> {
         self.record("rollback");
-        MockDriver::pop(&mut self.state.lock().unwrap().rollback, "rollback")
+        MockDriver::pop_or_ok(&mut self.state.lock().unwrap().rollback)
     }
 
     async fn execute(
@@ -228,12 +239,12 @@ impl Driver for MockDriver {
 
     async fn cancel(&self, _c: ConnHandle, _cursor: CursorId) -> Result<(), DriverError> {
         self.record("cancel");
-        MockDriver::pop(&mut self.state.lock().unwrap().cancel, "cancel")
+        MockDriver::pop_or_ok(&mut self.state.lock().unwrap().cancel)
     }
 
     async fn close(&self, _c: ConnHandle) -> Result<(), DriverError> {
         self.record("close");
-        MockDriver::pop(&mut self.state.lock().unwrap().close, "close")
+        MockDriver::pop_or_ok(&mut self.state.lock().unwrap().close)
     }
 }
 

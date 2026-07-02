@@ -13,6 +13,7 @@ pub mod engine;
 pub mod error;
 pub mod result;
 pub mod schema;
+pub mod session;
 pub mod tx;
 pub mod value;
 
@@ -31,6 +32,10 @@ pub use schema::{
     CatalogTree, ConstraintInfo, ConstraintKind, IndexInfo, IndexKind, ObjectInfo, ObjectKind,
     ObjectPath, SchemaDepth, SchemaFilter, SchemaScope, SchemaSnapshot, SchemaTree, TriggerEvent,
     TriggerInfo, TriggerTiming,
+};
+pub use session::{
+    Ack, CancelRequest, ConnectionId, ConnectionInfo, ExecuteRequestHttp, ExecuteResponse, Health,
+    OpenConnectionRequest, OpenSessionRequest, SessionId, SessionInfo, TxHandleRef,
 };
 pub use tx::{AccessMode as TxAccessMode, IsolationLevel, TxId, TxMode};
 

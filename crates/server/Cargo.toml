@@ -9,8 +9,29 @@ repository.workspace = true
 [dependencies]
 sift-protocol = { workspace = true }
 sift-core = { workspace = true }
-sift-driver-api = { workspace = true }
+sift-driver-api = { workspace = true, features = ["mock"] }
 sift-driver-postgres = { workspace = true }
 sift-driver-sqlserver = { workspace = true }
-tokio = { workspace = true }
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+axum = { workspace = true }
+chrono = { workspace = true }
+dashmap = { workspace = true }
+figment = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
 thiserror = { workspace = true }
+tokio = { workspace = true }
+tower = { workspace = true }
+tower-http = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+[dev-dependencies]
+sift-driver-api = { workspace = true, features = ["mock"] }
+tower = { workspace = true, features = ["util"] }
+tokio = { workspace = true, features = ["full", "test-util"] }
+
+[[bin]]
+name = "sift-server"
+path = "src/main.rs"

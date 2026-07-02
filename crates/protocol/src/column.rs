@@ -53,7 +53,7 @@ pub enum Nullability {
 ///   The native name is carried verbatim; the client renders it as opaque
 ///   text with the engine as a hint, using `category` to pick a renderer.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(tag = "kind", content = "value", rename_all = "snake_case")]
 pub enum TypeRef {
     Primitive(PrimitiveType),
     Engine {

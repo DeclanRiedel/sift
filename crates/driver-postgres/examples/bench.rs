@@ -9,9 +9,7 @@ use std::time::{Duration, Instant};
 
 use sift_driver_api::Driver;
 use sift_driver_postgres::PgDriver;
-use sift_protocol::{
-    ConnectionSpec, Engine, ExecuteRequest, SchemaScope, SslMode,
-};
+use sift_protocol::{ConnectionSpec, ExecuteRequest, SchemaScope, SslMode};
 
 const PG_HOST: &str = "/tmp/opencode/sift-pg-socket";
 const PG_PORT: u16 = 5433;
@@ -20,7 +18,6 @@ const PG_DB: &str = "sifttest";
 
 fn spec() -> ConnectionSpec {
     ConnectionSpec {
-        engine: Engine::Postgres,
         host: PG_HOST.to_string(),
         port: Some(PG_PORT),
         database: Some(PG_DB.to_string()),
@@ -73,11 +70,17 @@ async fn main() {
     // the same spec hit the cache.
     let t0 = Instant::now();
     let conn = driver.open(&spec()).await.expect("open");
-    println!("  open (cold, builds pool):                {:?}", t0.elapsed());
+    println!(
+        "  open (cold, builds pool):                {:?}",
+        t0.elapsed()
+    );
 
     let t0 = Instant::now();
     let conn2 = driver.open(&spec()).await.expect("open cached");
-    println!("  open (warm, cached pool):                {:?}", t0.elapsed());
+    println!(
+        "  open (warm, cached pool):                {:?}",
+        t0.elapsed()
+    );
     driver.close(conn2).await.unwrap();
 
     println!();
@@ -86,10 +89,7 @@ async fn main() {
 
     let _ = time_n("execute \"SELECT 1\"", 200, || async {
         let s = driver
-            .execute(
-                conn.clone(),
-                ExecuteRequest::new("SELECT 1"),
-            )
+            .execute(conn.clone(), ExecuteRequest::new("SELECT 1"))
             .await
             .unwrap();
         drain(s).await
@@ -120,16 +120,20 @@ async fn main() {
     })
     .await;
 
-    let _ = time_n("execute DML \"UPDATE bench SET payload=payload\"", 200, || async {
-        let s = driver
-            .execute(
-                conn.clone(),
-                ExecuteRequest::new("UPDATE bench SET payload=payload"),
-            )
-            .await
-            .unwrap();
-        drain(s).await
-    })
+    let _ = time_n(
+        "execute DML \"UPDATE bench SET payload=payload\"",
+        200,
+        || async {
+            let s = driver
+                .execute(
+                    conn.clone(),
+                    ExecuteRequest::new("UPDATE bench SET payload=payload"),
+                )
+                .await
+                .unwrap();
+            drain(s).await
+        },
+    )
     .await;
 
     let _ = time_n("schema (Shallow)", 50, || async {
@@ -152,15 +156,15 @@ async fn main() {
     println!("throughput: 10k-row full table scan");
     let t0 = Instant::now();
     let s = driver
-        .execute(
-            conn.clone(),
-            ExecuteRequest::new("SELECT * FROM bench"),
-        )
+        .execute(conn.clone(), ExecuteRequest::new("SELECT * FROM bench"))
         .await
         .unwrap();
     let rows = drain(s).await;
     let elapsed = t0.elapsed();
-    println!("  {rows} rows in {elapsed:?}  =  {:.0} rows/sec", rows as f64 / elapsed.as_secs_f64());
+    println!(
+        "  {rows} rows in {elapsed:?}  =  {:.0} rows/sec",
+        rows as f64 / elapsed.as_secs_f64()
+    );
 
     println!();
     println!("throughput: 100× ping burst (sequential)");
@@ -169,7 +173,10 @@ async fn main() {
         let _ = driver.ping(conn.clone()).await.unwrap();
     }
     let elapsed = t0.elapsed();
-    println!("  100 pings in {elapsed:?}  =  {:.0} pings/sec", 100.0 / elapsed.as_secs_f64());
+    println!(
+        "  100 pings in {elapsed:?}  =  {:.0} pings/sec",
+        100.0 / elapsed.as_secs_f64()
+    );
 
     driver.close(conn).await.unwrap();
 }

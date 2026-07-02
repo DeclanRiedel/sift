@@ -3,11 +3,14 @@
 use crate::Engine;
 use serde::{Deserialize, Serialize};
 
-/// All a driver needs to open a connection. Engine-agnostic fields plus an
-/// engine-specific blob for knobs the other engine doesn't have.
+/// All a driver needs to open a connection. The engine is NOT carried here
+/// — the caller (server registry, MockDriver tests) already knows which
+/// engine the spec is destined for, because drivers are registered per
+/// engine. Carrying `engine` here collided with `OpenConnectionRequest`'s
+/// `#[serde(flatten)]` of the spec; the envelope is the single source of
+/// truth for engine selection.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConnectionSpec {
-    pub engine: Engine,
     pub host: String,
     pub port: Option<u16>,
     pub database: Option<String>,

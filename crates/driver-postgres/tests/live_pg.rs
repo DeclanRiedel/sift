@@ -48,7 +48,6 @@ fn unique_schema() -> String {
 
 fn spec() -> ConnectionSpec {
     ConnectionSpec {
-        engine: Engine::Postgres,
         host: PG_HOST.to_string(),
         port: Some(PG_PORT),
         database: Some(PG_DB.to_string()),
@@ -198,7 +197,7 @@ async fn execute_dml_reports_affected_rows() {
 async fn schema_shallow_lists_test_objects() {
     let driver = PgDriver::new();
     let conn = driver.open(&spec()).await.unwrap();
-    setup_schema(&driver, &conn).await;
+    let schema_name = setup_schema(&driver, &conn).await;
 
     let snap = driver
         .schema(conn.clone(), SchemaScope::shallow())
@@ -207,19 +206,19 @@ async fn schema_shallow_lists_test_objects() {
     assert_eq!(snap.trees.len(), 1);
     assert_eq!(snap.trees[0].name, PG_DB);
 
-    let schema = snap.trees[0]
+    let schema_tree = snap.trees[0]
         .schemas
         .iter()
-        .find(|s| s.name == "live_pg_test")
+        .find(|s| s.name == schema_name)
         .expect("test schema present");
-    let kinds: std::collections::HashSet<_> = schema.objects.iter().map(|o| o.kind).collect();
+    let kinds: std::collections::HashSet<_> = schema_tree.objects.iter().map(|o| o.kind).collect();
     assert!(kinds.contains(&ObjectKind::Table), "found users table");
     assert!(
         kinds.contains(&ObjectKind::MaterializedView),
         "found mv_adults"
     );
 
-    let users = schema
+    let users = schema_tree
         .objects
         .iter()
         .find(|o| o.name == "users")

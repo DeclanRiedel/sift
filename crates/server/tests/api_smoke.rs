@@ -1,0 +1,379 @@
+//! Server integration tests against `MockDriver`. No real DB required —
+//! these exercise the axum surface end-to-end via tower::ServiceExt::oneshot.
+
+use axum::body::{to_bytes, Body};
+use axum::http::{Request, StatusCode};
+use sift_driver_api::mock::MockDriver;
+use sift_protocol::{
+    ColumnMetadata, ConnectionSpec, Engine, ExecuteRequestHttp, Health, Nullability, Page,
+    PrimitiveType, Row, SchemaScope, SchemaSnapshot, ServerInfo, SslMode, TypeRef, Value,
+};
+use sift_server::http::{app, AppState};
+use sift_server::registry::DriverRegistry;
+use sift_server::session::SessionStore;
+use tower::ServiceExt;
+
+fn mock_postgres_driver() -> MockDriver {
+    let columns = vec![
+        ColumnMetadata {
+            name: "id".into(),
+            type_ref: TypeRef::Primitive(PrimitiveType::Int32),
+            nullable: Nullability::NotNullable,
+            auto_increment: false,
+            primary_key: false,
+            facets: Default::default(),
+        },
+        ColumnMetadata {
+            name: "name".into(),
+            type_ref: TypeRef::Primitive(PrimitiveType::Text),
+            nullable: Nullability::Nullable,
+            auto_increment: false,
+            primary_key: false,
+            facets: Default::default(),
+        },
+    ];
+    let rows = vec![
+        Row::new(vec![Value::Int32(1), Value::Text("alice".into())]),
+        Row::new(vec![Value::Int32(2), Value::Text("bob".into())]),
+    ];
+    MockDriver::builder()
+        .engine(Engine::Postgres)
+        .ping_ok(ServerInfo {
+            engine: Engine::Postgres,
+            server_version: "MockDB 0.1".into(),
+            current_database: "mock".into(),
+            current_user: "mock".into(),
+        })
+        .schema_ok(SchemaSnapshot::empty(SchemaScope::shallow()))
+        .execute_ok(vec![
+            Page::NextResult { columns },
+            Page::Rows(rows),
+            Page::Done {
+                affected_rows: Some(2),
+                warnings: Vec::new(),
+            },
+        ])
+        .build()
+}
+
+fn test_state() -> AppState {
+    let registry = DriverRegistry::builder()
+        .register(mock_postgres_driver())
+        .build();
+    AppState {
+        sessions: SessionStore::new(registry),
+    }
+}
+
+fn pg_spec() -> ConnectionSpec {
+    ConnectionSpec {
+        host: "mock.invalid".into(),
+        port: Some(5432),
+        database: Some("mock".into()),
+        user: "mock".into(),
+        password: None,
+        ssl_mode: Some(SslMode::Disable),
+        engine_specific: None,
+    }
+}
+
+async fn body_json<T: serde::de::DeserializeOwned>(body: Body) -> T {
+    let bytes = to_bytes(body, 1024 * 1024).await.unwrap();
+    serde_json::from_slice(&bytes)
+        .unwrap_or_else(|e| panic!("decode body: {e}; {}", String::from_utf8_lossy(&bytes)))
+}
+
+/// Build a POST request with a JSON body and the right content-type.
+fn post_json(uri: impl Into<String>, body: impl serde::Serialize) -> Request<Body> {
+    Request::post(uri.into())
+        .header("content-type", "application/json")
+        .body(Body::from(serde_json::to_vec(&body).unwrap()))
+        .unwrap()
+}
+
+fn post_json_str(uri: impl Into<String>, body: &str) -> Request<Body> {
+    Request::post(uri.into())
+        .header("content-type", "application/json")
+        .body(Body::from(body.to_owned()))
+        .unwrap()
+}
+
+#[tokio::test]
+async fn health_lists_registered_engines() {
+    let app = app(test_state());
+    let res = app
+        .oneshot(Request::get("/v1/health").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let health: Health = body_json(res.into_body()).await;
+    assert_eq!(health.status, "ok");
+    assert!(health.engines.contains(&Engine::Postgres));
+}
+
+#[tokio::test]
+async fn session_lifecycle_create_list_close() {
+    let app = app(test_state());
+
+    // Create.
+    let res = app
+        .clone()
+        .oneshot(post_json_str("/v1/sessions", r#"{"tag":"test"}"#))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let info: sift_protocol::SessionInfo = body_json(res.into_body()).await;
+    assert_eq!(info.tag.as_deref(), Some("test"));
+    let id = info.id;
+
+    // List.
+    let res = app
+        .clone()
+        .oneshot(Request::get("/v1/sessions").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    let list: Vec<sift_protocol::SessionInfo> = body_json(res.into_body()).await;
+    assert_eq!(list.len(), 1);
+    assert_eq!(list[0].id, id);
+
+    // Get.
+    let res = app
+        .clone()
+        .oneshot(
+            Request::get(format!("/v1/sessions/{id}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+
+    // 404 for unknown.
+    let res = app
+        .clone()
+        .oneshot(
+            Request::get("/v1/sessions/9999")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::NOT_FOUND);
+
+    // Close.
+    let res = app
+        .oneshot(
+            Request::delete(format!("/v1/sessions/{id}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn connection_open_ping_close() {
+    let app = app(test_state());
+
+    // Create session first.
+    let res = app
+        .clone()
+        .oneshot(
+            Request::post("/v1/sessions")
+                .body(Body::from("{}"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let session: sift_protocol::SessionInfo = body_json(res.into_body()).await;
+    let sid = session.id;
+
+    // Open connection.
+    let open_req = serde_json::json!({
+        "engine": "postgres",
+        "host": "mock.invalid",
+        "port": 5432,
+        "database": "mock",
+        "user": "mock",
+        "ssl_mode": "disable",
+    });
+    let res = app
+        .clone()
+        .oneshot(post_json(
+            format!("/v1/sessions/{sid}/connections"),
+            open_req,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        res.status(),
+        StatusCode::OK,
+        "open_connection should succeed"
+    );
+    let conn: sift_protocol::ConnectionInfo = body_json(res.into_body()).await;
+    assert_eq!(conn.engine, Engine::Postgres);
+    let cid = conn.id;
+
+    // List.
+    let res = app
+        .clone()
+        .oneshot(
+            Request::get(format!("/v1/sessions/{sid}/connections"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let list: Vec<sift_protocol::ConnectionInfo> = body_json(res.into_body()).await;
+    assert_eq!(list.len(), 1);
+
+    // Ping.
+    let res = app
+        .clone()
+        .oneshot(
+            Request::post(format!("/v1/sessions/{sid}/connections/{cid}/ping"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let info: ServerInfo = body_json(res.into_body()).await;
+    assert_eq!(info.engine, Engine::Postgres);
+
+    // Schema.
+    let res = app
+        .clone()
+        .oneshot(
+            Request::get(format!("/v1/sessions/{sid}/connections/{cid}/schema"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+
+    // Close connection.
+    let res = app
+        .clone()
+        .oneshot(
+            Request::delete(format!("/v1/sessions/{sid}/connections/{cid}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+
+    // 404 after close.
+    let res = app
+        .oneshot(
+            Request::post(format!("/v1/sessions/{sid}/connections/{cid}/ping"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn execute_returns_drained_rows_and_affected_count() {
+    let app = app(test_state());
+
+    let session: sift_protocol::SessionInfo = body_json(
+        app.clone()
+            .oneshot(post_json_str("/v1/sessions", "{}"))
+            .await
+            .unwrap()
+            .into_body(),
+    )
+    .await;
+    let sid = session.id;
+
+    let open_req = serde_json::json!({
+        "engine": "postgres",
+        "host": "mock.invalid",
+        "port": 5432,
+        "database": "mock",
+        "user": "mock",
+        "ssl_mode": "disable",
+    });
+    let conn: sift_protocol::ConnectionInfo = body_json(
+        app.clone()
+            .oneshot(post_json(
+                format!("/v1/sessions/{sid}/connections"),
+                open_req,
+            ))
+            .await
+            .unwrap()
+            .into_body(),
+    )
+    .await;
+    let cid = conn.id;
+
+    let exec_req = ExecuteRequestHttp {
+        connection: cid,
+        sql: "SELECT id, name FROM users".into(),
+        tx: None,
+    };
+    let res = app
+        .oneshot(post_json(format!("/v1/sessions/{sid}/queries"), exec_req))
+        .await
+        .unwrap();
+    let status = res.status();
+    let body_bytes = to_bytes(res.into_body(), 1024 * 1024).await.unwrap();
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "execute failed: {}",
+        String::from_utf8_lossy(&body_bytes)
+    );
+    let resp: sift_protocol::ExecuteResponse =
+        serde_json::from_slice(&body_bytes).expect("decode ExecuteResponse");
+    assert_eq!(resp.columns.len(), 2);
+    assert_eq!(resp.columns[0].name, "id");
+    assert_eq!(resp.rows.len(), 2);
+    assert!(matches!(&resp.rows[0].values[0], Value::Int32(1)));
+    assert_eq!(resp.affected_rows, Some(2));
+    assert!(!resp.has_more);
+}
+
+#[tokio::test]
+async fn unsupported_engine_yields_422() {
+    let app = app(test_state());
+
+    let session: sift_protocol::SessionInfo = body_json(
+        app.clone()
+            .oneshot(post_json_str("/v1/sessions", "{}"))
+            .await
+            .unwrap()
+            .into_body(),
+    )
+    .await;
+    let sid = session.id;
+
+    // SQL Server is registered but is the stub that returns UnsupportedForEngine.
+    let res = app
+        .oneshot(post_json(
+            format!("/v1/sessions/{sid}/connections"),
+            serde_json::json!({
+                "engine": "sql_server",
+                "host": "mock.invalid",
+                "user": "mock",
+            }),
+        ))
+        .await
+        .unwrap();
+    // The MssqlDriver stub returns UnsupportedForEngine on `open`, so the
+    // server maps it to 422.
+    assert_eq!(res.status(), StatusCode::UNPROCESSABLE_ENTITY);
+}
+
+// Silence unused imports for the spec helper (used only when test wants a
+// canonical ConnectionSpec; kept for future tests).
+#[allow(dead_code)]
+fn _pg_spec_marker() -> ConnectionSpec {
+    pg_spec()
+}
