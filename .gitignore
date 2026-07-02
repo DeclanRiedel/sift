@@ -1,0 +1,14 @@
+# Rust
+/target
+
+# Nix
+/result
+/result-*
+/.direnv
+
+# Caches
+/.cache
+
+# Editor / OS
+*.log
+.DS_Store
