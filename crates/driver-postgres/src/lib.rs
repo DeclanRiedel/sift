@@ -164,18 +164,52 @@ impl PgExt for PgDriver {
         .with_engine(Engine::Postgres))
     }
 
-    async fn advisory_lock(&self, _c: ConnHandle, _key: AdvisoryKey) -> Result<(), DriverError> {
-        Err(
-            DriverError::new(Code::UnsupportedForEngine, "advisory locks not yet wired")
-                .with_engine(Engine::Postgres),
-        )
+    async fn advisory_lock(&self, c: ConnHandle, key: AdvisoryKey) -> Result<(), DriverError> {
+        let conn = self.take_for_op(&c).await?;
+        let result = async {
+            match key {
+                AdvisoryKey::Int32(k1, k2) => {
+                    conn.execute("SELECT pg_advisory_lock($1, $2)", &[&k1, &k2])
+                        .await
+                }
+                AdvisoryKey::Int64(k) => conn.execute("SELECT pg_advisory_lock($1)", &[&k]).await,
+            }
+            .map_err(pg_err)?;
+            Ok::<_, DriverError>(())
+        }
+        .await;
+        self.restore_after_op(&c, conn).await;
+        result
     }
 
-    async fn advisory_unlock(&self, _c: ConnHandle, _key: AdvisoryKey) -> Result<(), DriverError> {
-        Err(
-            DriverError::new(Code::UnsupportedForEngine, "advisory locks not yet wired")
-                .with_engine(Engine::Postgres),
-        )
+    async fn advisory_unlock(&self, c: ConnHandle, key: AdvisoryKey) -> Result<(), DriverError> {
+        let conn = self.take_for_op(&c).await?;
+        let result = async {
+            let unlocked = match key {
+                AdvisoryKey::Int32(k1, k2) => {
+                    conn.query_one("SELECT pg_advisory_unlock($1, $2)", &[&k1, &k2])
+                        .await
+                }
+                AdvisoryKey::Int64(k) => {
+                    conn.query_one("SELECT pg_advisory_unlock($1)", &[&k]).await
+                }
+            }
+            .map_err(pg_err)?
+            .try_get::<_, bool>(0)
+            .map_err(pg_err)?;
+            if unlocked {
+                Ok(())
+            } else {
+                Err(DriverError::new(
+                    Code::InvalidParameterValue,
+                    "advisory lock was not held by this connection",
+                )
+                .with_engine(Engine::Postgres))
+            }
+        }
+        .await;
+        self.restore_after_op(&c, conn).await;
+        result
     }
 
     async fn savepoint(&self, t: &TxHandle, name: &str) -> Result<PgSavepoint, DriverError> {

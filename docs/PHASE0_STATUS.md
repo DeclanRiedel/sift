@@ -16,7 +16,7 @@ build a UI against Postgres and SQL Server without private guidance.
 - WebSocket streaming with ACK-gated backpressure and SDK E2E proof.
 - Rust SDK covering HTTP and WS, including bearer auth propagation.
 - Postgres driver with pooled connections, streaming, params, schema,
-  transactions, cancel, and live container tests.
+  transactions, cancel, advisory locks, and live container tests.
 - SQL Server driver via `tiberius` with params, streaming, schema, transactions,
   savepoints, cancel-by-abort isolation, close/cancel cleanup, and live
   container tests.
@@ -26,7 +26,7 @@ build a UI against Postgres and SQL Server without private guidance.
 
 - `cargo test -q`
 - `cargo clippy --workspace --all-targets -- -D warnings`
-- Live Postgres: `10` tests pass with `live-pg`.
+- Live Postgres: `11` tests pass with `live-pg`.
 - Live SQL Server: `3` tests pass with `live-mssql`.
 
 ## Remaining Phase 0 Gaps
@@ -39,7 +39,7 @@ build a UI against Postgres and SQL Server without private guidance.
 - SQL Server MARS and bulk insert extension methods are declared but unsupported.
 - Postgres `VerifyCa` / `VerifyFull` TLS modes are rejected until a verifying
   TLS connector is wired.
-- Postgres native extension ops (`LISTEN/NOTIFY`, `COPY`, advisory locks) are
-  declared but unsupported.
+- Postgres native extension ops `LISTEN/NOTIFY` and `COPY` are declared but
+  unsupported.
 - Month-aware Postgres intervals intentionally surface as engine-native values
   because `chrono::Duration` cannot represent calendar months.

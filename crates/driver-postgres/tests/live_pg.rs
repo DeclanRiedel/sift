@@ -21,7 +21,7 @@
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use sift_driver_api::{ConnHandle, Driver};
+use sift_driver_api::{AdvisoryKey, ConnHandle, Driver, PgExt};
 use sift_driver_postgres::PgDriver;
 use sift_protocol::{
     ConnectionSpec, Engine, IsolationLevel, ObjectKind, Page, PrimitiveType, SchemaScope, SslMode,
@@ -448,6 +448,21 @@ async fn transaction_rollback_discards() {
         .unwrap();
     assert!(matches!(last_row, Value::Int64(0)), "row rolled back");
 
+    driver.close(conn).await.unwrap();
+}
+
+#[tokio::test]
+async fn advisory_lock_round_trip() {
+    let driver = PgDriver::new();
+    let conn = driver.open(&spec()).await.unwrap();
+    driver
+        .advisory_lock(conn.clone(), AdvisoryKey::Int64(42))
+        .await
+        .expect("lock");
+    driver
+        .advisory_unlock(conn.clone(), AdvisoryKey::Int64(42))
+        .await
+        .expect("unlock");
     driver.close(conn).await.unwrap();
 }
 
