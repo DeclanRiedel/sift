@@ -131,20 +131,20 @@ async fn execute_select_decodes_types() {
         .execute(
             conn.clone(),
             sift_protocol::ExecuteRequest::new(format!(
-                "SELECT email, age FROM {schema}.users ORDER BY age"
+                "SELECT email, age, 12345.67::numeric AS amount, INTERVAL '2 days 1 second' AS elapsed FROM {schema}.users ORDER BY age"
             )),
         )
         .await
         .expect("execute select");
     let pages = drain(stream).await;
 
-    // Expect: NextResult { 2 cols }, Rows x 3, Done.
+    // Expect: NextResult { 4 cols }, Rows x 3, Done.
     let columns = pages.iter().find_map(|p| match p {
         Page::NextResult { columns } => Some(columns),
         _ => None,
     });
     let cols = columns.expect("got NextResult").clone();
-    assert_eq!(cols.len(), 2);
+    assert_eq!(cols.len(), 4);
     assert_eq!(cols[0].name, "email");
     assert_eq!(cols[1].name, "age");
     assert!(
@@ -155,6 +155,14 @@ async fn execute_select_decodes_types() {
     assert!(matches!(
         cols[1].type_ref,
         TypeRef::Primitive(PrimitiveType::Int32)
+    ));
+    assert!(matches!(
+        cols[2].type_ref,
+        TypeRef::Primitive(PrimitiveType::Decimal)
+    ));
+    assert!(matches!(
+        cols[3].type_ref,
+        TypeRef::Primitive(PrimitiveType::Interval)
     ));
 
     let rows: Vec<&[Value]> = pages
@@ -169,6 +177,10 @@ async fn execute_select_decodes_types() {
     assert_eq!(rows.len(), 3, "three users seeded");
     assert!(matches!(&rows[0][0], Value::Text(s) if s.contains("bob")));
     assert!(matches!(&rows[0][1], Value::Int32(25)));
+    assert!(matches!(&rows[0][2], Value::Decimal(v) if v == "12345.67"));
+    assert!(
+        matches!(&rows[0][3], Value::Interval(v) if *v == chrono::Duration::days(2) + chrono::Duration::seconds(1))
+    );
 
     driver.close(conn).await.unwrap();
 }

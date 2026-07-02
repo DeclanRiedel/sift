@@ -51,16 +51,108 @@ fn decode_value(ty: &Type, raw: &[u8]) -> Result<Value, Box<dyn std::error::Erro
         Type::TIMESTAMPTZ => {
             Value::TimestampTz(chrono::DateTime::<chrono::FixedOffset>::from_sql(ty, raw)?.into())
         }
-        // Decimal/numeric: tokio-postgres's binary form needs the `bigdecimal`
-        // feature to decode cleanly. For Phase 0 we surface the type name via
-        // the Engine escape hatch; a typed Decimal lands with FEATURES.md
-        // Tier 1 #15 (type-aware rendering).
+        Type::NUMERIC => Value::Decimal(decode_numeric(raw)?),
+        Type::INTERVAL => decode_interval(raw)?,
         _ => Value::Engine {
             engine: Engine::Postgres,
             type_name: ty.name().to_string(),
             display_text: format!("<undecoded {}>", ty.name()),
         },
     })
+}
+
+fn decode_numeric(raw: &[u8]) -> Result<String, Box<dyn std::error::Error + Sync + Send>> {
+    const SIGN_POS: u16 = 0x0000;
+    const SIGN_NEG: u16 = 0x4000;
+    const SIGN_NAN: u16 = 0xC000;
+
+    if raw.len() < 8 || raw.len() % 2 != 0 {
+        return Err("invalid numeric payload".into());
+    }
+    let ndigits = i16::from_be_bytes([raw[0], raw[1]]) as usize;
+    let weight = i16::from_be_bytes([raw[2], raw[3]]);
+    let sign = u16::from_be_bytes([raw[4], raw[5]]);
+    let dscale = u16::from_be_bytes([raw[6], raw[7]]) as usize;
+    if raw.len() != 8 + ndigits * 2 {
+        return Err("numeric payload length mismatch".into());
+    }
+    if sign == SIGN_NAN {
+        return Ok("NaN".to_string());
+    }
+    if sign != SIGN_POS && sign != SIGN_NEG {
+        return Err("invalid numeric sign".into());
+    }
+
+    let groups: Vec<u16> = raw[8..]
+        .chunks_exact(2)
+        .map(|chunk| u16::from_be_bytes([chunk[0], chunk[1]]))
+        .collect();
+    if groups.iter().any(|group| *group >= 10_000) {
+        return Err("invalid numeric digit group".into());
+    }
+
+    let int_group_count = (i32::from(weight) + 1).max(0) as usize;
+    let mut int_part = String::new();
+    for idx in 0..int_group_count {
+        let group = groups.get(idx).copied().unwrap_or(0);
+        if idx == 0 {
+            int_part.push_str(&group.to_string());
+        } else {
+            int_part.push_str(&format!("{group:04}"));
+        }
+    }
+    let int_part = int_part.trim_start_matches('0');
+    let mut out = if int_part.is_empty() {
+        "0".to_string()
+    } else {
+        int_part.to_string()
+    };
+
+    let mut frac = String::new();
+    if weight < 0 {
+        for _ in 0..(-i32::from(weight) - 1) {
+            frac.push_str("0000");
+        }
+        for group in &groups {
+            frac.push_str(&format!("{group:04}"));
+        }
+    } else {
+        for group in groups.iter().skip(int_group_count) {
+            frac.push_str(&format!("{group:04}"));
+        }
+    }
+    if dscale > 0 {
+        if frac.len() < dscale {
+            frac.extend(std::iter::repeat('0').take(dscale - frac.len()));
+        }
+        frac.truncate(dscale);
+        out.push('.');
+        out.push_str(&frac);
+    }
+    if sign == SIGN_NEG && out != "0" && !out.starts_with('-') {
+        out.insert(0, '-');
+    }
+    Ok(out)
+}
+
+fn decode_interval(raw: &[u8]) -> Result<Value, Box<dyn std::error::Error + Sync + Send>> {
+    if raw.len() != 16 {
+        return Err("invalid interval payload".into());
+    }
+    let micros = i64::from_be_bytes(raw[0..8].try_into()?);
+    let days = i32::from_be_bytes(raw[8..12].try_into()?);
+    let months = i32::from_be_bytes(raw[12..16].try_into()?);
+    if months != 0 {
+        return Ok(Value::Engine {
+            engine: Engine::Postgres,
+            type_name: "interval".to_string(),
+            display_text: format!("{months} months {days} days {micros} microseconds"),
+        });
+    }
+    let duration = chrono::Duration::days(i64::from(days))
+        .checked_add(&chrono::Duration::microseconds(micros))
+        .ok_or("interval duration overflow")?;
+    Ok(Value::Interval(duration))
 }
 
 /// Map a PG [`Type`] to our protocol-level [`TypeRef`]. Known primitives
@@ -79,6 +171,7 @@ pub(crate) fn pg_type_to_type_ref(ty: &Type) -> TypeRef {
         Type::BYTEA => Some(PrimitiveType::Blob),
         Type::DATE => Some(PrimitiveType::Date),
         Type::TIME => Some(PrimitiveType::Time),
+        Type::INTERVAL => Some(PrimitiveType::Interval),
         Type::TIMESTAMP => Some(PrimitiveType::Timestamp),
         Type::TIMESTAMPTZ => Some(PrimitiveType::TimestampTz),
         Type::UUID => Some(PrimitiveType::Uuid),
@@ -216,5 +309,40 @@ mod tests {
             }
             TypeRef::Primitive(_) => panic!("arrays should not map to Primitive"),
         }
+    }
+
+    #[test]
+    fn decodes_numeric_binary_payload() {
+        let raw = [
+            0x00, 0x03, // ndigits
+            0x00, 0x01, // weight
+            0x00, 0x00, // positive
+            0x00, 0x02, // dscale
+            0x00, 0x01, // 1
+            0x09, 0x29, // 2345
+            0x1A, 0x2C, // 6700
+        ];
+        assert_eq!(decode_numeric(&raw).unwrap(), "12345.67");
+
+        let raw = [
+            0x00, 0x01, // ndigits
+            0xFF, 0xFF, // weight -1
+            0x40, 0x00, // negative
+            0x00, 0x04, // dscale
+            0x00, 0x0C, // 12
+        ];
+        assert_eq!(decode_numeric(&raw).unwrap(), "-0.0012");
+    }
+
+    #[test]
+    fn decodes_month_free_interval_payload() {
+        let mut raw = [0_u8; 16];
+        raw[0..8].copy_from_slice(&1_000_000_i64.to_be_bytes());
+        raw[8..12].copy_from_slice(&2_i32.to_be_bytes());
+        raw[12..16].copy_from_slice(&0_i32.to_be_bytes());
+        assert_eq!(
+            decode_interval(&raw).unwrap(),
+            Value::Interval(chrono::Duration::days(2) + chrono::Duration::seconds(1))
+        );
     }
 }
