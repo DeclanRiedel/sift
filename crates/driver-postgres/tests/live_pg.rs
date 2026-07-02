@@ -28,10 +28,10 @@ use sift_protocol::{
     TxAccessMode as AccessMode, TxMode, TypeRef, Value,
 };
 
-const PG_HOST: &str = "/tmp/opencode/sift-pg-socket";
-const PG_PORT: u16 = 5433;
-const PG_USER: &str = "sift";
-const PG_DB: &str = "sifttest";
+const DEFAULT_PG_HOST: &str = "/tmp/opencode/sift-pg-socket";
+const DEFAULT_PG_PORT: u16 = 5433;
+const DEFAULT_PG_USER: &str = "sift";
+const DEFAULT_PG_DB: &str = "sifttest";
 
 static SCHEMA_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -48,11 +48,16 @@ fn unique_schema() -> String {
 
 fn spec() -> ConnectionSpec {
     ConnectionSpec {
-        host: PG_HOST.to_string(),
-        port: Some(PG_PORT),
-        database: Some(PG_DB.to_string()),
-        user: PG_USER.to_string(),
-        password: None,
+        host: std::env::var("SIFT_PG_HOST").unwrap_or_else(|_| DEFAULT_PG_HOST.to_string()),
+        port: Some(
+            std::env::var("SIFT_PG_PORT")
+                .ok()
+                .and_then(|p| p.parse().ok())
+                .unwrap_or(DEFAULT_PG_PORT),
+        ),
+        database: Some(std::env::var("SIFT_PG_DB").unwrap_or_else(|_| DEFAULT_PG_DB.to_string())),
+        user: std::env::var("SIFT_PG_USER").unwrap_or_else(|_| DEFAULT_PG_USER.to_string()),
+        password: std::env::var("SIFT_PG_PASSWORD").ok(),
         ssl_mode: Some(SslMode::Disable),
         engine_specific: None,
     }
@@ -108,7 +113,10 @@ async fn open_and_ping() {
     let info = driver.ping(conn.clone()).await.expect("ping succeeds");
     assert_eq!(info.engine, Engine::Postgres);
     assert!(info.current_user.contains("sift"));
-    assert_eq!(info.current_database, PG_DB);
+    assert_eq!(
+        info.current_database,
+        std::env::var("SIFT_PG_DB").unwrap_or_else(|_| DEFAULT_PG_DB.to_string())
+    );
     assert!(info.server_version.starts_with("PostgreSQL"));
     driver.close(conn).await.expect("close clean");
 }
@@ -204,7 +212,10 @@ async fn schema_shallow_lists_test_objects() {
         .await
         .expect("schema shallow");
     assert_eq!(snap.trees.len(), 1);
-    assert_eq!(snap.trees[0].name, PG_DB);
+    assert_eq!(
+        snap.trees[0].name,
+        std::env::var("SIFT_PG_DB").unwrap_or_else(|_| DEFAULT_PG_DB.to_string())
+    );
 
     let schema_tree = snap.trees[0]
         .schemas
