@@ -148,51 +148,223 @@ async fn openapi() -> Json<serde_json::Value> {
             "title": "sift API",
             "version": VERSION
         },
+        "x-sift-protocol-version": PROTOCOL_VERSION,
+        "security": [{ "bearerAuth": [] }],
         "paths": {
-            "/v1/health": { "get": { "summary": "Health and registered engines" } },
-            "/v1/audit": { "get": { "summary": "List in-memory operation audit rows" } },
+            "/v1/health": {
+                "get": {
+                    "operationId": "health",
+                    "summary": "Health and registered engines",
+                    "responses": { "200": { "description": "Health", "content": json_content("Health") } }
+                }
+            },
+            "/v1/audit": {
+                "get": {
+                    "operationId": "listAudit",
+                    "summary": "List in-memory operation audit rows",
+                    "responses": { "200": { "description": "Audit rows", "content": json_array_content("AuditEntry") } }
+                }
+            },
             "/v1/sessions": {
-                "get": { "summary": "List sessions" },
-                "post": { "summary": "Create session" }
+                "get": {
+                    "operationId": "listSessions",
+                    "summary": "List sessions",
+                    "responses": { "200": { "description": "Sessions", "content": json_array_content("SessionInfo") } }
+                },
+                "post": {
+                    "operationId": "createSession",
+                    "summary": "Create session",
+                    "requestBody": json_body("OpenSessionRequest"),
+                    "responses": { "200": { "description": "Session", "content": json_content("SessionInfo") } }
+                }
             },
             "/v1/sessions/{id}": {
-                "get": { "summary": "Get session" },
-                "delete": { "summary": "Close session" }
+                "get": {
+                    "operationId": "getSession",
+                    "summary": "Get session",
+                    "responses": { "200": { "description": "Session", "content": json_content("SessionInfo") } }
+                },
+                "delete": {
+                    "operationId": "closeSession",
+                    "summary": "Close session",
+                    "responses": { "200": { "description": "Ack", "content": json_object_content() } }
+                }
             },
             "/v1/sessions/{id}/connections": {
-                "get": { "summary": "List connections" },
-                "post": { "summary": "Open connection" }
+                "get": {
+                    "operationId": "listConnections",
+                    "summary": "List connections",
+                    "responses": { "200": { "description": "Connections", "content": json_array_content("ConnectionInfo") } }
+                },
+                "post": {
+                    "operationId": "openConnection",
+                    "summary": "Open connection",
+                    "requestBody": json_body("OpenConnectionRequest"),
+                    "responses": { "200": { "description": "Connection", "content": json_content("ConnectionInfo") } }
+                }
             },
             "/v1/sessions/{id}/connections/{conn_id}": {
-                "delete": { "summary": "Close connection" }
+                "delete": {
+                    "operationId": "closeConnection",
+                    "summary": "Close connection",
+                    "responses": { "200": { "description": "Ack", "content": json_object_content() } }
+                }
             },
             "/v1/sessions/{id}/connections/{conn_id}/ping": {
-                "post": { "summary": "Ping connection" }
+                "post": {
+                    "operationId": "pingConnection",
+                    "summary": "Ping connection",
+                    "responses": { "200": { "description": "Server info", "content": json_content("ServerInfo") } }
+                }
             },
             "/v1/sessions/{id}/connections/{conn_id}/schema": {
-                "get": { "summary": "Fetch schema" }
+                "get": {
+                    "operationId": "getSchema",
+                    "summary": "Fetch schema",
+                    "parameters": [
+                        { "name": "depth", "in": "query", "schema": { "type": "string", "enum": ["shallow", "deep"] } },
+                        { "name": "schema", "in": "query", "schema": { "type": "string" } },
+                        { "name": "object", "in": "query", "schema": { "type": "string" } },
+                        { "name": "name_pattern", "in": "query", "schema": { "type": "string" } }
+                    ],
+                    "responses": { "200": { "description": "Schema snapshot", "content": json_content("SchemaSnapshot") } }
+                }
             },
             "/v1/sessions/{id}/queries": {
-                "post": { "summary": "Execute query over synchronous HTTP" }
+                "post": {
+                    "operationId": "executeQuery",
+                    "summary": "Execute query over synchronous HTTP",
+                    "requestBody": json_body("ExecuteRequestHttp"),
+                    "responses": { "200": { "description": "Query result", "content": json_content("ExecuteResponse") } }
+                }
             },
             "/v1/sessions/{id}/transactions": {
-                "post": { "summary": "Begin transaction" }
+                "post": {
+                    "operationId": "beginTransaction",
+                    "summary": "Begin transaction",
+                    "requestBody": json_body("BeginTransactionRequest"),
+                    "responses": { "200": { "description": "Transaction", "content": json_content("TransactionInfo") } }
+                }
             },
             "/v1/sessions/{id}/transactions/{tx_id}/commit": {
-                "post": { "summary": "Commit transaction" }
+                "post": {
+                    "operationId": "commitTransaction",
+                    "summary": "Commit transaction",
+                    "requestBody": json_body("EndTransactionRequest"),
+                    "responses": { "200": { "description": "Ack", "content": json_object_content() } }
+                }
             },
             "/v1/sessions/{id}/transactions/{tx_id}/rollback": {
-                "post": { "summary": "Rollback transaction" }
+                "post": {
+                    "operationId": "rollbackTransaction",
+                    "summary": "Rollback transaction",
+                    "requestBody": json_body("EndTransactionRequest"),
+                    "responses": { "200": { "description": "Ack", "content": json_object_content() } }
+                }
             },
             "/v1/sessions/{id}/queries/{cursor_id}/cancel": {
-                "post": { "summary": "Cancel query" }
+                "post": {
+                    "operationId": "cancelQuery",
+                    "summary": "Cancel query",
+                    "requestBody": json_body("CancelRequest"),
+                    "responses": { "200": { "description": "Ack", "content": json_object_content() } }
+                }
             },
             "/v1/sessions/{id}/ws": {
-                "get": { "summary": "WebSocket query stream; protocol uses WsClientMessage/WsServerMessage" }
+                "get": {
+                    "operationId": "sessionWebSocket",
+                    "summary": "WebSocket query stream; protocol uses WsClientMessage/WsServerMessage",
+                    "responses": { "101": { "description": "WebSocket upgrade" } }
+                }
             },
-            "/v1/openapi.json": { "get": { "summary": "OpenAPI document" } }
+            "/v1/openapi.json": {
+                "get": {
+                    "operationId": "openapi",
+                    "summary": "OpenAPI document",
+                    "responses": { "200": { "description": "OpenAPI document" } }
+                }
+            }
+        },
+        "components": {
+            "securitySchemes": {
+                "bearerAuth": { "type": "http", "scheme": "bearer" }
+            },
+            "schemas": protocol_schema_refs()
         }
     }))
+}
+
+fn json_body(schema: &'static str) -> serde_json::Value {
+    json!({
+        "required": true,
+        "content": {
+            "application/json": {
+                "schema": { "$ref": format!("#/components/schemas/{schema}") }
+            }
+        }
+    })
+}
+
+fn json_content(schema: &'static str) -> serde_json::Value {
+    json!({
+        "application/json": {
+            "schema": { "$ref": format!("#/components/schemas/{schema}") }
+        }
+    })
+}
+
+fn json_array_content(schema: &'static str) -> serde_json::Value {
+    json!({
+        "application/json": {
+            "schema": {
+                "type": "array",
+                "items": { "$ref": format!("#/components/schemas/{schema}") }
+            }
+        }
+    })
+}
+
+fn json_object_content() -> serde_json::Value {
+    json!({
+        "application/json": {
+            "schema": { "type": "object" }
+        }
+    })
+}
+
+fn protocol_schema_refs() -> serde_json::Value {
+    let names = [
+        "AuditEntry",
+        "BeginTransactionRequest",
+        "CancelRequest",
+        "ConnectionInfo",
+        "EndTransactionRequest",
+        "ExecuteRequestHttp",
+        "ExecuteResponse",
+        "Health",
+        "OpenConnectionRequest",
+        "OpenSessionRequest",
+        "SchemaSnapshot",
+        "ServerInfo",
+        "SessionInfo",
+        "TransactionInfo",
+        "WsClientMessage",
+        "WsServerMessage",
+    ];
+    serde_json::Value::Object(
+        names
+            .into_iter()
+            .map(|name| {
+                (
+                    name.to_string(),
+                    json!({
+                        "type": "object",
+                        "description": format!("Serde JSON shape from sift-protocol::{name}")
+                    }),
+                )
+            })
+            .collect(),
+    )
 }
 
 async fn create_session(

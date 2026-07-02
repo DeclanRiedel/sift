@@ -1,0 +1,41 @@
+# sift — Phase 0 Status
+
+## Project Goal
+
+Build `sift` as a server-first DB IDE substrate. Phase 0 is complete when a
+third party can run the headless server, read the versioned API contract, and
+build a UI against Postgres and SQL Server without private guidance.
+
+## Implemented
+
+- Versioned protocol crate with stable HTTP/WS serde envelopes and error codes.
+- Headless axum server with sessions, connections, auth hook, audit rows, and
+  protocol-version response header.
+- HTTP v1 surface for health, sessions, connections, schema, execute, cancel,
+  transactions, audit, and OpenAPI.
+- WebSocket streaming with ACK-gated backpressure and SDK E2E proof.
+- Rust SDK covering HTTP and WS, including bearer auth propagation.
+- Postgres driver with pooled connections, streaming, params, schema,
+  transactions, cancel, and live container tests.
+- SQL Server driver via `tiberius` with params, streaming, schema, transactions,
+  savepoints, cancel-by-abort isolation, and live container tests.
+
+## Verified
+
+- `cargo test -q`
+- `cargo clippy --workspace --all-targets -- -D warnings`
+- Live Postgres: `10` tests pass with `live-pg`.
+- Live SQL Server: `3` tests pass with `live-mssql`.
+
+## Remaining Phase 0 Gaps
+
+- OpenAPI is published and route-complete, but schemas are still placeholder
+  component refs instead of generated structural schemas.
+- Audit is bounded in-memory rows, not durable/replayable operation records.
+- SQL Server cancel uses task abort/drop-connection semantics, not TDS ATTENTION.
+- SQL Server MARS and bulk insert extension methods are declared but unsupported.
+- Postgres `VerifyCa` / `VerifyFull` TLS modes are rejected until a verifying
+  TLS connector is wired.
+- Postgres native extension ops (`LISTEN/NOTIFY`, `COPY`, advisory locks) are
+  declared but unsupported.
+- PG numeric/interval decoding is not native yet for all wire types.

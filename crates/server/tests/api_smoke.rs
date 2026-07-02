@@ -152,8 +152,15 @@ async fn openapi_is_published() {
     assert_eq!(res.status(), StatusCode::OK);
     let body: serde_json::Value = body_json(res.into_body()).await;
     assert_eq!(body["openapi"], "3.1.0");
+    assert_eq!(
+        body["x-sift-protocol-version"],
+        sift_protocol::PROTOCOL_VERSION
+    );
     assert!(body["paths"]["/v1/sessions/{id}/ws"].is_object());
+    assert!(body["paths"]["/v1/sessions/{id}/transactions"].is_object());
     assert!(body["paths"]["/v1/audit"].is_object());
+    assert!(body["components"]["securitySchemes"]["bearerAuth"].is_object());
+    assert!(body["components"]["schemas"]["ExecuteResponse"].is_object());
 }
 
 #[tokio::test]
