@@ -95,3 +95,26 @@ async fn open_ping_execute_close() {
 
     driver.close(conn).await.expect("close succeeds");
 }
+
+#[tokio::test]
+async fn cancel_long_query() {
+    let driver = MssqlDriver::new();
+    let conn = driver.open(&spec()).await.expect("open succeeds");
+    let stream = driver
+        .execute(
+            conn.clone(),
+            ExecuteRequest {
+                sql: "WAITFOR DELAY '00:00:05'; SELECT 1 AS done".into(),
+                params: Vec::new(),
+            },
+        )
+        .await
+        .expect("execute starts");
+
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    driver
+        .cancel(conn.clone(), stream.cursor_id)
+        .await
+        .expect("cancel succeeds");
+    driver.close(conn).await.expect("close is idempotent");
+}
