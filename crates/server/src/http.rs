@@ -403,9 +403,23 @@ async fn handle_ws(
                         sql,
                         params,
                     } => {
-                        let stream = sessions
+                        let stream = match sessions
                             .execute_stream(session_id, connection, ExecuteRequest { sql, params })
-                            .await?;
+                            .await
+                        {
+                            Ok(stream) => stream,
+                            Err(error) => {
+                                send_json(
+                                    &mut sender,
+                                    &WsServerMessage::Error {
+                                        request_id: Some(request_id),
+                                        message: error.to_string(),
+                                    },
+                                )
+                                .await?;
+                                continue;
+                            }
+                        };
                         send_json(
                             &mut sender,
                             &WsServerMessage::Started {
@@ -457,6 +471,10 @@ async fn stream_pages_with_ack(
 ) -> ApiResult<()> {
     let mut seq = 0_u64;
     while let Some(page) = rows.recv().await {
+        let terminal = matches!(
+            &page,
+            sift_protocol::Page::Done { .. } | sift_protocol::Page::Error { .. }
+        );
         send_json(
             sender,
             &WsServerMessage::Page {
@@ -466,6 +484,9 @@ async fn stream_pages_with_ack(
             },
         )
         .await?;
+        if terminal {
+            break;
+        }
         wait_for_ack(receiver, cursor_id, seq).await?;
         seq += 1;
     }

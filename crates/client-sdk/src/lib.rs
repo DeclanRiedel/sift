@@ -200,9 +200,19 @@ impl Client {
         sql: impl Into<String>,
     ) -> Result<Vec<Page>> {
         use futures::SinkExt;
+        use tokio_tungstenite::tungstenite::client::IntoClientRequest;
         use tokio_tungstenite::tungstenite::Message;
 
-        let (mut ws, _) = tokio_tungstenite::connect_async(self.ws_url(session)).await?;
+        let mut request = self.ws_url(session).into_client_request()?;
+        if let Some(token) = &self.token {
+            request.headers_mut().insert(
+                "authorization",
+                format!("Bearer {token}")
+                    .parse()
+                    .map_err(|e| Error::Protocol(format!("invalid bearer token header: {e}")))?,
+            );
+        }
+        let (mut ws, _) = tokio_tungstenite::connect_async(request).await?;
         let request_id = "sdk-stream-query".to_string();
         ws.send(Message::Text(
             serde_json::to_string(&WsClientMessage::Execute {
@@ -239,13 +249,13 @@ impl Client {
                 } if got == cursor_id => {
                     let done = matches!(page, Page::Done { .. } | Page::Error { .. });
                     pages.push(page);
+                    if done {
+                        return Ok(pages);
+                    }
                     ws.send(Message::Text(
                         serde_json::to_string(&WsClientMessage::Ack { cursor_id, seq })?.into(),
                     ))
                     .await?;
-                    if done {
-                        return Ok(pages);
-                    }
                 }
                 WsServerMessage::Error { message, .. } => return Err(Error::Protocol(message)),
                 other => {

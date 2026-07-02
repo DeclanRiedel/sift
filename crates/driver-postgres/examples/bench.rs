@@ -32,7 +32,7 @@ async fn drain(stream: sift_driver_api::ResultSetStream) -> u64 {
     let mut rows = 0u64;
     let mut rx = stream.rows;
     while let Some(page) = rx.recv().await {
-        if let sift_protocol::Page::Rows(r) = page {
+        if let sift_protocol::Page::Rows { rows: r } = page {
             rows += r.len() as u64;
         }
     }

@@ -47,7 +47,7 @@ fn mock_postgres_driver() -> MockDriver {
         .schema_ok(SchemaSnapshot::empty(SchemaScope::shallow()))
         .execute_ok(vec![
             Page::NextResult { columns },
-            Page::Rows(rows),
+            Page::Rows { rows },
             Page::Done {
                 affected_rows: Some(2),
                 warnings: Vec::new(),
@@ -209,6 +209,44 @@ async fn client_sdk_consumes_public_http_api() {
     assert_eq!(result.rows.len(), 2);
     let audit = client.audit().await.unwrap();
     assert!(audit.iter().any(|row| row.path == "/v1/health"));
+
+    server.abort();
+}
+
+#[tokio::test]
+async fn client_sdk_consumes_public_websocket_api() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app(test_state()).into_make_service())
+            .await
+            .unwrap();
+    });
+
+    let client = sift_client_sdk::Client::new(format!("http://{addr}"));
+    let session = client.open_session(Some("sdk-ws".into())).await.unwrap();
+    let conn = client
+        .open_connection(
+            session.id,
+            sift_protocol::OpenConnectionRequest {
+                engine: Engine::Postgres,
+                spec: pg_spec(),
+            },
+        )
+        .await
+        .unwrap();
+
+    let pages = client
+        .stream_query(session.id, conn.id, "SELECT id, name FROM users")
+        .await
+        .unwrap();
+    assert!(pages
+        .iter()
+        .any(|page| matches!(page, Page::NextResult { columns } if columns.len() == 2)));
+    assert!(pages
+        .iter()
+        .any(|page| matches!(page, Page::Rows { rows } if rows.len() == 2)));
+    assert!(pages.iter().any(|page| matches!(page, Page::Done { .. })));
 
     server.abort();
 }

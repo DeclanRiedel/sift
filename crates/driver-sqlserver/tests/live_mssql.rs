@@ -84,7 +84,7 @@ async fn open_ping_execute_close() {
     let rows: Vec<_> = pages
         .iter()
         .filter_map(|p| match p {
-            Page::Rows(rows) => Some(rows),
+            Page::Rows { rows } => Some(rows),
             _ => None,
         })
         .flatten()
@@ -204,7 +204,7 @@ async fn schema_deep_and_transactions() {
     )
     .await;
     let count = pages.iter().find_map(|p| match p {
-        Page::Rows(rows) => rows.first().and_then(|row| row.values.first()),
+        Page::Rows { rows } => rows.first().and_then(|row| row.values.first()),
         _ => None,
     });
     assert!(matches!(count, Some(Value::Int32(0))));

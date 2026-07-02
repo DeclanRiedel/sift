@@ -507,7 +507,7 @@ pub async fn drain_stream(stream: ResultSetStream) -> Result<ExecuteResponse, Dr
     while let Some(page) = rx.recv().await {
         match page {
             Page::NextResult { columns: cols } => columns = cols,
-            Page::Rows(r) => rows.extend(r),
+            Page::Rows { rows: r } => rows.extend(r),
             Page::Error { error } => return Err(error),
             Page::Done {
                 affected_rows: a,

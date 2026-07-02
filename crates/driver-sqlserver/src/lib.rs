@@ -329,7 +329,7 @@ async fn run_query(
                 QueryItem::Metadata(meta) => {
                     if !batch.is_empty() {
                         let rows = std::mem::take(&mut batch);
-                        if tx.send(sift_protocol::Page::Rows(rows)).await.is_err() {
+                        if tx.send(sift_protocol::Page::Rows { rows }).await.is_err() {
                             return Ok::<_, DriverError>(());
                         }
                     }
@@ -346,7 +346,7 @@ async fn run_query(
                     batch.push(ms_row(&row));
                     if batch.len() >= ROW_BATCH_SIZE {
                         let rows = std::mem::take(&mut batch);
-                        if tx.send(sift_protocol::Page::Rows(rows)).await.is_err() {
+                        if tx.send(sift_protocol::Page::Rows { rows }).await.is_err() {
                             return Ok(());
                         }
                     }
@@ -354,7 +354,7 @@ async fn run_query(
             }
         }
         if !batch.is_empty() {
-            let _ = tx.send(sift_protocol::Page::Rows(batch)).await;
+            let _ = tx.send(sift_protocol::Page::Rows { rows: batch }).await;
         }
         let _ = tx
             .send(sift_protocol::Page::Done {

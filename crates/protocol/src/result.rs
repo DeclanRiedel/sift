@@ -55,7 +55,9 @@ impl Row {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Page {
-    Rows(Vec<Row>),
+    Rows {
+        rows: Vec<Row>,
+    },
     NextResult {
         columns: Vec<ColumnMetadata>,
     },

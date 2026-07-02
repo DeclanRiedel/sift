@@ -160,7 +160,7 @@ async fn execute_select_decodes_types() {
     let rows: Vec<&[Value]> = pages
         .iter()
         .filter_map(|p| match p {
-            Page::Rows(rows) => Some(rows),
+            Page::Rows { rows } => Some(rows),
             _ => None,
         })
         .flatten()
@@ -377,7 +377,7 @@ async fn transaction_commit_persists() {
         .iter()
         .rev()
         .find_map(|p| match p {
-            Page::Rows(r) => Some(&r[r.len() - 1].values[0]),
+            Page::Rows { rows: r } => Some(&r[r.len() - 1].values[0]),
             _ => None,
         })
         .unwrap();
@@ -430,7 +430,7 @@ async fn transaction_rollback_discards() {
         .iter()
         .rev()
         .find_map(|p| match p {
-            Page::Rows(r) => Some(&r[r.len() - 1].values[0]),
+            Page::Rows { rows: r } => Some(&r[r.len() - 1].values[0]),
             _ => None,
         })
         .unwrap();

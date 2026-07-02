@@ -165,7 +165,7 @@ async fn run_streaming(job: QueryJob) {
                 row_batch.push(Row::new(values));
                 if row_batch.len() >= ROW_BATCH_SIZE {
                     let batch = std::mem::take(&mut row_batch);
-                    if page_tx.send(Page::Rows(batch)).await.is_err() {
+                    if page_tx.send(Page::Rows { rows: batch }).await.is_err() {
                         finish(&inner, conn_id, slot_kind, conn, cursor_id_num).await;
                         return;
                     }
@@ -178,7 +178,7 @@ async fn run_streaming(job: QueryJob) {
     }
 
     if !row_batch.is_empty() {
-        let _ = page_tx.send(Page::Rows(row_batch)).await;
+        let _ = page_tx.send(Page::Rows { rows: row_batch }).await;
     }
 
     let _ = page_tx
@@ -238,7 +238,11 @@ async fn run_simple(job: QueryJob) {
                         .unwrap_or(Value::Null);
                     values.push(value);
                 }
-                let _ = page_tx.send(Page::Rows(vec![Row::new(values)])).await;
+                let _ = page_tx
+                    .send(Page::Rows {
+                        rows: vec![Row::new(values)],
+                    })
+                    .await;
             }
             SimpleQueryMessage::CommandComplete(n) => {
                 affected_rows = Some(n);
