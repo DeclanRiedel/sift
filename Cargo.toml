@@ -53,6 +53,7 @@ hyper-util = { version = "0.1", features = ["tokio"] }
 http-body-util = "0.1"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 tiberius = { version = "0.12", default-features = false, features = ["rustls", "tds73", "chrono"] }
+tokio-tungstenite = { version = "0.26", default-features = false, features = ["connect", "rustls-tls-webpki-roots"] }
 
 [profile.dev]
 split-debuginfo = "unpacked"

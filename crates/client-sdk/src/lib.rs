@@ -3,8 +3,8 @@
 
 use sift_protocol::{
     CancelRequest, ConnectionId, ConnectionInfo, CursorId, Engine, ExecuteRequestHttp,
-    ExecuteResponse, Health, OpenConnectionRequest, OpenSessionRequest, SchemaSnapshot, ServerInfo,
-    SessionId, SessionInfo,
+    ExecuteResponse, Health, OpenConnectionRequest, OpenSessionRequest, Page, SchemaSnapshot,
+    ServerInfo, SessionId, SessionInfo, WsClientMessage, WsServerMessage,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -16,6 +16,12 @@ pub enum Error {
         status: reqwest::StatusCode,
         body: String,
     },
+    #[error("websocket error: {0}")]
+    WebSocket(#[from] tokio_tungstenite::tungstenite::Error),
+    #[error("protocol error: {0}")]
+    Protocol(String),
+    #[error("json error: {0}")]
+    Json(#[from] serde_json::Error),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -122,6 +128,74 @@ impl Client {
         self.get("/v1/openapi.json").await
     }
 
+    pub async fn audit(&self) -> Result<Vec<sift_protocol::AuditEntry>> {
+        self.get("/v1/audit").await
+    }
+
+    pub async fn stream_query(
+        &self,
+        session: SessionId,
+        connection: ConnectionId,
+        sql: impl Into<String>,
+    ) -> Result<Vec<Page>> {
+        use futures::SinkExt;
+        use tokio_tungstenite::tungstenite::Message;
+
+        let (mut ws, _) = tokio_tungstenite::connect_async(self.ws_url(session)).await?;
+        let request_id = "sdk-stream-query".to_string();
+        ws.send(Message::Text(
+            serde_json::to_string(&WsClientMessage::Execute {
+                request_id: request_id.clone(),
+                connection,
+                sql: sql.into(),
+                params: Vec::new(),
+            })?
+            .into(),
+        ))
+        .await?;
+
+        let first = next_ws(&mut ws).await?;
+        let cursor_id = match first {
+            WsServerMessage::Started {
+                request_id: got,
+                cursor_id,
+            } if got == request_id => cursor_id,
+            other => {
+                return Err(Error::Protocol(format!(
+                    "expected started message, got {other:?}"
+                )));
+            }
+        };
+
+        let mut pages = Vec::new();
+        loop {
+            let msg = next_ws(&mut ws).await?;
+            match msg {
+                WsServerMessage::Page {
+                    cursor_id: got,
+                    seq,
+                    page,
+                } if got == cursor_id => {
+                    let done = matches!(page, Page::Done { .. } | Page::Error { .. });
+                    pages.push(page);
+                    ws.send(Message::Text(
+                        serde_json::to_string(&WsClientMessage::Ack { cursor_id, seq })?.into(),
+                    ))
+                    .await?;
+                    if done {
+                        return Ok(pages);
+                    }
+                }
+                WsServerMessage::Error { message, .. } => return Err(Error::Protocol(message)),
+                other => {
+                    return Err(Error::Protocol(format!(
+                        "unexpected websocket message: {other:?}"
+                    )));
+                }
+            }
+        }
+    }
+
     pub fn ws_url(&self, session: SessionId) -> String {
         let base = self
             .base
@@ -180,6 +254,30 @@ impl Client {
 
     fn url(&self, path: &str) -> String {
         format!("{}{}", self.base, path)
+    }
+}
+
+async fn next_ws<S>(ws: &mut S) -> Result<WsServerMessage>
+where
+    S: futures::Stream<
+            Item = std::result::Result<
+                tokio_tungstenite::tungstenite::Message,
+                tokio_tungstenite::tungstenite::Error,
+            >,
+        > + Unpin,
+{
+    use futures::StreamExt;
+    use tokio_tungstenite::tungstenite::Message;
+
+    loop {
+        let Some(message) = ws.next().await else {
+            return Err(Error::Protocol("websocket closed".into()));
+        };
+        match message? {
+            Message::Text(text) => return Ok(serde_json::from_str(&text)?),
+            Message::Close(_) => return Err(Error::Protocol("websocket closed".into())),
+            Message::Ping(_) | Message::Pong(_) | Message::Binary(_) | Message::Frame(_) => {}
+        }
     }
 }
 
