@@ -14,6 +14,8 @@ mod stream;
 pub use conn::PgDriver;
 
 use async_trait::async_trait;
+use bytes::Bytes;
+use futures::{SinkExt, TryStreamExt};
 use sift_driver_api::{
     AdvisoryKey, ConnHandle, CopyOp, CopyResult, Driver, NotificationStream, PgExt, PgSavepoint,
     ResultSetStream, TxHandle,
@@ -156,12 +158,42 @@ impl PgExt for PgDriver {
         )
     }
 
-    async fn copy(&self, _c: ConnHandle, _op: CopyOp) -> Result<CopyResult, DriverError> {
-        Err(DriverError::new(
-            Code::UnsupportedForEngine,
-            "COPY not yet wired (FEATURES.md Tier 1 #12)",
-        )
-        .with_engine(Engine::Postgres))
+    async fn copy(&self, c: ConnHandle, op: CopyOp) -> Result<CopyResult, DriverError> {
+        let (conn, slot_kind) = self.inner.take_for_op(&c).await?;
+        let result = async {
+            match op {
+                CopyOp::Export { sql } => {
+                    let bytes = conn
+                        .copy_out(&sql)
+                        .await
+                        .map_err(pg_err)?
+                        .try_fold(0_u64, |total, chunk| async move {
+                            Ok::<_, tokio_postgres::Error>(total + chunk.len() as u64)
+                        })
+                        .await
+                        .map_err(pg_err)?;
+                    Ok(CopyResult { bytes, rows: None })
+                }
+                CopyOp::Import { table, data } => {
+                    let table = quote_qualified_ident(&table)?;
+                    let sql = format!("COPY {table} FROM STDIN");
+                    let bytes = data.len() as u64;
+                    let mut stream = futures::stream::iter(vec![Ok::<_, tokio_postgres::Error>(
+                        Bytes::from(data),
+                    )]);
+                    let mut sink = std::pin::pin!(conn.copy_in(&sql).await.map_err(pg_err)?);
+                    sink.send_all(&mut stream).await.map_err(pg_err)?;
+                    let rows = sink.finish().await.map_err(pg_err)?;
+                    Ok(CopyResult {
+                        bytes,
+                        rows: Some(rows),
+                    })
+                }
+            }
+        }
+        .await;
+        self.inner.restore(c.id(), slot_kind, conn).await;
+        result
     }
 
     async fn advisory_lock(&self, c: ConnHandle, key: AdvisoryKey) -> Result<(), DriverError> {
@@ -327,6 +359,42 @@ pub(crate) fn validate_ident(name: &str) -> Result<(), DriverError> {
         ));
     }
     Ok(())
+}
+
+fn quote_qualified_ident(name: &str) -> Result<String, DriverError> {
+    let parts: Vec<&str> = name.split('.').collect();
+    if parts.is_empty() || parts.len() > 2 {
+        return Err(DriverError::new(
+            Code::InvalidParameterValue,
+            "table name must be `table` or `schema.table`",
+        ));
+    }
+    let mut quoted = Vec::with_capacity(parts.len());
+    for part in parts {
+        validate_ident(part)?;
+        quoted.push(format!("\"{part}\""));
+    }
+    Ok(quoted.join("."))
+}
+
+#[cfg(test)]
+mod copy_tests {
+    use super::*;
+
+    #[test]
+    fn quote_qualified_ident_accepts_table_and_schema() {
+        assert_eq!(quote_qualified_ident("users").unwrap(), "\"users\"");
+        assert_eq!(
+            quote_qualified_ident("public.users").unwrap(),
+            "\"public\".\"users\""
+        );
+    }
+
+    #[test]
+    fn quote_qualified_ident_rejects_injection() {
+        assert!(quote_qualified_ident("public.users;drop").is_err());
+        assert!(quote_qualified_ident("a.b.c").is_err());
+    }
 }
 
 #[cfg(test)]

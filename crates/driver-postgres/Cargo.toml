@@ -13,6 +13,7 @@ live-pg = []
 sift-protocol = { workspace = true }
 sift-driver-api = { workspace = true }
 async-trait = { workspace = true }
+bytes = { workspace = true }
 tokio = { workspace = true }
 tokio-postgres = { workspace = true }
 deadpool-postgres = { workspace = true }

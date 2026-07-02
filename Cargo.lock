@@ -1816,6 +1816,7 @@ name = "sift-driver-postgres"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "bytes",
  "chrono",
  "dashmap",
  "deadpool-postgres",

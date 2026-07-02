@@ -34,6 +34,7 @@ schemars = { version = "0.8", features = ["chrono", "uuid1"] }
 thiserror = "1.0"
 anyhow = "1.0"
 async-trait = "0.1"
+bytes = "1"
 tokio = { version = "1", features = ["full"] }
 tokio-util = { version = "0.7", features = ["compat"] }
 tracing = "0.1"

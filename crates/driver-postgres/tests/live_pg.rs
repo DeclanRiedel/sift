@@ -21,7 +21,7 @@
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use sift_driver_api::{AdvisoryKey, ConnHandle, Driver, PgExt};
+use sift_driver_api::{AdvisoryKey, ConnHandle, CopyOp, Driver, PgExt};
 use sift_driver_postgres::PgDriver;
 use sift_protocol::{
     ConnectionSpec, Engine, IsolationLevel, ObjectKind, Page, PrimitiveType, SchemaScope, SslMode,
@@ -463,6 +463,51 @@ async fn advisory_lock_round_trip() {
         .advisory_unlock(conn.clone(), AdvisoryKey::Int64(42))
         .await
         .expect("unlock");
+    driver.close(conn).await.unwrap();
+}
+
+#[tokio::test]
+async fn copy_import_export_round_trip() {
+    let driver = PgDriver::new();
+    let conn = driver.open(&spec()).await.unwrap();
+    let schema = setup_schema(&driver, &conn).await;
+    let table = format!("{schema}.copy_round_trip");
+    drain(
+        driver
+            .execute(
+                conn.clone(),
+                sift_protocol::ExecuteRequest::new(format!(
+                    "CREATE TABLE {table} (id integer, name text)"
+                )),
+            )
+            .await
+            .expect("create copy table"),
+    )
+    .await;
+
+    let imported = driver
+        .copy(
+            conn.clone(),
+            CopyOp::Import {
+                table: table.clone(),
+                data: b"1\talice\n2\tbob\n".to_vec(),
+            },
+        )
+        .await
+        .expect("copy import");
+    assert_eq!(imported.rows, Some(2));
+
+    let exported = driver
+        .copy(
+            conn.clone(),
+            CopyOp::Export {
+                sql: format!("COPY {table} TO STDOUT"),
+            },
+        )
+        .await
+        .expect("copy export");
+    assert!(exported.bytes >= b"1\talice\n2\tbob\n".len() as u64);
+
     driver.close(conn).await.unwrap();
 }
 
