@@ -29,6 +29,7 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 
 [dev-dependencies]
+sift-client-sdk = { workspace = true }
 sift-driver-api = { workspace = true, features = ["mock"] }
 tower = { workspace = true, features = ["util"] }
 tokio = { workspace = true, features = ["full", "test-util"] }

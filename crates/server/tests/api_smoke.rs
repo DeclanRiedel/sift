@@ -178,6 +178,42 @@ async fn audit_records_http_operations() {
 }
 
 #[tokio::test]
+async fn client_sdk_consumes_public_http_api() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app(test_state()).into_make_service())
+            .await
+            .unwrap();
+    });
+
+    let client = sift_client_sdk::Client::new(format!("http://{addr}"));
+    let health = client.health().await.unwrap();
+    assert!(health.engines.contains(&Engine::Postgres));
+
+    let session = client.open_session(Some("sdk".into())).await.unwrap();
+    let conn = client
+        .open_connection(
+            session.id,
+            sift_protocol::OpenConnectionRequest {
+                engine: Engine::Postgres,
+                spec: pg_spec(),
+            },
+        )
+        .await
+        .unwrap();
+    let result = client
+        .execute(session.id, conn.id, "SELECT id, name FROM users")
+        .await
+        .unwrap();
+    assert_eq!(result.rows.len(), 2);
+    let audit = client.audit().await.unwrap();
+    assert!(audit.iter().any(|row| row.path == "/v1/health"));
+
+    server.abort();
+}
+
+#[tokio::test]
 async fn bearer_token_auth_is_enforced_when_configured() {
     let app = app(test_state_with_token("secret"));
     let res = app
