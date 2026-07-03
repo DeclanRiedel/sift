@@ -10,7 +10,10 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use dashmap::DashMap;
 use futures::StreamExt;
-use sift_driver_api::{ConnHandle, Driver, IdCounter, MssqlExt, ResultSetStream, TxHandle};
+use sift_driver_api::{
+    BulkFormat, BulkOp, BulkResult, ConnHandle, Driver, IdCounter, MssqlExt, ResultSetStream,
+    TxHandle,
+};
 use sift_protocol::{
     Code, ColumnMetadata, ConnectionSpec, ConstraintInfo, ConstraintKind, CursorId, DriverError,
     Engine, ExecuteRequest, IndexInfo, IndexKind, Nullability, ObjectInfo, ObjectKind,
@@ -24,6 +27,8 @@ use tokio::sync::Mutex;
 use tokio_util::compat::{Compat, TokioAsyncWriteCompatExt};
 
 const ROW_BATCH_SIZE: usize = 128;
+const BULK_INSERT_BATCH_ROWS: usize = 256;
+const BULK_INSERT_MAX_SQL_BYTES: usize = 512 * 1024;
 
 type MssqlConn = Client<Compat<TcpStream>>;
 
@@ -262,15 +267,11 @@ impl MssqlExt for MssqlDriver {
         result.map(|_| ())
     }
 
-    async fn bulk_insert(
-        &self,
-        _c: ConnHandle,
-        _op: sift_driver_api::BulkOp,
-    ) -> Result<sift_driver_api::BulkResult, DriverError> {
-        Err(DriverError::new(
-            Code::UnsupportedForEngine,
-            "bulk insert not wired yet",
-        ))
+    async fn bulk_insert(&self, c: ConnHandle, op: BulkOp) -> Result<BulkResult, DriverError> {
+        let mut conn = self.take_conn(&c).await?;
+        let result = bulk_insert_csv(&mut conn, op).await;
+        self.put_conn(&c, conn).await;
+        result
     }
 
     async fn set_mars(&self, _c: ConnHandle, _enabled: bool) -> Result<(), DriverError> {
@@ -791,6 +792,127 @@ fn params_to_mssql(params: Vec<Value>) -> Result<Vec<Box<dyn ToSql>>, DriverErro
     Ok(out)
 }
 
+async fn bulk_insert_csv(conn: &mut MssqlConn, op: BulkOp) -> Result<BulkResult, DriverError> {
+    if !matches!(op.format, BulkFormat::Csv) {
+        return Err(DriverError::new(
+            Code::UnsupportedForEngine,
+            "SQL Server native bulk format is not supported yet",
+        )
+        .with_engine(Engine::SqlServer));
+    }
+
+    let table = quote_qualified_ident(&op.table)?;
+    let mut reader = csv::ReaderBuilder::new()
+        .has_headers(true)
+        .from_reader(op.data.as_slice());
+    let headers = reader
+        .headers()
+        .map_err(csv_err)?
+        .iter()
+        .map(quote_ident)
+        .collect::<Result<Vec<_>, _>>()?;
+    if headers.is_empty() {
+        return Err(DriverError::new(
+            Code::InvalidParameterValue,
+            "CSV bulk insert requires at least one header column",
+        )
+        .with_engine(Engine::SqlServer));
+    }
+
+    let insert_prefix = format!("INSERT INTO {table} ({}) VALUES ", headers.join(", "));
+    let mut sql = String::with_capacity(insert_prefix.len() + 8192);
+    let mut rows_in_batch = 0usize;
+    let mut rows_inserted = 0u64;
+
+    for record in reader.records() {
+        let record = record.map_err(csv_err)?;
+        if record.len() != headers.len() {
+            return Err(DriverError::new(
+                Code::InvalidParameterValue,
+                "CSV record width does not match header width",
+            )
+            .with_engine(Engine::SqlServer));
+        }
+        let row_sql = csv_record_values(&record);
+        if rows_in_batch > 0
+            && (rows_in_batch >= BULK_INSERT_BATCH_ROWS
+                || sql.len() + row_sql.len() + 2 > BULK_INSERT_MAX_SQL_BYTES)
+        {
+            execute_sql_batch(conn, &sql).await?;
+            sql.clear();
+            rows_in_batch = 0;
+        }
+        if rows_in_batch == 0 {
+            sql.push_str(&insert_prefix);
+        } else {
+            sql.push_str(", ");
+        }
+        sql.push_str(&row_sql);
+        rows_in_batch += 1;
+        rows_inserted += 1;
+    }
+
+    if rows_in_batch > 0 {
+        execute_sql_batch(conn, &sql).await?;
+    }
+    Ok(BulkResult { rows_inserted })
+}
+
+async fn execute_sql_batch(conn: &mut MssqlConn, sql: &str) -> Result<(), DriverError> {
+    conn.simple_query(sql)
+        .await
+        .map_err(ms_err)?
+        .into_results()
+        .await
+        .map_err(ms_err)?;
+    Ok(())
+}
+
+fn csv_record_values(record: &csv::StringRecord) -> String {
+    let mut out = String::with_capacity(record.len() * 8 + 2);
+    out.push('(');
+    for (idx, field) in record.iter().enumerate() {
+        if idx > 0 {
+            out.push_str(", ");
+        }
+        out.push_str(&mssql_literal(field));
+    }
+    out.push(')');
+    out
+}
+
+fn mssql_literal(value: &str) -> String {
+    if value.is_empty() {
+        return "NULL".to_string();
+    }
+    format!("N'{}'", value.replace('\'', "''"))
+}
+
+fn quote_qualified_ident(name: &str) -> Result<String, DriverError> {
+    let parts = name.split('.').collect::<Vec<_>>();
+    if parts.is_empty() || parts.len() > 3 {
+        return Err(DriverError::new(
+            Code::InvalidParameterValue,
+            "identifier must be `table`, `schema.table`, or `database.schema.table`",
+        )
+        .with_engine(Engine::SqlServer));
+    }
+    parts
+        .into_iter()
+        .map(quote_ident)
+        .collect::<Result<Vec<_>, _>>()
+        .map(|parts| parts.join("."))
+}
+
+fn quote_ident(name: &str) -> Result<String, DriverError> {
+    validate_ident(name)?;
+    Ok(format!("[{name}]"))
+}
+
+fn csv_err(error: csv::Error) -> DriverError {
+    DriverError::new(Code::InvalidParameterValue, error.to_string()).with_engine(Engine::SqlServer)
+}
+
 fn ms_type_ref(ty: ColumnType) -> TypeRef {
     let primitive = match ty {
         ColumnType::Bit | ColumnType::Bitn => Some(PrimitiveType::Bool),
@@ -929,4 +1051,32 @@ fn io_err(e: std::io::Error) -> DriverError {
 
 fn ms_err(e: tiberius::error::Error) -> DriverError {
     DriverError::new(Code::DriverInternal, e.to_string()).with_engine(Engine::SqlServer)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn quote_qualified_ident_accepts_common_shapes() {
+        assert_eq!(quote_qualified_ident("users").unwrap(), "[users]");
+        assert_eq!(quote_qualified_ident("dbo.users").unwrap(), "[dbo].[users]");
+        assert_eq!(
+            quote_qualified_ident("db.dbo.users").unwrap(),
+            "[db].[dbo].[users]"
+        );
+    }
+
+    #[test]
+    fn quote_qualified_ident_rejects_injection() {
+        assert!(quote_qualified_ident("dbo.users;drop").is_err());
+        assert!(quote_qualified_ident("dbo.[users]").is_err());
+        assert!(quote_qualified_ident("a.b.c.d").is_err());
+    }
+
+    #[test]
+    fn mssql_literal_escapes_text_and_maps_empty_to_null() {
+        assert_eq!(mssql_literal(""), "NULL");
+        assert_eq!(mssql_literal("O'Reilly"), "N'O''Reilly'");
+    }
 }

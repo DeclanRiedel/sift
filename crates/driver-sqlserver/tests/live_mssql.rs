@@ -10,7 +10,7 @@
 
 #![cfg(feature = "live-mssql")]
 
-use sift_driver_api::Driver;
+use sift_driver_api::{BulkFormat, BulkOp, Driver, MssqlExt};
 use sift_driver_sqlserver::MssqlDriver;
 use sift_protocol::{
     ConnectionSpec, Engine, EngineConnectionSpec, ExecuteRequest, MssqlConnectionSpec, ObjectPath,
@@ -93,6 +93,75 @@ async fn open_ping_execute_close() {
     assert!(matches!(rows[0].values[0], Value::Int32(7)));
     assert!(matches!(&rows[0].values[1], Value::Text(v) if v == "seven"));
 
+    driver.close(conn).await.expect("close succeeds");
+}
+
+#[tokio::test]
+async fn bulk_insert_csv_round_trip() {
+    let driver = MssqlDriver::new();
+    let conn = driver.open(&spec()).await.expect("open succeeds");
+    let table = format!(
+        "sift_bulk_{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos()
+    );
+
+    drain(
+        driver
+            .execute(
+                conn.clone(),
+                ExecuteRequest::new(format!(
+                    "CREATE TABLE dbo.[{table}] (id int NOT NULL, name nvarchar(64) NULL)"
+                )),
+            )
+            .await
+            .expect("create bulk table"),
+    )
+    .await;
+
+    let result = driver
+        .bulk_insert(
+            conn.clone(),
+            BulkOp {
+                table: format!("dbo.{table}"),
+                data: b"id,name\n1,Alice\n2,\"Bob, Jr\"\n3,\n".to_vec(),
+                format: BulkFormat::Csv,
+            },
+        )
+        .await
+        .expect("bulk insert");
+    assert_eq!(result.rows_inserted, 3);
+
+    let pages = drain(
+        driver
+            .execute(
+                conn.clone(),
+                ExecuteRequest::new(format!(
+                    "SELECT COUNT(*) AS ct FROM dbo.[{table}] WHERE name IS NULL OR name LIKE N'Bob,%'"
+                )),
+            )
+            .await
+            .expect("select bulk rows"),
+    )
+    .await;
+    let count = pages.iter().find_map(|p| match p {
+        Page::Rows { rows } => rows.first().and_then(|row| row.values.first()),
+        _ => None,
+    });
+    assert!(matches!(count, Some(Value::Int32(2))));
+
+    drain(
+        driver
+            .execute(
+                conn.clone(),
+                ExecuteRequest::new(format!("DROP TABLE dbo.[{table}]")),
+            )
+            .await
+            .expect("drop bulk table"),
+    )
+    .await;
     driver.close(conn).await.expect("close succeeds");
 }
 

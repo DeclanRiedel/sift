@@ -22,8 +22,8 @@ build a UI against Postgres and SQL Server without private guidance.
 - Postgres `VerifyCa` / `VerifyFull` TLS modes use rustls with native trust
   roots. `VerifyCa` is intentionally strict and performs hostname verification.
 - SQL Server driver via `tiberius` with params, streaming, schema, transactions,
-  savepoints, cancel-by-abort isolation, close/cancel cleanup, and live
-  container tests.
+  savepoints, CSV bulk insert, cancel-by-abort isolation, close/cancel cleanup,
+  and live container tests.
 - Postgres binary decoding for numeric/decimal and month-free intervals.
 
 ## Verified
@@ -31,7 +31,7 @@ build a UI against Postgres and SQL Server without private guidance.
 - `cargo test -q`
 - `cargo clippy --workspace --all-targets -- -D warnings`
 - Live Postgres: `13` tests pass with `live-pg`.
-- Live SQL Server: `4` tests pass with `live-mssql`.
+- Live SQL Server: `5` tests pass with `live-mssql`.
 
 ## Remaining Phase 0 Gaps
 
@@ -40,7 +40,9 @@ build a UI against Postgres and SQL Server without private guidance.
   JSONL via `SIFT_AUDIT__OPERATION_LOG_PATH`.
 - SQL Server cancel uses task abort/drop-connection semantics with session
   cleanup, not TDS ATTENTION.
-- SQL Server MARS and bulk insert extension methods are declared but unsupported.
+- SQL Server MARS is declared but unsupported.
+- SQL Server bulk insert supports headered CSV through bounded batched INSERTs;
+  native BCP format is still unsupported.
 - Postgres `LISTEN/NOTIFY` uses a dedicated listener connection and bounded
   in-process notification delivery; server route/WebSocket fanout remains to
   be exposed if UI needs direct subscription endpoints.
