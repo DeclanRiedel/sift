@@ -13,7 +13,7 @@ use async_trait::async_trait;
 
 use crate::{
     BulkResult, ConnHandle, Driver, IdCounter, MssqlExt, MssqlSavepoint, NotificationStream, PgExt,
-    PgSavepoint, ResultSetStream, TxHandle,
+    PgNotification, PgSavepoint, ResultSetStream, TxHandle,
 };
 use sift_protocol::{
     Code, ConnectionSpec, CursorId, DriverError, Engine, ExecuteRequest, SchemaScope,
@@ -35,6 +35,7 @@ struct Queues {
     commit: VecDeque<Boxed<Result<(), DriverError>>>,
     rollback: VecDeque<Boxed<Result<(), DriverError>>>,
     execute: VecDeque<Boxed<Result<Vec<sift_protocol::Page>, DriverError>>>,
+    listen: VecDeque<Boxed<Result<Vec<PgNotification>, DriverError>>>,
     bulk_insert: VecDeque<Boxed<Result<BulkResult, DriverError>>>,
     cancel: VecDeque<Boxed<Result<(), DriverError>>>,
     close: VecDeque<Boxed<Result<(), DriverError>>>,
@@ -137,6 +138,13 @@ impl MockDriverBuilder {
 
     pub fn execute_err(mut self, err: DriverError) -> Self {
         self.state.execute.push_back(Box::new(move || Err(err)));
+        self
+    }
+
+    pub fn listen_ok(mut self, notifications: Vec<PgNotification>) -> Self {
+        self.state
+            .listen
+            .push_back(Box::new(move || Ok(notifications)));
         self
     }
 
@@ -279,10 +287,17 @@ impl PgExt for MockDriver {
         _c: ConnHandle,
         _channels: Vec<String>,
     ) -> Result<NotificationStream, DriverError> {
-        Err(DriverError::new(
-            Code::UnsupportedForEngine,
-            "LISTEN/NOTIFY not wired in MockDriver",
-        ))
+        self.record("listen");
+        let notifications = MockDriver::pop(&mut self.state.lock().unwrap().listen, "listen")?;
+        let (tx, rx) = mpsc::channel(notifications.len().max(1));
+        tokio::spawn(async move {
+            for notification in notifications {
+                if tx.send(notification).await.is_err() {
+                    break;
+                }
+            }
+        });
+        Ok(NotificationStream { notifications: rx })
     }
 
     async fn unlisten(&self, _c: ConnHandle, _channels: Vec<String>) -> Result<(), DriverError> {

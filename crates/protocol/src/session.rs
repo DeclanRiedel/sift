@@ -207,6 +207,11 @@ pub enum WsClientMessage {
         #[serde(default)]
         params: Vec<Value>,
     },
+    Listen {
+        request_id: String,
+        connection: ConnectionId,
+        channels: Vec<String>,
+    },
     Ack {
         cursor_id: CursorId,
         seq: u64,
@@ -231,6 +236,11 @@ pub enum WsServerMessage {
         cursor_id: CursorId,
         seq: u64,
         page: Page,
+    },
+    Notification {
+        request_id: String,
+        channel: String,
+        payload: String,
     },
     Error {
         request_id: Option<String>,

@@ -730,6 +730,28 @@ async fn handle_ws(
                         )
                         .await?;
                     }
+                    WsClientMessage::Listen {
+                        request_id,
+                        connection,
+                        channels,
+                    } => {
+                        let stream =
+                            match sessions.listen_pg(session_id, connection, channels).await {
+                                Ok(stream) => stream,
+                                Err(error) => {
+                                    send_json(
+                                        &mut sender,
+                                        &WsServerMessage::Error {
+                                            request_id: Some(request_id),
+                                            message: error.to_string(),
+                                        },
+                                    )
+                                    .await?;
+                                    continue;
+                                }
+                            };
+                        stream_notifications(&mut sender, request_id, stream.notifications).await?;
+                    }
                     WsClientMessage::Cancel {
                         connection,
                         cursor_id,
@@ -753,6 +775,25 @@ async fn handle_ws(
                 .map_err(|e| ApiError::BadRequest(e.to_string()))?,
             Message::Pong(_) | Message::Binary(_) => {}
         }
+    }
+    Ok(())
+}
+
+async fn stream_notifications(
+    sender: &mut futures::stream::SplitSink<WebSocket, Message>,
+    request_id: String,
+    mut notifications: tokio::sync::mpsc::Receiver<sift_driver_api::PgNotification>,
+) -> ApiResult<()> {
+    while let Some(notification) = notifications.recv().await {
+        send_json(
+            sender,
+            &WsServerMessage::Notification {
+                request_id: request_id.clone(),
+                channel: notification.channel,
+                payload: notification.payload,
+            },
+        )
+        .await?;
     }
     Ok(())
 }
@@ -819,6 +860,11 @@ async fn wait_for_ack(
                 WsClientMessage::Execute { .. } => {
                     return Err(ApiError::BadRequest(
                         "concurrent execute on one websocket is not supported".into(),
+                    ));
+                }
+                WsClientMessage::Listen { .. } => {
+                    return Err(ApiError::BadRequest(
+                        "listen during active stream is not supported".into(),
                     ));
                 }
             },

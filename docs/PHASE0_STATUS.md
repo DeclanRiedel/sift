@@ -15,6 +15,7 @@ build a UI against Postgres and SQL Server without private guidance.
   transactions, SQL Server CSV bulk insert, HTTP audit, durable replayable
   operation log, and generated OpenAPI.
 - WebSocket streaming with ACK-gated backpressure and SDK E2E proof.
+- WebSocket Postgres notification fanout for `LISTEN/NOTIFY`, with SDK proof.
 - Rust SDK covering HTTP and WS, including bearer auth propagation.
 - Postgres driver with pooled connections, streaming, params, schema,
   transactions, cancel, advisory locks, COPY import/export, LISTEN/NOTIFY, and
@@ -30,7 +31,7 @@ build a UI against Postgres and SQL Server without private guidance.
 
 - `cargo test -q`
 - `cargo clippy --workspace --all-targets -- -D warnings`
-- Server API smoke: `16` tests pass against `MockDriver`.
+- Server API smoke: `17` tests pass against `MockDriver`.
 - Live Postgres: `13` tests pass with `live-pg`.
 - Live SQL Server: `5` tests pass with `live-mssql`.
 
@@ -46,8 +47,7 @@ build a UI against Postgres and SQL Server without private guidance.
 - SQL Server bulk insert is exposed through the public HTTP API and SDK for
   headered CSV via bounded batched INSERTs; native BCP format is still
   unsupported.
-- Postgres `LISTEN/NOTIFY` uses a dedicated listener connection and bounded
-  in-process notification delivery; server route/WebSocket fanout remains to
-  be exposed if UI needs direct subscription endpoints.
+- Postgres `LISTEN/NOTIFY` uses a dedicated listener connection, bounded
+  in-process notification delivery, and public WebSocket fanout.
 - Month-aware Postgres intervals intentionally surface as engine-native values
   because `chrono::Duration` cannot represent calendar months.

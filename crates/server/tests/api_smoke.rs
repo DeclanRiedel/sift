@@ -3,7 +3,7 @@
 
 use axum::body::{to_bytes, Body};
 use axum::http::{Request, StatusCode};
-use sift_driver_api::{mock::MockDriver, BulkResult};
+use sift_driver_api::{mock::MockDriver, BulkResult, PgNotification};
 use sift_protocol::{
     ColumnMetadata, ConnectionSpec, Engine, ExecuteRequestHttp, Health, Nullability, Page,
     PrimitiveType, Row, SchemaScope, SchemaSnapshot, ServerInfo, SslMode, TypeRef, Value,
@@ -417,6 +417,51 @@ async fn client_sdk_consumes_public_websocket_api() {
         .iter()
         .any(|page| matches!(page, Page::Rows { rows } if rows.len() == 2)));
     assert!(pages.iter().any(|page| matches!(page, Page::Done { .. })));
+
+    server.abort();
+}
+
+#[tokio::test]
+async fn client_sdk_consumes_postgres_notifications() {
+    let driver = MockDriver::builder()
+        .engine(Engine::Postgres)
+        .listen_ok(vec![PgNotification {
+            channel: "events".into(),
+            payload: "created".into(),
+        }])
+        .build();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        axum::serve(
+            listener,
+            app(test_state_with_driver(driver)).into_make_service(),
+        )
+        .await
+        .unwrap();
+    });
+
+    let client = sift_client_sdk::Client::new(format!("http://{addr}"));
+    let session = client
+        .open_session(Some("sdk-listen".into()))
+        .await
+        .unwrap();
+    let conn = client
+        .open_connection(
+            session.id,
+            sift_protocol::OpenConnectionRequest {
+                engine: Engine::Postgres,
+                spec: pg_spec(),
+            },
+        )
+        .await
+        .unwrap();
+
+    let notifications = client
+        .listen_notifications(session.id, conn.id, vec!["events".into()], 1)
+        .await
+        .unwrap();
+    assert_eq!(notifications, vec![("events".into(), "created".into())]);
 
     server.abort();
 }

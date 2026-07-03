@@ -12,7 +12,9 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use dashmap::DashMap;
-use sift_driver_api::{BulkFormat, BulkOp, ConnHandle, Driver, ResultSetStream, TxHandle};
+use sift_driver_api::{
+    BulkFormat, BulkOp, ConnHandle, Driver, NotificationStream, ResultSetStream, TxHandle,
+};
 use sift_protocol::{
     AuditEntry, BeginTransactionRequest, BulkInsertFormat, BulkInsertRequest, BulkInsertResponse,
     ColumnMetadata, ConnectionId, ConnectionInfo, ConnectionSpec, CursorId, DriverError,
@@ -303,6 +305,25 @@ impl SessionStore {
     ) -> ApiResult<ResultSetStream> {
         let entry = self.get_conn_entry(session_id, conn_id)?;
         Ok(entry.driver.execute(entry.handle.clone(), req).await?)
+    }
+
+    pub async fn listen_pg(
+        &self,
+        session_id: SessionId,
+        conn_id: ConnectionId,
+        channels: Vec<String>,
+    ) -> ApiResult<NotificationStream> {
+        let entry = self.get_conn_entry(session_id, conn_id)?;
+        let pg = entry.driver.as_pg().ok_or_else(|| {
+            ApiError::Driver(
+                DriverError::new(
+                    sift_protocol::Code::UnsupportedForEngine,
+                    "LISTEN/NOTIFY is only supported by Postgres connections",
+                )
+                .with_engine(entry.driver.engine()),
+            )
+        })?;
+        Ok(pg.listen(entry.handle.clone(), channels).await?)
     }
 
     pub async fn cancel(

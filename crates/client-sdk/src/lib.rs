@@ -284,6 +284,57 @@ impl Client {
         }
     }
 
+    pub async fn listen_notifications(
+        &self,
+        session: SessionId,
+        connection: ConnectionId,
+        channels: Vec<String>,
+        max_notifications: usize,
+    ) -> Result<Vec<(String, String)>> {
+        use futures::SinkExt;
+        use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+        use tokio_tungstenite::tungstenite::Message;
+
+        let mut request = self.ws_url(session).into_client_request()?;
+        if let Some(token) = &self.token {
+            request.headers_mut().insert(
+                "authorization",
+                format!("Bearer {token}")
+                    .parse()
+                    .map_err(|e| Error::Protocol(format!("invalid bearer token header: {e}")))?,
+            );
+        }
+        let (mut ws, _) = tokio_tungstenite::connect_async(request).await?;
+        let request_id = "sdk-listen".to_string();
+        ws.send(Message::Text(
+            serde_json::to_string(&WsClientMessage::Listen {
+                request_id: request_id.clone(),
+                connection,
+                channels,
+            })?
+            .into(),
+        ))
+        .await?;
+
+        let mut notifications = Vec::with_capacity(max_notifications);
+        while notifications.len() < max_notifications {
+            match next_ws(&mut ws).await? {
+                WsServerMessage::Notification {
+                    request_id: got,
+                    channel,
+                    payload,
+                } if got == request_id => notifications.push((channel, payload)),
+                WsServerMessage::Error { message, .. } => return Err(Error::Protocol(message)),
+                other => {
+                    return Err(Error::Protocol(format!(
+                        "unexpected websocket message: {other:?}"
+                    )));
+                }
+            }
+        }
+        Ok(notifications)
+    }
+
     pub fn ws_url(&self, session: SessionId) -> String {
         let base = self
             .base
