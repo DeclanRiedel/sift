@@ -5,7 +5,8 @@ use sift_protocol::{
     BeginTransactionRequest, BulkInsertRequest, BulkInsertResponse, CancelRequest, ConnectionId,
     ConnectionInfo, CursorId, EndTransactionRequest, Engine, ExecuteRequestHttp, ExecuteResponse,
     Health, OpenConnectionRequest, OpenSessionRequest, Page, SchemaSnapshot, ServerInfo, SessionId,
-    SessionInfo, TransactionInfo, TxHandleRef, TxId, TxMode, WsClientMessage, WsServerMessage,
+    SessionInfo, TransactionInfo, TxHandleRef, TxId, TxMode, Value, WsClientMessage,
+    WsServerMessage,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -119,6 +120,26 @@ impl Client {
             &ExecuteRequestHttp {
                 connection,
                 sql: sql.into(),
+                params: Vec::new(),
+                tx: None,
+            },
+        )
+        .await
+    }
+
+    pub async fn execute_with_params(
+        &self,
+        session: SessionId,
+        connection: ConnectionId,
+        sql: impl Into<String>,
+        params: Vec<Value>,
+    ) -> Result<ExecuteResponse> {
+        self.post(
+            &format!("/v1/sessions/{session}/queries"),
+            &ExecuteRequestHttp {
+                connection,
+                sql: sql.into(),
+                params,
                 tx: None,
             },
         )
@@ -136,6 +157,7 @@ impl Client {
             &ExecuteRequestHttp {
                 connection: tx.connection,
                 sql: sql.into(),
+                params: Vec::new(),
                 tx: Some(TxHandleRef {
                     tx_id: tx.tx_id,
                     connection: tx.connection,

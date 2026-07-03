@@ -12,11 +12,12 @@ build a UI against Postgres and SQL Server without private guidance.
 - Headless axum server with sessions, connections, auth hook, audit rows, and
   protocol-version response header.
 - HTTP v1 surface for health, sessions, connections, schema, execute, cancel,
-  transactions, SQL Server CSV bulk insert, HTTP audit, durable replayable
-  operation log, and generated OpenAPI.
+  parameterized execute, transactions, SQL Server CSV bulk insert, HTTP audit,
+  durable replayable operation log, and generated OpenAPI.
 - WebSocket streaming with ACK-gated backpressure and SDK E2E proof.
 - WebSocket Postgres notification fanout for `LISTEN/NOTIFY`, with SDK proof.
-- Rust SDK covering HTTP and WS, including bearer auth propagation.
+- Rust SDK covering HTTP and WS, including parameterized execute and bearer
+  auth propagation.
 - Postgres driver with pooled connections, streaming, params, schema,
   transactions, cancel, advisory locks, COPY import/export, LISTEN/NOTIFY, and
   live container tests.

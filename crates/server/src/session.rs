@@ -290,7 +290,7 @@ impl SessionStore {
         self.validate_execute_tx(session_id, conn_id, req.tx.as_ref())?;
         let req = ExecuteRequest {
             sql: req.sql,
-            params: Vec::new(),
+            params: req.params,
         };
         let entry = self.get_conn_entry(session_id, conn_id)?;
         let stream = entry.driver.execute(entry.handle.clone(), req).await?;

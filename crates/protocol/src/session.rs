@@ -74,6 +74,8 @@ pub struct ConnectionInfo {
 pub struct ExecuteRequestHttp {
     pub connection: ConnectionId,
     pub sql: String,
+    #[serde(default)]
+    pub params: Vec<Value>,
     /// Optional transaction to run under. None = autocommit.
     #[serde(default)]
     pub tx: Option<TxHandleRef>,

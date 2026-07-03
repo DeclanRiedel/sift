@@ -693,6 +693,7 @@ async fn execute_returns_drained_rows_and_affected_count() {
     let exec_req = ExecuteRequestHttp {
         connection: cid,
         sql: "SELECT id, name FROM users".into(),
+        params: Vec::new(),
         tx: None,
     };
     let res = app
@@ -773,6 +774,7 @@ async fn transaction_flow_requires_explicit_tx_ref() {
             ExecuteRequestHttp {
                 connection: conn.id,
                 sql: "SELECT id, name FROM users".into(),
+                params: Vec::new(),
                 tx: None,
             },
         ))
@@ -787,6 +789,7 @@ async fn transaction_flow_requires_explicit_tx_ref() {
             ExecuteRequestHttp {
                 connection: conn.id,
                 sql: "SELECT id, name FROM users".into(),
+                params: Vec::new(),
                 tx: Some(sift_protocol::TxHandleRef {
                     tx_id: tx.tx_id,
                     connection: conn.id,
@@ -902,6 +905,7 @@ async fn execute_stream_error_maps_to_http_error() {
             ExecuteRequestHttp {
                 connection: conn.id,
                 sql: "BAD".into(),
+                params: Vec::new(),
                 tx: None,
             },
         ))
