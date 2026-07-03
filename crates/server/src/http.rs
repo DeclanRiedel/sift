@@ -16,9 +16,10 @@ use serde_json::json;
 use std::time::Instant;
 
 use sift_protocol::{
-    AuditEntry, BeginTransactionRequest, CancelRequest, EndTransactionRequest, ExecuteRequest,
-    ExecuteRequestHttp, Health, ObjectPath, OpenConnectionRequest, OpenSessionRequest, Operation,
-    OperationStatus, SchemaFilter, SchemaScope, WsClientMessage, WsServerMessage, PROTOCOL_VERSION,
+    AuditEntry, BeginTransactionRequest, BulkInsertRequest, CancelRequest, EndTransactionRequest,
+    ExecuteRequest, ExecuteRequestHttp, Health, ObjectPath, OpenConnectionRequest,
+    OpenSessionRequest, Operation, OperationStatus, SchemaFilter, SchemaScope, WsClientMessage,
+    WsServerMessage, PROTOCOL_VERSION,
 };
 
 use crate::error::{ApiError, ApiResult};
@@ -55,6 +56,10 @@ pub fn app(state: AppState) -> Router {
         .route(
             "/v1/sessions/:id/connections/:conn_id/ping",
             post(ping_connection),
+        )
+        .route(
+            "/v1/sessions/:id/connections/:conn_id/bulk-insert",
+            post(bulk_insert),
         )
         .route(
             "/v1/sessions/:id/connections/:conn_id/schema",
@@ -232,6 +237,14 @@ async fn openapi() -> Json<serde_json::Value> {
                     "responses": { "200": { "description": "Server info", "content": json_content("ServerInfo") } }
                 }
             },
+            "/v1/sessions/{id}/connections/{conn_id}/bulk-insert": {
+                "post": {
+                    "operationId": "bulkInsert",
+                    "summary": "Bulk insert rows into a SQL Server table",
+                    "requestBody": json_body("BulkInsertRequest"),
+                    "responses": { "200": { "description": "Bulk insert result", "content": json_content("BulkInsertResponse") } }
+                }
+            },
             "/v1/sessions/{id}/connections/{conn_id}/schema": {
                 "get": {
                     "operationId": "getSchema",
@@ -351,6 +364,8 @@ fn protocol_schema_refs() -> serde_json::Value {
     let mut schemas = serde_json::Map::new();
     add_schema::<sift_protocol::AuditEntry>("AuditEntry", &mut schemas);
     add_schema::<sift_protocol::BeginTransactionRequest>("BeginTransactionRequest", &mut schemas);
+    add_schema::<sift_protocol::BulkInsertRequest>("BulkInsertRequest", &mut schemas);
+    add_schema::<sift_protocol::BulkInsertResponse>("BulkInsertResponse", &mut schemas);
     add_schema::<sift_protocol::CancelRequest>("CancelRequest", &mut schemas);
     add_schema::<sift_protocol::ConnectionInfo>("ConnectionInfo", &mut schemas);
     add_schema::<sift_protocol::EndTransactionRequest>("EndTransactionRequest", &mut schemas);
@@ -475,6 +490,23 @@ async fn ping_connection(
     Path((id, conn_id)): Path<(sift_protocol::SessionId, sift_protocol::ConnectionId)>,
 ) -> ApiResult<Json<sift_protocol::ServerInfo>> {
     Ok(Json(state.sessions.ping(id, conn_id).await?))
+}
+
+async fn bulk_insert(
+    State(state): State<AppState>,
+    Path((id, conn_id)): Path<(sift_protocol::SessionId, sift_protocol::ConnectionId)>,
+    Json(req): Json<BulkInsertRequest>,
+) -> ApiResult<Json<sift_protocol::BulkInsertResponse>> {
+    let operation = Operation::BulkInsert {
+        session: id,
+        connection: conn_id,
+        request: req.clone(),
+    };
+    let response = state.sessions.bulk_insert(id, conn_id, req).await?;
+    state
+        .sessions
+        .push_operation(operation, OperationStatus::Succeeded);
+    Ok(Json(response))
 }
 
 #[derive(Deserialize)]

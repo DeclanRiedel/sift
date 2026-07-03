@@ -12,13 +12,14 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use dashmap::DashMap;
-use sift_driver_api::{ConnHandle, Driver, ResultSetStream, TxHandle};
+use sift_driver_api::{BulkFormat, BulkOp, ConnHandle, Driver, ResultSetStream, TxHandle};
 use sift_protocol::{
-    AuditEntry, BeginTransactionRequest, ColumnMetadata, ConnectionId, ConnectionInfo,
-    ConnectionSpec, CursorId, DriverError, DriverWarning, EndTransactionRequest, Engine,
-    ExecuteRequest, ExecuteRequestHttp, ExecuteResponse, OpenSessionRequest, Operation,
-    OperationAuditEntry, OperationStatus, Page, Row, SchemaScope, SchemaSnapshot, ServerInfo,
-    SessionId, SessionInfo, TransactionInfo, TxHandleRef, TxId,
+    AuditEntry, BeginTransactionRequest, BulkInsertFormat, BulkInsertRequest, BulkInsertResponse,
+    ColumnMetadata, ConnectionId, ConnectionInfo, ConnectionSpec, CursorId, DriverError,
+    DriverWarning, EndTransactionRequest, Engine, ExecuteRequest, ExecuteRequestHttp,
+    ExecuteResponse, OpenSessionRequest, Operation, OperationAuditEntry, OperationStatus, Page,
+    Row, SchemaScope, SchemaSnapshot, ServerInfo, SessionId, SessionInfo, TransactionInfo,
+    TxHandleRef, TxId,
 };
 
 use crate::error::{ApiError, ApiResult};
@@ -321,6 +322,40 @@ impl SessionStore {
             );
         }
         Ok(())
+    }
+
+    pub async fn bulk_insert(
+        &self,
+        session_id: SessionId,
+        conn_id: ConnectionId,
+        req: BulkInsertRequest,
+    ) -> ApiResult<BulkInsertResponse> {
+        let entry = self.get_conn_entry(session_id, conn_id)?;
+        let mssql = entry.driver.as_mssql().ok_or_else(|| {
+            ApiError::Driver(
+                DriverError::new(
+                    sift_protocol::Code::UnsupportedForEngine,
+                    "bulk insert is only supported by SQL Server connections",
+                )
+                .with_engine(entry.driver.engine()),
+            )
+        })?;
+        let result = mssql
+            .bulk_insert(
+                entry.handle.clone(),
+                BulkOp {
+                    table: req.table,
+                    data: req.data,
+                    format: match req.format {
+                        BulkInsertFormat::Csv => BulkFormat::Csv,
+                        BulkInsertFormat::Native => BulkFormat::Native,
+                    },
+                },
+            )
+            .await?;
+        Ok(BulkInsertResponse {
+            rows_inserted: result.rows_inserted,
+        })
     }
 
     pub async fn begin_transaction(

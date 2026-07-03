@@ -5,7 +5,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    BeginTransactionRequest, CancelRequest, ConnectionId, EndTransactionRequest,
+    BeginTransactionRequest, BulkInsertRequest, CancelRequest, ConnectionId, EndTransactionRequest,
     ExecuteRequestHttp, OpenConnectionRequest, OpenSessionRequest, SchemaScope, SessionId,
 };
 
@@ -39,6 +39,11 @@ pub enum Operation {
     CancelQuery {
         session: SessionId,
         request: CancelRequest,
+    },
+    BulkInsert {
+        session: SessionId,
+        connection: ConnectionId,
+        request: BulkInsertRequest,
     },
     BeginTransaction {
         session: SessionId,

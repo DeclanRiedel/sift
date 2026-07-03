@@ -3,7 +3,7 @@
 
 use axum::body::{to_bytes, Body};
 use axum::http::{Request, StatusCode};
-use sift_driver_api::mock::MockDriver;
+use sift_driver_api::{mock::MockDriver, BulkResult};
 use sift_protocol::{
     ColumnMetadata, ConnectionSpec, Engine, ExecuteRequestHttp, Health, Nullability, Page,
     PrimitiveType, Row, SchemaScope, SchemaSnapshot, ServerInfo, SslMode, TypeRef, Value,
@@ -109,6 +109,25 @@ fn pg_spec() -> ConnectionSpec {
     }
 }
 
+fn mssql_spec() -> ConnectionSpec {
+    ConnectionSpec {
+        host: "mock.invalid".into(),
+        port: Some(1433),
+        database: Some("mock".into()),
+        user: "mock".into(),
+        password: Some("mock".into()),
+        ssl_mode: Some(SslMode::Require),
+        engine_specific: Some(sift_protocol::EngineConnectionSpec::SqlServer(
+            sift_protocol::MssqlConnectionSpec {
+                mars: false,
+                encrypt: Some(true),
+                trust_server_certificate: Some(true),
+                connect_timeout_secs: Some(15),
+            },
+        )),
+    }
+}
+
 async fn body_json<T: serde::de::DeserializeOwned>(body: Body) -> T {
     let bytes = to_bytes(body, 1024 * 1024).await.unwrap();
     serde_json::from_slice(&bytes)
@@ -169,10 +188,13 @@ async fn openapi_is_published() {
     );
     assert!(body["paths"]["/v1/sessions/{id}/ws"].is_object());
     assert!(body["paths"]["/v1/sessions/{id}/transactions"].is_object());
+    assert!(body["paths"]["/v1/sessions/{id}/connections/{conn_id}/bulk-insert"].is_object());
     assert!(body["paths"]["/v1/audit"].is_object());
     assert!(body["paths"]["/v1/operations"].is_object());
     assert!(body["components"]["securitySchemes"]["bearerAuth"].is_object());
     assert!(body["components"]["schemas"]["ExecuteResponse"].is_object());
+    assert!(body["components"]["schemas"]["BulkInsertRequest"].is_object());
+    assert!(body["components"]["schemas"]["BulkInsertResponse"].is_object());
     assert!(body["components"]["schemas"]["ExecuteResponse"]["properties"]["rows"].is_object());
     assert!(
         body["components"]["schemas"]["OpenConnectionRequest"]["properties"]["engine"].is_object()
@@ -181,6 +203,75 @@ async fn openapi_is_published() {
     assert!(
         body["components"]["schemas"]["OperationAuditEntry"]["properties"]["operation"].is_object()
     );
+}
+
+#[tokio::test]
+async fn bulk_insert_is_public_http_api() {
+    let driver = MockDriver::builder()
+        .engine(Engine::SqlServer)
+        .bulk_insert_ok(BulkResult { rows_inserted: 3 })
+        .build();
+    let app = app(test_state_with_driver(driver));
+
+    let session: sift_protocol::SessionInfo = body_json(
+        app.clone()
+            .oneshot(post_json(
+                "/v1/sessions",
+                sift_protocol::OpenSessionRequest {
+                    tag: Some("bulk".into()),
+                },
+            ))
+            .await
+            .unwrap()
+            .into_body(),
+    )
+    .await;
+    let conn: sift_protocol::ConnectionInfo = body_json(
+        app.clone()
+            .oneshot(post_json(
+                format!("/v1/sessions/{}/connections", session.id),
+                sift_protocol::OpenConnectionRequest {
+                    engine: Engine::SqlServer,
+                    spec: mssql_spec(),
+                },
+            ))
+            .await
+            .unwrap()
+            .into_body(),
+    )
+    .await;
+
+    let res = app
+        .clone()
+        .oneshot(post_json(
+            format!(
+                "/v1/sessions/{}/connections/{}/bulk-insert",
+                session.id, conn.id
+            ),
+            sift_protocol::BulkInsertRequest {
+                table: "dbo.people".into(),
+                data: b"id,name\n1,Alice\n2,Bob\n3,Carol\n".to_vec(),
+                format: sift_protocol::BulkInsertFormat::Csv,
+            },
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let body: sift_protocol::BulkInsertResponse = body_json(res.into_body()).await;
+    assert_eq!(body.rows_inserted, 3);
+
+    let ops: Vec<sift_protocol::OperationAuditEntry> = body_json(
+        app.oneshot(Request::get("/v1/operations").body(Body::empty()).unwrap())
+            .await
+            .unwrap()
+            .into_body(),
+    )
+    .await;
+    assert!(ops.iter().any(|row| matches!(
+        &row.operation,
+        sift_protocol::Operation::BulkInsert { connection, request, .. }
+            if *connection == conn.id && request.table == "dbo.people"
+    )));
 }
 
 #[tokio::test]

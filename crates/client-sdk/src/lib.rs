@@ -2,9 +2,9 @@
 //! buildable-against from outside the server crate.
 
 use sift_protocol::{
-    BeginTransactionRequest, CancelRequest, ConnectionId, ConnectionInfo, CursorId,
-    EndTransactionRequest, Engine, ExecuteRequestHttp, ExecuteResponse, Health,
-    OpenConnectionRequest, OpenSessionRequest, Page, SchemaSnapshot, ServerInfo, SessionId,
+    BeginTransactionRequest, BulkInsertRequest, BulkInsertResponse, CancelRequest, ConnectionId,
+    ConnectionInfo, CursorId, EndTransactionRequest, Engine, ExecuteRequestHttp, ExecuteResponse,
+    Health, OpenConnectionRequest, OpenSessionRequest, Page, SchemaSnapshot, ServerInfo, SessionId,
     SessionInfo, TransactionInfo, TxHandleRef, TxId, TxMode, WsClientMessage, WsServerMessage,
 };
 
@@ -92,6 +92,19 @@ impl Client {
         self.get(&format!(
             "/v1/sessions/{session}/connections/{connection}/schema"
         ))
+        .await
+    }
+
+    pub async fn bulk_insert(
+        &self,
+        session: SessionId,
+        connection: ConnectionId,
+        request: BulkInsertRequest,
+    ) -> Result<BulkInsertResponse> {
+        self.post(
+            &format!("/v1/sessions/{session}/connections/{connection}/bulk-insert"),
+            &request,
+        )
         .await
     }
 

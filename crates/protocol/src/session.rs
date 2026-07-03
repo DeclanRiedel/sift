@@ -132,6 +132,31 @@ pub struct CancelRequest {
     pub cursor: CursorId,
 }
 
+/// Body of `POST /v1/sessions/:id/connections/:conn_id/bulk-insert`.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct BulkInsertRequest {
+    pub table: String,
+    #[schemars(with = "Vec<u8>")]
+    pub data: Vec<u8>,
+    #[serde(default)]
+    pub format: BulkInsertFormat,
+}
+
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum BulkInsertFormat {
+    #[default]
+    Csv,
+    Native,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct BulkInsertResponse {
+    pub rows_inserted: u64,
+}
+
 /// Generic ok-ack body.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct Ack {

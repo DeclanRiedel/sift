@@ -12,8 +12,8 @@ use std::sync::Mutex;
 use async_trait::async_trait;
 
 use crate::{
-    ConnHandle, Driver, IdCounter, NotificationStream, PgExt, PgSavepoint, ResultSetStream,
-    TxHandle,
+    BulkResult, ConnHandle, Driver, IdCounter, MssqlExt, MssqlSavepoint, NotificationStream, PgExt,
+    PgSavepoint, ResultSetStream, TxHandle,
 };
 use sift_protocol::{
     Code, ConnectionSpec, CursorId, DriverError, Engine, ExecuteRequest, SchemaScope,
@@ -35,6 +35,7 @@ struct Queues {
     commit: VecDeque<Boxed<Result<(), DriverError>>>,
     rollback: VecDeque<Boxed<Result<(), DriverError>>>,
     execute: VecDeque<Boxed<Result<Vec<sift_protocol::Page>, DriverError>>>,
+    bulk_insert: VecDeque<Boxed<Result<BulkResult, DriverError>>>,
     cancel: VecDeque<Boxed<Result<(), DriverError>>>,
     close: VecDeque<Boxed<Result<(), DriverError>>>,
     invocations: Vec<&'static str>,
@@ -141,6 +142,13 @@ impl MockDriverBuilder {
 
     pub fn cancel_ok(mut self) -> Self {
         self.state.cancel.push_back(Box::new(|| Ok(())));
+        self
+    }
+
+    pub fn bulk_insert_ok(mut self, result: BulkResult) -> Self {
+        self.state
+            .bulk_insert
+            .push_back(Box::new(move || Ok(result)));
         self
     }
 
@@ -254,6 +262,14 @@ impl Driver for MockDriver {
         self.record("close");
         MockDriver::pop_or_ok(&mut self.state.lock().unwrap().close)
     }
+
+    fn as_pg(&self) -> Option<&dyn PgExt> {
+        (self.engine == Engine::Postgres).then_some(self)
+    }
+
+    fn as_mssql(&self) -> Option<&dyn MssqlExt> {
+        (self.engine == Engine::SqlServer).then_some(self)
+    }
 }
 
 #[async_trait]
@@ -312,6 +328,45 @@ impl PgExt for MockDriver {
     }
 
     async fn release_savepoint(&self, _sp: PgSavepoint) -> Result<(), DriverError> {
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl MssqlExt for MockDriver {
+    async fn use_database(&self, _c: ConnHandle, _db: &str) -> Result<(), DriverError> {
+        self.record("use_database");
+        Ok(())
+    }
+
+    async fn bulk_insert(
+        &self,
+        _c: ConnHandle,
+        _op: crate::BulkOp,
+    ) -> Result<BulkResult, DriverError> {
+        self.record("bulk_insert");
+        MockDriver::pop(&mut self.state.lock().unwrap().bulk_insert, "bulk_insert")
+    }
+
+    async fn set_mars(&self, _c: ConnHandle, _enabled: bool) -> Result<(), DriverError> {
+        self.record("set_mars");
+        Err(DriverError::new(
+            Code::UnsupportedForEngine,
+            "MARS not wired in MockDriver",
+        ))
+    }
+
+    async fn savepoint(&self, t: &TxHandle, name: &str) -> Result<MssqlSavepoint, DriverError> {
+        self.record("mssql_savepoint");
+        Ok(MssqlSavepoint {
+            tx: t.tx_id,
+            conn: t.conn.clone(),
+            name: name.to_string(),
+        })
+    }
+
+    async fn rollback_to(&self, _sp: MssqlSavepoint) -> Result<(), DriverError> {
+        self.record("mssql_rollback_to");
         Ok(())
     }
 }

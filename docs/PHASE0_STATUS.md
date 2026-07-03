@@ -12,8 +12,8 @@ build a UI against Postgres and SQL Server without private guidance.
 - Headless axum server with sessions, connections, auth hook, audit rows, and
   protocol-version response header.
 - HTTP v1 surface for health, sessions, connections, schema, execute, cancel,
-  transactions, HTTP audit, durable replayable operation log, and generated
-  OpenAPI.
+  transactions, SQL Server CSV bulk insert, HTTP audit, durable replayable
+  operation log, and generated OpenAPI.
 - WebSocket streaming with ACK-gated backpressure and SDK E2E proof.
 - Rust SDK covering HTTP and WS, including bearer auth propagation.
 - Postgres driver with pooled connections, streaming, params, schema,
@@ -30,6 +30,7 @@ build a UI against Postgres and SQL Server without private guidance.
 
 - `cargo test -q`
 - `cargo clippy --workspace --all-targets -- -D warnings`
+- Server API smoke: `16` tests pass against `MockDriver`.
 - Live Postgres: `13` tests pass with `live-pg`.
 - Live SQL Server: `5` tests pass with `live-mssql`.
 
@@ -42,8 +43,9 @@ build a UI against Postgres and SQL Server without private guidance.
   cleanup, not TDS ATTENTION.
 - SQL Server MARS is declared but unsupported; requests with `mars: true` fail
   early instead of silently opening a non-MARS connection.
-- SQL Server bulk insert supports headered CSV through bounded batched INSERTs;
-  native BCP format is still unsupported.
+- SQL Server bulk insert is exposed through the public HTTP API and SDK for
+  headered CSV via bounded batched INSERTs; native BCP format is still
+  unsupported.
 - Postgres `LISTEN/NOTIFY` uses a dedicated listener connection and bounded
   in-process notification delivery; server route/WebSocket fanout remains to
   be exposed if UI needs direct subscription endpoints.
