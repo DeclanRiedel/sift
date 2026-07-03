@@ -23,7 +23,7 @@ build a UI against Postgres and SQL Server without private guidance.
   roots. `VerifyCa` is intentionally strict and performs hostname verification.
 - SQL Server driver via `tiberius` with params, streaming, schema, transactions,
   savepoints, CSV bulk insert, cancel-by-abort isolation, close/cancel cleanup,
-  and live container tests.
+  connect timeouts, and live container tests.
 - Postgres binary decoding for numeric/decimal and month-free intervals.
 
 ## Verified
@@ -40,7 +40,8 @@ build a UI against Postgres and SQL Server without private guidance.
   JSONL via `SIFT_AUDIT__OPERATION_LOG_PATH`.
 - SQL Server cancel uses task abort/drop-connection semantics with session
   cleanup, not TDS ATTENTION.
-- SQL Server MARS is declared but unsupported.
+- SQL Server MARS is declared but unsupported; requests with `mars: true` fail
+  early instead of silently opening a non-MARS connection.
 - SQL Server bulk insert supports headered CSV through bounded batched INSERTs;
   native BCP format is still unsupported.
 - Postgres `LISTEN/NOTIFY` uses a dedicated listener connection and bounded

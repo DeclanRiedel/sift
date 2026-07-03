@@ -5,7 +5,9 @@
 //! metadata preserved through the protocol escape hatches.
 
 use std::collections::HashMap;
+use std::future::Future;
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use dashmap::DashMap;
@@ -98,7 +100,16 @@ impl Driver for MssqlDriver {
             spec.password.clone().unwrap_or_default(),
         ));
 
-        if let Some(sift_protocol::EngineConnectionSpec::SqlServer(ms)) = &spec.engine_specific {
+        let connect_timeout = if let Some(sift_protocol::EngineConnectionSpec::SqlServer(ms)) =
+            &spec.engine_specific
+        {
+            if ms.mars {
+                return Err(DriverError::new(
+                    Code::UnsupportedForEngine,
+                    "SQL Server MARS is not supported by the current driver backend",
+                )
+                .with_engine(Engine::SqlServer));
+            }
             if let Some(encrypt) = ms.encrypt {
                 config.encryption(if encrypt {
                     EncryptionLevel::Required
@@ -109,15 +120,18 @@ impl Driver for MssqlDriver {
             if ms.trust_server_certificate.unwrap_or(false) {
                 config.trust_cert();
             }
-        }
+            ms.connect_timeout_secs
+                .map(|secs| Duration::from_secs(secs as u64))
+        } else {
+            None
+        };
 
-        let tcp = TcpStream::connect(config.get_addr())
+        let tcp = timeout_io(connect_timeout, TcpStream::connect(config.get_addr()))
             .await
             .map_err(io_err)?;
         tcp.set_nodelay(true).map_err(io_err)?;
-        let conn = Client::connect(config, tcp.compat_write())
-            .await
-            .map_err(ms_err)?;
+        let conn =
+            timeout_tds(connect_timeout, Client::connect(config, tcp.compat_write())).await?;
         let id = self.inner.conn_id.next();
         self.inner.conns.lock().await.insert(id, conn);
         Ok(ConnHandle::new(id, Engine::SqlServer))
@@ -1042,6 +1056,34 @@ fn validate_ident(name: &str) -> Result<(), DriverError> {
             Code::InvalidParameterValue,
             "invalid identifier",
         ))
+    }
+}
+
+async fn timeout_io<T>(
+    timeout: Option<Duration>,
+    future: impl Future<Output = std::io::Result<T>>,
+) -> std::io::Result<T> {
+    match timeout {
+        Some(timeout) => tokio::time::timeout(timeout, future).await.map_err(|_| {
+            std::io::Error::new(std::io::ErrorKind::TimedOut, "SQL Server connect timed out")
+        })?,
+        None => future.await,
+    }
+}
+
+async fn timeout_tds<T>(
+    timeout: Option<Duration>,
+    future: impl Future<Output = tiberius::Result<T>>,
+) -> Result<T, DriverError> {
+    match timeout {
+        Some(timeout) => tokio::time::timeout(timeout, future)
+            .await
+            .map_err(|_| {
+                DriverError::new(Code::ConnectionFailed, "SQL Server login timed out")
+                    .with_engine(Engine::SqlServer)
+            })?
+            .map_err(ms_err),
+        None => future.await.map_err(ms_err),
     }
 }
 
