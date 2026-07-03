@@ -36,7 +36,7 @@ build a UI against Postgres and SQL Server without private guidance.
 - Live Postgres: `13` tests pass with `live-pg`.
 - Live SQL Server: `5` tests pass with `live-mssql`.
 
-## Remaining Phase 0 Gaps
+## Implemented With Known Limits
 
 - OpenAPI is published with generated protocol schemas.
 - Operation audit is replayable from `/v1/operations` and can be persisted as
@@ -52,3 +52,9 @@ build a UI against Postgres and SQL Server without private guidance.
   in-process notification delivery, and public WebSocket fanout.
 - Month-aware Postgres intervals intentionally surface as engine-native values
   because `chrono::Duration` cannot represent calendar months.
+
+## Remaining Phase 0 Gaps
+
+- No known Phase 0-critical API surface remains unimplemented.
+- SQL Server true TDS ATTENTION, MARS concurrency, and native BCP are deferred
+  backend-depth improvements, not blockers for the Phase 0 headless API.
