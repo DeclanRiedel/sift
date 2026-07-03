@@ -13,17 +13,21 @@ mod stream;
 
 pub use conn::PgDriver;
 
+use std::sync::Arc;
+
 use async_trait::async_trait;
 use bytes::Bytes;
-use futures::{SinkExt, TryStreamExt};
+use futures::{future::poll_fn, SinkExt, TryStreamExt};
 use sift_driver_api::{
-    AdvisoryKey, ConnHandle, CopyOp, CopyResult, Driver, NotificationStream, PgExt, PgSavepoint,
-    ResultSetStream, TxHandle,
+    AdvisoryKey, ConnHandle, CopyOp, CopyResult, Driver, NotificationStream, PgExt, PgNotification,
+    PgSavepoint, ResultSetStream, TxHandle,
 };
 use sift_protocol::{
     Code, ConnectionSpec, CursorId, DriverError, Engine, ExecuteRequest, IsolationLevel,
     SchemaScope, SchemaSnapshot, ServerInfo, TxAccessMode as AccessMode, TxId, TxMode,
 };
+use tokio::io::{AsyncRead, AsyncWrite};
+use tokio_postgres::{AsyncMessage, Client, Connection};
 
 #[async_trait]
 impl Driver for PgDriver {
@@ -35,6 +39,7 @@ impl Driver for PgDriver {
         let conn = self.open_internal(spec).await?;
         let id = self.inner.conn_id.next();
         self.inner.put_free(id, conn).await;
+        self.inner.put_spec(id, spec.clone());
         Ok(ConnHandle::new(id, Engine::Postgres))
     }
 
@@ -138,24 +143,46 @@ impl Driver for PgDriver {
 impl PgExt for PgDriver {
     async fn listen(
         &self,
-        _c: ConnHandle,
-        _channels: Vec<String>,
+        c: ConnHandle,
+        channels: Vec<String>,
     ) -> Result<NotificationStream, DriverError> {
-        // LISTEN/NOTIFY needs its own dedicated connection (stateful). The
-        // dedicated `listen_pool` lands with FEATURES.md Tier 3 (collab
-        // events); for Phase 0 we surface this as unsupported.
-        Err(DriverError::new(
-            Code::UnsupportedForEngine,
-            "LISTEN/NOTIFY not yet wired (listen_pool TBD)",
-        )
-        .with_engine(Engine::Postgres))
+        if channels.is_empty() {
+            return Err(DriverError::new(
+                Code::InvalidParameterValue,
+                "at least one LISTEN channel is required",
+            )
+            .with_engine(Engine::Postgres));
+        }
+        let spec = self.inner.spec_for(c.id()).ok_or_else(|| {
+            DriverError::new(Code::ConnectionFailed, "no connection spec for handle")
+                .with_engine(Engine::Postgres)
+        })?;
+        let (tx, rx) = tokio::sync::mpsc::channel(128);
+        let cfg = pg_connect_config(&spec);
+        let ssl_mode = spec.ssl_mode.unwrap_or(sift_protocol::SslMode::Prefer);
+        if matches!(
+            ssl_mode,
+            sift_protocol::SslMode::VerifyCa | sift_protocol::SslMode::VerifyFull
+        ) {
+            let tls = conn::native_tls_connector()?;
+            let (client, connection) = cfg.connect(tls).await.map_err(pg_err)?;
+            let client = Arc::new(client);
+            spawn_notification_pump(Arc::clone(&client), connection, tx);
+            listen_channels(&client, channels).await?;
+        } else {
+            let (client, connection) = cfg.connect(tokio_postgres::NoTls).await.map_err(pg_err)?;
+            let client = Arc::new(client);
+            spawn_notification_pump(Arc::clone(&client), connection, tx);
+            listen_channels(&client, channels).await?;
+        }
+        Ok(NotificationStream { notifications: rx })
     }
 
-    async fn unlisten(&self, _c: ConnHandle, _channels: Vec<String>) -> Result<(), DriverError> {
-        Err(
-            DriverError::new(Code::UnsupportedForEngine, "LISTEN/NOTIFY not yet wired")
-                .with_engine(Engine::Postgres),
-        )
+    async fn unlisten(&self, _c: ConnHandle, channels: Vec<String>) -> Result<(), DriverError> {
+        for channel in channels {
+            validate_ident(&channel)?;
+        }
+        Ok(())
     }
 
     async fn copy(&self, c: ConnHandle, op: CopyOp) -> Result<CopyResult, DriverError> {
@@ -342,6 +369,98 @@ fn begin_sql(mode: &TxMode) -> String {
     format!("BEGIN ISOLATION LEVEL {iso}{access}")
 }
 
+fn pg_connect_config(spec: &ConnectionSpec) -> tokio_postgres::Config {
+    let mut cfg = tokio_postgres::Config::new();
+    if spec.host.starts_with('/') {
+        cfg.host_path(&spec.host);
+    } else {
+        cfg.host(&spec.host);
+    }
+    if let Some(port) = spec.port {
+        cfg.port(port);
+    }
+    if let Some(database) = &spec.database {
+        cfg.dbname(database);
+    }
+    cfg.user(&spec.user);
+    if let Some(password) = &spec.password {
+        cfg.password(password);
+    }
+    cfg.application_name("sift-listen");
+    cfg.ssl_mode(
+        match spec.ssl_mode.unwrap_or(sift_protocol::SslMode::Prefer) {
+            sift_protocol::SslMode::Disable => tokio_postgres::config::SslMode::Disable,
+            sift_protocol::SslMode::Prefer => tokio_postgres::config::SslMode::Prefer,
+            sift_protocol::SslMode::Require
+            | sift_protocol::SslMode::VerifyCa
+            | sift_protocol::SslMode::VerifyFull => tokio_postgres::config::SslMode::Require,
+        },
+    );
+
+    if let Some(sift_protocol::EngineConnectionSpec::Postgres(pg)) = &spec.engine_specific {
+        if let Some(search_path) = &pg.search_path {
+            cfg.options(format!("-c search_path={}", search_path.join(",")));
+        }
+        if let Some(timeout) = pg.connect_timeout_secs {
+            cfg.connect_timeout(std::time::Duration::from_secs(timeout as u64));
+        }
+    }
+    cfg
+}
+
+async fn listen_channels(client: &Client, channels: Vec<String>) -> Result<(), DriverError> {
+    for channel in channels {
+        client
+            .batch_execute(&format!("LISTEN {}", quote_ident(&channel)?))
+            .await
+            .map_err(pg_err)?;
+    }
+    Ok(())
+}
+
+fn spawn_notification_pump<S, T>(
+    client: Arc<Client>,
+    mut connection: Connection<S, T>,
+    notifications: tokio::sync::mpsc::Sender<PgNotification>,
+) where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    T: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    tokio::spawn(async move {
+        let _client = client;
+        loop {
+            let message = tokio::select! {
+                biased;
+                _ = notifications.closed() => break,
+                message = poll_fn(|cx| connection.poll_message(cx)) => message,
+            };
+            match message {
+                Some(Ok(AsyncMessage::Notification(notification))) => {
+                    let notification = PgNotification {
+                        channel: notification.channel().to_string(),
+                        payload: notification.payload().to_string(),
+                    };
+                    if notifications.send(notification).await.is_err() {
+                        break;
+                    }
+                }
+                Some(Ok(AsyncMessage::Notice(notice))) => {
+                    tracing::debug!(message = %notice.message(), "postgres listen notice");
+                    tokio::task::yield_now().await;
+                }
+                Some(Ok(_)) => {
+                    tokio::task::yield_now().await;
+                }
+                Some(Err(error)) => {
+                    tracing::warn!(error = %error, "postgres listen connection ended");
+                    break;
+                }
+                None => break,
+            }
+        }
+    });
+}
+
 /// PG identifiers are [A-Za-z_][A-Za-z0-9_]*. Reject anything else to avoid
 /// SQL injection through engine-specific ops (savepoint names, advisory
 /// lock keys, channel names).
@@ -361,6 +480,11 @@ pub(crate) fn validate_ident(name: &str) -> Result<(), DriverError> {
     Ok(())
 }
 
+fn quote_ident(name: &str) -> Result<String, DriverError> {
+    validate_ident(name)?;
+    Ok(format!("\"{name}\""))
+}
+
 fn quote_qualified_ident(name: &str) -> Result<String, DriverError> {
     let parts: Vec<&str> = name.split('.').collect();
     if parts.is_empty() || parts.len() > 2 {
@@ -371,8 +495,7 @@ fn quote_qualified_ident(name: &str) -> Result<String, DriverError> {
     }
     let mut quoted = Vec::with_capacity(parts.len());
     for part in parts {
-        validate_ident(part)?;
-        quoted.push(format!("\"{part}\""));
+        quoted.push(quote_ident(part)?);
     }
     Ok(quoted.join("."))
 }

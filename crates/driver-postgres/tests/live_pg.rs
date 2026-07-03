@@ -512,6 +512,40 @@ async fn copy_import_export_round_trip() {
 }
 
 #[tokio::test]
+async fn listen_notify_receives_payload() {
+    let driver = PgDriver::new();
+    let conn = driver.open(&spec()).await.unwrap();
+    let channel = unique_schema();
+    let mut notifications = driver
+        .listen(conn.clone(), vec![channel.clone()])
+        .await
+        .expect("listen");
+
+    drain(
+        driver
+            .execute(
+                conn.clone(),
+                sift_protocol::ExecuteRequest::new(format!("NOTIFY \"{channel}\", 'hello'")),
+            )
+            .await
+            .expect("notify"),
+    )
+    .await;
+
+    let notification = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        notifications.notifications.recv(),
+    )
+    .await
+    .expect("notification received before timeout")
+    .expect("notification stream remains open");
+    assert_eq!(notification.channel, channel);
+    assert_eq!(notification.payload, "hello");
+
+    driver.close(conn).await.unwrap();
+}
+
+#[tokio::test]
 async fn cancel_aborts_long_query() {
     let driver = PgDriver::new();
     let conn = driver.open(&spec()).await.unwrap();

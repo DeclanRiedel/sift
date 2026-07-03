@@ -35,6 +35,7 @@ pub(crate) struct PgDriverInner {
     /// already-seen spec reuses the pool; identical connections share warm
     /// capacity. String key avoids silent hash-collision pool reuse.
     pub(crate) pools: DashMap<String, Arc<Pool>>,
+    pub(crate) specs: DashMap<u64, ConnectionSpec>,
     pub(crate) conn_id: IdCounter,
     pub(crate) tx_id: IdCounter,
     pub(crate) cursor_id: IdCounter,
@@ -75,6 +76,7 @@ impl PgDriverInner {
             conns: Mutex::new(HashMap::new()),
             cursors: DashMap::new(),
             pools: DashMap::new(),
+            specs: DashMap::new(),
             conn_id: IdCounter::new(),
             tx_id: IdCounter::new(),
             cursor_id: IdCounter::new(),
@@ -138,6 +140,14 @@ impl PgDriverInner {
 
     pub(crate) async fn put_free(&self, id: u64, conn: PooledConn) {
         self.conns.lock().await.insert(id, ConnState::Free(conn));
+    }
+
+    pub(crate) fn put_spec(&self, id: u64, spec: ConnectionSpec) {
+        self.specs.insert(id, spec);
+    }
+
+    pub(crate) fn spec_for(&self, id: u64) -> Option<ConnectionSpec> {
+        self.specs.get(&id).map(|entry| entry.clone())
     }
 
     pub(crate) async fn put_in_tx(&self, conn_id: u64, tx_id: u64, conn: PooledConn) {
@@ -207,6 +217,7 @@ impl PgDriverInner {
             // tracing only — caller decides whether that's an error.
             tracing::warn!(conn_id = c.id(), "closing conn with open transaction");
         }
+        self.specs.remove(&c.id());
         // Drain live cursors belonging to this conn. The spawned query tasks
         // will observe socket close and finish their Page::Done themselves.
         let to_remove: Vec<u64> = self
@@ -260,7 +271,8 @@ fn map_ssl_mode(m: SslMode) -> deadpool_postgres::SslMode {
     }
 }
 
-fn native_tls_connector() -> Result<tokio_postgres_rustls::MakeRustlsConnect, DriverError> {
+pub(crate) fn native_tls_connector() -> Result<tokio_postgres_rustls::MakeRustlsConnect, DriverError>
+{
     static INSTALL_PROVIDER: Once = Once::new();
     INSTALL_PROVIDER.call_once(|| {
         let _ = rustls::crypto::ring::default_provider().install_default();
