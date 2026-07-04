@@ -69,16 +69,22 @@ fn build_registry(cfg: &Config) -> DriverRegistry {
         // MockDriver is registered for engine=postgres; useful for headless
         // tests without a DB. Real driver registration is gated behind
         // config so a `mock=true` sift.toml gives a runnable-no-PG server.
-        let mock = sift_driver_api::mock::MockDriver::builder()
-            .engine(sift_protocol::Engine::Postgres)
-            .ping_ok(sift_protocol::ServerInfo {
-                engine: sift_protocol::Engine::Postgres,
-                server_version: "MockDB 0.1".to_string(),
-                current_database: "mock".to_string(),
-                current_user: "mock".to_string(),
-            })
-            .schema_ok(sift_protocol::SchemaSnapshot::empty(SchemaScope::shallow()))
-            .build();
+        let server_info = sift_protocol::ServerInfo {
+            engine: sift_protocol::Engine::Postgres,
+            server_version: "MockDB 0.1".to_string(),
+            current_database: "mock".to_string(),
+            current_user: "mock".to_string(),
+        };
+        let schema = sift_protocol::SchemaSnapshot::empty(SchemaScope::shallow());
+        let mut mock =
+            sift_driver_api::mock::MockDriver::builder().engine(sift_protocol::Engine::Postgres);
+        for _ in 0..32 {
+            mock = mock
+                .ping_ok(server_info.clone())
+                .schema_ok(schema.clone())
+                .execute_ok(demo_execute_pages());
+        }
+        let mock = mock.build();
         builder = builder.register(mock);
     } else {
         // Real PG driver. Connections are not actually opened here; the
@@ -92,6 +98,43 @@ fn build_registry(cfg: &Config) -> DriverRegistry {
     builder = builder.register(sift_driver_sqlserver::MssqlDriver::new());
 
     builder.build()
+}
+
+fn demo_execute_pages() -> Vec<sift_protocol::Page> {
+    use sift_protocol::{ColumnMetadata, Nullability, Page, PrimitiveType, Row, TypeRef, Value};
+
+    vec![
+        Page::NextResult {
+            columns: vec![
+                ColumnMetadata {
+                    name: "id".to_string(),
+                    type_ref: TypeRef::Primitive(PrimitiveType::Int32),
+                    nullable: Nullability::NotNullable,
+                    auto_increment: false,
+                    primary_key: false,
+                    facets: Default::default(),
+                },
+                ColumnMetadata {
+                    name: "name".to_string(),
+                    type_ref: TypeRef::Primitive(PrimitiveType::Text),
+                    nullable: Nullability::NotNullable,
+                    auto_increment: false,
+                    primary_key: false,
+                    facets: Default::default(),
+                },
+            ],
+        },
+        Page::Rows {
+            rows: vec![
+                Row::new(vec![Value::Int32(1), Value::Text("demo alice".into())]),
+                Row::new(vec![Value::Int32(2), Value::Text("demo bob".into())]),
+            ],
+        },
+        Page::Done {
+            affected_rows: Some(2),
+            warnings: Vec::new(),
+        },
+    ]
 }
 
 async fn shutdown_signal() {
