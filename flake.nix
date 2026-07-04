@@ -116,7 +116,7 @@
 
         backendLabStack = pkgs.writeShellApplication {
           name = "sift-backend-lab-stack";
-          runtimeInputs = with pkgs; [ nodejs nix ];
+          runtimeInputs = with pkgs; [ curl nodejs nix ];
           text = ''
             set -euo pipefail
 
@@ -146,12 +146,130 @@
             }
             trap cleanup EXIT
 
+            ready=0
+            for _ in $(seq 1 "''${SIFT_BACKEND_LAB_READY_TRIES:-480}"); do
+              if curl -fsS "http://''${SIFT_BIND:-127.0.0.1:3000}/v1/health" >/dev/null 2>&1; then
+                ready=1
+                break
+              fi
+              if ! kill -0 "$backend_pid" >/dev/null 2>&1; then
+                echo "sift backend exited before becoming ready. Log follows:" >&2
+                sed -n '1,240p' "$backend_log" >&2
+                exit 1
+              fi
+              sleep 0.25
+            done
+            if [ "$ready" != 1 ]; then
+              echo "sift backend was not ready before timeout. Log follows:" >&2
+              sed -n '1,240p' "$backend_log" >&2
+              exit 1
+            fi
+
             cd "$lab"
             if [ ! -d node_modules ]; then
               npm ci
             fi
 
             echo "Backend log: $backend_log"
+            echo "Lab UI: http://127.0.0.1:5177"
+            exec npm run dev -- "$@"
+          '';
+        };
+
+        demoPostgres = pkgs.writeShellApplication {
+          name = "sift-demo-postgres";
+          runtimeInputs = with pkgs; [ curl nodejs nix postgresql ];
+          text = ''
+            set -euo pipefail
+
+            repo="''${SIFT_REPO:-$PWD}"
+            lab="$repo/.labs/sift-backend-lab"
+            if [ ! -f "$repo/flake.nix" ] || [ ! -f "$repo/Cargo.toml" ]; then
+              echo "Run this from the sift checkout, or set SIFT_REPO=/path/to/sift." >&2
+              exit 1
+            fi
+            if [ ! -f "$lab/package.json" ]; then
+              echo "Missing $lab. Clone it with:" >&2
+              echo "  git clone git@github.com:DeclanRiedel/sift-backend-lab.git $lab" >&2
+              exit 1
+            fi
+
+            pgdata="''${SIFT_DEMO_PGDATA:-/tmp/sift-demo-pg}"
+            pglog="''${SIFT_DEMO_PG_LOG:-/tmp/sift-demo-pg.log}"
+            pgport="''${SIFT_DEMO_PG_PORT:-5433}"
+            pgsocket="''${SIFT_DEMO_PG_SOCKET_DIR:-/tmp/sift-demo-pg-socket}"
+            backend_log="''${SIFT_BACKEND_LAB_BACKEND_LOG:-/tmp/sift-backend-lab-backend.log}"
+            mkdir -p "$pgsocket"
+
+            if [ ! -f "$pgdata/PG_VERSION" ]; then
+              rm -rf "$pgdata"
+              initdb -D "$pgdata" -U sift --auth=trust --no-locale --encoding=UTF8
+              {
+                echo "listen_addresses = '127.0.0.1'"
+                echo "port = $pgport"
+                echo "unix_socket_directories = '$pgsocket'"
+              } >> "$pgdata/postgresql.conf"
+            fi
+            if ! grep -q "unix_socket_directories = '$pgsocket'" "$pgdata/postgresql.conf"; then
+              echo "unix_socket_directories = '$pgsocket'" >> "$pgdata/postgresql.conf"
+            fi
+
+            pg_ctl -D "$pgdata" -l "$pglog" -w start
+            createdb -h 127.0.0.1 -p "$pgport" -U sift sifttest 2>/dev/null || true
+            psql -h 127.0.0.1 -p "$pgport" -U sift -d sifttest <<'SQL'
+            CREATE SCHEMA IF NOT EXISTS lab;
+            CREATE TABLE IF NOT EXISTS lab.people (
+              id integer PRIMARY KEY,
+              name text NOT NULL,
+              role text NOT NULL,
+              created_at timestamptz NOT NULL DEFAULT now()
+            );
+            INSERT INTO lab.people (id, name, role) VALUES
+              (1, 'Ada', 'engineer'),
+              (2, 'Grace', 'analyst'),
+              (3, 'Linus', 'operator')
+            ON CONFLICT (id) DO UPDATE
+              SET name = EXCLUDED.name,
+                  role = EXCLUDED.role;
+            SQL
+
+            cd "$repo"
+            nix develop "$repo" --command env SIFT_BIND="''${SIFT_BIND:-127.0.0.1:3000}" cargo run -p sift-server -- >"$backend_log" 2>&1 &
+            backend_pid=$!
+            cleanup() {
+              kill "$backend_pid" >/dev/null 2>&1 || true
+              wait "$backend_pid" >/dev/null 2>&1 || true
+              pg_ctl -D "$pgdata" -m fast -w stop >/dev/null 2>&1 || true
+            }
+            trap cleanup EXIT
+
+            ready=0
+            for _ in $(seq 1 "''${SIFT_BACKEND_LAB_READY_TRIES:-480}"); do
+              if curl -fsS "http://''${SIFT_BIND:-127.0.0.1:3000}/v1/health" >/dev/null 2>&1; then
+                ready=1
+                break
+              fi
+              if ! kill -0 "$backend_pid" >/dev/null 2>&1; then
+                echo "sift backend exited before becoming ready. Log follows:" >&2
+                sed -n '1,240p' "$backend_log" >&2
+                exit 1
+              fi
+              sleep 0.25
+            done
+            if [ "$ready" != 1 ]; then
+              echo "sift backend was not ready before timeout. Log follows:" >&2
+              sed -n '1,240p' "$backend_log" >&2
+              exit 1
+            fi
+
+            cd "$lab"
+            if [ ! -d node_modules ]; then
+              npm ci
+            fi
+
+            echo "Postgres: host=127.0.0.1 port=$pgport db=sifttest user=sift password=<empty> ssl=disable"
+            echo "Backend log: $backend_log"
+            echo "Postgres log: $pglog"
             echo "Lab UI: http://127.0.0.1:5177"
             exec npm run dev -- "$@"
           '';
@@ -301,6 +419,10 @@
           backend-lab-stack = {
             type = "app";
             program = "${backendLabStack}/bin/sift-backend-lab-stack";
+          };
+          demo-postgres = {
+            type = "app";
+            program = "${demoPostgres}/bin/sift-demo-postgres";
           };
           health = {
             type = "app";
