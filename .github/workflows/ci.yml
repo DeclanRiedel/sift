@@ -20,3 +20,62 @@ jobs:
         run: nix develop . --command cargo test --workspace
       - name: Dependency policy
         run: nix develop . --command cargo deny check
+
+  # Two-impl validation gate (ADR-017). The live driver tests exercise
+  # real Postgres + SQL Server; without them, PgExt/MssqlExt correctness
+  # is unverified. Runs against service containers on every push.
+  live-drivers:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: sift
+          POSTGRES_PASSWORD: sift
+          POSTGRES_DB: sifttest
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd="pg_isready -U sift -d sifttest"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=20
+      mssql:
+        image: mcr.microsoft.com/mssql/server:2022-latest
+        env:
+          ACCEPT_EULA: "Y"
+          MSSQL_SA_PASSWORD: "SiftTest_Pass1"
+          MSSQL_PID: Developer
+        ports:
+          - 1433:1433
+    env:
+      SIFT_PG_HOST: 127.0.0.1
+      SIFT_PG_PORT: "5432"
+      SIFT_PG_USER: sift
+      SIFT_PG_PASSWORD: sift
+      SIFT_PG_DB: sifttest
+      SIFT_MSSQL_HOST: 127.0.0.1
+      SIFT_MSSQL_PORT: "1433"
+      SIFT_MSSQL_USER: sa
+      SIFT_MSSQL_PASSWORD: "SiftTest_Pass1"
+      SIFT_MSSQL_DB: master
+    steps:
+      - uses: actions/checkout@v4
+      - uses: DeterminateSystems/nix-installer-action@v16
+      - uses: DeterminateSystems/magic-nix-cache-action@v8
+      - name: Wait for SQL Server
+        run: |
+          for i in {1..30}; do
+            if bash -c '</dev/tcp/127.0.0.1/1433' 2>/dev/null; then
+              echo "SQL Server accepting connections"
+              exit 0
+            fi
+            echo "waiting for SQL Server ($i/30)..."
+            sleep 5
+          done
+          echo "SQL Server never came up" >&2
+          exit 1
+      - name: Live Postgres tests
+        run: nix develop . --command cargo test -p sift-driver-postgres --features live-pg --test live_pg -- --nocapture
+      - name: Live SQL Server tests
+        run: nix develop . --command cargo test -p sift-driver-sqlserver --features live-mssql --test live_mssql -- --nocapture

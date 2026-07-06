@@ -26,11 +26,12 @@ view while prioritizing:
 - Several "already in place" assumptions are weaker than they sound:
   there are **no per-query timeouts** (`config.timeouts.request_secs` is
   parsed then never read); Operation audit hard-codes `Succeeded` at every
-  call site; there is **no correlation id** anywhere; the `doc` crate is
-  **not a real CRDT** (UTF-8 byte buffer + apply-op); and CI does **not**
-  run the live driver tests. *(Closed since the last snapshot:
-  driver-isolation `catch_unwind` now covers SQL Server too; the
-  loopback-bypass flag now checks the peer address.)*
+  call site; there is **no correlation id** anywhere; and the `doc` crate
+  is **not a real CRDT** (UTF-8 byte buffer + apply-op). *(Closed since
+  the last snapshot: driver-isolation `catch_unwind` now covers SQL
+  Server too; the loopback-bypass flag now checks the peer address; CI
+  now runs the live driver tests against PG and MSSQL service
+  containers.)*
 - Three metadata tables (`principal_key`, `keypair_challenge`,
   `saved_query`) are created by migrations but never read or written by any
   Rust code — dead schema.
@@ -244,10 +245,13 @@ engine itself.
       `ReleaseSavepoint` returns `Code::UnsupportedForEngine` on SQL Server
       (no `MssqlExt::release_savepoint`). Regression test:
       `savepoint_routes_dispatch_to_ext_traits`.
-- [ ] [Implement] CI runs the live driver tests. `.github/workflows/ci.yml:20`
-      runs `cargo test --workspace` with no `--features live-pg,live-mssql`,
-      so the entire two-impl validation gate never runs in CI. Add PG +
-      MSSQL service containers (or self-hosted) and the feature flags.
+- [x] [Implement] CI runs the live driver tests — new `live-drivers` job
+      in `.github/workflows/ci.yml` spins up `postgres:16` and
+      `mcr.microsoft.com/mssql/server:2022-latest` as service containers,
+      exports the `SIFT_{PG,MSSQL}_*` env, waits for SQL Server on port
+      1433, then runs `cargo test -p sift-driver-postgres --features
+      live-pg` and `cargo test -p sift-driver-sqlserver --features
+      live-mssql`. Runs alongside the existing `rust` job on every push.
 
 ## Phase B — Server reliability layer
 
@@ -580,12 +584,14 @@ Goal: the last mile before a real release.
 
 ## Sequencing & dependency notes
 
-- **Phase A is the gate for "trait locked."** Verified-still-open A items
-  that block the gate: ADR-017 not written, SQL Server cancel is
-  `task.abort()` not TDS attention, SQL Server has no panic isolation, save
-  points are not reachable over the protocol, and CI does not run the live
-  tests. The decode/TLS/listen/copy/advisory items that used to gate A are
-  already done.
+- **Phase A is the gate for "trait locked."** Remaining A items:
+  ADR-017 (and the smaller Numeric/Interval/TLS/parity design items it
+  should absorb) not written, SQL Server cancel is still `task.abort()`
+  not TDS attention, and SQL Server has no pool (Phase C pool-warmth for
+  MSSQL is blocked on this). Closed since the last audit: SQL Server
+  panic isolation, savepoints on the wire, live driver tests in CI,
+  deep-schema parity (triggers, sys.objects shallow, IndexKind mapping),
+  and driver-level tracing spans.
 - **Phase B is the gate for "hosted is conceivable."** The loopback-bypass
   P0 is now closed (peer IP checked via trusted internal header +
   regression test). The remaining Phase B P0 is the unbounded
