@@ -1,0 +1,661 @@
+//! Local metadata persistence for tenants, principals, connection profiles,
+//! and workspace state.
+
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
+
+use argon2::password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString};
+use argon2::Argon2;
+use chrono::{DateTime, Utc};
+use rand_core::OsRng;
+use rusqlite::{params, Connection, OptionalExtension};
+use sift_protocol::ConnectionSpec;
+use uuid::Uuid;
+
+pub mod schema;
+pub mod secrets;
+
+pub use schema::*;
+pub use secrets::{MemorySecretStore, SecretStore};
+
+mod migrations {
+    refinery::embed_migrations!("migrations");
+}
+
+const SECRET_NAMESPACE: &str = "sift.local";
+
+pub type Result<T> = std::result::Result<T, MetadataError>;
+
+#[derive(Debug, thiserror::Error)]
+pub enum MetadataError {
+    #[error("sqlite error: {0}")]
+    Sqlite(#[from] rusqlite::Error),
+    #[error("migration error: {0}")]
+    Migration(#[from] refinery::Error),
+    #[error("json error: {0}")]
+    Json(#[from] serde_json::Error),
+    #[error("password hash error: {0}")]
+    PasswordHash(String),
+    #[error("invalid {field} value: {value}")]
+    InvalidEnum { field: &'static str, value: String },
+    #[error("invalid timestamp {value}: {source}")]
+    InvalidTimestamp {
+        value: String,
+        source: chrono::ParseError,
+    },
+    #[error("connection profile {0:?} not found")]
+    ConnectionProfileNotFound(ConnectionProfileId),
+    #[error("connection profile {0:?} has no credential for principal {1:?}")]
+    MissingCredential(ConnectionProfileId, PrincipalId),
+    #[error("connection profile {0:?} uses broker credentials, which are not implemented")]
+    BrokerCredentialUnsupported(ConnectionProfileId),
+    #[error("connection profile {0:?} is not in tenant {1:?}")]
+    TenantMismatch(ConnectionProfileId, TenantId),
+    #[error("secret store error: {0}")]
+    SecretStore(String),
+}
+
+#[derive(Clone)]
+pub struct MetadataStore {
+    conn: Arc<Mutex<Connection>>,
+    secrets: Arc<dyn SecretStore>,
+}
+
+impl MetadataStore {
+    pub fn open(path: &Path, secrets: Arc<dyn SecretStore>) -> Result<Self> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|error| MetadataError::SecretStore(error.to_string()))?;
+        }
+        let mut conn = Connection::open(path)?;
+        configure_connection(&conn)?;
+        migrations::migrations::runner().run(&mut conn)?;
+        Ok(Self {
+            conn: Arc::new(Mutex::new(conn)),
+            secrets,
+        })
+    }
+
+    pub fn open_in_memory(secrets: Arc<dyn SecretStore>) -> Result<Self> {
+        let mut conn = Connection::open_in_memory()?;
+        configure_connection(&conn)?;
+        migrations::migrations::runner().run(&mut conn)?;
+        Ok(Self {
+            conn: Arc::new(Mutex::new(conn)),
+            secrets,
+        })
+    }
+
+    pub fn default_local_path() -> PathBuf {
+        if cfg!(target_os = "macos") {
+            let home = std::env::var_os("HOME")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from("."));
+            return home
+                .join("Library")
+                .join("Application Support")
+                .join("sift")
+                .join("metadata.sqlite");
+        }
+
+        let state = std::env::var_os("XDG_STATE_HOME")
+            .map(PathBuf::from)
+            .or_else(|| {
+                std::env::var_os("HOME")
+                    .map(|home| PathBuf::from(home).join(".local").join("state"))
+            })
+            .unwrap_or_else(|| PathBuf::from("."));
+        state.join("sift").join("metadata.sqlite")
+    }
+
+    pub fn bootstrap_local(&self, display_name: &str) -> Result<()> {
+        let now = now_text();
+        let conn = self.conn.lock().unwrap();
+        let tenant_count: i64 =
+            conn.query_row("SELECT COUNT(*) FROM tenant", [], |row| row.get(0))?;
+        let principal_count: i64 =
+            conn.query_row("SELECT COUNT(*) FROM principal", [], |row| row.get(0))?;
+        if tenant_count != 0 || principal_count != 0 {
+            return Ok(());
+        }
+        conn.execute(
+            "INSERT INTO tenant (id, name, kind, created_at, updated_at) VALUES (1, 'local', 'personal', ?1, ?1)",
+            params![now],
+        )?;
+        conn.execute(
+            "INSERT INTO principal (id, external_id, display_name, email, created_at, updated_at)
+             VALUES (1, 'local:1', ?1, NULL, ?2, ?2)",
+            params![display_name, now],
+        )?;
+        conn.execute(
+            "INSERT INTO membership (tenant_id, principal_id, role, created_at, updated_at)
+             VALUES (1, 1, 'owner', ?1, ?1)",
+            params![now],
+        )?;
+        Ok(())
+    }
+
+    pub fn resolve_principal_by_external_id(&self, external_id: &str) -> Result<Option<Principal>> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT id, external_id, display_name, email, created_at, updated_at
+             FROM principal WHERE external_id = ?1",
+            params![external_id],
+            principal_from_row,
+        )
+        .optional()
+        .map_err(Into::into)
+    }
+
+    pub fn list_principal_tenants(&self, principal: PrincipalId) -> Result<Vec<TenantMembership>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT t.id, t.name, t.kind, t.created_at, t.updated_at,
+                    m.principal_id, m.role, m.created_at, m.updated_at
+             FROM membership m
+             JOIN tenant t ON t.id = m.tenant_id
+             WHERE m.principal_id = ?1
+             ORDER BY t.name",
+        )?;
+        let memberships = rows(stmt.query_map(params![principal.0], tenant_membership_from_row)?);
+        memberships
+    }
+
+    pub fn issue_api_token(
+        &self,
+        principal: PrincipalId,
+        scope: Option<TenantId>,
+        name: &str,
+        expires_at: Option<DateTime<Utc>>,
+    ) -> Result<(ApiTokenRow, String)> {
+        let plaintext = format!("sift_{}", Uuid::new_v4().simple());
+        let salt = SaltString::generate(&mut OsRng);
+        let token_hash = Argon2::default()
+            .hash_password(plaintext.as_bytes(), &salt)
+            .map_err(password_hash_error)?
+            .to_string();
+        let now = now_text();
+        let expires_at_text = expires_at.map(|dt| dt.to_rfc3339());
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO api_token
+             (principal_id, tenant_id, token_hash, name, created_at, updated_at, expires_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?5, ?6)",
+            params![
+                principal.0,
+                scope.map(|id| id.0),
+                token_hash,
+                name,
+                now,
+                expires_at_text
+            ],
+        )?;
+        let id = ApiTokenId(conn.last_insert_rowid());
+        let row = self.api_token_by_id_locked(&conn, id)?;
+        Ok((row, plaintext))
+    }
+
+    pub fn verify_api_token(&self, presented: &str) -> Result<Option<ApiTokenRow>> {
+        let now = Utc::now();
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, token_hash FROM api_token
+             WHERE revoked_at IS NULL AND (expires_at IS NULL OR expires_at > ?1)",
+        )?;
+        let candidates = rows(stmt.query_map(params![now.to_rfc3339()], |row| {
+            Ok((ApiTokenId(row.get(0)?), row.get::<_, String>(1)?))
+        })?)?;
+        for (id, hash) in candidates {
+            let parsed = PasswordHash::new(&hash).map_err(password_hash_error)?;
+            if Argon2::default()
+                .verify_password(presented.as_bytes(), &parsed)
+                .is_ok()
+            {
+                let used_at = now.to_rfc3339();
+                conn.execute(
+                    "UPDATE api_token SET last_used_at = ?1, updated_at = ?1 WHERE id = ?2",
+                    params![used_at, id.0],
+                )?;
+                return self.api_token_by_id_locked(&conn, id).map(Some);
+            }
+        }
+        Ok(None)
+    }
+
+    pub fn list_connection_profiles(&self, tenant: TenantId) -> Result<Vec<ConnectionProfile>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, tenant_id, name, engine, spec_json, credential_mode,
+                    shared_secret_handle, tags_json, created_by, created_at, updated_at
+             FROM connection_profile
+             WHERE tenant_id = ?1
+             ORDER BY name",
+        )?;
+        let profiles = rows(stmt.query_map(params![tenant.0], connection_profile_from_row)?);
+        profiles
+    }
+
+    pub async fn upsert_connection_profile(
+        &self,
+        tenant: TenantId,
+        actor: PrincipalId,
+        mut input: NewConnectionProfile,
+    ) -> Result<ConnectionProfile> {
+        let password = input.spec.password.take();
+        let mut shared_secret_handle = None;
+        if input.credential_mode == CredentialMode::Shared {
+            if let Some(password) = password.as_deref() {
+                let handle = Uuid::new_v4().to_string();
+                self.secrets
+                    .put(SECRET_NAMESPACE, &handle, password.as_bytes())
+                    .await?;
+                shared_secret_handle = Some(handle);
+            }
+        }
+
+        let now = now_text();
+        let spec_json = serde_json::to_string(&input.spec)?;
+        let tags_json = serde_json::to_string(&input.tags)?;
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO connection_profile
+             (tenant_id, name, engine, spec_json, credential_mode, shared_secret_handle,
+              tags_json, created_by, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?9)
+             ON CONFLICT(tenant_id, name) DO UPDATE SET
+                engine = excluded.engine,
+                spec_json = excluded.spec_json,
+                credential_mode = excluded.credential_mode,
+                shared_secret_handle = COALESCE(excluded.shared_secret_handle, connection_profile.shared_secret_handle),
+                tags_json = excluded.tags_json,
+                updated_at = excluded.updated_at",
+            params![
+                tenant.0,
+                input.name,
+                input.engine.as_str(),
+                spec_json,
+                input.credential_mode.as_str(),
+                shared_secret_handle,
+                tags_json,
+                actor.0,
+                now
+            ],
+        )?;
+        let id = ConnectionProfileId(conn.query_row(
+            "SELECT id FROM connection_profile WHERE tenant_id = ?1 AND name = ?2",
+            params![tenant.0, input.name],
+            |row| row.get(0),
+        )?);
+        self.connection_profile_by_id_locked(&conn, id)
+    }
+
+    pub fn delete_connection_profile(
+        &self,
+        tenant: TenantId,
+        id: ConnectionProfileId,
+    ) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        let deleted = conn.execute(
+            "DELETE FROM connection_profile WHERE tenant_id = ?1 AND id = ?2",
+            params![tenant.0, id.0],
+        )?;
+        if deleted == 0 {
+            return Err(MetadataError::ConnectionProfileNotFound(id));
+        }
+        Ok(())
+    }
+
+    pub async fn set_per_user_credential(
+        &self,
+        profile_id: ConnectionProfileId,
+        principal_id: PrincipalId,
+        secret: &[u8],
+    ) -> Result<()> {
+        let handle = Uuid::new_v4().to_string();
+        self.secrets.put(SECRET_NAMESPACE, &handle, secret).await?;
+        let now = now_text();
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO connection_credential
+             (connection_profile_id, principal_id, secret_handle, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?4)
+             ON CONFLICT(connection_profile_id, principal_id) DO UPDATE SET
+                secret_handle = excluded.secret_handle,
+                updated_at = excluded.updated_at",
+            params![profile_id.0, principal_id.0, handle, now],
+        )?;
+        Ok(())
+    }
+
+    pub async fn resolve_connection_spec(
+        &self,
+        tenant: TenantId,
+        principal: PrincipalId,
+        id: ConnectionProfileId,
+    ) -> Result<ConnectionSpec> {
+        let (profile, handle) = {
+            let conn = self.conn.lock().unwrap();
+            let profile = self.connection_profile_by_id_locked(&conn, id)?;
+            if profile.tenant_id != tenant {
+                return Err(MetadataError::TenantMismatch(id, tenant));
+            }
+            let handle = match profile.credential_mode {
+                CredentialMode::Shared => profile.shared_secret_handle.clone(),
+                CredentialMode::PerUser => conn
+                    .query_row(
+                        "SELECT secret_handle FROM connection_credential
+                         WHERE connection_profile_id = ?1 AND principal_id = ?2",
+                        params![id.0, principal.0],
+                        |row| row.get::<_, String>(0),
+                    )
+                    .optional()?
+                    .ok_or(MetadataError::MissingCredential(id, principal))
+                    .map(Some)?,
+                CredentialMode::Broker => {
+                    return Err(MetadataError::BrokerCredentialUnsupported(id))
+                }
+            };
+            (profile, handle)
+        };
+        let mut spec = profile.spec;
+        if let Some(handle) = handle {
+            let secret = self
+                .secrets
+                .get(SECRET_NAMESPACE, &handle)
+                .await?
+                .ok_or(MetadataError::MissingCredential(id, principal))?;
+            spec.password = Some(String::from_utf8_lossy(&secret).into_owned());
+        }
+        Ok(spec)
+    }
+
+    fn api_token_by_id_locked(&self, conn: &Connection, id: ApiTokenId) -> Result<ApiTokenRow> {
+        conn.query_row(
+            "SELECT id, principal_id, tenant_id, name, created_at, updated_at,
+                    last_used_at, expires_at, revoked_at
+             FROM api_token WHERE id = ?1",
+            params![id.0],
+            api_token_from_row,
+        )
+        .map_err(Into::into)
+    }
+
+    fn connection_profile_by_id_locked(
+        &self,
+        conn: &Connection,
+        id: ConnectionProfileId,
+    ) -> Result<ConnectionProfile> {
+        conn.query_row(
+            "SELECT id, tenant_id, name, engine, spec_json, credential_mode,
+                    shared_secret_handle, tags_json, created_by, created_at, updated_at
+             FROM connection_profile WHERE id = ?1",
+            params![id.0],
+            connection_profile_from_row,
+        )
+        .optional()?
+        .ok_or(MetadataError::ConnectionProfileNotFound(id))
+    }
+}
+
+fn configure_connection(conn: &Connection) -> Result<()> {
+    conn.pragma_update(None, "foreign_keys", "ON")?;
+    conn.pragma_update(None, "journal_mode", "WAL")?;
+    Ok(())
+}
+
+fn now_text() -> String {
+    Utc::now().to_rfc3339()
+}
+
+fn parse_time(value: String) -> Result<DateTime<Utc>> {
+    DateTime::parse_from_rfc3339(&value)
+        .map(|dt| dt.with_timezone(&Utc))
+        .map_err(|source| MetadataError::InvalidTimestamp { value, source })
+}
+
+fn parse_optional_time(value: Option<String>) -> Result<Option<DateTime<Utc>>> {
+    value.map(parse_time).transpose()
+}
+
+fn rows<T>(
+    rows: rusqlite::MappedRows<'_, impl FnMut(&rusqlite::Row<'_>) -> rusqlite::Result<T>>,
+) -> Result<Vec<T>> {
+    let mut out = Vec::new();
+    for row in rows {
+        out.push(row?);
+    }
+    Ok(out)
+}
+
+fn principal_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Principal> {
+    Ok(Principal {
+        id: PrincipalId(row.get(0)?),
+        external_id: row.get(1)?,
+        display_name: row.get(2)?,
+        email: row.get(3)?,
+        created_at: parse_time_sql(row.get(4)?)?,
+        updated_at: parse_time_sql(row.get(5)?)?,
+    })
+}
+
+fn tenant_membership_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TenantMembership> {
+    let kind: String = row.get(2)?;
+    let role: String = row.get(6)?;
+    Ok(TenantMembership {
+        tenant: Tenant {
+            id: TenantId(row.get(0)?),
+            name: row.get(1)?,
+            kind: parse_tenant_kind_sql(kind)?,
+            created_at: parse_time_sql(row.get(3)?)?,
+            updated_at: parse_time_sql(row.get(4)?)?,
+        },
+        principal_id: PrincipalId(row.get(5)?),
+        role: parse_role_sql(role)?,
+        created_at: parse_time_sql(row.get(7)?)?,
+        updated_at: parse_time_sql(row.get(8)?)?,
+    })
+}
+
+fn api_token_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ApiTokenRow> {
+    Ok(ApiTokenRow {
+        id: ApiTokenId(row.get(0)?),
+        principal_id: PrincipalId(row.get(1)?),
+        tenant_id: row.get::<_, Option<i64>>(2)?.map(TenantId),
+        name: row.get(3)?,
+        created_at: parse_time_sql(row.get(4)?)?,
+        updated_at: parse_time_sql(row.get(5)?)?,
+        last_used_at: parse_optional_time_sql(row.get(6)?)?,
+        expires_at: parse_optional_time_sql(row.get(7)?)?,
+        revoked_at: parse_optional_time_sql(row.get(8)?)?,
+    })
+}
+
+fn connection_profile_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ConnectionProfile> {
+    let engine: String = row.get(3)?;
+    let spec_json: String = row.get(4)?;
+    let credential_mode: String = row.get(5)?;
+    let tags_json: String = row.get(7)?;
+    Ok(ConnectionProfile {
+        id: ConnectionProfileId(row.get(0)?),
+        tenant_id: TenantId(row.get(1)?),
+        name: row.get(2)?,
+        engine: engine.parse().map_err(sql_message_error)?,
+        spec: serde_json::from_str(&spec_json).map_err(sql_conversion_error)?,
+        credential_mode: parse_credential_mode_sql(credential_mode)?,
+        shared_secret_handle: row.get(6)?,
+        tags: serde_json::from_str(&tags_json).map_err(sql_conversion_error)?,
+        created_by: PrincipalId(row.get(8)?),
+        created_at: parse_time_sql(row.get(9)?)?,
+        updated_at: parse_time_sql(row.get(10)?)?,
+    })
+}
+
+fn parse_time_sql(value: String) -> rusqlite::Result<DateTime<Utc>> {
+    parse_time(value).map_err(sql_conversion_error)
+}
+
+fn parse_optional_time_sql(value: Option<String>) -> rusqlite::Result<Option<DateTime<Utc>>> {
+    parse_optional_time(value).map_err(sql_conversion_error)
+}
+
+fn parse_tenant_kind_sql(value: String) -> rusqlite::Result<TenantKind> {
+    schema::parse_tenant_kind(value).map_err(sql_conversion_error)
+}
+
+fn parse_role_sql(value: String) -> rusqlite::Result<MembershipRole> {
+    schema::parse_role(value).map_err(sql_conversion_error)
+}
+
+fn parse_credential_mode_sql(value: String) -> rusqlite::Result<CredentialMode> {
+    schema::parse_credential_mode(value).map_err(sql_conversion_error)
+}
+
+fn sql_conversion_error(error: impl std::error::Error + Send + Sync + 'static) -> rusqlite::Error {
+    rusqlite::Error::ToSqlConversionFailure(Box::new(error))
+}
+
+fn sql_message_error(error: impl Into<String>) -> rusqlite::Error {
+    sql_conversion_error(std::io::Error::new(
+        std::io::ErrorKind::InvalidData,
+        error.into(),
+    ))
+}
+
+fn password_hash_error(error: argon2::password_hash::Error) -> MetadataError {
+    MetadataError::PasswordHash(error.to_string())
+}
+
+impl From<std::io::Error> for MetadataError {
+    fn from(error: std::io::Error) -> Self {
+        Self::SecretStore(error.to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sift_protocol::Engine;
+
+    fn store() -> MetadataStore {
+        MetadataStore::open_in_memory(Arc::new(MemorySecretStore::new())).unwrap()
+    }
+
+    fn spec(password: Option<&str>) -> ConnectionSpec {
+        ConnectionSpec {
+            host: "localhost".to_string(),
+            port: Some(5432),
+            database: Some("sift".to_string()),
+            user: "sift".to_string(),
+            password: password.map(str::to_string),
+            ssl_mode: None,
+            engine_specific: None,
+        }
+    }
+
+    #[test]
+    fn bootstraps_local_identity_once() {
+        let store = store();
+        store.bootstrap_local("local user").unwrap();
+        store.bootstrap_local("ignored").unwrap();
+
+        let principal = store
+            .resolve_principal_by_external_id("local:1")
+            .unwrap()
+            .unwrap();
+        assert_eq!(principal.id, PrincipalId(1));
+        assert_eq!(principal.display_name, "local user");
+
+        let tenants = store.list_principal_tenants(PrincipalId(1)).unwrap();
+        assert_eq!(tenants.len(), 1);
+        assert_eq!(tenants[0].tenant.id, TenantId(1));
+        assert_eq!(tenants[0].role, MembershipRole::Owner);
+    }
+
+    #[test]
+    fn api_token_round_trip() {
+        let store = store();
+        store.bootstrap_local("local user").unwrap();
+
+        let (row, plaintext) = store
+            .issue_api_token(PrincipalId(1), Some(TenantId(1)), "test", None)
+            .unwrap();
+        assert_eq!(row.name, "test");
+
+        let verified = store.verify_api_token(&plaintext).unwrap().unwrap();
+        assert_eq!(verified.id, row.id);
+        assert!(store.verify_api_token("sift_wrong").unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn shared_connection_profile_stores_secret_out_of_band() {
+        let store = store();
+        store.bootstrap_local("local user").unwrap();
+
+        let profile = store
+            .upsert_connection_profile(
+                TenantId(1),
+                PrincipalId(1),
+                NewConnectionProfile {
+                    name: "local pg".to_string(),
+                    engine: Engine::Postgres,
+                    spec: spec(Some("secret")),
+                    credential_mode: CredentialMode::Shared,
+                    tags: vec!["dev".to_string()],
+                },
+            )
+            .await
+            .unwrap();
+
+        assert!(profile.spec.password.is_none());
+        assert!(profile.shared_secret_handle.is_some());
+
+        let listed = store.list_connection_profiles(TenantId(1)).unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].name, "local pg");
+        assert!(listed[0].spec.password.is_none());
+
+        let resolved = store
+            .resolve_connection_spec(TenantId(1), PrincipalId(1), profile.id)
+            .await
+            .unwrap();
+        assert_eq!(resolved.password.as_deref(), Some("secret"));
+    }
+
+    #[tokio::test]
+    async fn per_user_connection_profile_requires_principal_secret() {
+        let store = store();
+        store.bootstrap_local("local user").unwrap();
+
+        let profile = store
+            .upsert_connection_profile(
+                TenantId(1),
+                PrincipalId(1),
+                NewConnectionProfile {
+                    name: "per-user pg".to_string(),
+                    engine: Engine::Postgres,
+                    spec: spec(None),
+                    credential_mode: CredentialMode::PerUser,
+                    tags: Vec::new(),
+                },
+            )
+            .await
+            .unwrap();
+
+        assert!(matches!(
+            store
+                .resolve_connection_spec(TenantId(1), PrincipalId(1), profile.id)
+                .await,
+            Err(MetadataError::MissingCredential(_, _))
+        ));
+
+        store
+            .set_per_user_credential(profile.id, PrincipalId(1), b"user-secret")
+            .await
+            .unwrap();
+        let resolved = store
+            .resolve_connection_spec(TenantId(1), PrincipalId(1), profile.id)
+            .await
+            .unwrap();
+        assert_eq!(resolved.password.as_deref(), Some("user-secret"));
+    }
+}
