@@ -174,12 +174,12 @@
             fi
 
             if [ "$#" -eq 0 ]; then
-              set -- --host 0.0.0.0
+              set -- --host 0.0.0.0 --port 5177
             fi
 
             echo "Backend log: $backend_log"
             echo "Lab UI: http://0.0.0.0:5177 (open this host's IP or forwarded URL)"
-            exec npm run dev -- "$@"
+            exec ./node_modules/.bin/vite "$@"
           '';
         };
 
