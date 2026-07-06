@@ -23,6 +23,8 @@ mod migrations {
 }
 
 const SECRET_NAMESPACE: &str = "sift.local";
+const API_TOKEN_PREFIX: &str = "sift_";
+const API_TOKEN_LOOKUP_LEN: usize = 12;
 
 pub type Result<T> = std::result::Result<T, MetadataError>;
 
@@ -168,7 +170,12 @@ impl MetadataStore {
         name: &str,
         expires_at: Option<DateTime<Utc>>,
     ) -> Result<(ApiTokenRow, String)> {
-        let plaintext = format!("sift_{}", Uuid::new_v4().simple());
+        let lookup_seed = Uuid::new_v4().simple().to_string();
+        let token_lookup = &lookup_seed[..API_TOKEN_LOOKUP_LEN];
+        let plaintext = format!(
+            "{API_TOKEN_PREFIX}{token_lookup}_{}",
+            Uuid::new_v4().simple()
+        );
         let salt = SaltString::generate(&mut OsRng);
         let token_hash = Argon2::default()
             .hash_password(plaintext.as_bytes(), &salt)
@@ -179,11 +186,12 @@ impl MetadataStore {
         let conn = self.conn.lock().unwrap();
         conn.execute(
             "INSERT INTO api_token
-             (principal_id, tenant_id, token_hash, name, created_at, updated_at, expires_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?5, ?6)",
+             (principal_id, tenant_id, token_lookup, token_hash, name, created_at, updated_at, expires_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6, ?7)",
             params![
                 principal.0,
                 scope.map(|id| id.0),
+                token_lookup,
                 token_hash,
                 name,
                 now,
@@ -196,30 +204,39 @@ impl MetadataStore {
     }
 
     pub fn verify_api_token(&self, presented: &str) -> Result<Option<ApiTokenRow>> {
+        let Some(token_lookup) = token_lookup_from_presented(presented) else {
+            return Ok(None);
+        };
         let now = Utc::now();
         let conn = self.conn.lock().unwrap();
-        let mut stmt = conn.prepare(
-            "SELECT id, token_hash FROM api_token
-             WHERE revoked_at IS NULL AND (expires_at IS NULL OR expires_at > ?1)",
-        )?;
-        let candidates = rows(stmt.query_map(params![now.to_rfc3339()], |row| {
-            Ok((ApiTokenId(row.get(0)?), row.get::<_, String>(1)?))
-        })?)?;
-        for (id, hash) in candidates {
-            let parsed = PasswordHash::new(&hash).map_err(password_hash_error)?;
-            if Argon2::default()
-                .verify_password(presented.as_bytes(), &parsed)
-                .is_ok()
-            {
-                let used_at = now.to_rfc3339();
-                conn.execute(
-                    "UPDATE api_token SET last_used_at = ?1, updated_at = ?1 WHERE id = ?2",
-                    params![used_at, id.0],
-                )?;
-                return self.api_token_by_id_locked(&conn, id).map(Some);
-            }
+        let candidate = conn
+            .query_row(
+                "SELECT id, token_hash FROM api_token
+                 WHERE token_lookup = ?1
+                   AND revoked_at IS NULL
+                   AND (expires_at IS NULL OR expires_at > ?2)",
+                params![token_lookup, now.to_rfc3339()],
+                |row| Ok((ApiTokenId(row.get(0)?), row.get::<_, String>(1)?)),
+            )
+            .optional()?;
+        let Some((id, hash)) = candidate else {
+            return Ok(None);
+        };
+
+        let parsed = PasswordHash::new(&hash).map_err(password_hash_error)?;
+        if Argon2::default()
+            .verify_password(presented.as_bytes(), &parsed)
+            .is_err()
+        {
+            return Ok(None);
         }
-        Ok(None)
+
+        let used_at = now.to_rfc3339();
+        conn.execute(
+            "UPDATE api_token SET last_used_at = ?1, updated_at = ?1 WHERE id = ?2",
+            params![used_at, id.0],
+        )?;
+        self.api_token_by_id_locked(&conn, id).map(Some)
     }
 
     pub fn list_connection_profiles(&self, tenant: TenantId) -> Result<Vec<ConnectionProfile>> {
@@ -525,6 +542,19 @@ fn password_hash_error(error: argon2::password_hash::Error) -> MetadataError {
     MetadataError::PasswordHash(error.to_string())
 }
 
+fn token_lookup_from_presented(presented: &str) -> Option<&str> {
+    let body = presented.strip_prefix(API_TOKEN_PREFIX)?;
+    if body.len() <= API_TOKEN_LOOKUP_LEN
+        || !body
+            .as_bytes()
+            .get(API_TOKEN_LOOKUP_LEN)
+            .is_some_and(|b| *b == b'_')
+    {
+        return None;
+    }
+    Some(&body[..API_TOKEN_LOOKUP_LEN])
+}
+
 impl From<std::io::Error> for MetadataError {
     fn from(error: std::io::Error) -> Self {
         Self::SecretStore(error.to_string())
@@ -580,6 +610,7 @@ mod tests {
             .issue_api_token(PrincipalId(1), Some(TenantId(1)), "test", None)
             .unwrap();
         assert_eq!(row.name, "test");
+        assert_eq!(token_lookup_from_presented(&plaintext).unwrap().len(), 12);
 
         let verified = store.verify_api_token(&plaintext).unwrap().unwrap();
         assert_eq!(verified.id, row.id);
