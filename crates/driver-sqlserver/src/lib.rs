@@ -478,9 +478,18 @@ async fn mssql_schema(
 
     match &scope.depth {
         SchemaDepth::Shallow => {
+            // `sys.objects` covers tables, views, procs, funcs, synonyms,
+            // sequences in one shot — INFORMATION_SCHEMA.TABLES only
+            // reports tables and views.
             let rows = conn
                 .query(
-                    "SELECT TABLE_SCHEMA, TABLE_NAME, TABLE_TYPE FROM INFORMATION_SCHEMA.TABLES ORDER BY TABLE_SCHEMA, TABLE_NAME",
+                    r#"
+SELECT s.name AS schema_name, o.name AS object_name, o.type AS object_type
+FROM sys.objects o
+JOIN sys.schemas s ON s.schema_id = o.schema_id
+WHERE o.type IN ('U','V','P','IF','FN','TF','SN','SO')
+ORDER BY s.name, o.name
+"#,
                     &[],
                 )
                 .await
@@ -502,11 +511,13 @@ async fn mssql_schema(
                     .map_err(ms_err)?
                     .unwrap_or_default()
                     .to_string();
-                let table_type = row
+                let object_type = row
                     .try_get::<&str, _>(2)
                     .map_err(ms_err)?
-                    .unwrap_or_default();
-                let kind = mssql_object_kind(table_type);
+                    .unwrap_or_default()
+                    .trim()
+                    .to_string();
+                let kind = mssql_object_kind_from_sys(&object_type);
                 if !schema_filter_matches(scope.filter.as_ref(), &schema, &name, kind) {
                     continue;
                 }
@@ -532,6 +543,7 @@ async fn mssql_schema(
             obj.columns = mssql_columns(conn, schema, &object.name).await?;
             obj.indexes = mssql_indexes(conn, schema, &object.name).await?;
             obj.constraints = mssql_constraints(conn, schema, &object.name).await?;
+            obj.triggers = mssql_triggers(conn, schema, &object.name).await?;
             snapshot.trees.push(sift_protocol::CatalogTree {
                 name: object
                     .catalog
@@ -639,7 +651,7 @@ async fn mssql_indexes(
     let rows = conn
         .query(
             r#"
-SELECT i.name, i.is_unique, i.is_primary_key, c.name
+SELECT i.name, i.is_unique, i.is_primary_key, c.name, CAST(i.type AS int)
 FROM sys.indexes i
 JOIN sys.objects o ON o.object_id = i.object_id
 JOIN sys.schemas s ON s.schema_id = o.schema_id
@@ -670,6 +682,7 @@ ORDER BY i.index_id, ic.key_ordinal
             .map_err(ms_err)?
             .unwrap_or_default()
             .to_string();
+        let sys_type = row.try_get::<i32, _>(4).map_err(ms_err)?.unwrap_or(0);
         map.entry(name.clone())
             .and_modify(|idx| idx.columns.push(column.clone()))
             .or_insert_with(|| IndexInfo {
@@ -677,7 +690,7 @@ ORDER BY i.index_id, ic.key_ordinal
                 columns: vec![column],
                 unique,
                 primary_key,
-                kind: IndexKind::Other,
+                kind: mssql_index_kind_from_sys(sys_type),
                 partial_predicate: None,
             });
     }
@@ -743,6 +756,79 @@ ORDER BY tc.CONSTRAINT_NAME, ku.ORDINAL_POSITION
                 definition: None,
                 references: None,
             });
+    }
+    Ok(map.into_values().collect())
+}
+
+async fn mssql_triggers(
+    conn: &mut MssqlConn,
+    schema: &str,
+    object: &str,
+) -> Result<Vec<sift_protocol::TriggerInfo>, DriverError> {
+    // `sys.trigger_events.type_desc` reports 'INSERT'/'UPDATE'/'DELETE'.
+    // SQL Server has AFTER and INSTEAD OF timings — no BEFORE analogue.
+    let rows = conn
+        .query(
+            r#"
+SELECT
+  t.name,
+  t.is_instead_of_trigger,
+  te.type_desc,
+  OBJECT_DEFINITION(t.object_id) AS definition
+FROM sys.triggers t
+JOIN sys.trigger_events te ON te.object_id = t.object_id
+JOIN sys.objects o ON o.object_id = t.parent_id
+JOIN sys.schemas s ON s.schema_id = o.schema_id
+WHERE t.parent_class = 1
+  AND s.name = @P1
+  AND o.name = @P2
+ORDER BY t.name, te.type
+"#,
+            &[&schema, &object],
+        )
+        .await
+        .map_err(ms_err)?
+        .into_first_result()
+        .await
+        .map_err(ms_err)?;
+
+    use sift_protocol::{TriggerEvent, TriggerInfo, TriggerTiming};
+    let mut map: std::collections::BTreeMap<String, TriggerInfo> = Default::default();
+    for row in rows {
+        let name = row
+            .try_get::<&str, _>(0)
+            .map_err(ms_err)?
+            .unwrap_or_default()
+            .to_string();
+        let is_instead_of = row.try_get::<bool, _>(1).map_err(ms_err)?.unwrap_or(false);
+        let timing = if is_instead_of {
+            TriggerTiming::InsteadOf
+        } else {
+            TriggerTiming::After
+        };
+        let event = match row.try_get::<&str, _>(2).map_err(ms_err)?.unwrap_or("") {
+            "INSERT" => Some(TriggerEvent::Insert),
+            "UPDATE" => Some(TriggerEvent::Update),
+            "DELETE" => Some(TriggerEvent::Delete),
+            _ => None,
+        };
+        let definition = row
+            .try_get::<&str, _>(3)
+            .map_err(ms_err)?
+            .map(str::to_string);
+
+        let entry = map.entry(name.clone()).or_insert_with(|| TriggerInfo {
+            name,
+            timing,
+            events: Vec::new(),
+            columns: Vec::new(),
+            definition,
+        });
+        if let Some(event) = event {
+            if !entry.events.contains(&event) {
+                entry.events.push(event);
+            }
+        }
     }
     Ok(map.into_values().collect())
 }
@@ -1058,11 +1144,29 @@ fn mssql_type_name_ref(type_name: &str) -> TypeRef {
         })
 }
 
-fn mssql_object_kind(table_type: &str) -> ObjectKind {
-    if table_type == "VIEW" {
-        ObjectKind::View
-    } else {
-        ObjectKind::Table
+/// Map `sys.objects.type` codes onto the engine-neutral `ObjectKind`.
+/// Unknown codes fall back to `ObjectKind::Table` — the historical default.
+fn mssql_object_kind_from_sys(sys_type: &str) -> ObjectKind {
+    match sys_type {
+        "U" => ObjectKind::Table,
+        "V" => ObjectKind::View,
+        "P" => ObjectKind::Procedure,
+        "IF" | "FN" => ObjectKind::ScalarFunction,
+        "TF" => ObjectKind::TableValuedFunction,
+        "SN" => ObjectKind::Synonym,
+        "SO" => ObjectKind::Sequence,
+        _ => ObjectKind::Table,
+    }
+}
+
+/// Map `sys.indexes.type` codes onto the engine-neutral `IndexKind`.
+/// CLUSTERED/NONCLUSTERED are both rowstore B-trees; hash is memory-
+/// optimized hash; columnstore/xml/spatial fall through to `Other`.
+fn mssql_index_kind_from_sys(sys_type: i32) -> IndexKind {
+    match sys_type {
+        1 | 2 => IndexKind::Btree, // CLUSTERED, NONCLUSTERED
+        7 => IndexKind::Hash,      // NONCLUSTERED HASH (in-memory OLTP)
+        _ => IndexKind::Other,
     }
 }
 
@@ -1183,6 +1287,32 @@ mod tests {
     fn mssql_literal_escapes_text_and_maps_empty_to_null() {
         assert_eq!(mssql_literal(""), "NULL");
         assert_eq!(mssql_literal("O'Reilly"), "N'O''Reilly'");
+    }
+
+    #[test]
+    fn mssql_object_kind_covers_sys_types() {
+        assert_eq!(mssql_object_kind_from_sys("U"), ObjectKind::Table);
+        assert_eq!(mssql_object_kind_from_sys("V"), ObjectKind::View);
+        assert_eq!(mssql_object_kind_from_sys("P"), ObjectKind::Procedure);
+        assert_eq!(mssql_object_kind_from_sys("IF"), ObjectKind::ScalarFunction);
+        assert_eq!(mssql_object_kind_from_sys("FN"), ObjectKind::ScalarFunction);
+        assert_eq!(
+            mssql_object_kind_from_sys("TF"),
+            ObjectKind::TableValuedFunction
+        );
+        assert_eq!(mssql_object_kind_from_sys("SN"), ObjectKind::Synonym);
+        assert_eq!(mssql_object_kind_from_sys("SO"), ObjectKind::Sequence);
+        // Unknown codes are safe (default to Table rather than panic).
+        assert_eq!(mssql_object_kind_from_sys("XX"), ObjectKind::Table);
+    }
+
+    #[test]
+    fn mssql_index_kind_maps_clustered_and_hash() {
+        assert_eq!(mssql_index_kind_from_sys(1), IndexKind::Btree); // CLUSTERED
+        assert_eq!(mssql_index_kind_from_sys(2), IndexKind::Btree); // NONCLUSTERED
+        assert_eq!(mssql_index_kind_from_sys(7), IndexKind::Hash); // hash
+        assert_eq!(mssql_index_kind_from_sys(5), IndexKind::Other); // columnstore
+        assert_eq!(mssql_index_kind_from_sys(0), IndexKind::Other); // heap
     }
 
     #[test]

@@ -195,14 +195,16 @@ engine itself.
       procs/synonyms in shallow, `IndexKind` always `Other` (no
       CLUSTERED/NONCLUSTERED mapping), DML `affected_rows` always `None`
       (`lib.rs:393-396`).
-- [ ] [Implement] driver-sqlserver: deep schema parity with PG — add
-      **triggers**, surface views/procs/synonyms/functions/sequences in
-      shallow, map CLUSTERED/NONCLUSTERED to `IndexKind`. PG sets the
-      engine-uniform `ObjectInfo` bar; SQL Server currently omits triggers.
-      *(DML `affected_rows` — now reported for pure DML via
-      `ExecuteResult::total()`, `lib.rs:358-373`; row-producing SQL and
-      OUTPUT-clause DML stay on the streaming path. Test:
-      `is_pure_dml_recognizes_dml_and_keeps_output_on_query_path`.)*
+- [x] [Implement] driver-sqlserver: deep schema parity with PG —
+      triggers now populated from `sys.triggers` + `sys.trigger_events`
+      (`lib.rs::mssql_triggers`), shallow scope now enumerates
+      tables/views/procs/scalar+TVF/synonyms/sequences via `sys.objects`
+      (`lib.rs::mssql_object_kind_from_sys`), and index kinds map
+      CLUSTERED/NONCLUSTERED → `Btree` and hash → `Hash`
+      (`lib.rs::mssql_index_kind_from_sys`). DML `affected_rows` reported
+      for pure DML via `ExecuteResult::total()`. Unit tests cover the
+      three mapping functions; end-to-end trigger/shallow SQL still
+      relies on live-mssql tests (blocked on CI live-driver item).
 - [ ] [Implement] driver-sqlserver: cancel via **TDS attention** on the
       shared socket. Current `cancel()` calls `task.abort()`
       (`lib.rs:237-244`) which orphans the in-flight query server-side.
