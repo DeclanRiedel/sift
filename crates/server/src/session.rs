@@ -279,8 +279,8 @@ impl SessionStore {
     }
 
     /// Synchronous execute: drains the entire page stream into the response.
-    /// Suitable for small/medium results. The WS streaming surface (PHASE0
-    /// step 10) replaces this for large results.
+    /// Suitable for small/medium results; the WS streaming surface handles
+    /// large results.
     pub async fn execute_http(
         &self,
         session_id: SessionId,
@@ -645,7 +645,7 @@ fn read_operation_log(path: &Path) -> std::io::Result<Vec<OperationAuditEntry>> 
 }
 
 /// Result type returned by the HTTP execute handler. Public so the WS
-/// streaming layer (PHASE0 step 10) can re-use the drain logic.
+/// streaming layer can re-use the drain logic.
 pub async fn drain_stream(stream: ResultSetStream) -> Result<ExecuteResponse, DriverError> {
     let cursor_id = stream.cursor_id;
     let rx = stream.rows;

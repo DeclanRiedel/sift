@@ -4,8 +4,6 @@
 //! future wasm web client. Holds operation enums, request/response structs,
 //! error codes, and serde models — and nothing else. No `tokio`, no
 //! networking, no filesystem.
-//!
-//! See `docs/DRIVER_TRAIT.md` for the design these types serve.
 
 /// Current wire protocol version. Sent by the server as
 /// `X-Sift-Protocol-Version` on every HTTP response.

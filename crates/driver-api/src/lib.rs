@@ -11,8 +11,6 @@
 //! in the corresponding driver crate (`driver-postgres`, `driver-sqlserver`).
 //! Wrong engine returns `None`; the server translates that into
 //! `Code::UnsupportedForEngine`, never a silent no-op.
-//!
-//! See `docs/DRIVER_TRAIT.md` for the design.
 
 use std::sync::Arc;
 
@@ -32,11 +30,10 @@ pub use sift_protocol::{
 /// so the trait stays object-safe (no associated type). The driver maps
 /// `id` to its own typed connection in its own internal map.
 ///
-/// Phase 0 simplification: this does not carry a `Weak<dyn Driver>`
-/// backref. The server's registry is in scope wherever a ConnHandle is
-/// used; that suffices. The backref is a documented ADR-017 candidate
-/// for an explicit future pass if cross-task cancel/close without the
-/// registry in scope turns out to be a real need.
+/// This does not carry a `Weak<dyn Driver>` backref. The server's registry
+/// is in scope wherever a ConnHandle is used; that suffices. The backref is
+/// a documented ADR-017 candidate for an explicit future pass if cross-task
+/// cancel/close without the registry in scope turns out to be a real need.
 #[derive(Clone)]
 pub struct ConnHandle(Arc<ConnHandleInner>);
 

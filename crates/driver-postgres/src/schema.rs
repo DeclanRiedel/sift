@@ -11,7 +11,6 @@ use sift_protocol::{
     TypeRef,
 };
 use sift_protocol::{DriverError, SchemaFilter};
-use tokio_postgres::Row;
 
 use crate::pg_err;
 
@@ -492,6 +491,3 @@ fn to_pg_like(pattern: &str) -> String {
     }
     out
 }
-
-#[allow(dead_code)]
-fn _unused_row_marker(_r: &Row) {}

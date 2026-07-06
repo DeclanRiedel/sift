@@ -790,8 +790,3 @@ where
         }
     }
 }
-
-#[allow(dead_code)]
-fn _engine_marker(engine: Engine) -> Engine {
-    engine
-}

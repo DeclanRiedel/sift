@@ -1707,10 +1707,3 @@ async fn execute_stream_error_maps_to_http_error() {
 
     assert_eq!(res.status(), StatusCode::BAD_REQUEST);
 }
-
-// Silence unused imports for the spec helper (used only when test wants a
-// canonical ConnectionSpec; kept for future tests).
-#[allow(dead_code)]
-fn _pg_spec_marker() -> ConnectionSpec {
-    pg_spec()
-}

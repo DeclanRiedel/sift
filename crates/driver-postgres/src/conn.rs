@@ -26,7 +26,7 @@ pub(crate) struct PgDriverInner {
     /// had a separate `tx_index` map producing a two-lock window between
     /// `tx_index.remove` and `conns.lock`. Now `ConnState::InTx` carries the
     /// `tx_id` inline, and `find_conn_in_tx` iterates the map. Acceptable at
-    /// Phase 0 connection counts; revisit only if profiling shows contention.
+    /// current connection counts; revisit only if profiling shows contention.
     pub(crate) conns: Mutex<HashMap<u64, ConnState>>,
     /// cursor_id → (owning conn_id, cancel token). `conn_id` is carried so
     /// `close` can drain live cursors belonging to the conn.
@@ -211,7 +211,6 @@ impl PgDriverInner {
     }
 
     pub(crate) async fn remove_conn(&self, c: &ConnHandle) {
-        // Drop the slot.
         if let Some(ConnState::InTx { .. }) = self.conns.lock().await.remove(&c.id()) {
             // The tx is implicitly aborted by connection close; surface as
             // tracing only — caller decides whether that's an error.

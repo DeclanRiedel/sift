@@ -15,8 +15,8 @@ pub struct ConnectionSpec {
     pub port: Option<u16>,
     pub database: Option<String>,
     pub user: String,
-    /// Plaintext for now; Phase 0 step 22 (BACKEND.md) moves secrets to OS
-    /// keychain. The field stays — the *source* changes.
+    /// Plaintext for now; later moved to OS keychain. The field stays —
+    /// the *source* changes.
     pub password: Option<String>,
     pub ssl_mode: Option<SslMode>,
     pub engine_specific: Option<EngineConnectionSpec>,

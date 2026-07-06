@@ -1,10 +1,8 @@
 //! `sift-driver-postgres` — Postgres driver via `tokio-postgres` +
-//! `deadpool-postgres` (ADR-003). The easy case (PHASE0.md step 7): known-
-//! good driver isolates server-substrate bugs from driver bugs.
+//! `deadpool-postgres` (ADR-003). Wraps a known-good driver so server-
+//! substrate bugs stay isolated from driver bugs.
 //!
 //! Implements [`sift_driver_api::Driver`] and [`sift_driver_api::PgExt`].
-//! SQL Server ships as a fast-follow in step 15; until that lands the
-//! trait API in `driver-api` is mutable.
 
 mod conn;
 mod decode;

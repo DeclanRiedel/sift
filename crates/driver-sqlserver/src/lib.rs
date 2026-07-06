@@ -1,8 +1,8 @@
 //! `sift-driver-sqlserver` — SQL Server via tiberius (ADR-003).
 //!
-//! Phase 0 hard-case implementation. This is intentionally conservative:
-//! one in-flight operation per connection, streamed result pages, native
-//! metadata preserved through the protocol escape hatches.
+//! Intentionally conservative: one in-flight operation per connection,
+//! streamed result pages, native metadata preserved through the protocol
+//! escape hatches.
 
 use std::collections::HashMap;
 use std::future::Future;

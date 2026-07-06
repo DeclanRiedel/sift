@@ -1,6 +1,6 @@
 //! Integration tests against a real Postgres instance. Gated behind the
 //! `live-pg` feature so CI runs without it; local invocation requires the
-//! developer to bring up a PG first (see PHASE0.md step 14).
+//! developer to bring up a PG first.
 //!
 //! Bring up a throwaway PG inside the nix shell:
 //!

@@ -5,7 +5,6 @@
 
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
 
 use anyhow::{bail, Context};
 use sift_metadata::{MemorySecretStore, MetadataStore};
@@ -205,7 +204,3 @@ async fn shutdown_signal() {
 // pulling it into the local scope via a `use` (keeps the registry function
 // visually focused on driver wiring).
 use sift_protocol::SchemaScope;
-
-// Unused-Duration marker; reap_idle wiring lands with Tier 1 health checks.
-#[allow(dead_code)]
-fn _duration_marker(_d: Duration) {}

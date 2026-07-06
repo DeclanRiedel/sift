@@ -68,8 +68,7 @@ pub struct ConnectionInfo {
 }
 
 /// Body of `POST /v1/sessions/:id/queries`. Sync HTTP path returns the whole
-/// result inline; WS streaming path (PHASE0 step 10) replaces this with a
-/// streamed page consumer.
+/// result inline; the WS streaming surface pages large results.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ExecuteRequestHttp {
     pub connection: ConnectionId,
@@ -87,8 +86,8 @@ pub struct ExecuteRequestHttp {
     pub connection_profile_id: Option<i64>,
 }
 
-/// Reference to an open transaction. Returned by the (TBD) transactions
-/// endpoint; carried back by the client on subsequent queries.
+/// Reference to an open transaction. Returned by the transactions endpoint;
+/// carried back by the client on subsequent queries.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct TxHandleRef {
     pub tx_id: TxId,
@@ -122,7 +121,7 @@ pub struct TransactionInfo {
 
 /// Sync execute response. The HTTP surface drains the driver's page stream
 /// into `rows`; `has_more` is always `false` in the sync path (the WS
-/// streaming surface uses `cursor_id` to page future results, PHASE0 #10).
+/// streaming surface uses `cursor_id` to page future results).
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ExecuteResponse {
     pub cursor_id: CursorId,
@@ -232,7 +231,7 @@ pub enum WsClientMessage {
 
 /// WebSocket server → client messages. Each `Page` must be acked by
 /// `(cursor_id, seq)` before the server sends the next page, providing the
-/// Phase 0 backpressure contract.
+/// backpressure contract.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum WsServerMessage {

@@ -71,9 +71,7 @@ pub enum Page {
     },
 }
 
-/// Execute query request. SQL string + bind parameters (empty for now —
-/// parameterized queries are FEATURES.md Tier 2 #33; the trait carries
-/// the slot so adding them later is not a breaking change).
+/// Execute query request. SQL string + bind parameters.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ExecuteRequest {
     pub sql: String,
