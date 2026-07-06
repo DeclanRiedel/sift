@@ -228,7 +228,32 @@ impl Driver for MssqlDriver {
         let cursor_key = cursor_id.0;
         let conn_id = c.id();
         let task = tokio::spawn(async move {
-            run_query(inner, conn_id, conn, cursor_id, req, tx).await;
+            // Isolate panics so a wedged decode path produces a `Page::Error`
+            // instead of silently dropping the channel. Parity with PG's
+            // `run_query` wrapper.
+            let cursor_key = cursor_id.0;
+            let cleanup_inner = Arc::clone(&inner);
+            let error_tx = tx.clone();
+            let fut = std::panic::AssertUnwindSafe(run_query(
+                inner, conn_id, conn, cursor_id, req, tx,
+            ));
+            if let Err(panic) = futures::FutureExt::catch_unwind(fut).await {
+                let msg = panic_message(panic);
+                tracing::error!(cursor_key, "sqlserver query task panicked: {msg}");
+                let _ = error_tx
+                    .send(sift_protocol::Page::Error {
+                        error: DriverError::new(
+                            Code::DriverInternal,
+                            format!("query task panicked: {msg}"),
+                        )
+                        .with_engine(Engine::SqlServer),
+                    })
+                    .await;
+                // Connection was consumed by the panicking future; do not
+                // restore it. Just drop the cursor entry so a subsequent
+                // `close()` doesn't try to abort a dead task.
+                cleanup_inner.cursors.remove(&cursor_key);
+            }
         });
         self.inner.cursors.insert(cursor_key, (conn_id, task));
         Ok(ResultSetStream::with_cursor_mode(cursor_id, rx, false))
@@ -355,6 +380,24 @@ async fn run_query(
             .iter()
             .map(|p| p.as_ref() as &dyn ToSql)
             .collect();
+        // Route pure DML (no OUTPUT clause) through `execute()` so we can
+        // report `affected_rows` from `ExecuteResult`. Row-producing SQL
+        // (SELECT/WITH/VALUES/EXEC/…) and DML with OUTPUT stay on the
+        // streaming `query()` path to preserve returned rows.
+        if is_pure_dml(&req.sql) {
+            let exec = conn
+                .execute(req.sql, &param_refs)
+                .await
+                .map_err(ms_err)?;
+            let _ = tx
+                .send(sift_protocol::Page::Done {
+                    affected_rows: Some(exec.total()),
+                    warnings: Vec::new(),
+                })
+                .await;
+            return Ok::<_, DriverError>(());
+        }
+
         let mut stream = conn.query(req.sql, &param_refs).await.map_err(ms_err)?;
         let mut batch = Vec::with_capacity(ROW_BATCH_SIZE);
         while let Some(item) = stream.next().await {
@@ -405,6 +448,30 @@ async fn run_query(
     inner.cursors.remove(&cursor_id.0);
     inner.conns.lock().await.insert(conn_id, conn);
     tracing::debug!(%cursor_id, conn_id, "sqlserver query finished");
+}
+
+/// True when `sql` is a pure DML statement (INSERT/UPDATE/DELETE/MERGE)
+/// with no OUTPUT clause — the case where `execute()`'s row-count is
+/// useful and we don't lose returned rows by skipping the streaming path.
+fn is_pure_dml(sql: &str) -> bool {
+    let up = sql.trim_start().to_ascii_uppercase();
+    // OUTPUT clauses stream rows; keep them on the query() path.
+    if up.contains(" OUTPUT ") {
+        return false;
+    }
+    let first = up.split_whitespace().next().unwrap_or("");
+    matches!(first, "INSERT" | "UPDATE" | "DELETE" | "MERGE")
+}
+
+/// Extract a usable message from a panic payload.
+fn panic_message(p: Box<dyn std::any::Any + Send>) -> String {
+    if let Some(s) = p.downcast_ref::<&'static str>() {
+        return (*s).to_string();
+    }
+    if let Some(s) = p.downcast_ref::<String>() {
+        return s.clone();
+    }
+    "<non-string panic payload>".to_string()
 }
 
 async fn mssql_schema(
@@ -1120,5 +1187,23 @@ mod tests {
     fn mssql_literal_escapes_text_and_maps_empty_to_null() {
         assert_eq!(mssql_literal(""), "NULL");
         assert_eq!(mssql_literal("O'Reilly"), "N'O''Reilly'");
+    }
+
+    #[test]
+    fn is_pure_dml_recognizes_dml_and_keeps_output_on_query_path() {
+        assert!(is_pure_dml("INSERT INTO t VALUES (1)"));
+        assert!(is_pure_dml("  update t set x = 1 where id = 2"));
+        assert!(is_pure_dml("DELETE FROM t"));
+        assert!(is_pure_dml("MERGE t USING s ON s.id = t.id WHEN MATCHED THEN UPDATE SET x = s.x;"));
+
+        // Row-producing statements stay on the streaming path.
+        assert!(!is_pure_dml("SELECT * FROM t"));
+        assert!(!is_pure_dml("WITH c AS (SELECT 1) SELECT * FROM c"));
+        assert!(!is_pure_dml("VALUES (1),(2)"));
+        assert!(!is_pure_dml("EXEC sp_who"));
+
+        // OUTPUT clauses stream returned rows — must not route to execute().
+        assert!(!is_pure_dml("INSERT INTO t OUTPUT INSERTED.id VALUES (1)"));
+        assert!(!is_pure_dml("DELETE FROM t OUTPUT DELETED.id WHERE id = 1"));
     }
 }

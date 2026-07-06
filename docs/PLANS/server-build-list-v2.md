@@ -24,13 +24,13 @@ view while prioritizing:
   methods (`listen`/`unlisten`/`copy`/`advisory_lock`/`unlock`/`savepoint`/
   `rollback_to`/`release_savepoint`), and the SQL Server live test harness.
 - Several "already in place" assumptions are weaker than they sound:
-  driver-isolation `catch_unwind` exists **only for PG, not SQL Server**;
   there are **no per-query timeouts** (`config.timeouts.request_secs` is
-  parsed then never read); the loopback-bypass auth flag **does not check
-  the peer address**; Operation audit hard-codes `Succeeded` at every call
-  site; there is **no correlation id** anywhere; the `doc` crate is **not a
-  real CRDT** (UTF-8 byte buffer + apply-op); and CI does **not** run the
-  live driver tests.
+  parsed then never read); Operation audit hard-codes `Succeeded` at every
+  call site; there is **no correlation id** anywhere; the `doc` crate is
+  **not a real CRDT** (UTF-8 byte buffer + apply-op); and CI does **not**
+  run the live driver tests. *(Closed since the last snapshot:
+  driver-isolation `catch_unwind` now covers SQL Server too; the
+  loopback-bypass flag now checks the peer address.)*
 - Three metadata tables (`principal_key`, `keypair_challenge`,
   `saved_query`) are created by migrations but never read or written by any
   Rust code — dead schema.
@@ -197,19 +197,22 @@ engine itself.
       (`lib.rs:393-396`).
 - [ ] [Implement] driver-sqlserver: deep schema parity with PG — add
       **triggers**, surface views/procs/synonyms/functions/sequences in
-      shallow, map CLUSTERED/NONCLUSTERED to `IndexKind`, report DML
-      `affected_rows` from `tiberius::ExecuteResult`. PG sets the
+      shallow, map CLUSTERED/NONCLUSTERED to `IndexKind`. PG sets the
       engine-uniform `ObjectInfo` bar; SQL Server currently omits triggers.
+      *(DML `affected_rows` — now reported for pure DML via
+      `ExecuteResult::total()`, `lib.rs:358-373`; row-producing SQL and
+      OUTPUT-clause DML stay on the streaming path. Test:
+      `is_pure_dml_recognizes_dml_and_keeps_output_on_query_path`.)*
 - [ ] [Implement] driver-sqlserver: cancel via **TDS attention** on the
       shared socket. Current `cancel()` calls `task.abort()`
       (`lib.rs:237-244`) which orphans the in-flight query server-side.
       Cross-task cancel test mirroring PG's `cancel_aborts_long_query` is
       present but only asserts client-side abort.
-- [ ] [Implement] driver-sqlserver: panic isolation via `catch_unwind`.
-      PG has it (`stream.rs:79-94`); SQL Server's `run_query`
-      (`lib.rs:344-408`) has none — a panic in the query task silently
-      closes the channel with no `Page::Error`. This is a driver-isolation
-      (ADR-013 candidate) gap on one engine.
+- [x] [Implement] driver-sqlserver: panic isolation via `catch_unwind`
+      around the spawned `run_query` future — `lib.rs:230-260`. On panic,
+      emits `Page::Error { Code::DriverInternal }` (engine-tagged
+      SqlServer), removes the cursor entry, and drops the (consumed)
+      connection. Parity with PG's `stream.rs:79-94`.
 - [ ] [Implement] driver-sqlserver: connection pool (deadpool-analogue).
       Currently `conns: Mutex<HashMap<u64, MssqlConn>>` (`lib.rs:42`) —
       every `open()` dials fresh, no reuse, no `min_connections`, no
