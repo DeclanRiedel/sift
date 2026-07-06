@@ -794,6 +794,24 @@ impl MetadataStore {
         history
     }
 
+    pub fn list_query_history_for_principal(
+        &self,
+        principal: PrincipalId,
+        limit: u32,
+    ) -> Result<Vec<QueryHistory>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, principal_id, connection_profile_id, sql_text, started_at,
+                    duration_ms, row_count, status, error_code, error_message, room_id
+             FROM query_history
+             WHERE principal_id = ?1
+             ORDER BY started_at DESC, id DESC
+             LIMIT ?2",
+        )?;
+        let history = rows(stmt.query_map(params![principal.0, limit], query_history_from_row)?);
+        history
+    }
+
     fn api_token_by_id_locked(&self, conn: &Connection, id: ApiTokenId) -> Result<ApiTokenRow> {
         conn.query_row(
             "SELECT id, principal_id, tenant_id, name, created_at, updated_at,

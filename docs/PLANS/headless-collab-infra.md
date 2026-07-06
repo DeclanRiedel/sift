@@ -40,7 +40,8 @@ Implemented:
   - `room_attachment`
   - `query_history.room_id`
 - Metadata APIs for creating/listing rooms, room members, opaque document
-  snapshots, active room attachments, and room-scoped history.
+  snapshots, active room attachments, room-scoped history, and
+  principal-scoped history.
 - Existing Phase 0 server remains intact: sessions, inline connection specs,
   HTTP execute, WebSocket execute/listen, operation log, OpenAPI, SDK.
 - `sift-server` constructs the local metadata store at startup, bootstraps the
@@ -48,9 +49,14 @@ Implemented:
 - Metadata-backed API tokens can authenticate metadata routes; local loopback
   mode resolves to the bootstrapped local principal.
 - Headless HTTP routes now cover tenant listing, room create/list/delete,
-  document create/list/update/delete, connection profile create/list/delete,
-  per-user credential set, open-session-connection-from-profile, token
-  issue/list/revoke, and room-scoped history.
+  room member join/leave/add/remove/list, document create/list/update/delete,
+  connection profile create/list/delete, per-user credential set,
+  open-session-connection-from-profile, token issue/list/revoke, room-scoped
+  history, and principal-scoped history.
+- Synchronous SQLite metadata work in HTTP handlers runs via `spawn_blocking`
+  for the local/headless route surface.
+- `sift-doc` exists as the first pure document abstraction crate for opaque
+  CRDT snapshots and text helpers.
 - The current read routes use `GET`; the new HTTP `QUERY` method is reserved
   for future safe/idempotent reads that need a request body. SQL execute stays
   `POST` because SQL can mutate databases.
@@ -70,7 +76,7 @@ Deliberately not implemented yet:
 
 1. `sift-protocol` stays pure serde data: no I/O, no Tokio, no OS APIs.
 2. UI dependencies must not enter shared crates.
-3. Metadata stores opaque CRDT bytes only; a future `sift-doc` crate owns CRDT
+3. Metadata stores opaque CRDT bytes only; `sift-doc` owns document-facing
    semantics.
 4. Secrets never live in SQLite; SQLite stores opaque secret handles.
 5. Existing `/v1/sessions` APIs remain compatible until room APIs can fully
@@ -99,8 +105,8 @@ Deliberately not implemented yet:
   - secret backend
   - local bootstrap
 - [x] Construct `MetadataStore` at server startup.
-- [ ] Use blocking-safe wrappers or `spawn_blocking` for SQLite work from async
-  handlers before hosted/concurrent server mode.
+- [x] Use blocking-safe wrappers or `spawn_blocking` for SQLite work from async
+  handlers.
 
 ### H4 — Auth Context
 
@@ -114,18 +120,19 @@ Deliberately not implemented yet:
 
 - [x] Tenants: list current principal's tenants.
 - [x] Rooms: create/list/delete.
-- [ ] Rooms: join/leave/member management.
+- [x] Rooms: join/leave/member management.
 - [x] Documents: create/list/update snapshot/delete.
 - [x] Connection profiles: create/list/delete/set credential/open from profile.
 - [x] Query history: list by room.
-- [ ] Query history: list by principal.
-- [ ] Add OpenAPI coverage and operation-log entries for metadata routes.
+- [x] Query history: list by principal.
+- [x] Add OpenAPI coverage and operation-log entries for metadata routes.
 
 ### H6 — `sift-doc`
 
-- Minimal CRDT abstraction crate.
-- Initial text document helpers.
-- Snapshot/apply/text extraction APIs.
+- [x] Minimal CRDT abstraction crate.
+- [x] Initial text document helpers.
+- [x] Snapshot/text extraction APIs.
+- [ ] Apply operation API once CRDT backend is selected.
 - Keep Loro/Automerge choice hidden behind this crate.
 
 ### H7 — Protocol Room Surface
@@ -156,11 +163,11 @@ Deliberately not implemented yet:
 - `SessionStore` is still session-centric and single-stream-per-WebSocket.
 - OpenAPI is manually assembled and will become harder to maintain as routes
   grow.
-- Metadata uses synchronous SQLite behind a mutex; current route calls are fine
-  for the local-first slice but should move behind `spawn_blocking` or an
-  actor before hosted/concurrent mode.
+- Metadata uses synchronous SQLite behind a mutex and HTTP handlers now isolate
+  sync store calls with `spawn_blocking`; hosted mode may still want a metadata
+  actor or pool.
 - API tokens issued before token lookup migration cannot be verified by lookup;
   no server release used them, so this is acceptable.
-- Metadata route coverage is intentionally headless and minimal; member
-  management, principal-scoped history, and OpenAPI/operation-log metadata
-  entries are the remaining first-slice gaps.
+- Metadata route coverage is intentionally headless and minimal; permissions
+  are tenant-scoped today and need role-aware room authorization before hosted
+  multi-user mode.

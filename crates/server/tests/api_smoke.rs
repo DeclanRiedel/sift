@@ -214,6 +214,11 @@ async fn openapi_is_published() {
     assert!(body["paths"]["/v1/sessions/{id}/connections/{conn_id}/bulk-insert"].is_object());
     assert!(body["paths"]["/v1/audit"].is_object());
     assert!(body["paths"]["/v1/operations"].is_object());
+    assert!(body["paths"]["/v1/metadata/tenants"].is_object());
+    assert!(body["paths"]["/v1/metadata/rooms/{id}/members"].is_object());
+    assert!(body["paths"]["/v1/metadata/history"].is_object());
+    assert!(body["paths"]["/v1/auth/tokens"].is_object());
+    assert!(body["paths"]["/v1/sessions/{id}/connections/from-profile"].is_object());
     assert!(body["components"]["securitySchemes"]["bearerAuth"].is_object());
     assert!(body["components"]["schemas"]["ExecuteResponse"].is_object());
     assert!(body["components"]["schemas"]["BulkInsertRequest"].is_object());
@@ -545,6 +550,33 @@ async fn metadata_room_document_lifecycle_uses_local_principal() {
     .await;
     let room_id = room["id"].as_i64().unwrap();
 
+    let members: Vec<serde_json::Value> = body_json(
+        app.clone()
+            .oneshot(
+                Request::get(format!("/v1/metadata/rooms/{room_id}/members"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+            .into_body(),
+    )
+    .await;
+    assert_eq!(members.len(), 1);
+
+    let member: serde_json::Value = body_json(
+        app.clone()
+            .oneshot(post_json(
+                format!("/v1/metadata/rooms/{room_id}/join"),
+                serde_json::json!({}),
+            ))
+            .await
+            .unwrap()
+            .into_body(),
+    )
+    .await;
+    assert_eq!(member["principal_id"], 1);
+
     let rooms: Vec<serde_json::Value> = body_json(
         app.clone()
             .oneshot(
@@ -579,6 +611,7 @@ async fn metadata_room_document_lifecycle_uses_local_principal() {
     let document_id = document["id"].as_i64().unwrap();
 
     let res = app
+        .clone()
         .oneshot(
             Request::put(format!("/v1/metadata/documents/{document_id}"))
                 .header("content-type", "application/json")
@@ -590,6 +623,38 @@ async fn metadata_room_document_lifecycle_uses_local_principal() {
     assert_eq!(res.status(), StatusCode::OK);
     let updated: serde_json::Value = body_json(res.into_body()).await;
     assert_eq!(updated["crdt_state"], serde_json::json!([4, 5]));
+
+    let history: Vec<serde_json::Value> = body_json(
+        app.clone()
+            .oneshot(
+                Request::get("/v1/metadata/history?limit=10")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+            .into_body(),
+    )
+    .await;
+    assert!(history.is_empty());
+
+    let ops: Vec<sift_protocol::OperationAuditEntry> = body_json(
+        app.oneshot(Request::get("/v1/operations").body(Body::empty()).unwrap())
+            .await
+            .unwrap()
+            .into_body(),
+    )
+    .await;
+    assert!(ops.iter().any(|row| matches!(
+        &row.operation,
+        sift_protocol::Operation::Metadata { action, target, id }
+            if action == "create" && target == "room" && *id == Some(room_id)
+    )));
+    assert!(ops.iter().any(|row| matches!(
+        &row.operation,
+        sift_protocol::Operation::Metadata { action, target, id }
+            if action == "update" && target == "document" && *id == Some(document_id)
+    )));
 }
 
 #[tokio::test]
@@ -615,8 +680,8 @@ async fn metadata_api_tokens_can_authenticate_and_be_revoked() {
 
     let mut no_loopback = state;
     no_loopback.auth.loopback_bypass = false;
-    let app = app(no_loopback);
-    let res = app
+    let app_no_loopback = app(no_loopback);
+    let res = app_no_loopback
         .clone()
         .oneshot(
             Request::get("/v1/metadata/tenants")
@@ -628,7 +693,7 @@ async fn metadata_api_tokens_can_authenticate_and_be_revoked() {
         .unwrap();
     assert_eq!(res.status(), StatusCode::OK);
 
-    let res = app
+    let res = app_no_loopback
         .clone()
         .oneshot(
             Request::delete(format!("/v1/auth/tokens/{token_id}"))
@@ -640,7 +705,7 @@ async fn metadata_api_tokens_can_authenticate_and_be_revoked() {
         .unwrap();
     assert_eq!(res.status(), StatusCode::OK);
 
-    let res = app
+    let res = app_no_loopback
         .oneshot(
             Request::get("/v1/metadata/tenants")
                 .header("authorization", format!("Bearer {plaintext}"))
@@ -650,6 +715,67 @@ async fn metadata_api_tokens_can_authenticate_and_be_revoked() {
         .await
         .unwrap();
     assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn metadata_auth_and_tenant_edges_are_rejected() {
+    let state = test_state_with_metadata(true);
+    let app_with_loopback = app(state.clone());
+    let issued: serde_json::Value = body_json(
+        app_with_loopback
+            .oneshot(post_json(
+                "/v1/auth/tokens",
+                serde_json::json!({
+                    "name": "expired",
+                    "tenant_id": 1,
+                    "expires_at": "2000-01-01T00:00:00Z"
+                }),
+            ))
+            .await
+            .unwrap()
+            .into_body(),
+    )
+    .await;
+    let expired = issued["plaintext"].as_str().unwrap().to_string();
+
+    let mut no_loopback = state;
+    no_loopback.auth.loopback_bypass = false;
+    let app_no_loopback = app(no_loopback);
+    let res = app_no_loopback
+        .clone()
+        .oneshot(
+            Request::get("/v1/metadata/tenants")
+                .header("authorization", format!("Bearer {expired}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+
+    let app_with_loopback = app(test_state_with_metadata(true));
+    let res = app_with_loopback
+        .clone()
+        .oneshot(
+            Request::get("/v1/metadata/rooms?tenant=2")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::FORBIDDEN);
+
+    let res = app_with_loopback
+        .oneshot(post_json(
+            "/v1/sessions/1/connections/from-profile",
+            serde_json::json!({
+                "tenant_id": 2,
+                "profile_id": 1
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::FORBIDDEN);
 }
 
 #[tokio::test]

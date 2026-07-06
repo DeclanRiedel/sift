@@ -7,6 +7,7 @@ members = [
     "crates/driver-postgres",
     "crates/driver-sqlserver",
     "crates/metadata",
+    "crates/doc",
     "crates/server",
     "crates/client-sdk",
 ]
@@ -26,6 +27,7 @@ sift-driver-api = { path = "crates/driver-api", version = "0.1.0" }
 sift-driver-postgres = { path = "crates/driver-postgres", version = "0.1.0" }
 sift-driver-sqlserver = { path = "crates/driver-sqlserver", version = "0.1.0" }
 sift-metadata = { path = "crates/metadata", version = "0.1.0" }
+sift-doc = { path = "crates/doc", version = "0.1.0" }
 sift-server = { path = "crates/server", version = "0.1.0" }
 sift-client-sdk = { path = "crates/client-sdk", version = "0.1.0" }
 

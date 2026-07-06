@@ -1,3 +1,5 @@
+#![recursion_limit = "256"]
+
 //! `sift-server` — workspace server. The server is the product; clients
 //! (desktop GPUI, future web) are thin stateless consumers of its HTTP API
 //! (ADR-001, ADR-002). Local-first by default (ADR-010): same binary runs

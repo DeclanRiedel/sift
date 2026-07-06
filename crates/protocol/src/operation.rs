@@ -57,4 +57,9 @@ pub enum Operation {
         session: SessionId,
         request: EndTransactionRequest,
     },
+    Metadata {
+        action: String,
+        target: String,
+        id: Option<i64>,
+    },
 }
