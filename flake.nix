@@ -173,8 +173,12 @@
               npm ci
             fi
 
+            if [ "$#" -eq 0 ]; then
+              set -- --host 0.0.0.0
+            fi
+
             echo "Backend log: $backend_log"
-            echo "Lab UI: http://127.0.0.1:5177"
+            echo "Lab UI: http://0.0.0.0:5177 (open this host's IP or forwarded URL)"
             exec npm run dev -- "$@"
           '';
         };
@@ -400,7 +404,7 @@
               sift-server-mock          Run sift-server with the mock Postgres driver enabled.
               sift-backend-lab          Run the browser backend lab UI from .labs/sift-backend-lab.
               sift-backend-lab-backend  Run the backend for the lab on SIFT_BIND, mock mode by default.
-              sift-backend-lab-stack    Run mock backend + lab UI together, with readiness checks.
+              sift-backend-lab-stack    Run mock backend + network-bound lab UI together.
               sift-demo-postgres        Run temporary local Postgres + backend + lab UI together.
               sift-health               Curl /v1/health from the configured backend and pretty-print JSON.
               sift-smoke                Start a mock backend and exercise health/session/connection/schema/audit.
