@@ -57,6 +57,9 @@
           fi
 
           cd "$repo"
+          if [ -n "''${IN_NIX_SHELL:-}" ]; then
+            exec ${command} "$@"
+          fi
           exec nix develop "$repo" --command ${command} "$@"
         '';
 
@@ -383,11 +386,55 @@
           runtimeInputs = [ pkgs.nix ];
           text = devCommand ''cargo check --workspace --all-targets'';
         };
+
+        siftHelp = pkgs.writeShellApplication {
+          name = "sift-help";
+          text = ''
+            set -euo pipefail
+
+            cat <<'EOF'
+            Sift commands available after `nix develop`:
+
+              sift-help                 Show this TLDR.
+              sift-server               Run sift-server with normal configured drivers.
+              sift-server-mock          Run sift-server with the mock Postgres driver enabled.
+              sift-backend-lab          Run the browser backend lab UI from .labs/sift-backend-lab.
+              sift-backend-lab-backend  Run the backend for the lab on SIFT_BIND, mock mode by default.
+              sift-backend-lab-stack    Run mock backend + lab UI together, with readiness checks.
+              sift-demo-postgres        Run temporary local Postgres + backend + lab UI together.
+              sift-health               Curl /v1/health from the configured backend and pretty-print JSON.
+              sift-smoke                Start a mock backend and exercise health/session/connection/schema/audit.
+              sift-test                 Run cargo nextest for the whole workspace.
+              sift-check                Run cargo check for the whole workspace.
+
+            Typical flow:
+              nix develop
+              sift-help
+              sift-backend-lab-stack
+
+            Environment:
+              SIFT_REPO=/path/to/sift      Override checkout path for commands that need it.
+              SIFT_BIND=127.0.0.1:3000     Override backend bind address where supported.
+            EOF
+          '';
+        };
       in
       {
         devShells.default = pkgs.mkShell {
           inherit nativeBuildInputs buildInputs;
-          packages = rustDeps;
+          packages = rustDeps ++ [
+            siftHelp
+            server
+            serverMock
+            backendLab
+            backendLabBackend
+            backendLabStack
+            demoPostgres
+            health
+            smoke
+            test
+            check
+          ];
 
           # Point rust-analyzer + cargo at the right std sources.
           RUST_SRC_PATH = "${rustToolchain}/lib/rustlib/src/rust/library";
