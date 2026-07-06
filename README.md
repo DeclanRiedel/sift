@@ -19,6 +19,14 @@ connections stay server-authoritative.
 **The protocol is pure serde, public, and semver-stable from v0.1:** a third
 party should be able to build a working UI against the OpenAPI spec alone.
 
+## Status
+
+The server substrate is the active work surface: two real drivers (Postgres,
+SQL Server), HTTP + WebSocket surfaces, sessions, rooms, metadata, and audit
+are in place. No product GUI exists yet (ADR-010). For the code-grounded
+backlog and verified gaps, see `docs/PLANS/server-build-list-v2.md`; for
+load-bearing decisions, see `docs/DECISIONS.md`.
+
 ## The five goals this product wishes to achieve
 
 1. **The server is the product.** All product behavior lives in `sift-server`;

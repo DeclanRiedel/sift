@@ -1,7 +1,9 @@
 # sift — Architectural Decisions
 
-This file keeps only current, load-bearing decisions. Historical planning
-snapshots live under `docs/legacy/` until that directory is deleted.
+This file keeps only current, load-bearing decisions. Reference material
+(feature checklist, Zed-lessons rationale) lives under `docs/legacy/`; the
+code-grounded ordered backlog is `docs/PLANS/server-build-list-v2.md`.
+Candidates ADR-011 through ADR-022 are listed there against their phase.
 
 Format is ADR-lite: **Context · Decision · Consequences.**
 

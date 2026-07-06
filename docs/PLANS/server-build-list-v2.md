@@ -1,31 +1,30 @@
-# Server-Side Build List (v2) — Everything Before The GUI
+# Server-Side Build List — Everything Before The GUI
 
-> Status: **code-grounded work-management checklist.** This is a refresh of
-> `server-build-list.md` produced by reading the actual source in every
-> crate, not by trusting the `.md` docs under `docs/`. Every "done" claim
-> below cites `file:line` evidence; every "open" item reflects a real gap
-> verified against the code as of this audit.
+> Status: **code-grounded work-management checklist.** Every "done" claim
+> below cites `file:line` evidence verified against the current source;
+> every "open" item reflects a real gap verified against the code. This is
+> the single ordered backlog for all server-side work that must land before
+> the product GUI.
 >
-> Companion to `docs/DECISIONS.md` (ADRs). The prior `server-build-list.md`
-> and `docs/legacy/DRIVER_STATUS.md` are stale relative to the code; this
-> document supersedes them for prioritization. Items marked `[x]` are
-> verified-present in code; `[ ]` are verified-absent or stubbed.
+> Companion to `docs/DECISIONS.md` (ADRs) and `docs/legacy/ZED_LESSONS.md`
+> (rationale for stolen ideas). Items marked `[x]` are verified-present in
+> code; `[ ]` are verified-absent or stubbed.
 >
 > Format: `- [status] [Design|Implement] <area>: <goal>` plus a code
 > citation when `[x]`. **Design** = lock a decision (ADR/crate/contract);
 > **Implement** = build against a locked design.
 
-## How this differs from the prior build-list
+## Notable audit findings
 
-The prior list under-reported what was finished and over-reported what was
-stubbed. The largest corrections:
+Reading the code directly surfaced several corrections worth keeping in
+view while prioritizing:
 
-- PG `NUMERIC`/`INTERVAL` decode, PG TLS (rustls), PG `PgExt`
-  (`listen`/`unlisten`/`copy`/`advisory_lock`/`unlock`/`savepoint`/
-  `rollback_to`/`release_savepoint`), and the SQL Server live test harness
-  are **all already implemented** — they were listed as open Phase A work.
-- Conversely, several "already in place" claims were weaker than stated:
-  driver isolation (`catch_unwind`) exists **only for PG, not SQL Server**;
+- Several Phase A items that older snapshots listed as open are in fact
+  done: PG `NUMERIC`/`INTERVAL` decode, PG TLS (rustls), all `PgExt`
+  methods (`listen`/`unlisten`/`copy`/`advisory_lock`/`unlock`/`savepoint`/
+  `rollback_to`/`release_savepoint`), and the SQL Server live test harness.
+- Several "already in place" assumptions are weaker than they sound:
+  driver-isolation `catch_unwind` exists **only for PG, not SQL Server**;
   there are **no per-query timeouts** (`config.timeouts.request_secs` is
   parsed then never read); the loopback-bypass auth flag **does not check
   the peer address**; Operation audit hard-codes `Succeeded` at every call

@@ -1,9 +1,10 @@
 # sift — Lessons from Zed
 
-> Companion to `DECISIONS.md` and `TECH_STACK.md`. Not binding ADRs; this is a
-> study of what Zed does well, why it feels fast, and which of those ideas are
-> worth stealing for a database IDE. Where an idea matures into a real decision,
-> it should graduate into its own ADR.
+> Reference rationale, not binding ADRs. This is a study of what Zed does
+> well, why it feels fast, and which of those ideas are worth stealing for a
+> database IDE. Where an idea matures into a real decision, it graduates
+> into its own ADR in `docs/DECISIONS.md`; the actionable backlog for each
+> stolen idea lives in `docs/PLANS/server-build-list-v2.md`.
 
 Zed is already cited in ADR-006 (operation/command model). This doc goes wider:
 rendering, process layout, collaboration, restart/update behaviour, and the
@@ -151,7 +152,7 @@ is a CRDT because every byte is editable; in sift, almost nothing is.
 
 | # | Zed idea | sift adaptation | Priority |
 | --- | --- | --- | --- |
-| 1 | Retained-mode GPU UI (GPUI) | Already adopted (ADR-005). | Done |
+| 1 | Retained-mode GPU UI (GPUI) | Not adopted — sift is server-first; the UI stack is a deferred product-client decision (ADR-010), not GPUI. | Dropped |
 | 2 | Out-of-process workers for heavy/untrusted work | Run each DB driver (and maybe each long query) in a side process or task sandbox; a wedged tiberius connection cannot freeze the server. | High |
 | 3 | State snapshot on disk; restore before any I/O | Persist tabs, query text, layout, column widths, recent queries; paint window before reconnecting. | High |
 | 4 | Background updater; apply on next launch | Same idea works verbatim for sift. Background-fetch the new server binary; swap on restart prompt. | Medium |
@@ -187,25 +188,30 @@ is a CRDT because every byte is editable; in sift, almost nothing is.
 
 ## 6. Resulting ADR candidates
 
-These are not decisions yet, just the follow-ups this study implies:
+These are not decisions yet. Each is tracked as a candidate against a phase
+in `docs/PLANS/server-build-list-v2.md`; none have graduated into
+`docs/DECISIONS.md`.
 
 - **ADR-011 (candidate): result streaming via server-side cursors.** Keep DB
   cursors open server-side; clients page by cursor id; WS channel carries
   pages with backpressure tied to grid readiness. (Addresses the novel hard
-  part flagged in §5.)
-- **ADR-012 (candidate): workspace snapshot and restore.** Define the exact
-  persisted-on-every-change set (tabs, query text, layout, column widths,
-  recent queries, scroll positions) and the launch ordering (paint →
-  reconnect → refresh schema).
+  part flagged in §5.) *Status: Phase C design; today cursors live inside
+  each driver with no server-side registry.*
+- **ADR-012 (candidate): workspace snapshot and restore.** *Status: superseded
+  — the rooms model (ADR-007) plus the `query_history` table cover the durable
+  pieces; tab/layout restore is a client concern.*
 - **ADR-013 (candidate): driver isolation.** Each driver crate (and possibly
   each long-running query) runs in a sandboxed task or side process so a
   wedged driver cannot take the server down. Mirrors Zed's out-of-process LSP.
-- **ADR-014 (candidate): collaboration scope.** Phase-2 collaboration covers
-  (a) shared SQL editor tabs via CRDT, (b) ephemeral presence, (c) shared
-  session/connection state via server broadcast. Explicitly excludes result
-  replication beyond references.
+  *Status: Phase B design; PG meets it (`catch_unwind` + `CancelToken`), SQL
+  Server does not yet.*
+- **ADR-014 (candidate): collaboration scope.** Covers (a) shared SQL editor
+  tabs via CRDT, (b) ephemeral presence, (c) shared session/connection state
+  via server broadcast. Explicitly excludes result replication beyond
+  references. *Status: Phase G design; the `doc` crate is currently an
+  apply-op abstraction, not a real CRDT.*
 - **ADR-015 (candidate): background updater.** Background-fetch new server
-  binary, apply on next launch, no in-session modal.
+  binary, apply on next launch, no in-session modal. *Status: Phase H.*
 
 ---
 
