@@ -1,5 +1,5 @@
 //! Local metadata persistence for tenants, principals, connection profiles,
-//! and workspace state.
+//! rooms, documents, and room-scoped history.
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -118,28 +118,30 @@ impl MetadataStore {
 
     pub fn bootstrap_local(&self, display_name: &str) -> Result<()> {
         let now = now_text();
-        let conn = self.conn.lock().unwrap();
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
         let tenant_count: i64 =
-            conn.query_row("SELECT COUNT(*) FROM tenant", [], |row| row.get(0))?;
+            tx.query_row("SELECT COUNT(*) FROM tenant", [], |row| row.get(0))?;
         let principal_count: i64 =
-            conn.query_row("SELECT COUNT(*) FROM principal", [], |row| row.get(0))?;
+            tx.query_row("SELECT COUNT(*) FROM principal", [], |row| row.get(0))?;
         if tenant_count != 0 || principal_count != 0 {
             return Ok(());
         }
-        conn.execute(
+        tx.execute(
             "INSERT INTO tenant (id, name, kind, created_at, updated_at) VALUES (1, 'local', 'personal', ?1, ?1)",
             params![now],
         )?;
-        conn.execute(
+        tx.execute(
             "INSERT INTO principal (id, external_id, display_name, email, created_at, updated_at)
              VALUES (1, 'local:1', ?1, NULL, ?2, ?2)",
             params![display_name, now],
         )?;
-        conn.execute(
+        tx.execute(
             "INSERT INTO membership (tenant_id, principal_id, role, created_at, updated_at)
              VALUES (1, 1, 'owner', ?1, ?1)",
             params![now],
         )?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -265,65 +267,127 @@ impl MetadataStore {
         mut input: NewConnectionProfile,
     ) -> Result<ConnectionProfile> {
         let password = input.spec.password.take();
-        let mut shared_secret_handle = None;
+        let mut new_shared_secret_handle = None;
         if input.credential_mode == CredentialMode::Shared {
             if let Some(password) = password.as_deref() {
                 let handle = Uuid::new_v4().to_string();
                 self.secrets
                     .put(SECRET_NAMESPACE, &handle, password.as_bytes())
                     .await?;
-                shared_secret_handle = Some(handle);
+                new_shared_secret_handle = Some(handle);
             }
         }
 
         let now = now_text();
         let spec_json = serde_json::to_string(&input.spec)?;
         let tags_json = serde_json::to_string(&input.tags)?;
-        let conn = self.conn.lock().unwrap();
-        conn.execute(
-            "INSERT INTO connection_profile
-             (tenant_id, name, engine, spec_json, credential_mode, shared_secret_handle,
-              tags_json, created_by, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?9)
-             ON CONFLICT(tenant_id, name) DO UPDATE SET
-                engine = excluded.engine,
-                spec_json = excluded.spec_json,
-                credential_mode = excluded.credential_mode,
-                shared_secret_handle = COALESCE(excluded.shared_secret_handle, connection_profile.shared_secret_handle),
-                tags_json = excluded.tags_json,
-                updated_at = excluded.updated_at",
-            params![
-                tenant.0,
-                input.name,
-                input.engine.as_str(),
-                spec_json,
-                input.credential_mode.as_str(),
-                shared_secret_handle,
-                tags_json,
-                actor.0,
-                now
-            ],
-        )?;
-        let id = ConnectionProfileId(conn.query_row(
-            "SELECT id FROM connection_profile WHERE tenant_id = ?1 AND name = ?2",
-            params![tenant.0, input.name],
-            |row| row.get(0),
-        )?);
-        self.connection_profile_by_id_locked(&conn, id)
+        let db_result: Result<(ConnectionProfile, Option<String>)> = {
+            let mut conn = self.conn.lock().unwrap();
+            let tx = conn.transaction()?;
+            let old_shared_secret_handle: Option<String> = tx
+                .query_row(
+                    "SELECT shared_secret_handle FROM connection_profile WHERE tenant_id = ?1 AND name = ?2",
+                    params![tenant.0, input.name],
+                    |row| row.get(0),
+                )
+                .optional()?
+                .flatten();
+            let write_result = tx.execute(
+                "INSERT INTO connection_profile
+                 (tenant_id, name, engine, spec_json, credential_mode, shared_secret_handle,
+                  tags_json, created_by, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?9)
+                 ON CONFLICT(tenant_id, name) DO UPDATE SET
+                    engine = excluded.engine,
+                    spec_json = excluded.spec_json,
+                    credential_mode = excluded.credential_mode,
+                    shared_secret_handle = COALESCE(excluded.shared_secret_handle, connection_profile.shared_secret_handle),
+                    tags_json = excluded.tags_json,
+                    updated_at = excluded.updated_at",
+                params![
+                    tenant.0,
+                    input.name,
+                    input.engine.as_str(),
+                    spec_json,
+                    input.credential_mode.as_str(),
+                    new_shared_secret_handle.as_deref(),
+                    tags_json,
+                    actor.0,
+                    now
+                ],
+            );
+            if let Err(error) = write_result {
+                Err(error.into())
+            } else {
+                let id = ConnectionProfileId(tx.query_row(
+                    "SELECT id FROM connection_profile WHERE tenant_id = ?1 AND name = ?2",
+                    params![tenant.0, input.name],
+                    |row| row.get(0),
+                )?);
+                tx.commit()?;
+                let profile = self.connection_profile_by_id_locked(&conn, id)?;
+                Ok((profile, old_shared_secret_handle))
+            }
+        };
+        let (profile, old_shared_secret_handle) = match db_result {
+            Ok(result) => result,
+            Err(error) => {
+                if let Some(handle) = new_shared_secret_handle.as_deref() {
+                    let _ = self.secrets.delete(SECRET_NAMESPACE, handle).await;
+                }
+                return Err(error);
+            }
+        };
+        if let (Some(old), Some(new)) = (
+            old_shared_secret_handle.as_deref(),
+            new_shared_secret_handle.as_deref(),
+        ) {
+            if old != new {
+                let _ = self.secrets.delete(SECRET_NAMESPACE, old).await;
+            }
+        }
+        Ok(profile)
     }
 
-    pub fn delete_connection_profile(
+    pub async fn delete_connection_profile(
         &self,
         tenant: TenantId,
         id: ConnectionProfileId,
     ) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
-        let deleted = conn.execute(
-            "DELETE FROM connection_profile WHERE tenant_id = ?1 AND id = ?2",
-            params![tenant.0, id.0],
-        )?;
-        if deleted == 0 {
-            return Err(MetadataError::ConnectionProfileNotFound(id));
+        let handles = {
+            let mut conn = self.conn.lock().unwrap();
+            let tx = conn.transaction()?;
+            let mut handles = Vec::new();
+            if let Some(handle) = tx
+                .query_row(
+                    "SELECT shared_secret_handle FROM connection_profile WHERE tenant_id = ?1 AND id = ?2",
+                    params![tenant.0, id.0],
+                    |row| row.get::<_, Option<String>>(0),
+                )
+                .optional()?
+                .flatten()
+            {
+                handles.push(handle);
+            }
+            {
+                let mut stmt = tx.prepare(
+                    "SELECT secret_handle FROM connection_credential WHERE connection_profile_id = ?1",
+                )?;
+                let credential_handles = rows(stmt.query_map(params![id.0], |row| row.get(0))?)?;
+                handles.extend(credential_handles);
+            }
+            let deleted = tx.execute(
+                "DELETE FROM connection_profile WHERE tenant_id = ?1 AND id = ?2",
+                params![tenant.0, id.0],
+            )?;
+            if deleted == 0 {
+                return Err(MetadataError::ConnectionProfileNotFound(id));
+            }
+            tx.commit()?;
+            handles
+        };
+        for handle in handles {
+            let _ = self.secrets.delete(SECRET_NAMESPACE, &handle).await;
         }
         Ok(())
     }
@@ -337,16 +401,45 @@ impl MetadataStore {
         let handle = Uuid::new_v4().to_string();
         self.secrets.put(SECRET_NAMESPACE, &handle, secret).await?;
         let now = now_text();
-        let conn = self.conn.lock().unwrap();
-        conn.execute(
-            "INSERT INTO connection_credential
-             (connection_profile_id, principal_id, secret_handle, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?4)
-             ON CONFLICT(connection_profile_id, principal_id) DO UPDATE SET
-                secret_handle = excluded.secret_handle,
-                updated_at = excluded.updated_at",
-            params![profile_id.0, principal_id.0, handle, now],
-        )?;
+        let db_result: Result<Option<String>> = {
+            let mut conn = self.conn.lock().unwrap();
+            let tx = conn.transaction()?;
+            let old_handle: Option<String> = tx
+                .query_row(
+                    "SELECT secret_handle FROM connection_credential
+                     WHERE connection_profile_id = ?1 AND principal_id = ?2",
+                    params![profile_id.0, principal_id.0],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            let write_result = tx.execute(
+                "INSERT INTO connection_credential
+                 (connection_profile_id, principal_id, secret_handle, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?4)
+                 ON CONFLICT(connection_profile_id, principal_id) DO UPDATE SET
+                    secret_handle = excluded.secret_handle,
+                    updated_at = excluded.updated_at",
+                params![profile_id.0, principal_id.0, handle, now],
+            );
+            if let Err(error) = write_result {
+                Err(error.into())
+            } else {
+                tx.commit()?;
+                Ok(old_handle)
+            }
+        };
+        let old_handle = match db_result {
+            Ok(old_handle) => old_handle,
+            Err(error) => {
+                let _ = self.secrets.delete(SECRET_NAMESPACE, &handle).await;
+                return Err(error);
+            }
+        };
+        if let Some(old) = old_handle.as_deref() {
+            if old != handle {
+                let _ = self.secrets.delete(SECRET_NAMESPACE, old).await;
+            }
+        }
         Ok(())
     }
 
@@ -399,18 +492,20 @@ impl MetadataStore {
         input: NewRoom,
     ) -> Result<Room> {
         let now = now_text();
-        let conn = self.conn.lock().unwrap();
-        conn.execute(
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        tx.execute(
             "INSERT INTO room (tenant_id, name, kind, created_by, created_at, updated_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?5)",
             params![tenant.0, input.name, input.kind.as_str(), actor.0, now],
         )?;
-        let room_id = RoomId(conn.last_insert_rowid());
-        conn.execute(
+        let room_id = RoomId(tx.last_insert_rowid());
+        tx.execute(
             "INSERT INTO room_member (room_id, principal_id, role, joined_at)
              VALUES (?1, ?2, 'owner', ?3)",
             params![room_id.0, actor.0, now],
         )?;
+        tx.commit()?;
         self.room_by_id_locked(&conn, room_id)
     }
 
@@ -425,6 +520,23 @@ impl MetadataStore {
              FROM room r
              JOIN room_member rm ON rm.room_id = r.id
              WHERE r.tenant_id = ?1 AND rm.principal_id = ?2
+             ORDER BY r.updated_at DESC, r.id DESC",
+        )?;
+        let rooms = rows(stmt.query_map(params![tenant.0, principal.0], room_from_row)?);
+        rooms
+    }
+
+    pub fn list_shared_rooms_for_principal(
+        &self,
+        tenant: TenantId,
+        principal: PrincipalId,
+    ) -> Result<Vec<Room>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT r.id, r.tenant_id, r.name, r.kind, r.created_by, r.created_at, r.updated_at
+             FROM room r
+             JOIN room_member rm ON rm.room_id = r.id
+             WHERE r.tenant_id = ?1 AND rm.principal_id = ?2 AND r.kind = 'shared'
              ORDER BY r.updated_at DESC, r.id DESC",
         )?;
         let rooms = rows(stmt.query_map(params![tenant.0, principal.0], room_from_row)?);
@@ -458,6 +570,24 @@ impl MetadataStore {
         )?;
         let members = rows(stmt.query_map(params![room.0], room_member_from_row)?);
         members
+    }
+
+    pub fn remove_room_member(&self, room: RoomId, principal: PrincipalId) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "DELETE FROM room_member WHERE room_id = ?1 AND principal_id = ?2",
+            params![room.0, principal.0],
+        )?;
+        Ok(())
+    }
+
+    pub fn delete_room(&self, room: RoomId) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        let deleted = conn.execute("DELETE FROM room WHERE id = ?1", params![room.0])?;
+        if deleted == 0 {
+            return Err(MetadataError::RoomNotFound(room));
+        }
+        Ok(())
     }
 
     pub fn create_document(&self, room: RoomId, input: NewDocument) -> Result<Document> {
@@ -510,6 +640,15 @@ impl MetadataStore {
             return Err(MetadataError::DocumentNotFound(document));
         }
         self.document_by_id_locked(&conn, document)
+    }
+
+    pub fn delete_document(&self, document: DocumentId) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        let deleted = conn.execute("DELETE FROM document WHERE id = ?1", params![document.0])?;
+        if deleted == 0 {
+            return Err(MetadataError::DocumentNotFound(document));
+        }
+        Ok(())
     }
 
     pub fn attach_room(
@@ -934,6 +1073,14 @@ mod tests {
         MetadataStore::open_in_memory(Arc::new(MemorySecretStore::new())).unwrap()
     }
 
+    fn store_with_memory() -> (MetadataStore, Arc<MemorySecretStore>) {
+        let secrets = Arc::new(MemorySecretStore::new());
+        (
+            MetadataStore::open_in_memory(secrets.clone()).unwrap(),
+            secrets,
+        )
+    }
+
     fn spec(password: Option<&str>) -> ConnectionSpec {
         ConnectionSpec {
             host: "localhost".to_string(),
@@ -1017,6 +1164,69 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn replacing_and_deleting_shared_connection_profile_cleans_old_secret() {
+        let (store, secrets) = store_with_memory();
+        store.bootstrap_local("local user").unwrap();
+
+        let first = store
+            .upsert_connection_profile(
+                TenantId(1),
+                PrincipalId(1),
+                NewConnectionProfile {
+                    name: "local pg".to_string(),
+                    engine: Engine::Postgres,
+                    spec: spec(Some("first-secret")),
+                    credential_mode: CredentialMode::Shared,
+                    tags: Vec::new(),
+                },
+            )
+            .await
+            .unwrap();
+        let first_handle = first.shared_secret_handle.clone().unwrap();
+
+        let second = store
+            .upsert_connection_profile(
+                TenantId(1),
+                PrincipalId(1),
+                NewConnectionProfile {
+                    name: "local pg".to_string(),
+                    engine: Engine::Postgres,
+                    spec: spec(Some("second-secret")),
+                    credential_mode: CredentialMode::Shared,
+                    tags: Vec::new(),
+                },
+            )
+            .await
+            .unwrap();
+        let second_handle = second.shared_secret_handle.clone().unwrap();
+
+        assert_ne!(first_handle, second_handle);
+        assert!(secrets
+            .get(SECRET_NAMESPACE, &first_handle)
+            .await
+            .unwrap()
+            .is_none());
+        assert_eq!(
+            secrets
+                .get(SECRET_NAMESPACE, &second_handle)
+                .await
+                .unwrap()
+                .as_deref(),
+            Some(&b"second-secret"[..])
+        );
+
+        store
+            .delete_connection_profile(TenantId(1), second.id)
+            .await
+            .unwrap();
+        assert!(secrets
+            .get(SECRET_NAMESPACE, &second_handle)
+            .await
+            .unwrap()
+            .is_none());
+    }
+
+    #[tokio::test]
     async fn per_user_connection_profile_requires_principal_secret() {
         let store = store();
         store.bootstrap_local("local user").unwrap();
@@ -1082,6 +1292,11 @@ mod tests {
         assert_eq!(members.len(), 1);
         assert_eq!(members[0].principal_id, PrincipalId(1));
         assert_eq!(members[0].role, RoomRole::Owner);
+
+        let shared_rooms = store
+            .list_shared_rooms_for_principal(TenantId(1), PrincipalId(1))
+            .unwrap();
+        assert!(shared_rooms.is_empty());
     }
 
     #[test]
@@ -1123,6 +1338,46 @@ mod tests {
         let documents = store.list_documents(room.id).unwrap();
         assert_eq!(documents.len(), 1);
         assert_eq!(documents[0].id, document.id);
+
+        store.delete_document(document.id).unwrap();
+        assert!(store.list_documents(room.id).unwrap().is_empty());
+    }
+
+    #[test]
+    fn deleting_room_cascades_documents_and_members() {
+        let store = store();
+        store.bootstrap_local("local user").unwrap();
+        let room = store
+            .create_room(
+                TenantId(1),
+                PrincipalId(1),
+                NewRoom {
+                    name: "throwaway".to_string(),
+                    kind: RoomKind::Shared,
+                },
+            )
+            .unwrap();
+        store
+            .create_document(
+                room.id,
+                NewDocument {
+                    kind: "sql".to_string(),
+                    title: "scratch.sql".to_string(),
+                    crdt_type: CrdtType::Loro,
+                    crdt_state: Vec::new(),
+                    position: 0,
+                    connection_profile_id: None,
+                },
+            )
+            .unwrap();
+
+        store.delete_room(room.id).unwrap();
+        assert!(store
+            .list_rooms_for_principal(TenantId(1), PrincipalId(1))
+            .unwrap()
+            .is_empty());
+        assert!(store.list_documents(room.id).unwrap().is_empty());
+        assert!(store.list_room_members(room.id).unwrap().is_empty());
     }
 
     #[test]

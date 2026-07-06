@@ -58,3 +58,9 @@ build a UI against Postgres and SQL Server without private guidance.
 - No known Phase 0-critical API surface remains unimplemented.
 - SQL Server true TDS ATTENTION, MARS concurrency, and native BCP are deferred
   backend-depth improvements, not blockers for the Phase 0 headless API.
+
+## Current Direction After Phase 0
+
+The active post-Phase 0 direction is headless, collaboration-native
+infrastructure. Rooms and CRDT-backed documents supersede the earlier
+workspace/tab planning model. See `docs/PLANS/headless-collab-infra.md`.

@@ -1,0 +1,45 @@
+[graph]
+all-features = true
+
+[advisories]
+version = 2
+yanked = "deny"
+ignore = [
+  # Transitive through tiberius 0.12.3 -> tokio-rustls 0.24/rustls 0.21.
+  # tiberius 0.12.3 is the latest published tiberius release currently in use.
+  # Remove these once the SQL Server driver can move to a tiberius release on
+  # rustls-webpki >= 0.103.13 / rustls-pki-types PEM parsing.
+  "RUSTSEC-2025-0134",
+  "RUSTSEC-2026-0098",
+  "RUSTSEC-2026-0099",
+  "RUSTSEC-2026-0104",
+]
+
+[licenses]
+version = 2
+confidence-threshold = 0.8
+allow = [
+  "AGPL-3.0-only",
+  "Apache-2.0",
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  "BSL-1.0",
+  "CDLA-Permissive-2.0",
+  "ISC",
+  "MIT",
+  "Unicode-3.0",
+  "Zlib",
+]
+exceptions = []
+
+[bans]
+multiple-versions = "allow"
+wildcards = "deny"
+highlight = "all"
+workspace-default-features = "allow"
+external-default-features = "allow"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

@@ -18,30 +18,52 @@ Known limits are not Phase 0 blockers:
 - SQL Server MARS and native BCP are unsupported; CSV bulk import works.
 - Postgres month-aware intervals are engine-native because `chrono::Duration` has no months.
 
-## Phase 1 — Usable Local IDE
+## Phase 1 — Headless Collab Infrastructure
+
+Goal: make the server persist and expose the room/document/auth substrate that
+desktop and future web clients will render.
+
+1. **Metadata and auth wiring**
+   - Construct `MetadataStore` at server startup.
+   - Bootstrap local tenant/principal in local mode.
+   - Resolve `AuthContext` through loopback bypass and metadata-backed API
+     tokens.
+   - Keep existing shared bearer token only as a compatibility fallback.
+
+2. **Room and document APIs**
+   - Rooms replace old workspaces/tabs as the durable collaborative unit.
+   - Documents store opaque CRDT snapshots in metadata.
+   - Attachments track live clients; presence remains in memory.
+   - Existing `/v1/sessions` APIs stay available during the transition.
+
+3. **Connection library**
+   - Expose connection profile CRUD routes.
+   - Keep secrets outside SQLite via `SecretStore`.
+   - Add open-from-profile route for the existing session execution path.
+
+4. **Query history and saved queries**
+   - Store executed SQL, timing, row counts, actor, optional room, connection
+     label, and errors.
+   - Add saved-query CRUD API after room routes are stable.
+
+5. **CRDT document primitive**
+   - Add `sift-doc` crate.
+   - Keep the CRDT backend hidden behind a small stable API.
+
+## Phase 1b — Usable Local IDE
 
 Goal: make one person productive against real PG/SQL Server daily.
 
-1. **Workspace persistence**
-   - Persist sessions, tabs, query text, recent connections, layout metadata.
-   - Do not persist plaintext secrets; add keychain-backed secret references.
-   - Restore UI state before any DB round-trip.
-
-2. **Schema cache and search**
+1. **Schema cache and search**
    - Cache shallow/deep schema snapshots per connection.
    - Invalidate via PG notifications where available; SQL Server starts with polling.
    - Add global schema search endpoint: table/column/function by name.
 
-3. **Query history and saved queries**
-   - Store executed SQL, timing, row counts, engine, connection label, and errors.
-   - Add saved-query CRUD API.
-   - Keep history append-only; allow local pruning.
-
-4. **Result export**
+2. **Result export**
    - Public export API for CSV, TSV, JSON, clipboard-friendly payloads.
    - Stream large exports; avoid buffering full result sets in memory.
 
-5. **Process and cancellation UX APIs**
+3. **Process and cancellation UX APIs**
    - Add active-query listing per session/connection.
    - Keep current SQL Server cancel behavior explicit in API response.
    - Later replace with true TDS ATTENTION when backend supports it safely.
@@ -102,8 +124,8 @@ Tackle only when product need justifies it:
 
 ## Immediate Next Sprint
 
-1. Add local metadata store crate/table migrations.
-2. Persist workspace/session/query history without secrets.
-3. Add schema cache with explicit refresh/invalidate API.
-4. Add result export API and SDK method.
-5. Start minimal desktop/web client only after those APIs are stable.
+1. Add CI and dependency guardrails.
+2. Wire `sift-metadata` into `sift-server` startup/config.
+3. Add loopback/API-token auth context.
+4. Add room/document/connection-profile HTTP routes.
+5. Add `sift-doc` only after the headless routes are stable.
