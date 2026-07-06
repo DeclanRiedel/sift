@@ -122,6 +122,8 @@ impl Client {
                 sql: sql.into(),
                 params: Vec::new(),
                 tx: None,
+                room_id: None,
+                connection_profile_id: None,
             },
         )
         .await
@@ -141,6 +143,8 @@ impl Client {
                 sql: sql.into(),
                 params,
                 tx: None,
+                room_id: None,
+                connection_profile_id: None,
             },
         )
         .await
@@ -163,6 +167,8 @@ impl Client {
                     connection: tx.connection,
                     mode: tx.mode,
                 }),
+                room_id: None,
+                connection_profile_id: None,
             },
         )
         .await

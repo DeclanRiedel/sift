@@ -4,7 +4,10 @@
 use axum::body::{to_bytes, Body};
 use axum::http::{Request, StatusCode};
 use sift_driver_api::{mock::MockDriver, BulkResult, PgNotification};
-use sift_metadata::{MemorySecretStore, MetadataStore};
+use sift_metadata::{
+    CrdtType, MembershipRole, MemorySecretStore, MetadataStore, NewDocument, NewRoom, PrincipalId,
+    RoomKind, RoomRole, TenantId,
+};
 use sift_protocol::{
     ColumnMetadata, ConnectionSpec, Engine, ExecuteRequestHttp, Health, Nullability, Page,
     PrimitiveType, Row, SchemaScope, SchemaSnapshot, ServerInfo, SslMode, TypeRef, Value,
@@ -219,10 +222,28 @@ async fn openapi_is_published() {
     assert!(body["paths"]["/v1/metadata/history"].is_object());
     assert!(body["paths"]["/v1/auth/tokens"].is_object());
     assert!(body["paths"]["/v1/sessions/{id}/connections/from-profile"].is_object());
+    assert_eq!(
+        body["paths"]["/v1/metadata/rooms"]["post"]["requestBody"]["content"]["application/json"]
+            ["schema"]["$ref"],
+        "#/components/schemas/CreateRoomRequest"
+    );
+    assert_eq!(
+        body["paths"]["/v1/metadata/rooms"]["get"]["responses"]["200"]["content"]
+            ["application/json"]["schema"]["items"]["$ref"],
+        "#/components/schemas/Room"
+    );
+    assert_eq!(
+        body["paths"]["/v1/auth/tokens"]["post"]["responses"]["200"]["content"]["application/json"]
+            ["schema"]["$ref"],
+        "#/components/schemas/IssueTokenResponse"
+    );
     assert!(body["components"]["securitySchemes"]["bearerAuth"].is_object());
     assert!(body["components"]["schemas"]["ExecuteResponse"].is_object());
     assert!(body["components"]["schemas"]["BulkInsertRequest"].is_object());
     assert!(body["components"]["schemas"]["BulkInsertResponse"].is_object());
+    assert!(body["components"]["schemas"]["CreateRoomRequest"].is_object());
+    assert!(body["components"]["schemas"]["IssueTokenResponse"].is_object());
+    assert!(body["components"]["schemas"]["Room"].is_object());
     assert!(body["components"]["schemas"]["ExecuteResponse"]["properties"]["rows"].is_object());
     assert!(
         body["components"]["schemas"]["OpenConnectionRequest"]["properties"]["engine"].is_object()
@@ -779,6 +800,229 @@ async fn metadata_auth_and_tenant_edges_are_rejected() {
 }
 
 #[tokio::test]
+async fn metadata_room_roles_are_enforced() {
+    let mut state = test_state_with_metadata(true);
+    let metadata = state.metadata.as_ref().unwrap();
+    let viewer = metadata
+        .create_principal("test:viewer", "Viewer", None)
+        .unwrap();
+    let editor = metadata
+        .create_principal("test:editor", "Editor", None)
+        .unwrap();
+    let outsider = metadata
+        .create_principal("test:outsider", "Outsider", None)
+        .unwrap();
+    for principal in [viewer.id, editor.id, outsider.id] {
+        metadata
+            .upsert_tenant_membership(TenantId(1), principal, MembershipRole::Member)
+            .unwrap();
+    }
+    let room = metadata
+        .create_room(
+            TenantId(1),
+            PrincipalId(1),
+            NewRoom {
+                name: "roles".into(),
+                kind: RoomKind::Shared,
+            },
+        )
+        .unwrap();
+    metadata
+        .add_room_member(room.id, viewer.id, RoomRole::Viewer)
+        .unwrap();
+    metadata
+        .add_room_member(room.id, editor.id, RoomRole::Editor)
+        .unwrap();
+    let document = metadata
+        .create_document(
+            room.id,
+            NewDocument {
+                kind: "sql".into(),
+                title: "role-check.sql".into(),
+                crdt_type: CrdtType::Loro,
+                crdt_state: vec![1],
+                position: 0,
+                connection_profile_id: None,
+            },
+        )
+        .unwrap();
+    let (_, viewer_token) = metadata
+        .issue_api_token(viewer.id, Some(TenantId(1)), "viewer", None)
+        .unwrap();
+    let (_, editor_token) = metadata
+        .issue_api_token(editor.id, Some(TenantId(1)), "editor", None)
+        .unwrap();
+    let (_, outsider_token) = metadata
+        .issue_api_token(outsider.id, Some(TenantId(1)), "outsider", None)
+        .unwrap();
+
+    state.auth.loopback_bypass = false;
+    let app = app(state);
+
+    let res = app
+        .clone()
+        .oneshot(
+            Request::get(format!("/v1/metadata/rooms/{}/documents", room.id.0))
+                .header("authorization", format!("Bearer {viewer_token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+
+    let res = app
+        .clone()
+        .oneshot(
+            Request::put(format!("/v1/metadata/documents/{}", document.id.0))
+                .header("authorization", format!("Bearer {viewer_token}"))
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"crdt_state":[2]}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::FORBIDDEN);
+
+    let res = app
+        .clone()
+        .oneshot(
+            Request::put(format!("/v1/metadata/documents/{}", document.id.0))
+                .header("authorization", format!("Bearer {editor_token}"))
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"crdt_state":[3]}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+
+    let res = app
+        .clone()
+        .oneshot(
+            Request::delete(format!("/v1/metadata/rooms/{}", room.id.0))
+                .header("authorization", format!("Bearer {editor_token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::FORBIDDEN);
+
+    let res = app
+        .clone()
+        .oneshot(
+            Request::post(format!("/v1/metadata/rooms/{}/members", room.id.0))
+                .header("authorization", format!("Bearer {viewer_token}"))
+                .header("content-type", "application/json")
+                .body(Body::from(format!(
+                    r#"{{"principal_id":{},"role":"viewer"}}"#,
+                    outsider.id.0
+                )))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::FORBIDDEN);
+
+    let res = app
+        .oneshot(
+            Request::get(format!("/v1/metadata/rooms/{}/documents", room.id.0))
+                .header("authorization", format!("Bearer {outsider_token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn http_execute_records_room_scoped_query_history() {
+    let mut state = test_state_with_metadata(true);
+    let metadata = state.metadata.as_ref().unwrap();
+    let room = metadata
+        .create_room(
+            TenantId(1),
+            PrincipalId(1),
+            NewRoom {
+                name: "history execute".into(),
+                kind: RoomKind::Shared,
+            },
+        )
+        .unwrap();
+    let (_, token) = metadata
+        .issue_api_token(PrincipalId(1), Some(TenantId(1)), "history", None)
+        .unwrap();
+    state.auth.loopback_bypass = false;
+    let app = app(state);
+
+    let session: sift_protocol::SessionInfo = body_json(
+        app.clone()
+            .oneshot(post_json_str("/v1/sessions", r#"{"tag":"history"}"#))
+            .await
+            .unwrap()
+            .into_body(),
+    )
+    .await;
+    let conn: sift_protocol::ConnectionInfo = body_json(
+        app.clone()
+            .oneshot(post_json(
+                format!("/v1/sessions/{}/connections", session.id),
+                sift_protocol::OpenConnectionRequest {
+                    engine: Engine::Postgres,
+                    spec: pg_spec(),
+                },
+            ))
+            .await
+            .unwrap()
+            .into_body(),
+    )
+    .await;
+
+    let res = app
+        .clone()
+        .oneshot(
+            Request::post(format!("/v1/sessions/{}/queries", session.id))
+                .header("authorization", format!("Bearer {token}"))
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::to_vec(&ExecuteRequestHttp {
+                        connection: conn.id,
+                        sql: "SELECT id, name FROM users".into(),
+                        params: Vec::new(),
+                        tx: None,
+                        room_id: Some(room.id.0),
+                        connection_profile_id: None,
+                    })
+                    .unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+
+    let history: Vec<serde_json::Value> = body_json(
+        app.oneshot(
+            Request::get(format!("/v1/metadata/history?room={}&limit=10", room.id.0))
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+        .into_body(),
+    )
+    .await;
+    assert_eq!(history.len(), 1);
+    assert_eq!(history[0]["room_id"], room.id.0);
+    assert_eq!(history[0]["sql_text"], "SELECT id, name FROM users");
+    assert_eq!(history[0]["status"], "ok");
+    assert_eq!(history[0]["row_count"], 2);
+}
+
+#[tokio::test]
 async fn metadata_connection_profile_opens_session_connection() {
     let app = app(test_state_with_metadata(true));
     let session: sift_protocol::SessionInfo = body_json(
@@ -1038,6 +1282,8 @@ async fn execute_returns_drained_rows_and_affected_count() {
         sql: "SELECT id, name FROM users".into(),
         params: Vec::new(),
         tx: None,
+        room_id: None,
+        connection_profile_id: None,
     };
     let res = app
         .oneshot(post_json(format!("/v1/sessions/{sid}/queries"), exec_req))
@@ -1119,6 +1365,8 @@ async fn transaction_flow_requires_explicit_tx_ref() {
                 sql: "SELECT id, name FROM users".into(),
                 params: Vec::new(),
                 tx: None,
+                room_id: None,
+                connection_profile_id: None,
             },
         ))
         .await
@@ -1138,6 +1386,8 @@ async fn transaction_flow_requires_explicit_tx_ref() {
                     connection: conn.id,
                     mode: tx.mode,
                 }),
+                room_id: None,
+                connection_profile_id: None,
             },
         ))
         .await
@@ -1250,6 +1500,8 @@ async fn execute_stream_error_maps_to_http_error() {
                 sql: "BAD".into(),
                 params: Vec::new(),
                 tx: None,
+                room_id: None,
+                connection_profile_id: None,
             },
         ))
         .await

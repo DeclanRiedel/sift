@@ -79,6 +79,12 @@ pub struct ExecuteRequestHttp {
     /// Optional transaction to run under. None = autocommit.
     #[serde(default)]
     pub tx: Option<TxHandleRef>,
+    /// Optional metadata room context for query history attribution.
+    #[serde(default)]
+    pub room_id: Option<i64>,
+    /// Optional metadata connection profile context for query history attribution.
+    #[serde(default)]
+    pub connection_profile_id: Option<i64>,
 }
 
 /// Reference to an open transaction. Returned by the (TBD) transactions

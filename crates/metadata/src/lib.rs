@@ -157,6 +157,57 @@ impl MetadataStore {
         .map_err(Into::into)
     }
 
+    pub fn create_principal(
+        &self,
+        external_id: &str,
+        display_name: &str,
+        email: Option<&str>,
+    ) -> Result<Principal> {
+        let now = now_text();
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO principal (external_id, display_name, email, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?4)",
+            params![external_id, display_name, email, now],
+        )?;
+        let id = PrincipalId(conn.last_insert_rowid());
+        conn.query_row(
+            "SELECT id, external_id, display_name, email, created_at, updated_at
+             FROM principal WHERE id = ?1",
+            params![id.0],
+            principal_from_row,
+        )
+        .map_err(Into::into)
+    }
+
+    pub fn upsert_tenant_membership(
+        &self,
+        tenant: TenantId,
+        principal: PrincipalId,
+        role: MembershipRole,
+    ) -> Result<TenantMembership> {
+        let now = now_text();
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO membership (tenant_id, principal_id, role, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?4)
+             ON CONFLICT(tenant_id, principal_id) DO UPDATE SET
+                role = excluded.role,
+                updated_at = excluded.updated_at",
+            params![tenant.0, principal.0, role.as_str(), now],
+        )?;
+        conn.query_row(
+            "SELECT t.id, t.name, t.kind, t.created_at, t.updated_at,
+                    m.principal_id, m.role, m.created_at, m.updated_at
+             FROM membership m
+             JOIN tenant t ON t.id = m.tenant_id
+             WHERE m.tenant_id = ?1 AND m.principal_id = ?2",
+            params![tenant.0, principal.0],
+            tenant_membership_from_row,
+        )
+        .map_err(Into::into)
+    }
+
     pub fn list_principal_tenants(&self, principal: PrincipalId) -> Result<Vec<TenantMembership>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
@@ -623,6 +674,15 @@ impl MetadataStore {
         members
     }
 
+    pub fn get_room_member(
+        &self,
+        room: RoomId,
+        principal: PrincipalId,
+    ) -> Result<Option<RoomMember>> {
+        let conn = self.conn.lock().unwrap();
+        self.room_member_optional_locked(&conn, room, principal)
+    }
+
     pub fn remove_room_member(&self, room: RoomId, principal: PrincipalId) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
@@ -856,12 +916,23 @@ impl MetadataStore {
         room: RoomId,
         principal: PrincipalId,
     ) -> Result<RoomMember> {
+        self.room_member_optional_locked(conn, room, principal)?
+            .ok_or(MetadataError::RoomNotFound(room))
+    }
+
+    fn room_member_optional_locked(
+        &self,
+        conn: &Connection,
+        room: RoomId,
+        principal: PrincipalId,
+    ) -> Result<Option<RoomMember>> {
         conn.query_row(
             "SELECT room_id, principal_id, role, joined_at
              FROM room_member WHERE room_id = ?1 AND principal_id = ?2",
             params![room.0, principal.0],
             room_member_from_row,
         )
+        .optional()
         .map_err(Into::into)
     }
 

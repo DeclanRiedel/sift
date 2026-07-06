@@ -18,8 +18,8 @@ use std::time::Instant;
 
 use sift_metadata::{
     ApiTokenId, ConnectionProfileId, CrdtType, CredentialMode, Document, DocumentId, MetadataStore,
-    NewConnectionProfile, NewDocument, NewRoom, PrincipalId, QueryHistory, Room, RoomId, RoomKind,
-    RoomMember, RoomRole, TenantId, TenantMembership,
+    NewConnectionProfile, NewDocument, NewQueryHistory, NewRoom, PrincipalId, QueryHistory,
+    QueryStatus, Room, RoomId, RoomKind, RoomMember, RoomRole, TenantId, TenantMembership,
 };
 use sift_protocol::{
     AuditEntry, BeginTransactionRequest, BulkInsertRequest, CancelRequest, EndTransactionRequest,
@@ -200,41 +200,48 @@ struct AuthContext {
     tenants: Vec<TenantMembership>,
 }
 
-#[derive(Deserialize)]
+struct ExecuteMetadataContext {
+    metadata: MetadataStore,
+    principal_id: PrincipalId,
+    room_id: Option<RoomId>,
+    connection_profile_id: Option<ConnectionProfileId>,
+}
+
+#[derive(Deserialize, JsonSchema)]
 struct TenantQuery {
     tenant: i64,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, JsonSchema)]
 struct RoomListQuery {
     tenant: i64,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, JsonSchema)]
 struct DeleteConnectionQuery {
     tenant: i64,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, JsonSchema)]
 struct HistoryQuery {
     room: Option<i64>,
     limit: Option<u32>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, JsonSchema)]
 struct CreateRoomRequest {
     tenant_id: i64,
     name: String,
     kind: RoomKind,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, JsonSchema)]
 struct AddRoomMemberRequest {
     principal_id: i64,
     role: RoomRole,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, JsonSchema)]
 struct CreateDocumentRequest {
     kind: String,
     title: String,
@@ -244,12 +251,12 @@ struct CreateDocumentRequest {
     connection_profile_id: Option<i64>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, JsonSchema)]
 struct UpdateDocumentSnapshotRequest {
     crdt_state: Vec<u8>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, JsonSchema)]
 struct UpsertConnectionProfileRequest {
     tenant_id: i64,
     name: String,
@@ -260,25 +267,25 @@ struct UpsertConnectionProfileRequest {
     tags: Vec<String>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, JsonSchema)]
 struct SetCredentialRequest {
     secret: String,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, JsonSchema)]
 struct OpenConnectionFromProfileRequest {
     tenant_id: i64,
     profile_id: i64,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, JsonSchema)]
 struct IssueTokenRequest {
     name: String,
     tenant_id: Option<i64>,
     expires_at: Option<DateTime<Utc>>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, JsonSchema)]
 struct IssueTokenResponse {
     token: sift_metadata::ApiTokenRow,
     plaintext: String,
@@ -312,7 +319,10 @@ fn resolve_auth_context(state: &AppState, headers: &HeaderMap) -> ApiResult<Auth
     let metadata = metadata_store(state)?;
     if let Some(token) = bearer_from_headers(headers) {
         if let Some(row) = metadata.verify_api_token(token)? {
-            let tenants = metadata.list_principal_tenants(row.principal_id)?;
+            let mut tenants = metadata.list_principal_tenants(row.principal_id)?;
+            if let Some(scope) = row.tenant_id {
+                tenants.retain(|membership| membership.tenant.id == scope);
+            }
             return Ok(AuthContext {
                 principal_id: row.principal_id,
                 tenants,
@@ -434,13 +444,54 @@ fn ensure_room_access(
     Ok(room)
 }
 
+#[derive(Clone, Copy)]
+enum RoomPermission {
+    Read,
+    Write,
+    Admin,
+}
+
+fn ensure_room_permission(
+    metadata: &MetadataStore,
+    auth: &AuthContext,
+    room: RoomId,
+    permission: RoomPermission,
+) -> ApiResult<Room> {
+    let room_row = ensure_room_access(metadata, auth, room)?;
+    let Some(member) = metadata.get_room_member(room, auth.principal_id)? else {
+        return Err(ApiError::Forbidden(format!(
+            "principal {:?} is not a member of room {:?}",
+            auth.principal_id, room
+        )));
+    };
+    if room_role_allows(&member.role, permission) {
+        Ok(room_row)
+    } else {
+        Err(ApiError::Forbidden(format!(
+            "room role {:?} cannot perform this action in room {:?}",
+            member.role, room
+        )))
+    }
+}
+
+fn room_role_allows(role: &RoomRole, permission: RoomPermission) -> bool {
+    match permission {
+        RoomPermission::Read => {
+            matches!(role, RoomRole::Owner | RoomRole::Editor | RoomRole::Viewer)
+        }
+        RoomPermission::Write => matches!(role, RoomRole::Owner | RoomRole::Editor),
+        RoomPermission::Admin => matches!(role, RoomRole::Owner),
+    }
+}
+
 fn ensure_document_access(
     metadata: &MetadataStore,
     auth: &AuthContext,
     document: DocumentId,
+    permission: RoomPermission,
 ) -> ApiResult<Document> {
     let document = metadata.get_document(document)?;
-    ensure_room_access(metadata, auth, document.room_id)?;
+    ensure_room_permission(metadata, auth, document.room_id, permission)?;
     Ok(document)
 }
 
@@ -453,6 +504,94 @@ fn push_metadata_operation(state: &AppState, action: &str, target: &str, id: Opt
         },
         OperationStatus::Succeeded,
     );
+}
+
+async fn execute_metadata_context(
+    state: &AppState,
+    headers: HeaderMap,
+    req: &ExecuteRequestHttp,
+) -> ApiResult<Option<ExecuteMetadataContext>> {
+    if req.room_id.is_none() && req.connection_profile_id.is_none() {
+        return Ok(None);
+    }
+
+    let metadata = metadata_store_cloned(state)?;
+    let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
+    let room = req.room_id.map(room_id).transpose()?;
+    let profile = req
+        .connection_profile_id
+        .map(connection_profile_id)
+        .transpose()?;
+    let metadata_for_check = metadata.clone();
+    let auth_for_check = auth.clone();
+    metadata_blocking(move || {
+        if let Some(room) = room {
+            ensure_room_permission(
+                &metadata_for_check,
+                &auth_for_check,
+                room,
+                RoomPermission::Write,
+            )?;
+        }
+        if let Some(profile) = profile {
+            let profile = metadata_for_check.get_connection_profile_for_any_tenant(profile)?;
+            ensure_tenant(&auth_for_check, profile.tenant_id)?;
+        }
+        Ok(())
+    })
+    .await?;
+
+    Ok(Some(ExecuteMetadataContext {
+        metadata,
+        principal_id: auth.principal_id,
+        room_id: room,
+        connection_profile_id: profile,
+    }))
+}
+
+async fn record_execute_history(
+    context: ExecuteMetadataContext,
+    sql_text: String,
+    duration_ms: i64,
+    result: &ApiResult<sift_protocol::ExecuteResponse>,
+) {
+    let (status, row_count, error_code, error_message) = match result {
+        Ok(response) => (
+            QueryStatus::Ok,
+            Some(response.rows.len() as i64),
+            None,
+            None,
+        ),
+        Err(ApiError::Driver(error)) => (
+            QueryStatus::Error,
+            None,
+            Some(error.code.to_string()),
+            Some(error.message.clone()),
+        ),
+        Err(error) => (QueryStatus::Error, None, None, Some(error.to_string())),
+    };
+    let record = NewQueryHistory {
+        principal_id: context.principal_id,
+        room_id: context.room_id,
+        connection_profile_id: context.connection_profile_id,
+        sql_text,
+        duration_ms: Some(duration_ms),
+        row_count,
+        status,
+        error_code,
+        error_message,
+    };
+    if let Err(error) = metadata_blocking(move || {
+        context
+            .metadata
+            .record_query_history(record)
+            .map(|_| ())
+            .map_err(Into::into)
+    })
+    .await
+    {
+        tracing::warn!(%error, "failed to record query history");
+    }
 }
 
 async fn health(State(state): State<AppState>) -> Json<Health> {
@@ -635,19 +774,20 @@ async fn openapi() -> Json<serde_json::Value> {
                 "get": {
                     "operationId": "listMetadataTenants",
                     "summary": "List current principal tenant memberships",
-                    "responses": { "200": { "description": "Tenant memberships", "content": json_array_object_content() } }
+                    "responses": { "200": { "description": "Tenant memberships", "content": json_array_content("TenantMembership") } }
                 }
             },
             "/v1/metadata/rooms": {
                 "get": {
                     "operationId": "listMetadataRooms",
                     "summary": "List rooms for current principal in a tenant",
-                    "responses": { "200": { "description": "Rooms", "content": json_array_object_content() } }
+                    "responses": { "200": { "description": "Rooms", "content": json_array_content("Room") } }
                 },
                 "post": {
                     "operationId": "createMetadataRoom",
                     "summary": "Create room",
-                    "responses": { "200": { "description": "Room", "content": json_object_content() } }
+                    "requestBody": json_body("CreateRoomRequest"),
+                    "responses": { "200": { "description": "Room", "content": json_content("Room") } }
                 }
             },
             "/v1/metadata/rooms/{id}": {
@@ -661,12 +801,13 @@ async fn openapi() -> Json<serde_json::Value> {
                 "get": {
                     "operationId": "listMetadataRoomMembers",
                     "summary": "List room members",
-                    "responses": { "200": { "description": "Room members", "content": json_array_object_content() } }
+                    "responses": { "200": { "description": "Room members", "content": json_array_content("RoomMember") } }
                 },
                 "post": {
                     "operationId": "addMetadataRoomMember",
                     "summary": "Add or update room member",
-                    "responses": { "200": { "description": "Room member", "content": json_object_content() } }
+                    "requestBody": json_body("AddRoomMemberRequest"),
+                    "responses": { "200": { "description": "Room member", "content": json_content("RoomMember") } }
                 }
             },
             "/v1/metadata/rooms/{id}/members/{principal_id}": {
@@ -694,19 +835,21 @@ async fn openapi() -> Json<serde_json::Value> {
                 "get": {
                     "operationId": "listMetadataDocuments",
                     "summary": "List room documents",
-                    "responses": { "200": { "description": "Documents", "content": json_array_object_content() } }
+                    "responses": { "200": { "description": "Documents", "content": json_array_content("Document") } }
                 },
                 "post": {
                     "operationId": "createMetadataDocument",
                     "summary": "Create room document",
-                    "responses": { "200": { "description": "Document", "content": json_object_content() } }
+                    "requestBody": json_body("CreateDocumentRequest"),
+                    "responses": { "200": { "description": "Document", "content": json_content("Document") } }
                 }
             },
             "/v1/metadata/documents/{id}": {
                 "put": {
                     "operationId": "updateMetadataDocument",
                     "summary": "Update document CRDT snapshot",
-                    "responses": { "200": { "description": "Document", "content": json_object_content() } }
+                    "requestBody": json_body("UpdateDocumentSnapshotRequest"),
+                    "responses": { "200": { "description": "Document", "content": json_content("Document") } }
                 },
                 "delete": {
                     "operationId": "deleteMetadataDocument",
@@ -718,12 +861,13 @@ async fn openapi() -> Json<serde_json::Value> {
                 "get": {
                     "operationId": "listMetadataConnectionProfiles",
                     "summary": "List connection profiles",
-                    "responses": { "200": { "description": "Connection profiles", "content": json_array_object_content() } }
+                    "responses": { "200": { "description": "Connection profiles", "content": json_array_content("ConnectionProfile") } }
                 },
                 "post": {
                     "operationId": "upsertMetadataConnectionProfile",
                     "summary": "Create or replace connection profile",
-                    "responses": { "200": { "description": "Connection profile", "content": json_object_content() } }
+                    "requestBody": json_body("UpsertConnectionProfileRequest"),
+                    "responses": { "200": { "description": "Connection profile", "content": json_content("ConnectionProfile") } }
                 }
             },
             "/v1/metadata/connections/{id}": {
@@ -737,6 +881,7 @@ async fn openapi() -> Json<serde_json::Value> {
                 "post": {
                     "operationId": "setMetadataConnectionCredential",
                     "summary": "Set per-user credential for connection profile",
+                    "requestBody": json_body("SetCredentialRequest"),
                     "responses": { "200": { "description": "Ack", "content": json_object_content() } }
                 }
             },
@@ -744,19 +889,20 @@ async fn openapi() -> Json<serde_json::Value> {
                 "get": {
                     "operationId": "listMetadataHistory",
                     "summary": "List query history by room or current principal",
-                    "responses": { "200": { "description": "Query history", "content": json_array_object_content() } }
+                    "responses": { "200": { "description": "Query history", "content": json_array_content("QueryHistory") } }
                 }
             },
             "/v1/auth/tokens": {
                 "get": {
                     "operationId": "listAuthTokens",
                     "summary": "List current principal API tokens",
-                    "responses": { "200": { "description": "API tokens", "content": json_array_object_content() } }
+                    "responses": { "200": { "description": "API tokens", "content": json_array_content("ApiTokenRow") } }
                 },
                 "post": {
                     "operationId": "issueAuthToken",
                     "summary": "Issue API token; plaintext returned once",
-                    "responses": { "200": { "description": "Issued token", "content": json_object_content() } }
+                    "requestBody": json_body("IssueTokenRequest"),
+                    "responses": { "200": { "description": "Issued token", "content": json_content("IssueTokenResponse") } }
                 }
             },
             "/v1/auth/tokens/{id}": {
@@ -770,6 +916,7 @@ async fn openapi() -> Json<serde_json::Value> {
                 "post": {
                     "operationId": "openConnectionFromProfile",
                     "summary": "Open session connection from metadata profile",
+                    "requestBody": json_body("OpenConnectionFromProfileRequest"),
                     "responses": { "200": { "description": "Connection", "content": json_content("ConnectionInfo") } }
                 }
             }
@@ -813,17 +960,6 @@ fn json_array_content(schema: &'static str) -> serde_json::Value {
     })
 }
 
-fn json_array_object_content() -> serde_json::Value {
-    json!({
-        "application/json": {
-            "schema": {
-                "type": "array",
-                "items": { "type": "object" }
-            }
-        }
-    })
-}
-
 fn json_object_content() -> serde_json::Value {
     json!({
         "application/json": {
@@ -853,6 +989,25 @@ fn protocol_schema_refs() -> serde_json::Value {
     add_schema::<sift_protocol::TransactionInfo>("TransactionInfo", &mut schemas);
     add_schema::<sift_protocol::WsClientMessage>("WsClientMessage", &mut schemas);
     add_schema::<sift_protocol::WsServerMessage>("WsServerMessage", &mut schemas);
+    add_schema::<sift_metadata::ApiTokenRow>("ApiTokenRow", &mut schemas);
+    add_schema::<sift_metadata::ConnectionProfile>("ConnectionProfile", &mut schemas);
+    add_schema::<sift_metadata::Document>("Document", &mut schemas);
+    add_schema::<sift_metadata::QueryHistory>("QueryHistory", &mut schemas);
+    add_schema::<sift_metadata::Room>("Room", &mut schemas);
+    add_schema::<sift_metadata::RoomMember>("RoomMember", &mut schemas);
+    add_schema::<sift_metadata::TenantMembership>("TenantMembership", &mut schemas);
+    add_schema::<AddRoomMemberRequest>("AddRoomMemberRequest", &mut schemas);
+    add_schema::<CreateDocumentRequest>("CreateDocumentRequest", &mut schemas);
+    add_schema::<CreateRoomRequest>("CreateRoomRequest", &mut schemas);
+    add_schema::<IssueTokenRequest>("IssueTokenRequest", &mut schemas);
+    add_schema::<IssueTokenResponse>("IssueTokenResponse", &mut schemas);
+    add_schema::<OpenConnectionFromProfileRequest>(
+        "OpenConnectionFromProfileRequest",
+        &mut schemas,
+    );
+    add_schema::<SetCredentialRequest>("SetCredentialRequest", &mut schemas);
+    add_schema::<UpdateDocumentSnapshotRequest>("UpdateDocumentSnapshotRequest", &mut schemas);
+    add_schema::<UpsertConnectionProfileRequest>("UpsertConnectionProfileRequest", &mut schemas);
     serde_json::Value::Object(schemas)
 }
 
@@ -934,7 +1089,7 @@ async fn delete_metadata_room(
     let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
     let room = room_id(id)?;
     metadata_blocking(move || {
-        ensure_room_access(&metadata, &auth, room)?;
+        ensure_room_permission(&metadata, &auth, room, RoomPermission::Admin)?;
         metadata.delete_room(room)?;
         Ok(())
     })
@@ -953,7 +1108,7 @@ async fn list_metadata_room_members(
     let room = room_id(id)?;
     Ok(Json(
         metadata_blocking(move || {
-            ensure_room_access(&metadata, &auth, room)?;
+            ensure_room_permission(&metadata, &auth, room, RoomPermission::Read)?;
             metadata.list_room_members(room).map_err(Into::into)
         })
         .await?,
@@ -971,7 +1126,7 @@ async fn add_metadata_room_member(
     let room = room_id(id)?;
     let principal = principal_id(req.principal_id)?;
     let member = metadata_blocking(move || {
-        ensure_room_access(&metadata, &auth, room)?;
+        ensure_room_permission(&metadata, &auth, room, RoomPermission::Admin)?;
         metadata
             .add_room_member(room, principal, req.role)
             .map_err(Into::into)
@@ -991,7 +1146,7 @@ async fn remove_metadata_room_member(
     let room = room_id(id)?;
     let principal = principal_id(principal)?;
     metadata_blocking(move || {
-        ensure_room_access(&metadata, &auth, room)?;
+        ensure_room_permission(&metadata, &auth, room, RoomPermission::Admin)?;
         metadata.remove_room_member(room, principal)?;
         Ok(())
     })
@@ -1012,6 +1167,11 @@ async fn join_metadata_room(
     let member = metadata_blocking(move || {
         let room_row = metadata.get_room(room)?;
         ensure_tenant(&auth, room_row.tenant_id)?;
+        if room_row.kind == RoomKind::Personal && room_row.created_by != principal {
+            return Err(ApiError::Forbidden(
+                "personal rooms cannot be joined by other principals".into(),
+            ));
+        }
         metadata
             .add_room_member(room, principal, RoomRole::Editor)
             .map_err(Into::into)
@@ -1031,7 +1191,7 @@ async fn leave_metadata_room(
     let room = room_id(id)?;
     let principal = auth.principal_id;
     metadata_blocking(move || {
-        ensure_room_access(&metadata, &auth, room)?;
+        ensure_room_permission(&metadata, &auth, room, RoomPermission::Read)?;
         metadata.remove_room_member(room, principal)?;
         Ok(())
     })
@@ -1050,7 +1210,7 @@ async fn list_metadata_documents(
     let room = room_id(id)?;
     Ok(Json(
         metadata_blocking(move || {
-            ensure_room_access(&metadata, &auth, room)?;
+            ensure_room_permission(&metadata, &auth, room, RoomPermission::Read)?;
             metadata.list_documents(room).map_err(Into::into)
         })
         .await?,
@@ -1067,7 +1227,7 @@ async fn create_metadata_document(
     let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
     let room = room_id(id)?;
     let document = metadata_blocking(move || {
-        ensure_room_access(&metadata, &auth, room)?;
+        ensure_room_permission(&metadata, &auth, room, RoomPermission::Write)?;
         metadata
             .create_document(
                 room,
@@ -1097,7 +1257,7 @@ async fn update_metadata_document(
     let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
     let document = document_id(id)?;
     let updated = metadata_blocking(move || {
-        ensure_document_access(&metadata, &auth, document)?;
+        ensure_document_access(&metadata, &auth, document, RoomPermission::Write)?;
         metadata
             .update_document_snapshot(document, req.crdt_state)
             .map_err(Into::into)
@@ -1116,7 +1276,7 @@ async fn delete_metadata_document(
     let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
     let document = document_id(id)?;
     metadata_blocking(move || {
-        ensure_document_access(&metadata, &auth, document)?;
+        ensure_document_access(&metadata, &auth, document, RoomPermission::Write)?;
         metadata.delete_document(document)?;
         Ok(())
     })
@@ -1227,7 +1387,7 @@ async fn list_metadata_history(
         metadata_blocking(move || {
             if let Some(room) = q.room {
                 let room = room_id(room)?;
-                ensure_room_access(&metadata, &auth, room)?;
+                ensure_room_permission(&metadata, &auth, room, RoomPermission::Read)?;
                 metadata
                     .list_query_history_for_room(room, limit)
                     .map_err(Into::into)
@@ -1506,14 +1666,23 @@ fn build_scope(q: SchemaQuery) -> ApiResult<SchemaScope> {
 
 async fn execute_query(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Path(id): Path<sift_protocol::SessionId>,
     Json(req): Json<ExecuteRequestHttp>,
 ) -> ApiResult<Json<sift_protocol::ExecuteResponse>> {
+    let metadata_context = execute_metadata_context(&state, headers, &req).await?;
+    let sql_text = req.sql.clone();
     let operation = Operation::ExecuteQuery {
         session: id,
         request: req.clone(),
     };
-    let resp = state.sessions.execute_http(id, req).await?;
+    let started = Instant::now();
+    let result = state.sessions.execute_http(id, req).await;
+    let duration_ms = started.elapsed().as_millis().min(i64::MAX as u128) as i64;
+    if let Some(context) = metadata_context {
+        record_execute_history(context, sql_text, duration_ms, &result).await;
+    }
+    let resp = result?;
     state
         .sessions
         .push_operation(operation, OperationStatus::Succeeded);

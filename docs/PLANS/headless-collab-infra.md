@@ -47,12 +47,23 @@ Implemented:
 - `sift-server` constructs the local metadata store at startup, bootstraps the
   local tenant/principal, and exposes a headless metadata/auth HTTP surface.
 - Metadata-backed API tokens can authenticate metadata routes; local loopback
-  mode resolves to the bootstrapped local principal.
+  mode resolves to the bootstrapped local principal. Tenant-scoped tokens only
+  authorize the tenant they were issued for.
 - Headless HTTP routes now cover tenant listing, room create/list/delete,
   room member join/leave/add/remove/list, document create/list/update/delete,
   connection profile create/list/delete, per-user credential set,
   open-session-connection-from-profile, token issue/list/revoke, room-scoped
   history, and principal-scoped history.
+- Room HTTP routes enforce room roles:
+  - viewers can read room members, documents, and room-scoped history;
+  - editors can create/update/delete documents and attach query history
+    context;
+  - owners can manage room membership and delete rooms.
+- HTTP execute accepts optional `room_id` and `connection_profile_id` metadata
+  context. When supplied, the server validates room/profile access and records
+  actor-attributed query history after execution.
+- OpenAPI metadata/auth routes now reference typed request and response
+  schemas instead of anonymous object payloads.
 - Synchronous SQLite metadata work in HTTP handlers runs via `spawn_blocking`
   for the local/headless route surface.
 - `sift-doc` exists as the first pure document abstraction crate for opaque
@@ -125,6 +136,9 @@ Deliberately not implemented yet:
 - [x] Connection profiles: create/list/delete/set credential/open from profile.
 - [x] Query history: list by room.
 - [x] Query history: list by principal.
+- [x] HTTP execute records room/profile-attributed query history when metadata
+  context is supplied.
+- [x] Room routes enforce owner/editor/viewer permissions.
 - [x] Add OpenAPI coverage and operation-log entries for metadata routes.
 
 ### H6 — `sift-doc`
@@ -161,13 +175,13 @@ Deliberately not implemented yet:
 ## Known Design Gaps
 
 - `SessionStore` is still session-centric and single-stream-per-WebSocket.
-- OpenAPI is manually assembled and will become harder to maintain as routes
-  grow.
+- OpenAPI still has a hand-authored path map, though metadata/auth payloads now
+  use typed schemas.
 - Metadata uses synchronous SQLite behind a mutex and HTTP handlers now isolate
   sync store calls with `spawn_blocking`; hosted mode may still want a metadata
   actor or pool.
 - API tokens issued before token lookup migration cannot be verified by lookup;
   no server release used them, so this is acceptable.
-- Metadata route coverage is intentionally headless and minimal; permissions
-  are tenant-scoped today and need role-aware room authorization before hosted
-  multi-user mode.
+- Metadata route coverage is intentionally headless and focused on the server
+  contract; room runtime, presence, and document operation fanout still need
+  dedicated coverage once those surfaces exist.
