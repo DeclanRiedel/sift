@@ -1709,6 +1709,108 @@ async fn execute_stream_error_maps_to_http_error() {
 }
 
 #[tokio::test]
+async fn savepoint_routes_dispatch_to_ext_traits() {
+    let app = app(test_state());
+
+    let session: sift_protocol::SessionInfo = body_json(
+        app.clone()
+            .oneshot(post_json_str("/v1/sessions", "{}"))
+            .await
+            .unwrap()
+            .into_body(),
+    )
+    .await;
+    let sid = session.id;
+
+    let conn: sift_protocol::ConnectionInfo = body_json(
+        app.clone()
+            .oneshot(post_json(
+                format!("/v1/sessions/{sid}/connections"),
+                serde_json::json!({
+                    "engine": "postgres",
+                    "host": "mock.invalid",
+                    "user": "mock",
+                }),
+            ))
+            .await
+            .unwrap()
+            .into_body(),
+    )
+    .await;
+
+    let tx: sift_protocol::TransactionInfo = body_json(
+        app.clone()
+            .oneshot(post_json(
+                format!("/v1/sessions/{sid}/transactions"),
+                sift_protocol::BeginTransactionRequest {
+                    connection: conn.id,
+                    mode: sift_protocol::TxMode::default(),
+                },
+            ))
+            .await
+            .unwrap()
+            .into_body(),
+    )
+    .await;
+
+    let sp_body = sift_protocol::SavepointRequest {
+        connection: conn.id,
+        tx_id: tx.tx_id,
+        name: "sp1".into(),
+    };
+
+    let res = app
+        .clone()
+        .oneshot(post_json(
+            format!("/v1/sessions/{sid}/transactions/{}/savepoints", tx.tx_id),
+            sp_body.clone(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+
+    let res = app
+        .clone()
+        .oneshot(post_json(
+            format!(
+                "/v1/sessions/{sid}/transactions/{}/savepoints/rollback",
+                tx.tx_id
+            ),
+            sp_body.clone(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+
+    let res = app
+        .clone()
+        .oneshot(post_json(
+            format!(
+                "/v1/sessions/{sid}/transactions/{}/savepoints/release",
+                tx.tx_id
+            ),
+            sp_body,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+
+    // Path/body tx_id mismatch must be rejected.
+    let res = app
+        .oneshot(post_json(
+            format!("/v1/sessions/{sid}/transactions/{}/savepoints", tx.tx_id),
+            sift_protocol::SavepointRequest {
+                connection: conn.id,
+                tx_id: sift_protocol::TxId(999),
+                name: "sp2".into(),
+            },
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
 async fn loopback_bypass_rejects_non_loopback_peer() {
     use axum::extract::ConnectInfo;
     use std::net::SocketAddr;

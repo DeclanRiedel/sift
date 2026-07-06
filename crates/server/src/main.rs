@@ -57,9 +57,9 @@ async fn main() -> anyhow::Result<()> {
         listener,
         app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
     )
-        .with_graceful_shutdown(shutdown_signal())
-        .await
-        .context("server runtime")?;
+    .with_graceful_shutdown(shutdown_signal())
+    .await
+    .context("server runtime")?;
 
     tracing::info!("sift-server stopped");
     Ok(())

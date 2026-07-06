@@ -110,6 +110,18 @@ pub struct EndTransactionRequest {
     pub tx_id: TxId,
 }
 
+/// Body of savepoint operations. `Savepoint` creates the named point
+/// within an open transaction; `RollbackToSavepoint` and `ReleaseSavepoint`
+/// target an existing one. `RELEASE SAVEPOINT` is Postgres-only — SQL
+/// Server has no analogue and the server returns
+/// `Code::UnsupportedForEngine` in that case.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct SavepointRequest {
+    pub connection: ConnectionId,
+    pub tx_id: TxId,
+    pub name: String,
+}
+
 /// Server-visible transaction metadata.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct TransactionInfo {

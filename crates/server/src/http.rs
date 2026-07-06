@@ -28,8 +28,8 @@ use sift_protocol::{
     AuditEntry, BeginTransactionRequest, BulkInsertRequest, CancelRequest,
     DocumentOperationEnvelope, EndTransactionRequest, Engine, ExecuteRequest, ExecuteRequestHttp,
     Health, ObjectPath, OpenConnectionRequest, OpenSessionRequest, Operation, OperationStatus,
-    RoomClientMessage, RoomQueryResult, RoomQueryStatus, RoomServerMessage, SchemaFilter,
-    SchemaScope, WsClientMessage, WsServerMessage, PROTOCOL_VERSION,
+    RoomClientMessage, RoomQueryResult, RoomQueryStatus, RoomServerMessage, SavepointRequest,
+    SchemaFilter, SchemaScope, WsClientMessage, WsServerMessage, PROTOCOL_VERSION,
 };
 
 use crate::error::{ApiError, ApiResult};
@@ -138,6 +138,18 @@ pub fn app(state: AppState) -> Router {
         .route(
             "/v1/sessions/:id/transactions/:tx_id/rollback",
             post(rollback_transaction),
+        )
+        .route(
+            "/v1/sessions/:id/transactions/:tx_id/savepoints",
+            post(create_savepoint),
+        )
+        .route(
+            "/v1/sessions/:id/transactions/:tx_id/savepoints/rollback",
+            post(rollback_to_savepoint),
+        )
+        .route(
+            "/v1/sessions/:id/transactions/:tx_id/savepoints/release",
+            post(release_savepoint),
         )
         .route("/v1/sessions/:id/ws", get(ws_session))
         .route(
@@ -1831,6 +1843,72 @@ async fn rollback_transaction(
     state.sessions.rollback_transaction(id, req.clone()).await?;
     state.sessions.push_operation(
         Operation::RollbackTransaction {
+            session: id,
+            request: req,
+        },
+        OperationStatus::Succeeded,
+    );
+    Ok(Json(json!({"ok": true})))
+}
+
+async fn create_savepoint(
+    State(state): State<AppState>,
+    Path((id, tx_id)): Path<(sift_protocol::SessionId, sift_protocol::TxId)>,
+    Json(req): Json<SavepointRequest>,
+) -> ApiResult<Json<serde_json::Value>> {
+    if req.tx_id != tx_id {
+        return Err(ApiError::BadRequest(
+            "`tx_id` body value must match tx id in path".into(),
+        ));
+    }
+    state.sessions.create_savepoint(id, req.clone()).await?;
+    state.sessions.push_operation(
+        Operation::Savepoint {
+            session: id,
+            request: req,
+        },
+        OperationStatus::Succeeded,
+    );
+    Ok(Json(json!({"ok": true})))
+}
+
+async fn rollback_to_savepoint(
+    State(state): State<AppState>,
+    Path((id, tx_id)): Path<(sift_protocol::SessionId, sift_protocol::TxId)>,
+    Json(req): Json<SavepointRequest>,
+) -> ApiResult<Json<serde_json::Value>> {
+    if req.tx_id != tx_id {
+        return Err(ApiError::BadRequest(
+            "`tx_id` body value must match tx id in path".into(),
+        ));
+    }
+    state
+        .sessions
+        .rollback_to_savepoint(id, req.clone())
+        .await?;
+    state.sessions.push_operation(
+        Operation::RollbackToSavepoint {
+            session: id,
+            request: req,
+        },
+        OperationStatus::Succeeded,
+    );
+    Ok(Json(json!({"ok": true})))
+}
+
+async fn release_savepoint(
+    State(state): State<AppState>,
+    Path((id, tx_id)): Path<(sift_protocol::SessionId, sift_protocol::TxId)>,
+    Json(req): Json<SavepointRequest>,
+) -> ApiResult<Json<serde_json::Value>> {
+    if req.tx_id != tx_id {
+        return Err(ApiError::BadRequest(
+            "`tx_id` body value must match tx id in path".into(),
+        ));
+    }
+    state.sessions.release_savepoint(id, req.clone()).await?;
+    state.sessions.push_operation(
+        Operation::ReleaseSavepoint {
             session: id,
             request: req,
         },

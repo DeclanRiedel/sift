@@ -234,9 +234,8 @@ impl Driver for MssqlDriver {
             let cursor_key = cursor_id.0;
             let cleanup_inner = Arc::clone(&inner);
             let error_tx = tx.clone();
-            let fut = std::panic::AssertUnwindSafe(run_query(
-                inner, conn_id, conn, cursor_id, req, tx,
-            ));
+            let fut =
+                std::panic::AssertUnwindSafe(run_query(inner, conn_id, conn, cursor_id, req, tx));
             if let Err(panic) = futures::FutureExt::catch_unwind(fut).await {
                 let msg = panic_message(panic);
                 tracing::error!(cursor_key, "sqlserver query task panicked: {msg}");
@@ -385,10 +384,7 @@ async fn run_query(
         // (SELECT/WITH/VALUES/EXEC/…) and DML with OUTPUT stay on the
         // streaming `query()` path to preserve returned rows.
         if is_pure_dml(&req.sql) {
-            let exec = conn
-                .execute(req.sql, &param_refs)
-                .await
-                .map_err(ms_err)?;
+            let exec = conn.execute(req.sql, &param_refs).await.map_err(ms_err)?;
             let _ = tx
                 .send(sift_protocol::Page::Done {
                     affected_rows: Some(exec.total()),
@@ -1194,7 +1190,9 @@ mod tests {
         assert!(is_pure_dml("INSERT INTO t VALUES (1)"));
         assert!(is_pure_dml("  update t set x = 1 where id = 2"));
         assert!(is_pure_dml("DELETE FROM t"));
-        assert!(is_pure_dml("MERGE t USING s ON s.id = t.id WHEN MATCHED THEN UPDATE SET x = s.x;"));
+        assert!(is_pure_dml(
+            "MERGE t USING s ON s.id = t.id WHEN MATCHED THEN UPDATE SET x = s.x;"
+        ));
 
         // Row-producing statements stay on the streaming path.
         assert!(!is_pure_dml("SELECT * FROM t"));

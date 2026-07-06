@@ -6,8 +6,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     BeginTransactionRequest, BulkInsertRequest, CancelRequest, ConnectionId, EndTransactionRequest,
-    ExecuteRequestHttp, OpenConnectionRequest, OpenSessionRequest, SchemaScope, SessionId,
-    TextDocumentOperation,
+    ExecuteRequestHttp, OpenConnectionRequest, OpenSessionRequest, SavepointRequest, SchemaScope,
+    SessionId, TextDocumentOperation,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
@@ -57,6 +57,18 @@ pub enum Operation {
     RollbackTransaction {
         session: SessionId,
         request: EndTransactionRequest,
+    },
+    Savepoint {
+        session: SessionId,
+        request: SavepointRequest,
+    },
+    RollbackToSavepoint {
+        session: SessionId,
+        request: SavepointRequest,
+    },
+    ReleaseSavepoint {
+        session: SessionId,
+        request: SavepointRequest,
     },
     Metadata {
         action: String,

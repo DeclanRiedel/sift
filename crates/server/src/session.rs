@@ -13,15 +13,16 @@ use std::time::Duration;
 
 use dashmap::DashMap;
 use sift_driver_api::{
-    BulkFormat, BulkOp, ConnHandle, Driver, NotificationStream, ResultSetStream, TxHandle,
+    BulkFormat, BulkOp, ConnHandle, Driver, MssqlSavepoint, NotificationStream, PgSavepoint,
+    ResultSetStream, TxHandle,
 };
 use sift_protocol::{
     AuditEntry, BeginTransactionRequest, BulkInsertFormat, BulkInsertRequest, BulkInsertResponse,
-    ColumnMetadata, ConnectionId, ConnectionInfo, ConnectionSpec, CursorId, DriverError,
+    Code, ColumnMetadata, ConnectionId, ConnectionInfo, ConnectionSpec, CursorId, DriverError,
     DriverWarning, EndTransactionRequest, Engine, ExecuteRequest, ExecuteRequestHttp,
     ExecuteResponse, OpenSessionRequest, Operation, OperationAuditEntry, OperationStatus, Page,
-    Row, SchemaScope, SchemaSnapshot, ServerInfo, SessionId, SessionInfo, TransactionInfo,
-    TxHandleRef, TxId,
+    Row, SavepointRequest, SchemaScope, SchemaSnapshot, ServerInfo, SessionId, SessionInfo,
+    TransactionInfo, TxHandleRef, TxId,
 };
 
 use crate::error::{ApiError, ApiResult};
@@ -428,6 +429,124 @@ impl SessionStore {
         Ok(())
     }
 
+    pub async fn create_savepoint(
+        &self,
+        session_id: SessionId,
+        req: SavepointRequest,
+    ) -> ApiResult<()> {
+        let tx_handle = self.tx_handle_for(session_id, req.connection, req.tx_id)?;
+        let entry = self.get_conn_entry(session_id, req.connection)?;
+        match entry.driver.engine() {
+            Engine::Postgres => {
+                let pg = entry
+                    .driver
+                    .as_pg()
+                    .ok_or_else(|| ext_missing(Engine::Postgres, "PgExt"))?;
+                pg.savepoint(&tx_handle, &req.name).await?;
+            }
+            Engine::SqlServer => {
+                let mssql = entry
+                    .driver
+                    .as_mssql()
+                    .ok_or_else(|| ext_missing(Engine::SqlServer, "MssqlExt"))?;
+                mssql.savepoint(&tx_handle, &req.name).await?;
+            }
+        }
+        Ok(())
+    }
+
+    pub async fn rollback_to_savepoint(
+        &self,
+        session_id: SessionId,
+        req: SavepointRequest,
+    ) -> ApiResult<()> {
+        let tx_handle = self.tx_handle_for(session_id, req.connection, req.tx_id)?;
+        let entry = self.get_conn_entry(session_id, req.connection)?;
+        match entry.driver.engine() {
+            Engine::Postgres => {
+                let pg = entry
+                    .driver
+                    .as_pg()
+                    .ok_or_else(|| ext_missing(Engine::Postgres, "PgExt"))?;
+                pg.rollback_to(PgSavepoint {
+                    tx: req.tx_id,
+                    name: req.name,
+                })
+                .await?;
+            }
+            Engine::SqlServer => {
+                let mssql = entry
+                    .driver
+                    .as_mssql()
+                    .ok_or_else(|| ext_missing(Engine::SqlServer, "MssqlExt"))?;
+                mssql
+                    .rollback_to(MssqlSavepoint {
+                        tx: req.tx_id,
+                        conn: tx_handle.conn.clone(),
+                        name: req.name,
+                    })
+                    .await?;
+            }
+        }
+        Ok(())
+    }
+
+    pub async fn release_savepoint(
+        &self,
+        session_id: SessionId,
+        req: SavepointRequest,
+    ) -> ApiResult<()> {
+        // Validate tx is active on the connection before dispatching.
+        let _ = self.tx_handle_for(session_id, req.connection, req.tx_id)?;
+        let entry = self.get_conn_entry(session_id, req.connection)?;
+        match entry.driver.engine() {
+            Engine::Postgres => {
+                let pg = entry
+                    .driver
+                    .as_pg()
+                    .ok_or_else(|| ext_missing(Engine::Postgres, "PgExt"))?;
+                pg.release_savepoint(PgSavepoint {
+                    tx: req.tx_id,
+                    name: req.name,
+                })
+                .await?;
+                Ok(())
+            }
+            Engine::SqlServer => Err(ApiError::Driver(
+                DriverError::new(
+                    Code::UnsupportedForEngine,
+                    "RELEASE SAVEPOINT is not supported by SQL Server",
+                )
+                .with_engine(Engine::SqlServer),
+            )),
+        }
+    }
+
+    fn tx_handle_for(
+        &self,
+        session_id: SessionId,
+        conn_id: ConnectionId,
+        tx_id: TxId,
+    ) -> ApiResult<TxHandle> {
+        let session = self
+            .inner
+            .sessions
+            .get(&session_id)
+            .ok_or(ApiError::SessionNotFound(session_id))?;
+        let entry = session.transactions.get(&tx_id).ok_or_else(|| {
+            ApiError::Driver(DriverError::new(
+                sift_protocol::Code::TransactionNotFound,
+                "transaction not active",
+            ))
+        })?;
+        if entry.info.connection != conn_id {
+            return Err(ApiError::BadRequest(
+                "`connection` must match transaction connection".into(),
+            ));
+        }
+        Ok(entry.handle.clone())
+    }
+
     fn validate_execute_tx(
         &self,
         session_id: SessionId,
@@ -601,6 +720,16 @@ pub struct ConnectionEntry {
 pub struct TransactionEntry {
     pub info: TransactionInfo,
     pub handle: TxHandle,
+}
+
+fn ext_missing(engine: Engine, trait_name: &str) -> ApiError {
+    ApiError::Driver(
+        DriverError::new(
+            Code::UnsupportedForEngine,
+            format!("driver does not expose {trait_name}"),
+        )
+        .with_engine(engine),
+    )
 }
 
 fn drain_connection_transactions(s: &Session, conn_id: ConnectionId) -> Vec<TransactionEntry> {

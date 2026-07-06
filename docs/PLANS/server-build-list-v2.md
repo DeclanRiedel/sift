@@ -228,12 +228,16 @@ engine itself.
       spec's `Weak<dyn Driver>` backref or formally drop it from ADR-017.
       Currently documented as a Phase 0 simplification
       (`driver-api/src/lib.rs:35-39`).
-- [ ] [Implement] Protocol `Operation::Savepoint`/`RollbackToSavepoint`/
+- [x] [Implement] Protocol `Operation::Savepoint`/`RollbackToSavepoint`/
       `ReleaseSavepoint` variants + server routing via `as_pg()`/`as_mssql()`
-      downcast. Verified absent — `Operation` (`protocol/src/operation.rs:15`)
-      has no savepoint family; the server only downcasts for `PgExt::listen`
-      (`session.rs:317`) and `MssqlExt::bulk_insert` (`session.rs:355`),
-      never for savepoints. The driver layer is ready; the wire is not.
+      downcast — `protocol/src/operation.rs:53-64`,
+      `protocol/src/session.rs:113-122` (`SavepointRequest`), server methods
+      at `session.rs:430-544`, HTTP routes at
+      `http.rs:141-152` (three POSTs under
+      `/v1/sessions/:id/transactions/:tx_id/savepoints{,/rollback,/release}`).
+      `ReleaseSavepoint` returns `Code::UnsupportedForEngine` on SQL Server
+      (no `MssqlExt::release_savepoint`). Regression test:
+      `savepoint_routes_dispatch_to_ext_traits`.
 - [ ] [Implement] CI runs the live driver tests. `.github/workflows/ci.yml:20`
       runs `cargo test --workspace` with no `--features live-pg,live-mssql`,
       so the entire two-impl validation gate never runs in CI. Add PG +
