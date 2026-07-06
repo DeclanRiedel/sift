@@ -145,9 +145,40 @@ pub fn app(state: AppState) -> Router {
             post(cancel_query),
         )
         .layer(from_fn_with_state(state.auth.clone(), auth_middleware))
+        .layer(from_fn(inject_peer_addr))
         .layer(from_fn_with_state(state.sessions.clone(), audit_middleware))
         .layer(from_fn(protocol_version_header))
         .with_state(state)
+}
+
+/// Internal header carrying the trusted peer IP. Any client-supplied value
+/// is stripped before we set this — handlers may treat it as authoritative.
+const PEER_ADDR_HEADER: HeaderName = HeaderName::from_static("x-sift-peer-addr");
+
+async fn inject_peer_addr(
+    peer: Option<axum::extract::ConnectInfo<std::net::SocketAddr>>,
+    mut req: Request<Body>,
+    next: Next,
+) -> Response {
+    req.headers_mut().remove(&PEER_ADDR_HEADER);
+    // Absent ConnectInfo => in-process caller (e.g. tower::oneshot in tests),
+    // treated as loopback. Real network path always has ConnectInfo when the
+    // server is started via `into_make_service_with_connect_info`.
+    let ip = peer
+        .map(|axum::extract::ConnectInfo(addr)| addr.ip())
+        .unwrap_or_else(|| std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST));
+    if let Ok(value) = HeaderValue::from_str(&ip.to_string()) {
+        req.headers_mut().insert(PEER_ADDR_HEADER.clone(), value);
+    }
+    next.run(req).await
+}
+
+fn peer_is_loopback(headers: &HeaderMap) -> bool {
+    headers
+        .get(&PEER_ADDR_HEADER)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.parse::<std::net::IpAddr>().ok())
+        .is_some_and(|ip| ip.is_loopback())
 }
 
 async fn protocol_version_header(req: Request<Body>, next: Next) -> Response {
@@ -349,13 +380,19 @@ fn resolve_auth_context(state: &AppState, headers: &HeaderMap) -> ApiResult<Auth
         }
     }
 
+    // Loopback bypass: only trust when the peer is actually on the loopback
+    // interface. Without this check, `loopback_bypass = true` (the default)
+    // authenticates any unauthenticated client — remote or local — as the
+    // local principal.
+    let bypass_allowed = state.auth.loopback_bypass && peer_is_loopback(headers);
+
     if bearer_from_headers(headers).is_some_and(|token| {
         state
             .auth
             .bearer_token
             .as_deref()
             .is_some_and(|expected| token == expected)
-    }) && state.auth.loopback_bypass
+    }) && bypass_allowed
     {
         let principal = metadata
             .resolve_principal_by_external_id("local:1")?
@@ -367,7 +404,7 @@ fn resolve_auth_context(state: &AppState, headers: &HeaderMap) -> ApiResult<Auth
         });
     }
 
-    if state.auth.loopback_bypass {
+    if bypass_allowed {
         let principal = metadata
             .resolve_principal_by_external_id("local:1")?
             .ok_or(ApiError::Unauthorized)?;

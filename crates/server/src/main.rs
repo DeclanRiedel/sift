@@ -53,7 +53,10 @@ async fn main() -> anyhow::Result<()> {
         .with_context(|| format!("binding {bind}"))?;
     tracing::info!("listening on http://{bind}");
 
-    axum::serve(listener, app.into_make_service())
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
         .with_graceful_shutdown(shutdown_signal())
         .await
         .context("server runtime")?;

@@ -315,12 +315,14 @@ are safety holes, not just polish.
 - [ ] [Implement] Per-query `tokio::spawn` + `timeout` on the HTTP
       `execute_query` path (parity with the WS path's spawned pump).
       Wire `config.timeouts.request_secs` or remove the dead config.
-- [ ] [Implement] Loopback bypass must check the peer address. Currently
-      `auth.loopback_bypass == true` (the **default**, `config.rs:113`)
-      resolves **any** unauthenticated client — local or remote — as
-      `local:1` (`http.rs:370-379`). There is no `ConnectInfo` extractor,
-      no `127.0.0.1`/`::1`/Unix-socket check. This is a remote-auth bypass
-      hiding behind a default flag.
+- [x] [Implement] Loopback bypass must check the peer address —
+      `http.rs:162-192` (middleware injects trusted peer IP from
+      `ConnectInfo<SocketAddr>` into an internal `x-sift-peer-addr` header,
+      stripping any client-supplied value); `http.rs:353-357` gates the
+      bypass on `IpAddr::is_loopback`. `main.rs:56-59` binds via
+      `into_make_service_with_connect_info::<SocketAddr>`. Regression test:
+      `tests/api_smoke.rs::loopback_bypass_rejects_non_loopback_peer`
+      covers loopback allow, remote deny, and header-spoof deny.
 - [ ] [Implement] Constant-time bearer-token comparison. `auth_middleware`
       (`http.rs:194-199`) uses plain `==` on the bearer token — timing
       oracle. API-token verification uses Argon2 (`metadata/src/lib.rs:286`)
@@ -571,11 +573,11 @@ Goal: the last mile before a real release.
   points are not reachable over the protocol, and CI does not run the live
   tests. The decode/TLS/listen/copy/advisory items that used to gate A are
   already done.
-- **Phase B is the gate for "hosted is conceivable."** Two Phase B items
-  are safety holes that should not wait behind design: the loopback-bypass
-  default that authenticates remote clients as `local:1`, and the
-  unbounded `drain_stream` that OOMs the server on a large HTTP result.
-  Treat those as P0 patches inside Phase B.
+- **Phase B is the gate for "hosted is conceivable."** The loopback-bypass
+  P0 is now closed (peer IP checked via trusted internal header +
+  regression test). The remaining Phase B P0 is the unbounded
+  `drain_stream` on the HTTP `execute_query` path that OOMs the server on
+  a large result — still a patch, not a design.
 - **Phase C can proceed in parallel with D once A's schema/type items
   land**, but the SQL Server pool question in Phase A shapes Phase C's
   pool-warmth work — resolve it first.

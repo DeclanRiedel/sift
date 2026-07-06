@@ -1707,3 +1707,44 @@ async fn execute_stream_error_maps_to_http_error() {
 
     assert_eq!(res.status(), StatusCode::BAD_REQUEST);
 }
+
+#[tokio::test]
+async fn loopback_bypass_rejects_non_loopback_peer() {
+    use axum::extract::ConnectInfo;
+    use std::net::SocketAddr;
+
+    let app = app(test_state_with_metadata(true));
+
+    // Sanity: a loopback peer with no bearer token is authorized under
+    // the bypass path.
+    let mut req = Request::get("/v1/metadata/tenants")
+        .body(Body::empty())
+        .unwrap();
+    req.extensions_mut()
+        .insert(ConnectInfo::<SocketAddr>("127.0.0.1:5555".parse().unwrap()));
+    let res = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+
+    // A remote peer must NOT be authorized just because loopback_bypass
+    // is on — that would be a remote-auth bypass hiding behind a default.
+    let mut req = Request::get("/v1/metadata/tenants")
+        .body(Body::empty())
+        .unwrap();
+    req.extensions_mut().insert(ConnectInfo::<SocketAddr>(
+        "203.0.113.4:5555".parse().unwrap(),
+    ));
+    let res = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+
+    // A remote peer cannot spoof the internal peer header — the middleware
+    // strips any client-supplied value before setting its own.
+    let mut req = Request::get("/v1/metadata/tenants")
+        .header("x-sift-peer-addr", "127.0.0.1")
+        .body(Body::empty())
+        .unwrap();
+    req.extensions_mut().insert(ConnectInfo::<SocketAddr>(
+        "203.0.113.4:5555".parse().unwrap(),
+    ));
+    let res = app.oneshot(req).await.unwrap();
+    assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+}
