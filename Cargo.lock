@@ -2195,6 +2195,7 @@ dependencies = [
  "sift-driver-api",
  "sift-driver-postgres",
  "sift-driver-sqlserver",
+ "sift-metadata",
  "sift-protocol",
  "thiserror 1.0.69",
  "tokio",

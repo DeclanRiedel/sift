@@ -16,6 +16,8 @@ pub struct Config {
     pub timeouts: TimeoutConfig,
     /// Minimal Phase 0 auth hook.
     pub auth: AuthConfig,
+    /// Local metadata store configuration.
+    pub metadata: MetadataConfig,
     /// Audit/replay log configuration.
     pub audit: AuditConfig,
 }
@@ -45,12 +47,28 @@ pub struct TimeoutConfig {
     pub request_secs: u64,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AuthConfig {
     /// If set, non-loopback clients must send `Authorization: Bearer <token>`.
     /// Empty by default for local-first development.
     pub bearer_token: Option<String>,
+    /// Zero-auth local mode. The current implementation applies this for the
+    /// local server process; peer-address scoping lands with hosted mode.
+    pub loopback_bypass: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct MetadataConfig {
+    /// Enable the local metadata store.
+    pub enabled: bool,
+    /// Optional SQLite path. Defaults to the platform-local state path.
+    pub path: Option<String>,
+    /// Secret backend. Only `memory` exists today; keyring/file land later.
+    pub secret_backend: String,
+    /// Bootstrap implicit local tenant/principal when the DB is empty.
+    pub bootstrap_local: bool,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -68,6 +86,7 @@ impl Default for Config {
             drivers: DriversConfig::default(),
             timeouts: TimeoutConfig::default(),
             auth: AuthConfig::default(),
+            metadata: MetadataConfig::default(),
             audit: AuditConfig::default(),
         }
     }
@@ -84,6 +103,26 @@ impl Default for LogConfig {
 impl Default for TimeoutConfig {
     fn default() -> Self {
         Self { request_secs: 30 }
+    }
+}
+
+impl Default for AuthConfig {
+    fn default() -> Self {
+        Self {
+            bearer_token: None,
+            loopback_bypass: true,
+        }
+    }
+}
+
+impl Default for MetadataConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            path: None,
+            secret_backend: "memory".to_string(),
+            bootstrap_local: true,
+        }
     }
 }
 

@@ -43,6 +43,17 @@ Implemented:
   snapshots, active room attachments, and room-scoped history.
 - Existing Phase 0 server remains intact: sessions, inline connection specs,
   HTTP execute, WebSocket execute/listen, operation log, OpenAPI, SDK.
+- `sift-server` constructs the local metadata store at startup, bootstraps the
+  local tenant/principal, and exposes a headless metadata/auth HTTP surface.
+- Metadata-backed API tokens can authenticate metadata routes; local loopback
+  mode resolves to the bootstrapped local principal.
+- Headless HTTP routes now cover tenant listing, room create/list/delete,
+  document create/list/update/delete, connection profile create/list/delete,
+  per-user credential set, open-session-connection-from-profile, token
+  issue/list/revoke, and room-scoped history.
+- The current read routes use `GET`; the new HTTP `QUERY` method is reserved
+  for future safe/idempotent reads that need a request body. SQL execute stays
+  `POST` because SQL can mutate databases.
 
 Deliberately not implemented yet:
 
@@ -83,30 +94,32 @@ Deliberately not implemented yet:
 
 ### H3 — Server Metadata Wiring
 
-- Add metadata config:
+- [x] Add metadata config:
   - path
   - secret backend
   - local bootstrap
-- Construct `MetadataStore` at server startup.
-- Use blocking-safe wrappers or `spawn_blocking` for SQLite work from async
-  handlers.
+- [x] Construct `MetadataStore` at server startup.
+- [ ] Use blocking-safe wrappers or `spawn_blocking` for SQLite work from async
+  handlers before hosted/concurrent server mode.
 
 ### H4 — Auth Context
 
-- Add `AuthContext` and principal resolver:
+- [x] Add `AuthContext` and principal resolver:
   - loopback bypass for local mode
   - metadata-backed API tokens
   - existing shared bearer token only as compatibility fallback
-- Add tenant scoping helper.
+- [x] Add tenant scoping helper.
 
 ### H5 — Headless Metadata Routes
 
-- Tenants: list current principal's tenants.
-- Rooms: create/list/join/leave/member management.
-- Documents: create/list/update snapshot/delete.
-- Connection profiles: create/list/delete/set credential/open from profile.
-- Query history: list by principal and by room.
-- Add OpenAPI coverage and operation-log entries.
+- [x] Tenants: list current principal's tenants.
+- [x] Rooms: create/list/delete.
+- [ ] Rooms: join/leave/member management.
+- [x] Documents: create/list/update snapshot/delete.
+- [x] Connection profiles: create/list/delete/set credential/open from profile.
+- [x] Query history: list by room.
+- [ ] Query history: list by principal.
+- [ ] Add OpenAPI coverage and operation-log entries for metadata routes.
 
 ### H6 — `sift-doc`
 
@@ -141,10 +154,13 @@ Deliberately not implemented yet:
 ## Known Design Gaps
 
 - `SessionStore` is still session-centric and single-stream-per-WebSocket.
-- `sift-server` does not yet depend on `sift-metadata`.
 - OpenAPI is manually assembled and will become harder to maintain as routes
   grow.
-- Metadata uses synchronous SQLite behind a mutex; route integration must avoid
-  blocking async workers directly.
+- Metadata uses synchronous SQLite behind a mutex; current route calls are fine
+  for the local-first slice but should move behind `spawn_blocking` or an
+  actor before hosted/concurrent mode.
 - API tokens issued before token lookup migration cannot be verified by lookup;
   no server release used them, so this is acceptable.
+- Metadata route coverage is intentionally headless and minimal; member
+  management, principal-scoped history, and OpenAPI/operation-log metadata
+  entries are the remaining first-slice gaps.

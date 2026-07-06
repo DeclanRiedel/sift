@@ -12,6 +12,7 @@ sift-core = { workspace = true }
 sift-driver-api = { workspace = true, features = ["mock"] }
 sift-driver-postgres = { workspace = true }
 sift-driver-sqlserver = { workspace = true }
+sift-metadata = { workspace = true }
 anyhow = { workspace = true }
 async-trait = { workspace = true }
 axum = { workspace = true }

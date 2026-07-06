@@ -247,6 +247,31 @@ impl MetadataStore {
         self.api_token_by_id_locked(&conn, id).map(Some)
     }
 
+    pub fn list_api_tokens(&self, principal: PrincipalId) -> Result<Vec<ApiTokenRow>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, principal_id, tenant_id, name, created_at, updated_at,
+                    last_used_at, expires_at, revoked_at
+             FROM api_token
+             WHERE principal_id = ?1
+             ORDER BY created_at DESC, id DESC",
+        )?;
+        let tokens = rows(stmt.query_map(params![principal.0], api_token_from_row)?);
+        tokens
+    }
+
+    pub fn revoke_api_token(&self, id: ApiTokenId) -> Result<()> {
+        let now = now_text();
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE api_token
+             SET revoked_at = COALESCE(revoked_at, ?1), updated_at = ?1
+             WHERE id = ?2",
+            params![now, id.0],
+        )?;
+        Ok(())
+    }
+
     pub fn list_connection_profiles(&self, tenant: TenantId) -> Result<Vec<ConnectionProfile>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
@@ -258,6 +283,27 @@ impl MetadataStore {
         )?;
         let profiles = rows(stmt.query_map(params![tenant.0], connection_profile_from_row)?);
         profiles
+    }
+
+    pub fn get_connection_profile(
+        &self,
+        tenant: TenantId,
+        id: ConnectionProfileId,
+    ) -> Result<ConnectionProfile> {
+        let conn = self.conn.lock().unwrap();
+        let profile = self.connection_profile_by_id_locked(&conn, id)?;
+        if profile.tenant_id != tenant {
+            return Err(MetadataError::TenantMismatch(id, tenant));
+        }
+        Ok(profile)
+    }
+
+    pub fn get_connection_profile_for_any_tenant(
+        &self,
+        id: ConnectionProfileId,
+    ) -> Result<ConnectionProfile> {
+        let conn = self.conn.lock().unwrap();
+        self.connection_profile_by_id_locked(&conn, id)
     }
 
     pub async fn upsert_connection_profile(
@@ -526,6 +572,11 @@ impl MetadataStore {
         rooms
     }
 
+    pub fn get_room(&self, id: RoomId) -> Result<Room> {
+        let conn = self.conn.lock().unwrap();
+        self.room_by_id_locked(&conn, id)
+    }
+
     pub fn list_shared_rooms_for_principal(
         &self,
         tenant: TenantId,
@@ -623,6 +674,11 @@ impl MetadataStore {
         )?;
         let documents = rows(stmt.query_map(params![room.0], document_from_row)?);
         documents
+    }
+
+    pub fn get_document(&self, id: DocumentId) -> Result<Document> {
+        let conn = self.conn.lock().unwrap();
+        self.document_by_id_locked(&conn, id)
     }
 
     pub fn update_document_snapshot(

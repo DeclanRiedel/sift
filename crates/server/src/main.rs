@@ -3,9 +3,12 @@
 //! (ADR-010): same binary runs in-process alongside the desktop client or
 //! as a standalone daemon.
 
+use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::Context;
+use anyhow::{bail, Context};
+use sift_metadata::{MemorySecretStore, MetadataStore};
 use sift_server::{
     config::{load as load_config, Config},
     http::{app, AppState},
@@ -27,11 +30,14 @@ async fn main() -> anyhow::Result<()> {
     } else {
         SessionStore::new(registry)
     };
+    let metadata = build_metadata_store(&cfg)?;
     let state = AppState {
         sessions,
         auth: sift_server::http::AuthState {
             bearer_token: cfg.auth.bearer_token.clone(),
+            loopback_bypass: cfg.auth.loopback_bypass,
         },
+        metadata,
     };
 
     let app = app(state);
@@ -98,6 +104,36 @@ fn build_registry(cfg: &Config) -> DriverRegistry {
     builder = builder.register(sift_driver_sqlserver::MssqlDriver::new());
 
     builder.build()
+}
+
+fn build_metadata_store(cfg: &Config) -> anyhow::Result<Option<MetadataStore>> {
+    if !cfg.metadata.enabled {
+        return Ok(None);
+    }
+    if cfg.metadata.secret_backend != "memory" {
+        bail!(
+            "unsupported metadata.secret_backend `{}`; only `memory` is available",
+            cfg.metadata.secret_backend
+        );
+    }
+
+    let path = cfg
+        .metadata
+        .path
+        .as_deref()
+        .map(PathBuf::from)
+        .unwrap_or_else(MetadataStore::default_local_path);
+    let store = MetadataStore::open(&path, Arc::new(MemorySecretStore::new()))
+        .with_context(|| format!("opening metadata store: {}", path.display()))?;
+    if cfg.metadata.bootstrap_local {
+        let display_name = std::env::var("USER")
+            .or_else(|_| std::env::var("USERNAME"))
+            .unwrap_or_else(|_| "local".to_string());
+        store
+            .bootstrap_local(&display_name)
+            .context("bootstrapping local metadata principal")?;
+    }
+    Ok(Some(store))
 }
 
 fn demo_execute_pages() -> Vec<sift_protocol::Page> {

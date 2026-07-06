@@ -5,6 +5,7 @@
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
+use sift_metadata::MetadataError;
 use sift_protocol::{Code, DriverError};
 
 #[derive(Debug, thiserror::Error)]
@@ -20,6 +21,18 @@ pub enum ApiError {
 
     #[error("bad request: {0}")]
     BadRequest(String),
+
+    #[error("unauthorized")]
+    Unauthorized,
+
+    #[error("forbidden: {0}")]
+    Forbidden(String),
+
+    #[error("metadata unavailable")]
+    MetadataUnavailable,
+
+    #[error("metadata error: {0}")]
+    Metadata(#[from] MetadataError),
 
     #[error("internal error: {0}")]
     Internal(String),
@@ -52,6 +65,31 @@ impl ApiError {
                 (StatusCode::NOT_FOUND, "not_found")
             }
             ApiError::BadRequest(_) => (StatusCode::BAD_REQUEST, "bad_request"),
+            ApiError::Unauthorized => (StatusCode::UNAUTHORIZED, "unauthorized"),
+            ApiError::Forbidden(_) => (StatusCode::FORBIDDEN, "forbidden"),
+            ApiError::MetadataUnavailable => {
+                (StatusCode::SERVICE_UNAVAILABLE, "metadata_unavailable")
+            }
+            ApiError::Metadata(error) => match error {
+                MetadataError::ConnectionProfileNotFound(_)
+                | MetadataError::RoomNotFound(_)
+                | MetadataError::DocumentNotFound(_)
+                | MetadataError::RoomAttachmentNotFound(_) => (StatusCode::NOT_FOUND, "not_found"),
+                MetadataError::TenantMismatch(_, _) => (StatusCode::FORBIDDEN, "forbidden"),
+                MetadataError::MissingCredential(_, _)
+                | MetadataError::BrokerCredentialUnsupported(_) => {
+                    (StatusCode::UNPROCESSABLE_ENTITY, "metadata_unavailable")
+                }
+                MetadataError::InvalidEnum { .. }
+                | MetadataError::InvalidTimestamp { .. }
+                | MetadataError::Json(_) => (StatusCode::BAD_REQUEST, "bad_request"),
+                MetadataError::Sqlite(_)
+                | MetadataError::Migration(_)
+                | MetadataError::PasswordHash(_)
+                | MetadataError::SecretStore(_) => {
+                    (StatusCode::INTERNAL_SERVER_ERROR, "metadata_internal")
+                }
+            },
             ApiError::Internal(_) => (StatusCode::INTERNAL_SERVER_ERROR, "internal"),
         }
     }

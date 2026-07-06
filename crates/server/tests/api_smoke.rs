@@ -4,6 +4,7 @@
 use axum::body::{to_bytes, Body};
 use axum::http::{Request, StatusCode};
 use sift_driver_api::{mock::MockDriver, BulkResult, PgNotification};
+use sift_metadata::{MemorySecretStore, MetadataStore};
 use sift_protocol::{
     ColumnMetadata, ConnectionSpec, Engine, ExecuteRequestHttp, Health, Nullability, Page,
     PrimitiveType, Row, SchemaScope, SchemaSnapshot, ServerInfo, SslMode, TypeRef, Value,
@@ -11,6 +12,7 @@ use sift_protocol::{
 use sift_server::http::{app, AppState, AuthState};
 use sift_server::registry::DriverRegistry;
 use sift_server::session::SessionStore;
+use std::sync::Arc;
 use tower::ServiceExt;
 
 fn mock_postgres_driver() -> MockDriver {
@@ -63,6 +65,7 @@ fn test_state() -> AppState {
     AppState {
         sessions: SessionStore::new(registry),
         auth: AuthState::default(),
+        metadata: None,
     }
 }
 
@@ -71,6 +74,7 @@ fn test_state_with_driver(driver: MockDriver) -> AppState {
     AppState {
         sessions: SessionStore::new(registry),
         auth: AuthState::default(),
+        metadata: None,
     }
 }
 
@@ -82,7 +86,9 @@ fn test_state_with_token(token: &str) -> AppState {
         sessions: SessionStore::new(registry),
         auth: AuthState {
             bearer_token: Some(token.to_string()),
+            loopback_bypass: false,
         },
+        metadata: None,
     }
 }
 
@@ -94,6 +100,23 @@ fn test_state_with_operation_log(path: &std::path::Path) -> AppState {
         sessions: SessionStore::new_with_operation_log_path(registry, path)
             .expect("operation log opens"),
         auth: AuthState::default(),
+        metadata: None,
+    }
+}
+
+fn test_state_with_metadata(loopback_bypass: bool) -> AppState {
+    let registry = DriverRegistry::builder()
+        .register(mock_postgres_driver())
+        .build();
+    let metadata = MetadataStore::open_in_memory(Arc::new(MemorySecretStore::new())).unwrap();
+    metadata.bootstrap_local("local user").unwrap();
+    AppState {
+        sessions: SessionStore::new(registry),
+        auth: AuthState {
+            bearer_token: None,
+            loopback_bypass,
+        },
+        metadata: Some(metadata),
     }
 }
 
@@ -486,6 +509,200 @@ async fn bearer_token_auth_is_enforced_when_configured() {
         .await
         .unwrap();
     assert_eq!(res.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn metadata_room_document_lifecycle_uses_local_principal() {
+    let app = app(test_state_with_metadata(true));
+
+    let res = app
+        .clone()
+        .oneshot(
+            Request::get("/v1/metadata/tenants")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let tenants: serde_json::Value = body_json(res.into_body()).await;
+    assert_eq!(tenants[0]["tenant"]["id"], 1);
+
+    let room: serde_json::Value = body_json(
+        app.clone()
+            .oneshot(post_json(
+                "/v1/metadata/rooms",
+                serde_json::json!({
+                    "tenant_id": 1,
+                    "name": "planning",
+                    "kind": "personal"
+                }),
+            ))
+            .await
+            .unwrap()
+            .into_body(),
+    )
+    .await;
+    let room_id = room["id"].as_i64().unwrap();
+
+    let rooms: Vec<serde_json::Value> = body_json(
+        app.clone()
+            .oneshot(
+                Request::get("/v1/metadata/rooms?tenant=1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+            .into_body(),
+    )
+    .await;
+    assert_eq!(rooms.len(), 1);
+
+    let document: serde_json::Value = body_json(
+        app.clone()
+            .oneshot(post_json(
+                format!("/v1/metadata/rooms/{room_id}/documents"),
+                serde_json::json!({
+                    "kind": "sql",
+                    "title": "scratch",
+                    "crdt_type": "loro",
+                    "crdt_state": [1, 2, 3],
+                    "position": 0
+                }),
+            ))
+            .await
+            .unwrap()
+            .into_body(),
+    )
+    .await;
+    let document_id = document["id"].as_i64().unwrap();
+
+    let res = app
+        .oneshot(
+            Request::put(format!("/v1/metadata/documents/{document_id}"))
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"crdt_state":[4,5]}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let updated: serde_json::Value = body_json(res.into_body()).await;
+    assert_eq!(updated["crdt_state"], serde_json::json!([4, 5]));
+}
+
+#[tokio::test]
+async fn metadata_api_tokens_can_authenticate_and_be_revoked() {
+    let state = test_state_with_metadata(true);
+    let app_with_loopback = app(state.clone());
+    let issued: serde_json::Value = body_json(
+        app_with_loopback
+            .oneshot(post_json(
+                "/v1/auth/tokens",
+                serde_json::json!({
+                    "name": "test token",
+                    "tenant_id": 1
+                }),
+            ))
+            .await
+            .unwrap()
+            .into_body(),
+    )
+    .await;
+    let plaintext = issued["plaintext"].as_str().unwrap().to_string();
+    let token_id = issued["token"]["id"].as_i64().unwrap();
+
+    let mut no_loopback = state;
+    no_loopback.auth.loopback_bypass = false;
+    let app = app(no_loopback);
+    let res = app
+        .clone()
+        .oneshot(
+            Request::get("/v1/metadata/tenants")
+                .header("authorization", format!("Bearer {plaintext}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+
+    let res = app
+        .clone()
+        .oneshot(
+            Request::delete(format!("/v1/auth/tokens/{token_id}"))
+                .header("authorization", format!("Bearer {plaintext}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+
+    let res = app
+        .oneshot(
+            Request::get("/v1/metadata/tenants")
+                .header("authorization", format!("Bearer {plaintext}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn metadata_connection_profile_opens_session_connection() {
+    let app = app(test_state_with_metadata(true));
+    let session: sift_protocol::SessionInfo = body_json(
+        app.clone()
+            .oneshot(post_json_str("/v1/sessions", r#"{"tag":"profile"}"#))
+            .await
+            .unwrap()
+            .into_body(),
+    )
+    .await;
+
+    let profile: serde_json::Value = body_json(
+        app.clone()
+            .oneshot(post_json(
+                "/v1/metadata/connections",
+                serde_json::json!({
+                    "tenant_id": 1,
+                    "name": "local pg",
+                    "engine": "postgres",
+                    "spec": {
+                        "host": "mock.invalid",
+                        "port": 5432,
+                        "database": "mock",
+                        "user": "mock",
+                        "ssl_mode": "disable"
+                    },
+                    "credential_mode": "shared",
+                    "tags": ["test"]
+                }),
+            ))
+            .await
+            .unwrap()
+            .into_body(),
+    )
+    .await;
+    let profile_id = profile["id"].as_i64().unwrap();
+
+    let res = app
+        .oneshot(post_json(
+            format!("/v1/sessions/{}/connections/from-profile", session.id),
+            serde_json::json!({
+                "tenant_id": 1,
+                "profile_id": profile_id
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let conn: sift_protocol::ConnectionInfo = body_json(res.into_body()).await;
+    assert_eq!(conn.engine, Engine::Postgres);
 }
 
 #[tokio::test]

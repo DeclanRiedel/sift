@@ -4,20 +4,26 @@
 use axum::body::Body;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Path, Query, State};
-use axum::http::{header, header::HeaderName, HeaderValue, Request, StatusCode};
+use axum::http::{header, header::HeaderName, HeaderMap, HeaderValue, Request, StatusCode};
 use axum::middleware::{from_fn, from_fn_with_state, Next};
 use axum::response::Response;
-use axum::routing::{delete, get, post};
+use axum::routing::{delete, get, post, put};
 use axum::{Json, Router};
+use chrono::{DateTime, Utc};
 use futures::{SinkExt, StreamExt};
 use schemars::{schema_for, JsonSchema};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::time::Instant;
 
+use sift_metadata::{
+    ApiTokenId, ConnectionProfileId, CrdtType, CredentialMode, Document, DocumentId, MetadataStore,
+    NewConnectionProfile, NewDocument, NewRoom, PrincipalId, QueryHistory, Room, RoomId, RoomKind,
+    TenantId, TenantMembership,
+};
 use sift_protocol::{
     AuditEntry, BeginTransactionRequest, BulkInsertRequest, CancelRequest, EndTransactionRequest,
-    ExecuteRequest, ExecuteRequestHttp, Health, ObjectPath, OpenConnectionRequest,
+    Engine, ExecuteRequest, ExecuteRequestHttp, Health, ObjectPath, OpenConnectionRequest,
     OpenSessionRequest, Operation, OperationStatus, SchemaFilter, SchemaScope, WsClientMessage,
     WsServerMessage, PROTOCOL_VERSION,
 };
@@ -30,11 +36,13 @@ use crate::VERSION;
 pub struct AppState {
     pub sessions: SessionStore,
     pub auth: AuthState,
+    pub metadata: Option<MetadataStore>,
 }
 
 #[derive(Clone, Default)]
 pub struct AuthState {
     pub bearer_token: Option<String>,
+    pub loopback_bypass: bool,
 }
 
 pub fn app(state: AppState) -> Router {
@@ -43,11 +51,47 @@ pub fn app(state: AppState) -> Router {
         .route("/v1/audit", get(list_audit))
         .route("/v1/operations", get(list_operations))
         .route("/v1/openapi.json", get(openapi))
+        .route("/v1/metadata/tenants", get(list_metadata_tenants))
+        .route(
+            "/v1/metadata/rooms",
+            get(list_metadata_rooms).post(create_metadata_room),
+        )
+        .route("/v1/metadata/rooms/:id", delete(delete_metadata_room))
+        .route(
+            "/v1/metadata/rooms/:id/documents",
+            get(list_metadata_documents).post(create_metadata_document),
+        )
+        .route(
+            "/v1/metadata/documents/:id",
+            put(update_metadata_document).delete(delete_metadata_document),
+        )
+        .route(
+            "/v1/metadata/connections",
+            get(list_metadata_connections).post(upsert_metadata_connection),
+        )
+        .route(
+            "/v1/metadata/connections/:id",
+            delete(delete_metadata_connection),
+        )
+        .route(
+            "/v1/metadata/connections/:id/credential",
+            post(set_metadata_connection_credential),
+        )
+        .route("/v1/metadata/history", get(list_metadata_history))
+        .route(
+            "/v1/auth/tokens",
+            get(list_auth_tokens).post(issue_auth_token),
+        )
+        .route("/v1/auth/tokens/:id", delete(revoke_auth_token))
         .route("/v1/sessions", post(create_session).get(list_sessions))
         .route("/v1/sessions/:id", get(get_session).delete(close_session))
         .route(
             "/v1/sessions/:id/connections",
             post(open_connection).get(list_connections),
+        )
+        .route(
+            "/v1/sessions/:id/connections/from-profile",
+            post(open_connection_from_profile),
         )
         .route(
             "/v1/sessions/:id/connections/:conn_id",
@@ -120,6 +164,10 @@ async fn auth_middleware(
     req: Request<Body>,
     next: Next,
 ) -> Result<Response, StatusCode> {
+    let path = req.uri().path();
+    if path.starts_with("/v1/metadata/") || path.starts_with("/v1/auth/") {
+        return Ok(next.run(req).await);
+    }
     let Some(expected) = auth.bearer_token.as_deref() else {
         return Ok(next.run(req).await);
     };
@@ -134,6 +182,222 @@ async fn auth_middleware(
     } else {
         Err(StatusCode::UNAUTHORIZED)
     }
+}
+
+#[derive(Clone)]
+struct AuthContext {
+    principal_id: PrincipalId,
+    tenants: Vec<TenantMembership>,
+}
+
+#[derive(Deserialize)]
+struct TenantQuery {
+    tenant: i64,
+}
+
+#[derive(Deserialize)]
+struct RoomListQuery {
+    tenant: i64,
+}
+
+#[derive(Deserialize)]
+struct DeleteConnectionQuery {
+    tenant: i64,
+}
+
+#[derive(Deserialize)]
+struct HistoryQuery {
+    room: i64,
+    limit: Option<u32>,
+}
+
+#[derive(Deserialize)]
+struct CreateRoomRequest {
+    tenant_id: i64,
+    name: String,
+    kind: RoomKind,
+}
+
+#[derive(Deserialize)]
+struct CreateDocumentRequest {
+    kind: String,
+    title: String,
+    crdt_type: CrdtType,
+    crdt_state: Vec<u8>,
+    position: i64,
+    connection_profile_id: Option<i64>,
+}
+
+#[derive(Deserialize)]
+struct UpdateDocumentSnapshotRequest {
+    crdt_state: Vec<u8>,
+}
+
+#[derive(Deserialize)]
+struct UpsertConnectionProfileRequest {
+    tenant_id: i64,
+    name: String,
+    engine: Engine,
+    spec: sift_protocol::ConnectionSpec,
+    credential_mode: CredentialMode,
+    #[serde(default)]
+    tags: Vec<String>,
+}
+
+#[derive(Deserialize)]
+struct SetCredentialRequest {
+    secret: String,
+}
+
+#[derive(Deserialize)]
+struct OpenConnectionFromProfileRequest {
+    tenant_id: i64,
+    profile_id: i64,
+}
+
+#[derive(Deserialize)]
+struct IssueTokenRequest {
+    name: String,
+    tenant_id: Option<i64>,
+    expires_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Serialize)]
+struct IssueTokenResponse {
+    token: sift_metadata::ApiTokenRow,
+    plaintext: String,
+}
+
+fn metadata_store(state: &AppState) -> ApiResult<&MetadataStore> {
+    state.metadata.as_ref().ok_or(ApiError::MetadataUnavailable)
+}
+
+fn bearer_from_headers(headers: &HeaderMap) -> Option<&str> {
+    headers
+        .get(header::AUTHORIZATION)
+        .and_then(|h| h.to_str().ok())
+        .and_then(|h| h.strip_prefix("Bearer "))
+}
+
+fn resolve_auth_context(state: &AppState, headers: &HeaderMap) -> ApiResult<AuthContext> {
+    let metadata = metadata_store(state)?;
+    if let Some(token) = bearer_from_headers(headers) {
+        if let Some(row) = metadata.verify_api_token(token)? {
+            let tenants = metadata.list_principal_tenants(row.principal_id)?;
+            return Ok(AuthContext {
+                principal_id: row.principal_id,
+                tenants,
+            });
+        }
+    }
+
+    if bearer_from_headers(headers).is_some_and(|token| {
+        state
+            .auth
+            .bearer_token
+            .as_deref()
+            .is_some_and(|expected| token == expected)
+    }) && state.auth.loopback_bypass
+    {
+        let principal = metadata
+            .resolve_principal_by_external_id("local:1")?
+            .ok_or(ApiError::Unauthorized)?;
+        let tenants = metadata.list_principal_tenants(principal.id)?;
+        return Ok(AuthContext {
+            principal_id: principal.id,
+            tenants,
+        });
+    }
+
+    if state.auth.loopback_bypass {
+        let principal = metadata
+            .resolve_principal_by_external_id("local:1")?
+            .ok_or(ApiError::Unauthorized)?;
+        let tenants = metadata.list_principal_tenants(principal.id)?;
+        return Ok(AuthContext {
+            principal_id: principal.id,
+            tenants,
+        });
+    }
+
+    Err(ApiError::Unauthorized)
+}
+
+fn ensure_tenant(auth: &AuthContext, tenant: TenantId) -> ApiResult<()> {
+    if auth
+        .tenants
+        .iter()
+        .any(|membership| membership.tenant.id == tenant)
+    {
+        Ok(())
+    } else {
+        Err(ApiError::Forbidden(format!(
+            "principal {:?} is not a member of tenant {:?}",
+            auth.principal_id, tenant
+        )))
+    }
+}
+
+fn tenant_id(id: i64) -> ApiResult<TenantId> {
+    if id > 0 {
+        Ok(TenantId(id))
+    } else {
+        Err(ApiError::BadRequest("tenant id must be positive".into()))
+    }
+}
+
+fn room_id(id: i64) -> ApiResult<RoomId> {
+    if id > 0 {
+        Ok(RoomId(id))
+    } else {
+        Err(ApiError::BadRequest("room id must be positive".into()))
+    }
+}
+
+fn document_id(id: i64) -> ApiResult<DocumentId> {
+    if id > 0 {
+        Ok(DocumentId(id))
+    } else {
+        Err(ApiError::BadRequest("document id must be positive".into()))
+    }
+}
+
+fn connection_profile_id(id: i64) -> ApiResult<ConnectionProfileId> {
+    if id > 0 {
+        Ok(ConnectionProfileId(id))
+    } else {
+        Err(ApiError::BadRequest(
+            "connection profile id must be positive".into(),
+        ))
+    }
+}
+
+fn api_token_id(id: i64) -> ApiResult<ApiTokenId> {
+    if id > 0 {
+        Ok(ApiTokenId(id))
+    } else {
+        Err(ApiError::BadRequest("token id must be positive".into()))
+    }
+}
+
+fn ensure_room_access(
+    metadata: &MetadataStore,
+    auth: &AuthContext,
+    room: RoomId,
+) -> ApiResult<Room> {
+    let room = metadata.get_room(room)?;
+    ensure_tenant(auth, room.tenant_id)?;
+    Ok(room)
+}
+
+fn ensure_document_access(
+    metadata: &MetadataStore,
+    auth: &AuthContext,
+    document: DocumentId,
+) -> ApiResult<Document> {
+    let document = metadata.get_document(document)?;
+    ensure_room_access(metadata, auth, document.room_id)?;
+    Ok(document)
 }
 
 async fn health(State(state): State<AppState>) -> Json<Health> {
@@ -398,6 +662,278 @@ fn add_schema<T: JsonSchema>(
         name.to_string(),
         serde_json::to_value(root.schema).expect("schema serializes"),
     );
+}
+
+async fn list_metadata_tenants(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> ApiResult<Json<Vec<TenantMembership>>> {
+    let auth = resolve_auth_context(&state, &headers)?;
+    Ok(Json(auth.tenants))
+}
+
+async fn list_metadata_rooms(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(q): Query<RoomListQuery>,
+) -> ApiResult<Json<Vec<Room>>> {
+    let metadata = metadata_store(&state)?;
+    let auth = resolve_auth_context(&state, &headers)?;
+    let tenant = tenant_id(q.tenant)?;
+    ensure_tenant(&auth, tenant)?;
+    Ok(Json(
+        metadata.list_rooms_for_principal(tenant, auth.principal_id)?,
+    ))
+}
+
+async fn create_metadata_room(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(req): Json<CreateRoomRequest>,
+) -> ApiResult<Json<Room>> {
+    let metadata = metadata_store(&state)?;
+    let auth = resolve_auth_context(&state, &headers)?;
+    let tenant = tenant_id(req.tenant_id)?;
+    ensure_tenant(&auth, tenant)?;
+    let room = metadata.create_room(
+        tenant,
+        auth.principal_id,
+        NewRoom {
+            name: req.name,
+            kind: req.kind,
+        },
+    )?;
+    Ok(Json(room))
+}
+
+async fn delete_metadata_room(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let metadata = metadata_store(&state)?;
+    let auth = resolve_auth_context(&state, &headers)?;
+    let room = room_id(id)?;
+    ensure_room_access(metadata, &auth, room)?;
+    metadata.delete_room(room)?;
+    Ok(Json(json!({"ok": true})))
+}
+
+async fn list_metadata_documents(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+) -> ApiResult<Json<Vec<Document>>> {
+    let metadata = metadata_store(&state)?;
+    let auth = resolve_auth_context(&state, &headers)?;
+    let room = room_id(id)?;
+    ensure_room_access(metadata, &auth, room)?;
+    Ok(Json(metadata.list_documents(room)?))
+}
+
+async fn create_metadata_document(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+    Json(req): Json<CreateDocumentRequest>,
+) -> ApiResult<Json<Document>> {
+    let metadata = metadata_store(&state)?;
+    let auth = resolve_auth_context(&state, &headers)?;
+    let room = room_id(id)?;
+    ensure_room_access(metadata, &auth, room)?;
+    let document = metadata.create_document(
+        room,
+        NewDocument {
+            kind: req.kind,
+            title: req.title,
+            crdt_type: req.crdt_type,
+            crdt_state: req.crdt_state,
+            position: req.position,
+            connection_profile_id: req.connection_profile_id.map(ConnectionProfileId),
+        },
+    )?;
+    Ok(Json(document))
+}
+
+async fn update_metadata_document(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+    Json(req): Json<UpdateDocumentSnapshotRequest>,
+) -> ApiResult<Json<Document>> {
+    let metadata = metadata_store(&state)?;
+    let auth = resolve_auth_context(&state, &headers)?;
+    let document = document_id(id)?;
+    ensure_document_access(metadata, &auth, document)?;
+    Ok(Json(
+        metadata.update_document_snapshot(document, req.crdt_state)?,
+    ))
+}
+
+async fn delete_metadata_document(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let metadata = metadata_store(&state)?;
+    let auth = resolve_auth_context(&state, &headers)?;
+    let document = document_id(id)?;
+    ensure_document_access(metadata, &auth, document)?;
+    metadata.delete_document(document)?;
+    Ok(Json(json!({"ok": true})))
+}
+
+async fn list_metadata_connections(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(q): Query<TenantQuery>,
+) -> ApiResult<Json<Vec<sift_metadata::ConnectionProfile>>> {
+    let metadata = metadata_store(&state)?;
+    let auth = resolve_auth_context(&state, &headers)?;
+    let tenant = tenant_id(q.tenant)?;
+    ensure_tenant(&auth, tenant)?;
+    Ok(Json(metadata.list_connection_profiles(tenant)?))
+}
+
+async fn upsert_metadata_connection(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(req): Json<UpsertConnectionProfileRequest>,
+) -> ApiResult<Json<sift_metadata::ConnectionProfile>> {
+    let metadata = metadata_store(&state)?;
+    let auth = resolve_auth_context(&state, &headers)?;
+    let tenant = tenant_id(req.tenant_id)?;
+    ensure_tenant(&auth, tenant)?;
+    let profile = metadata
+        .upsert_connection_profile(
+            tenant,
+            auth.principal_id,
+            NewConnectionProfile {
+                name: req.name,
+                engine: req.engine,
+                spec: req.spec,
+                credential_mode: req.credential_mode,
+                tags: req.tags,
+            },
+        )
+        .await?;
+    Ok(Json(profile))
+}
+
+async fn delete_metadata_connection(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+    Query(q): Query<DeleteConnectionQuery>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let metadata = metadata_store(&state)?;
+    let auth = resolve_auth_context(&state, &headers)?;
+    let tenant = tenant_id(q.tenant)?;
+    ensure_tenant(&auth, tenant)?;
+    metadata
+        .delete_connection_profile(tenant, connection_profile_id(id)?)
+        .await?;
+    Ok(Json(json!({"ok": true})))
+}
+
+async fn set_metadata_connection_credential(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+    Json(req): Json<SetCredentialRequest>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let metadata = metadata_store(&state)?;
+    let auth = resolve_auth_context(&state, &headers)?;
+    let profile_id = connection_profile_id(id)?;
+    let profile = metadata.get_connection_profile_for_any_tenant(profile_id)?;
+    ensure_tenant(&auth, profile.tenant_id)?;
+    metadata
+        .set_per_user_credential(profile_id, auth.principal_id, req.secret.as_bytes())
+        .await?;
+    Ok(Json(json!({"ok": true})))
+}
+
+async fn list_metadata_history(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(q): Query<HistoryQuery>,
+) -> ApiResult<Json<Vec<QueryHistory>>> {
+    let metadata = metadata_store(&state)?;
+    let auth = resolve_auth_context(&state, &headers)?;
+    let room = room_id(q.room)?;
+    ensure_room_access(metadata, &auth, room)?;
+    Ok(Json(metadata.list_query_history_for_room(
+        room,
+        q.limit.unwrap_or(100).min(500),
+    )?))
+}
+
+async fn list_auth_tokens(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> ApiResult<Json<Vec<sift_metadata::ApiTokenRow>>> {
+    let metadata = metadata_store(&state)?;
+    let auth = resolve_auth_context(&state, &headers)?;
+    Ok(Json(metadata.list_api_tokens(auth.principal_id)?))
+}
+
+async fn issue_auth_token(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(req): Json<IssueTokenRequest>,
+) -> ApiResult<Json<IssueTokenResponse>> {
+    let metadata = metadata_store(&state)?;
+    let auth = resolve_auth_context(&state, &headers)?;
+    let tenant = req.tenant_id.map(tenant_id).transpose()?;
+    if let Some(tenant) = tenant {
+        ensure_tenant(&auth, tenant)?;
+    }
+    let (token, plaintext) =
+        metadata.issue_api_token(auth.principal_id, tenant, &req.name, req.expires_at)?;
+    Ok(Json(IssueTokenResponse { token, plaintext }))
+}
+
+async fn revoke_auth_token(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let metadata = metadata_store(&state)?;
+    let auth = resolve_auth_context(&state, &headers)?;
+    let token_id = api_token_id(id)?;
+    if !metadata
+        .list_api_tokens(auth.principal_id)?
+        .iter()
+        .any(|token| token.id == token_id)
+    {
+        return Err(ApiError::Forbidden(
+            "cannot revoke another principal's token".into(),
+        ));
+    }
+    metadata.revoke_api_token(token_id)?;
+    Ok(Json(json!({"ok": true})))
+}
+
+async fn open_connection_from_profile(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(session_id): Path<sift_protocol::SessionId>,
+    Json(req): Json<OpenConnectionFromProfileRequest>,
+) -> ApiResult<Json<sift_protocol::ConnectionInfo>> {
+    let metadata = metadata_store(&state)?;
+    let auth = resolve_auth_context(&state, &headers)?;
+    let tenant = tenant_id(req.tenant_id)?;
+    ensure_tenant(&auth, tenant)?;
+    let profile_id = connection_profile_id(req.profile_id)?;
+    let profile = metadata.get_connection_profile(tenant, profile_id)?;
+    let spec = metadata
+        .resolve_connection_spec(tenant, auth.principal_id, profile_id)
+        .await?;
+    let info = state
+        .sessions
+        .open_connection(session_id, profile.engine, spec)
+        .await?;
+    Ok(Json(info))
 }
 
 async fn create_session(
