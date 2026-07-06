@@ -2077,10 +2077,12 @@ checksum = "f8fadd59c855ef2080decdef8ff161eb6661b86933c9d82e5ba29dc602a55aba"
 name = "sift-client-sdk"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "futures",
  "reqwest",
  "serde",
  "serde_json",
+ "sift-metadata",
  "sift-protocol",
  "thiserror 1.0.69",
  "tokio-tungstenite 0.26.2",
@@ -2201,6 +2203,7 @@ dependencies = [
  "serde_json",
  "sift-client-sdk",
  "sift-core",
+ "sift-doc",
  "sift-driver-api",
  "sift-driver-postgres",
  "sift-driver-sqlserver",
@@ -2208,6 +2211,7 @@ dependencies = [
  "sift-protocol",
  "thiserror 1.0.69",
  "tokio",
+ "tokio-tungstenite 0.26.2",
  "tower",
  "tower-http",
  "tracing",

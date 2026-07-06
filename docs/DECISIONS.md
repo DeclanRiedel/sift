@@ -1,169 +1,145 @@
-# sift — Early Architectural Decisions
+# sift — Architectural Decisions
 
-> Recorded at project start (phase 0). Each is reversible until code locks it
-> in; once a crate boundary depends on one, treat it as load-bearing.
+This file keeps only current, load-bearing decisions. Historical planning
+snapshots live under `docs/legacy/` until that directory is deleted.
 
 Format is ADR-lite: **Context · Decision · Consequences.**
 
 ---
 
-## ADR-001 — Three-artifact split: server, desktop, web
+## ADR-001 — The Server Is The Product
 
-**Context.** Requirements are: native desktop performance, browser/tablet
-access, hosted multi-user sessions. No single UI technology serves desktop and
-browser equally well; GPUI in particular is desktop-only.
+**Context.** Database IDE behavior spans connections, credentials, sessions,
+schema, execution, history, audit, and collaboration. Putting that logic in a
+window process would make hosted and multi-client modes bolt-ons.
 
-**Decision.** Build three artifacts sharing one protocol:
-`workspace-server` (the product), `client-desktop` (GPUI), and `client-web`
-(later). The server does not know or care which client is talking to it.
+**Decision.** `sift-server` owns product behavior. Clients are renderers and
+automation consumers over the public HTTP/WebSocket protocol. The backend lab is
+a development workbench, not the product UI.
 
-**Consequences.** (+) frontends can be built/released independently and each
-play to its strengths; (+) the server is reusable and headless-ly testable;
-(+) multi-user is a server feature, not a UI problem. (−) some duplicated UI
-effort across desktop and web; (−) the protocol must be kept stable and
-versioned, because two consumers depend on it.
+**Consequences.** The server can be tested headlessly and reused by future
+desktop, web, and automation clients. The protocol must stay stable,
+versioned, and explicit.
 
 ---
 
-## ADR-002 — The server is the product; clients are stateless shells
+## ADR-002 — Shared Crates Stay UI-Free
 
-**Context.** Navicat-style tools couple the window directly to the database.
-That makes them brittle, single-user, and impossible to host or share.
+**Context.** Desktop and web product clients may use different UI stacks, while
+server, protocol, drivers, metadata, document, and SDK crates need to remain
+portable and testable.
 
-**Decision.** All business logic — connections, sessions, drivers, query
-execution, schema metadata, exports — lives in the server. Clients render
-server state only. The call chain is:
+**Decision.** UI dependencies do not enter shared crates. Product clients map
+protocol/server data into their own UI models at their crate boundary.
 
-```
-Window -> WorkspaceClient -> WorkspaceAPI -> WorkspaceServer -> Driver -> DB
-```
-
-never `Window -> Connection -> DB`.
-
-**Consequences.** (+) UI stays thin and testable; (+) multi-user falls out for
-free; (+) one backend serves every client. (−) higher latency than an embedded
-client; (−) the protocol and streaming model must be good enough that this
-isn't felt.
+**Consequences.** UI decisions remain reversible without changing backend
+contracts. Some edge mapping code is expected in each product client.
 
 ---
 
-## ADR-003 — tiberius (pure Rust) for SQL Server, not ODBC
+## ADR-003 — Protocol Is Pure Serde Data
 
-**Context.** SQL Server from Rust is commonly done via ODBC + `msodbcsql18` +
-`freetds`/`unixODBC`. That stack is unfree, awkward to package on Nix, and
-introduces non-reproducible native runtime dependencies — directly fighting the
-Nix dev-env goal.
+**Context.** The server, SDK, backend lab, and future clients all need the same
+wire contract.
 
-**Decision.** Use **tiberius** (pure-Rust TDS client) for SQL Server, and
-**tokio-postgres** for PostgreSQL. Both are async and tokio-native.
+**Decision.** `sift-protocol` contains serde/schemars data types only: request
+and response structs, operation enums, WebSocket messages, and stable error
+codes. It has no I/O, Tokio, filesystem, or server dependencies.
 
-**Consequences.** (+) fully reproducible Nix builds with no native runtime deps;
-(+) idiomatic async; (+) same packaging story on Linux/macOS/Windows. (−)
-tiberius is narrower than the ODBC surface for some exotic SQL Server features;
-flag any gap when a driver needs it and reassess per-feature.
+**Consequences.** The protocol is easy to version and inspect, and can be used
+from native and wasm consumers. Server-internal types must be adapted at the
+boundary.
 
 ---
 
-## ADR-004 — The protocol crate is pure serde types, no I/O
+## ADR-004 — Tokio Async Server And Drivers
 
-**Context.** The desktop binary, a future wasm web client, and the server must
-all agree on the exact same request/response/operation contract.
+**Context.** Database work is I/O-bound, query streams need backpressure, and
+the public API includes HTTP plus WebSocket streams.
 
-**Decision.** A dedicated `protocol` crate holds operation enums,
-request/response structs, error codes, and serde models — and **nothing else**.
-No `tokio`, no networking, no filesystem. Pure data.
+**Decision.** The server, drivers, and SDK use Tokio. Synchronous metadata
+SQLite work is isolated behind bounded blocking work.
 
-**Consequences.** (+) shareable across native and wasm without dependency
-friction; (+) trivially versionable and unit-testable; (+) the API surface is
-explicit and reviewable. (−) requires discipline to stop server-internal types
-leaking into it.
+**Consequences.** Driver and streaming code can remain async end-to-end.
+Blocking components need explicit isolation and backpressure.
 
 ---
 
-## ADR-005 — GPUI is confined to the desktop binary crate
+## ADR-005 — Pure-Rust Database Driver Stack Where Possible
 
-**Context.** GPUI is desktop-only and its API is still maturing. Letting it
-touch shared crates would couple the whole system to one UI toolkit.
+**Context.** Native ODBC stacks add packaging friction, especially in Nix and
+cross-platform environments.
 
-**Decision.** GPUI lives **only** in `client-desktop`. It is never a dependency
-of `core`, `protocol`, `server`, `driver-api`, or any driver. Shared types are
-mapped to GPUI models at the boundary, inside the desktop crate.
+**Decision.** PostgreSQL uses `tokio-postgres`; SQL Server uses `tiberius`.
 
-**Consequences.** (+) UI/logic separation enforced at the compiler level;
-(+) desktop UI tech remains swappable without touching the server. (−) a little
-boilerplate mapping protocol types to GPUI view entities at the edge.
+**Consequences.** Builds stay reproducible and mostly Rust-native. SQL Server
+features not exposed by `tiberius` are evaluated individually instead of
+pulling in ODBC by default.
 
 ---
 
-## ADR-006 — Operation/command model (Zed-inspired)
+## ADR-006 — Local-First, Hosted-Capable
 
-**Context.** Ad-hoc verbs ("execute SQL") do not scale to an IDE's surface area
-and don't give us a command palette, undo, replay, or uniform audit.
+**Context.** Single-user local usage should be easy, but hosted collaboration
+must use the same product model.
 
-**Decision.** Every user action is an **Operation** sent to the server:
-`OpenConnection`, `RefreshSchema`, `ExecuteQuery`, `CancelQuery`, `RenameTable`,
-`ExportCsv`, `Import`, `Backup`, `CompareSchemas`, ... The server is a command
-processor over a session.
+**Decision.** The same server binary supports local-first mode and hosted mode
+through config. Local bootstrap creates a personal tenant/principal, while
+remote/hosted modes use explicit auth.
 
-**Consequences.** (+) powers the command palette; (+) every action is loggable,
-replayable, and auditable in one place; (+) uniform auth/rate-limit hooks.
-(−) a bit more upfront design per action; the protocol is the product.
+**Consequences.** Local and hosted paths share code. Auth and metadata runtime
+hardening can advance without changing the product model.
 
 ---
 
-## ADR-007 — Async end-to-end (tokio)
+## ADR-007 — Rooms Are The Collaboration Unit
 
-**Context.** Database work is I/O-bound; queries run concurrently; results
-stream over WebSocket.
+**Context.** Earlier workspace/tab planning does not map cleanly to shared
+documents, presence, and room-scoped history.
 
-**Decision.** tokio runtime throughout the server, drivers, and client-sdk.
+**Decision.** A room is the durable collaboration boundary under a tenant:
+members, documents, attachments/presence, and query history are scoped through
+rooms.
 
-**Consequences.** (+) idiomatic for the driver crates; (+) natural streaming.
-(−) GPUI runs its own event loop — the desktop client must bridge carefully
-(run tokio on a side runtime, pass results back onto the UI thread), not nest
-them.
-
----
-
-## ADR-008 — Nix flake dev env; one toolchain source of truth
-
-**Context.** Contributors on different OSes/toolchain versions cause build
-drift, "works on my machine" failures, and CI/local divergence.
-
-**Decision.** `flake.nix` + `rust-toolchain.toml`. rust-overlay reads the toml,
-so Nix and non-Nix (rustup) hosts use the identical toolchain. direnv
-auto-loads the shell on `cd`.
-
-**Consequences.** (+) reproducible, one-command (`nix develop`) setup;
-(+) CI can reuse the same flake. (−) Nix learning curve for new contributors;
-mitigated by `rust-toolchain.toml` working standalone via rustup.
+**Consequences.** Single-user local mode is a one-member room. Multi-user mode
+adds members and attachments without changing the core model.
 
 ---
 
-## ADR-009 — Defer the web client
+## ADR-008 — Secrets Stay Out Of SQLite
 
-**Context.** Phase 0/1 budget is a working server + desktop client. The web
-client is a large surface (wasm, assets, auth UI, browser quirks).
+**Context.** Connection profile metadata needs persistence, but credentials
+should not be stored in the metadata database.
 
-**Decision.** No web client in phase 0 or 1. Ship desktop + server first; build
-the web client once the protocol is proven and stable.
+**Decision.** SQLite stores opaque secret handles only. Secret bytes live behind
+`SecretStore`.
 
-**Consequences.** (+) focus and a faster path to something usable; (+) the
-protocol is battle-tested before the second consumer arrives. (−) users without
-a desktop install can't use sift in the meantime — an accepted, temporary cost.
+**Consequences.** Metadata remains portable and inspectable. Secret backend
+quality can improve independently from schema and route design.
 
 ---
 
-## ADR-010 — Local-first by default, hosted as a mode
+## ADR-009 — Operation Audit Is A First-Class Contract
 
-**Context.** A single user wanting a Navicat-like experience shouldn't have to
-run a daemon and connect to it. But multi-user/hosted must be a first-class
-mode, not a bolt-on.
+**Context.** Collaboration, replay, diagnostics, and command surfaces all need
+a durable vocabulary of user-visible actions.
 
-**Decision.** The server runs as a single in-process or localhost instance for
-the desktop client by default, and as a real daemon for multi-user/hosted use.
-Same binary, same code paths, different config.
+**Decision.** Public user actions are represented as `Operation` variants or
+metadata operation entries and are recorded in the operation audit.
 
-**Consequences.** (+) good single-user UX with zero ops; (+) all server logic
-is reused in both modes. (−) the client-sdk must treat embedded-vs-remote
-transparently, so the UI never knows which mode it's in.
+**Consequences.** New product actions should add protocol-visible operation
+shape instead of disappearing into ad hoc handler logic.
+
+---
+
+## ADR-010 — Product UI Is Deferred Until The Headless Layer Is Stable
+
+**Context.** The backend lab can test routes and workflows, but it is not a
+production client. A product UI should not drive backend architecture before
+the headless layer is stable.
+
+**Decision.** Desktop/web product UI work starts after the headless server,
+metadata, room runtime, and protocol contract are stable enough to consume.
+
+**Consequences.** The next product-client decision can choose desktop, web, or
+both from a stable backend foundation instead of freezing backend design early.

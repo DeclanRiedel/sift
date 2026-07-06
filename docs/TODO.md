@@ -1,54 +1,49 @@
 # TODO — Ordered Work Queue
 
-This is the current implementation order. Keep `docs/PLANS/headless-collab-infra.md`
-as the architecture plan of record; use this file for execution order.
+This file tracks active implementation work only. The headless collaboration
+infrastructure slice described in `docs/PLANS/headless-collab-infra.md` is now
+implemented to its planned foundation boundary.
 
-## Work On First
+## Active Work
 
-1. Harden metadata runtime shape.
-   - Current sync SQLite calls are isolated with `spawn_blocking`.
-   - Hosted mode should use a metadata actor or connection pool, plus clearer
-     backpressure and shutdown behavior.
+No active headless-collab foundation tasks remain.
 
-2. Expand `sift-doc`.
-   - Add an apply-operation API.
-   - Hide the eventual Loro/Automerge choice behind crate-local adapters.
-   - Add document diff/merge tests before any UI consumes it.
+Before opening the next implementation slice, decide which deferred product
+surface is next:
 
-3. Add typed client SDK methods for metadata/auth routes.
-   - Tenants, rooms, members, documents, profiles, tokens, and history.
-   - Keep the lab as a manual workbench, but make SDK coverage the stable API
-     contract.
+1. Desktop or web product client.
+2. Hosted auth hardening beyond local/token auth, such as OIDC or keypair auth.
+3. Deeper query/result collaboration, such as full result broadcast streams and
+   observer lag recovery.
+4. Daily-driver database IDE features, such as schema search, autocomplete,
+   export, explain plans, and edit workflows.
 
-4. Introduce room runtime.
-   - In-memory attachments/presence.
-   - Document operation WebSocket class.
-   - Room-aware operation audit.
+## Completed Headless-Collab Foundation
 
-## Improve Next
-
-5. Start room-aware result handling.
-   - Keep direct session execution working.
-   - Add supportable shape for future result fanout without implementing full
-     broadcast streams yet.
-
-## Work On After That
-
-6. Defer UI until the headless layer is stable.
-   - No GPUI crate, web-client decision, OIDC, keypair remote auth,
-     voice/video, or follow-mode polish until the above foundation is solid.
-
-## Completed In Phase 0 Polish
-
-- Added role-aware room authorization:
-  - tenant membership remains the outer guard;
-  - room viewers can read;
-  - room editors can write documents and query history context;
-  - room owners can manage members and delete rooms.
-- Added negative metadata route coverage for non-member, viewer, and editor
-  permission failures.
-- Scoped metadata API tokens to their issued tenant when `tenant_id` is set.
-- Added optional `room_id` and `connection_profile_id` fields to HTTP execute
-  requests and record room/profile-attributed query history when supplied.
-- Replaced anonymous metadata OpenAPI route payloads with typed schemas for
-  metadata/auth request and response bodies.
+- Metadata runtime hardening:
+  - synchronous SQLite work is isolated from async handlers;
+  - blocking metadata work has explicit backpressure;
+  - multi-row metadata mutations use transactions where needed;
+  - credential replacement and deletion clean old secret handles on a
+    best-effort basis.
+- `sift-doc`:
+  - snapshot/text extraction helpers;
+  - backend-agnostic text operation apply API;
+  - operation tests for replacement, insert/delete, and UTF-8 boundaries.
+- Client SDK:
+  - typed metadata/auth methods for tenants, rooms, members, documents,
+    profiles, credentials, tokens, history, and profile-backed connections;
+  - room document-operation WebSocket helper.
+- Room runtime:
+  - room WebSocket class for attachment, presence, and document operations;
+  - in-memory attachment/presence runtime;
+  - document operations apply through `sift-doc` and persist snapshots;
+  - room-aware operation audit entries.
+- Room-aware result handling:
+  - direct session execution remains compatible;
+  - room/profile context records query history;
+  - room WebSocket receives query result summaries without broadcasting full
+    result streams.
+- API contract:
+  - OpenAPI includes typed metadata/auth and room WebSocket schemas;
+  - CI covers format, clippy, tests, and cargo-deny.

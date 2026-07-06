@@ -1,6 +1,7 @@
 # Plan — Headless Collab Infrastructure
 
-Status: active. This is the current plan of record.
+Status: implemented for the foundation slice. Keep this as the record of what
+the headless collaboration infrastructure now provides.
 
 ## What Are We Building?
 
@@ -64,8 +65,22 @@ Implemented:
   actor-attributed query history after execution.
 - OpenAPI metadata/auth routes now reference typed request and response
   schemas instead of anonymous object payloads.
+- `sift-doc` exposes a backend-agnostic apply-operation API for text
+  documents, with UTF-8 boundary validation.
+- `sift-client-sdk` exposes typed metadata/auth methods and a room
+  document-operation WebSocket helper.
+- Room runtime exists for the headless foundation:
+  - room WebSocket attachment/detachment;
+  - in-memory presence;
+  - document-operation broadcast;
+  - persisted document snapshot updates through `sift-doc`;
+  - room-aware operation audit.
+- Room-aware query result handling has a foundation shape: direct session
+  execution remains unchanged, room/profile context records history, and room
+  WebSocket clients receive query result summaries. Full result broadcast
+  streams remain deferred.
 - Synchronous SQLite metadata work in HTTP handlers runs via `spawn_blocking`
-  for the local/headless route surface.
+  with explicit backpressure for the local/headless route surface.
 - `sift-doc` exists as the first pure document abstraction crate for opaque
   CRDT snapshots and text helpers.
 - The current read routes use `GET`; the new HTTP `QUERY` method is reserved
@@ -93,21 +108,22 @@ Deliberately not implemented yet:
 5. Existing `/v1/sessions` APIs remain compatible until room APIs can fully
    replace them.
 
-## Next Headless Milestones
+## Headless Milestone Status
 
 ### H1 — Repo Guardrails
 
-- GitHub Actions CI for format, clippy, and tests.
-- `cargo-deny` policy baseline.
-- Keep `cargo fmt`, `cargo clippy --workspace --all-targets -- -D warnings`,
+- [x] GitHub Actions CI for format, clippy, tests, and cargo-deny.
+- [x] `cargo-deny` policy baseline.
+- [x] Keep `cargo fmt`, `cargo clippy --workspace --all-targets -- -D warnings`,
   and `cargo test --workspace` green.
 
 ### H2 — Metadata Hardening
 
-- Multi-row metadata writes are transactional.
-- Credential replacement deletes old secret handles on a best-effort basis.
-- Room/document delete/remove APIs.
-- Personal-room visibility rules are enforced in queries and later routes.
+- [x] Multi-row metadata writes are transactional where needed.
+- [x] Credential replacement deletes old secret handles on a best-effort basis.
+- [x] Room/document delete/remove APIs.
+- [x] Personal-room visibility rules are enforced in list/join routes.
+- [x] Blocking metadata work has explicit backpressure.
 
 ### H3 — Server Metadata Wiring
 
@@ -146,20 +162,20 @@ Deliberately not implemented yet:
 - [x] Minimal CRDT abstraction crate.
 - [x] Initial text document helpers.
 - [x] Snapshot/text extraction APIs.
-- [ ] Apply operation API once CRDT backend is selected.
+- [x] Apply operation API behind crate-local document semantics.
 - Keep Loro/Automerge choice hidden behind this crate.
 
 ### H7 — Protocol Room Surface
 
-- Room/document operation variants.
-- Priority WebSocket class for presence/doc ops.
-- Keep existing stream class for query pages.
+- [x] Room/document operation variants.
+- [x] Dedicated room WebSocket class for presence/doc ops.
+- [x] Existing session stream class remains the query page path.
 
 ### H8 — Room Runtime
 
-- Introduce room attachments and in-memory presence.
-- Move document editing through CRDT operations.
-- Later, replace session-only result handling with room-aware fanout.
+- [x] Introduce room attachments and in-memory presence.
+- [x] Move document editing through document operations.
+- [x] Add room-aware query result summary events without full result fanout.
 
 ## Deferred Until The Headless Layer Is Stable
 
@@ -177,11 +193,10 @@ Deliberately not implemented yet:
 - `SessionStore` is still session-centric and single-stream-per-WebSocket.
 - OpenAPI still has a hand-authored path map, though metadata/auth payloads now
   use typed schemas.
-- Metadata uses synchronous SQLite behind a mutex and HTTP handlers now isolate
-  sync store calls with `spawn_blocking`; hosted mode may still want a metadata
-  actor or pool.
+- Metadata uses synchronous SQLite behind a mutex and HTTP handlers isolate
+  sync store calls with bounded `spawn_blocking`; hosted scale may still justify
+  a metadata actor or connection pool.
 - API tokens issued before token lookup migration cannot be verified by lookup;
   no server release used them, so this is acceptable.
-- Metadata route coverage is intentionally headless and focused on the server
-  contract; room runtime, presence, and document operation fanout still need
-  dedicated coverage once those surfaces exist.
+- Full query result broadcast streams and observer lag recovery remain
+  deferred beyond this foundation.

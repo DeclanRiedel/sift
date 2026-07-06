@@ -14,27 +14,36 @@ use futures::{SinkExt, StreamExt};
 use schemars::{schema_for, JsonSchema};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use std::sync::{Arc, OnceLock};
 use std::time::Instant;
+use tokio::sync::Semaphore;
 
+use sift_doc::{CrdtKind, DocumentSnapshot, TextDocument, TextOperation};
 use sift_metadata::{
     ApiTokenId, ConnectionProfileId, CrdtType, CredentialMode, Document, DocumentId, MetadataStore,
     NewConnectionProfile, NewDocument, NewQueryHistory, NewRoom, PrincipalId, QueryHistory,
     QueryStatus, Room, RoomId, RoomKind, RoomMember, RoomRole, TenantId, TenantMembership,
 };
 use sift_protocol::{
-    AuditEntry, BeginTransactionRequest, BulkInsertRequest, CancelRequest, EndTransactionRequest,
-    Engine, ExecuteRequest, ExecuteRequestHttp, Health, ObjectPath, OpenConnectionRequest,
-    OpenSessionRequest, Operation, OperationStatus, SchemaFilter, SchemaScope, WsClientMessage,
-    WsServerMessage, PROTOCOL_VERSION,
+    AuditEntry, BeginTransactionRequest, BulkInsertRequest, CancelRequest,
+    DocumentOperationEnvelope, EndTransactionRequest, Engine, ExecuteRequest, ExecuteRequestHttp,
+    Health, ObjectPath, OpenConnectionRequest, OpenSessionRequest, Operation, OperationStatus,
+    RoomClientMessage, RoomQueryResult, RoomQueryStatus, RoomServerMessage, SchemaFilter,
+    SchemaScope, WsClientMessage, WsServerMessage, PROTOCOL_VERSION,
 };
 
 use crate::error::{ApiError, ApiResult};
+use crate::room_runtime::RoomRuntime;
 use crate::session::SessionStore;
 use crate::VERSION;
+
+const MAX_METADATA_BLOCKING_TASKS: usize = 16;
+static METADATA_BLOCKING_PERMITS: OnceLock<Arc<Semaphore>> = OnceLock::new();
 
 #[derive(Clone)]
 pub struct AppState {
     pub sessions: SessionStore,
+    pub rooms: RoomRuntime,
     pub auth: AuthState,
     pub metadata: Option<MetadataStore>,
 }
@@ -67,6 +76,7 @@ pub fn app(state: AppState) -> Router {
         )
         .route("/v1/metadata/rooms/:id/join", post(join_metadata_room))
         .route("/v1/metadata/rooms/:id/leave", post(leave_metadata_room))
+        .route("/v1/metadata/rooms/:id/ws", get(ws_room))
         .route(
             "/v1/metadata/rooms/:id/documents",
             get(list_metadata_documents).post(create_metadata_document),
@@ -200,6 +210,7 @@ struct AuthContext {
     tenants: Vec<TenantMembership>,
 }
 
+#[derive(Clone)]
 struct ExecuteMetadataContext {
     metadata: MetadataStore,
     principal_id: PrincipalId,
@@ -303,9 +314,17 @@ async fn metadata_blocking<T>(f: impl FnOnce() -> ApiResult<T> + Send + 'static)
 where
     T: Send + 'static,
 {
-    tokio::task::spawn_blocking(f)
+    let permit = METADATA_BLOCKING_PERMITS
+        .get_or_init(|| Arc::new(Semaphore::new(MAX_METADATA_BLOCKING_TASKS)))
+        .clone()
+        .acquire_owned()
         .await
-        .map_err(|error| ApiError::Internal(format!("metadata task failed: {error}")))?
+        .map_err(|error| ApiError::Internal(format!("metadata runtime closed: {error}")))?;
+    let result = tokio::task::spawn_blocking(f)
+        .await
+        .map_err(|error| ApiError::Internal(format!("metadata task failed: {error}")))?;
+    drop(permit);
+    result
 }
 
 fn bearer_from_headers(headers: &HeaderMap) -> Option<&str> {
@@ -594,6 +613,27 @@ async fn record_execute_history(
     }
 }
 
+fn room_query_result(
+    context: &ExecuteMetadataContext,
+    sql_text: String,
+    result: &ApiResult<sift_protocol::ExecuteResponse>,
+) -> Option<RoomQueryResult> {
+    let room_id = context.room_id?;
+    let (status, row_count, error_message) = match result {
+        Ok(response) => (RoomQueryStatus::Ok, Some(response.rows.len() as i64), None),
+        Err(error) => (RoomQueryStatus::Error, None, Some(error.to_string())),
+    };
+    Some(RoomQueryResult {
+        room_id: room_id.0,
+        actor_principal_id: context.principal_id.0,
+        connection_profile_id: context.connection_profile_id.map(|id| id.0),
+        sql_text,
+        row_count,
+        status,
+        error_message,
+    })
+}
+
 async fn health(State(state): State<AppState>) -> Json<Health> {
     Json(Health {
         status: "ok".to_string(),
@@ -831,6 +871,13 @@ async fn openapi() -> Json<serde_json::Value> {
                     "responses": { "200": { "description": "Ack", "content": json_object_content() } }
                 }
             },
+            "/v1/metadata/rooms/{id}/ws": {
+                "get": {
+                    "operationId": "roomWebSocket",
+                    "summary": "WebSocket room presence and document operations; protocol uses RoomClientMessage/RoomServerMessage",
+                    "responses": { "101": { "description": "WebSocket upgrade" } }
+                }
+            },
             "/v1/metadata/rooms/{id}/documents": {
                 "get": {
                     "operationId": "listMetadataDocuments",
@@ -989,6 +1036,8 @@ fn protocol_schema_refs() -> serde_json::Value {
     add_schema::<sift_protocol::TransactionInfo>("TransactionInfo", &mut schemas);
     add_schema::<sift_protocol::WsClientMessage>("WsClientMessage", &mut schemas);
     add_schema::<sift_protocol::WsServerMessage>("WsServerMessage", &mut schemas);
+    add_schema::<sift_protocol::RoomClientMessage>("RoomClientMessage", &mut schemas);
+    add_schema::<sift_protocol::RoomServerMessage>("RoomServerMessage", &mut schemas);
     add_schema::<sift_metadata::ApiTokenRow>("ApiTokenRow", &mut schemas);
     add_schema::<sift_metadata::ConnectionProfile>("ConnectionProfile", &mut schemas);
     add_schema::<sift_metadata::Document>("Document", &mut schemas);
@@ -1680,6 +1729,12 @@ async fn execute_query(
     let result = state.sessions.execute_http(id, req).await;
     let duration_ms = started.elapsed().as_millis().min(i64::MAX as u128) as i64;
     if let Some(context) = metadata_context {
+        if let Some(summary) = room_query_result(&context, sql_text.clone(), &result) {
+            state.rooms.publish(
+                summary.room_id,
+                RoomServerMessage::QueryResult { result: summary },
+            );
+        }
         record_execute_history(context, sql_text, duration_ms, &result).await;
     }
     let resp = result?;
@@ -1778,6 +1833,200 @@ async fn ws_session(
             tracing::warn!(%session_id, error = %error, "websocket session ended with error");
         }
     })
+}
+
+async fn ws_room(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+    ws: WebSocketUpgrade,
+) -> Result<Response, ApiError> {
+    let metadata = metadata_store_cloned(&state)?;
+    let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
+    let room = room_id(id)?;
+    let room_row = metadata_blocking({
+        let metadata = metadata.clone();
+        let auth = auth.clone();
+        move || ensure_room_permission(&metadata, &auth, room, RoomPermission::Read)
+    })
+    .await?;
+    Ok(ws.on_upgrade(move |socket| async move {
+        if let Err(error) = handle_room_ws(state, metadata, auth, room_row.id, socket).await {
+            tracing::warn!(room_id = %room_row.id.0, error = %error, "room websocket ended with error");
+        }
+    }))
+}
+
+async fn handle_room_ws(
+    state: AppState,
+    metadata: MetadataStore,
+    auth: AuthContext,
+    room: RoomId,
+    socket: WebSocket,
+) -> ApiResult<()> {
+    let (mut sender, mut receiver) = socket.split();
+    let mut events = state.rooms.subscribe(room.0);
+    let mut attachment_id = None;
+
+    loop {
+        tokio::select! {
+            Some(message) = receiver.next() => {
+                let message = message.map_err(|error| ApiError::BadRequest(error.to_string()))?;
+                let Message::Text(text) = message else {
+                    if matches!(message, Message::Close(_)) {
+                        break;
+                    }
+                    continue;
+                };
+                let message: RoomClientMessage =
+                    serde_json::from_str(&text).map_err(|error| ApiError::BadRequest(error.to_string()))?;
+                match message {
+                    RoomClientMessage::Attach { client_id } => {
+                        if attachment_id.is_some() {
+                            send_json(&mut sender, &RoomServerMessage::Error {
+                                message: "room websocket is already attached".into(),
+                            }).await?;
+                            continue;
+                        }
+                        let (id, presence, next_events) =
+                            state.rooms.attach(room.0, auth.principal_id.0, client_id.clone());
+                        events = next_events;
+                        attachment_id = Some(id);
+                        state.sessions.push_operation(
+                            Operation::AttachRoom {
+                                room_id: room.0,
+                                attachment_id: id,
+                                client_id,
+                            },
+                            OperationStatus::Succeeded,
+                        );
+                        send_json(&mut sender, &RoomServerMessage::Attached {
+                            attachment_id: id,
+                            presence,
+                        }).await?;
+                    }
+                    RoomClientMessage::Detach => break,
+                    RoomClientMessage::PresencePing => {
+                        send_json(&mut sender, &RoomServerMessage::Presence {
+                            presence: state.rooms.presence(room.0),
+                        }).await?;
+                    }
+                    RoomClientMessage::DocumentOperation {
+                        operation_id,
+                        document_id: raw_document_id,
+                        operation,
+                    } => {
+                        if attachment_id.is_none() {
+                            send_json(&mut sender, &RoomServerMessage::Error {
+                                message: "attach before sending document operations".into(),
+                            }).await?;
+                            continue;
+                        }
+                        let document = document_id(raw_document_id)?;
+                        let applied = apply_room_document_operation(
+                            metadata.clone(),
+                            auth.clone(),
+                            room,
+                            document,
+                            operation.clone(),
+                        )
+                        .await;
+                        if let Err(error) = applied {
+                            send_json(&mut sender, &RoomServerMessage::Error {
+                                message: error.to_string(),
+                            }).await?;
+                            continue;
+                        }
+                        let envelope = DocumentOperationEnvelope {
+                            operation_id: operation_id.clone(),
+                            room_id: room.0,
+                            document_id: document.0,
+                            actor_principal_id: auth.principal_id.0,
+                            operation: operation.clone(),
+                        };
+                        state.rooms.publish(
+                            room.0,
+                            RoomServerMessage::DocumentOperation {
+                                operation: envelope,
+                            },
+                        );
+                        state.sessions.push_operation(
+                            Operation::ApplyDocumentOperation {
+                                room_id: room.0,
+                                document_id: document.0,
+                                operation_id,
+                                operation,
+                            },
+                            OperationStatus::Succeeded,
+                        );
+                    }
+                }
+            }
+            event = events.recv() => {
+                match event {
+                    Ok(message) => send_json(&mut sender, &message).await?,
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                        send_json(&mut sender, &RoomServerMessage::Presence {
+                            presence: state.rooms.presence(room.0),
+                        }).await?;
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                }
+            }
+        }
+    }
+
+    if let Some(id) = attachment_id {
+        state.rooms.detach(room.0, id);
+        state.sessions.push_operation(
+            Operation::DetachRoom {
+                room_id: room.0,
+                attachment_id: id,
+            },
+            OperationStatus::Succeeded,
+        );
+    }
+    Ok(())
+}
+
+async fn apply_room_document_operation(
+    metadata: MetadataStore,
+    auth: AuthContext,
+    room: RoomId,
+    document: DocumentId,
+    operation: sift_protocol::TextDocumentOperation,
+) -> ApiResult<()> {
+    metadata_blocking(move || {
+        let row = ensure_document_access(&metadata, &auth, document, RoomPermission::Write)?;
+        if row.room_id != room {
+            return Err(ApiError::Forbidden(format!(
+                "document {:?} is not in room {:?}",
+                document, room
+            )));
+        }
+        let crdt = match row.crdt_type {
+            CrdtType::Loro => CrdtKind::Loro,
+            CrdtType::Automerge => CrdtKind::Automerge,
+        };
+        let mut doc = TextDocument::from_snapshot(DocumentSnapshot::new(crdt, row.crdt_state));
+        let operation = match operation {
+            sift_protocol::TextDocumentOperation::Replace { text } => {
+                TextOperation::Replace { text }
+            }
+            sift_protocol::TextDocumentOperation::Insert { offset, text } => {
+                TextOperation::Insert { offset, text }
+            }
+            sift_protocol::TextDocumentOperation::Delete { start, end } => {
+                TextOperation::Delete { start, end }
+            }
+        };
+        let snapshot = doc
+            .apply(operation)
+            .map_err(|error| ApiError::BadRequest(error.to_string()))?;
+        metadata.update_document_snapshot(document, snapshot.bytes)?;
+        Ok(())
+    })
+    .await
 }
 
 async fn handle_ws(

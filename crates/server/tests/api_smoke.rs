@@ -10,10 +10,12 @@ use sift_metadata::{
 };
 use sift_protocol::{
     ColumnMetadata, ConnectionSpec, Engine, ExecuteRequestHttp, Health, Nullability, Page,
-    PrimitiveType, Row, SchemaScope, SchemaSnapshot, ServerInfo, SslMode, TypeRef, Value,
+    PrimitiveType, RoomClientMessage, RoomServerMessage, Row, SchemaScope, SchemaSnapshot,
+    ServerInfo, SslMode, TextDocumentOperation, TypeRef, Value,
 };
 use sift_server::http::{app, AppState, AuthState};
 use sift_server::registry::DriverRegistry;
+use sift_server::room_runtime::RoomRuntime;
 use sift_server::session::SessionStore;
 use std::sync::Arc;
 use tower::ServiceExt;
@@ -67,6 +69,7 @@ fn test_state() -> AppState {
         .build();
     AppState {
         sessions: SessionStore::new(registry),
+        rooms: RoomRuntime::default(),
         auth: AuthState::default(),
         metadata: None,
     }
@@ -76,6 +79,7 @@ fn test_state_with_driver(driver: MockDriver) -> AppState {
     let registry = DriverRegistry::builder().register(driver).build();
     AppState {
         sessions: SessionStore::new(registry),
+        rooms: RoomRuntime::default(),
         auth: AuthState::default(),
         metadata: None,
     }
@@ -87,6 +91,7 @@ fn test_state_with_token(token: &str) -> AppState {
         .build();
     AppState {
         sessions: SessionStore::new(registry),
+        rooms: RoomRuntime::default(),
         auth: AuthState {
             bearer_token: Some(token.to_string()),
             loopback_bypass: false,
@@ -102,6 +107,7 @@ fn test_state_with_operation_log(path: &std::path::Path) -> AppState {
     AppState {
         sessions: SessionStore::new_with_operation_log_path(registry, path)
             .expect("operation log opens"),
+        rooms: RoomRuntime::default(),
         auth: AuthState::default(),
         metadata: None,
     }
@@ -115,6 +121,7 @@ fn test_state_with_metadata(loopback_bypass: bool) -> AppState {
     metadata.bootstrap_local("local user").unwrap();
     AppState {
         sessions: SessionStore::new(registry),
+        rooms: RoomRuntime::default(),
         auth: AuthState {
             bearer_token: None,
             loopback_bypass,
@@ -219,6 +226,7 @@ async fn openapi_is_published() {
     assert!(body["paths"]["/v1/operations"].is_object());
     assert!(body["paths"]["/v1/metadata/tenants"].is_object());
     assert!(body["paths"]["/v1/metadata/rooms/{id}/members"].is_object());
+    assert!(body["paths"]["/v1/metadata/rooms/{id}/ws"].is_object());
     assert!(body["paths"]["/v1/metadata/history"].is_object());
     assert!(body["paths"]["/v1/auth/tokens"].is_object());
     assert!(body["paths"]["/v1/sessions/{id}/connections/from-profile"].is_object());
@@ -244,6 +252,8 @@ async fn openapi_is_published() {
     assert!(body["components"]["schemas"]["CreateRoomRequest"].is_object());
     assert!(body["components"]["schemas"]["IssueTokenResponse"].is_object());
     assert!(body["components"]["schemas"]["Room"].is_object());
+    assert!(body["components"]["schemas"]["RoomClientMessage"].is_object());
+    assert!(body["components"]["schemas"]["RoomServerMessage"].is_object());
     assert!(body["components"]["schemas"]["ExecuteResponse"]["properties"]["rows"].is_object());
     assert!(
         body["components"]["schemas"]["OpenConnectionRequest"]["properties"]["engine"].is_object()
@@ -428,6 +438,79 @@ async fn client_sdk_consumes_public_http_api() {
     assert_eq!(result.rows.len(), 2);
     let audit = client.audit().await.unwrap();
     assert!(audit.iter().any(|row| row.path == "/v1/health"));
+
+    server.abort();
+}
+
+#[tokio::test]
+async fn client_sdk_consumes_metadata_api() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        axum::serve(
+            listener,
+            app(test_state_with_metadata(true)).into_make_service(),
+        )
+        .await
+        .unwrap();
+    });
+
+    let client = sift_client_sdk::Client::new(format!("http://{addr}"));
+    let tenants = client.tenants().await.unwrap();
+    assert_eq!(tenants[0].tenant.id, TenantId(1));
+
+    let room = client
+        .create_room(sift_client_sdk::CreateRoomRequest {
+            tenant_id: 1,
+            name: "sdk room".into(),
+            kind: RoomKind::Shared,
+        })
+        .await
+        .unwrap();
+    let rooms = client.rooms(TenantId(1)).await.unwrap();
+    assert!(rooms.iter().any(|listed| listed.id == room.id));
+
+    let document = client
+        .create_document(
+            room.id,
+            sift_client_sdk::CreateDocumentRequest {
+                kind: "sql".into(),
+                title: "sdk.sql".into(),
+                crdt_type: CrdtType::Loro,
+                crdt_state: b"select 1".to_vec(),
+                position: 0,
+                connection_profile_id: None,
+            },
+        )
+        .await
+        .unwrap();
+    let updated = client
+        .update_document_snapshot(
+            document.id,
+            sift_client_sdk::UpdateDocumentSnapshotRequest {
+                crdt_state: b"select 2".to_vec(),
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(updated.crdt_state, b"select 2");
+
+    let issued = client
+        .issue_token(sift_client_sdk::IssueTokenRequest {
+            name: "sdk token".into(),
+            tenant_id: Some(1),
+            expires_at: None,
+        })
+        .await
+        .unwrap();
+    assert!(issued.plaintext.starts_with("sift_"));
+    assert!(client
+        .auth_tokens()
+        .await
+        .unwrap()
+        .iter()
+        .any(|token| token.id == issued.token.id));
+    client.revoke_token(issued.token.id).await.unwrap();
 
     server.abort();
 }
@@ -1020,6 +1103,121 @@ async fn http_execute_records_room_scoped_query_history() {
     assert_eq!(history[0]["sql_text"], "SELECT id, name FROM users");
     assert_eq!(history[0]["status"], "ok");
     assert_eq!(history[0]["row_count"], 2);
+}
+
+#[tokio::test]
+async fn room_websocket_applies_and_broadcasts_document_operations() {
+    use futures::{SinkExt, StreamExt};
+    use tokio_tungstenite::tungstenite::Message;
+
+    let state = test_state_with_metadata(true);
+    let metadata = state.metadata.as_ref().unwrap().clone();
+    let room = metadata
+        .create_room(
+            TenantId(1),
+            PrincipalId(1),
+            NewRoom {
+                name: "room ws".into(),
+                kind: RoomKind::Shared,
+            },
+        )
+        .unwrap();
+    let document = metadata
+        .create_document(
+            room.id,
+            NewDocument {
+                kind: "sql".into(),
+                title: "ws.sql".into(),
+                crdt_type: CrdtType::Loro,
+                crdt_state: b"select 1".to_vec(),
+                position: 0,
+                connection_profile_id: None,
+            },
+        )
+        .unwrap();
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app(state).into_make_service())
+            .await
+            .unwrap();
+    });
+
+    let (mut ws, _) =
+        tokio_tungstenite::connect_async(format!("ws://{addr}/v1/metadata/rooms/{}/ws", room.id.0))
+            .await
+            .unwrap();
+    ws.send(Message::Text(
+        serde_json::to_string(&RoomClientMessage::Attach {
+            client_id: "test-client".into(),
+        })
+        .unwrap()
+        .into(),
+    ))
+    .await
+    .unwrap();
+    let attached: RoomServerMessage = match ws.next().await.unwrap().unwrap() {
+        Message::Text(text) => serde_json::from_str(&text).unwrap(),
+        other => panic!("unexpected websocket message: {other:?}"),
+    };
+    assert!(matches!(attached, RoomServerMessage::Attached { .. }));
+
+    ws.send(Message::Text(
+        serde_json::to_string(&RoomClientMessage::DocumentOperation {
+            operation_id: "op-1".into(),
+            document_id: document.id.0,
+            operation: TextDocumentOperation::Replace {
+                text: "select 2".into(),
+            },
+        })
+        .unwrap()
+        .into(),
+    ))
+    .await
+    .unwrap();
+
+    let mut saw_operation = false;
+    for _ in 0..4 {
+        let message: RoomServerMessage = match ws.next().await.unwrap().unwrap() {
+            Message::Text(text) => serde_json::from_str(&text).unwrap(),
+            other => panic!("unexpected websocket message: {other:?}"),
+        };
+        if matches!(
+            message,
+            RoomServerMessage::DocumentOperation { operation }
+                if operation.operation_id == "op-1"
+        ) {
+            saw_operation = true;
+            break;
+        }
+    }
+    assert!(saw_operation);
+    assert_eq!(
+        metadata.get_document(document.id).unwrap().crdt_state,
+        b"select 2"
+    );
+
+    let client = sift_client_sdk::Client::new(format!("http://{addr}"));
+    let envelope = client
+        .apply_room_text_operation(
+            room.id,
+            document.id,
+            "sdk-room-client",
+            "op-2",
+            TextDocumentOperation::Replace {
+                text: "select 3".into(),
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(envelope.operation_id, "op-2");
+    assert_eq!(
+        metadata.get_document(document.id).unwrap().crdt_state,
+        b"select 3"
+    );
+
+    server.abort();
 }
 
 #[tokio::test]

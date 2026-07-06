@@ -12,6 +12,7 @@ sift-core = { workspace = true }
 sift-driver-api = { workspace = true, features = ["mock"] }
 sift-driver-postgres = { workspace = true }
 sift-driver-sqlserver = { workspace = true }
+sift-doc = { workspace = true }
 sift-metadata = { workspace = true }
 anyhow = { workspace = true }
 async-trait = { workspace = true }
@@ -33,8 +34,9 @@ tracing-subscriber = { workspace = true }
 [dev-dependencies]
 sift-client-sdk = { workspace = true }
 sift-driver-api = { workspace = true, features = ["mock"] }
-tower = { workspace = true, features = ["util"] }
 tokio = { workspace = true, features = ["full", "test-util"] }
+tokio-tungstenite = { workspace = true }
+tower = { workspace = true, features = ["util"] }
 
 [[bin]]
 name = "sift-server"

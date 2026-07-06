@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use crate::{
     BeginTransactionRequest, BulkInsertRequest, CancelRequest, ConnectionId, EndTransactionRequest,
     ExecuteRequestHttp, OpenConnectionRequest, OpenSessionRequest, SchemaScope, SessionId,
+    TextDocumentOperation,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
@@ -61,5 +62,20 @@ pub enum Operation {
         action: String,
         target: String,
         id: Option<i64>,
+    },
+    AttachRoom {
+        room_id: i64,
+        attachment_id: i64,
+        client_id: String,
+    },
+    DetachRoom {
+        room_id: i64,
+        attachment_id: i64,
+    },
+    ApplyDocumentOperation {
+        room_id: i64,
+        document_id: i64,
+        operation_id: String,
+        operation: TextDocumentOperation,
     },
 }

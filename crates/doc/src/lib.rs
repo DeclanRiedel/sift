@@ -24,10 +24,24 @@ pub struct TextDocument {
     snapshot: DocumentSnapshot,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum TextOperation {
+    Replace { text: String },
+    Insert { offset: usize, text: String },
+    Delete { start: usize, end: usize },
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum DocError {
     #[error("snapshot is not valid utf-8 text: {0}")]
     Utf8(#[from] std::string::FromUtf8Error),
+    #[error("operation boundary {boundary} is not a utf-8 character boundary")]
+    InvalidBoundary { boundary: usize },
+    #[error("delete range start {start} is greater than end {end}")]
+    InvalidRange { start: usize, end: usize },
+    #[error("operation boundary {boundary} is outside document length {len}")]
+    BoundaryOutOfBounds { boundary: usize, len: usize },
 }
 
 impl DocumentSnapshot {
@@ -62,6 +76,27 @@ impl TextDocument {
         self.snapshot.bytes = text.into().into_bytes();
     }
 
+    pub fn apply(&mut self, operation: TextOperation) -> Result<DocumentSnapshot, DocError> {
+        let mut text = self.text()?;
+        match operation {
+            TextOperation::Replace { text: next } => text = next,
+            TextOperation::Insert { offset, text: next } => {
+                ensure_boundary(&text, offset)?;
+                text.insert_str(offset, &next);
+            }
+            TextOperation::Delete { start, end } => {
+                if start > end {
+                    return Err(DocError::InvalidRange { start, end });
+                }
+                ensure_boundary(&text, start)?;
+                ensure_boundary(&text, end)?;
+                text.replace_range(start..end, "");
+            }
+        }
+        self.replace_text(text);
+        Ok(self.snapshot.clone())
+    }
+
     pub fn snapshot(&self) -> &DocumentSnapshot {
         &self.snapshot
     }
@@ -69,6 +104,19 @@ impl TextDocument {
     pub fn into_snapshot(self) -> DocumentSnapshot {
         self.snapshot
     }
+}
+
+fn ensure_boundary(text: &str, boundary: usize) -> Result<(), DocError> {
+    if boundary > text.len() {
+        return Err(DocError::BoundaryOutOfBounds {
+            boundary,
+            len: text.len(),
+        });
+    }
+    if !text.is_char_boundary(boundary) {
+        return Err(DocError::InvalidBoundary { boundary });
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -92,5 +140,42 @@ mod tests {
         doc.replace_text("new");
         assert_eq!(doc.text().unwrap(), "new");
         assert_eq!(doc.snapshot().bytes, b"new");
+    }
+
+    #[test]
+    fn text_operations_apply_in_order() {
+        let mut doc = TextDocument::from_text(CrdtKind::Loro, "select 1");
+        doc.apply(TextOperation::Insert {
+            offset: 6,
+            text: " *".into(),
+        })
+        .unwrap();
+        assert_eq!(doc.text().unwrap(), "select * 1");
+
+        doc.apply(TextOperation::Delete { start: 8, end: 10 })
+            .unwrap();
+        assert_eq!(doc.text().unwrap(), "select *");
+
+        doc.apply(TextOperation::Replace {
+            text: "select 2".into(),
+        })
+        .unwrap();
+        assert_eq!(doc.text().unwrap(), "select 2");
+    }
+
+    #[test]
+    fn text_operations_validate_utf8_boundaries() {
+        let mut doc = TextDocument::from_text(CrdtKind::Loro, "é");
+        assert!(matches!(
+            doc.apply(TextOperation::Insert {
+                offset: 1,
+                text: "!".into()
+            }),
+            Err(DocError::InvalidBoundary { boundary: 1 })
+        ));
+        assert!(matches!(
+            doc.apply(TextOperation::Delete { start: 2, end: 1 }),
+            Err(DocError::InvalidRange { start: 2, end: 1 })
+        ));
     }
 }

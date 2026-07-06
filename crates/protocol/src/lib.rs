@@ -17,6 +17,7 @@ pub mod engine;
 pub mod error;
 pub mod operation;
 pub mod result;
+pub mod room;
 pub mod schema;
 pub mod session;
 pub mod tx;
@@ -34,6 +35,10 @@ pub use engine::Engine;
 pub use error::{Code, DriverError, DriverWarning};
 pub use operation::Operation;
 pub use result::{CursorId, ExecuteRequest, Page, Row};
+pub use room::{
+    DocumentOperationEnvelope, RoomClientMessage, RoomPresence, RoomQueryResult, RoomQueryStatus,
+    RoomServerMessage, TextDocumentOperation,
+};
 pub use schema::{
     CatalogTree, ConstraintInfo, ConstraintKind, IndexInfo, IndexKind, ObjectInfo, ObjectKind,
     ObjectPath, SchemaDepth, SchemaFilter, SchemaScope, SchemaSnapshot, SchemaTree, TriggerEvent,

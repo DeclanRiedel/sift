@@ -1,13 +1,83 @@
 //! `sift-client-sdk` — thin reference consumer proving the HTTP API is
 //! buildable-against from outside the server crate.
 
+use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
+use sift_metadata::{
+    ApiTokenId, ConnectionProfile, ConnectionProfileId, CrdtType, CredentialMode, Document,
+    DocumentId, QueryHistory, Room, RoomId, RoomKind, RoomMember, RoomRole, TenantId,
+    TenantMembership,
+};
 use sift_protocol::{
     BeginTransactionRequest, BulkInsertRequest, BulkInsertResponse, CancelRequest, ConnectionId,
     ConnectionInfo, CursorId, EndTransactionRequest, Engine, ExecuteRequestHttp, ExecuteResponse,
     Health, OpenConnectionRequest, OpenSessionRequest, Page, SchemaSnapshot, ServerInfo, SessionId,
-    SessionInfo, TransactionInfo, TxHandleRef, TxId, TxMode, Value, WsClientMessage,
-    WsServerMessage,
+    SessionInfo, TextDocumentOperation, TransactionInfo, TxHandleRef, TxId, TxMode, Value,
+    WsClientMessage, WsServerMessage,
 };
+
+#[derive(Debug, Clone, Serialize)]
+pub struct CreateRoomRequest {
+    pub tenant_id: i64,
+    pub name: String,
+    pub kind: RoomKind,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct AddRoomMemberRequest {
+    pub principal_id: i64,
+    pub role: RoomRole,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct CreateDocumentRequest {
+    pub kind: String,
+    pub title: String,
+    pub crdt_type: CrdtType,
+    pub crdt_state: Vec<u8>,
+    pub position: i64,
+    pub connection_profile_id: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct UpdateDocumentSnapshotRequest {
+    pub crdt_state: Vec<u8>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct UpsertConnectionProfileRequest {
+    pub tenant_id: i64,
+    pub name: String,
+    pub engine: Engine,
+    pub spec: sift_protocol::ConnectionSpec,
+    pub credential_mode: CredentialMode,
+    #[serde(default)]
+    pub tags: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SetCredentialRequest {
+    pub secret: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct OpenConnectionFromProfileRequest {
+    pub tenant_id: i64,
+    pub profile_id: i64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct IssueTokenRequest {
+    pub name: String,
+    pub tenant_id: Option<i64>,
+    pub expires_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct IssueTokenResponse {
+    pub token: sift_metadata::ApiTokenRow,
+    pub plaintext: String,
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -230,6 +300,233 @@ impl Client {
         self.get("/v1/openapi.json").await
     }
 
+    pub async fn tenants(&self) -> Result<Vec<TenantMembership>> {
+        self.get("/v1/metadata/tenants").await
+    }
+
+    pub async fn rooms(&self, tenant: TenantId) -> Result<Vec<Room>> {
+        self.get(&format!("/v1/metadata/rooms?tenant={}", tenant.0))
+            .await
+    }
+
+    pub async fn create_room(&self, request: CreateRoomRequest) -> Result<Room> {
+        self.post("/v1/metadata/rooms", &request).await
+    }
+
+    pub async fn delete_room(&self, room: RoomId) -> Result<()> {
+        self.delete(&format!("/v1/metadata/rooms/{}", room.0)).await
+    }
+
+    pub async fn room_members(&self, room: RoomId) -> Result<Vec<RoomMember>> {
+        self.get(&format!("/v1/metadata/rooms/{}/members", room.0))
+            .await
+    }
+
+    pub async fn add_room_member(
+        &self,
+        room: RoomId,
+        request: AddRoomMemberRequest,
+    ) -> Result<RoomMember> {
+        self.post(&format!("/v1/metadata/rooms/{}/members", room.0), &request)
+            .await
+    }
+
+    pub async fn remove_room_member(&self, room: RoomId, principal_id: i64) -> Result<()> {
+        self.delete(&format!(
+            "/v1/metadata/rooms/{}/members/{principal_id}",
+            room.0
+        ))
+        .await
+    }
+
+    pub async fn join_room(&self, room: RoomId) -> Result<RoomMember> {
+        self.post_empty(&format!("/v1/metadata/rooms/{}/join", room.0))
+            .await
+    }
+
+    pub async fn leave_room(&self, room: RoomId) -> Result<()> {
+        self.post_empty_body(
+            &format!("/v1/metadata/rooms/{}/leave", room.0),
+            &serde_json::json!({}),
+        )
+        .await
+    }
+
+    pub async fn documents(&self, room: RoomId) -> Result<Vec<Document>> {
+        self.get(&format!("/v1/metadata/rooms/{}/documents", room.0))
+            .await
+    }
+
+    pub async fn create_document(
+        &self,
+        room: RoomId,
+        request: CreateDocumentRequest,
+    ) -> Result<Document> {
+        self.post(
+            &format!("/v1/metadata/rooms/{}/documents", room.0),
+            &request,
+        )
+        .await
+    }
+
+    pub async fn update_document_snapshot(
+        &self,
+        document: DocumentId,
+        request: UpdateDocumentSnapshotRequest,
+    ) -> Result<Document> {
+        self.put(&format!("/v1/metadata/documents/{}", document.0), &request)
+            .await
+    }
+
+    pub async fn delete_document(&self, document: DocumentId) -> Result<()> {
+        self.delete(&format!("/v1/metadata/documents/{}", document.0))
+            .await
+    }
+
+    pub async fn connection_profiles(&self, tenant: TenantId) -> Result<Vec<ConnectionProfile>> {
+        self.get(&format!("/v1/metadata/connections?tenant={}", tenant.0))
+            .await
+    }
+
+    pub async fn upsert_connection_profile(
+        &self,
+        request: UpsertConnectionProfileRequest,
+    ) -> Result<ConnectionProfile> {
+        self.post("/v1/metadata/connections", &request).await
+    }
+
+    pub async fn delete_connection_profile(
+        &self,
+        tenant: TenantId,
+        profile: ConnectionProfileId,
+    ) -> Result<()> {
+        self.delete(&format!(
+            "/v1/metadata/connections/{}?tenant={}",
+            profile.0, tenant.0
+        ))
+        .await
+    }
+
+    pub async fn set_connection_credential(
+        &self,
+        profile: ConnectionProfileId,
+        request: SetCredentialRequest,
+    ) -> Result<()> {
+        self.post_empty_body(
+            &format!("/v1/metadata/connections/{}/credential", profile.0),
+            &request,
+        )
+        .await
+    }
+
+    pub async fn open_connection_from_profile(
+        &self,
+        session: SessionId,
+        request: OpenConnectionFromProfileRequest,
+    ) -> Result<ConnectionInfo> {
+        self.post(
+            &format!("/v1/sessions/{session}/connections/from-profile"),
+            &request,
+        )
+        .await
+    }
+
+    pub async fn history(
+        &self,
+        room: Option<RoomId>,
+        limit: Option<u32>,
+    ) -> Result<Vec<QueryHistory>> {
+        let mut query = Vec::new();
+        if let Some(room) = room {
+            query.push(format!("room={}", room.0));
+        }
+        if let Some(limit) = limit {
+            query.push(format!("limit={limit}"));
+        }
+        let suffix = if query.is_empty() {
+            String::new()
+        } else {
+            format!("?{}", query.join("&"))
+        };
+        self.get(&format!("/v1/metadata/history{suffix}")).await
+    }
+
+    pub async fn auth_tokens(&self) -> Result<Vec<sift_metadata::ApiTokenRow>> {
+        self.get("/v1/auth/tokens").await
+    }
+
+    pub async fn issue_token(&self, request: IssueTokenRequest) -> Result<IssueTokenResponse> {
+        self.post("/v1/auth/tokens", &request).await
+    }
+
+    pub async fn revoke_token(&self, token: ApiTokenId) -> Result<()> {
+        self.delete(&format!("/v1/auth/tokens/{}", token.0)).await
+    }
+
+    pub async fn apply_room_text_operation(
+        &self,
+        room: RoomId,
+        document: DocumentId,
+        client_id: impl Into<String>,
+        operation_id: impl Into<String>,
+        operation: TextDocumentOperation,
+    ) -> Result<sift_protocol::DocumentOperationEnvelope> {
+        use futures::SinkExt;
+        use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+        use tokio_tungstenite::tungstenite::Message;
+
+        let mut request = self.room_ws_url(room).into_client_request()?;
+        if let Some(token) = &self.token {
+            request.headers_mut().insert(
+                "authorization",
+                format!("Bearer {token}")
+                    .parse()
+                    .map_err(|e| Error::Protocol(format!("invalid bearer token header: {e}")))?,
+            );
+        }
+        let (mut ws, _) = tokio_tungstenite::connect_async(request).await?;
+        ws.send(Message::Text(
+            serde_json::to_string(&sift_protocol::RoomClientMessage::Attach {
+                client_id: client_id.into(),
+            })?
+            .into(),
+        ))
+        .await?;
+        loop {
+            match next_room_ws(&mut ws).await? {
+                sift_protocol::RoomServerMessage::Attached { .. } => break,
+                sift_protocol::RoomServerMessage::Error { message } => {
+                    return Err(Error::Protocol(message));
+                }
+                _ => {}
+            }
+        }
+
+        let operation_id = operation_id.into();
+        ws.send(Message::Text(
+            serde_json::to_string(&sift_protocol::RoomClientMessage::DocumentOperation {
+                operation_id: operation_id.clone(),
+                document_id: document.0,
+                operation,
+            })?
+            .into(),
+        ))
+        .await?;
+        loop {
+            match next_room_ws(&mut ws).await? {
+                sift_protocol::RoomServerMessage::DocumentOperation { operation }
+                    if operation.operation_id == operation_id =>
+                {
+                    return Ok(operation);
+                }
+                sift_protocol::RoomServerMessage::Error { message } => {
+                    return Err(Error::Protocol(message));
+                }
+                _ => {}
+            }
+        }
+    }
+
     pub async fn audit(&self) -> Result<Vec<sift_protocol::AuditEntry>> {
         self.get("/v1/audit").await
     }
@@ -377,6 +674,20 @@ impl Client {
         format!("{base}/v1/sessions/{session}/ws")
     }
 
+    pub fn room_ws_url(&self, room: RoomId) -> String {
+        let base = self
+            .base
+            .strip_prefix("https://")
+            .map(|s| format!("wss://{s}"))
+            .or_else(|| {
+                self.base
+                    .strip_prefix("http://")
+                    .map(|s| format!("ws://{s}"))
+            })
+            .unwrap_or_else(|| self.base.clone());
+        format!("{base}/v1/metadata/rooms/{}/ws", room.0)
+    }
+
     async fn get<T: serde::de::DeserializeOwned>(&self, path: &str) -> Result<T> {
         self.send(self.http.get(self.url(path))).await
     }
@@ -387,6 +698,14 @@ impl Client {
         body: &B,
     ) -> Result<T> {
         self.send(self.http.post(self.url(path)).json(body)).await
+    }
+
+    async fn put<T: serde::de::DeserializeOwned, B: serde::Serialize>(
+        &self,
+        path: &str,
+        body: &B,
+    ) -> Result<T> {
+        self.send(self.http.put(self.url(path)).json(body)).await
     }
 
     async fn post_empty<T: serde::de::DeserializeOwned>(&self, path: &str) -> Result<T> {
@@ -425,6 +744,30 @@ impl Client {
 }
 
 async fn next_ws<S>(ws: &mut S) -> Result<WsServerMessage>
+where
+    S: futures::Stream<
+            Item = std::result::Result<
+                tokio_tungstenite::tungstenite::Message,
+                tokio_tungstenite::tungstenite::Error,
+            >,
+        > + Unpin,
+{
+    use futures::StreamExt;
+    use tokio_tungstenite::tungstenite::Message;
+
+    loop {
+        let Some(message) = ws.next().await else {
+            return Err(Error::Protocol("websocket closed".into()));
+        };
+        match message? {
+            Message::Text(text) => return Ok(serde_json::from_str(&text)?),
+            Message::Close(_) => return Err(Error::Protocol("websocket closed".into())),
+            Message::Ping(_) | Message::Pong(_) | Message::Binary(_) | Message::Frame(_) => {}
+        }
+    }
+}
+
+async fn next_room_ws<S>(ws: &mut S) -> Result<sift_protocol::RoomServerMessage>
 where
     S: futures::Stream<
             Item = std::result::Result<

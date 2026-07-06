@@ -13,6 +13,7 @@ use sift_server::{
     config::{load as load_config, Config},
     http::{app, AppState},
     registry::DriverRegistry,
+    room_runtime::RoomRuntime,
     session::SessionStore,
 };
 
@@ -33,6 +34,7 @@ async fn main() -> anyhow::Result<()> {
     let metadata = build_metadata_store(&cfg)?;
     let state = AppState {
         sessions,
+        rooms: RoomRuntime::default(),
         auth: sift_server::http::AuthState {
             bearer_token: cfg.auth.bearer_token.clone(),
             loopback_bypass: cfg.auth.loopback_bypass,
