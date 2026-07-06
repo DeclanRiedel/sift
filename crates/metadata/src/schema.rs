@@ -14,6 +14,18 @@ pub struct ApiTokenId(pub i64);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ConnectionProfileId(pub i64);
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct RoomId(pub i64);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct DocumentId(pub i64);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct RoomAttachmentId(pub i64);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct QueryHistoryId(pub i64);
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TenantKind {
@@ -36,6 +48,36 @@ pub enum CredentialMode {
     Shared,
     PerUser,
     Broker,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RoomKind {
+    Personal,
+    Shared,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RoomRole {
+    Owner,
+    Editor,
+    Viewer,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CrdtType {
+    Loro,
+    Automerge,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum QueryStatus {
+    Ok,
+    Error,
+    Canceled,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -103,12 +145,137 @@ pub struct NewConnectionProfile {
     pub tags: Vec<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Room {
+    pub id: RoomId,
+    pub tenant_id: TenantId,
+    pub name: String,
+    pub kind: RoomKind,
+    pub created_by: PrincipalId,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NewRoom {
+    pub name: String,
+    pub kind: RoomKind,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RoomMember {
+    pub room_id: RoomId,
+    pub principal_id: PrincipalId,
+    pub role: RoomRole,
+    pub joined_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Document {
+    pub id: DocumentId,
+    pub room_id: RoomId,
+    pub kind: String,
+    pub title: String,
+    pub crdt_type: CrdtType,
+    pub crdt_state: Vec<u8>,
+    pub position: i64,
+    pub connection_profile_id: Option<ConnectionProfileId>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NewDocument {
+    pub kind: String,
+    pub title: String,
+    pub crdt_type: CrdtType,
+    pub crdt_state: Vec<u8>,
+    pub position: i64,
+    pub connection_profile_id: Option<ConnectionProfileId>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RoomAttachment {
+    pub id: RoomAttachmentId,
+    pub room_id: RoomId,
+    pub principal_id: PrincipalId,
+    pub client_id: String,
+    pub attached_at: DateTime<Utc>,
+    pub detached_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QueryHistory {
+    pub id: QueryHistoryId,
+    pub principal_id: PrincipalId,
+    pub room_id: Option<RoomId>,
+    pub connection_profile_id: Option<ConnectionProfileId>,
+    pub sql_text: String,
+    pub started_at: DateTime<Utc>,
+    pub duration_ms: Option<i64>,
+    pub row_count: Option<i64>,
+    pub status: QueryStatus,
+    pub error_code: Option<String>,
+    pub error_message: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NewQueryHistory {
+    pub principal_id: PrincipalId,
+    pub room_id: Option<RoomId>,
+    pub connection_profile_id: Option<ConnectionProfileId>,
+    pub sql_text: String,
+    pub duration_ms: Option<i64>,
+    pub row_count: Option<i64>,
+    pub status: QueryStatus,
+    pub error_code: Option<String>,
+    pub error_message: Option<String>,
+}
+
 impl CredentialMode {
     pub(crate) fn as_str(&self) -> &'static str {
         match self {
             Self::Shared => "shared",
             Self::PerUser => "per_user",
             Self::Broker => "broker",
+        }
+    }
+}
+
+impl RoomKind {
+    pub(crate) fn as_str(&self) -> &'static str {
+        match self {
+            Self::Personal => "personal",
+            Self::Shared => "shared",
+        }
+    }
+}
+
+impl RoomRole {
+    pub(crate) fn as_str(&self) -> &'static str {
+        match self {
+            Self::Owner => "owner",
+            Self::Editor => "editor",
+            Self::Viewer => "viewer",
+        }
+    }
+}
+
+impl CrdtType {
+    pub(crate) fn as_str(&self) -> &'static str {
+        match self {
+            Self::Loro => "loro",
+            Self::Automerge => "automerge",
+        }
+    }
+}
+
+impl QueryStatus {
+    pub(crate) fn as_str(&self) -> &'static str {
+        match self {
+            Self::Ok => "ok",
+            Self::Error => "error",
+            Self::Canceled => "canceled",
         }
     }
 }
@@ -144,6 +311,52 @@ pub(crate) fn parse_credential_mode(value: String) -> crate::Result<CredentialMo
         "broker" => Ok(CredentialMode::Broker),
         _ => Err(crate::MetadataError::InvalidEnum {
             field: "connection_profile.credential_mode",
+            value,
+        }),
+    }
+}
+
+pub(crate) fn parse_room_kind(value: String) -> crate::Result<RoomKind> {
+    match value.as_str() {
+        "personal" => Ok(RoomKind::Personal),
+        "shared" => Ok(RoomKind::Shared),
+        _ => Err(crate::MetadataError::InvalidEnum {
+            field: "room.kind",
+            value,
+        }),
+    }
+}
+
+pub(crate) fn parse_room_role(value: String) -> crate::Result<RoomRole> {
+    match value.as_str() {
+        "owner" => Ok(RoomRole::Owner),
+        "editor" => Ok(RoomRole::Editor),
+        "viewer" => Ok(RoomRole::Viewer),
+        _ => Err(crate::MetadataError::InvalidEnum {
+            field: "room_member.role",
+            value,
+        }),
+    }
+}
+
+pub(crate) fn parse_crdt_type(value: String) -> crate::Result<CrdtType> {
+    match value.as_str() {
+        "loro" => Ok(CrdtType::Loro),
+        "automerge" => Ok(CrdtType::Automerge),
+        _ => Err(crate::MetadataError::InvalidEnum {
+            field: "document.crdt_type",
+            value,
+        }),
+    }
+}
+
+pub(crate) fn parse_query_status(value: String) -> crate::Result<QueryStatus> {
+    match value.as_str() {
+        "ok" => Ok(QueryStatus::Ok),
+        "error" => Ok(QueryStatus::Error),
+        "canceled" => Ok(QueryStatus::Canceled),
+        _ => Err(crate::MetadataError::InvalidEnum {
+            field: "query_history.status",
             value,
         }),
     }

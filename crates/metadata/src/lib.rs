@@ -53,6 +53,12 @@ pub enum MetadataError {
     BrokerCredentialUnsupported(ConnectionProfileId),
     #[error("connection profile {0:?} is not in tenant {1:?}")]
     TenantMismatch(ConnectionProfileId, TenantId),
+    #[error("room {0:?} not found")]
+    RoomNotFound(RoomId),
+    #[error("document {0:?} not found")]
+    DocumentNotFound(DocumentId),
+    #[error("room attachment {0:?} not found")]
+    RoomAttachmentNotFound(RoomAttachmentId),
     #[error("secret store error: {0}")]
     SecretStore(String),
 }
@@ -386,6 +392,213 @@ impl MetadataStore {
         Ok(spec)
     }
 
+    pub fn create_room(
+        &self,
+        tenant: TenantId,
+        actor: PrincipalId,
+        input: NewRoom,
+    ) -> Result<Room> {
+        let now = now_text();
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO room (tenant_id, name, kind, created_by, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?5)",
+            params![tenant.0, input.name, input.kind.as_str(), actor.0, now],
+        )?;
+        let room_id = RoomId(conn.last_insert_rowid());
+        conn.execute(
+            "INSERT INTO room_member (room_id, principal_id, role, joined_at)
+             VALUES (?1, ?2, 'owner', ?3)",
+            params![room_id.0, actor.0, now],
+        )?;
+        self.room_by_id_locked(&conn, room_id)
+    }
+
+    pub fn list_rooms_for_principal(
+        &self,
+        tenant: TenantId,
+        principal: PrincipalId,
+    ) -> Result<Vec<Room>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT r.id, r.tenant_id, r.name, r.kind, r.created_by, r.created_at, r.updated_at
+             FROM room r
+             JOIN room_member rm ON rm.room_id = r.id
+             WHERE r.tenant_id = ?1 AND rm.principal_id = ?2
+             ORDER BY r.updated_at DESC, r.id DESC",
+        )?;
+        let rooms = rows(stmt.query_map(params![tenant.0, principal.0], room_from_row)?);
+        rooms
+    }
+
+    pub fn add_room_member(
+        &self,
+        room: RoomId,
+        principal: PrincipalId,
+        role: RoomRole,
+    ) -> Result<RoomMember> {
+        let now = now_text();
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO room_member (room_id, principal_id, role, joined_at)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(room_id, principal_id) DO UPDATE SET role = excluded.role",
+            params![room.0, principal.0, role.as_str(), now],
+        )?;
+        self.room_member_locked(&conn, room, principal)
+    }
+
+    pub fn list_room_members(&self, room: RoomId) -> Result<Vec<RoomMember>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT room_id, principal_id, role, joined_at
+             FROM room_member
+             WHERE room_id = ?1
+             ORDER BY joined_at, principal_id",
+        )?;
+        let members = rows(stmt.query_map(params![room.0], room_member_from_row)?);
+        members
+    }
+
+    pub fn create_document(&self, room: RoomId, input: NewDocument) -> Result<Document> {
+        let now = now_text();
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO document
+             (room_id, kind, title, crdt_type, crdt_state, position, connection_profile_id, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8)",
+            params![
+                room.0,
+                input.kind,
+                input.title,
+                input.crdt_type.as_str(),
+                input.crdt_state,
+                input.position,
+                input.connection_profile_id.map(|id| id.0),
+                now
+            ],
+        )?;
+        let document_id = DocumentId(conn.last_insert_rowid());
+        self.document_by_id_locked(&conn, document_id)
+    }
+
+    pub fn list_documents(&self, room: RoomId) -> Result<Vec<Document>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, room_id, kind, title, crdt_type, crdt_state, position,
+                    connection_profile_id, created_at, updated_at
+             FROM document
+             WHERE room_id = ?1
+             ORDER BY position, id",
+        )?;
+        let documents = rows(stmt.query_map(params![room.0], document_from_row)?);
+        documents
+    }
+
+    pub fn update_document_snapshot(
+        &self,
+        document: DocumentId,
+        crdt_state: Vec<u8>,
+    ) -> Result<Document> {
+        let now = now_text();
+        let conn = self.conn.lock().unwrap();
+        let updated = conn.execute(
+            "UPDATE document SET crdt_state = ?1, updated_at = ?2 WHERE id = ?3",
+            params![crdt_state, now, document.0],
+        )?;
+        if updated == 0 {
+            return Err(MetadataError::DocumentNotFound(document));
+        }
+        self.document_by_id_locked(&conn, document)
+    }
+
+    pub fn attach_room(
+        &self,
+        room: RoomId,
+        principal: PrincipalId,
+        client_id: &str,
+    ) -> Result<RoomAttachment> {
+        let now = now_text();
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO room_attachment (room_id, principal_id, client_id, attached_at, detached_at)
+             VALUES (?1, ?2, ?3, ?4, NULL)",
+            params![room.0, principal.0, client_id, now],
+        )?;
+        let attachment_id = RoomAttachmentId(conn.last_insert_rowid());
+        self.room_attachment_by_id_locked(&conn, attachment_id)
+    }
+
+    pub fn detach_room(&self, attachment: RoomAttachmentId) -> Result<RoomAttachment> {
+        let now = now_text();
+        let conn = self.conn.lock().unwrap();
+        let updated = conn.execute(
+            "UPDATE room_attachment
+             SET detached_at = COALESCE(detached_at, ?1)
+             WHERE id = ?2",
+            params![now, attachment.0],
+        )?;
+        if updated == 0 {
+            return Err(MetadataError::RoomAttachmentNotFound(attachment));
+        }
+        self.room_attachment_by_id_locked(&conn, attachment)
+    }
+
+    pub fn list_active_room_attachments(&self, room: RoomId) -> Result<Vec<RoomAttachment>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, room_id, principal_id, client_id, attached_at, detached_at
+             FROM room_attachment
+             WHERE room_id = ?1 AND detached_at IS NULL
+             ORDER BY attached_at, id",
+        )?;
+        let attachments = rows(stmt.query_map(params![room.0], room_attachment_from_row)?);
+        attachments
+    }
+
+    pub fn record_query_history(&self, input: NewQueryHistory) -> Result<QueryHistory> {
+        let now = now_text();
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO query_history
+             (principal_id, connection_profile_id, sql_text, started_at, duration_ms,
+              row_count, status, error_code, error_message, room_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            params![
+                input.principal_id.0,
+                input.connection_profile_id.map(|id| id.0),
+                input.sql_text,
+                now,
+                input.duration_ms,
+                input.row_count,
+                input.status.as_str(),
+                input.error_code,
+                input.error_message,
+                input.room_id.map(|id| id.0)
+            ],
+        )?;
+        let history_id = QueryHistoryId(conn.last_insert_rowid());
+        self.query_history_by_id_locked(&conn, history_id)
+    }
+
+    pub fn list_query_history_for_room(
+        &self,
+        room: RoomId,
+        limit: u32,
+    ) -> Result<Vec<QueryHistory>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, principal_id, connection_profile_id, sql_text, started_at,
+                    duration_ms, row_count, status, error_code, error_message, room_id
+             FROM query_history
+             WHERE room_id = ?1
+             ORDER BY started_at DESC, id DESC
+             LIMIT ?2",
+        )?;
+        let history = rows(stmt.query_map(params![room.0, limit], query_history_from_row)?);
+        history
+    }
+
     fn api_token_by_id_locked(&self, conn: &Connection, id: ApiTokenId) -> Result<ApiTokenRow> {
         conn.query_row(
             "SELECT id, principal_id, tenant_id, name, created_at, updated_at,
@@ -411,6 +624,74 @@ impl MetadataStore {
         )
         .optional()?
         .ok_or(MetadataError::ConnectionProfileNotFound(id))
+    }
+
+    fn room_by_id_locked(&self, conn: &Connection, id: RoomId) -> Result<Room> {
+        conn.query_row(
+            "SELECT id, tenant_id, name, kind, created_by, created_at, updated_at
+             FROM room WHERE id = ?1",
+            params![id.0],
+            room_from_row,
+        )
+        .optional()?
+        .ok_or(MetadataError::RoomNotFound(id))
+    }
+
+    fn room_member_locked(
+        &self,
+        conn: &Connection,
+        room: RoomId,
+        principal: PrincipalId,
+    ) -> Result<RoomMember> {
+        conn.query_row(
+            "SELECT room_id, principal_id, role, joined_at
+             FROM room_member WHERE room_id = ?1 AND principal_id = ?2",
+            params![room.0, principal.0],
+            room_member_from_row,
+        )
+        .map_err(Into::into)
+    }
+
+    fn document_by_id_locked(&self, conn: &Connection, id: DocumentId) -> Result<Document> {
+        conn.query_row(
+            "SELECT id, room_id, kind, title, crdt_type, crdt_state, position,
+                    connection_profile_id, created_at, updated_at
+             FROM document WHERE id = ?1",
+            params![id.0],
+            document_from_row,
+        )
+        .optional()?
+        .ok_or(MetadataError::DocumentNotFound(id))
+    }
+
+    fn room_attachment_by_id_locked(
+        &self,
+        conn: &Connection,
+        id: RoomAttachmentId,
+    ) -> Result<RoomAttachment> {
+        conn.query_row(
+            "SELECT id, room_id, principal_id, client_id, attached_at, detached_at
+             FROM room_attachment WHERE id = ?1",
+            params![id.0],
+            room_attachment_from_row,
+        )
+        .optional()?
+        .ok_or(MetadataError::RoomAttachmentNotFound(id))
+    }
+
+    fn query_history_by_id_locked(
+        &self,
+        conn: &Connection,
+        id: QueryHistoryId,
+    ) -> Result<QueryHistory> {
+        conn.query_row(
+            "SELECT id, principal_id, connection_profile_id, sql_text, started_at,
+                    duration_ms, row_count, status, error_code, error_message, room_id
+             FROM query_history WHERE id = ?1",
+            params![id.0],
+            query_history_from_row,
+        )
+        .map_err(Into::into)
     }
 }
 
@@ -507,6 +788,73 @@ fn connection_profile_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Conn
     })
 }
 
+fn room_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Room> {
+    let kind: String = row.get(3)?;
+    Ok(Room {
+        id: RoomId(row.get(0)?),
+        tenant_id: TenantId(row.get(1)?),
+        name: row.get(2)?,
+        kind: parse_room_kind_sql(kind)?,
+        created_by: PrincipalId(row.get(4)?),
+        created_at: parse_time_sql(row.get(5)?)?,
+        updated_at: parse_time_sql(row.get(6)?)?,
+    })
+}
+
+fn room_member_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RoomMember> {
+    let role: String = row.get(2)?;
+    Ok(RoomMember {
+        room_id: RoomId(row.get(0)?),
+        principal_id: PrincipalId(row.get(1)?),
+        role: parse_room_role_sql(role)?,
+        joined_at: parse_time_sql(row.get(3)?)?,
+    })
+}
+
+fn document_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Document> {
+    let crdt_type: String = row.get(4)?;
+    Ok(Document {
+        id: DocumentId(row.get(0)?),
+        room_id: RoomId(row.get(1)?),
+        kind: row.get(2)?,
+        title: row.get(3)?,
+        crdt_type: parse_crdt_type_sql(crdt_type)?,
+        crdt_state: row.get(5)?,
+        position: row.get(6)?,
+        connection_profile_id: row.get::<_, Option<i64>>(7)?.map(ConnectionProfileId),
+        created_at: parse_time_sql(row.get(8)?)?,
+        updated_at: parse_time_sql(row.get(9)?)?,
+    })
+}
+
+fn room_attachment_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RoomAttachment> {
+    Ok(RoomAttachment {
+        id: RoomAttachmentId(row.get(0)?),
+        room_id: RoomId(row.get(1)?),
+        principal_id: PrincipalId(row.get(2)?),
+        client_id: row.get(3)?,
+        attached_at: parse_time_sql(row.get(4)?)?,
+        detached_at: parse_optional_time_sql(row.get(5)?)?,
+    })
+}
+
+fn query_history_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<QueryHistory> {
+    let status: String = row.get(7)?;
+    Ok(QueryHistory {
+        id: QueryHistoryId(row.get(0)?),
+        principal_id: PrincipalId(row.get(1)?),
+        connection_profile_id: row.get::<_, Option<i64>>(2)?.map(ConnectionProfileId),
+        sql_text: row.get(3)?,
+        started_at: parse_time_sql(row.get(4)?)?,
+        duration_ms: row.get(5)?,
+        row_count: row.get(6)?,
+        status: parse_query_status_sql(status)?,
+        error_code: row.get(8)?,
+        error_message: row.get(9)?,
+        room_id: row.get::<_, Option<i64>>(10)?.map(RoomId),
+    })
+}
+
 fn parse_time_sql(value: String) -> rusqlite::Result<DateTime<Utc>> {
     parse_time(value).map_err(sql_conversion_error)
 }
@@ -525,6 +873,22 @@ fn parse_role_sql(value: String) -> rusqlite::Result<MembershipRole> {
 
 fn parse_credential_mode_sql(value: String) -> rusqlite::Result<CredentialMode> {
     schema::parse_credential_mode(value).map_err(sql_conversion_error)
+}
+
+fn parse_room_kind_sql(value: String) -> rusqlite::Result<RoomKind> {
+    schema::parse_room_kind(value).map_err(sql_conversion_error)
+}
+
+fn parse_room_role_sql(value: String) -> rusqlite::Result<RoomRole> {
+    schema::parse_room_role(value).map_err(sql_conversion_error)
+}
+
+fn parse_crdt_type_sql(value: String) -> rusqlite::Result<CrdtType> {
+    schema::parse_crdt_type(value).map_err(sql_conversion_error)
+}
+
+fn parse_query_status_sql(value: String) -> rusqlite::Result<QueryStatus> {
+    schema::parse_query_status(value).map_err(sql_conversion_error)
 }
 
 fn sql_conversion_error(error: impl std::error::Error + Send + Sync + 'static) -> rusqlite::Error {
@@ -688,5 +1052,142 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resolved.password.as_deref(), Some("user-secret"));
+    }
+
+    #[test]
+    fn room_lifecycle_auto_adds_owner_member() {
+        let store = store();
+        store.bootstrap_local("local user").unwrap();
+
+        let room = store
+            .create_room(
+                TenantId(1),
+                PrincipalId(1),
+                NewRoom {
+                    name: "local room".to_string(),
+                    kind: RoomKind::Personal,
+                },
+            )
+            .unwrap();
+        assert_eq!(room.tenant_id, TenantId(1));
+        assert_eq!(room.created_by, PrincipalId(1));
+
+        let rooms = store
+            .list_rooms_for_principal(TenantId(1), PrincipalId(1))
+            .unwrap();
+        assert_eq!(rooms.len(), 1);
+        assert_eq!(rooms[0].id, room.id);
+
+        let members = store.list_room_members(room.id).unwrap();
+        assert_eq!(members.len(), 1);
+        assert_eq!(members[0].principal_id, PrincipalId(1));
+        assert_eq!(members[0].role, RoomRole::Owner);
+    }
+
+    #[test]
+    fn document_snapshots_are_opaque_room_state() {
+        let store = store();
+        store.bootstrap_local("local user").unwrap();
+        let room = store
+            .create_room(
+                TenantId(1),
+                PrincipalId(1),
+                NewRoom {
+                    name: "sql room".to_string(),
+                    kind: RoomKind::Shared,
+                },
+            )
+            .unwrap();
+
+        let document = store
+            .create_document(
+                room.id,
+                NewDocument {
+                    kind: "sql".to_string(),
+                    title: "scratch.sql".to_string(),
+                    crdt_type: CrdtType::Loro,
+                    crdt_state: b"initial".to_vec(),
+                    position: 0,
+                    connection_profile_id: None,
+                },
+            )
+            .unwrap();
+        assert_eq!(document.room_id, room.id);
+        assert_eq!(document.crdt_state, b"initial");
+
+        let updated = store
+            .update_document_snapshot(document.id, b"snapshot-v2".to_vec())
+            .unwrap();
+        assert_eq!(updated.crdt_state, b"snapshot-v2");
+
+        let documents = store.list_documents(room.id).unwrap();
+        assert_eq!(documents.len(), 1);
+        assert_eq!(documents[0].id, document.id);
+    }
+
+    #[test]
+    fn room_attachments_track_active_clients() {
+        let store = store();
+        store.bootstrap_local("local user").unwrap();
+        let room = store
+            .create_room(
+                TenantId(1),
+                PrincipalId(1),
+                NewRoom {
+                    name: "presence room".to_string(),
+                    kind: RoomKind::Shared,
+                },
+            )
+            .unwrap();
+
+        let attachment = store
+            .attach_room(room.id, PrincipalId(1), "client-a")
+            .unwrap();
+        let active = store.list_active_room_attachments(room.id).unwrap();
+        assert_eq!(active.len(), 1);
+        assert_eq!(active[0].client_id, "client-a");
+
+        let detached = store.detach_room(attachment.id).unwrap();
+        assert!(detached.detached_at.is_some());
+        assert!(store
+            .list_active_room_attachments(room.id)
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn query_history_can_be_room_scoped() {
+        let store = store();
+        store.bootstrap_local("local user").unwrap();
+        let room = store
+            .create_room(
+                TenantId(1),
+                PrincipalId(1),
+                NewRoom {
+                    name: "history room".to_string(),
+                    kind: RoomKind::Shared,
+                },
+            )
+            .unwrap();
+
+        let row = store
+            .record_query_history(NewQueryHistory {
+                principal_id: PrincipalId(1),
+                room_id: Some(room.id),
+                connection_profile_id: None,
+                sql_text: "select 1".to_string(),
+                duration_ms: Some(12),
+                row_count: Some(1),
+                status: QueryStatus::Ok,
+                error_code: None,
+                error_message: None,
+            })
+            .unwrap();
+        assert_eq!(row.room_id, Some(room.id));
+
+        let history = store.list_query_history_for_room(room.id, 10).unwrap();
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].sql_text, "select 1");
+        assert_eq!(history[0].status, QueryStatus::Ok);
     }
 }
