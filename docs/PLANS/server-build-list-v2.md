@@ -223,9 +223,13 @@ engine itself.
       own session model.
 - [ ] [Implement] driver-sqlserver: real `set_mars` and `BulkFormat::Native`
       (or formally drop them from `MssqlExt` and ADR-017).
-- [ ] [Implement] tracing: `#[tracing::instrument(skip(self))]` on every
-      `Driver` + ext method, span per `CursorId`/`ConnId`. Verified absent
-      — grep for `tracing::instrument` returns zero across all crates.
+- [x] [Implement] tracing: `#[tracing::instrument(skip_all, fields(...))]`
+      on every `Driver` + ext method across both engines
+      (`driver-postgres/src/lib.rs`, `driver-sqlserver/src/lib.rs`). Fields
+      pin the engine tag plus `conn`, `tx`, `cursor`, or op-specific
+      identifiers so a span carries a stable lookup key without the risk
+      of leaking bind values or secrets. Params (`req`, `spec`, bulk
+      `data`) are dropped from the span via `skip_all`.
 - [ ] [Design] `ConnHandle` weak backref: decide whether to restore the
       spec's `Weak<dyn Driver>` backref or formally drop it from ADR-017.
       Currently documented as a Phase 0 simplification

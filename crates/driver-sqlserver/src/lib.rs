@@ -85,6 +85,7 @@ impl Driver for MssqlDriver {
         Engine::SqlServer
     }
 
+    #[tracing::instrument(skip_all, fields(engine = "sql_server", host = %spec.host))]
     async fn open(&self, spec: &ConnectionSpec) -> Result<ConnHandle, DriverError> {
         let mut config = Config::new();
         config.host(&spec.host);
@@ -137,6 +138,7 @@ impl Driver for MssqlDriver {
         Ok(ConnHandle::new(id, Engine::SqlServer))
     }
 
+    #[tracing::instrument(skip_all, fields(engine = "sql_server", conn = c.id()))]
     async fn ping(&self, c: ConnHandle) -> Result<ServerInfo, DriverError> {
         let mut conn = self.take_conn(&c).await?;
         let result = async {
@@ -163,6 +165,7 @@ impl Driver for MssqlDriver {
         result
     }
 
+    #[tracing::instrument(skip_all, fields(engine = "sql_server", conn = c.id(), depth = ?scope.depth))]
     async fn schema(
         &self,
         c: ConnHandle,
@@ -174,6 +177,7 @@ impl Driver for MssqlDriver {
         result
     }
 
+    #[tracing::instrument(skip_all, fields(engine = "sql_server", conn = c.id()))]
     async fn begin(&self, c: ConnHandle, mode: TxMode) -> Result<TxHandle, DriverError> {
         let mut conn = self.take_conn(&c).await?;
         conn.simple_query("BEGIN TRANSACTION")
@@ -184,6 +188,7 @@ impl Driver for MssqlDriver {
         Ok(TxHandle::new(tx_id, c, mode))
     }
 
+    #[tracing::instrument(skip_all, fields(engine = "sql_server", tx = t.tx_id.0))]
     async fn commit(&self, t: TxHandle) -> Result<(), DriverError> {
         let mut conn = self.take_conn(&t.conn).await?;
         let result = async {
@@ -200,6 +205,7 @@ impl Driver for MssqlDriver {
         result
     }
 
+    #[tracing::instrument(skip_all, fields(engine = "sql_server", tx = t.tx_id.0))]
     async fn rollback(&self, t: TxHandle) -> Result<(), DriverError> {
         let mut conn = self.take_conn(&t.conn).await?;
         let result = async {
@@ -216,6 +222,7 @@ impl Driver for MssqlDriver {
         result
     }
 
+    #[tracing::instrument(skip_all, fields(engine = "sql_server", conn = c.id()))]
     async fn execute(
         &self,
         c: ConnHandle,
@@ -258,6 +265,7 @@ impl Driver for MssqlDriver {
         Ok(ResultSetStream::with_cursor_mode(cursor_id, rx, false))
     }
 
+    #[tracing::instrument(skip_all, fields(engine = "sql_server", cursor = _cursor.0))]
     async fn cancel(&self, _c: ConnHandle, _cursor: CursorId) -> Result<(), DriverError> {
         let Some((_, (_, task))) = self.inner.cursors.remove(&_cursor.0) else {
             return Err(DriverError::new(Code::CursorNotFound, "cursor not active")
@@ -267,6 +275,7 @@ impl Driver for MssqlDriver {
         Ok(())
     }
 
+    #[tracing::instrument(skip_all, fields(engine = "sql_server", conn = c.id()))]
     async fn close(&self, c: ConnHandle) -> Result<(), DriverError> {
         self.inner.conns.lock().await.remove(&c.id());
         let cursors: Vec<u64> = self
@@ -296,6 +305,7 @@ impl Driver for MssqlDriver {
 
 #[async_trait]
 impl MssqlExt for MssqlDriver {
+    #[tracing::instrument(skip_all, fields(engine = "sql_server", conn = c.id(), db = %db))]
     async fn use_database(&self, c: ConnHandle, db: &str) -> Result<(), DriverError> {
         validate_ident(db)?;
         let mut conn = self.take_conn(&c).await?;
@@ -305,6 +315,7 @@ impl MssqlExt for MssqlDriver {
         result.map(|_| ())
     }
 
+    #[tracing::instrument(skip_all, fields(engine = "sql_server", conn = c.id(), table = %op.table, bytes = op.data.len()))]
     async fn bulk_insert(&self, c: ConnHandle, op: BulkOp) -> Result<BulkResult, DriverError> {
         let mut conn = self.take_conn(&c).await?;
         let result = bulk_insert_csv(&mut conn, op).await;
@@ -312,6 +323,7 @@ impl MssqlExt for MssqlDriver {
         result
     }
 
+    #[tracing::instrument(skip_all, fields(engine = "sql_server", conn = _c.id(), enabled = _enabled))]
     async fn set_mars(&self, _c: ConnHandle, _enabled: bool) -> Result<(), DriverError> {
         Err(DriverError::new(
             Code::UnsupportedForEngine,
@@ -319,6 +331,7 @@ impl MssqlExt for MssqlDriver {
         ))
     }
 
+    #[tracing::instrument(skip_all, fields(engine = "sql_server", tx = t.tx_id.0, name = %name))]
     async fn savepoint(
         &self,
         t: &TxHandle,
@@ -346,6 +359,7 @@ impl MssqlExt for MssqlDriver {
         })
     }
 
+    #[tracing::instrument(skip_all, fields(engine = "sql_server", tx = sp.tx.0, name = %sp.name))]
     async fn rollback_to(&self, sp: sift_driver_api::MssqlSavepoint) -> Result<(), DriverError> {
         validate_ident(&sp.name)?;
         let mut conn = self.take_conn(&sp.conn).await?;

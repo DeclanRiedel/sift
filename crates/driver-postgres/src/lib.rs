@@ -33,6 +33,7 @@ impl Driver for PgDriver {
         Engine::Postgres
     }
 
+    #[tracing::instrument(skip_all, fields(engine = "postgres", host = %spec.host))]
     async fn open(&self, spec: &ConnectionSpec) -> Result<ConnHandle, DriverError> {
         let conn = self.open_internal(spec).await?;
         let id = self.inner.conn_id.next();
@@ -41,6 +42,7 @@ impl Driver for PgDriver {
         Ok(ConnHandle::new(id, Engine::Postgres))
     }
 
+    #[tracing::instrument(skip_all, fields(engine = "postgres", conn = c.id()))]
     async fn ping(&self, c: ConnHandle) -> Result<ServerInfo, DriverError> {
         let conn = self.take_for_op(&c).await?;
         let result = async {
@@ -60,6 +62,7 @@ impl Driver for PgDriver {
         result
     }
 
+    #[tracing::instrument(skip_all, fields(engine = "postgres", conn = c.id(), depth = ?scope.depth))]
     async fn schema(
         &self,
         c: ConnHandle,
@@ -71,6 +74,7 @@ impl Driver for PgDriver {
         result
     }
 
+    #[tracing::instrument(skip_all, fields(engine = "postgres", conn = c.id()))]
     async fn begin(&self, c: ConnHandle, mode: TxMode) -> Result<TxHandle, DriverError> {
         let conn = self.take_for_op(&c).await?;
         let sql = begin_sql(&mode);
@@ -83,6 +87,7 @@ impl Driver for PgDriver {
         Ok(TxHandle::new(tx_id, c, mode))
     }
 
+    #[tracing::instrument(skip_all, fields(engine = "postgres", tx = t.tx_id.0))]
     async fn commit(&self, t: TxHandle) -> Result<(), DriverError> {
         let (conn_id, conn) =
             self.inner.take_in_tx(&t.tx_id).await.ok_or_else(|| {
@@ -93,6 +98,7 @@ impl Driver for PgDriver {
         result.map(|_| ())
     }
 
+    #[tracing::instrument(skip_all, fields(engine = "postgres", tx = t.tx_id.0))]
     async fn rollback(&self, t: TxHandle) -> Result<(), DriverError> {
         let (conn_id, conn) =
             self.inner.take_in_tx(&t.tx_id).await.ok_or_else(|| {
@@ -103,6 +109,7 @@ impl Driver for PgDriver {
         result.map(|_| ())
     }
 
+    #[tracing::instrument(skip_all, fields(engine = "postgres", conn = c.id()))]
     async fn execute(
         &self,
         c: ConnHandle,
@@ -111,6 +118,7 @@ impl Driver for PgDriver {
         stream::execute_query(self, c, req).await
     }
 
+    #[tracing::instrument(skip_all, fields(engine = "postgres", cursor = cursor.0))]
     async fn cancel(&self, _c: ConnHandle, cursor: CursorId) -> Result<(), DriverError> {
         let token = {
             let entry = self
@@ -127,6 +135,7 @@ impl Driver for PgDriver {
         Ok(())
     }
 
+    #[tracing::instrument(skip_all, fields(engine = "postgres", conn = c.id()))]
     async fn close(&self, c: ConnHandle) -> Result<(), DriverError> {
         self.inner.remove_conn(&c).await;
         Ok(())
@@ -139,6 +148,7 @@ impl Driver for PgDriver {
 
 #[async_trait]
 impl PgExt for PgDriver {
+    #[tracing::instrument(skip_all, fields(engine = "postgres", conn = c.id(), channel_count = channels.len()))]
     async fn listen(
         &self,
         c: ConnHandle,
@@ -176,6 +186,7 @@ impl PgExt for PgDriver {
         Ok(NotificationStream { notifications: rx })
     }
 
+    #[tracing::instrument(skip_all, fields(engine = "postgres", conn = _c.id(), channel_count = channels.len()))]
     async fn unlisten(&self, _c: ConnHandle, channels: Vec<String>) -> Result<(), DriverError> {
         for channel in channels {
             validate_ident(&channel)?;
@@ -183,6 +194,7 @@ impl PgExt for PgDriver {
         Ok(())
     }
 
+    #[tracing::instrument(skip_all, fields(engine = "postgres", conn = c.id()))]
     async fn copy(&self, c: ConnHandle, op: CopyOp) -> Result<CopyResult, DriverError> {
         let (conn, slot_kind) = self.inner.take_for_op(&c).await?;
         let result = async {
@@ -221,6 +233,7 @@ impl PgExt for PgDriver {
         result
     }
 
+    #[tracing::instrument(skip_all, fields(engine = "postgres", conn = c.id(), key = ?key))]
     async fn advisory_lock(&self, c: ConnHandle, key: AdvisoryKey) -> Result<(), DriverError> {
         let conn = self.take_for_op(&c).await?;
         let result = async {
@@ -239,6 +252,7 @@ impl PgExt for PgDriver {
         result
     }
 
+    #[tracing::instrument(skip_all, fields(engine = "postgres", conn = c.id(), key = ?key))]
     async fn advisory_unlock(&self, c: ConnHandle, key: AdvisoryKey) -> Result<(), DriverError> {
         let conn = self.take_for_op(&c).await?;
         let result = async {
@@ -269,6 +283,7 @@ impl PgExt for PgDriver {
         result
     }
 
+    #[tracing::instrument(skip_all, fields(engine = "postgres", tx = t.tx_id.0, name = %name))]
     async fn savepoint(&self, t: &TxHandle, name: &str) -> Result<PgSavepoint, DriverError> {
         validate_ident(name)?;
         let (conn_id, conn) =
@@ -285,6 +300,7 @@ impl PgExt for PgDriver {
         })
     }
 
+    #[tracing::instrument(skip_all, fields(engine = "postgres", tx = sp.tx.0, name = %sp.name))]
     async fn rollback_to(&self, sp: PgSavepoint) -> Result<(), DriverError> {
         validate_ident(&sp.name)?;
         let (conn_id, conn) =
@@ -297,6 +313,7 @@ impl PgExt for PgDriver {
         result.map(|_| ())
     }
 
+    #[tracing::instrument(skip_all, fields(engine = "postgres", tx = sp.tx.0, name = %sp.name))]
     async fn release_savepoint(&self, sp: PgSavepoint) -> Result<(), DriverError> {
         validate_ident(&sp.name)?;
         let (conn_id, conn) =
