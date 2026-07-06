@@ -1,0 +1,7 @@
+- git login
+- git handling
+- remote use via ssh
+- workspace management
+- update scheduler
+- common ui pieces re-used
+-
