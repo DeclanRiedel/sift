@@ -1,0 +1,634 @@
+# Server-Side Build List (v2) — Everything Before The GUI
+
+> Status: **code-grounded work-management checklist.** This is a refresh of
+> `server-build-list.md` produced by reading the actual source in every
+> crate, not by trusting the `.md` docs under `docs/`. Every "done" claim
+> below cites `file:line` evidence; every "open" item reflects a real gap
+> verified against the code as of this audit.
+>
+> Companion to `docs/DECISIONS.md` (ADRs). The prior `server-build-list.md`
+> and `docs/legacy/DRIVER_STATUS.md` are stale relative to the code; this
+> document supersedes them for prioritization. Items marked `[x]` are
+> verified-present in code; `[ ]` are verified-absent or stubbed.
+>
+> Format: `- [status] [Design|Implement] <area>: <goal>` plus a code
+> citation when `[x]`. **Design** = lock a decision (ADR/crate/contract);
+> **Implement** = build against a locked design.
+
+## How this differs from the prior build-list
+
+The prior list under-reported what was finished and over-reported what was
+stubbed. The largest corrections:
+
+- PG `NUMERIC`/`INTERVAL` decode, PG TLS (rustls), PG `PgExt`
+  (`listen`/`unlisten`/`copy`/`advisory_lock`/`unlock`/`savepoint`/
+  `rollback_to`/`release_savepoint`), and the SQL Server live test harness
+  are **all already implemented** — they were listed as open Phase A work.
+- Conversely, several "already in place" claims were weaker than stated:
+  driver isolation (`catch_unwind`) exists **only for PG, not SQL Server**;
+  there are **no per-query timeouts** (`config.timeouts.request_secs` is
+  parsed then never read); the loopback-bypass auth flag **does not check
+  the peer address**; Operation audit hard-codes `Succeeded` at every call
+  site; there is **no correlation id** anywhere; the `doc` crate is **not a
+  real CRDT** (UTF-8 byte buffer + apply-op); and CI does **not** run the
+  live driver tests.
+- Three metadata tables (`principal_key`, `keypair_challenge`,
+  `saved_query`) are created by migrations but never read or written by any
+  Rust code — dead schema.
+
+## What is already in place (verified by code)
+
+- **Workspace** (`Cargo.toml`): `protocol`, `core` (empty placeholder,
+  `crates/core/src/lib.rs` is 3 comment-only lines), `driver-api`
+  (+`MockDriver` behind `mock` feature), `driver-postgres`,
+  `driver-sqlserver`, `metadata`, `doc`, `server`, `client-sdk`.
+- **`sift-protocol` is pure serde** (`crates/protocol/Cargo.toml:9-16`):
+  deps are `serde`, `serde_json`, `schemars`, `serde_bytes`, `thiserror`,
+  `chrono`, `uuid`. No tokio, no I/O. ADR-003/004 honored.
+- **Driver trait** (`crates/driver-api/src/lib.rs:138-193`): 8 core verbs
+  + `PgExt`/`MssqlExt` ext traits, object-safe (`&self` everywhere,
+  `async_trait`), `ConnHandle` newtype, `ResultSetStream`/`Page` multi-result
+  model, `TypeRef::Primitive`/`Engine` escape hatch. `as_pg()`/`as_mssql()`
+  default-downcast to `None`.
+- **Postgres impl** (`crates/driver-postgres/src/`): complete.
+  - All 8 verbs + every `PgExt` method is a real impl (`lib.rs:143-303`).
+  - Deep schema: columns/PK/indexes (with `amname` + partial predicates)/
+    constraints (PK/FK/UNIQUE/CHECK/Exclusion + FK target table)/triggers
+    (timing + events decoded from `tgtype`) — `schema.rs:98-445`.
+  - `NUMERIC` → `Value::Decimal` and `INTERVAL` → `Value::Interval` (month-
+    aware falls through to `Value::Engine`) — `decode.rs:54-156`, unit-tested.
+  - TLS: `tokio-postgres-rustls` with native certs wired for `VerifyCa`/
+    `VerifyFull` in both `pool_for` and the LISTEN path — `conn.rs:126-131`,
+    `274-294`, `lib.rs:163-177`.
+  - Pool-per-spec caching (deadpool, key = canonical serde JSON,
+    `max_size: 8`) — `conn.rs:89-139`.
+  - Cancel via `CancelToken` map (`conn.rs:33`, drained on close);
+    panic isolation via `AssertUnwindSafe::catch_unwind` (`stream.rs:79-94`);
+    channel buffer = 1 (`stream.rs:45`).
+  - DML `affected_rows` reported via `simple_query` `CommandComplete`.
+  - Live test harness: 14 tests covering open/ping, type decode, DML count,
+    shallow/deep schema, filter pushdown, tx commit/rollback, advisory lock,
+    COPY round trip, LISTEN/NOTIFY, cancel, close-mid-query —
+    `tests/live_pg.rs`, gated behind `live-pg` feature.
+- **SQL Server impl** (`crates/driver-sqlserver/src/lib.rs`): 1124 LOC,
+  mostly real.
+  - All 8 core verbs implemented; `use_database`, `savepoint`/`rollback_to`,
+    CSV `bulk_insert` are real (`lib.rs:275-341`, `809-873`).
+  - Deep schema: columns (with PK/identity/max_length/collation facets),
+    indexes (unique/PK/columns), constraints (PK/FK/UNIQUE/CHECK) —
+    `lib.rs:410-685`. Shallow lists tables + views only.
+  - Live test harness: 5 tests — `tests/live_mssql.rs`, gated behind
+    `live-mssql` feature.
+- **Server bootstrap** (`crates/server/src/`): axum + figment (TOML/env,
+  `SIFT_` prefix) + tracing + driver registry + `SessionStore` +
+  `RoomRuntime`. `main.rs:57-60` wires `axum::serve` with
+  `with_graceful_shutdown(shutdown_signal())`.
+- **HTTP surface** (`crates/server/src/http.rs:57-151`): 38 routes —
+  sessions, connections (incl. `from-profile`), queries, schema, cancel,
+  bulk-insert, transactions (begin/commit/rollback), auth tokens
+  (list/issue/revoke), metadata (tenants/rooms/members/documents/
+  connections/credentials/history), health, audit, operations, openapi.json.
+- **WebSocket surfaces**:
+  - Session WS (`http.rs:1826`, loop `:2032-2131`): `Execute`/`Listen`/
+    `Cancel`/`Ack` inbound; `Started`/`Page`/`Notification`/`Error`
+    outbound. Page-by-page ack backpressure (`stream_pages_with_ack`
+    `:2152-2180`); one active stream per socket.
+  - Room WS (`http.rs:1838`, loop `:1860-1990`): `Attach`/`Detach`/
+    `PresencePing`/`DocumentOperation` inbound; `Attached`/`Presence`/
+    `DocumentOperation`/`QueryResult`/`Error` outbound. Broadcast channel
+    per room (`room_runtime.rs:84`).
+- **Auth** (`crates/server/src/http.rs:182-382`): bearer-token middleware,
+  loopback-bypass flag, metadata API tokens (Argon2-stored, format
+  `sift_<lookup>_<uuid>`, minted at `metadata/src/lib.rs:225-263`, verified
+  Argon2 at `:265-299`), tenant scoping via `ensure_tenant` (`http.rs:391`).
+  Room RBAC: `RoomPermission::{Read,Write,Admin}` mapped from
+  owner/editor/viewer (`http.rs:466-504`).
+- **Metadata** (`crates/metadata/src/`): SQLite + refinery embedded
+  (`lib.rs:21-23`), run on startup (`lib.rs:80`, `:90`). 9 migrations.
+  Tables: `tenant`, `principal`, `membership`, `api_token`, `principal_key`,
+  `keypair_challenge`, `connection_profile`, `connection_credential`,
+  `room`, `room_member` (owner/editor/viewer), `document` (opaque `BLOB`),
+  `room_attachment`, `query_history`, `saved_query`. Secrets kept out of
+  SQLite **structurally** — password `.take()`n before `serde_json` in
+  `upsert_connection_profile` (`lib.rs:360-447`); only opaque handles
+  stored.
+- **SecretStore trait** (`crates/metadata/src/secrets/mod.rs:8-13`):
+  `put`/`get`/`delete`. Only `MemorySecretStore` exists (`:15-52`).
+- **Rooms runtime** (`crates/server/src/room_runtime.rs`): in-memory
+  presence + document-op broadcast + snapshot persistence (full-snapshot
+  `UPDATE document SET crdt_state = ?`, no op-log). Room-scoped query-result
+  summary events published from the HTTP `execute_query` path
+  (`http.rs:1731-1738`).
+- **Document crate** (`crates/doc/src/lib.rs`): `CrdtKind::{Loro,Automerge}`
+  tag + `TextDocument` over opaque bytes. **Apply-op abstraction, not a
+  real CRDT** — `apply()` deserializes bytes as UTF-8, mutates a `String`,
+  writes bytes back (`lib.rs:79-98`). No op-log, no merge, no pluggable
+  backend.
+- **OpenAPI** (`http.rs:655-978`): hand-authored JSON literal built from
+  `schemars::schema_for!` per protocol type. Served at `GET /v1/openapi.json`
+  with an `x-sift-protocol-version` field.
+- **Version header** (`http.rs:153-160`): `x-sift-protocol-version` emitted
+  on every response with value `PROTOCOL_VERSION = "1"` (`protocol/src/lib.rs:12`).
+- **Client SDK** (`crates/client-sdk/src/lib.rs`): `reqwest` + `tokio-tungstenite`;
+  broad HTTP coverage (sessions/connections/queries/tx/bulk/cancel/schema/
+  metadata/auth/audit) plus one-shot WS helpers (`stream_query`,
+  `listen_notifications`, `apply_room_text_operation`).
+- **CI** (`.github/workflows/ci.yml`): `cargo fmt --check`, `cargo clippy
+  --workspace --all-targets -- -D warnings`, `cargo test --workspace`,
+  `cargo deny check`. All run inside `nix develop`.
+
+---
+
+## Phase A — Driver & type completeness
+
+Goal: finish the two-impl validation gate so the `Driver` trait is genuinely
+locked (ADR-017), close the remaining SQL Server correctness gaps, and
+remove every `UnsupportedForEngine` stub that is semantically wrong for the
+engine itself.
+
+- [x] [Implement] driver-postgres: decode `Type::NUMERIC` → `Value::Decimal`
+      and `Type::INTERVAL` → `Value::Interval` — `decode.rs:54-156`, unit-
+      tested at `:314-347`. *(Month-aware intervals intentionally fall
+      through to `Value::Engine`; documented in the variant.)*
+- [x] [Implement] driver-postgres: `tokio-postgres-rustls` + `rustls` in
+      `pool_for` and the LISTEN path so `VerifyCa`/`VerifyFull` verify —
+      `conn.rs:126-131`, `:274-294`, `lib.rs:163-177`.
+- [x] [Implement] driver-postgres `PgExt::listen`/`unlisten` —
+      `lib.rs:144-186` (dedicated connection per LISTEN, notification pump,
+      `mpsc::Sender<PgNotification>`). Tested at `tests/live_pg.rs:515`.
+- [x] [Implement] driver-postgres `PgExt::copy` — `lib.rs:188-224`
+      (`copy_out`/`copy_in` byte streams through `CopyResult`). Tested at
+      `tests/live_pg.rs:470`.
+- [x] [Implement] driver-postgres `PgExt::advisory_lock`/`advisory_unlock`
+      — `lib.rs:226-272` (Int32+Int32 and Int64 key forms). Tested at
+      `tests/live_pg.rs:455`.
+- [x] [Implement] driver-postgres `PgExt::savepoint`/`rollback_to`/
+      `release_savepoint` — `lib.rs:274-303`.
+- [x] [Implement] driver-sqlserver `MssqlExt::use_database`, `savepoint`,
+      `rollback_to`, CSV `bulk_insert` — `lib.rs:275-341`, `:809-873`.
+- [x] [Implement] driver-sqlserver: live test harness (`live-mssql` feature)
+      — `tests/live_mssql.rs` (5 tests: open/ping/execute/close, bulk CSV,
+      cancel long query, close mid query, schema_deep + transactions).
+- [ ] [Design] ADR-017 graduation: lock the driver-trait shape (core 8 verbs
+      + fat structs + ext traits + union types) now that two real impls
+      exist; define the change-gate rule (signature change ⇒ protocol bump).
+      **Not written** — `DECISIONS.md` stops at ADR-010.
+- [ ] [Design] TLS strategy: separate (a) server-side TLS termination of
+      sift's own HTTP/WS (currently none — server binds plain HTTP,
+      `config.rs:10`) from (b) driver-side TLS to user DBs. PG driver-side
+      is rustls (`conn.rs:274`); SQL Server driver-side is tiberius's
+      `EncryptionLevel::{Required,Off}` + `trust_cert()`
+      (`driver-sqlserver/src/lib.rs:113-122`) — no rustls verifier wiring,
+      no `SslMode::VerifyCa`/`VerifyFull` distinction surfaced for MSSQL.
+      Pick one model and document it.
+- [ ] [Design] Numeric/Decimal representation: the implicit choice is
+      `Value::Decimal(String)` + hand-rolled PG wire decode
+      (`decode.rs:64-136`) and `tiberius::numeric::Decimal` → `String` for
+      SQL Server. Graduate this into ADR-017 so it stops being implicit.
+- [ ] [Design] Interval representation: the implicit choice is
+      `Value::Interval(chrono::Duration)` for month-free intervals and
+      `Value::Engine` for month-aware (`decode.rs:138-156`). SQL Server has
+      no analogue. Graduate into ADR-017.
+- [ ] [Design] SQL Server parity audit: enumerate every `MssqlExt` method
+      and every core verb against tiberius capabilities. Verified stubs:
+      `set_mars` (`lib.rs:291-296`) and native `BulkFormat::Native`
+      (`lib.rs:810-816`). Verified missing: triggers in deep schema, views/
+      procs/synonyms in shallow, `IndexKind` always `Other` (no
+      CLUSTERED/NONCLUSTERED mapping), DML `affected_rows` always `None`
+      (`lib.rs:393-396`).
+- [ ] [Implement] driver-sqlserver: deep schema parity with PG — add
+      **triggers**, surface views/procs/synonyms/functions/sequences in
+      shallow, map CLUSTERED/NONCLUSTERED to `IndexKind`, report DML
+      `affected_rows` from `tiberius::ExecuteResult`. PG sets the
+      engine-uniform `ObjectInfo` bar; SQL Server currently omits triggers.
+- [ ] [Implement] driver-sqlserver: cancel via **TDS attention** on the
+      shared socket. Current `cancel()` calls `task.abort()`
+      (`lib.rs:237-244`) which orphans the in-flight query server-side.
+      Cross-task cancel test mirroring PG's `cancel_aborts_long_query` is
+      present but only asserts client-side abort.
+- [ ] [Implement] driver-sqlserver: panic isolation via `catch_unwind`.
+      PG has it (`stream.rs:79-94`); SQL Server's `run_query`
+      (`lib.rs:344-408`) has none — a panic in the query task silently
+      closes the channel with no `Page::Error`. This is a driver-isolation
+      (ADR-013 candidate) gap on one engine.
+- [ ] [Implement] driver-sqlserver: connection pool (deadpool-analogue).
+      Currently `conns: Mutex<HashMap<u64, MssqlConn>>` (`lib.rs:42`) —
+      every `open()` dials fresh, no reuse, no `min_connections`, no
+      pre-warm (blocks Phase C pool-warmth for MSSQL). Decide before
+      Phase C design whether to pool at the driver or wrap tiberius's
+      own session model.
+- [ ] [Implement] driver-sqlserver: real `set_mars` and `BulkFormat::Native`
+      (or formally drop them from `MssqlExt` and ADR-017).
+- [ ] [Implement] tracing: `#[tracing::instrument(skip(self))]` on every
+      `Driver` + ext method, span per `CursorId`/`ConnId`. Verified absent
+      — grep for `tracing::instrument` returns zero across all crates.
+- [ ] [Design] `ConnHandle` weak backref: decide whether to restore the
+      spec's `Weak<dyn Driver>` backref or formally drop it from ADR-017.
+      Currently documented as a Phase 0 simplification
+      (`driver-api/src/lib.rs:35-39`).
+- [ ] [Implement] Protocol `Operation::Savepoint`/`RollbackToSavepoint`/
+      `ReleaseSavepoint` variants + server routing via `as_pg()`/`as_mssql()`
+      downcast. Verified absent — `Operation` (`protocol/src/operation.rs:15`)
+      has no savepoint family; the server only downcasts for `PgExt::listen`
+      (`session.rs:317`) and `MssqlExt::bulk_insert` (`session.rs:355`),
+      never for savepoints. The driver layer is ready; the wire is not.
+- [ ] [Implement] CI runs the live driver tests. `.github/workflows/ci.yml:20`
+      runs `cargo test --workspace` with no `--features live-pg,live-mssql`,
+      so the entire two-impl validation gate never runs in CI. Add PG +
+      MSSQL service containers (or self-hosted) and the feature flags.
+
+## Phase B — Server reliability layer
+
+Goal: "demo works" → "I would put real data in this." Every long-lived
+server needs these before hosted mode is conceivable. Several items here
+are safety holes, not just polish.
+
+- [ ] [Design] ADR-018 (candidate): graceful-shutdown contract — signal →
+      stop accepting → drain in-flight queries (with per-query deadline) →
+      close pools → flush metadata → persist room snapshots → exit.
+- [ ] [Design] ADR-013 graduation: lock driver-isolation policy. PG
+      satisfies it (`tokio::spawn` + `catch_unwind` + `CancelToken`,
+      `stream.rs:60-94`); SQL Server does not (no `catch_unwind`,
+      `task.abort()` cancel). Define the wedged-driver containment boundary
+      and make both engines meet it.
+- [ ] [Design] Reconnect logic: detect broken pool members, transparently
+      re-establish, surface `Code::ConnectionFailed` only after retry
+      budget exhaustion. Verified absent — a failed driver call propagates
+      as `ApiError::Driver` and the connection entry stays put (except
+      SQL Server after cancel which is removed, `session.rs:337-344`).
+- [ ] [Design] Health vs readiness split. Current `/v1/health`
+      (`http.rs:637-643`) always returns `{"status":"ok"}` — it does not
+      check the metadata store or any driver. It is a liveness probe that
+      lies about readiness. `/v1/ready` does not exist.
+- [ ] [Design] Audit granularity. HTTP-level audit (`session.rs:115-127`)
+      is an in-memory ring buffer (cap 10 000) + optional JSONL
+      (`operation_log_path`). Operation-level audit (`session.rs:129-151`)
+      carries `{ at, operation, status }` only — **no actor, no rows, no
+      result code beyond `Succeeded`/`Failed`, no correlation id**, and
+      `status` is hard-coded `Succeeded` at every call site (grep confirms
+      `OperationStatus::Failed` is defined at `protocol/src/session.rs:202`
+      but never constructed). No SQLite audit table exists in `metadata`.
+- [ ] [Design] Secret backends. Only `MemorySecretStore` is wired
+      (`main.rs:115-120` hard-errors on any other `secret_backend` value).
+      Define `OsKeychain` (keyring/security-framework), `File` (encrypted,
+      dev only), `Vault` (hosted, deferred).
+- [ ] [Design] API versioning policy (ADR-016). `PROTOCOL_VERSION = "1"`
+      (`protocol/src/lib.rs:12`) is a bare string, not semver; the header
+      is emitted on responses (`http.rs:153-160`) but **never read**; there
+      is no `Code::UnsupportedVersion`, no `451` handling, no negotiation
+      request/response type. Define breaking-vs-additive rules + deprecation
+      window.
+- [ ] [Design] Per-query timeout. `config.timeouts.request_secs`
+      (`config.rs:43-48`, default 30) is parsed and stored but **never
+      consumed** anywhere (grep confirms). `execute_http` runs inline in
+      the handler with no `tokio::spawn`/`timeout`, violating the AGENTS.md
+      "wedged driver cannot freeze the server" rule on the HTTP path.
+- [ ] [Implement] Graceful shutdown handler: drain gate that blocks new
+      sessions during drain, awaits in-flight queries with per-query
+      deadline, closes driver pools, flushes metadata, persists room
+      snapshots. Current `shutdown_signal` (`main.rs:178-202`) only stops
+      the listener.
+- [ ] [Implement] Health + readiness endpoints; `/v1/ready` returns 503
+      while draining or if no driver registered; pings metadata + a driver.
+- [ ] [Implement] Reconnect: broken-connection detection + transparent
+      re-establish for both engines; `Reused`/`Reopened` distinction in
+      `ping` result.
+- [ ] [Implement] Operation-level audit: enrich `OperationAuditEntry` with
+      actor/rows/result_code/correlation_id, record the failure path
+      (`OperationStatus::Failed`), and persist to a SQLite audit table in
+      `metadata` (currently server-side in-memory only).
+- [ ] [Implement] OS-keychain `SecretStore` backend; never log secret
+      bytes; redaction in audit + tracing; round-trip put/get/delete test.
+- [ ] [Implement] Audit redaction + query fingerprinting: never persist or
+      log bound parameter values. `query_history` already omits bind values
+      (`metadata/src/lib.rs:814-837`), but the JSONL operation log
+      serializes `Operation::ExecuteQuery` verbatim (`session.rs:137-145`)
+      which can carry bind values through `ExecuteRequest` — flag for
+      redaction at the audit boundary.
+- [ ] [Implement] Centralized error identity: every wire error carries a
+      correlation id echoed in audit + tracing + client response. Verified
+      absent — error body is `{"kind", "message"}` (`error.rs:98-109`),
+      no id generated or propagated anywhere.
+- [ ] [Implement] Protocol version negotiation: read inbound
+      `X-Sift-Protocol-Version`, return `451 Unsupported Version` (or
+      agreed status) with the supported range in the body. Add
+      `Code::UnsupportedVersion`.
+- [ ] [Implement] Per-query `tokio::spawn` + `timeout` on the HTTP
+      `execute_query` path (parity with the WS path's spawned pump).
+      Wire `config.timeouts.request_secs` or remove the dead config.
+- [ ] [Implement] Loopback bypass must check the peer address. Currently
+      `auth.loopback_bypass == true` (the **default**, `config.rs:113`)
+      resolves **any** unauthenticated client — local or remote — as
+      `local:1` (`http.rs:370-379`). There is no `ConnectInfo` extractor,
+      no `127.0.0.1`/`::1`/Unix-socket check. This is a remote-auth bypass
+      hiding behind a default flag.
+- [ ] [Implement] Constant-time bearer-token comparison. `auth_middleware`
+      (`http.rs:194-199`) uses plain `==` on the bearer token — timing
+      oracle. API-token verification uses Argon2 (`metadata/src/lib.rs:286`)
+      which is fine; the static bearer path is not.
+- [ ] [Implement] Result-byte / row-count cap. `drain_stream`
+      (`session.rs:649-682`) collects **all** rows into a `Vec<Row>` with
+      no upper bound on the HTTP execute path — a giant result OOMs the
+      server. (The WS path streams with backpressure; the HTTP path does
+      not.)
+
+## Phase C — Performance & snappiness
+
+Goal: the differentiator vs Navicat-class tools. Caches, prefetch, pool
+warmth, progressive indexing.
+
+- [ ] [Design] ADR-011 (candidate): server-side cursor registry — cursor id
+      lifecycle, eviction policy, max open cursors per session, spill-to-
+      disk threshold, backpressure tie to WS ack. Today cursors live inside
+      each driver (PG `cursors: DashMap`, SQL Server `cursors: DashMap` of
+      `JoinHandle`) with no server-side registry, no eviction, no global
+      cap.
+- [ ] [Design] Schema cache contract. No schema cache exists — every
+      `RefreshSchema`/`get_schema` call hits the driver (`http.rs:1664`),
+      which hits the DB. Define per-session `SchemaSnapshot` cache keyed by
+      `(connection, scope)`; invalidation on `RefreshSchema`; invalidation
+      signals (PG `LISTEN/NOTIFY` on a dedicated conn, SQL Server polling
+      on `sys.objects.modify_date`); TTL fallback.
+- [ ] [Design] Predictive prefetch: speculatively fetch page N+1 into a
+      1-deep buffer when page N is acked. Today the WS pump
+      (`stream_pages_with_ack`, `http.rs:2152-2222`) only pulls the next
+      page after ack.
+- [ ] [Design] Pool pre-warm. PG pool `max_size: 8`, no `min_connections`
+      (`conn.rs:117-124`); SQL Server has no pool at all (Phase A item).
+      Define warm count per engine and the cold-start budget.
+- [ ] [Implement] Server-side cursor registry with eviction; integration
+      test that a 1M-row result holds bounded memory on both HTTP and WS.
+- [ ] [Implement] Schema cache + invalidation (PG `LISTEN/NOTIFY` on a
+      dedicated listen conn per session; SQL Server polling); cache hit
+      returns in <1ms.
+- [ ] [Implement] Predictive page-N+1 prefetch behind the cursor;
+      backpressure pauses prefetch if the WS receiver is not draining.
+- [ ] [Implement] Pre-warm pool on `OpenConnection`/profile-open;
+      configurable `min_connections`; cold-start budget reported in `ping`.
+- [ ] [Implement] Large-result spill to disk (optional): cursor eviction
+      spills oldest cold cursor's buffered pages to a temp file.
+- [ ] [Implement] Response compression: gzip + brotli on HTTP JSON and on
+      WS frames where the client advertises support. (`tower-http`
+      CompressionLayer is already a dep but unwired, `Cargo.toml:30`.)
+
+## Phase D — Headless product features
+
+Goal: the server side of every daily-driver and power-user IDE feature, so
+a GUI later is just rendering. Every item below is verified absent from the
+`Operation` enum and the route table.
+
+- [ ] [Design] Autocomplete API: server endpoint returning ranked
+      candidates scoped to connection + schema + cursor position.
+- [ ] [Design] Export pipeline: server-side CSV/JSON/TSV generation from a
+      cursor; streaming over HTTP chunked or WS; NULL display policy;
+      type-aware cell formatting. (PG `COPY` exists at the driver layer
+      via `PgExt::copy`; no server route exposes it.)
+- [ ] [Design] DDL generation: `ddl_for(object)` driver method; PG from
+      `pg_get_*def`, SQL Server from `OBJECT_DEFINITION`.
+- [ ] [Design] Inline-edit → DML generation: edit set → parameterized DML
+      → diff preview → execute-in-tx; conflict detection.
+- [ ] [Design] Transactions panel contract: server exposes open-tx state
+      per connection, savepoint lifecycle (depends on Phase A savepoint
+      Operation variants), commit/rollback preview.
+- [ ] [Design] Saved-query library. **Note: `saved_query` table already
+      exists** (`V004__history.sql:16`) but is **dead schema** — no Rust
+      reads or writes it. Define the routes/sharing model and wire it.
+- [ ] [Design] Global schema search; data search; execution plans
+      (structured plan tree — no `PlanNode` protocol type exists today,
+      EXPLAIN would ride `Value::Text`); process list + kill.
+- [ ] [Design] Command-palette server surface: enumerate available
+      `Operation`s for a given capability context. (`GET /v1/operations`
+      exists at `http.rs:649` but returns the whole list unfiltered.)
+- [ ] [Design] CSV import → table (server-side ingest, type inference,
+      conflict policy). Ties to PG `COPY FROM STDIN` (`PgExt::copy` Import)
+      and SQL Server `BULK INSERT` (`MssqlExt::bulk_insert`).
+- [ ] [Implement] Autocomplete endpoint + driver method; engine-specific
+      function/keyword tables in `protocol`; cached against schema snapshot.
+- [ ] [Implement] Export over HTTP chunked + WS; format selection; NULL +
+      type-aware rendering hints.
+- [ ] [Implement] DDL generation driver methods; OpenAPI coverage;
+      round-trip test (DDL → object → DDL).
+- [ ] [Implement] Inline-edit envelope; transactions panel server state;
+      saved-query routes; schema-search; data-search; plan capture +
+      structured `PlanNode`; process-list + kill; capability query; CSV
+      import.
+
+## Phase E — Hosted auth & identity
+
+Goal: take auth from "bearer token + loopback bypass" to "hosted mode with
+real identity," without breaking local-first (ADR-006, ADR-010).
+
+- [ ] [Design] ADR-019 (candidate): hosted identity model — local mode
+      stays loopback-bypass + API tokens; hosted mode requires GitHub OAuth
+      as primary, OIDC as enterprise, keypair as programmatic.
+- [ ] [Design] OAuth flow shape (auth-code + PKCE); session token model
+      (short-lived access + rotating refresh with replay detection);
+      principal → tenant binding (invite/accept, default-tenant on first
+      OAuth login).
+- [ ] [Implement] GitHub OAuth login route pair; OIDC route pair for
+      enterprise; session-token issue/refresh/revoke with rotating refresh
+      tokens.
+- [ ] [Implement] Keypair auth. **Note: `principal_key` and
+      `keypair_challenge` tables already exist** (`V001__identity.sql:40`,
+      `:53`) but are **dead schema** — no Rust touches them. Wire or drop.
+- [ ] [Implement] Local-mode guarantee: when `mode = local`, OAuth/OIDC/
+      keypair are disabled and loopback-bypass + bootstrapped local
+      principal remain the only path.
+- [ ] [Implement] Principal profile sync (display name, email, avatar from
+      GitHub on login); expose via `/v1/auth/whoami`.
+
+## Phase F — Authorization, tenancy & limits
+
+Goal: once multiple principals exist, scope what each can do. Today the
+only authorization is room RBAC; per-connection and tenant-resource
+enforcement are entirely absent.
+
+- [ ] [Design] ADR-020 (candidate): authorization model — connection-level
+      permissions, room roles (already owner/editor/viewer), tenant roles;
+      where policy is evaluated.
+- [ ] [Design] Rate limiting (per-principal + per-tenant token bucket or
+      sliding window); 429 + `Retry-After`. `Code::RateLimited` does not
+      exist today.
+- [ ] [Design] Tenant isolation: connection quotas, concurrent-query caps,
+      total-result-bytes-per-tenant; `Code::TenantResourceExhausted` (does
+      not exist today) instead of a crash.
+- [ ] [Implement] Connection-profile permissions: `read_only`,
+      `allowed_ops`/`blocked_ops`, `allowed_schemas`; enforced in the
+      dispatcher before routing to the driver.
+- [ ] [Implement] Rate-limit middleware keyed by principal + tenant;
+      configurable per route class.
+- [ ] [Implement] Tenant resource accounting: concurrent queries, open
+      cursors, result bytes per tenant; metrics exported.
+- [ ] [Implement] Saved-query + document namespace isolation per
+      tenant/principal.
+
+## Phase G — Collaboration depth
+
+Goal: graduate the room runtime from "foundation" to a real multiplayer SQL
+session. CRDT only for query text; everything else server-authoritative.
+
+- [ ] [Design] ADR-014 (candidate): lock collaboration scope — shared SQL
+      editor via CRDT, ephemeral presence, shared session/connection state
+      via broadcast; explicitly exclude result replication beyond
+      references.
+- [ ] [Design] CRDT backend choice for `sift-doc`. **Today `sift-doc` is
+      not a CRDT** (`crates/doc/src/lib.rs:79-98`) — it is a UTF-8 byte
+      buffer with destructive `apply()`, no op-log, no merge, no pluggable
+      backend. The `CrdtKind::{Loro,Automerge}` tag is a label, never
+      dispatched on. Picking + wiring a real backend (Automerge vs Loro vs
+      Yjs) is the core Phase G deliverable.
+- [ ] [Design] Late-join protocol: snapshot + ops-since. Today only full
+      snapshots are persisted (`metadata/src/lib.rs:744-759`); there is no
+      bounded op-log and no compaction.
+- [ ] [Design] Presence vs durable separation: presence is ephemeral and
+      fire-and-forget; document text is durable CRDT. Today presence rides
+      the same `broadcast::channel(1024)` as document ops
+      (`room_runtime.rs:84`).
+- [ ] [Design] Shared-connection ownership: a connection opened in a room
+      is server-owned; members attach and run ops through it with role
+      gating (editor+ can run queries, viewer observes).
+- [ ] [Implement] Real CRDT in `sift-doc`; snapshot + op-log persistence in
+      metadata; deterministic merge across peers.
+- [ ] [Implement] Late-join snapshot + ops-since over the room WS; bounded
+      op log with background compaction.
+- [ ] [Implement] Ephemeral presence channel distinct from the durable
+      doc-op channel; not persisted.
+- [ ] [Implement] Shared room connection with role gating; result-reference
+      broadcast (today the room emits a `RoomQueryResult` *summary*
+      (`http.rs:1731-1738`), not a cursor reference peers can page from).
+- [ ] [Implement] Observer lag recovery + follow mode.
+
+## Phase H — Remote development & distribution
+
+Goal: a sift server can run remote while a thin client renders locally.
+Because sift is already server-first, this is mostly bootstrap + version
+handshake.
+
+- [ ] [Design] ADR-021 (candidate): remote topology — SSH-tunneled (Zed
+      model) vs hosted-collab-relay vs both.
+- [ ] [Design] Remote bootstrap (SSH control-master, binary fetch/upload,
+      version check, daemon spawn/reconnect); reconnect + state survival on
+      SSH drop.
+- [ ] [Design] Version handshake. The client-sdk never sends or inspects
+      `X-Sift-Protocol-Version` today (`client-sdk/src/lib.rs` never
+      imports `PROTOCOL_VERSION`); the server emits it one-way. Both sides
+      need a real handshake once remote mode exists.
+- [ ] [Design] Background updater (release channel + signature
+      verification); single-binary distribution modes (in-process / daemon
+      / container).
+- [ ] [Implement] Remote bootstrap client helper; proxy-mode daemon; port-
+      forward analogue; background updater; `--mode` distribution modes;
+      CI release pipeline.
+
+## Phase I — Extensibility
+
+Goal: third-party drivers, AI/automation consumers, and connection-time
+hooks without forking the server.
+
+- [ ] [Design] ADR-022 (candidate): driver extensibility — in-tree drivers
+      first-class; third-party drivers register over a local RPC protocol
+      implementing the `Driver` trait shape.
+- [ ] [Design] Driver RPC Protocol contract (wire encoding, capability
+      advertisement, streaming `Page` frames, cancel cross-call); the RPC
+      proxy must satisfy driver-isolation (ADR-013).
+- [ ] [Design] MCP server surface (`sift mcp`): every `Operation` is a
+      tool; results are protocol types.
+- [ ] [Design] MCP governance layer (operation classification, per-
+      connection policy, approval flow for write/destructive ops); ties to
+      Phase F authorization.
+- [ ] [Design] Connection hooks (`PreConnect`/`PostConnect`/etc); tunneling
+      for user DBs (SSH/SOCKS5/HTTP CONNECT/SSM); plugin/extension loading.
+- [ ] [Implement] Driver RPC host; `sift mcp` subcommand; governance
+      middleware; connection hooks; tunnel profiles; extension loader.
+
+## Phase J — Operations polish
+
+Goal: the last mile before a real release.
+
+- [ ] [Design] Metrics surface (`/v1/metrics` Prometheus); OpenTelemetry
+      export; server-side migrations policy (`sift migrate` subcommand vs
+      startup gate — today refinery runs eagerly on startup,
+      `metadata/src/lib.rs:80`); backup/restore ops; query plan capture +
+      retrieval; scheduler.
+- [ ] [Design] Release + packaging (musl/static Linux, macOS, Windows;
+      per-channel artifacts; signature material for the Phase H updater).
+- [ ] [Implement] Prometheus metrics endpoint; OTLP trace export; `sift
+      migrate` subcommand + startup gate with pre-release CI matrix;
+      backup/restore driver methods + Operations; plan capture wired into
+      `execute`; scheduler runtime.
+- [ ] [Implement] **OpenAPI generation from typed schemas** to replace the
+      hand-authored JSON at `http.rs:655-978`. The hand-authored map already
+      drifts from routes (e.g. `GET /v1/sessions/{id}/connections/{conn_id}`
+      is not listed). Single source of truth = `utoipa` annotations or
+      route-level schema extraction; add a drift test.
+
+---
+
+## Sequencing & dependency notes
+
+- **Phase A is the gate for "trait locked."** Verified-still-open A items
+  that block the gate: ADR-017 not written, SQL Server cancel is
+  `task.abort()` not TDS attention, SQL Server has no panic isolation, save
+  points are not reachable over the protocol, and CI does not run the live
+  tests. The decode/TLS/listen/copy/advisory items that used to gate A are
+  already done.
+- **Phase B is the gate for "hosted is conceivable."** Two Phase B items
+  are safety holes that should not wait behind design: the loopback-bypass
+  default that authenticates remote clients as `local:1`, and the
+  unbounded `drain_stream` that OOMs the server on a large HTTP result.
+  Treat those as P0 patches inside Phase B.
+- **Phase C can proceed in parallel with D once A's schema/type items
+  land**, but the SQL Server pool question in Phase A shapes Phase C's
+  pool-warmth work — resolve it first.
+- **Phase D's saved-query work is partially unblocked** — the metadata
+  table already exists (dead schema); wiring routes is mostly Implement,
+  not Design.
+- **Phase E's keypair work is partially unblocked** — `principal_key` and
+  `keypair_challenge` tables already exist (dead schema).
+- **Phase G's first deliverable is replacing `sift-doc` with a real CRDT.**
+  Everything else in G (late-join, presence split, follow mode) depends on
+  it. The current apply-op abstraction cannot satisfy the collaboration
+  contract.
+- **Phase H depends on E (auth) + a real version handshake.** The one-way
+  header today is not a handshake.
+- **Phase I is mostly orthogonal** but governance depends on F.
+- **Phase J's OpenAPI item can land earlier** — the hand-authored map is
+  already drifting and is a documentation-contract hazard.
+
+## ADR candidates this list implies
+
+| # | Candidate | Origin | Status |
+| --- | --- | --- | --- |
+| ADR-011 | result streaming via server-side cursors | Phase C | not written |
+| ADR-013 | driver isolation | Phase B | not written; PG meets it, SQL Server does not |
+| ADR-014 | collaboration scope (CRDT text only) | Phase G | not written |
+| ADR-016 | protocol versioning + semver stability | Phase B | not written; header is one-way, version is `"1"` not semver |
+| ADR-017 | driver trait shape | Phase A | not written; trait shape is stable in code |
+| ADR-018 | graceful shutdown contract | Phase B | not written |
+| ADR-019 | hosted identity model | Phase E | not written |
+| ADR-020 | authorization model | Phase F | not written |
+| ADR-021 | remote topology | Phase H | not written |
+| ADR-022 | driver extensibility | Phase I | not written |
+
+## Reference: what is being stolen, and what is not
+
+Stealing (with attribution):
+- **Zed** — process discipline (→ driver isolation ADR-013), restart model
+  (→ metadata + room snapshots), action system with capability checks
+  (→ Phase D capability query), background updater (Phase H), CRDT-only-
+  for-text (Phase G), progressive post-paint indexing (Phase C schema
+  cache), late-join = snapshot + ops-since (Phase G), GitHub OAuth
+  `read:user` flow (Phase E), remote SSH bootstrap + proxy-mode daemon
+  reconnect (Phase H).
+- **dbflux** — Driver RPC Protocol for out-of-process drivers (Phase I),
+  MCP server + governance/approval layer (Phase I), SSH/SOCKS5/HTTP/SSM
+  tunnel profiles (Phase I), connection hooks (Phase I), audit redaction +
+  query fingerprinting + centralized error correlation id (Phase B).
+
+Not copying (per ZED_LESSONS §5):
+- CRDTs for results/schema/sessions — those stay server-authoritative.
+- Local-first file ownership — sift's source of truth is the user DB, not
+  a client-owned file (ADR-002).
+- Treating result grids as editable buffers — they need server-side
+  cursors, virtualization hints, and backpressure.
+- Replicating result data to peers — share a reference, not the rows.
