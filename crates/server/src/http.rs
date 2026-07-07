@@ -46,6 +46,9 @@ pub struct AppState {
     pub rooms: RoomRuntime,
     pub auth: AuthState,
     pub metadata: Option<MetadataStore>,
+    /// Graceful-shutdown drain state (ADR-018). New work is refused once this
+    /// flips to draining; query execution is tracked so shutdown can wait.
+    pub shutdown: crate::shutdown::Shutdown,
 }
 
 #[derive(Clone, Default)]
@@ -1603,6 +1606,9 @@ async fn open_connection_from_profile(
     Path(session_id): Path<sift_protocol::SessionId>,
     Json(req): Json<OpenConnectionFromProfileRequest>,
 ) -> ApiResult<Json<sift_protocol::ConnectionInfo>> {
+    if state.shutdown.is_draining() {
+        return Err(ApiError::ServiceDraining);
+    }
     let metadata = metadata_store(&state)?;
     let metadata_sync = metadata_store_cloned(&state)?;
     let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
@@ -1630,6 +1636,9 @@ async fn create_session(
     State(state): State<AppState>,
     body: Option<Json<OpenSessionRequest>>,
 ) -> ApiResult<Json<sift_protocol::SessionInfo>> {
+    if state.shutdown.is_draining() {
+        return Err(ApiError::ServiceDraining);
+    }
     let req = match body {
         Some(Json(b)) => b,
         None => OpenSessionRequest { tag: None },
@@ -1676,6 +1685,9 @@ async fn open_connection(
     Path(id): Path<sift_protocol::SessionId>,
     Json(req): Json<OpenConnectionRequest>,
 ) -> ApiResult<Json<sift_protocol::ConnectionInfo>> {
+    if state.shutdown.is_draining() {
+        return Err(ApiError::ServiceDraining);
+    }
     let engine = req.engine;
     let operation = Operation::OpenConnection {
         session: id,
@@ -1809,6 +1821,9 @@ async fn execute_query(
         session: id,
         request: req.clone(),
     };
+    // Count this query against the shutdown drain gate for its whole lifetime;
+    // in-flight queries continue draining even after `begin_drain`.
+    let _query_guard = state.shutdown.track_query();
     let started = Instant::now();
     let result = state.sessions.execute_http(id, req).await;
     let duration_ms = started.elapsed().as_millis().min(i64::MAX as u128) as i64;
@@ -1988,7 +2003,7 @@ async fn ws_session(
     ws: WebSocketUpgrade,
 ) -> Response {
     ws.on_upgrade(move |socket| async move {
-        if let Err(error) = handle_ws(state.sessions, session_id, socket).await {
+        if let Err(error) = handle_ws(state.sessions, state.shutdown, session_id, socket).await {
             tracing::warn!(%session_id, error = %error, "websocket session ended with error");
         }
     })
@@ -2190,6 +2205,7 @@ async fn apply_room_document_operation(
 
 async fn handle_ws(
     sessions: SessionStore,
+    shutdown: crate::shutdown::Shutdown,
     session_id: sift_protocol::SessionId,
     socket: WebSocket,
 ) -> ApiResult<()> {
@@ -2208,6 +2224,9 @@ async fn handle_ws(
                         params,
                         tx,
                     } => {
+                        // Track the streaming query against the drain gate for
+                        // its whole lifetime (execute + paging).
+                        let _query_guard = shutdown.track_query();
                         let stream = match sessions
                             .execute_stream(
                                 session_id,

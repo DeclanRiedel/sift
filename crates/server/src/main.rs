@@ -14,6 +14,7 @@ use sift_server::{
     registry::DriverRegistry,
     room_runtime::RoomRuntime,
     session::SessionStore,
+    Shutdown,
 };
 
 #[tokio::main]
@@ -32,6 +33,7 @@ async fn main() -> anyhow::Result<()> {
     };
     sessions.set_request_timeout(std::time::Duration::from_secs(cfg.timeouts.request_secs));
     let metadata = build_metadata_store(&cfg)?;
+    let shutdown = Shutdown::default();
     let state = AppState {
         sessions,
         rooms: RoomRuntime::default(),
@@ -40,6 +42,7 @@ async fn main() -> anyhow::Result<()> {
             loopback_bypass: cfg.auth.loopback_bypass,
         },
         metadata,
+        shutdown: shutdown.clone(),
     };
 
     let app = app(state);
@@ -54,11 +57,12 @@ async fn main() -> anyhow::Result<()> {
         .with_context(|| format!("binding {bind}"))?;
     tracing::info!("listening on http://{bind}");
 
+    let drain_deadline = std::time::Duration::from_secs(cfg.timeouts.shutdown_drain_secs);
     axum::serve(
         listener,
         app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
     )
-    .with_graceful_shutdown(shutdown_signal())
+    .with_graceful_shutdown(shutdown_sequence(shutdown, drain_deadline))
     .await
     .context("server runtime")?;
 
@@ -178,7 +182,26 @@ fn demo_execute_pages() -> Vec<sift_protocol::Page> {
     ]
 }
 
-async fn shutdown_signal() {
+/// Drives the ADR-018 graceful-shutdown sequence. Resolving this future is
+/// what tells axum to stop the listener, so we hold it open through the drain
+/// window: on signal we flip the drain gate (new work is refused) and wait for
+/// in-flight queries to finish, bounded by `drain_deadline`, before returning.
+async fn shutdown_sequence(shutdown: Shutdown, drain_deadline: std::time::Duration) {
+    wait_for_signal().await;
+    tracing::info!("shutdown signal received; draining");
+    shutdown.begin_drain();
+    let remaining = shutdown.await_drain(drain_deadline).await;
+    if remaining > 0 {
+        tracing::warn!(
+            remaining,
+            "drain deadline elapsed with queries still in flight; abandoning them"
+        );
+    } else {
+        tracing::info!("in-flight queries drained cleanly");
+    }
+}
+
+async fn wait_for_signal() {
     let ctrl_c = async {
         tokio::signal::ctrl_c()
             .await
@@ -200,8 +223,6 @@ async fn shutdown_signal() {
         _ = ctrl_c => {},
         _ = terminate => {},
     }
-
-    tracing::info!("shutdown signal received");
 }
 
 // Re-export to satisfy the `SchemaScope::shallow()` call above without

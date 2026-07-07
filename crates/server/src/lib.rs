@@ -11,11 +11,13 @@ pub mod http;
 pub mod registry;
 pub mod room_runtime;
 pub mod session;
+pub mod shutdown;
 
 pub use config::Config;
 pub use error::ApiError;
 pub use registry::DriverRegistry;
 pub use room_runtime::RoomRuntime;
 pub use session::{ConnectionEntry, Session, SessionStore};
+pub use shutdown::Shutdown;
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

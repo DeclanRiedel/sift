@@ -219,3 +219,59 @@ contract without pretending every backend exposes the same native features.
 Known SQL Server limitations are explicit unsupported states rather than
 stubs. Performance work can improve pooling and warm starts without reopening
 the trait lock, while true protocol shape changes remain gated.
+
+---
+
+## ADR-018 — Graceful Shutdown Contract
+
+**Context.** `shutdown_signal` only resolves the axum graceful-shutdown
+future, which stops accepting new TCP connections and waits for in-flight HTTP
+requests. It does not stop accepting new *logical* work (sessions,
+connections, queries), does not bound how long draining may take, and does not
+deterministically cancel or persist anything. A long-running or wedged query
+could hold shutdown open indefinitely, or be dropped mid-flight with a driver
+connection left in an undefined state. Hosted operation needs a defined,
+bounded shutdown sequence.
+
+**Decision.** On the first termination signal (SIGINT/SIGTERM), the server runs
+a fixed sequence before the listener closes:
+
+1. **Stop accepting new work.** A process-wide drain flag flips to draining.
+   New sessions and new connections are rejected with `503 Service
+   Unavailable` (error kind `service_draining`). In-flight requests and queries
+   on existing sessions continue.
+2. **Mark readiness false.** `/v1/ready` (readiness split, next step) reports
+   not-ready while draining so external routers stop sending traffic.
+   `/v1/health` stays liveness-only and keeps returning ok until the process
+   exits.
+3. **Drain in-flight queries until a deadline.** The server awaits the
+   in-flight query count reaching zero, bounded by
+   `config.timeouts.shutdown_drain_secs` (default 30). Each individual query is
+   already bounded by the per-query request timeout (ADR-lite step 1), so the
+   drain deadline is a ceiling, not the common case.
+4. **Cancel remaining cursors.** Queries still running at the deadline are
+   abandoned: the listener closes and axum drops their request tasks. Per-query
+   timeouts and connection close reclaim driver-side work, and the SQL Server
+   discard-on-cancel rule (ADR-017) still applies to any cursor cancelled on
+   the way out. A global cursor registry that issues an explicit `cancel` to
+   every straggler is a documented follow-up; today the per-query deadline is
+   the backstop.
+5. **Flush durable state.** Room document CRDT state is persisted to the
+   metadata store on every applied operation, so there is no separate
+   room-snapshot buffer to flush; presence is ephemeral and intentionally
+   dropped. Metadata SQLite writes are durable at each call.
+6. **Exit.** The shutdown future returns, axum stops the listener, and the
+   process exits.
+
+The drain state lives in a `Shutdown` handle carried in `AppState`, separate
+from `SessionStore` and `RoomRuntime`, because both the HTTP layer (rejection,
+readiness) and the shutdown driver (await, deadline) share it.
+
+**Consequences.** Shutdown is bounded and observable: it never blocks forever,
+new work is refused deterministically once draining starts, and readiness can
+flip so external routers redirect traffic. In-flight queries get a real drain
+window rather than being killed immediately. The remaining gap — explicitly
+cancelling every straggler cursor at the deadline rather than relying on
+per-query timeout plus connection close — is documented and deferred to a
+cursor-registry pass. Adding `shutdown_drain_secs` is additive config; no
+protocol shape changes.

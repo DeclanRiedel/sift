@@ -45,6 +45,9 @@ pub struct DriversConfig {
 pub struct TimeoutConfig {
     /// Per-request timeout for synchronous ops (ping/schema/execute HTTP).
     pub request_secs: u64,
+    /// Deadline for draining in-flight queries during graceful shutdown
+    /// (ADR-018). `0` waits indefinitely for queries to finish.
+    pub shutdown_drain_secs: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -102,7 +105,10 @@ impl Default for LogConfig {
 
 impl Default for TimeoutConfig {
     fn default() -> Self {
-        Self { request_secs: 30 }
+        Self {
+            request_secs: 30,
+            shutdown_drain_secs: 30,
+        }
     }
 }
 

@@ -71,6 +71,7 @@ fn test_state() -> AppState {
     AppState {
         sessions: SessionStore::new(registry),
         rooms: RoomRuntime::default(),
+        shutdown: sift_server::shutdown::Shutdown::default(),
         auth: AuthState::default(),
         metadata: None,
     }
@@ -81,6 +82,7 @@ fn test_state_with_driver(driver: MockDriver) -> AppState {
     AppState {
         sessions: SessionStore::new(registry),
         rooms: RoomRuntime::default(),
+        shutdown: sift_server::shutdown::Shutdown::default(),
         auth: AuthState::default(),
         metadata: None,
     }
@@ -93,6 +95,7 @@ fn test_state_with_token(token: &str) -> AppState {
     AppState {
         sessions: SessionStore::new(registry),
         rooms: RoomRuntime::default(),
+        shutdown: sift_server::shutdown::Shutdown::default(),
         auth: AuthState {
             bearer_token: Some(token.to_string()),
             loopback_bypass: false,
@@ -109,6 +112,7 @@ fn test_state_with_operation_log(path: &std::path::Path) -> AppState {
         sessions: SessionStore::new_with_operation_log_path(registry, path)
             .expect("operation log opens"),
         rooms: RoomRuntime::default(),
+        shutdown: sift_server::shutdown::Shutdown::default(),
         auth: AuthState::default(),
         metadata: None,
     }
@@ -123,6 +127,7 @@ fn test_state_with_metadata(loopback_bypass: bool) -> AppState {
     AppState {
         sessions: SessionStore::new(registry),
         rooms: RoomRuntime::default(),
+        shutdown: sift_server::shutdown::Shutdown::default(),
         auth: AuthState {
             bearer_token: None,
             loopback_bypass,

@@ -31,6 +31,9 @@ pub enum ApiError {
     #[error("metadata unavailable")]
     MetadataUnavailable,
 
+    #[error("service draining")]
+    ServiceDraining,
+
     #[error("metadata error: {0}")]
     Metadata(#[from] MetadataError),
 
@@ -74,6 +77,7 @@ impl ApiError {
             ApiError::MetadataUnavailable => {
                 (StatusCode::SERVICE_UNAVAILABLE, "metadata_unavailable")
             }
+            ApiError::ServiceDraining => (StatusCode::SERVICE_UNAVAILABLE, "service_draining"),
             ApiError::Metadata(error) => match error {
                 MetadataError::ConnectionProfileNotFound(_)
                 | MetadataError::RoomNotFound(_)
