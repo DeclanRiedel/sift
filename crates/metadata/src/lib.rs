@@ -180,6 +180,24 @@ impl MetadataStore {
         .map_err(Into::into)
     }
 
+    pub fn create_tenant(&self, name: &str, kind: TenantKind) -> Result<Tenant> {
+        let now = now_text();
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO tenant (name, kind, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?3)",
+            params![name, kind.as_str(), now],
+        )?;
+        let id = TenantId(conn.last_insert_rowid());
+        Ok(Tenant {
+            id,
+            name: name.to_string(),
+            kind,
+            created_at: parse_time(now.clone())?,
+            updated_at: parse_time(now)?,
+        })
+    }
+
     pub fn upsert_tenant_membership(
         &self,
         tenant: TenantId,

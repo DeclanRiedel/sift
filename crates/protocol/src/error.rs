@@ -48,6 +48,12 @@ pub enum Code {
     #[error("transaction not found")]
     TransactionNotFound,
 
+    #[error("result too large")]
+    ResultTooLarge,
+
+    #[error("result shape is not supported by this surface")]
+    UnsupportedResultShape,
+
     #[error("driver internal error")]
     DriverInternal,
 

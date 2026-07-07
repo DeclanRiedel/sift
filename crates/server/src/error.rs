@@ -54,6 +54,10 @@ impl ApiError {
                 Code::UnsupportedForEngine => {
                     (StatusCode::UNPROCESSABLE_ENTITY, "unsupported_for_engine")
                 }
+                Code::ResultTooLarge => (StatusCode::PAYLOAD_TOO_LARGE, "result_too_large"),
+                Code::UnsupportedResultShape => {
+                    (StatusCode::UNPROCESSABLE_ENTITY, "unsupported_result_shape")
+                }
                 Code::CursorNotFound | Code::TransactionNotFound => {
                     (StatusCode::NOT_FOUND, "not_found")
                 }

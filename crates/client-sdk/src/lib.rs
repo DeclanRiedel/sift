@@ -562,6 +562,7 @@ impl Client {
                 connection,
                 sql: sql.into(),
                 params: Vec::new(),
+                tx: None,
             })?
             .into(),
         ))

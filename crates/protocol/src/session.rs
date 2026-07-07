@@ -225,6 +225,11 @@ pub enum WsClientMessage {
         sql: String,
         #[serde(default)]
         params: Vec<Value>,
+        /// Optional transaction to run under. Mirrors HTTP execute; omitted
+        /// means autocommit and is rejected if the connection has an active
+        /// transaction.
+        #[serde(default)]
+        tx: Option<TxHandleRef>,
     },
     Listen {
         request_id: String,

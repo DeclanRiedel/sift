@@ -837,6 +837,30 @@ async fn openapi() -> Json<serde_json::Value> {
                     "responses": { "200": { "description": "Ack", "content": json_object_content() } }
                 }
             },
+            "/v1/sessions/{id}/transactions/{tx_id}/savepoints": {
+                "post": {
+                    "operationId": "createSavepoint",
+                    "summary": "Create transaction savepoint",
+                    "requestBody": json_body("SavepointRequest"),
+                    "responses": { "200": { "description": "Ack", "content": json_object_content() } }
+                }
+            },
+            "/v1/sessions/{id}/transactions/{tx_id}/savepoints/rollback": {
+                "post": {
+                    "operationId": "rollbackToSavepoint",
+                    "summary": "Rollback to transaction savepoint",
+                    "requestBody": json_body("SavepointRequest"),
+                    "responses": { "200": { "description": "Ack", "content": json_object_content() } }
+                }
+            },
+            "/v1/sessions/{id}/transactions/{tx_id}/savepoints/release": {
+                "post": {
+                    "operationId": "releaseSavepoint",
+                    "summary": "Release transaction savepoint",
+                    "requestBody": json_body("SavepointRequest"),
+                    "responses": { "200": { "description": "Ack", "content": json_object_content() } }
+                }
+            },
             "/v1/sessions/{id}/queries/{cursor_id}/cancel": {
                 "post": {
                     "operationId": "cancelQuery",
@@ -1079,6 +1103,7 @@ fn protocol_schema_refs() -> serde_json::Value {
     add_schema::<sift_protocol::OpenConnectionRequest>("OpenConnectionRequest", &mut schemas);
     add_schema::<sift_protocol::OpenSessionRequest>("OpenSessionRequest", &mut schemas);
     add_schema::<sift_protocol::OperationAuditEntry>("OperationAuditEntry", &mut schemas);
+    add_schema::<sift_protocol::SavepointRequest>("SavepointRequest", &mut schemas);
     add_schema::<sift_protocol::SchemaSnapshot>("SchemaSnapshot", &mut schemas);
     add_schema::<sift_protocol::ServerInfo>("ServerInfo", &mut schemas);
     add_schema::<sift_protocol::SessionInfo>("SessionInfo", &mut schemas);
@@ -1325,7 +1350,17 @@ async fn create_metadata_document(
     let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
     let room = room_id(id)?;
     let document = metadata_blocking(move || {
-        ensure_room_permission(&metadata, &auth, room, RoomPermission::Write)?;
+        let room_row = ensure_room_permission(&metadata, &auth, room, RoomPermission::Write)?;
+        let connection_profile_id = req.connection_profile_id.map(ConnectionProfileId);
+        if let Some(profile_id) = connection_profile_id {
+            let profile = metadata.get_connection_profile_for_any_tenant(profile_id)?;
+            if profile.tenant_id != room_row.tenant_id {
+                return Err(ApiError::Forbidden(format!(
+                    "connection profile {:?} is not in room tenant {:?}",
+                    profile_id, room_row.tenant_id
+                )));
+            }
+        }
         metadata
             .create_document(
                 room,
@@ -1335,7 +1370,7 @@ async fn create_metadata_document(
                     crdt_type: req.crdt_type,
                     crdt_state: req.crdt_state,
                     position: req.position,
-                    connection_profile_id: req.connection_profile_id.map(ConnectionProfileId),
+                    connection_profile_id,
                 },
             )
             .map_err(Into::into)
@@ -1786,11 +1821,20 @@ async fn execute_query(
         }
         record_execute_history(context, sql_text, duration_ms, &result).await;
     }
-    let resp = result?;
-    state
-        .sessions
-        .push_operation(operation, OperationStatus::Succeeded);
-    Ok(Json(resp))
+    match result {
+        Ok(resp) => {
+            state
+                .sessions
+                .push_operation(operation, OperationStatus::Succeeded);
+            Ok(Json(resp))
+        }
+        Err(error) => {
+            state
+                .sessions
+                .push_operation(operation, OperationStatus::Failed);
+            Err(error)
+        }
+    }
 }
 
 async fn begin_transaction(
@@ -2162,9 +2206,15 @@ async fn handle_ws(
                         connection,
                         sql,
                         params,
+                        tx,
                     } => {
                         let stream = match sessions
-                            .execute_stream(session_id, connection, ExecuteRequest { sql, params })
+                            .execute_stream(
+                                session_id,
+                                connection,
+                                ExecuteRequest { sql, params },
+                                tx.as_ref(),
+                            )
                             .await
                         {
                             Ok(stream) => stream,

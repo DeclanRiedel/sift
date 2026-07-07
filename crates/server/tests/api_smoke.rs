@@ -5,8 +5,9 @@ use axum::body::{to_bytes, Body};
 use axum::http::{Request, StatusCode};
 use sift_driver_api::{mock::MockDriver, BulkResult, PgNotification};
 use sift_metadata::{
-    CrdtType, MembershipRole, MemorySecretStore, MetadataStore, NewDocument, NewRoom, PrincipalId,
-    RoomKind, RoomRole, TenantId,
+    CrdtType, CredentialMode, MembershipRole, MemorySecretStore, MetadataStore,
+    NewConnectionProfile, NewDocument, NewRoom, PrincipalId, RoomKind, RoomRole, TenantId,
+    TenantKind,
 };
 use sift_protocol::{
     ColumnMetadata, ConnectionSpec, Engine, ExecuteRequestHttp, Health, Nullability, Page,
@@ -221,6 +222,11 @@ async fn openapi_is_published() {
     );
     assert!(body["paths"]["/v1/sessions/{id}/ws"].is_object());
     assert!(body["paths"]["/v1/sessions/{id}/transactions"].is_object());
+    assert!(body["paths"]["/v1/sessions/{id}/transactions/{tx_id}/savepoints"].is_object());
+    assert!(
+        body["paths"]["/v1/sessions/{id}/transactions/{tx_id}/savepoints/rollback"].is_object()
+    );
+    assert!(body["paths"]["/v1/sessions/{id}/transactions/{tx_id}/savepoints/release"].is_object());
     assert!(body["paths"]["/v1/sessions/{id}/connections/{conn_id}/bulk-insert"].is_object());
     assert!(body["paths"]["/v1/audit"].is_object());
     assert!(body["paths"]["/v1/operations"].is_object());
@@ -234,6 +240,11 @@ async fn openapi_is_published() {
         body["paths"]["/v1/metadata/rooms"]["post"]["requestBody"]["content"]["application/json"]
             ["schema"]["$ref"],
         "#/components/schemas/CreateRoomRequest"
+    );
+    assert_eq!(
+        body["paths"]["/v1/sessions/{id}/transactions/{tx_id}/savepoints"]["post"]["requestBody"]
+            ["content"]["application/json"]["schema"]["$ref"],
+        "#/components/schemas/SavepointRequest"
     );
     assert_eq!(
         body["paths"]["/v1/metadata/rooms"]["get"]["responses"]["200"]["content"]
@@ -598,6 +609,69 @@ async fn client_sdk_consumes_public_websocket_api() {
         .iter()
         .any(|page| matches!(page, Page::Rows { rows } if rows.len() == 2)));
     assert!(pages.iter().any(|page| matches!(page, Page::Done { .. })));
+
+    server.abort();
+}
+
+#[tokio::test]
+async fn websocket_execute_requires_active_tx_ref() {
+    use futures::{SinkExt, StreamExt};
+    use tokio_tungstenite::tungstenite::Message;
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app(test_state()).into_make_service())
+            .await
+            .unwrap();
+    });
+
+    let client = sift_client_sdk::Client::new(format!("http://{addr}"));
+    let session = client.open_session(Some("sdk-ws-tx".into())).await.unwrap();
+    let conn = client
+        .open_connection(
+            session.id,
+            sift_protocol::OpenConnectionRequest {
+                engine: Engine::Postgres,
+                spec: pg_spec(),
+            },
+        )
+        .await
+        .unwrap();
+    let _tx = client
+        .begin_transaction(session.id, conn.id, sift_protocol::TxMode::default())
+        .await
+        .unwrap();
+
+    let (mut ws, _) =
+        tokio_tungstenite::connect_async(format!("ws://{addr}/v1/sessions/{}/ws", session.id))
+            .await
+            .unwrap();
+    ws.send(Message::Text(
+        serde_json::to_string(&sift_protocol::WsClientMessage::Execute {
+            request_id: "no-tx".into(),
+            connection: conn.id,
+            sql: "SELECT id, name FROM users".into(),
+            params: Vec::new(),
+            tx: None,
+        })
+        .unwrap()
+        .into(),
+    ))
+    .await
+    .unwrap();
+
+    let message: sift_protocol::WsServerMessage = match ws.next().await.unwrap().unwrap() {
+        Message::Text(text) => serde_json::from_str(&text).unwrap(),
+        other => panic!("unexpected websocket message: {other:?}"),
+    };
+    assert!(matches!(
+        message,
+        sift_protocol::WsServerMessage::Error {
+            request_id: Some(id),
+            message
+        } if id == "no-tx" && message.contains("active transaction")
+    ));
 
     server.abort();
 }
@@ -1064,6 +1138,57 @@ async fn metadata_room_roles_are_enforced() {
                 .body(Body::empty())
                 .unwrap(),
         )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn document_creation_rejects_cross_tenant_connection_profile() {
+    let state = test_state_with_metadata(true);
+    let metadata = state.metadata.as_ref().unwrap().clone();
+    let other_tenant = metadata.create_tenant("other", TenantKind::Team).unwrap();
+    metadata
+        .upsert_tenant_membership(other_tenant.id, PrincipalId(1), MembershipRole::Owner)
+        .unwrap();
+    let room = metadata
+        .create_room(
+            TenantId(1),
+            PrincipalId(1),
+            NewRoom {
+                name: "tenant-one-room".into(),
+                kind: RoomKind::Shared,
+            },
+        )
+        .unwrap();
+    let profile = metadata
+        .upsert_connection_profile(
+            other_tenant.id,
+            PrincipalId(1),
+            NewConnectionProfile {
+                name: "other-tenant-profile".into(),
+                engine: Engine::Postgres,
+                spec: pg_spec(),
+                credential_mode: CredentialMode::Shared,
+                tags: Vec::new(),
+            },
+        )
+        .await
+        .unwrap();
+    let app = app(state);
+
+    let res = app
+        .oneshot(post_json(
+            format!("/v1/metadata/rooms/{}/documents", room.id.0),
+            serde_json::json!({
+                "kind": "sql",
+                "title": "bad.sql",
+                "crdt_type": "loro",
+                "crdt_state": [],
+                "position": 0,
+                "connection_profile_id": profile.id.0
+            }),
+        ))
         .await
         .unwrap();
     assert_eq!(res.status(), StatusCode::FORBIDDEN);
@@ -1555,6 +1680,154 @@ async fn execute_returns_drained_rows_and_affected_count() {
 }
 
 #[tokio::test]
+async fn http_execute_rejects_results_over_row_cap() {
+    let rows = (0..10_001)
+        .map(|idx| Row::new(vec![Value::Int32(idx)]))
+        .collect::<Vec<_>>();
+    let driver = MockDriver::builder()
+        .engine(Engine::Postgres)
+        .execute_ok(vec![
+            Page::NextResult {
+                columns: vec![ColumnMetadata {
+                    name: "id".into(),
+                    type_ref: TypeRef::Primitive(PrimitiveType::Int32),
+                    nullable: Nullability::NotNullable,
+                    auto_increment: false,
+                    primary_key: false,
+                    facets: Default::default(),
+                }],
+            },
+            Page::Rows { rows },
+            Page::Done {
+                affected_rows: None,
+                warnings: Vec::new(),
+            },
+        ])
+        .build();
+    let app = app(test_state_with_driver(driver));
+
+    let session: sift_protocol::SessionInfo = body_json(
+        app.clone()
+            .oneshot(post_json_str("/v1/sessions", "{}"))
+            .await
+            .unwrap()
+            .into_body(),
+    )
+    .await;
+    let conn: sift_protocol::ConnectionInfo = body_json(
+        app.clone()
+            .oneshot(post_json(
+                format!("/v1/sessions/{}/connections", session.id),
+                serde_json::json!({
+                    "engine": "postgres",
+                    "host": "mock.invalid",
+                    "user": "mock",
+                }),
+            ))
+            .await
+            .unwrap()
+            .into_body(),
+    )
+    .await;
+
+    let res = app
+        .oneshot(post_json(
+            format!("/v1/sessions/{}/queries", session.id),
+            ExecuteRequestHttp {
+                connection: conn.id,
+                sql: "SELECT too_many_rows".into(),
+                params: Vec::new(),
+                tx: None,
+                room_id: None,
+                connection_profile_id: None,
+            },
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::PAYLOAD_TOO_LARGE);
+}
+
+#[tokio::test]
+async fn http_execute_rejects_multi_result_batches() {
+    let driver = MockDriver::builder()
+        .engine(Engine::Postgres)
+        .execute_ok(vec![
+            Page::NextResult {
+                columns: vec![ColumnMetadata {
+                    name: "one".into(),
+                    type_ref: TypeRef::Primitive(PrimitiveType::Int32),
+                    nullable: Nullability::NotNullable,
+                    auto_increment: false,
+                    primary_key: false,
+                    facets: Default::default(),
+                }],
+            },
+            Page::Rows {
+                rows: vec![Row::new(vec![Value::Int32(1)])],
+            },
+            Page::NextResult {
+                columns: vec![ColumnMetadata {
+                    name: "two".into(),
+                    type_ref: TypeRef::Primitive(PrimitiveType::Text),
+                    nullable: Nullability::NotNullable,
+                    auto_increment: false,
+                    primary_key: false,
+                    facets: Default::default(),
+                }],
+            },
+            Page::Rows {
+                rows: vec![Row::new(vec![Value::Text("x".into())])],
+            },
+            Page::Done {
+                affected_rows: None,
+                warnings: Vec::new(),
+            },
+        ])
+        .build();
+    let app = app(test_state_with_driver(driver));
+
+    let session: sift_protocol::SessionInfo = body_json(
+        app.clone()
+            .oneshot(post_json_str("/v1/sessions", "{}"))
+            .await
+            .unwrap()
+            .into_body(),
+    )
+    .await;
+    let conn: sift_protocol::ConnectionInfo = body_json(
+        app.clone()
+            .oneshot(post_json(
+                format!("/v1/sessions/{}/connections", session.id),
+                serde_json::json!({
+                    "engine": "postgres",
+                    "host": "mock.invalid",
+                    "user": "mock",
+                }),
+            ))
+            .await
+            .unwrap()
+            .into_body(),
+    )
+    .await;
+
+    let res = app
+        .oneshot(post_json(
+            format!("/v1/sessions/{}/queries", session.id),
+            ExecuteRequestHttp {
+                connection: conn.id,
+                sql: "SELECT 1; SELECT 'x'".into(),
+                params: Vec::new(),
+                tx: None,
+                room_id: None,
+                connection_profile_id: None,
+            },
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::UNPROCESSABLE_ENTITY);
+}
+
+#[tokio::test]
 async fn transaction_flow_requires_explicit_tx_ref() {
     let app = app(test_state());
 
@@ -1740,6 +2013,7 @@ async fn execute_stream_error_maps_to_http_error() {
     .await;
 
     let res = app
+        .clone()
         .oneshot(post_json(
             format!("/v1/sessions/{sid}/queries"),
             ExecuteRequestHttp {
@@ -1755,6 +2029,18 @@ async fn execute_stream_error_maps_to_http_error() {
         .unwrap();
 
     assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+    let ops: Vec<sift_protocol::OperationAuditEntry> = body_json(
+        app.oneshot(Request::get("/v1/operations").body(Body::empty()).unwrap())
+            .await
+            .unwrap()
+            .into_body(),
+    )
+    .await;
+    assert!(ops.iter().any(|entry| matches!(
+        &entry.operation,
+        sift_protocol::Operation::ExecuteQuery { request, .. }
+            if request.sql == "BAD" && entry.status == sift_protocol::OperationStatus::Failed
+    )));
 }
 
 #[tokio::test]

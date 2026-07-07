@@ -28,6 +28,8 @@ use sift_protocol::{
 use crate::error::{ApiError, ApiResult};
 use crate::registry::DriverRegistry;
 
+const MAX_HTTP_EXECUTE_ROWS: usize = 10_000;
+
 /// Server-owned session state. Clonable because handlers share it via
 /// `Arc<SessionStore>` from axum state.
 #[derive(Clone)]
@@ -303,7 +305,9 @@ impl SessionStore {
         session_id: SessionId,
         conn_id: ConnectionId,
         req: ExecuteRequest,
+        tx: Option<&TxHandleRef>,
     ) -> ApiResult<ResultSetStream> {
+        self.validate_execute_tx(session_id, conn_id, tx)?;
         let entry = self.get_conn_entry(session_id, conn_id)?;
         Ok(entry.driver.execute(entry.handle.clone(), req).await?)
     }
@@ -790,11 +794,31 @@ pub async fn drain_stream(stream: ResultSetStream) -> Result<ExecuteResponse, Dr
     let mut rows: Vec<Row> = Vec::new();
     let mut affected_rows: Option<u64> = None;
     let mut warnings: Vec<DriverWarning> = Vec::new();
+    let mut saw_result_set = false;
 
     while let Some(page) = rx.recv().await {
         match page {
-            Page::NextResult { columns: cols } => columns = cols,
-            Page::Rows { rows: r } => rows.extend(r),
+            Page::NextResult { columns: cols } => {
+                if saw_result_set {
+                    return Err(DriverError::new(
+                        Code::UnsupportedResultShape,
+                        "HTTP execute supports one result set; use WebSocket streaming for multi-result batches",
+                    ));
+                }
+                saw_result_set = true;
+                columns = cols;
+            }
+            Page::Rows { rows: r } => {
+                if rows.len().saturating_add(r.len()) > MAX_HTTP_EXECUTE_ROWS {
+                    return Err(DriverError::new(
+                        Code::ResultTooLarge,
+                        format!(
+                            "HTTP execute row cap exceeded ({MAX_HTTP_EXECUTE_ROWS}); use WebSocket streaming"
+                        ),
+                    ));
+                }
+                rows.extend(r);
+            }
             Page::Error { error } => return Err(error),
             Page::Done {
                 affected_rows: a,

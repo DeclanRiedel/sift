@@ -254,6 +254,15 @@ impl MembershipRole {
     }
 }
 
+impl TenantKind {
+    pub(crate) fn as_str(&self) -> &'static str {
+        match self {
+            Self::Personal => "personal",
+            Self::Team => "team",
+        }
+    }
+}
+
 impl RoomKind {
     pub(crate) fn as_str(&self) -> &'static str {
         match self {
