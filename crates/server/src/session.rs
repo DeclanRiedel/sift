@@ -25,6 +25,8 @@ use sift_protocol::{
     TransactionInfo, TxHandleRef, TxId,
 };
 
+use sift_metadata::{MetadataStore, NewOperationAudit, PrincipalId};
+
 use crate::error::{ApiError, ApiResult};
 use crate::registry::DriverRegistry;
 
@@ -51,6 +53,9 @@ struct SessionStoreInner {
     /// Stored as an atomic so the server can set it from config after the
     /// store is constructed and shared behind an `Arc`.
     request_timeout_ms: AtomicU64,
+    /// Durable operation-audit sink. `None` when metadata is disabled; every
+    /// recorded operation still lands in the in-memory/JSONL log below.
+    audit_store: Mutex<Option<MetadataStore>>,
 }
 
 struct OperationLog {
@@ -71,6 +76,7 @@ impl SessionStore {
                 next_id: AtomicU64::new(1),
                 registry,
                 request_timeout_ms: AtomicU64::new(DEFAULT_REQUEST_TIMEOUT_MS),
+                audit_store: Mutex::new(None),
             }),
         }
     }
@@ -96,6 +102,7 @@ impl SessionStore {
                 next_id: AtomicU64::new(1),
                 registry,
                 request_timeout_ms: AtomicU64::new(DEFAULT_REQUEST_TIMEOUT_MS),
+                audit_store: Mutex::new(None),
             }),
         })
     }
@@ -114,6 +121,12 @@ impl SessionStore {
 
     fn request_timeout(&self) -> Duration {
         Duration::from_millis(self.inner.request_timeout_ms.load(Ordering::Relaxed))
+    }
+
+    /// Install the durable operation-audit sink. Called by the server at
+    /// startup when a metadata store is configured.
+    pub fn set_audit_store(&self, store: MetadataStore) {
+        *self.inner.audit_store.lock().unwrap() = Some(store);
     }
 
     /// Run a driver future on its own task, bounded by the request timeout.
@@ -177,27 +190,71 @@ impl SessionStore {
         self.inner.audit.lock().unwrap().clone()
     }
 
+    /// Record an operation with only its status known (actor, row count, and
+    /// failure details unavailable at the call site). Prefer
+    /// [`SessionStore::push_operation_full`] where those are known.
     pub fn push_operation(&self, operation: Operation, status: OperationStatus) {
+        self.push_operation_full(operation, status, None, None, None, None);
+    }
+
+    /// The single choke point for operation audit. Records the operation in
+    /// the in-memory/JSONL replay log **and** — when a metadata store is
+    /// configured — a sanitized durable audit row (actor, target, result
+    /// code, row count, failure message; never SQL text or bind values).
+    /// Success and failure paths both call this, so a new operation cannot be
+    /// added without an audit trail.
+    pub fn push_operation_full(
+        &self,
+        operation: Operation,
+        status: OperationStatus,
+        actor_principal_id: Option<i64>,
+        result_code: Option<String>,
+        row_count: Option<i64>,
+        error_message: Option<String>,
+    ) {
         const MAX_OPERATION_ROWS: usize = 10_000;
-        let mut log = self.inner.operations.lock().unwrap();
-        let entry = OperationAuditEntry {
-            at: chrono::Utc::now(),
-            operation,
-            status,
-        };
-        if let Some(writer) = &mut log.writer {
-            match serde_json::to_writer(&mut *writer, &entry)
-                .and_then(|_| writer.write_all(b"\n").map_err(serde_json::Error::io))
-                .and_then(|_| writer.flush().map_err(serde_json::Error::io))
-            {
-                Ok(()) => {}
-                Err(error) => tracing::error!(%error, "operation audit append failed"),
+        let summary = operation.audit_summary();
+        {
+            let mut log = self.inner.operations.lock().unwrap();
+            let entry = OperationAuditEntry {
+                at: chrono::Utc::now(),
+                operation,
+                status,
+            };
+            if let Some(writer) = &mut log.writer {
+                match serde_json::to_writer(&mut *writer, &entry)
+                    .and_then(|_| writer.write_all(b"\n").map_err(serde_json::Error::io))
+                    .and_then(|_| writer.flush().map_err(serde_json::Error::io))
+                {
+                    Ok(()) => {}
+                    Err(error) => tracing::error!(%error, "operation audit append failed"),
+                }
+            }
+            log.entries.push(entry);
+            if log.entries.len() > MAX_OPERATION_ROWS {
+                let overflow = log.entries.len() - MAX_OPERATION_ROWS;
+                log.entries.drain(0..overflow);
             }
         }
-        log.entries.push(entry);
-        if log.entries.len() > MAX_OPERATION_ROWS {
-            let overflow = log.entries.len() - MAX_OPERATION_ROWS;
-            log.entries.drain(0..overflow);
+
+        let store = self.inner.audit_store.lock().unwrap().clone();
+        if let Some(store) = store {
+            let record = NewOperationAudit {
+                actor_principal_id: actor_principal_id.map(PrincipalId),
+                action: summary.action,
+                target: summary.target,
+                target_id: summary.target_id,
+                status: match status {
+                    OperationStatus::Succeeded => "succeeded".to_string(),
+                    OperationStatus::Failed => "failed".to_string(),
+                },
+                result_code,
+                row_count,
+                error_message,
+            };
+            if let Err(error) = store.record_operation_audit(record) {
+                tracing::warn!(%error, "durable operation audit write failed");
+            }
         }
     }
 

@@ -31,7 +31,7 @@ pub use connection::{
 };
 pub use engine::Engine;
 pub use error::{Code, DriverError, DriverWarning};
-pub use operation::Operation;
+pub use operation::{Operation, OperationSummary};
 pub use result::{CursorId, ExecuteRequest, Page, Row};
 pub use room::{
     DocumentOperationEnvelope, RoomClientMessage, RoomPresence, RoomQueryResult, RoomQueryStatus,

@@ -91,3 +91,75 @@ pub enum Operation {
         operation: TextDocumentOperation,
     },
 }
+
+/// Sanitized projection of an [`Operation`] for the durable audit log. Carries
+/// only *what* and *where* — never request bodies, SQL text, or bind values —
+/// so persisting it cannot leak query parameters or secrets.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OperationSummary {
+    pub action: String,
+    pub target: String,
+    pub target_id: Option<i64>,
+}
+
+impl Operation {
+    /// Sanitized `(action, target, target_id)` view for audit records.
+    pub fn audit_summary(&self) -> OperationSummary {
+        let summary = |action: &str, target: &str, target_id: Option<i64>| OperationSummary {
+            action: action.to_string(),
+            target: target.to_string(),
+            target_id,
+        };
+        match self {
+            Operation::OpenSession { .. } => summary("open", "session", None),
+            Operation::ListSessions => summary("list", "session", None),
+            Operation::CloseSession { session } => {
+                summary("close", "session", Some(session.0 as i64))
+            }
+            Operation::OpenConnection { session, .. } => {
+                summary("open", "connection", Some(session.0 as i64))
+            }
+            Operation::CloseConnection { connection, .. } => {
+                summary("close", "connection", Some(connection.0 as i64))
+            }
+            Operation::RefreshSchema { connection, .. } => {
+                summary("refresh", "schema", Some(connection.0 as i64))
+            }
+            Operation::ExecuteQuery { session, .. } => {
+                summary("execute", "query", Some(session.0 as i64))
+            }
+            Operation::CancelQuery { session, .. } => {
+                summary("cancel", "query", Some(session.0 as i64))
+            }
+            Operation::BulkInsert { connection, .. } => {
+                summary("bulk_insert", "connection", Some(connection.0 as i64))
+            }
+            Operation::BeginTransaction { session, .. } => {
+                summary("begin", "transaction", Some(session.0 as i64))
+            }
+            Operation::CommitTransaction { session, .. } => {
+                summary("commit", "transaction", Some(session.0 as i64))
+            }
+            Operation::RollbackTransaction { session, .. } => {
+                summary("rollback", "transaction", Some(session.0 as i64))
+            }
+            Operation::Savepoint { session, .. } => {
+                summary("savepoint", "transaction", Some(session.0 as i64))
+            }
+            Operation::RollbackToSavepoint { session, .. } => summary(
+                "rollback_to_savepoint",
+                "transaction",
+                Some(session.0 as i64),
+            ),
+            Operation::ReleaseSavepoint { session, .. } => {
+                summary("release_savepoint", "transaction", Some(session.0 as i64))
+            }
+            Operation::Metadata { action, target, id } => summary(action, target, *id),
+            Operation::AttachRoom { room_id, .. } => summary("attach", "room", Some(*room_id)),
+            Operation::DetachRoom { room_id, .. } => summary("detach", "room", Some(*room_id)),
+            Operation::ApplyDocumentOperation { document_id, .. } => {
+                summary("apply_operation", "document", Some(*document_id))
+            }
+        }
+    }
+}

@@ -4,9 +4,22 @@ Phase A is complete and the follow-up API audit fixes are committed. The next
 work should move into Phase B reliability, starting with the pieces that keep a
 bad driver call, long query, or host shutdown from breaking the server contract.
 
+## Progress
+
+- [x] 1. Per-query timeout and spawn discipline — commit `47c7db1`.
+- [x] 2. Graceful shutdown contract (ADR-018) — commit `f190739`.
+- [x] 3. Health and readiness split — commit `2d40aee`.
+- [x] 4. Durable operation audit — commit pending.
+- [ ] 5. Correlation IDs — next.
+- [ ] 6. Connection recovery behavior.
+
+Note (step 4): actor is captured on the query path; metadata admin operations
+still record durable rows but without an actor id yet — a small follow-up to
+thread `principal_id` through `push_metadata_operation`.
+
 ## Order of Work
 
-1. **Per-query timeout and spawn discipline**
+1. **Per-query timeout and spawn discipline** — done (`47c7db1`).
    - Route HTTP execute, schema, and other synchronous driver calls through a
      bounded spawned task.
    - Wire `config.timeouts.request_secs` into the execution path.
@@ -14,20 +27,20 @@ bad driver call, long query, or host shutdown from breaking the server contract.
      `Code::QueryTimedOut`.
    - Add tests proving a wedged or slow driver does not block the handler.
 
-2. **Graceful shutdown contract**
+2. **Graceful shutdown contract** — done (`f190739`).
    - Write ADR-018 before implementation.
    - Define the sequence: stop accepting new work, mark readiness false, drain
      in-flight queries until deadline, cancel remaining cursors, flush room
      snapshots, then exit.
    - Implement the drain gate and tests for new-session rejection during drain.
 
-3. **Health and readiness split**
+3. **Health and readiness split** — done (`2d40aee`).
    - Keep `/v1/health` as process liveness.
    - Add `/v1/ready` for readiness: metadata reachable, runtime not draining,
      and configured drivers registered.
    - Add OpenAPI coverage and client SDK support.
 
-4. **Durable operation audit**
+4. **Durable operation audit** — done.
    - Move operation audit out of memory-only state into metadata storage.
    - Capture actor, target resource, result code, row count where available,
      and failure details that do not leak bind values or secrets.

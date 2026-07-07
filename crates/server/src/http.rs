@@ -64,6 +64,7 @@ pub fn app(state: AppState) -> Router {
         .route("/v1/ready", get(ready))
         .route("/v1/audit", get(list_audit))
         .route("/v1/operations", get(list_operations))
+        .route("/v1/operations/audit", get(list_operation_audit_log))
         .route("/v1/openapi.json", get(openapi))
         .route("/v1/metadata/tenants", get(list_metadata_tenants))
         .route(
@@ -739,6 +740,17 @@ async fn list_operations(
     Json(state.sessions.list_operations())
 }
 
+async fn list_operation_audit_log(
+    State(state): State<AppState>,
+    Query(q): Query<HistoryQuery>,
+) -> ApiResult<Json<Vec<sift_metadata::OperationAudit>>> {
+    let metadata = metadata_store_cloned(&state)?;
+    let limit = q.limit.unwrap_or(100).min(500);
+    Ok(Json(
+        metadata_blocking(move || metadata.list_operation_audit(limit).map_err(Into::into)).await?,
+    ))
+}
+
 async fn openapi() -> Json<serde_json::Value> {
     Json(json!({
         "openapi": "3.1.0",
@@ -778,6 +790,13 @@ async fn openapi() -> Json<serde_json::Value> {
                     "operationId": "listOperations",
                     "summary": "List replayable operation audit rows",
                     "responses": { "200": { "description": "Operation rows", "content": json_array_content("OperationAuditEntry") } }
+                }
+            },
+            "/v1/operations/audit": {
+                "get": {
+                    "operationId": "listOperationAudit",
+                    "summary": "List durable operation audit rows (actor, target, result, rows)",
+                    "responses": { "200": { "description": "Durable audit rows", "content": json_array_content("OperationAudit") } }
                 }
             },
             "/v1/sessions": {
@@ -1164,6 +1183,7 @@ fn protocol_schema_refs() -> serde_json::Value {
     add_schema::<sift_metadata::ApiTokenRow>("ApiTokenRow", &mut schemas);
     add_schema::<sift_metadata::ConnectionProfile>("ConnectionProfile", &mut schemas);
     add_schema::<sift_metadata::Document>("Document", &mut schemas);
+    add_schema::<sift_metadata::OperationAudit>("OperationAudit", &mut schemas);
     add_schema::<sift_metadata::QueryHistory>("QueryHistory", &mut schemas);
     add_schema::<sift_metadata::Room>("Room", &mut schemas);
     add_schema::<sift_metadata::RoomMember>("RoomMember", &mut schemas);
@@ -1787,9 +1807,14 @@ async fn bulk_insert(
         request: req.clone(),
     };
     let response = state.sessions.bulk_insert(id, conn_id, req).await?;
-    state
-        .sessions
-        .push_operation(operation, OperationStatus::Succeeded);
+    state.sessions.push_operation_full(
+        operation,
+        OperationStatus::Succeeded,
+        None,
+        None,
+        Some(response.rows_inserted as i64),
+        None,
+    );
     Ok(Json(response))
 }
 
@@ -1870,6 +1895,7 @@ async fn execute_query(
     // Count this query against the shutdown drain gate for its whole lifetime;
     // in-flight queries continue draining even after `begin_drain`.
     let _query_guard = state.shutdown.track_query();
+    let actor = metadata_context.as_ref().map(|c| c.principal_id.0);
     let started = Instant::now();
     let result = state.sessions.execute_http(id, req).await;
     let duration_ms = started.elapsed().as_millis().min(i64::MAX as u128) as i64;
@@ -1884,15 +1910,32 @@ async fn execute_query(
     }
     match result {
         Ok(resp) => {
-            state
-                .sessions
-                .push_operation(operation, OperationStatus::Succeeded);
+            let row_count = Some(resp.rows.len() as i64);
+            state.sessions.push_operation_full(
+                operation,
+                OperationStatus::Succeeded,
+                actor,
+                None,
+                row_count,
+                None,
+            );
             Ok(Json(resp))
         }
         Err(error) => {
-            state
-                .sessions
-                .push_operation(operation, OperationStatus::Failed);
+            let (result_code, message) = match &error {
+                ApiError::Driver(driver) => {
+                    (Some(driver.code.to_string()), Some(driver.message.clone()))
+                }
+                other => (None, Some(other.to_string())),
+            };
+            state.sessions.push_operation_full(
+                operation,
+                OperationStatus::Failed,
+                actor,
+                result_code,
+                None,
+                message,
+            );
             Err(error)
         }
     }

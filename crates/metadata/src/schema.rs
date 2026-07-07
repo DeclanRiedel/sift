@@ -27,6 +27,9 @@ pub struct RoomAttachmentId(pub i64);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 pub struct QueryHistoryId(pub i64);
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+pub struct OperationAuditId(pub i64);
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum TenantKind {
@@ -230,6 +233,37 @@ pub struct NewQueryHistory {
     pub row_count: Option<i64>,
     pub status: QueryStatus,
     pub error_code: Option<String>,
+    pub error_message: Option<String>,
+}
+
+/// A durable operation-audit row: who did what, to which resource, and how it
+/// resolved. Never carries request bodies, SQL text, or bind values.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct OperationAudit {
+    pub id: OperationAuditId,
+    pub at: DateTime<Utc>,
+    pub actor_principal_id: Option<PrincipalId>,
+    pub action: String,
+    pub target: String,
+    pub target_id: Option<i64>,
+    /// `"succeeded"` or `"failed"`.
+    pub status: String,
+    /// Driver/error code for failures, where available.
+    pub result_code: Option<String>,
+    pub row_count: Option<i64>,
+    /// Sanitized failure message; never includes bind values or secrets.
+    pub error_message: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct NewOperationAudit {
+    pub actor_principal_id: Option<PrincipalId>,
+    pub action: String,
+    pub target: String,
+    pub target_id: Option<i64>,
+    pub status: String,
+    pub result_code: Option<String>,
+    pub row_count: Option<i64>,
     pub error_message: Option<String>,
 }
 

@@ -863,6 +863,52 @@ impl MetadataStore {
         self.query_history_by_id_locked(&conn, history_id)
     }
 
+    /// Append a durable operation-audit row. Called on both the success and
+    /// failure paths so the audit trail is complete.
+    pub fn record_operation_audit(&self, input: NewOperationAudit) -> Result<OperationAudit> {
+        let now = now_text();
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO operation_audit
+             (at, actor_principal_id, action, target, target_id, status, result_code,
+              row_count, error_message)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![
+                now,
+                input.actor_principal_id.map(|id| id.0),
+                input.action,
+                input.target,
+                input.target_id,
+                input.status,
+                input.result_code,
+                input.row_count,
+                input.error_message,
+            ],
+        )?;
+        let id = OperationAuditId(conn.last_insert_rowid());
+        conn.query_row(
+            "SELECT id, at, actor_principal_id, action, target, target_id, status,
+                    result_code, row_count, error_message
+             FROM operation_audit WHERE id = ?1",
+            params![id.0],
+            operation_audit_from_row,
+        )
+        .map_err(Into::into)
+    }
+
+    pub fn list_operation_audit(&self, limit: u32) -> Result<Vec<OperationAudit>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, at, actor_principal_id, action, target, target_id, status,
+                    result_code, row_count, error_message
+             FROM operation_audit
+             ORDER BY at DESC, id DESC
+             LIMIT ?1",
+        )?;
+        let audit = rows(stmt.query_map(params![limit], operation_audit_from_row)?);
+        audit
+    }
+
     pub fn list_query_history_for_room(
         &self,
         room: RoomId,
@@ -1166,6 +1212,21 @@ fn query_history_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<QueryHist
     })
 }
 
+fn operation_audit_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<OperationAudit> {
+    Ok(OperationAudit {
+        id: OperationAuditId(row.get(0)?),
+        at: parse_time_sql(row.get(1)?)?,
+        actor_principal_id: row.get::<_, Option<i64>>(2)?.map(PrincipalId),
+        action: row.get(3)?,
+        target: row.get(4)?,
+        target_id: row.get(5)?,
+        status: row.get(6)?,
+        result_code: row.get(7)?,
+        row_count: row.get(8)?,
+        error_message: row.get(9)?,
+    })
+}
+
 fn parse_time_sql(value: String) -> rusqlite::Result<DateTime<Utc>> {
     parse_time(value).map_err(sql_conversion_error)
 }
@@ -1263,6 +1324,47 @@ mod tests {
             ssl_mode: None,
             engine_specific: None,
         }
+    }
+
+    #[test]
+    fn records_and_lists_operation_audit() {
+        let store = store();
+        store.bootstrap_local("local user").unwrap();
+
+        store
+            .record_operation_audit(NewOperationAudit {
+                actor_principal_id: Some(PrincipalId(1)),
+                action: "execute".into(),
+                target: "query".into(),
+                target_id: Some(7),
+                status: "succeeded".into(),
+                result_code: None,
+                row_count: Some(42),
+                error_message: None,
+            })
+            .unwrap();
+        store
+            .record_operation_audit(NewOperationAudit {
+                actor_principal_id: None,
+                action: "execute".into(),
+                target: "query".into(),
+                target_id: Some(7),
+                status: "failed".into(),
+                result_code: Some("syntax_error".into()),
+                row_count: None,
+                error_message: Some("boom".into()),
+            })
+            .unwrap();
+
+        let rows = store.list_operation_audit(10).unwrap();
+        assert_eq!(rows.len(), 2);
+        // Most recent first.
+        assert_eq!(rows[0].status, "failed");
+        assert_eq!(rows[0].result_code.as_deref(), Some("syntax_error"));
+        assert_eq!(rows[0].actor_principal_id, None);
+        assert_eq!(rows[1].status, "succeeded");
+        assert_eq!(rows[1].actor_principal_id, Some(PrincipalId(1)));
+        assert_eq!(rows[1].row_count, Some(42));
     }
 
     #[test]

@@ -33,6 +33,9 @@ async fn main() -> anyhow::Result<()> {
     };
     sessions.set_request_timeout(std::time::Duration::from_secs(cfg.timeouts.request_secs));
     let metadata = build_metadata_store(&cfg)?;
+    if let Some(store) = &metadata {
+        sessions.set_audit_store(store.clone());
+    }
     let shutdown = Shutdown::default();
     let state = AppState {
         sessions,

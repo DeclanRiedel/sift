@@ -553,6 +553,12 @@ impl Client {
         self.get("/v1/operations").await
     }
 
+    /// Durable operation-audit rows (actor, target, result code, row count,
+    /// sanitized failure message). Requires a configured metadata store.
+    pub async fn operation_audit(&self) -> Result<Vec<sift_metadata::OperationAudit>> {
+        self.get("/v1/operations/audit").await
+    }
+
     pub async fn stream_query(
         &self,
         session: SessionId,
