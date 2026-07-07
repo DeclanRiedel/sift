@@ -53,9 +53,11 @@ struct SessionStoreInner {
     /// Stored as an atomic so the server can set it from config after the
     /// store is constructed and shared behind an `Arc`.
     request_timeout_ms: AtomicU64,
-    /// Durable operation-audit sink. `None` when metadata is disabled; every
-    /// recorded operation still lands in the in-memory/JSONL log below.
-    audit_store: Mutex<Option<MetadataStore>>,
+    /// Sender to the background durable-audit writer thread. `None` when
+    /// metadata is disabled. Sending is non-blocking, so the request path
+    /// never waits on the SQLite write; every recorded operation still lands
+    /// synchronously in the in-memory/JSONL log below.
+    audit_tx: Mutex<Option<std::sync::mpsc::Sender<NewOperationAudit>>>,
 }
 
 struct OperationLog {
@@ -76,7 +78,7 @@ impl SessionStore {
                 next_id: AtomicU64::new(1),
                 registry,
                 request_timeout_ms: AtomicU64::new(DEFAULT_REQUEST_TIMEOUT_MS),
-                audit_store: Mutex::new(None),
+                audit_tx: Mutex::new(None),
             }),
         }
     }
@@ -102,7 +104,7 @@ impl SessionStore {
                 next_id: AtomicU64::new(1),
                 registry,
                 request_timeout_ms: AtomicU64::new(DEFAULT_REQUEST_TIMEOUT_MS),
-                audit_store: Mutex::new(None),
+                audit_tx: Mutex::new(None),
             }),
         })
     }
@@ -123,10 +125,24 @@ impl SessionStore {
         Duration::from_millis(self.inner.request_timeout_ms.load(Ordering::Relaxed))
     }
 
-    /// Install the durable operation-audit sink. Called by the server at
-    /// startup when a metadata store is configured.
+    /// Install the durable operation-audit sink. Spawns a dedicated writer
+    /// thread that owns the metadata store and drains audit rows off the
+    /// request path, so a slow disk never stalls an async worker. Called by
+    /// the server at startup when a metadata store is configured.
     pub fn set_audit_store(&self, store: MetadataStore) {
-        *self.inner.audit_store.lock().unwrap() = Some(store);
+        let (tx, rx) = std::sync::mpsc::channel::<NewOperationAudit>();
+        std::thread::Builder::new()
+            .name("sift-audit-writer".to_string())
+            .spawn(move || {
+                // Exits when the sender is dropped (SessionStore torn down).
+                while let Ok(record) = rx.recv() {
+                    if let Err(error) = store.record_operation_audit(record) {
+                        tracing::warn!(%error, "durable operation audit write failed");
+                    }
+                }
+            })
+            .expect("spawn audit writer thread");
+        *self.inner.audit_tx.lock().unwrap() = Some(tx);
     }
 
     /// Run a driver future on its own task, bounded by the request timeout.
@@ -237,8 +253,7 @@ impl SessionStore {
             }
         }
 
-        let store = self.inner.audit_store.lock().unwrap().clone();
-        if let Some(store) = store {
+        if let Some(tx) = self.inner.audit_tx.lock().unwrap().as_ref() {
             let record = NewOperationAudit {
                 actor_principal_id: actor_principal_id.map(PrincipalId),
                 action: summary.action,
@@ -253,9 +268,10 @@ impl SessionStore {
                 error_message,
                 correlation_id: crate::correlation::current(),
             };
-            if let Err(error) = store.record_operation_audit(record) {
-                tracing::warn!(%error, "durable operation audit write failed");
-            }
+            // Hand off to the writer thread; the request path does not wait on
+            // the SQLite write. Send only fails if the writer died, already
+            // logged there.
+            let _ = tx.send(record);
         }
     }
 

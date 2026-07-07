@@ -130,6 +130,23 @@ async fn audit_rows(app: &axum::Router) -> Vec<OperationAudit> {
     body_json(res.into_body()).await
 }
 
+/// Durable audit is written on a background thread, so poll until the row we
+/// expect has been flushed (FIFO ordering means earlier rows are present too),
+/// then return the full set.
+async fn audit_rows_where(
+    app: &axum::Router,
+    predicate: impl Fn(&OperationAudit) -> bool,
+) -> Vec<OperationAudit> {
+    for _ in 0..200 {
+        let rows = audit_rows(app).await;
+        if rows.iter().any(&predicate) {
+            return rows;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    panic!("timed out waiting for expected audit row");
+}
+
 #[tokio::test]
 async fn successful_query_is_audited_with_row_count() {
     let driver = MockDriver::builder()
@@ -149,7 +166,7 @@ async fn successful_query_is_audited_with_row_count() {
         .unwrap();
     assert_eq!(res.status(), StatusCode::OK);
 
-    let rows = audit_rows(&app).await;
+    let rows = audit_rows_where(&app, |r| r.action == "execute" && r.target == "query").await;
     // Session open, connection open, and the query all recorded.
     assert!(rows
         .iter()
@@ -196,7 +213,7 @@ async fn query_audit_carries_client_correlation_id() {
         Some("corr-abc-123")
     );
 
-    let rows = audit_rows(&app).await;
+    let rows = audit_rows_where(&app, |r| r.action == "execute" && r.target == "query").await;
     let query = rows
         .iter()
         .find(|r| r.action == "execute" && r.target == "query")
@@ -237,7 +254,7 @@ async fn metadata_operation_records_actor() {
         .unwrap();
     assert_eq!(res.status(), StatusCode::OK);
 
-    let rows = audit_rows(&app).await;
+    let rows = audit_rows_where(&app, |r| r.action == "create" && r.target == "room").await;
     let created = rows
         .iter()
         .find(|r| r.action == "create" && r.target == "room")
@@ -275,7 +292,7 @@ async fn failed_query_records_failure_without_leaking_sql() {
         .unwrap();
     assert_eq!(res.status(), StatusCode::BAD_REQUEST);
 
-    let rows = audit_rows(&app).await;
+    let rows = audit_rows_where(&app, |r| r.action == "execute" && r.target == "query").await;
     let query = rows
         .iter()
         .find(|r| r.action == "execute" && r.target == "query")
