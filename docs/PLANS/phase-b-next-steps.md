@@ -10,8 +10,13 @@ bad driver call, long query, or host shutdown from breaking the server contract.
 - [x] 2. Graceful shutdown contract (ADR-018) — commit `f190739`.
 - [x] 3. Health and readiness split — commit `2d40aee`.
 - [x] 4. Durable operation audit — commit `d20375f`.
-- [x] 5. Correlation IDs — commit pending.
-- [ ] 6. Connection recovery behavior — next.
+- [x] 5. Correlation IDs — commit `f5e1df1`.
+- [x] 6. Connection recovery behavior — commit pending.
+
+All six reliability steps in this list are complete. The broader Phase B
+backlog (`server-build-list-v2.md`) still has items beyond this list:
+driver-isolation policy (ADR-013), secret backends, audit redaction /
+query fingerprinting, and API versioning policy (ADR-016).
 
 Note (step 4 follow-up, done): actor is now captured on both the query path and
 metadata admin operations (`push_metadata_operation` threads `principal_id`).
@@ -51,11 +56,18 @@ metadata admin operations (`push_metadata_operation` threads `principal_id`).
    - Echo it in responses, tracing spans, and audit records.
    - Add protocol fields only where the public wire contract needs them.
 
-6. **Connection recovery behavior**
+6. **Connection recovery behavior** — done.
    - Decide the retry boundary for broken driver connections.
    - Implement one retry on safe reconnectable failures where the operation is
      known idempotent.
    - Surface `Code::ConnectionFailed` only after retry or when retry is unsafe.
+
+   Retry boundary (implemented): only `Code::ConnectionFailed` is treated as
+   reconnectable, and only the idempotent reads `ping`/`schema` are retried —
+   once — after re-establishing the connection from the stored spec. Mutating
+   work (execute, bulk insert, transactions, savepoints) is never auto-retried
+   because a reconnect cannot know whether the first attempt's side effects
+   already landed; those surface the error directly.
 
 ## First Task to Start
 

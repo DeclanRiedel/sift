@@ -160,8 +160,18 @@ impl MockDriverBuilder {
         self
     }
 
+    pub fn ping_err(mut self, err: DriverError) -> Self {
+        self.state.ping.push_back(Box::new(move || Err(err)));
+        self
+    }
+
     pub fn schema_ok(mut self, snap: SchemaSnapshot) -> Self {
         self.state.schema.push_back(Box::new(move || Ok(snap)));
+        self
+    }
+
+    pub fn schema_err(mut self, err: DriverError) -> Self {
+        self.state.schema.push_back(Box::new(move || Err(err)));
         self
     }
 

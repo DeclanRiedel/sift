@@ -326,6 +326,7 @@ impl SessionStore {
                     handle: handle.clone(),
                     driver: driver.clone(),
                     info: info.clone(),
+                    spec,
                 },
             );
             info
@@ -374,8 +375,20 @@ impl SessionStore {
         let entry = self.get_conn_entry(session_id, conn_id)?;
         let driver = entry.driver.clone();
         let handle = entry.handle.clone();
-        self.run_bounded("ping", async move { driver.ping(handle).await })
-            .await
+        let first = {
+            let driver = driver.clone();
+            self.run_bounded("ping", async move { driver.ping(handle).await })
+                .await
+        };
+        match first {
+            Err(ApiError::Driver(error)) if is_reconnectable(&error) => {
+                // ping is idempotent: re-establish the connection and try once.
+                let handle = self.reconnect(session_id, conn_id).await?;
+                self.run_bounded("ping", async move { driver.ping(handle).await })
+                    .await
+            }
+            other => other,
+        }
     }
 
     pub async fn schema(
@@ -387,8 +400,69 @@ impl SessionStore {
         let entry = self.get_conn_entry(session_id, conn_id)?;
         let driver = entry.driver.clone();
         let handle = entry.handle.clone();
-        self.run_bounded("schema", async move { driver.schema(handle, scope).await })
-            .await
+        let first = {
+            let driver = driver.clone();
+            let scope = scope.clone();
+            self.run_bounded("schema", async move { driver.schema(handle, scope).await })
+                .await
+        };
+        match first {
+            Err(ApiError::Driver(error)) if is_reconnectable(&error) => {
+                // Schema introspection is idempotent: reconnect and retry once.
+                let handle = self.reconnect(session_id, conn_id).await?;
+                self.run_bounded("schema", async move { driver.schema(handle, scope).await })
+                    .await
+            }
+            other => other,
+        }
+    }
+
+    /// Re-establish a broken connection in place: open a fresh backend session
+    /// from the stored spec, swap it into the connection entry so later
+    /// operations use it, and close the dead handle best-effort. Bounded by
+    /// the request timeout. Only invoked for idempotent operations after a
+    /// reconnectable failure (see [`is_reconnectable`]).
+    async fn reconnect(
+        &self,
+        session_id: SessionId,
+        conn_id: ConnectionId,
+    ) -> ApiResult<ConnHandle> {
+        let (driver, spec, old_handle) = {
+            let session = self
+                .inner
+                .sessions
+                .get(&session_id)
+                .ok_or(ApiError::SessionNotFound(session_id))?;
+            let entry = session
+                .connections
+                .get(&conn_id)
+                .ok_or(ApiError::ConnectionNotFound(conn_id))?;
+            (
+                entry.driver.clone(),
+                entry.spec.clone(),
+                entry.handle.clone(),
+            )
+        };
+        let opener = driver.clone();
+        let new_handle = self
+            .run_bounded("reconnect", async move { opener.open(&spec).await })
+            .await?;
+        self.with_session(&session_id, |s| {
+            if let Some(mut entry) = s.connections.get_mut(&conn_id) {
+                entry.handle = new_handle.clone();
+            }
+        })?;
+        // The old backend session is gone; close it best-effort off the
+        // request path.
+        tokio::spawn(async move {
+            let _ = driver.close(old_handle).await;
+        });
+        tracing::info!(
+            session_id = %session_id,
+            conn_id = %conn_id,
+            "re-established broken connection"
+        );
+        Ok(new_handle)
     }
 
     /// Synchronous execute: drains the entire page stream into the response.
@@ -917,11 +991,24 @@ pub struct ConnectionEntry {
     pub handle: ConnHandle,
     pub driver: Arc<dyn Driver>,
     pub info: ConnectionInfo,
+    /// Original spec, retained so a broken connection can be transparently
+    /// re-established for idempotent operations (ping/schema).
+    pub spec: ConnectionSpec,
 }
 
 pub struct TransactionEntry {
     pub info: TransactionInfo,
     pub handle: TxHandle,
+}
+
+/// Whether a driver failure signals a broken connection that is safe to
+/// re-establish. The retry boundary is deliberately narrow: only
+/// `ConnectionFailed`, and callers only retry idempotent operations
+/// (ping/schema). Mutating work (execute, bulk insert, transactions) is never
+/// auto-retried because a reconnect cannot know whether the first attempt's
+/// side effects already landed.
+fn is_reconnectable(error: &DriverError) -> bool {
+    error.code == Code::ConnectionFailed
 }
 
 fn missing_ext(engine: Engine, trait_name: &str) -> DriverError {
