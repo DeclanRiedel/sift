@@ -11,15 +11,24 @@ bad driver call, long query, or host shutdown from breaking the server contract.
 - [x] 3. Health and readiness split — commit `2d40aee`.
 - [x] 4. Durable operation audit — commit `d20375f`.
 - [x] 5. Correlation IDs — commit `f5e1df1`.
-- [x] 6. Connection recovery behavior — commit pending.
+- [x] 6. Connection recovery behavior — commit `70ed1d6`.
 
-All six reliability steps in this list are complete. The broader Phase B
-backlog (`server-build-list-v2.md`) still has items beyond this list:
-driver-isolation policy (ADR-013), secret backends, audit redaction /
-query fingerprinting, and API versioning policy (ADR-016).
+All six reliability steps in this list are complete.
 
-Note (step 4 follow-up, done): actor is now captured on both the query path and
-metadata admin operations (`push_metadata_operation` threads `principal_id`).
+### Additional Phase B polish (beyond the six-step list)
+
+- [x] Driver isolation — ADR-013 written; both engines meet the containment
+      boundary (`a7b117f`).
+- [x] Protocol version negotiation — ADR-016 written and enforced (`cf07da5`).
+- [x] Correlation ID stamped into error responses (`ee4a205`).
+- [x] Performance: durable audit writes moved off the request path to a
+      background writer thread (`77dbd5d`).
+- [x] Metadata admin operations capture the actor (`f183cdc`).
+
+Still open in the broader Phase B backlog (`server-build-list-v2.md`):
+secret backends (OS keychain), and JSONL replay-log redaction (the durable
+audit is sanitized; the opt-in replay log still serializes full requests —
+an ADR-009 replay-vs-audit tension, deliberately deferred).
 
 ## Order of Work
 
