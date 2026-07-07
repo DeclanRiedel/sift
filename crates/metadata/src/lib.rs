@@ -116,6 +116,15 @@ impl MetadataStore {
         state.join("sift").join("metadata.sqlite")
     }
 
+    /// Cheap reachability probe for readiness checks: runs `SELECT 1` against
+    /// the store. Returns an error if the connection is poisoned or the query
+    /// fails.
+    pub fn health_check(&self) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row("SELECT 1", [], |row| row.get::<_, i64>(0))?;
+        Ok(())
+    }
+
     pub fn bootstrap_local(&self, display_name: &str) -> Result<()> {
         let now = now_text();
         let mut conn = self.conn.lock().unwrap();

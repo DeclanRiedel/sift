@@ -11,9 +11,9 @@ use sift_metadata::{
 use sift_protocol::{
     BeginTransactionRequest, BulkInsertRequest, BulkInsertResponse, CancelRequest, ConnectionId,
     ConnectionInfo, CursorId, EndTransactionRequest, Engine, ExecuteRequestHttp, ExecuteResponse,
-    Health, OpenConnectionRequest, OpenSessionRequest, Page, SchemaSnapshot, ServerInfo, SessionId,
-    SessionInfo, TextDocumentOperation, TransactionInfo, TxHandleRef, TxId, TxMode, Value,
-    WsClientMessage, WsServerMessage,
+    Health, OpenConnectionRequest, OpenSessionRequest, Page, Readiness, SchemaSnapshot, ServerInfo,
+    SessionId, SessionInfo, TextDocumentOperation, TransactionInfo, TxHandleRef, TxId, TxMode,
+    Value, WsClientMessage, WsServerMessage,
 };
 
 #[derive(Debug, Clone, Serialize)]
@@ -121,6 +121,24 @@ impl Client {
 
     pub async fn health(&self) -> Result<Health> {
         self.get("/v1/health").await
+    }
+
+    /// Readiness probe. Returns the parsed [`Readiness`] on both `200` (ready)
+    /// and `503` (not ready) — inspect [`Readiness::ready`] for the verdict.
+    /// Other statuses (e.g. auth failure) surface as [`Error::Server`].
+    pub async fn ready(&self) -> Result<Readiness> {
+        let mut request = self.http.get(self.url("/v1/ready"));
+        if let Some(token) = &self.token {
+            request = request.bearer_auth(token);
+        }
+        let response = request.send().await?;
+        let status = response.status();
+        if status == reqwest::StatusCode::OK || status == reqwest::StatusCode::SERVICE_UNAVAILABLE {
+            Ok(response.json().await?)
+        } else {
+            let body = response.text().await.unwrap_or_default();
+            Err(Error::Server { status, body })
+        }
     }
 
     pub async fn open_session(&self, tag: Option<String>) -> Result<SessionInfo> {

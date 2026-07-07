@@ -6,7 +6,7 @@ use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Path, Query, State};
 use axum::http::{header, header::HeaderName, HeaderMap, HeaderValue, Request, StatusCode};
 use axum::middleware::{from_fn, from_fn_with_state, Next};
-use axum::response::Response;
+use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post, put};
 use axum::{Json, Router};
 use chrono::{DateTime, Utc};
@@ -28,8 +28,9 @@ use sift_protocol::{
     AuditEntry, BeginTransactionRequest, BulkInsertRequest, CancelRequest,
     DocumentOperationEnvelope, EndTransactionRequest, Engine, ExecuteRequest, ExecuteRequestHttp,
     Health, ObjectPath, OpenConnectionRequest, OpenSessionRequest, Operation, OperationStatus,
-    RoomClientMessage, RoomQueryResult, RoomQueryStatus, RoomServerMessage, SavepointRequest,
-    SchemaFilter, SchemaScope, WsClientMessage, WsServerMessage, PROTOCOL_VERSION,
+    Readiness, RoomClientMessage, RoomQueryResult, RoomQueryStatus, RoomServerMessage,
+    SavepointRequest, SchemaFilter, SchemaScope, WsClientMessage, WsServerMessage,
+    PROTOCOL_VERSION,
 };
 
 use crate::error::{ApiError, ApiResult};
@@ -60,6 +61,7 @@ pub struct AuthState {
 pub fn app(state: AppState) -> Router {
     Router::new()
         .route("/v1/health", get(health))
+        .route("/v1/ready", get(ready))
         .route("/v1/audit", get(list_audit))
         .route("/v1/operations", get(list_operations))
         .route("/v1/openapi.json", get(openapi))
@@ -694,6 +696,39 @@ async fn health(State(state): State<AppState>) -> Json<Health> {
     })
 }
 
+/// Readiness probe (ADR-018): `200` when the server should take traffic,
+/// `503` otherwise. Not ready while draining, when no driver is registered,
+/// or when the (enabled) metadata store is unreachable. The `Readiness` body
+/// is returned in both cases so callers can see which check failed.
+async fn ready(State(state): State<AppState>) -> Response {
+    let draining = state.shutdown.is_draining();
+    let engines = state.sessions.registry().engines();
+    let drivers_registered = !engines.is_empty();
+    let metadata_ok = match state.metadata.clone() {
+        None => None,
+        Some(store) => Some(
+            metadata_blocking(move || store.health_check().map_err(Into::into))
+                .await
+                .is_ok(),
+        ),
+    };
+    let ready = !draining && drivers_registered && metadata_ok != Some(false);
+    let body = Readiness {
+        ready,
+        version: VERSION.to_string(),
+        draining,
+        drivers_registered,
+        metadata_ok,
+        engines,
+    };
+    let status = if ready {
+        StatusCode::OK
+    } else {
+        StatusCode::SERVICE_UNAVAILABLE
+    };
+    (status, Json(body)).into_response()
+}
+
 async fn list_audit(State(state): State<AppState>) -> Json<Vec<AuditEntry>> {
     Json(state.sessions.list_audit())
 }
@@ -717,8 +752,18 @@ async fn openapi() -> Json<serde_json::Value> {
             "/v1/health": {
                 "get": {
                     "operationId": "health",
-                    "summary": "Health and registered engines",
+                    "summary": "Liveness and registered engines",
                     "responses": { "200": { "description": "Health", "content": json_content("Health") } }
+                }
+            },
+            "/v1/ready": {
+                "get": {
+                    "operationId": "ready",
+                    "summary": "Readiness: 200 when ready, 503 while draining/unhealthy",
+                    "responses": {
+                        "200": { "description": "Ready", "content": json_content("Readiness") },
+                        "503": { "description": "Not ready", "content": json_content("Readiness") }
+                    }
                 }
             },
             "/v1/audit": {
@@ -1106,6 +1151,7 @@ fn protocol_schema_refs() -> serde_json::Value {
     add_schema::<sift_protocol::OpenConnectionRequest>("OpenConnectionRequest", &mut schemas);
     add_schema::<sift_protocol::OpenSessionRequest>("OpenSessionRequest", &mut schemas);
     add_schema::<sift_protocol::OperationAuditEntry>("OperationAuditEntry", &mut schemas);
+    add_schema::<sift_protocol::Readiness>("Readiness", &mut schemas);
     add_schema::<sift_protocol::SavepointRequest>("SavepointRequest", &mut schemas);
     add_schema::<sift_protocol::SchemaSnapshot>("SchemaSnapshot", &mut schemas);
     add_schema::<sift_protocol::ServerInfo>("ServerInfo", &mut schemas);

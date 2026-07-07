@@ -182,11 +182,30 @@ pub struct Ack {
     pub ok: bool,
 }
 
-/// Server-reported health. `GET /v1/health`.
+/// Server-reported health. `GET /v1/health`. Liveness only: reports the
+/// process is up. Use [`Readiness`] to decide whether to route traffic.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct Health {
     pub status: String,
     pub version: String,
+    pub engines: Vec<Engine>,
+}
+
+/// Server-reported readiness. `GET /v1/ready` returns `200` with `ready:
+/// true` when the server should receive traffic, or `503` with the failing
+/// checks when it should not (draining, no drivers, or metadata unreachable).
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct Readiness {
+    /// Overall verdict: true only when every required check passes.
+    pub ready: bool,
+    pub version: String,
+    /// Graceful shutdown has begun; the server is refusing new work.
+    pub draining: bool,
+    /// At least one driver is registered.
+    pub drivers_registered: bool,
+    /// Metadata store reachability: `None` when metadata is disabled (nothing
+    /// to reach), `Some(true/false)` for reachable / unreachable when enabled.
+    pub metadata_ok: Option<bool>,
     pub engines: Vec<Engine>,
 }
 

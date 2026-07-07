@@ -8,12 +8,14 @@
 use axum::body::{to_bytes, Body};
 use axum::http::{Request, StatusCode};
 use sift_driver_api::mock::MockDriver;
-use sift_protocol::{Engine, SchemaScope, SchemaSnapshot, ServerInfo, SessionInfo};
+use sift_metadata::{MemorySecretStore, MetadataStore};
+use sift_protocol::{Engine, Readiness, SchemaScope, SchemaSnapshot, ServerInfo, SessionInfo};
 use sift_server::http::{app, AppState, AuthState};
 use sift_server::registry::DriverRegistry;
 use sift_server::room_runtime::RoomRuntime;
 use sift_server::session::SessionStore;
 use sift_server::shutdown::Shutdown;
+use std::sync::Arc;
 use tower::ServiceExt;
 
 fn mock_driver() -> MockDriver {
@@ -124,4 +126,71 @@ async fn sessions_open_freely_before_draining() {
         .await
         .unwrap();
     assert_eq!(res.status(), StatusCode::OK);
+}
+
+async fn get_ready(app: axum::Router) -> (StatusCode, Readiness) {
+    let res = app
+        .oneshot(Request::get("/v1/ready").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    let status = res.status();
+    (status, body_json(res.into_body()).await)
+}
+
+#[tokio::test]
+async fn ready_returns_200_when_healthy() {
+    // No metadata store configured → metadata_ok is None (nothing to reach).
+    let (status, body) = get_ready(app(test_state())).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.ready);
+    assert!(!body.draining);
+    assert!(body.drivers_registered);
+    assert_eq!(body.metadata_ok, None);
+}
+
+#[tokio::test]
+async fn ready_returns_503_while_draining() {
+    let state = test_state();
+    let shutdown = state.shutdown.clone();
+    let app = app(state);
+    shutdown.begin_drain();
+
+    let (status, body) = get_ready(app).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert!(!body.ready);
+    assert!(body.draining);
+}
+
+#[tokio::test]
+async fn ready_probes_configured_metadata_store() {
+    let metadata = MetadataStore::open_in_memory(Arc::new(MemorySecretStore::new())).unwrap();
+    let registry = DriverRegistry::builder().register(mock_driver()).build();
+    let state = AppState {
+        sessions: SessionStore::new(registry),
+        rooms: RoomRuntime::default(),
+        auth: AuthState::default(),
+        metadata: Some(metadata),
+        shutdown: Shutdown::default(),
+    };
+
+    let (status, body) = get_ready(app(state)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.ready);
+    assert_eq!(body.metadata_ok, Some(true));
+}
+
+#[tokio::test]
+async fn ready_returns_503_when_no_driver_registered() {
+    let state = AppState {
+        sessions: SessionStore::new(DriverRegistry::builder().build()),
+        rooms: RoomRuntime::default(),
+        auth: AuthState::default(),
+        metadata: None,
+        shutdown: Shutdown::default(),
+    };
+
+    let (status, body) = get_ready(app(state)).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert!(!body.ready);
+    assert!(!body.drivers_registered);
 }

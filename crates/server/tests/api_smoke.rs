@@ -233,6 +233,12 @@ async fn openapi_is_published() {
     );
     assert!(body["paths"]["/v1/sessions/{id}/transactions/{tx_id}/savepoints/release"].is_object());
     assert!(body["paths"]["/v1/sessions/{id}/connections/{conn_id}/bulk-insert"].is_object());
+    assert!(body["paths"]["/v1/ready"].is_object());
+    assert_eq!(
+        body["paths"]["/v1/ready"]["get"]["responses"]["503"]["content"]["application/json"]
+            ["schema"]["$ref"],
+        "#/components/schemas/Readiness"
+    );
     assert!(body["paths"]["/v1/audit"].is_object());
     assert!(body["paths"]["/v1/operations"].is_object());
     assert!(body["paths"]["/v1/metadata/tenants"].is_object());

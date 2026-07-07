@@ -46,7 +46,7 @@ pub use session::{
     Ack, AuditEntry, BeginTransactionRequest, BulkInsertFormat, BulkInsertRequest,
     BulkInsertResponse, CancelRequest, ConnectionId, ConnectionInfo, EndTransactionRequest,
     ExecuteRequestHttp, ExecuteResponse, Health, OpenConnectionRequest, OpenSessionRequest,
-    OperationAuditEntry, OperationStatus, SavepointRequest, SessionId, SessionInfo,
+    OperationAuditEntry, OperationStatus, Readiness, SavepointRequest, SessionId, SessionInfo,
     TransactionInfo, TxHandleRef, WsClientMessage, WsServerMessage,
 };
 pub use tx::{AccessMode as TxAccessMode, IsolationLevel, TxId, TxMode};
