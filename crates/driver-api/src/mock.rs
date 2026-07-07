@@ -58,6 +58,9 @@ pub struct MockDriver {
     execute_hang: bool,
     /// `schema` never resolves — models a wedged introspection call.
     schema_pending: bool,
+    /// `ping` panics — models a driver code path that unwinds. Used to prove
+    /// the server contains driver panics rather than crashing.
+    ping_panic: bool,
 }
 
 impl MockDriver {
@@ -68,6 +71,7 @@ impl MockDriver {
             execute_pending: false,
             execute_hang: false,
             schema_pending: false,
+            ping_panic: false,
         }
     }
 
@@ -118,6 +122,7 @@ pub struct MockDriverBuilder {
     execute_pending: bool,
     execute_hang: bool,
     schema_pending: bool,
+    ping_panic: bool,
 }
 
 impl MockDriverBuilder {
@@ -142,6 +147,12 @@ impl MockDriverBuilder {
     /// Make `schema` hang forever.
     pub fn schema_pending(mut self) -> Self {
         self.schema_pending = true;
+        self
+    }
+
+    /// Make `ping` panic, to exercise the server's driver-panic containment.
+    pub fn ping_panic(mut self) -> Self {
+        self.ping_panic = true;
         self
     }
 
@@ -219,6 +230,7 @@ impl MockDriverBuilder {
             execute_pending: self.execute_pending,
             execute_hang: self.execute_hang,
             schema_pending: self.schema_pending,
+            ping_panic: self.ping_panic,
         }
     }
 }
@@ -242,6 +254,9 @@ impl Driver for MockDriver {
 
     async fn ping(&self, _c: ConnHandle) -> Result<ServerInfo, DriverError> {
         self.record("ping");
+        // Panic outside the state lock so we exercise the server's containment,
+        // not mutex poisoning.
+        assert!(!self.ping_panic, "mock ping panic");
         MockDriver::pop(&mut self.state.lock().unwrap().ping, "ping")
     }
 

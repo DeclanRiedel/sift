@@ -272,20 +272,17 @@ are safety holes, not just polish.
 - [ ] [Design] ADR-018 (candidate): graceful-shutdown contract — signal →
       stop accepting → drain in-flight queries (with per-query deadline) →
       close pools → flush metadata → persist room snapshots → exit.
-- [ ] [Design] ADR-013 graduation: lock driver-isolation policy. PG
-      satisfies it (`tokio::spawn` + `catch_unwind` + `CancelToken`,
-      `stream.rs:60-94`); SQL Server does not (no `catch_unwind`,
-      `task.abort()` cancel). Define the wedged-driver containment boundary
-      and make both engines meet it.
-- [ ] [Design] Reconnect logic: detect broken pool members, transparently
-      re-establish, surface `Code::ConnectionFailed` only after retry
-      budget exhaustion. Verified absent — a failed driver call propagates
-      as `ApiError::Driver` and the connection entry stays put (except
-      SQL Server after cancel which is removed, `session.rs:337-344`).
-- [ ] [Design] Health vs readiness split. Current `/v1/health`
-      (`http.rs:637-643`) always returns `{"status":"ok"}` — it does not
-      check the metadata store or any driver. It is a liveness probe that
-      lies about readiness. `/v1/ready` does not exist.
+- [x] [Design] ADR-013 graduation: lock driver-isolation policy. Written.
+      Both engines now satisfy the three-layer containment boundary
+      (spawn+timeout dispatch, `catch_unwind` on the streaming path, no
+      reusable connection after cancel). SQL Server gained its `catch_unwind`
+      wrapper; the abort+discard cancel is accepted per ADR-017. Server-side
+      spawn+timeout is the primary containment (see per-query timeout step).
+- [x] [Design] Reconnect logic: done. Retry boundary is one retry on
+      `Code::ConnectionFailed` for idempotent reads (ping/schema) only;
+      mutating work never auto-retries. See `phase-b-next-steps.md` step 6.
+- [x] [Design] Health vs readiness split: done. `/v1/ready` added; checks
+      not-draining + drivers registered + (enabled) metadata reachable.
 - [ ] [Design] Audit granularity. HTTP-level audit (`session.rs:115-127`)
       is an in-memory ring buffer (cap 10 000) + optional JSONL
       (`operation_log_path`). Operation-level audit (`session.rs:129-151`)
@@ -304,25 +301,23 @@ are safety holes, not just polish.
       is no `Code::UnsupportedVersion`, no `451` handling, no negotiation
       request/response type. Define breaking-vs-additive rules + deprecation
       window.
-- [ ] [Design] Per-query timeout. `config.timeouts.request_secs`
-      (`config.rs:43-48`, default 30) is parsed and stored but **never
-      consumed** anywhere (grep confirms). `execute_http` runs inline in
-      the handler with no `tokio::spawn`/`timeout`, violating the AGENTS.md
-      "wedged driver cannot freeze the server" rule on the HTTP path.
-- [ ] [Implement] Graceful shutdown handler: drain gate that blocks new
-      sessions during drain, awaits in-flight queries with per-query
-      deadline, closes driver pools, flushes metadata, persists room
-      snapshots. Current `shutdown_signal` (`main.rs:178-202`) only stops
-      the listener.
-- [ ] [Implement] Health + readiness endpoints; `/v1/ready` returns 503
-      while draining or if no driver registered; pings metadata + a driver.
-- [ ] [Implement] Reconnect: broken-connection detection + transparent
-      re-establish for both engines; `Reused`/`Reopened` distinction in
-      `ping` result.
-- [ ] [Implement] Operation-level audit: enrich `OperationAuditEntry` with
-      actor/rows/result_code/correlation_id, record the failure path
-      (`OperationStatus::Failed`), and persist to a SQLite audit table in
-      `metadata` (currently server-side in-memory only).
+- [x] [Design] Per-query timeout: done. `config.timeouts.request_secs` is
+      consumed; all synchronous driver calls run on a spawned task bounded by
+      the deadline and surface `Code::QueryTimedOut`.
+- [x] [Implement] Graceful shutdown handler: drain gate that blocks new
+      sessions/connections during drain and awaits in-flight queries with a
+      deadline (`shutdown_drain_secs`). Explicit pool close / straggler-cursor
+      cancel is deferred per ADR-018; room CRDT state is persisted per-op so
+      no separate flush is needed.
+- [x] [Implement] Health + readiness endpoints; `/v1/ready` returns 503
+      while draining or if no driver registered; probes metadata.
+- [x] [Implement] Reconnect: one-shot transparent re-establish for idempotent
+      reads (ping/schema) on `ConnectionFailed`, engine-agnostic. A
+      `Reused`/`Reopened` distinction in the `ping` result is not exposed yet.
+- [x] [Implement] Operation-level audit: durable `operation_audit` SQLite
+      table with actor/target/result_code/row_count/correlation_id and the
+      recorded failure path, written through one helper
+      (`push_operation_full`); exposed at `GET /v1/operations/audit`.
 - [ ] [Implement] OS-keychain `SecretStore` backend; never log secret
       bytes; redaction in audit + tracing; round-trip put/get/delete test.
 - [ ] [Implement] Audit redaction + query fingerprinting: never persist or
@@ -331,15 +326,15 @@ are safety holes, not just polish.
       serializes `Operation::ExecuteQuery` verbatim (`session.rs:137-145`)
       which can carry bind values through `ExecuteRequest` — flag for
       redaction at the audit boundary.
-- [ ] [Implement] Centralized error identity: every wire error carries a
-      correlation id echoed in audit + tracing + client response. Verified
-      absent — error body is `{"kind", "message"}` (`error.rs:98-109`),
-      no id generated or propagated anywhere.
+- [x] [Implement] Correlation IDs: accept-or-generate `x-correlation-id`,
+      carried on a task-local, echoed in the response header + tracing span
+      and recorded on durable audit rows (HTTP and WebSocket). The error body
+      itself is not yet stamped with the id — a small follow-up.
 - [ ] [Implement] Protocol version negotiation: read inbound
       `X-Sift-Protocol-Version`, return `451 Unsupported Version` (or
       agreed status) with the supported range in the body. Add
       `Code::UnsupportedVersion`.
-- [ ] [Implement] Per-query `tokio::spawn` + `timeout` on the HTTP
+- [x] [Implement] Per-query `tokio::spawn` + `timeout` on the HTTP
       `execute_query` path (parity with the WS path's spawned pump).
       Wire `config.timeouts.request_secs` or remove the dead config.
 - [x] [Implement] Loopback bypass must check the peer address —
@@ -630,11 +625,11 @@ Goal: the last mile before a real release.
 | # | Candidate | Origin | Status |
 | --- | --- | --- | --- |
 | ADR-011 | result streaming via server-side cursors | Phase C | not written |
-| ADR-013 | driver isolation | Phase B | not written; PG meets it, SQL Server does not |
+| ADR-013 | driver isolation | Phase B | written; both engines meet the containment boundary |
 | ADR-014 | collaboration scope (CRDT text only) | Phase G | not written |
 | ADR-016 | protocol versioning + semver stability | Phase B | not written; header is one-way, version is `"1"` not semver |
 | ADR-017 | driver trait shape | Phase A | written; Phase A trait lock |
-| ADR-018 | graceful shutdown contract | Phase B | not written |
+| ADR-018 | graceful shutdown contract | Phase B | written |
 | ADR-019 | hosted identity model | Phase E | not written |
 | ADR-020 | authorization model | Phase F | not written |
 | ADR-021 | remote topology | Phase H | not written |

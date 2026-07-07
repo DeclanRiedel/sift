@@ -148,6 +148,54 @@ both from a stable backend foundation instead of freezing backend design early.
 
 ---
 
+## ADR-013 — Driver Isolation and Wedged-Driver Containment
+
+**Context.** Drivers run engine-specific, panic-prone code (tiberius,
+tokio-postgres, decode paths) behind the object-safe `Driver` trait. A driver
+that panics, hangs, or leaves a connection in an undefined state must not take
+down the server or wedge unrelated requests. Two engines with different
+cancellation capabilities — PostgreSQL cooperative backend cancel, SQL Server
+task-abort plus connection discard (ADR-017) — must clear the same bar.
+
+**Decision.** The containment boundary has three layers, and both engines meet
+all three:
+
+1. **No driver work runs inline on the request path.** Every synchronous driver
+   call the server makes (ping, schema, execute, bulk insert, transactions,
+   savepoints, reconnect-open) is dispatched on a spawned task bounded by the
+   per-request timeout. A wedged or slow call surfaces `Code::QueryTimedOut`
+   and frees the handler instead of blocking it. Streaming execute additionally
+   runs the query producer on its own task with one-page backpressure.
+
+2. **Panics are caught, not propagated.** A panic in driver work never unwinds
+   across the trait boundary. tokio isolates a spawned task's panic from the
+   process, and the server maps the resulting `JoinError` to
+   `ApiError::Internal`. On the streaming path each driver wraps its query task
+   in `catch_unwind` (PG `run_query`, SQL Server `execute`) and emits a terminal
+   `Page::Error { DriverInternal }`, so the consumer sees a clean diagnostic
+   rather than a silently dropped channel.
+
+3. **A cancelled or broken connection leaves nothing reusable.** PG cancel uses
+   the backend cancel token; SQL Server cancel aborts the query task and
+   discards the connection, because tiberius exposes no safe out-of-band
+   attention API (ADR-017). Neither hands a poisoned connection to a later
+   request. Idempotent reads (ping/schema) may transparently re-establish a
+   broken connection once; mutating work never auto-retries.
+
+The policy is defined by the guarantee, not the mechanism. A new driver must
+dispatch on a task, catch panics on its streaming path, and ensure no reusable
+connection survives a cancel; how it cancels is its own choice.
+
+**Consequences.** A wedged, panicking, or connection-dropping driver degrades
+one request, not the process. Server-side timeout plus spawn discipline is the
+primary containment; per-driver `catch_unwind` is a diagnostics refinement on
+the streaming path. Engine parity is the guarantee, so PG's cooperative cancel
+and SQL Server's abort-and-discard both satisfy it without a
+lowest-common-denominator trait. A driver that blocks inline, lets panics
+escape, or reuses a post-cancel connection is an ADR violation, not just a bug.
+
+---
+
 ## ADR-017 — Driver Trait Lock After Two Real Implementations
 
 **Context.** The server now has real PostgreSQL and SQL Server drivers behind
