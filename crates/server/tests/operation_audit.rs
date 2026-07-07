@@ -147,6 +147,62 @@ async fn successful_query_is_audited_with_row_count() {
 }
 
 #[tokio::test]
+async fn query_audit_carries_client_correlation_id() {
+    let driver = MockDriver::builder()
+        .engine(Engine::Postgres)
+        .execute_ok(success_pages())
+        .build();
+    let app = app(audited_state(driver));
+    let (session_id, conn_id) = open_session_and_connection(&app).await;
+
+    let request = Request::post(format!("/v1/sessions/{session_id}/queries"))
+        .header("content-type", "application/json")
+        .header("x-correlation-id", "corr-abc-123")
+        .body(Body::from(
+            serde_json::to_vec(&serde_json::json!({
+                "connection": conn_id,
+                "sql": "select id from t"
+            }))
+            .unwrap(),
+        ))
+        .unwrap();
+    let res = app.clone().oneshot(request).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    // The correlation ID is echoed back to the client.
+    assert_eq!(
+        res.headers()
+            .get("x-correlation-id")
+            .and_then(|v| v.to_str().ok()),
+        Some("corr-abc-123")
+    );
+
+    let rows = audit_rows(&app).await;
+    let query = rows
+        .iter()
+        .find(|r| r.action == "execute" && r.target == "query")
+        .expect("query op audited");
+    assert_eq!(query.correlation_id.as_deref(), Some("corr-abc-123"));
+}
+
+#[tokio::test]
+async fn response_generates_correlation_id_when_absent() {
+    let app = app(audited_state(
+        MockDriver::builder().engine(Engine::Postgres).build(),
+    ));
+    let res = app
+        .oneshot(post("/v1/sessions", serde_json::json!({})))
+        .await
+        .unwrap();
+    let id = res
+        .headers()
+        .get("x-correlation-id")
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string)
+        .expect("correlation id present");
+    assert!(!id.is_empty());
+}
+
+#[tokio::test]
 async fn failed_query_records_failure_without_leaking_sql() {
     let secret_literal = "hunter2";
     let driver = MockDriver::builder()

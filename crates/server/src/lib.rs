@@ -6,6 +6,7 @@
 //! in-process alongside the desktop client or as a daemon for hosted use.
 
 pub mod config;
+pub mod correlation;
 pub mod error;
 pub mod http;
 pub mod registry;

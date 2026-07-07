@@ -166,6 +166,7 @@ pub fn app(state: AppState) -> Router {
         .layer(from_fn(inject_peer_addr))
         .layer(from_fn_with_state(state.sessions.clone(), audit_middleware))
         .layer(from_fn(protocol_version_header))
+        .layer(from_fn(correlation_middleware))
         .with_state(state)
 }
 
@@ -205,6 +206,30 @@ async fn protocol_version_header(req: Request<Body>, next: Next) -> Response {
         HeaderName::from_static("x-sift-protocol-version"),
         HeaderValue::from_static(PROTOCOL_VERSION),
     );
+    response
+}
+
+/// Accept-or-generate a request correlation ID (ADR step 5). The ID is put on
+/// the request's tracing span, made available to handlers and audit writes via
+/// a task-local, and echoed back in the response header.
+async fn correlation_middleware(req: Request<Body>, next: Next) -> Response {
+    use tracing::Instrument;
+
+    let id = req
+        .headers()
+        .get(&crate::correlation::CORRELATION_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .and_then(crate::correlation::sanitize)
+        .unwrap_or_else(crate::correlation::generate);
+    let span = tracing::info_span!("request", correlation_id = %id);
+    let mut response = crate::correlation::scope(id.clone(), next.run(req))
+        .instrument(span)
+        .await;
+    if let Ok(value) = HeaderValue::from_str(&id) {
+        response
+            .headers_mut()
+            .insert(crate::correlation::CORRELATION_HEADER, value);
+    }
     response
 }
 
@@ -2091,10 +2116,16 @@ async fn ws_session(
     Path(session_id): Path<sift_protocol::SessionId>,
     ws: WebSocketUpgrade,
 ) -> Response {
-    ws.on_upgrade(move |socket| async move {
-        if let Err(error) = handle_ws(state.sessions, state.shutdown, session_id, socket).await {
-            tracing::warn!(%session_id, error = %error, "websocket session ended with error");
-        }
+    // Capture the correlation ID from the upgrade request so the (detached)
+    // socket task's per-message operations are audited under the same ID.
+    let correlation_id = crate::correlation::current().unwrap_or_else(crate::correlation::generate);
+    ws.on_upgrade(move |socket| {
+        crate::correlation::scope(correlation_id, async move {
+            if let Err(error) = handle_ws(state.sessions, state.shutdown, session_id, socket).await
+            {
+                tracing::warn!(%session_id, error = %error, "websocket session ended with error");
+            }
+        })
     })
 }
 
@@ -2113,10 +2144,13 @@ async fn ws_room(
         move || ensure_room_permission(&metadata, &auth, room, RoomPermission::Read)
     })
     .await?;
-    Ok(ws.on_upgrade(move |socket| async move {
-        if let Err(error) = handle_room_ws(state, metadata, auth, room_row.id, socket).await {
-            tracing::warn!(room_id = %room_row.id.0, error = %error, "room websocket ended with error");
-        }
+    let correlation_id = crate::correlation::current().unwrap_or_else(crate::correlation::generate);
+    Ok(ws.on_upgrade(move |socket| {
+        crate::correlation::scope(correlation_id, async move {
+            if let Err(error) = handle_room_ws(state, metadata, auth, room_row.id, socket).await {
+                tracing::warn!(room_id = %room_row.id.0, error = %error, "room websocket ended with error");
+            }
+        })
     }))
 }
 

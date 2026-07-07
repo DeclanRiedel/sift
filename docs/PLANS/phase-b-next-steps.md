@@ -9,9 +9,9 @@ bad driver call, long query, or host shutdown from breaking the server contract.
 - [x] 1. Per-query timeout and spawn discipline — commit `47c7db1`.
 - [x] 2. Graceful shutdown contract (ADR-018) — commit `f190739`.
 - [x] 3. Health and readiness split — commit `2d40aee`.
-- [x] 4. Durable operation audit — commit pending.
-- [ ] 5. Correlation IDs — next.
-- [ ] 6. Connection recovery behavior.
+- [x] 4. Durable operation audit — commit `d20375f`.
+- [x] 5. Correlation IDs — commit pending.
+- [ ] 6. Connection recovery behavior — next.
 
 Note (step 4): actor is captured on the query path; metadata admin operations
 still record durable rows but without an actor id yet — a small follow-up to
@@ -47,7 +47,7 @@ thread `principal_id` through `push_metadata_operation`.
    - Ensure success and failure paths use one helper so future operations are
      hard to forget.
 
-5. **Correlation IDs**
+5. **Correlation IDs** — done.
    - Accept or generate a request correlation ID for HTTP and WebSocket work.
    - Echo it in responses, tracing spans, and audit records.
    - Add protocol fields only where the public wire contract needs them.

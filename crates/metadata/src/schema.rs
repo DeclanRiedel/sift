@@ -253,6 +253,8 @@ pub struct OperationAudit {
     pub row_count: Option<i64>,
     /// Sanitized failure message; never includes bind values or secrets.
     pub error_message: Option<String>,
+    /// Request correlation ID tying this row to logs and the client request.
+    pub correlation_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -265,6 +267,7 @@ pub struct NewOperationAudit {
     pub result_code: Option<String>,
     pub row_count: Option<i64>,
     pub error_message: Option<String>,
+    pub correlation_id: Option<String>,
 }
 
 impl CredentialMode {

@@ -871,8 +871,8 @@ impl MetadataStore {
         conn.execute(
             "INSERT INTO operation_audit
              (at, actor_principal_id, action, target, target_id, status, result_code,
-              row_count, error_message)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+              row_count, error_message, correlation_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             params![
                 now,
                 input.actor_principal_id.map(|id| id.0),
@@ -883,12 +883,13 @@ impl MetadataStore {
                 input.result_code,
                 input.row_count,
                 input.error_message,
+                input.correlation_id,
             ],
         )?;
         let id = OperationAuditId(conn.last_insert_rowid());
         conn.query_row(
             "SELECT id, at, actor_principal_id, action, target, target_id, status,
-                    result_code, row_count, error_message
+                    result_code, row_count, error_message, correlation_id
              FROM operation_audit WHERE id = ?1",
             params![id.0],
             operation_audit_from_row,
@@ -900,7 +901,7 @@ impl MetadataStore {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
             "SELECT id, at, actor_principal_id, action, target, target_id, status,
-                    result_code, row_count, error_message
+                    result_code, row_count, error_message, correlation_id
              FROM operation_audit
              ORDER BY at DESC, id DESC
              LIMIT ?1",
@@ -1224,6 +1225,7 @@ fn operation_audit_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Operati
         result_code: row.get(7)?,
         row_count: row.get(8)?,
         error_message: row.get(9)?,
+        correlation_id: row.get(10)?,
     })
 }
 
@@ -1341,6 +1343,7 @@ mod tests {
                 result_code: None,
                 row_count: Some(42),
                 error_message: None,
+                correlation_id: Some("corr-1".into()),
             })
             .unwrap();
         store
@@ -1353,6 +1356,7 @@ mod tests {
                 result_code: Some("syntax_error".into()),
                 row_count: None,
                 error_message: Some("boom".into()),
+                correlation_id: None,
             })
             .unwrap();
 
@@ -1365,6 +1369,7 @@ mod tests {
         assert_eq!(rows[1].status, "succeeded");
         assert_eq!(rows[1].actor_principal_id, Some(PrincipalId(1)));
         assert_eq!(rows[1].row_count, Some(42));
+        assert_eq!(rows[1].correlation_id.as_deref(), Some("corr-1"));
     }
 
     #[test]

@@ -251,6 +251,7 @@ impl SessionStore {
                 result_code,
                 row_count,
                 error_message,
+                correlation_id: crate::correlation::current(),
             };
             if let Err(error) = store.record_operation_audit(record) {
                 tracing::warn!(%error, "durable operation audit write failed");
