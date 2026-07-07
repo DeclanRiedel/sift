@@ -30,6 +30,10 @@ use crate::registry::DriverRegistry;
 
 const MAX_HTTP_EXECUTE_ROWS: usize = 10_000;
 
+/// Fallback per-request timeout used until the server wires
+/// `config.timeouts.request_secs` in via [`SessionStore::set_request_timeout`].
+const DEFAULT_REQUEST_TIMEOUT_MS: u64 = 30_000;
+
 /// Server-owned session state. Clonable because handlers share it via
 /// `Arc<SessionStore>` from axum state.
 #[derive(Clone)]
@@ -43,6 +47,10 @@ struct SessionStoreInner {
     operations: Mutex<OperationLog>,
     next_id: AtomicU64,
     registry: DriverRegistry,
+    /// Per-request driver deadline in milliseconds. `0` disables the bound.
+    /// Stored as an atomic so the server can set it from config after the
+    /// store is constructed and shared behind an `Arc`.
+    request_timeout_ms: AtomicU64,
 }
 
 struct OperationLog {
@@ -62,6 +70,7 @@ impl SessionStore {
                 }),
                 next_id: AtomicU64::new(1),
                 registry,
+                request_timeout_ms: AtomicU64::new(DEFAULT_REQUEST_TIMEOUT_MS),
             }),
         }
     }
@@ -86,12 +95,51 @@ impl SessionStore {
                 }),
                 next_id: AtomicU64::new(1),
                 registry,
+                request_timeout_ms: AtomicU64::new(DEFAULT_REQUEST_TIMEOUT_MS),
             }),
         })
     }
 
     pub fn registry(&self) -> &DriverRegistry {
         &self.inner.registry
+    }
+
+    /// Set the per-request driver deadline. A zero duration disables the
+    /// bound (driver calls run to completion). Called by the server at
+    /// startup with `config.timeouts.request_secs`.
+    pub fn set_request_timeout(&self, timeout: Duration) {
+        let ms = timeout.as_millis().min(u64::MAX as u128) as u64;
+        self.inner.request_timeout_ms.store(ms, Ordering::Relaxed);
+    }
+
+    fn request_timeout(&self) -> Duration {
+        Duration::from_millis(self.inner.request_timeout_ms.load(Ordering::Relaxed))
+    }
+
+    /// Run a driver future on its own task, bounded by the request timeout.
+    /// Driver work never runs inline on the handler task: a wedged driver
+    /// cannot freeze the request path, and on timeout we surface
+    /// [`Code::QueryTimedOut`] rather than hanging. The spawned task is
+    /// detached on timeout (not aborted) so the driver reaches a safe point
+    /// on its own rather than being dropped mid-call.
+    async fn run_bounded<F, T>(&self, op: &'static str, fut: F) -> ApiResult<T>
+    where
+        F: std::future::Future<Output = Result<T, DriverError>> + Send + 'static,
+        T: Send + 'static,
+    {
+        let dur = self.request_timeout();
+        let task = tokio::spawn(fut);
+        if dur.is_zero() {
+            return match task.await {
+                Ok(res) => res.map_err(ApiError::Driver),
+                Err(join) => Err(ApiError::Internal(format!("{op} task failed: {join}"))),
+            };
+        }
+        match tokio::time::timeout(dur, task).await {
+            Ok(Ok(res)) => res.map_err(ApiError::Driver),
+            Ok(Err(join)) => Err(ApiError::Internal(format!("{op} task failed: {join}"))),
+            Err(_) => Err(timeout_error(op)),
+        }
     }
 
     pub fn open_session(&self, req: OpenSessionRequest) -> SessionInfo {
@@ -266,8 +314,10 @@ impl SessionStore {
         conn_id: ConnectionId,
     ) -> ApiResult<ServerInfo> {
         let entry = self.get_conn_entry(session_id, conn_id)?;
-        let info = entry.driver.ping(entry.handle.clone()).await?;
-        Ok(info)
+        let driver = entry.driver.clone();
+        let handle = entry.handle.clone();
+        self.run_bounded("ping", async move { driver.ping(handle).await })
+            .await
     }
 
     pub async fn schema(
@@ -277,8 +327,10 @@ impl SessionStore {
         scope: SchemaScope,
     ) -> ApiResult<SchemaSnapshot> {
         let entry = self.get_conn_entry(session_id, conn_id)?;
-        let snap = entry.driver.schema(entry.handle.clone(), scope).await?;
-        Ok(snap)
+        let driver = entry.driver.clone();
+        let handle = entry.handle.clone();
+        self.run_bounded("schema", async move { driver.schema(handle, scope).await })
+            .await
     }
 
     /// Synchronous execute: drains the entire page stream into the response.
@@ -291,13 +343,88 @@ impl SessionStore {
     ) -> ApiResult<ExecuteResponse> {
         let conn_id = req.connection;
         self.validate_execute_tx(session_id, conn_id, req.tx.as_ref())?;
-        let req = ExecuteRequest {
+        let exec = ExecuteRequest {
             sql: req.sql,
             params: req.params,
         };
         let entry = self.get_conn_entry(session_id, conn_id)?;
-        let stream = entry.driver.execute(entry.handle.clone(), req).await?;
-        drain_stream(stream).await.map_err(ApiError::Driver)
+        let driver = entry.driver.clone();
+        let handle = entry.handle.clone();
+        let dur = self.request_timeout();
+
+        // The driver's execute + full drain runs on its own task. The cursor
+        // id is only known once `execute` returns, so we stash it in a shared
+        // slot the moment it is available; on timeout that lets us cancel the
+        // in-flight cursor (which also drives SQL Server's discard-on-cancel).
+        let cursor_slot: Arc<Mutex<Option<CursorId>>> = Arc::new(Mutex::new(None));
+        let slot = cursor_slot.clone();
+        let task = tokio::spawn(async move {
+            let stream = driver.execute(handle, exec).await?;
+            *slot.lock().unwrap() = Some(stream.cursor_id);
+            drain_stream(stream).await
+        });
+
+        if dur.is_zero() {
+            return match task.await {
+                Ok(res) => res.map_err(ApiError::Driver),
+                Err(join) => Err(ApiError::Internal(format!("execute task failed: {join}"))),
+            };
+        }
+
+        match tokio::time::timeout(dur, task).await {
+            Ok(Ok(res)) => res.map_err(ApiError::Driver),
+            Ok(Err(join)) => Err(ApiError::Internal(format!("execute task failed: {join}"))),
+            Err(_) => {
+                let cursor = *cursor_slot.lock().unwrap();
+                if let Some(cursor) = cursor {
+                    self.cancel_after_timeout(session_id, conn_id, cursor).await;
+                }
+                Err(timeout_error("execute"))
+            }
+        }
+    }
+
+    /// Best-effort cancel of a cursor whose HTTP execute exceeded the request
+    /// timeout. Reuses [`SessionStore::cancel`] so SQL Server's
+    /// discard-on-cancel rule (drop the connection after aborting) still
+    /// holds. Bounded so a wedged cancel cannot itself hang the handler.
+    async fn cancel_after_timeout(
+        &self,
+        session_id: SessionId,
+        conn_id: ConnectionId,
+        cursor: CursorId,
+    ) {
+        let dur = self.request_timeout();
+        let cancel = self.cancel(session_id, conn_id, cursor);
+        let result = if dur.is_zero() {
+            cancel.await
+        } else {
+            match tokio::time::timeout(dur, cancel).await {
+                Ok(res) => res,
+                Err(_) => {
+                    tracing::warn!(
+                        session_id = %session_id,
+                        conn_id = %conn_id,
+                        "cancel after query timeout itself timed out"
+                    );
+                    return;
+                }
+            }
+        };
+        match result {
+            Ok(()) => tracing::info!(
+                session_id = %session_id,
+                conn_id = %conn_id,
+                cursor = %cursor,
+                "canceled query after request timeout"
+            ),
+            Err(error) => tracing::warn!(
+                session_id = %session_id,
+                conn_id = %conn_id,
+                error = %error,
+                "cancel after query timeout failed"
+            ),
+        }
     }
 
     pub async fn execute_stream(
@@ -357,15 +484,6 @@ impl SessionStore {
         req: BulkInsertRequest,
     ) -> ApiResult<BulkInsertResponse> {
         let entry = self.get_conn_entry(session_id, conn_id)?;
-        let mssql = entry.driver.as_mssql().ok_or_else(|| {
-            ApiError::Driver(
-                DriverError::new(
-                    sift_protocol::Code::UnsupportedForEngine,
-                    "bulk insert is only supported by SQL Server connections",
-                )
-                .with_engine(entry.driver.engine()),
-            )
-        })?;
         if req.format == BulkInsertFormat::Native {
             return Err(ApiError::Driver(
                 DriverError::new(
@@ -376,14 +494,21 @@ impl SessionStore {
             ));
         }
 
-        let result = mssql
-            .bulk_insert(
-                entry.handle.clone(),
-                BulkOp {
-                    table: req.table,
-                    data: req.data,
-                },
-            )
+        let driver = entry.driver.clone();
+        let handle = entry.handle.clone();
+        let table = req.table;
+        let data = req.data;
+        let result = self
+            .run_bounded("bulk_insert", async move {
+                let mssql = driver.as_mssql().ok_or_else(|| {
+                    DriverError::new(
+                        Code::UnsupportedForEngine,
+                        "bulk insert is only supported by SQL Server connections",
+                    )
+                    .with_engine(driver.engine())
+                })?;
+                mssql.bulk_insert(handle, BulkOp { table, data }).await
+            })
             .await?;
         Ok(BulkInsertResponse {
             rows_inserted: result.rows_inserted,
@@ -397,7 +522,15 @@ impl SessionStore {
     ) -> ApiResult<TransactionInfo> {
         let entry = self.get_conn_entry(session_id, req.connection)?;
         self.reject_if_connection_has_tx(session_id, req.connection, None)?;
-        let handle = entry.driver.begin(entry.handle.clone(), req.mode).await?;
+        let driver = entry.driver.clone();
+        let conn_handle = entry.handle.clone();
+        let mode = req.mode;
+        let handle = self
+            .run_bounded(
+                "begin",
+                async move { driver.begin(conn_handle, mode).await },
+            )
+            .await?;
         let info = TransactionInfo {
             tx_id: handle.tx_id,
             connection: req.connection,
@@ -424,8 +557,9 @@ impl SessionStore {
     ) -> ApiResult<()> {
         let tx = self.remove_tx(session_id, req.connection, req.tx_id)?;
         let entry = self.get_conn_entry(session_id, req.connection)?;
-        entry.driver.commit(tx.handle).await?;
-        Ok(())
+        let driver = entry.driver.clone();
+        self.run_bounded("commit", async move { driver.commit(tx.handle).await })
+            .await
     }
 
     pub async fn rollback_transaction(
@@ -435,8 +569,9 @@ impl SessionStore {
     ) -> ApiResult<()> {
         let tx = self.remove_tx(session_id, req.connection, req.tx_id)?;
         let entry = self.get_conn_entry(session_id, req.connection)?;
-        entry.driver.rollback(tx.handle).await?;
-        Ok(())
+        let driver = entry.driver.clone();
+        self.run_bounded("rollback", async move { driver.rollback(tx.handle).await })
+            .await
     }
 
     pub async fn create_savepoint(
@@ -446,23 +581,25 @@ impl SessionStore {
     ) -> ApiResult<()> {
         let tx_handle = self.tx_handle_for(session_id, req.connection, req.tx_id)?;
         let entry = self.get_conn_entry(session_id, req.connection)?;
-        match entry.driver.engine() {
-            Engine::Postgres => {
-                let pg = entry
-                    .driver
-                    .as_pg()
-                    .ok_or_else(|| ext_missing(Engine::Postgres, "PgExt"))?;
-                pg.savepoint(&tx_handle, &req.name).await?;
+        let driver = entry.driver.clone();
+        let name = req.name;
+        self.run_bounded("savepoint", async move {
+            match driver.engine() {
+                Engine::Postgres => {
+                    let pg = driver
+                        .as_pg()
+                        .ok_or_else(|| missing_ext(Engine::Postgres, "PgExt"))?;
+                    pg.savepoint(&tx_handle, &name).await.map(|_| ())
+                }
+                Engine::SqlServer => {
+                    let mssql = driver
+                        .as_mssql()
+                        .ok_or_else(|| missing_ext(Engine::SqlServer, "MssqlExt"))?;
+                    mssql.savepoint(&tx_handle, &name).await.map(|_| ())
+                }
             }
-            Engine::SqlServer => {
-                let mssql = entry
-                    .driver
-                    .as_mssql()
-                    .ok_or_else(|| ext_missing(Engine::SqlServer, "MssqlExt"))?;
-                mssql.savepoint(&tx_handle, &req.name).await?;
-            }
-        }
-        Ok(())
+        })
+        .await
     }
 
     pub async fn rollback_to_savepoint(
@@ -472,33 +609,32 @@ impl SessionStore {
     ) -> ApiResult<()> {
         let tx_handle = self.tx_handle_for(session_id, req.connection, req.tx_id)?;
         let entry = self.get_conn_entry(session_id, req.connection)?;
-        match entry.driver.engine() {
-            Engine::Postgres => {
-                let pg = entry
-                    .driver
-                    .as_pg()
-                    .ok_or_else(|| ext_missing(Engine::Postgres, "PgExt"))?;
-                pg.rollback_to(PgSavepoint {
-                    tx: req.tx_id,
-                    name: req.name,
-                })
-                .await?;
+        let driver = entry.driver.clone();
+        let name = req.name;
+        let tx_id = req.tx_id;
+        self.run_bounded("rollback_to_savepoint", async move {
+            match driver.engine() {
+                Engine::Postgres => {
+                    let pg = driver
+                        .as_pg()
+                        .ok_or_else(|| missing_ext(Engine::Postgres, "PgExt"))?;
+                    pg.rollback_to(PgSavepoint { tx: tx_id, name }).await
+                }
+                Engine::SqlServer => {
+                    let mssql = driver
+                        .as_mssql()
+                        .ok_or_else(|| missing_ext(Engine::SqlServer, "MssqlExt"))?;
+                    mssql
+                        .rollback_to(MssqlSavepoint {
+                            tx: tx_id,
+                            conn: tx_handle.conn.clone(),
+                            name,
+                        })
+                        .await
+                }
             }
-            Engine::SqlServer => {
-                let mssql = entry
-                    .driver
-                    .as_mssql()
-                    .ok_or_else(|| ext_missing(Engine::SqlServer, "MssqlExt"))?;
-                mssql
-                    .rollback_to(MssqlSavepoint {
-                        tx: req.tx_id,
-                        conn: tx_handle.conn.clone(),
-                        name: req.name,
-                    })
-                    .await?;
-            }
-        }
-        Ok(())
+        })
+        .await
     }
 
     pub async fn release_savepoint(
@@ -509,27 +645,25 @@ impl SessionStore {
         // Validate tx is active on the connection before dispatching.
         let _ = self.tx_handle_for(session_id, req.connection, req.tx_id)?;
         let entry = self.get_conn_entry(session_id, req.connection)?;
-        match entry.driver.engine() {
-            Engine::Postgres => {
-                let pg = entry
-                    .driver
-                    .as_pg()
-                    .ok_or_else(|| ext_missing(Engine::Postgres, "PgExt"))?;
-                pg.release_savepoint(PgSavepoint {
-                    tx: req.tx_id,
-                    name: req.name,
-                })
-                .await?;
-                Ok(())
-            }
-            Engine::SqlServer => Err(ApiError::Driver(
-                DriverError::new(
+        let driver = entry.driver.clone();
+        let name = req.name;
+        let tx_id = req.tx_id;
+        self.run_bounded("release_savepoint", async move {
+            match driver.engine() {
+                Engine::Postgres => {
+                    let pg = driver
+                        .as_pg()
+                        .ok_or_else(|| missing_ext(Engine::Postgres, "PgExt"))?;
+                    pg.release_savepoint(PgSavepoint { tx: tx_id, name }).await
+                }
+                Engine::SqlServer => Err(DriverError::new(
                     Code::UnsupportedForEngine,
                     "RELEASE SAVEPOINT is not supported by SQL Server",
                 )
-                .with_engine(Engine::SqlServer),
-            )),
-        }
+                .with_engine(Engine::SqlServer)),
+            }
+        })
+        .await
     }
 
     fn tx_handle_for(
@@ -732,14 +866,21 @@ pub struct TransactionEntry {
     pub handle: TxHandle,
 }
 
-fn ext_missing(engine: Engine, trait_name: &str) -> ApiError {
-    ApiError::Driver(
-        DriverError::new(
-            Code::UnsupportedForEngine,
-            format!("driver does not expose {trait_name}"),
-        )
-        .with_engine(engine),
+fn missing_ext(engine: Engine, trait_name: &str) -> DriverError {
+    DriverError::new(
+        Code::UnsupportedForEngine,
+        format!("driver does not expose {trait_name}"),
     )
+    .with_engine(engine)
+}
+
+/// Build the `QueryTimedOut` driver error returned when a synchronous driver
+/// call exceeds the configured per-request deadline.
+fn timeout_error(op: &str) -> ApiError {
+    ApiError::Driver(DriverError::new(
+        Code::QueryTimedOut,
+        format!("`{op}` exceeded the configured request timeout"),
+    ))
 }
 
 fn drain_connection_transactions(s: &Session, conn_id: ConnectionId) -> Vec<TransactionEntry> {

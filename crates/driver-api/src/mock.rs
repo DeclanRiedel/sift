@@ -49,6 +49,15 @@ pub struct MockDriver {
     conn_id: IdCounter,
     tx_id: IdCounter,
     cursor_id: IdCounter,
+    /// `execute` never resolves — models a driver wedged before it can even
+    /// return a cursor. Used to exercise the server's request timeout.
+    execute_pending: bool,
+    /// `execute` returns a cursor immediately, but its page stream never
+    /// yields — models a query that hangs mid-drain. The returned cursor lets
+    /// the server exercise cancel-on-timeout.
+    execute_hang: bool,
+    /// `schema` never resolves — models a wedged introspection call.
+    schema_pending: bool,
 }
 
 impl MockDriver {
@@ -56,6 +65,9 @@ impl MockDriver {
         MockDriverBuilder {
             engine: Engine::Postgres,
             state: Queues::default(),
+            execute_pending: false,
+            execute_hang: false,
+            schema_pending: false,
         }
     }
 
@@ -103,11 +115,33 @@ impl MockDriver {
 pub struct MockDriverBuilder {
     engine: Engine,
     state: Queues,
+    execute_pending: bool,
+    execute_hang: bool,
+    schema_pending: bool,
 }
 
 impl MockDriverBuilder {
     pub fn engine(mut self, e: Engine) -> Self {
         self.engine = e;
+        self
+    }
+
+    /// Make `execute` hang forever without returning a cursor.
+    pub fn execute_pending(mut self) -> Self {
+        self.execute_pending = true;
+        self
+    }
+
+    /// Make `execute` return a cursor immediately but hang forever draining
+    /// pages. Exercises the server's cancel-on-timeout path.
+    pub fn execute_hang(mut self) -> Self {
+        self.execute_hang = true;
+        self
+    }
+
+    /// Make `schema` hang forever.
+    pub fn schema_pending(mut self) -> Self {
+        self.schema_pending = true;
         self
     }
 
@@ -172,6 +206,9 @@ impl MockDriverBuilder {
             conn_id: IdCounter::new(),
             tx_id: IdCounter::new(),
             cursor_id: IdCounter::new(),
+            execute_pending: self.execute_pending,
+            execute_hang: self.execute_hang,
+            schema_pending: self.schema_pending,
         }
     }
 }
@@ -204,6 +241,9 @@ impl Driver for MockDriver {
         _scope: SchemaScope,
     ) -> Result<SchemaSnapshot, DriverError> {
         self.record("schema");
+        if self.schema_pending {
+            std::future::pending::<()>().await;
+        }
         MockDriver::pop(&mut self.state.lock().unwrap().schema, "schema")
     }
 
@@ -233,7 +273,21 @@ impl Driver for MockDriver {
         _req: ExecuteRequest,
     ) -> Result<ResultSetStream, DriverError> {
         self.record("execute");
+        if self.execute_pending {
+            std::future::pending::<()>().await;
+        }
         let cursor_id = CursorId::new(self.cursor_id.next());
+        if self.execute_hang {
+            // Return a live cursor whose page stream never yields: hold the
+            // sender open on a parked task so the receiver blocks forever.
+            let (tx, rx) = mpsc::channel(1);
+            tokio::spawn(async move {
+                let _held = tx;
+                std::future::pending::<()>().await;
+            });
+            let _ = c;
+            return Ok(ResultSetStream::new(cursor_id, rx));
+        }
         let result = MockDriver::pop::<Vec<sift_protocol::Page>>(
             &mut self.state.lock().unwrap().execute,
             "execute",

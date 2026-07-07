@@ -30,6 +30,7 @@ async fn main() -> anyhow::Result<()> {
     } else {
         SessionStore::new(registry)
     };
+    sessions.set_request_timeout(std::time::Duration::from_secs(cfg.timeouts.request_secs));
     let metadata = build_metadata_store(&cfg)?;
     let state = AppState {
         sessions,
