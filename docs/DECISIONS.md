@@ -145,3 +145,77 @@ metadata, room runtime, and protocol contract are stable enough to consume.
 
 **Consequences.** The next product-client decision can choose desktop, web, or
 both from a stable backend foundation instead of freezing backend design early.
+
+---
+
+## ADR-017 — Driver Trait Lock After Two Real Implementations
+
+**Context.** The server now has real PostgreSQL and SQL Server drivers behind
+the same `Driver` trait. Phase A's purpose was to prove the trait shape before
+the public protocol is treated as stable enough for GUI and third-party
+clients. The remaining Phase A ambiguity was not about more verbs; it was about
+which engine-specific capabilities belong in extension traits, how portable
+values are represented, and which backend limitations are explicit
+unsupported states.
+
+**Decision.** The Phase A driver contract is locked around the core eight
+verbs: `open`, `ping`, `schema`, `begin`, `commit`, `rollback`, `execute`,
+`cancel`, and `close`. The trait remains object-safe: `&self` receivers,
+boxed async futures via `async_trait`, concrete protocol-crate request/response
+types, and handle structs rather than associated connection types. Engine-only
+features stay in extension traits selected through `as_pg()` and `as_mssql()`;
+wrong-engine calls produce `UnsupportedForEngine` at the server boundary.
+
+`ConnHandle` remains an opaque id plus engine tag and does not carry a
+`Weak<dyn Driver>` back-reference. The server's connection registry is the
+ownership boundary for routing cancel/close/transaction work. A future backref
+would be a new design item, not part of the Phase A lock.
+
+The portable value union is intentionally not a lowest-common-denominator
+schema. Decimal values are represented as canonical strings in
+`Value::Decimal(String)` to avoid binary floating-point rounding and preserve
+arbitrary precision across PostgreSQL `numeric` and SQL Server
+`decimal`/`numeric`/money-like values. Intervals use `Value::Interval` only
+when they can be represented as `chrono::Duration`; month-aware PostgreSQL
+intervals fall through to `Value::Engine` with display text because a month is
+calendar-relative and cannot be represented as a fixed duration. SQL Server has
+no matching interval primitive.
+
+TLS has two separate boundaries. Driver-side TLS to user databases is owned by
+the concrete driver and connection spec: PostgreSQL maps `SslMode` through
+rustls/native roots for verify modes, while SQL Server uses tiberius TDS
+encryption plus `TrustServerCertificate`. TLS termination for sift's own
+HTTP/WebSocket listener is a server deployment concern and is not implied by
+driver TLS.
+
+SQL Server parity is locked to what tiberius and the current protocol can
+support cleanly: core verbs, schema including shallow objects/triggers/index
+kinds, CSV bulk import, `USE`, and savepoint/rollback-to-savepoint. Runtime
+MARS toggling is not in `MssqlExt`; MARS is a connection-time setting and is
+currently rejected because the driver/session model allows one active stream
+per connection. SQL Server native bulk-load is not represented by the Phase A
+`BulkOp`, which carries CSV bytes; native TDS bulk needs typed rows and column
+metadata and must use a future request shape if it graduates.
+
+PostgreSQL cancellation uses the backend cancel token. SQL Server cancellation
+is implemented as task abort plus connection discard because tiberius does not
+expose a public TDS attention API that can be safely sent from a different
+task while the query owns the socket. The server removes the SQL Server
+connection after cancel so the orphaned backend session cannot be reused.
+
+Driver pooling is not part of the trait signature. PostgreSQL may satisfy
+`open()` from a cached pool; SQL Server currently dials one backend session per
+handle. Pool warmth and preconnect policy are Phase C performance work and do
+not change the Phase A trait shape.
+
+Any future change to a locked core driver signature, handle semantics, portable
+value representation, or public operation/request shape requires an explicit
+ADR update and a protocol-version bump. Adding a new extension method is
+allowed only when the unsupported behavior is already explicit and existing
+clients continue to receive the same response shape.
+
+**Consequences.** Server code can depend on a stable two-engine driver
+contract without pretending every backend exposes the same native features.
+Known SQL Server limitations are explicit unsupported states rather than
+stubs. Performance work can improve pooling and warm starts without reopening
+the trait lock, while true protocol shape changes remain gated.

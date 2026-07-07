@@ -141,10 +141,10 @@ view while prioritizing:
 
 ## Phase A — Driver & type completeness
 
-Goal: finish the two-impl validation gate so the `Driver` trait is genuinely
-locked (ADR-017), close the remaining SQL Server correctness gaps, and
-remove every `UnsupportedForEngine` stub that is semantically wrong for the
-engine itself.
+Status: **complete.** The two-implementation validation gate is closed and
+the `Driver` trait is locked by ADR-017. Remaining SQL Server limitations are
+either deliberate unsupported states in the public contract or later-phase
+performance/product work, not Phase A blockers.
 
 - [x] [Implement] driver-postgres: decode `Type::NUMERIC` → `Value::Decimal`
       and `Type::INTERVAL` → `Value::Interval` — `decode.rs:54-156`, unit-
@@ -169,33 +169,36 @@ engine itself.
 - [x] [Implement] driver-sqlserver: live test harness (`live-mssql` feature)
       — `tests/live_mssql.rs` (5 tests: open/ping/execute/close, bulk CSV,
       cancel long query, close mid query, schema_deep + transactions).
-- [ ] [Design] ADR-017 graduation: lock the driver-trait shape (core 8 verbs
+- [x] [Design] ADR-017 graduation: lock the driver-trait shape (core 8 verbs
       + fat structs + ext traits + union types) now that two real impls
       exist; define the change-gate rule (signature change ⇒ protocol bump).
-      **Not written** — `DECISIONS.md` stops at ADR-010.
-- [ ] [Design] TLS strategy: separate (a) server-side TLS termination of
-      sift's own HTTP/WS (currently none — server binds plain HTTP,
-      `config.rs:10`) from (b) driver-side TLS to user DBs. PG driver-side
-      is rustls (`conn.rs:274`); SQL Server driver-side is tiberius's
-      `EncryptionLevel::{Required,Off}` + `trust_cert()`
-      (`driver-sqlserver/src/lib.rs:113-122`) — no rustls verifier wiring,
-      no `SslMode::VerifyCa`/`VerifyFull` distinction surfaced for MSSQL.
-      Pick one model and document it.
-- [ ] [Design] Numeric/Decimal representation: the implicit choice is
+      ADR-017 is now written in `docs/DECISIONS.md:151-218` and gates
+      locked signature/handle/value/protocol-shape changes on an ADR update
+      plus protocol-version bump.
+- [x] [Design] TLS strategy: separate (a) server-side TLS termination of
+      sift's own HTTP/WS from (b) driver-side TLS to user DBs. ADR-017
+      documents this boundary (`docs/DECISIONS.md:184-190`): PG driver-side
+      TLS maps `SslMode` through rustls/native roots; SQL Server uses
+      tiberius TDS encryption plus `TrustServerCertificate`; HTTP/WS TLS is
+      a server deployment concern.
+- [x] [Design] Numeric/Decimal representation: the implicit choice is
       `Value::Decimal(String)` + hand-rolled PG wire decode
       (`decode.rs:64-136`) and `tiberius::numeric::Decimal` → `String` for
-      SQL Server. Graduate this into ADR-017 so it stops being implicit.
-- [ ] [Design] Interval representation: the implicit choice is
+      SQL Server. Graduated in ADR-017 (`docs/DECISIONS.md:174-178`).
+- [x] [Design] Interval representation: the implicit choice is
       `Value::Interval(chrono::Duration)` for month-free intervals and
       `Value::Engine` for month-aware (`decode.rs:138-156`). SQL Server has
-      no analogue. Graduate into ADR-017.
-- [ ] [Design] SQL Server parity audit: enumerate every `MssqlExt` method
-      and every core verb against tiberius capabilities. Verified stubs:
-      `set_mars` (`lib.rs:291-296`) and native `BulkFormat::Native`
-      (`lib.rs:810-816`). Verified missing: triggers in deep schema, views/
-      procs/synonyms in shallow, `IndexKind` always `Other` (no
-      CLUSTERED/NONCLUSTERED mapping), DML `affected_rows` always `None`
-      (`lib.rs:393-396`).
+      no analogue. Graduated in ADR-017 (`docs/DECISIONS.md:178-183`).
+- [x] [Design] SQL Server parity audit: enumerate every `MssqlExt` method
+      and every core verb against tiberius capabilities. ADR-017 locks core
+      verbs + `use_database`/CSV `bulk_insert`/savepoints as supported,
+      keeps MARS as a rejected connection-time setting
+      (`driver-sqlserver/src/lib.rs:106-113`), removes the runtime
+      `set_mars` extension method, and keeps native bulk out of Phase A
+      because the locked `BulkOp` is CSV bytes only
+      (`driver-api/src/lib.rs:303-307`). The public `native` bulk request is
+      rejected explicitly in the server (`server/src/session.rs:349-361`),
+      with a regression test (`server/tests/api_smoke.rs:337`).
 - [x] [Implement] driver-sqlserver: deep schema parity with PG —
       triggers now populated from `sys.triggers` + `sys.trigger_events`
       (`lib.rs::mssql_triggers`), shallow scope now enumerates
@@ -204,26 +207,32 @@ engine itself.
       CLUSTERED/NONCLUSTERED → `Btree` and hash → `Hash`
       (`lib.rs::mssql_index_kind_from_sys`). DML `affected_rows` reported
       for pure DML via `ExecuteResult::total()`. Unit tests cover the
-      three mapping functions; end-to-end trigger/shallow SQL still
-      relies on live-mssql tests (blocked on CI live-driver item).
-- [ ] [Implement] driver-sqlserver: cancel via **TDS attention** on the
-      shared socket. Current `cancel()` calls `task.abort()`
-      (`lib.rs:237-244`) which orphans the in-flight query server-side.
-      Cross-task cancel test mirroring PG's `cancel_aborts_long_query` is
-      present but only asserts client-side abort.
+      three mapping functions; live-mssql coverage runs in CI's
+      `live-drivers` job.
+- [x] [Implement] driver-sqlserver: cancel containment. TDS attention is not
+      exposed by tiberius as a safe cross-task public API, so ADR-017 locks
+      SQL Server cancel as task abort plus connection discard
+      (`docs/DECISIONS.md:200-204`). The driver aborts the cursor task
+      (`driver-sqlserver/src/lib.rs:268-276`) and the server removes the
+      SQL Server connection after cancel (`server/src/session.rs:330-344`)
+      so the orphaned backend session cannot be reused.
 - [x] [Implement] driver-sqlserver: panic isolation via `catch_unwind`
       around the spawned `run_query` future — `lib.rs:230-260`. On panic,
       emits `Page::Error { Code::DriverInternal }` (engine-tagged
       SqlServer), removes the cursor entry, and drops the (consumed)
       connection. Parity with PG's `stream.rs:79-94`.
-- [ ] [Implement] driver-sqlserver: connection pool (deadpool-analogue).
-      Currently `conns: Mutex<HashMap<u64, MssqlConn>>` (`lib.rs:42`) —
-      every `open()` dials fresh, no reuse, no `min_connections`, no
-      pre-warm (blocks Phase C pool-warmth for MSSQL). Decide before
-      Phase C design whether to pool at the driver or wrap tiberius's
-      own session model.
-- [ ] [Implement] driver-sqlserver: real `set_mars` and `BulkFormat::Native`
-      (or formally drop them from `MssqlExt` and ADR-017).
+- [x] [Design] driver-sqlserver pooling boundary: pooling is not part of the
+      Phase A trait signature. ADR-017 documents that PG may satisfy
+      `open()` from a cached pool while SQL Server currently owns one backend
+      session per handle (`docs/DECISIONS.md:206-209`); pool warmth and
+      preconnect remain Phase C performance work, not a trait-lock blocker.
+- [x] [Implement] driver-sqlserver: drop runtime `set_mars` and internal
+      `BulkFormat::Native` from the locked driver API. `MssqlExt` now only
+      exposes `use_database`, CSV `bulk_insert`, `savepoint`, and
+      `rollback_to` (`driver-api/src/lib.rs:232-244`); `BulkOp` is CSV
+      bytes only (`driver-api/src/lib.rs:303-307`). Protocol-level
+      `BulkInsertFormat::Native` remains accepted by serde but is rejected
+      before driver dispatch (`server/src/session.rs:349-361`).
 - [x] [Implement] tracing: `#[tracing::instrument(skip_all, fields(...))]`
       on every `Driver` + ext method across both engines
       (`driver-postgres/src/lib.rs`, `driver-sqlserver/src/lib.rs`). Fields
@@ -231,10 +240,11 @@ engine itself.
       identifiers so a span carries a stable lookup key without the risk
       of leaking bind values or secrets. Params (`req`, `spec`, bulk
       `data`) are dropped from the span via `skip_all`.
-- [ ] [Design] `ConnHandle` weak backref: decide whether to restore the
+- [x] [Design] `ConnHandle` weak backref: decide whether to restore the
       spec's `Weak<dyn Driver>` backref or formally drop it from ADR-017.
-      Currently documented as a Phase 0 simplification
-      (`driver-api/src/lib.rs:35-39`).
+      ADR-017 formally keeps `ConnHandle` as opaque id + engine tag without
+      a driver backref (`docs/DECISIONS.md:169-173`), matching the code
+      (`driver-api/src/lib.rs:38-63`).
 - [x] [Implement] Protocol `Operation::Savepoint`/`RollbackToSavepoint`/
       `ReleaseSavepoint` variants + server routing via `as_pg()`/`as_mssql()`
       downcast — `protocol/src/operation.rs:53-64`,
@@ -372,7 +382,9 @@ warmth, progressive indexing.
       (`stream_pages_with_ack`, `http.rs:2152-2222`) only pulls the next
       page after ack.
 - [ ] [Design] Pool pre-warm. PG pool `max_size: 8`, no `min_connections`
-      (`conn.rs:117-124`); SQL Server has no pool at all (Phase A item).
+      (`conn.rs:117-124`); SQL Server has no pool today, and ADR-017 keeps
+      pooling/preconnect as Phase C performance work rather than part of the
+      Phase A trait lock.
       Define warm count per engine and the cold-start budget.
 - [ ] [Implement] Server-side cursor registry with eviction; integration
       test that a 1M-row result holds bounded memory on both HTTP and WS.
@@ -584,22 +596,20 @@ Goal: the last mile before a real release.
 
 ## Sequencing & dependency notes
 
-- **Phase A is the gate for "trait locked."** Remaining A items:
-  ADR-017 (and the smaller Numeric/Interval/TLS/parity design items it
-  should absorb) not written, SQL Server cancel is still `task.abort()`
-  not TDS attention, and SQL Server has no pool (Phase C pool-warmth for
-  MSSQL is blocked on this). Closed since the last audit: SQL Server
-  panic isolation, savepoints on the wire, live driver tests in CI,
-  deep-schema parity (triggers, sys.objects shallow, IndexKind mapping),
-  and driver-level tracing spans.
+- **Phase A is complete: the driver trait is locked.** ADR-017 now absorbs
+  the Numeric/Interval/TLS/parity/backref decisions, SQL Server cancel is
+  explicitly abort-plus-discard under tiberius rather than a hidden TDS
+  attention promise, runtime MARS is out of `MssqlExt`, and native bulk is
+  deferred until there is a typed-row request shape. SQL Server pool warmth
+  is Phase C performance work, not a Phase A trait blocker.
 - **Phase B is the gate for "hosted is conceivable."** The loopback-bypass
   P0 is now closed (peer IP checked via trusted internal header +
   regression test). The remaining Phase B P0 is the unbounded
   `drain_stream` on the HTTP `execute_query` path that OOMs the server on
   a large result — still a patch, not a design.
-- **Phase C can proceed in parallel with D once A's schema/type items
-  land**, but the SQL Server pool question in Phase A shapes Phase C's
-  pool-warmth work — resolve it first.
+- **Phase C can proceed in parallel with D.** The remaining pool-warmth work
+  can choose a SQL Server pooling strategy without reopening the Phase A
+  driver trait.
 - **Phase D's saved-query work is partially unblocked** — the metadata
   table already exists (dead schema); wiring routes is mostly Implement,
   not Design.
@@ -623,7 +633,7 @@ Goal: the last mile before a real release.
 | ADR-013 | driver isolation | Phase B | not written; PG meets it, SQL Server does not |
 | ADR-014 | collaboration scope (CRDT text only) | Phase G | not written |
 | ADR-016 | protocol versioning + semver stability | Phase B | not written; header is one-way, version is `"1"` not semver |
-| ADR-017 | driver trait shape | Phase A | not written; trait shape is stable in code |
+| ADR-017 | driver trait shape | Phase A | written; Phase A trait lock |
 | ADR-018 | graceful shutdown contract | Phase B | not written |
 | ADR-019 | hosted identity model | Phase E | not written |
 | ADR-020 | authorization model | Phase F | not written |

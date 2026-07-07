@@ -23,11 +23,13 @@ The price of entry. Without these the tool is unusable as a Navicat alternative.
    **server: partial** — WS streams pages with ack (`http.rs:2152`); the HTTP
    `execute` path drains all rows unbounded (`session.rs:649` — Phase B cap).
 4. [D] Schema tree — server → db → schema → tables/views, click-to-inspect
-   columns. **server: partial** — shallow + deep schema for PG (incl triggers);
-   SQL Server omits triggers and lists only tables/views (`driver-sqlserver`).
+   columns. **server: partial** — shallow + deep schema for PG and SQL Server
+   include columns/indexes/constraints/triggers; richer cache/invalidation is
+   still Phase C.
 5. [D] Run query + cancel — async, cancel button, elapsed indicator.
    **server: partial** — execute + cancel routes work; PG cancel is real
-   (`CancelToken`), SQL Server cancel is `task.abort()` (Phase A TDS attention).
+   (`CancelToken`), SQL Server cancel is abort-plus-connection-discard per
+   ADR-017 because tiberius does not expose cross-task TDS attention.
 6. [D] Error reporting — query failures surface cleanly, not stack traces.
    **server: partial** — `Code` enum + `{kind, message}` body; no correlation
    id yet (Phase B).
