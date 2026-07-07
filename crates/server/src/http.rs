@@ -594,14 +594,24 @@ fn ensure_document_access(
     Ok(document)
 }
 
-fn push_metadata_operation(state: &AppState, action: &str, target: &str, id: Option<i64>) {
-    state.sessions.push_operation(
+fn push_metadata_operation(
+    state: &AppState,
+    actor: PrincipalId,
+    action: &str,
+    target: &str,
+    id: Option<i64>,
+) {
+    state.sessions.push_operation_full(
         Operation::Metadata {
             action: action.to_string(),
             target: target.to_string(),
             id,
         },
         OperationStatus::Succeeded,
+        Some(actor.0),
+        None,
+        None,
+        None,
     );
 }
 
@@ -1293,7 +1303,7 @@ async fn create_metadata_room(
             .map_err(Into::into)
     })
     .await?;
-    push_metadata_operation(&state, "create", "room", Some(room.id.0));
+    push_metadata_operation(&state, auth.principal_id, "create", "room", Some(room.id.0));
     Ok(Json(room))
 }
 
@@ -1305,13 +1315,14 @@ async fn delete_metadata_room(
     let metadata = metadata_store_cloned(&state)?;
     let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
     let room = room_id(id)?;
+    let actor = auth.principal_id;
     metadata_blocking(move || {
         ensure_room_permission(&metadata, &auth, room, RoomPermission::Admin)?;
         metadata.delete_room(room)?;
         Ok(())
     })
     .await?;
-    push_metadata_operation(&state, "delete", "room", Some(room.0));
+    push_metadata_operation(&state, actor, "delete", "room", Some(room.0));
     Ok(Json(json!({"ok": true})))
 }
 
@@ -1342,6 +1353,7 @@ async fn add_metadata_room_member(
     let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
     let room = room_id(id)?;
     let principal = principal_id(req.principal_id)?;
+    let actor = auth.principal_id;
     let member = metadata_blocking(move || {
         ensure_room_permission(&metadata, &auth, room, RoomPermission::Admin)?;
         metadata
@@ -1349,7 +1361,7 @@ async fn add_metadata_room_member(
             .map_err(Into::into)
     })
     .await?;
-    push_metadata_operation(&state, "add_member", "room", Some(room.0));
+    push_metadata_operation(&state, actor, "add_member", "room", Some(room.0));
     Ok(Json(member))
 }
 
@@ -1362,13 +1374,14 @@ async fn remove_metadata_room_member(
     let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
     let room = room_id(id)?;
     let principal = principal_id(principal)?;
+    let actor = auth.principal_id;
     metadata_blocking(move || {
         ensure_room_permission(&metadata, &auth, room, RoomPermission::Admin)?;
         metadata.remove_room_member(room, principal)?;
         Ok(())
     })
     .await?;
-    push_metadata_operation(&state, "remove_member", "room", Some(room.0));
+    push_metadata_operation(&state, actor, "remove_member", "room", Some(room.0));
     Ok(Json(json!({"ok": true})))
 }
 
@@ -1394,7 +1407,7 @@ async fn join_metadata_room(
             .map_err(Into::into)
     })
     .await?;
-    push_metadata_operation(&state, "join", "room", Some(room.0));
+    push_metadata_operation(&state, principal, "join", "room", Some(room.0));
     Ok(Json(member))
 }
 
@@ -1413,7 +1426,7 @@ async fn leave_metadata_room(
         Ok(())
     })
     .await?;
-    push_metadata_operation(&state, "leave", "room", Some(room.0));
+    push_metadata_operation(&state, principal, "leave", "room", Some(room.0));
     Ok(Json(json!({"ok": true})))
 }
 
@@ -1443,6 +1456,7 @@ async fn create_metadata_document(
     let metadata = metadata_store_cloned(&state)?;
     let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
     let room = room_id(id)?;
+    let actor = auth.principal_id;
     let document = metadata_blocking(move || {
         let room_row = ensure_room_permission(&metadata, &auth, room, RoomPermission::Write)?;
         let connection_profile_id = req.connection_profile_id.map(ConnectionProfileId);
@@ -1470,7 +1484,7 @@ async fn create_metadata_document(
             .map_err(Into::into)
     })
     .await?;
-    push_metadata_operation(&state, "create", "document", Some(document.id.0));
+    push_metadata_operation(&state, actor, "create", "document", Some(document.id.0));
     Ok(Json(document))
 }
 
@@ -1483,6 +1497,7 @@ async fn update_metadata_document(
     let metadata = metadata_store_cloned(&state)?;
     let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
     let document = document_id(id)?;
+    let actor = auth.principal_id;
     let updated = metadata_blocking(move || {
         ensure_document_access(&metadata, &auth, document, RoomPermission::Write)?;
         metadata
@@ -1490,7 +1505,7 @@ async fn update_metadata_document(
             .map_err(Into::into)
     })
     .await?;
-    push_metadata_operation(&state, "update", "document", Some(document.0));
+    push_metadata_operation(&state, actor, "update", "document", Some(document.0));
     Ok(Json(updated))
 }
 
@@ -1502,13 +1517,14 @@ async fn delete_metadata_document(
     let metadata = metadata_store_cloned(&state)?;
     let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
     let document = document_id(id)?;
+    let actor = auth.principal_id;
     metadata_blocking(move || {
         ensure_document_access(&metadata, &auth, document, RoomPermission::Write)?;
         metadata.delete_document(document)?;
         Ok(())
     })
     .await?;
-    push_metadata_operation(&state, "delete", "document", Some(document.0));
+    push_metadata_operation(&state, actor, "delete", "document", Some(document.0));
     Ok(Json(json!({"ok": true})))
 }
 
@@ -1553,7 +1569,13 @@ async fn upsert_metadata_connection(
             },
         )
         .await?;
-    push_metadata_operation(&state, "upsert", "connection_profile", Some(profile.id.0));
+    push_metadata_operation(
+        &state,
+        auth.principal_id,
+        "upsert",
+        "connection_profile",
+        Some(profile.id.0),
+    );
     Ok(Json(profile))
 }
 
@@ -1569,7 +1591,13 @@ async fn delete_metadata_connection(
     ensure_tenant(&auth, tenant)?;
     let profile = connection_profile_id(id)?;
     metadata.delete_connection_profile(tenant, profile).await?;
-    push_metadata_operation(&state, "delete", "connection_profile", Some(profile.0));
+    push_metadata_operation(
+        &state,
+        auth.principal_id,
+        "delete",
+        "connection_profile",
+        Some(profile.0),
+    );
     Ok(Json(json!({"ok": true})))
 }
 
@@ -1595,6 +1623,7 @@ async fn set_metadata_connection_credential(
         .await?;
     push_metadata_operation(
         &state,
+        auth.principal_id,
         "set_credential",
         "connection_profile",
         Some(profile_id.0),
@@ -1661,7 +1690,13 @@ async fn issue_auth_token(
             .map_err(Into::into)
     })
     .await?;
-    push_metadata_operation(&state, "issue", "api_token", Some(token.id.0));
+    push_metadata_operation(
+        &state,
+        auth.principal_id,
+        "issue",
+        "api_token",
+        Some(token.id.0),
+    );
     Ok(Json(IssueTokenResponse { token, plaintext }))
 }
 
@@ -1687,7 +1722,13 @@ async fn revoke_auth_token(
         Ok(())
     })
     .await?;
-    push_metadata_operation(&state, "revoke", "api_token", Some(token_id.0));
+    push_metadata_operation(
+        &state,
+        auth.principal_id,
+        "revoke",
+        "api_token",
+        Some(token_id.0),
+    );
     Ok(Json(json!({"ok": true})))
 }
 
@@ -1719,7 +1760,13 @@ async fn open_connection_from_profile(
         .sessions
         .open_connection(session_id, profile.engine, spec)
         .await?;
-    push_metadata_operation(&state, "open", "connection_profile", Some(profile_id.0));
+    push_metadata_operation(
+        &state,
+        auth.principal_id,
+        "open",
+        "connection_profile",
+        Some(profile_id.0),
+    );
     Ok(Json(info))
 }
 

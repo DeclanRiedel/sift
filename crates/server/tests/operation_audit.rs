@@ -62,6 +62,26 @@ fn audited_state(driver: MockDriver) -> AppState {
     }
 }
 
+/// Like [`audited_state`] but with loopback auth bypass so metadata mutations
+/// resolve to the bootstrapped local principal (id 1).
+fn audited_state_loopback(driver: MockDriver) -> AppState {
+    let registry = DriverRegistry::builder().register(driver).build();
+    let sessions = SessionStore::new(registry);
+    let metadata = MetadataStore::open_in_memory(Arc::new(MemorySecretStore::new())).unwrap();
+    metadata.bootstrap_local("local user").unwrap();
+    sessions.set_audit_store(metadata.clone());
+    AppState {
+        sessions,
+        rooms: RoomRuntime::default(),
+        auth: AuthState {
+            bearer_token: None,
+            loopback_bypass: true,
+        },
+        metadata: Some(metadata),
+        shutdown: Shutdown::default(),
+    }
+}
+
 fn post(uri: &str, body: serde_json::Value) -> Request<Body> {
     Request::post(uri)
         .header("content-type", "application/json")
@@ -200,6 +220,32 @@ async fn response_generates_correlation_id_when_absent() {
         .map(str::to_string)
         .expect("correlation id present");
     assert!(!id.is_empty());
+}
+
+#[tokio::test]
+async fn metadata_operation_records_actor() {
+    let app = app(audited_state_loopback(
+        MockDriver::builder().engine(Engine::Postgres).build(),
+    ));
+    let res = app
+        .clone()
+        .oneshot(post(
+            "/v1/metadata/rooms",
+            serde_json::json!({ "tenant_id": 1, "name": "room-a", "kind": "personal" }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+
+    let rows = audit_rows(&app).await;
+    let created = rows
+        .iter()
+        .find(|r| r.action == "create" && r.target == "room")
+        .expect("room create audited");
+    assert_eq!(
+        created.actor_principal_id,
+        Some(sift_metadata::PrincipalId(1))
+    );
 }
 
 #[tokio::test]

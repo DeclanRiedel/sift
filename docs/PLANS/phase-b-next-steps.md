@@ -13,9 +13,8 @@ bad driver call, long query, or host shutdown from breaking the server contract.
 - [x] 5. Correlation IDs — commit pending.
 - [ ] 6. Connection recovery behavior — next.
 
-Note (step 4): actor is captured on the query path; metadata admin operations
-still record durable rows but without an actor id yet — a small follow-up to
-thread `principal_id` through `push_metadata_operation`.
+Note (step 4 follow-up, done): actor is now captured on both the query path and
+metadata admin operations (`push_metadata_operation` threads `principal_id`).
 
 ## Order of Work
 
