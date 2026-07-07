@@ -295,12 +295,9 @@ are safety holes, not just polish.
       (`main.rs:115-120` hard-errors on any other `secret_backend` value).
       Define `OsKeychain` (keyring/security-framework), `File` (encrypted,
       dev only), `Vault` (hosted, deferred).
-- [ ] [Design] API versioning policy (ADR-016). `PROTOCOL_VERSION = "1"`
-      (`protocol/src/lib.rs:12`) is a bare string, not semver; the header
-      is emitted on responses (`http.rs:153-160`) but **never read**; there
-      is no `Code::UnsupportedVersion`, no `451` handling, no negotiation
-      request/response type. Define breaking-vs-additive rules + deprecation
-      window.
+- [x] [Design] API versioning policy (ADR-016): written. Monotonic integer
+      version, breaking-vs-additive rules, pin-or-proceed negotiation via the
+      `x-sift-protocol-version` header.
 - [x] [Design] Per-query timeout: done. `config.timeouts.request_secs` is
       consumed; all synchronous driver calls run on a spawned task bounded by
       the deadline and surface `Code::QueryTimedOut`.
@@ -329,10 +326,10 @@ are safety holes, not just polish.
 - [x] [Implement] Correlation IDs: accept-or-generate `x-correlation-id`,
       carried on a task-local, echoed in the response header, error body,
       tracing span, and durable audit rows (HTTP and WebSocket).
-- [ ] [Implement] Protocol version negotiation: read inbound
-      `X-Sift-Protocol-Version`, return `451 Unsupported Version` (or
-      agreed status) with the supported range in the body. Add
-      `Code::UnsupportedVersion`.
+- [x] [Implement] Protocol version negotiation: inbound
+      `x-sift-protocol-version` is read in middleware; a mismatch returns
+      `400 unsupported_protocol_version` naming requested vs supported. Absent
+      header proceeds (unpinned). Chose 400 over 451 as the standard fit.
 - [x] [Implement] Per-query `tokio::spawn` + `timeout` on the HTTP
       `execute_query` path (parity with the WS path's spawned pump).
       Wire `config.timeouts.request_secs` or remove the dead config.
@@ -626,7 +623,7 @@ Goal: the last mile before a real release.
 | ADR-011 | result streaming via server-side cursors | Phase C | not written |
 | ADR-013 | driver isolation | Phase B | written; both engines meet the containment boundary |
 | ADR-014 | collaboration scope (CRDT text only) | Phase G | not written |
-| ADR-016 | protocol versioning + semver stability | Phase B | not written; header is one-way, version is `"1"` not semver |
+| ADR-016 | protocol versioning + semver stability | Phase B | written; pin-or-proceed negotiation, monotonic integer version |
 | ADR-017 | driver trait shape | Phase A | written; Phase A trait lock |
 | ADR-018 | graceful shutdown contract | Phase B | written |
 | ADR-019 | hosted identity model | Phase E | not written |

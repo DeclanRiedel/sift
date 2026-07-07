@@ -138,6 +138,37 @@ async fn get_ready(app: axum::Router) -> (StatusCode, Readiness) {
 }
 
 #[tokio::test]
+async fn pinning_unsupported_protocol_version_is_rejected() {
+    let app = app(test_state());
+    let request = Request::get("/v1/health")
+        .header("x-sift-protocol-version", "999")
+        .body(Body::empty())
+        .unwrap();
+    let res = app.oneshot(request).await.unwrap();
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+    let body: serde_json::Value = body_json(res.into_body()).await;
+    assert_eq!(body["kind"], "unsupported_protocol_version");
+}
+
+#[tokio::test]
+async fn pinning_supported_protocol_version_is_accepted() {
+    let app = app(test_state());
+    let request = Request::get("/v1/health")
+        .header("x-sift-protocol-version", sift_protocol::PROTOCOL_VERSION)
+        .body(Body::empty())
+        .unwrap();
+    let res = app.oneshot(request).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    // Server advertises its version on the response regardless.
+    assert_eq!(
+        res.headers()
+            .get("x-sift-protocol-version")
+            .and_then(|v| v.to_str().ok()),
+        Some(sift_protocol::PROTOCOL_VERSION)
+    );
+}
+
+#[tokio::test]
 async fn error_body_echoes_correlation_id() {
     let app = app(test_state());
     let request = Request::get("/v1/sessions/999999")

@@ -165,7 +165,7 @@ pub fn app(state: AppState) -> Router {
         .layer(from_fn_with_state(state.auth.clone(), auth_middleware))
         .layer(from_fn(inject_peer_addr))
         .layer(from_fn_with_state(state.sessions.clone(), audit_middleware))
-        .layer(from_fn(protocol_version_header))
+        .layer(from_fn(protocol_version_middleware))
         .layer(from_fn(correlation_middleware))
         .with_state(state)
 }
@@ -200,10 +200,28 @@ fn peer_is_loopback(headers: &HeaderMap) -> bool {
         .is_some_and(|ip| ip.is_loopback())
 }
 
-async fn protocol_version_header(req: Request<Body>, next: Next) -> Response {
+const PROTOCOL_VERSION_HEADER: HeaderName = HeaderName::from_static("x-sift-protocol-version");
+
+/// Protocol version negotiation (ADR-016). A request may pin a version via the
+/// `x-sift-protocol-version` header; a mismatch is rejected before routing.
+/// Absent header = unpinned = proceed. The server's version is always
+/// advertised on the response.
+async fn protocol_version_middleware(req: Request<Body>, next: Next) -> Response {
+    if let Some(requested) = req
+        .headers()
+        .get(&PROTOCOL_VERSION_HEADER)
+        .and_then(|value| value.to_str().ok())
+    {
+        if requested != PROTOCOL_VERSION {
+            return ApiError::UnsupportedProtocolVersion {
+                requested: requested.to_string(),
+            }
+            .into_response();
+        }
+    }
     let mut response = next.run(req).await;
     response.headers_mut().insert(
-        HeaderName::from_static("x-sift-protocol-version"),
+        PROTOCOL_VERSION_HEADER,
         HeaderValue::from_static(PROTOCOL_VERSION),
     );
     response

@@ -196,6 +196,41 @@ escape, or reuses a post-cancel connection is an ADR violation, not just a bug.
 
 ---
 
+## ADR-016 — Protocol Versioning and Negotiation
+
+**Context.** `PROTOCOL_VERSION` is a bare string (`"1"`) emitted in the
+`x-sift-protocol-version` response header but never read from requests. A
+client built against a future, incompatible wire contract would hit confusing
+partial failures instead of a clear signal, and there was no way to reject an
+unsupported client.
+
+**Decision.** The protocol version is a single monotonically increasing integer
+string, not semver. It bumps only on a *breaking* wire change; additive changes
+do not.
+
+- Breaking (bump): removing or renaming a field or endpoint, changing a field's
+  type or meaning, changing an existing enum variant's shape, or tightening
+  validation so previously valid requests fail.
+- Additive (no bump): new endpoints, new optional request fields with defaults,
+  new response fields, new enum variants existing clients can ignore.
+
+Negotiation is pin-or-proceed. A request may pin the version via the
+`x-sift-protocol-version` header. If present and it does not equal the server's
+version, the request is rejected before routing with `400` and error kind
+`unsupported_protocol_version`, naming the requested and supported versions. If
+absent, the request proceeds — an unpinned client is assumed compatible — and
+the server always advertises its version on the response. There is no range
+negotiation while a single version exists; a future multi-version window
+extends this by accepting a set and defining a deprecation window (N and N-1).
+
+**Consequences.** A client pinned to a version the server no longer speaks
+fails fast with an actionable error instead of subtle misbehavior. Additive
+evolution stays cheap — most changes never touch the version. The check is a
+cheap header comparison in middleware. Unpinned clients keep working, so the
+gate is opt-in until a breaking change makes pinning meaningful.
+
+---
+
 ## ADR-017 — Driver Trait Lock After Two Real Implementations
 
 **Context.** The server now has real PostgreSQL and SQL Server drivers behind

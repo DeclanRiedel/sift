@@ -34,6 +34,12 @@ pub enum ApiError {
     #[error("service draining")]
     ServiceDraining,
 
+    #[error(
+        "unsupported protocol version `{requested}`; server speaks `{}`",
+        sift_protocol::PROTOCOL_VERSION
+    )]
+    UnsupportedProtocolVersion { requested: String },
+
     #[error("metadata error: {0}")]
     Metadata(#[from] MetadataError),
 
@@ -78,6 +84,9 @@ impl ApiError {
                 (StatusCode::SERVICE_UNAVAILABLE, "metadata_unavailable")
             }
             ApiError::ServiceDraining => (StatusCode::SERVICE_UNAVAILABLE, "service_draining"),
+            ApiError::UnsupportedProtocolVersion { .. } => {
+                (StatusCode::BAD_REQUEST, "unsupported_protocol_version")
+            }
             ApiError::Metadata(error) => match error {
                 MetadataError::ConnectionProfileNotFound(_)
                 | MetadataError::RoomNotFound(_)
