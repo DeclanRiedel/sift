@@ -107,10 +107,15 @@ impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         let (status, kind) = self.status_and_code();
         let message = self.to_string();
-        tracing::warn!(%status, %kind, %message, "api error");
+        // Correlation ID is set on the request task by the middleware; echo it
+        // in the error body too so a client sees the same id it gets in the
+        // response header and the server logs/audit carry.
+        let correlation_id = crate::correlation::current();
+        tracing::warn!(%status, %kind, %message, correlation_id = ?correlation_id, "api error");
         let body = serde_json::json!({
             "kind": kind,
             "message": message,
+            "correlation_id": correlation_id,
         });
         (status, Json(body)).into_response()
     }

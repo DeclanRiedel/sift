@@ -327,9 +327,8 @@ are safety holes, not just polish.
       which can carry bind values through `ExecuteRequest` — flag for
       redaction at the audit boundary.
 - [x] [Implement] Correlation IDs: accept-or-generate `x-correlation-id`,
-      carried on a task-local, echoed in the response header + tracing span
-      and recorded on durable audit rows (HTTP and WebSocket). The error body
-      itself is not yet stamped with the id — a small follow-up.
+      carried on a task-local, echoed in the response header, error body,
+      tracing span, and durable audit rows (HTTP and WebSocket).
 - [ ] [Implement] Protocol version negotiation: read inbound
       `X-Sift-Protocol-Version`, return `451 Unsupported Version` (or
       agreed status) with the supported range in the body. Add

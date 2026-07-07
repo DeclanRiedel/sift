@@ -138,6 +138,25 @@ async fn get_ready(app: axum::Router) -> (StatusCode, Readiness) {
 }
 
 #[tokio::test]
+async fn error_body_echoes_correlation_id() {
+    let app = app(test_state());
+    let request = Request::get("/v1/sessions/999999")
+        .header("x-correlation-id", "corr-err")
+        .body(Body::empty())
+        .unwrap();
+    let res = app.oneshot(request).await.unwrap();
+    assert_eq!(res.status(), StatusCode::NOT_FOUND);
+    assert_eq!(
+        res.headers()
+            .get("x-correlation-id")
+            .and_then(|v| v.to_str().ok()),
+        Some("corr-err")
+    );
+    let body: serde_json::Value = body_json(res.into_body()).await;
+    assert_eq!(body["correlation_id"], "corr-err");
+}
+
+#[tokio::test]
 async fn ready_returns_200_when_healthy() {
     // No metadata store configured → metadata_ok is None (nothing to reach).
     let (status, body) = get_ready(app(test_state())).await;
