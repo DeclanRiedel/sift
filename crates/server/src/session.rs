@@ -13,8 +13,8 @@ use std::time::Duration;
 
 use dashmap::DashMap;
 use sift_driver_api::{
-    BulkFormat, BulkOp, ConnHandle, Driver, MssqlSavepoint, NotificationStream, PgSavepoint,
-    ResultSetStream, TxHandle,
+    BulkOp, ConnHandle, Driver, MssqlSavepoint, NotificationStream, PgSavepoint, ResultSetStream,
+    TxHandle,
 };
 use sift_protocol::{
     AuditEntry, BeginTransactionRequest, BulkInsertFormat, BulkInsertRequest, BulkInsertResponse,
@@ -362,16 +362,22 @@ impl SessionStore {
                 .with_engine(entry.driver.engine()),
             )
         })?;
+        if req.format == BulkInsertFormat::Native {
+            return Err(ApiError::Driver(
+                DriverError::new(
+                    sift_protocol::Code::UnsupportedForEngine,
+                    "SQL Server native bulk format needs typed rows and is not part of the locked Phase A driver trait",
+                )
+                .with_engine(Engine::SqlServer),
+            ));
+        }
+
         let result = mssql
             .bulk_insert(
                 entry.handle.clone(),
                 BulkOp {
                     table: req.table,
                     data: req.data,
-                    format: match req.format {
-                        BulkInsertFormat::Csv => BulkFormat::Csv,
-                        BulkInsertFormat::Native => BulkFormat::Native,
-                    },
                 },
             )
             .await?;

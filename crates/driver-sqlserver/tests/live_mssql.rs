@@ -10,7 +10,7 @@
 
 #![cfg(feature = "live-mssql")]
 
-use sift_driver_api::{BulkFormat, BulkOp, Driver, MssqlExt};
+use sift_driver_api::{BulkOp, Driver, MssqlExt};
 use sift_driver_sqlserver::MssqlDriver;
 use sift_protocol::{
     ConnectionSpec, Engine, EngineConnectionSpec, ExecuteRequest, MssqlConnectionSpec, ObjectPath,
@@ -127,7 +127,6 @@ async fn bulk_insert_csv_round_trip() {
             BulkOp {
                 table: format!("dbo.{table}"),
                 data: b"id,name\n1,Alice\n2,\"Bob, Jr\"\n3,\n".to_vec(),
-                format: BulkFormat::Csv,
             },
         )
         .await

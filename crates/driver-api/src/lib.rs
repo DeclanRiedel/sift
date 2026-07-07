@@ -138,8 +138,9 @@ pub trait Driver: Send + Sync {
     /// by clients to pick the right ext-trait downcast.
     fn engine(&self) -> Engine;
 
-    /// Open a new connection from this driver's pool. The driver internally
-    /// maps the returned handle id to its typed connection.
+    /// Open a new logical connection. Drivers may satisfy this from a pool
+    /// or by dialing a fresh backend session, but the returned handle maps
+    /// to one typed connection owned by that driver.
     async fn open(&self, spec: &ConnectionSpec) -> Result<ConnHandle, DriverError>;
 
     /// Cheap liveness check + server-reported metadata.
@@ -235,8 +236,6 @@ pub trait MssqlExt: Send + Sync {
 
     async fn bulk_insert(&self, c: ConnHandle, op: BulkOp) -> Result<BulkResult, DriverError>;
 
-    async fn set_mars(&self, c: ConnHandle, enabled: bool) -> Result<(), DriverError>;
-
     /// SQL Server savepoint: `SAVE TRANSACTION <name>` / `ROLLBACK
     /// TRANSACTION <name>`.
     async fn savepoint(&self, t: &TxHandle, name: &str) -> Result<MssqlSavepoint, DriverError>;
@@ -297,19 +296,13 @@ pub struct MssqlSavepoint {
     pub name: String,
 }
 
-/// BULK INSERT request shape. To be fleshed out with column mapping when
-/// FEATURES.md Tier 2 #31 (CSV import) lands.
+/// BULK INSERT request shape for the currently supported CSV import path.
+/// Native TDS bulk-load needs typed rows and column metadata, not raw bytes,
+/// so it will require a separate request type if it graduates later.
 #[derive(Debug, Clone)]
 pub struct BulkOp {
     pub table: String,
     pub data: Vec<u8>,
-    pub format: BulkFormat,
-}
-
-#[derive(Debug, Clone, Copy)]
-pub enum BulkFormat {
-    Csv,
-    Native,
 }
 
 #[derive(Debug, Clone)]

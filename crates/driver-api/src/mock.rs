@@ -363,14 +363,6 @@ impl MssqlExt for MockDriver {
         MockDriver::pop(&mut self.state.lock().unwrap().bulk_insert, "bulk_insert")
     }
 
-    async fn set_mars(&self, _c: ConnHandle, _enabled: bool) -> Result<(), DriverError> {
-        self.record("set_mars");
-        Err(DriverError::new(
-            Code::UnsupportedForEngine,
-            "MARS not wired in MockDriver",
-        ))
-    }
-
     async fn savepoint(&self, t: &TxHandle, name: &str) -> Result<MssqlSavepoint, DriverError> {
         self.record("mssql_savepoint");
         Ok(MssqlSavepoint {

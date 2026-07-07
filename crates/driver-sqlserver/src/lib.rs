@@ -13,8 +13,7 @@ use async_trait::async_trait;
 use dashmap::DashMap;
 use futures::StreamExt;
 use sift_driver_api::{
-    BulkFormat, BulkOp, BulkResult, ConnHandle, Driver, IdCounter, MssqlExt, ResultSetStream,
-    TxHandle,
+    BulkOp, BulkResult, ConnHandle, Driver, IdCounter, MssqlExt, ResultSetStream, TxHandle,
 };
 use sift_protocol::{
     Code, ColumnMetadata, ConnectionSpec, ConstraintInfo, ConstraintKind, CursorId, DriverError,
@@ -321,14 +320,6 @@ impl MssqlExt for MssqlDriver {
         let result = bulk_insert_csv(&mut conn, op).await;
         self.put_conn(&c, conn).await;
         result
-    }
-
-    #[tracing::instrument(skip_all, fields(engine = "sql_server", conn = _c.id(), enabled = _enabled))]
-    async fn set_mars(&self, _c: ConnHandle, _enabled: bool) -> Result<(), DriverError> {
-        Err(DriverError::new(
-            Code::UnsupportedForEngine,
-            "MARS toggle not wired yet",
-        ))
     }
 
     #[tracing::instrument(skip_all, fields(engine = "sql_server", tx = t.tx_id.0, name = %name))]
@@ -970,14 +961,6 @@ fn params_to_mssql(params: Vec<Value>) -> Result<Vec<Box<dyn ToSql>>, DriverErro
 }
 
 async fn bulk_insert_csv(conn: &mut MssqlConn, op: BulkOp) -> Result<BulkResult, DriverError> {
-    if !matches!(op.format, BulkFormat::Csv) {
-        return Err(DriverError::new(
-            Code::UnsupportedForEngine,
-            "SQL Server native bulk format is not supported yet",
-        )
-        .with_engine(Engine::SqlServer));
-    }
-
     let table = quote_qualified_ident(&op.table)?;
     let mut reader = csv::ReaderBuilder::new()
         .has_headers(true)

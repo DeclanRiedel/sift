@@ -334,6 +334,55 @@ async fn bulk_insert_is_public_http_api() {
 }
 
 #[tokio::test]
+async fn native_bulk_insert_is_explicitly_rejected() {
+    let driver = MockDriver::builder().engine(Engine::SqlServer).build();
+    let app = app(test_state_with_driver(driver));
+
+    let session: sift_protocol::SessionInfo = body_json(
+        app.clone()
+            .oneshot(post_json(
+                "/v1/sessions",
+                sift_protocol::OpenSessionRequest { tag: None },
+            ))
+            .await
+            .unwrap()
+            .into_body(),
+    )
+    .await;
+    let conn: sift_protocol::ConnectionInfo = body_json(
+        app.clone()
+            .oneshot(post_json(
+                format!("/v1/sessions/{}/connections", session.id),
+                sift_protocol::OpenConnectionRequest {
+                    engine: Engine::SqlServer,
+                    spec: mssql_spec(),
+                },
+            ))
+            .await
+            .unwrap()
+            .into_body(),
+    )
+    .await;
+
+    let res = app
+        .oneshot(post_json(
+            format!(
+                "/v1/sessions/{}/connections/{}/bulk-insert",
+                session.id, conn.id
+            ),
+            sift_protocol::BulkInsertRequest {
+                table: "dbo.people".into(),
+                data: Vec::new(),
+                format: sift_protocol::BulkInsertFormat::Native,
+            },
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(res.status(), StatusCode::UNPROCESSABLE_ENTITY);
+}
+
+#[tokio::test]
 async fn audit_records_http_operations() {
     let app = app(test_state());
     let res = app
