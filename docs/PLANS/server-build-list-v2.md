@@ -23,15 +23,13 @@ view while prioritizing:
   done: PG `NUMERIC`/`INTERVAL` decode, PG TLS (rustls), all `PgExt`
   methods (`listen`/`unlisten`/`copy`/`advisory_lock`/`unlock`/`savepoint`/
   `rollback_to`/`release_savepoint`), and the SQL Server live test harness.
-- Several "already in place" assumptions are weaker than they sound:
-  there are **no per-query timeouts** (`config.timeouts.request_secs` is
-  parsed then never read); Operation audit hard-codes `Succeeded` at every
-  call site; there is **no correlation id** anywhere; and the `doc` crate
-  is **not a real CRDT** (UTF-8 byte buffer + apply-op). *(Closed since
-  the last snapshot: driver-isolation `catch_unwind` now covers SQL
-  Server too; the loopback-bypass flag now checks the peer address; CI
-  now runs the live driver tests against PG and MSSQL service
-  containers.)*
+- The `doc` crate is **not a real CRDT** (UTF-8 byte buffer + apply-op) —
+  still open, and the first Phase G deliverable. *(Closed in Phase B: per-query
+  timeouts now consume `config.timeouts.request_secs`; operation audit records
+  the failure path via one helper, not a hard-coded `Succeeded`; correlation
+  ids flow end to end; driver-isolation `catch_unwind` covers SQL Server;
+  loopback-bypass checks the peer address; CI runs the live driver tests
+  against PG and MSSQL service containers.)*
 - Three metadata tables (`principal_key`, `keypair_challenge`,
   `saved_query`) are created by migrations but never read or written by any
   Rust code — dead schema.
@@ -112,8 +110,11 @@ view while prioritizing:
   SQLite **structurally** — password `.take()`n before `serde_json` in
   `upsert_connection_profile` (`lib.rs:360-447`); only opaque handles
   stored.
-- **SecretStore trait** (`crates/metadata/src/secrets/mod.rs:8-13`):
-  `put`/`get`/`delete`. Only `MemorySecretStore` exists (`:15-52`).
+- **SecretStore trait** (`crates/metadata/src/secrets/mod.rs`):
+  `put`/`get`/`delete`, with three backends — `MemorySecretStore`,
+  `FileSecretStore` (ChaCha20-Poly1305, keyfile-derived key), and
+  `OsKeychainSecretStore` (keyring, `os-keychain` feature). Selected by
+  `metadata.secret_backend`.
 - **Rooms runtime** (`crates/server/src/room_runtime.rs`): in-memory
   presence + document-op broadcast + snapshot persistence (full-snapshot
   `UPDATE document SET crdt_state = ?`, no op-log). Room-scoped query-result
@@ -265,13 +266,17 @@ performance/product work, not Phase A blockers.
 
 ## Phase B — Server reliability layer
 
-Goal: "demo works" → "I would put real data in this." Every long-lived
-server needs these before hosted mode is conceivable. Several items here
-are safety holes, not just polish.
+Status: **complete.** "Demo works" → "I would put real data in this." Every
+item below is landed and covered by tests (`cargo test --workspace` green;
+`clippy --workspace --all-targets -D warnings` clean). The former safety holes
+— per-query timeout, unbounded HTTP result, bind-value/secret leaks in audit,
+timing-oracle auth, no readiness signal, no graceful drain — are all closed.
 
-- [ ] [Design] ADR-018 (candidate): graceful-shutdown contract — signal →
-      stop accepting → drain in-flight queries (with per-query deadline) →
-      close pools → flush metadata → persist room snapshots → exit.
+- [x] [Design] ADR-018: graceful-shutdown contract — written in
+      `docs/DECISIONS.md`. Sequence: signal → stop accepting new work → mark
+      readiness false → drain in-flight queries to a deadline → cancel/close →
+      exit. (Explicit pool close / straggler-cursor cancel documented as
+      deferred; per-query timeout is the backstop.)
 - [x] [Design] ADR-013 graduation: lock driver-isolation policy. Written.
       Both engines now satisfy the three-layer containment boundary
       (spawn+timeout dispatch, `catch_unwind` on the streaming path, no
@@ -287,10 +292,11 @@ are safety holes, not just polish.
       table now carries actor, target, result_code, row_count, correlation_id,
       and error_message; the failure path is recorded; success and failure go
       through one helper. See the operation-level audit implement item below.
-- [ ] [Design] Secret backends. Only `MemorySecretStore` is wired
-      (`main.rs:115-120` hard-errors on any other `secret_backend` value).
-      Define `OsKeychain` (keyring/security-framework), `File` (encrypted,
-      dev only), `Vault` (hosted, deferred).
+- [x] [Design] Secret backends: done. `metadata.secret_backend` selects
+      `memory` | `file` | `keychain`. `file` is an encrypted (ChaCha20-Poly1305)
+      store keyed from `metadata.secret_key_file`; `keychain` is the OS
+      credential store (pure-Rust keyring, `os-keychain` feature). Vault stays
+      deferred to the hosted phase.
 - [x] [Design] API versioning policy (ADR-016): written. Monotonic integer
       version, breaking-vs-additive rules, pin-or-proceed negotiation via the
       `x-sift-protocol-version` header.
@@ -311,8 +317,11 @@ are safety holes, not just polish.
       table with actor/target/result_code/row_count/correlation_id and the
       recorded failure path, written through one helper
       (`push_operation_full`); exposed at `GET /v1/operations/audit`.
-- [ ] [Implement] OS-keychain `SecretStore` backend; never log secret
-      bytes; redaction in audit + tracing; round-trip put/get/delete test.
+- [x] [Implement] OS-keychain `SecretStore` backend: done. `keyring` 3 under
+      the `os-keychain` feature (pure-Rust zbus Secret Service on Linux, no
+      system libdbus); binary `set_secret`/`get_secret`. Secret bytes are never
+      logged. Compile-verified; gated off by default (needs a runtime
+      credential service) with an `#[ignore]`d round-trip test.
 - [x] [Implement] Audit redaction + query fingerprinting: done. Operations are
       sanitized before storage on every surface — SQL becomes a `sqlfp:` hash,
       execute params cleared, connection passwords redacted, bulk payloads
@@ -586,11 +595,13 @@ Goal: the last mile before a real release.
   attention promise, runtime MARS is out of `MssqlExt`, and native bulk is
   deferred until there is a typed-row request shape. SQL Server pool warmth
   is Phase C performance work, not a Phase A trait blocker.
-- **Phase B is the gate for "hosted is conceivable."** The loopback-bypass
-  P0 is now closed (peer IP checked via trusted internal header +
-  regression test). The remaining Phase B P0 is the unbounded
-  `drain_stream` on the HTTP `execute_query` path that OOMs the server on
-  a large result — still a patch, not a design.
+- **Phase B is complete — the gate for "hosted is conceivable" is met.** All
+  reliability, safety, and hardening items landed: per-query timeout + spawn
+  discipline, graceful shutdown (ADR-018), health/readiness split, durable +
+  sanitized operation audit, correlation ids, connection recovery, driver
+  isolation (ADR-013), protocol versioning (ADR-016), secret backends
+  (file + keychain), the HTTP result row/byte caps, and constant-time bearer
+  comparison. Remaining backlog is later-phase feature work (C onward).
 - **Phase C can proceed in parallel with D.** The remaining pool-warmth work
   can choose a SQL Server pooling strategy without reopening the Phase A
   driver trait.
