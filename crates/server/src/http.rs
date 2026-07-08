@@ -2469,6 +2469,9 @@ async fn handle_ws(
                         stream_pages_with_ack(
                             &mut sender,
                             &mut receiver,
+                            &sessions,
+                            session_id,
+                            connection,
                             stream.cursor_id,
                             stream.rows,
                         )
@@ -2542,9 +2545,17 @@ async fn stream_notifications(
     Ok(())
 }
 
+enum AckOutcome {
+    Acked,
+    Cancelled,
+}
+
 async fn stream_pages_with_ack(
     sender: &mut futures::stream::SplitSink<WebSocket, Message>,
     receiver: &mut futures::stream::SplitStream<WebSocket>,
+    sessions: &SessionStore,
+    session_id: sift_protocol::SessionId,
+    connection: sift_protocol::ConnectionId,
     cursor_id: sift_protocol::CursorId,
     mut rows: tokio::sync::mpsc::Receiver<sift_protocol::Page>,
 ) -> ApiResult<()> {
@@ -2566,7 +2577,10 @@ async fn stream_pages_with_ack(
         if terminal {
             break;
         }
-        wait_for_ack(receiver, cursor_id, seq).await?;
+        match wait_for_ack(receiver, sessions, session_id, connection, cursor_id, seq).await? {
+            AckOutcome::Acked => {}
+            AckOutcome::Cancelled => break,
+        }
         seq += 1;
     }
     Ok(())
@@ -2574,11 +2588,18 @@ async fn stream_pages_with_ack(
 
 async fn wait_for_ack(
     receiver: &mut futures::stream::SplitStream<WebSocket>,
+    sessions: &SessionStore,
+    session_id: sift_protocol::SessionId,
+    connection: sift_protocol::ConnectionId,
     cursor_id: sift_protocol::CursorId,
     seq: u64,
-) -> ApiResult<()> {
+) -> ApiResult<AckOutcome> {
     loop {
         let Some(message) = receiver.next().await else {
+            // Client dropped the socket mid-stream: cancel the driver-side
+            // work so we honor the abort+discard invariant instead of
+            // waiting for the mpsc drop to eventually reach the driver.
+            let _ = sessions.cancel(session_id, connection, cursor_id).await;
             return Err(ApiError::BadRequest("websocket closed before ack".into()));
         };
         let message = message.map_err(|e| ApiError::BadRequest(e.to_string()))?;
@@ -2589,17 +2610,21 @@ async fn wait_for_ack(
                 WsClientMessage::Ack {
                     cursor_id: ack_cursor,
                     seq: ack_seq,
-                } if ack_cursor == cursor_id && ack_seq == seq => return Ok(()),
+                } if ack_cursor == cursor_id && ack_seq == seq => return Ok(AckOutcome::Acked),
                 WsClientMessage::Ack { .. } => {
                     return Err(ApiError::BadRequest("ack cursor or seq mismatch".into()));
                 }
                 WsClientMessage::Cancel {
-                    connection: _,
-                    cursor_id: _,
+                    connection: cancel_conn,
+                    cursor_id: cancel_cursor,
                 } => {
-                    return Err(ApiError::BadRequest(
-                        "cancel during active stream must use HTTP cancel endpoint".into(),
-                    ));
+                    if cancel_cursor != cursor_id || cancel_conn != connection {
+                        return Err(ApiError::BadRequest(
+                            "cancel cursor or connection mismatch".into(),
+                        ));
+                    }
+                    sessions.cancel(session_id, connection, cursor_id).await?;
+                    return Ok(AckOutcome::Cancelled);
                 }
                 WsClientMessage::Execute { .. } => {
                     return Err(ApiError::BadRequest(
@@ -2612,7 +2637,10 @@ async fn wait_for_ack(
                     ));
                 }
             },
-            Message::Close(_) => return Err(ApiError::BadRequest("websocket closed".into())),
+            Message::Close(_) => {
+                let _ = sessions.cancel(session_id, connection, cursor_id).await;
+                return Err(ApiError::BadRequest("websocket closed".into()));
+            }
             Message::Ping(_) | Message::Pong(_) | Message::Binary(_) => {}
         }
     }
