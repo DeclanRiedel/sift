@@ -139,10 +139,27 @@ impl Driver for PgDriver {
             }
             entry.1.clone()
         };
-        token
-            .cancel_query(tokio_postgres::NoTls)
-            .await
-            .map_err(pg_err)?;
+        // Match the SSL mode the original conn used. Postgres deployments
+        // configured with `hostssl` reject a NoTls cancel socket, and the
+        // caller would then observe "cancel succeeded" while the query
+        // kept running server-side.
+        let ssl_mode = self
+            .inner
+            .spec_for(c.id())
+            .and_then(|s| s.ssl_mode)
+            .unwrap_or(sift_protocol::SslMode::Prefer);
+        match ssl_mode {
+            sift_protocol::SslMode::VerifyCa | sift_protocol::SslMode::VerifyFull => {
+                let tls = conn::native_tls_connector()?;
+                token.cancel_query(tls).await.map_err(pg_err)?;
+            }
+            _ => {
+                token
+                    .cancel_query(tokio_postgres::NoTls)
+                    .await
+                    .map_err(pg_err)?;
+            }
+        }
         Ok(())
     }
 
