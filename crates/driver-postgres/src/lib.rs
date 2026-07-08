@@ -196,6 +196,7 @@ impl PgExt for PgDriver {
         let (tx, rx) = tokio::sync::mpsc::channel(128);
         let cfg = pg_connect_config(&spec);
         let ssl_mode = spec.ssl_mode.unwrap_or(sift_protocol::SslMode::Prefer);
+        let channels_set: std::collections::HashSet<String> = channels.iter().cloned().collect();
         let client = if matches!(
             ssl_mode,
             sift_protocol::SslMode::VerifyCa | sift_protocol::SslMode::VerifyFull
@@ -213,9 +214,17 @@ impl PgExt for PgDriver {
             listen_channels(&client, channels).await?;
             client
         };
-        // Track the dedicated LISTEN client so `unlisten` (and `close`)
-        // can reach it; without this UNLISTEN would be a no-op.
-        self.inner.listens.entry(c.id()).or_default().push(client);
+        // Track the dedicated LISTEN client and the channels it
+        // subscribed to so `unlisten` (and `close`) can reach only the
+        // clients that actually care about a given channel.
+        self.inner
+            .listens
+            .entry(c.id())
+            .or_default()
+            .push(conn::ListenEntry {
+                client,
+                channels: channels_set,
+            });
         Ok(NotificationStream { notifications: rx })
     }
 
@@ -224,16 +233,28 @@ impl PgExt for PgDriver {
         for channel in &channels {
             validate_ident(channel)?;
         }
-        // Snapshot the clients so we don't hold the DashMap shard across
-        // .await points.
-        let clients: Vec<Arc<tokio_postgres::Client>> = self
-            .inner
-            .listens
-            .get(&c.id())
-            .map(|entry| entry.value().clone())
-            .unwrap_or_default();
-        for client in &clients {
-            for channel in &channels {
+        // Snapshot the (client, its channels) tuples out of the DashMap
+        // so we don't hold a shard lock across the .await. Also update
+        // each entry's channel set in place before releasing.
+        let targets: Vec<(Arc<tokio_postgres::Client>, Vec<String>)> = {
+            let Some(mut entry) = self.inner.listens.get_mut(&c.id()) else {
+                return Ok(());
+            };
+            let mut out = Vec::new();
+            for listen in entry.value_mut().iter_mut() {
+                let hits: Vec<String> = channels
+                    .iter()
+                    .filter(|ch| listen.channels.remove(*ch))
+                    .cloned()
+                    .collect();
+                if !hits.is_empty() {
+                    out.push((Arc::clone(&listen.client), hits));
+                }
+            }
+            out
+        };
+        for (client, chans) in &targets {
+            for channel in chans {
                 client
                     .batch_execute(&format!("UNLISTEN {}", quote_ident(channel)?))
                     .await

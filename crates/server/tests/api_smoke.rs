@@ -625,6 +625,132 @@ async fn client_sdk_consumes_public_websocket_api() {
 }
 
 #[tokio::test]
+async fn websocket_mid_stream_cancel_stops_paging() {
+    use futures::{SinkExt, StreamExt};
+    use tokio_tungstenite::tungstenite::Message;
+
+    // Drive many pages so the server sits waiting on our ack between them.
+    let driver = MockDriver::builder()
+        .engine(Engine::Postgres)
+        .execute_ok(vec![
+            Page::NextResult {
+                columns: vec![ColumnMetadata {
+                    name: "n".into(),
+                    type_ref: TypeRef::Primitive(PrimitiveType::Int32),
+                    nullable: Nullability::NotNullable,
+                    auto_increment: false,
+                    primary_key: false,
+                    facets: Default::default(),
+                }],
+            },
+            Page::Rows {
+                rows: vec![Row::new(vec![Value::Int32(1)])],
+            },
+            Page::Rows {
+                rows: vec![Row::new(vec![Value::Int32(2)])],
+            },
+            Page::Done {
+                affected_rows: None,
+                warnings: Vec::new(),
+            },
+        ])
+        .build();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        axum::serve(
+            listener,
+            app(test_state_with_driver(driver)).into_make_service(),
+        )
+        .await
+        .unwrap();
+    });
+
+    let client = sift_client_sdk::Client::new(format!("http://{addr}"));
+    let session = client
+        .open_session(Some("sdk-ws-cancel".into()))
+        .await
+        .unwrap();
+    let conn = client
+        .open_connection(
+            session.id,
+            sift_protocol::OpenConnectionRequest {
+                engine: Engine::Postgres,
+                spec: pg_spec(),
+            },
+        )
+        .await
+        .unwrap();
+
+    let (mut ws, _) =
+        tokio_tungstenite::connect_async(format!("ws://{addr}/v1/sessions/{}/ws", session.id))
+            .await
+            .unwrap();
+    ws.send(Message::Text(
+        serde_json::to_string(&sift_protocol::WsClientMessage::Execute {
+            request_id: "req".into(),
+            connection: conn.id,
+            sql: "SELECT * FROM big".into(),
+            params: Vec::new(),
+            tx: None,
+        })
+        .unwrap()
+        .into(),
+    ))
+    .await
+    .unwrap();
+
+    // Started + first page (columns).
+    let started = match ws.next().await.unwrap().unwrap() {
+        Message::Text(text) => serde_json::from_str::<sift_protocol::WsServerMessage>(&text)
+            .unwrap(),
+        other => panic!("unexpected {other:?}"),
+    };
+    let cursor_id = match started {
+        sift_protocol::WsServerMessage::Started { cursor_id, .. } => cursor_id,
+        other => panic!("expected Started, got {other:?}"),
+    };
+    let first = match ws.next().await.unwrap().unwrap() {
+        Message::Text(text) => serde_json::from_str::<sift_protocol::WsServerMessage>(&text)
+            .unwrap(),
+        other => panic!("unexpected {other:?}"),
+    };
+    assert!(matches!(first, sift_protocol::WsServerMessage::Page { .. }));
+
+    // Send Cancel instead of Ack. Server must route to driver.cancel and
+    // stop paging, not reject the message.
+    ws.send(Message::Text(
+        serde_json::to_string(&sift_protocol::WsClientMessage::Cancel {
+            connection: conn.id,
+            cursor_id,
+        })
+        .unwrap()
+        .into(),
+    ))
+    .await
+    .unwrap();
+
+    // The server should either close the socket cleanly or send nothing
+    // further. It MUST NOT push more Pages. Give it a short window to do
+    // anything else; assert what did (or didn't) arrive.
+    let after = tokio::time::timeout(std::time::Duration::from_millis(200), ws.next()).await;
+    match after {
+        Ok(Some(Ok(Message::Close(_)))) | Ok(None) => {}
+        Ok(Some(Ok(Message::Text(text)))) => {
+            let msg: sift_protocol::WsServerMessage = serde_json::from_str(&text).unwrap();
+            assert!(
+                !matches!(msg, sift_protocol::WsServerMessage::Page { .. }),
+                "server sent another Page after Cancel: {msg:?}"
+            );
+        }
+        Ok(Some(Ok(_))) | Ok(Some(Err(_))) => {}
+        Err(_) => {} // idle within the window is also acceptable
+    }
+
+    server.abort();
+}
+
+#[tokio::test]
 async fn websocket_execute_requires_active_tx_ref() {
     use futures::{SinkExt, StreamExt};
     use tokio_tungstenite::tungstenite::Message;

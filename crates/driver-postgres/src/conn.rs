@@ -31,11 +31,11 @@ pub(crate) struct PgDriverInner {
     /// cursor_id → (owning conn_id, cancel token). `conn_id` is carried so
     /// `close` can drain live cursors belonging to the conn.
     pub(crate) cursors: DashMap<u64, (u64, tokio_postgres::CancelToken)>,
-    /// conn_id → dedicated LISTEN clients. Each `listen` call spawns its
-    /// own connection and appends the client here so `unlisten` can issue
-    /// UNLISTEN against the correct sockets. Multiple listens per conn
-    /// stack.
-    pub(crate) listens: DashMap<u64, Vec<Arc<tokio_postgres::Client>>>,
+    /// conn_id → dedicated LISTEN clients + the channels each subscribed
+    /// to. Each `listen` call spawns its own connection and appends an
+    /// entry here so `unlisten` can issue UNLISTEN against only the
+    /// clients that actually subscribed to the named channels.
+    pub(crate) listens: DashMap<u64, Vec<ListenEntry>>,
     /// Cached pools by canonical connection-spec key. `open()` of an
     /// already-seen spec reuses the pool; identical connections share warm
     /// capacity. String key avoids silent hash-collision pool reuse.
@@ -44,6 +44,12 @@ pub(crate) struct PgDriverInner {
     pub(crate) conn_id: IdCounter,
     pub(crate) tx_id: IdCounter,
     pub(crate) cursor_id: IdCounter,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ListenEntry {
+    pub(crate) client: Arc<tokio_postgres::Client>,
+    pub(crate) channels: std::collections::HashSet<String>,
 }
 
 #[derive(Debug)]
@@ -137,6 +143,21 @@ impl PgDriverInner {
         }
         .map_err(|e| DriverError::new(Code::ConnectionFailed, e.to_string()))?;
         let arc = Arc::new(pool);
+        // Best-effort eviction: if we're over the soft cap, drop any
+        // idle-looking pool (strong_count == 1 means only the map holds
+        // it — no outstanding PooledConn objects). Cheap linear scan;
+        // fine for the cap size we set.
+        const MAX_POOLS: usize = 64;
+        if self.pools.len() >= MAX_POOLS {
+            let evict: Option<String> = self
+                .pools
+                .iter()
+                .find(|entry| Arc::strong_count(entry.value()) == 1)
+                .map(|entry| entry.key().clone());
+            if let Some(key) = evict {
+                self.pools.remove(&key);
+            }
+        }
         // Another opener may have raced us; keep whichever landed first.
         self.pools
             .entry(key.clone())

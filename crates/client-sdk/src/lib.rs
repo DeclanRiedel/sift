@@ -16,9 +16,9 @@ use sift_metadata::{
 use sift_protocol::{
     BeginTransactionRequest, BulkInsertRequest, BulkInsertResponse, CancelRequest, ConnectionId,
     ConnectionInfo, CursorId, EndTransactionRequest, ExecuteRequestHttp, ExecuteResponse, Health,
-    OpenConnectionRequest, OpenSessionRequest, Page, Readiness, SchemaSnapshot, ServerInfo,
-    SessionId, SessionInfo, TextDocumentOperation, TransactionInfo, TxHandleRef, TxId, TxMode,
-    Value, WsClientMessage, WsServerMessage,
+    OpenConnectionRequest, OpenSessionRequest, Page, Readiness, SavepointRequest, SchemaSnapshot,
+    ServerInfo, SessionId, SessionInfo, TextDocumentOperation, TransactionInfo, TxHandleRef, TxId,
+    TxMode, Value, WsClientMessage, WsServerMessage,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -252,6 +252,71 @@ impl Client {
         self.post_empty_body(
             &format!("/v1/sessions/{session}/queries/{cursor}/cancel"),
             &CancelRequest { connection, cursor },
+        )
+        .await
+    }
+
+    pub async fn close_connection(
+        &self,
+        session: SessionId,
+        connection: ConnectionId,
+    ) -> Result<()> {
+        self.delete(&format!(
+            "/v1/sessions/{session}/connections/{connection}"
+        ))
+        .await
+    }
+
+    pub async fn create_savepoint(
+        &self,
+        session: SessionId,
+        connection: ConnectionId,
+        tx_id: TxId,
+        name: impl Into<String>,
+    ) -> Result<()> {
+        self.post_empty_body(
+            &format!("/v1/sessions/{session}/transactions/{tx_id}/savepoints"),
+            &SavepointRequest {
+                connection,
+                tx_id,
+                name: name.into(),
+            },
+        )
+        .await
+    }
+
+    pub async fn rollback_to_savepoint(
+        &self,
+        session: SessionId,
+        connection: ConnectionId,
+        tx_id: TxId,
+        name: impl Into<String>,
+    ) -> Result<()> {
+        self.post_empty_body(
+            &format!("/v1/sessions/{session}/transactions/{tx_id}/savepoints/rollback"),
+            &SavepointRequest {
+                connection,
+                tx_id,
+                name: name.into(),
+            },
+        )
+        .await
+    }
+
+    pub async fn release_savepoint(
+        &self,
+        session: SessionId,
+        connection: ConnectionId,
+        tx_id: TxId,
+        name: impl Into<String>,
+    ) -> Result<()> {
+        self.post_empty_body(
+            &format!("/v1/sessions/{session}/transactions/{tx_id}/savepoints/release"),
+            &SavepointRequest {
+                connection,
+                tx_id,
+                name: name.into(),
+            },
         )
         .await
     }
