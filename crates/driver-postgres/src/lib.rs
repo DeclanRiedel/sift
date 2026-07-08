@@ -196,7 +196,7 @@ impl PgExt for PgDriver {
         let (tx, rx) = tokio::sync::mpsc::channel(128);
         let cfg = pg_connect_config(&spec);
         let ssl_mode = spec.ssl_mode.unwrap_or(sift_protocol::SslMode::Prefer);
-        if matches!(
+        let client = if matches!(
             ssl_mode,
             sift_protocol::SslMode::VerifyCa | sift_protocol::SslMode::VerifyFull
         ) {
@@ -205,19 +205,40 @@ impl PgExt for PgDriver {
             let client = Arc::new(client);
             spawn_notification_pump(Arc::clone(&client), connection, tx);
             listen_channels(&client, channels).await?;
+            client
         } else {
             let (client, connection) = cfg.connect(tokio_postgres::NoTls).await.map_err(pg_err)?;
             let client = Arc::new(client);
             spawn_notification_pump(Arc::clone(&client), connection, tx);
             listen_channels(&client, channels).await?;
-        }
+            client
+        };
+        // Track the dedicated LISTEN client so `unlisten` (and `close`)
+        // can reach it; without this UNLISTEN would be a no-op.
+        self.inner.listens.entry(c.id()).or_default().push(client);
         Ok(NotificationStream { notifications: rx })
     }
 
-    #[tracing::instrument(skip_all, fields(engine = "postgres", conn = _c.id(), channel_count = channels.len()))]
-    async fn unlisten(&self, _c: ConnHandle, channels: Vec<String>) -> Result<(), DriverError> {
-        for channel in channels {
-            validate_ident(&channel)?;
+    #[tracing::instrument(skip_all, fields(engine = "postgres", conn = c.id(), channel_count = channels.len()))]
+    async fn unlisten(&self, c: ConnHandle, channels: Vec<String>) -> Result<(), DriverError> {
+        for channel in &channels {
+            validate_ident(channel)?;
+        }
+        // Snapshot the clients so we don't hold the DashMap shard across
+        // .await points.
+        let clients: Vec<Arc<tokio_postgres::Client>> = self
+            .inner
+            .listens
+            .get(&c.id())
+            .map(|entry| entry.value().clone())
+            .unwrap_or_default();
+        for client in &clients {
+            for channel in &channels {
+                client
+                    .batch_execute(&format!("UNLISTEN {}", quote_ident(channel)?))
+                    .await
+                    .map_err(pg_err)?;
+            }
         }
         Ok(())
     }

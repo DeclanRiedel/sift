@@ -31,6 +31,11 @@ pub(crate) struct PgDriverInner {
     /// cursor_id → (owning conn_id, cancel token). `conn_id` is carried so
     /// `close` can drain live cursors belonging to the conn.
     pub(crate) cursors: DashMap<u64, (u64, tokio_postgres::CancelToken)>,
+    /// conn_id → dedicated LISTEN clients. Each `listen` call spawns its
+    /// own connection and appends the client here so `unlisten` can issue
+    /// UNLISTEN against the correct sockets. Multiple listens per conn
+    /// stack.
+    pub(crate) listens: DashMap<u64, Vec<Arc<tokio_postgres::Client>>>,
     /// Cached pools by canonical connection-spec key. `open()` of an
     /// already-seen spec reuses the pool; identical connections share warm
     /// capacity. String key avoids silent hash-collision pool reuse.
@@ -75,6 +80,7 @@ impl PgDriverInner {
         Self {
             conns: Mutex::new(HashMap::new()),
             cursors: DashMap::new(),
+            listens: DashMap::new(),
             pools: DashMap::new(),
             specs: DashMap::new(),
             conn_id: IdCounter::new(),
@@ -233,6 +239,9 @@ impl PgDriverInner {
         for cursor_id in to_remove {
             self.cursors.remove(&cursor_id);
         }
+        // Drop any LISTEN clients tied to this conn. Dropping the Arc
+        // ends their notification pumps at the next `poll_message`.
+        self.listens.remove(&c.id());
     }
 }
 
