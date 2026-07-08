@@ -13,3 +13,6 @@
 # Editor / OS
 *.log
 .DS_Store
+
+# Local dev secret keyfile (encrypted-file backend)
+.sift/

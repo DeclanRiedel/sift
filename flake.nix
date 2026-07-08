@@ -33,6 +33,7 @@
           openssl
           postgresql.lib        # libpq headers — needed by tokio-postgres / sqlx at build time
           postgresql            # psql client + ability to run a local dev instance
+          dbus                  # libdbus — needed only for the `os-keychain` feature (Secret Service)
         ];
 
         # Rust + adjacent dev tooling.
@@ -447,6 +448,21 @@
 
           # Keep sccache inside the repo so it survives GC and is machine-local.
           SCCACHE_DIR = "${toString ./.}/.cache/sccache";
+
+          # Generate a local dev keyfile for the encrypted-file secret backend
+          # and export its path, so `SIFT_METADATA__SECRET_BACKEND=file` works
+          # out of the box. The key is 64 hex chars (32 bytes), git-ignored,
+          # 0600. Selecting the backend stays opt-in (default remains memory).
+          shellHook = ''
+            keyfile="''${SIFT_METADATA__SECRET_KEY_FILE:-$PWD/.sift/dev-secret.key}"
+            if [ ! -f "$keyfile" ]; then
+              mkdir -p "$(dirname "$keyfile")"
+              head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n' > "$keyfile"
+              chmod 600 "$keyfile"
+              echo "sift: generated dev secret keyfile at $keyfile"
+            fi
+            export SIFT_METADATA__SECRET_KEY_FILE="$keyfile"
+          '';
         };
 
         apps = {
