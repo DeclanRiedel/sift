@@ -10,9 +10,27 @@
 /.cache
 /.labs
 
+# Local env files. Commit .env.example only.
+.env
+.env.*
+!.env.example
+
+# Local sift runtime state. Commit templates and docs, not generated state.
+.sift/
+sift.toml
+!sift.example.toml
+*.sqlite
+*.sqlite3
+*.sqlite3-*
+*.db
+*.db-*
+*.jsonl
+
+# Local database fixtures.
+pgdata/
+postgres-data/
+mssql-data/
+
 # Editor / OS
 *.log
 .DS_Store
-
-# Local dev secret keyfile (encrypted-file backend)
-.sift/

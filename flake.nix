@@ -391,6 +391,12 @@
           text = devCommand ''cargo check --workspace --all-targets'';
         };
 
+        devSecretKey = pkgs.writeShellApplication {
+          name = "sift-dev-secret-key";
+          runtimeInputs = with pkgs; [ coreutils openssl ];
+          text = devCommand ''sh scripts/dev-secret-key.sh'';
+        };
+
         siftHelp = pkgs.writeShellApplication {
           name = "sift-help";
           text = ''
@@ -410,6 +416,7 @@
               sift-smoke                Start a mock backend and exercise health/session/connection/schema/audit.
               sift-test                 Run cargo nextest for the whole workspace.
               sift-check                Run cargo check for the whole workspace.
+              sift-dev-secret-key       Generate the ignored local metadata secret key file.
 
             Typical flow:
               nix develop
@@ -419,6 +426,8 @@
             Environment:
               SIFT_REPO=/path/to/sift      Override checkout path for commands that need it.
               SIFT_BIND=127.0.0.1:3000     Override backend bind address where supported.
+              .env.example                 Template for local env vars; never commit .env.
+              sift.example.toml            Template for local sift.toml; never commit sift.toml.
             EOF
           '';
         };
@@ -438,6 +447,7 @@
             smoke
             test
             check
+            devSecretKey
           ];
 
           # Point rust-analyzer + cargo at the right std sources.
@@ -449,17 +459,9 @@
           SCCACHE_DIR = "${toString ./.}/.cache/sccache";
 
           # Generate a local dev keyfile for the encrypted-file secret backend
-          # and export its path, so `SIFT_METADATA__SECRET_BACKEND=file` works
-          # out of the box. The key is 64 hex chars (32 bytes), git-ignored,
-          # 0600. Selecting the backend stays opt-in (default remains memory).
+          # and export its path. Selecting the backend stays opt-in.
           shellHook = ''
-            keyfile="''${SIFT_METADATA__SECRET_KEY_FILE:-$PWD/.sift/dev-secret.key}"
-            if [ ! -f "$keyfile" ]; then
-              mkdir -p "$(dirname "$keyfile")"
-              head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n' > "$keyfile"
-              chmod 600 "$keyfile"
-              echo "sift: generated dev secret keyfile at $keyfile"
-            fi
+            keyfile="$(sh "$PWD/scripts/dev-secret-key.sh" "''${SIFT_METADATA__SECRET_KEY_FILE:-$PWD/.sift/dev-secret.key}")"
             export SIFT_METADATA__SECRET_KEY_FILE="$keyfile"
           '';
         };
@@ -505,6 +507,10 @@
           check = {
             type = "app";
             program = "${check}/bin/sift-check";
+          };
+          dev-secret-key = {
+            type = "app";
+            program = "${devSecretKey}/bin/sift-dev-secret-key";
           };
         };
       });

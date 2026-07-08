@@ -1,0 +1,43 @@
+# sift config template
+#
+# Copy to `sift.toml` for local development if you prefer file-based config.
+# Do not commit `sift.toml` with real machine paths, tokens, or private DB
+# details. Environment variables with the `SIFT_` prefix override this file.
+
+bind = "127.0.0.1:7474"
+
+[log]
+filter = "sift=info,tower_http=info"
+
+[drivers]
+mock = false
+mock_extra = false
+
+[timeouts]
+request_secs = 30
+shutdown_drain_secs = 30
+
+[auth]
+# Unsafe to commit with a real value.
+# bearer_token = "replace-me"
+loopback_bypass = true
+
+[metadata]
+enabled = true
+# Optional. If unset, sift uses the platform-local state path.
+# path = ".sift/metadata.sqlite3"
+secret_backend = "memory"
+# Required only when secret_backend = "file". The Nix dev shell and
+# `sift-dev-secret-key` generate this local ignored file.
+# secret_key_file = ".sift/dev-secret.key"
+bootstrap_local = true
+store_sql = true
+
+[audit]
+# May include query fingerprints and operational metadata; keep local unless
+# intentionally sharing.
+# operation_log_path = ".sift/operations.jsonl"
+
+[limits]
+max_http_result_rows = 10000
+max_http_result_bytes = 16777216
