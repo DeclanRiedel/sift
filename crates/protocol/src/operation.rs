@@ -70,6 +70,12 @@ pub enum Operation {
         session: SessionId,
         request: SavepointRequest,
     },
+    /// Catch-all for CRUD-shaped metadata mutations (rooms, documents,
+    /// connection profiles, tokens). `action`/`target` are intentionally
+    /// free-form strings — the audit sink treats them as opaque tags,
+    /// not a bounded vocabulary. Consumers that need to switch on them
+    /// should either narrow to the specific enum variants above or
+    /// treat unrecognized (action, target) tuples as `Other`.
     Metadata {
         action: String,
         target: String,

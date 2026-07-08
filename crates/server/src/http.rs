@@ -181,10 +181,19 @@ async fn inject_peer_addr(
     req.headers_mut().remove(&PEER_ADDR_HEADER);
     // Absent ConnectInfo => in-process caller (e.g. tower::oneshot in tests),
     // treated as loopback. Real network path always has ConnectInfo when the
-    // server is started via `into_make_service_with_connect_info`.
+    // server is started via `into_make_service_with_connect_info`; if a future
+    // refactor drops that wiring, remote requests would be authenticated as
+    // loopback under the default loopback_bypass=true. Emit a warn so the
+    // regression is at least noticeable in logs.
     let ip = peer
         .map(|axum::extract::ConnectInfo(addr)| addr.ip())
-        .unwrap_or_else(|| std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST));
+        .unwrap_or_else(|| {
+            tracing::warn!(
+                "request lacks ConnectInfo; falling back to loopback — \
+                 verify serve() uses into_make_service_with_connect_info"
+            );
+            std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)
+        });
     if let Ok(value) = HeaderValue::from_str(&ip.to_string()) {
         req.headers_mut().insert(PEER_ADDR_HEADER.clone(), value);
     }

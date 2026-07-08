@@ -678,6 +678,18 @@ impl SessionStore {
         entry.driver.cancel(entry.handle.clone(), cursor).await?;
         if entry.driver.engine() == Engine::SqlServer {
             self.with_session(&session_id, |s| s.connections.remove(&conn_id))?;
+            // Also invoke driver.close so the driver-level socket/FD is
+            // returned promptly instead of relying on ConnHandle::Drop.
+            // Best-effort — the driver has already dropped its state, so
+            // an error here is informational only.
+            if let Err(error) = entry.driver.close(entry.handle.clone()).await {
+                tracing::debug!(
+                    session_id = %session_id,
+                    conn_id = %conn_id,
+                    %error,
+                    "driver.close after mssql cancel returned error"
+                );
+            }
             tracing::info!(
                 session_id = %session_id,
                 conn_id = %conn_id,

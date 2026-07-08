@@ -81,24 +81,24 @@ view while prioritizing:
   `SIFT_` prefix) + tracing + driver registry + `SessionStore` +
   `RoomRuntime`. `main.rs:57-60` wires `axum::serve` with
   `with_graceful_shutdown(shutdown_signal())`.
-- **HTTP surface** (`crates/server/src/http.rs:57-151`): 38 routes —
+- **HTTP surface** (`crates/server/src/http.rs:63-164`): 39 routes —
   sessions, connections (incl. `from-profile`), queries, schema, cancel,
   bulk-insert, transactions (begin/commit/rollback), auth tokens
   (list/issue/revoke), metadata (tenants/rooms/members/documents/
   connections/credentials/history), health, audit, operations, openapi.json.
 - **WebSocket surfaces**:
-  - Session WS (`http.rs:1826`, loop `:2032-2131`): `Execute`/`Listen`/
-    `Cancel`/`Ack` inbound; `Started`/`Page`/`Notification`/`Error`
-    outbound. Page-by-page ack backpressure (`stream_pages_with_ack`
-    `:2152-2180`); one active stream per socket.
-  - Room WS (`http.rs:1838`, loop `:1860-1990`): `Attach`/`Detach`/
-    `PresencePing`/`DocumentOperation` inbound; `Attached`/`Presence`/
-    `DocumentOperation`/`QueryResult`/`Error` outbound. Broadcast channel
-    per room (`room_runtime.rs:84`).
-- **Auth** (`crates/server/src/http.rs:182-382`): bearer-token middleware,
+  - Session WS (`http.rs:2151`): `Execute`/`Listen`/`Cancel`/`Ack`
+    inbound; `Started`/`Page`/`Notification`/`Error` outbound.
+    Page-by-page ack backpressure (`stream_pages_with_ack` `:2504`);
+    one active stream per socket.
+  - Room WS (`http.rs:2169`): `Attach`/`Detach`/`PresencePing`/
+    `DocumentOperation` inbound; `Attached`/`Presence`/
+    `DocumentOperation`/`QueryResult`/`Error` outbound. Broadcast
+    channel per room (`room_runtime.rs`).
+- **Auth** (`crates/server/src/http.rs:282`): bearer-token middleware,
   loopback-bypass flag, metadata API tokens (Argon2-stored, format
   `sift_<lookup>_<uuid>`, minted at `metadata/src/lib.rs:225-263`, verified
-  Argon2 at `:265-299`), tenant scoping via `ensure_tenant` (`http.rs:391`).
+  Argon2 at `:265-299`), tenant scoping via `ensure_tenant` (`http.rs:454`).
   Room RBAC: `RoomPermission::{Read,Write,Admin}` mapped from
   owner/editor/viewer (`http.rs:466-504`).
 - **Metadata** (`crates/metadata/src/`): SQLite + refinery embedded

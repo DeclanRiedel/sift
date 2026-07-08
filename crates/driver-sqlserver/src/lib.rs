@@ -318,7 +318,9 @@ impl Driver for MssqlDriver {
 
     #[tracing::instrument(skip_all, fields(engine = "sql_server", conn = c.id()))]
     async fn close(&self, c: ConnHandle) -> Result<(), DriverError> {
-        self.inner.conns.lock().await.remove(&c.id());
+        // Abort in-flight cursor tasks BEFORE we clear the conns map so
+        // an aborted task's final `conns.insert` (which would run inside
+        // run_query on the happy path) cannot race with our removal.
         let cursors: Vec<u64> = self
             .inner
             .cursors
@@ -336,6 +338,10 @@ impl Driver for MssqlDriver {
                 task.abort();
             }
         }
+        // Yield once so any task that raced past the abort has a chance
+        // to complete its final `conns.insert` before we clear.
+        tokio::task::yield_now().await;
+        self.inner.conns.lock().await.remove(&c.id());
         Ok(())
     }
 
