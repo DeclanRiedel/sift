@@ -264,9 +264,26 @@ impl Driver for MssqlDriver {
         Ok(ResultSetStream::with_cursor_mode(cursor_id, rx, false))
     }
 
-    #[tracing::instrument(skip_all, fields(engine = "sql_server", cursor = _cursor.0))]
-    async fn cancel(&self, _c: ConnHandle, _cursor: CursorId) -> Result<(), DriverError> {
-        let Some((_, (_, task))) = self.inner.cursors.remove(&_cursor.0) else {
+    #[tracing::instrument(skip_all, fields(engine = "sql_server", cursor = cursor.0))]
+    async fn cancel(&self, c: ConnHandle, cursor: CursorId) -> Result<(), DriverError> {
+        // Ownership check first: peek at the entry, refuse cancels for a
+        // cursor that does not belong to this ConnHandle. Cursor ids are
+        // monotonic across all conns, so without this an authenticated
+        // caller with any ConnHandle could cancel another user's query.
+        {
+            let entry = self.inner.cursors.get(&cursor.0).ok_or_else(|| {
+                DriverError::new(Code::CursorNotFound, "cursor not active")
+                    .with_engine(Engine::SqlServer)
+            })?;
+            if entry.value().0 != c.id() {
+                return Err(DriverError::new(
+                    Code::CursorNotFound,
+                    "cursor does not belong to this connection",
+                )
+                .with_engine(Engine::SqlServer));
+            }
+        }
+        let Some((_, (_, task))) = self.inner.cursors.remove(&cursor.0) else {
             return Err(DriverError::new(Code::CursorNotFound, "cursor not active")
                 .with_engine(Engine::SqlServer));
         };
