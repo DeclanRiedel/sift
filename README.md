@@ -46,3 +46,7 @@ load-bearing decisions, see `docs/DECISIONS.md`.
 5. **A genuinely public API.** The protocol crate is pure data, semver-stable,
    and consumable by native and wasm clients. OpenAPI is a release artifact,
    not an afterthought; a 3rd-party UI is a valid target, not a threat.
+
+
+## consider
+https://github.com/pavi2410/based 
