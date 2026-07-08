@@ -45,15 +45,35 @@ async fn shallow_tree(
     filter: Option<&SchemaFilter>,
 ) -> Result<CatalogTree, DriverError> {
     // Single round-trip: all schemas + objects (excluding system schemas).
-    // `name_pattern` from the filter is pushed down to a LIKE clause so the
-    // server-side cache stays small for narrow filters.
+    // `name_pattern` pushes down to a LIKE, `schemas` pushes down to
+    // n.nspname = ANY($2::text[]) when supplied; `kinds` filters after
+    // fetching because it maps to relkind chars we already read.
     let like = filter
         .and_then(|f| f.name_pattern.as_deref())
         .map(to_pg_like)
         .unwrap_or_else(|| "%".to_string());
+    let schemas_filter: Option<Vec<String>> = filter.and_then(|f| f.schemas.clone());
+    let kinds_filter: Option<Vec<ObjectKind>> = filter.and_then(|f| f.kinds.clone());
 
-    let rows = conn
-        .query(
+    let rows = if let Some(schemas) = schemas_filter.as_ref() {
+        conn.query(
+            "SELECT n.nspname AS schema_name,
+                    c.relname AS object_name,
+                    c.relkind AS relkind
+             FROM pg_class c
+             JOIN pg_namespace n ON n.oid = c.relnamespace
+             WHERE n.nspname NOT IN ('pg_catalog', 'information_schema')
+               AND n.nspname NOT LIKE 'pg_toast%'
+               AND c.relkind IN ('r', 'v', 'm', 'S', 'f', 'p')
+               AND c.relname LIKE $1
+               AND n.nspname = ANY($2::text[])
+             ORDER BY 1, 2",
+            &[&like, schemas],
+        )
+        .await
+        .map_err(pg_err)?
+    } else {
+        conn.query(
             "SELECT n.nspname AS schema_name,
                     c.relname AS object_name,
                     c.relkind AS relkind
@@ -67,7 +87,8 @@ async fn shallow_tree(
             &[&like],
         )
         .await
-        .map_err(pg_err)?;
+        .map_err(pg_err)?
+    };
 
     let mut by_schema: BTreeMap<String, Vec<ObjectInfo>> = BTreeMap::new();
     for row in rows {
@@ -77,6 +98,11 @@ async fn shallow_tree(
         let Some(kind) = relkind_to_kind(relkind as u8) else {
             continue;
         };
+        if let Some(kinds) = kinds_filter.as_ref() {
+            if !kinds.contains(&kind) {
+                continue;
+            }
+        }
         by_schema
             .entry(schema_name)
             .or_default()
