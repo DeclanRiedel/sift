@@ -1,83 +1,25 @@
 //! `sift-client-sdk` — thin reference consumer proving the HTTP API is
 //! buildable-against from outside the server crate.
 
-use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
+// Request/response DTOs shared with the server. Re-export so downstream
+// consumers can build requests without depending on sift_metadata::http
+// directly.
+pub use sift_metadata::http::{
+    AddRoomMemberRequest, CreateDocumentRequest, CreateRoomRequest, IssueTokenRequest,
+    IssueTokenResponse, OpenConnectionFromProfileRequest, SetCredentialRequest,
+    UpdateDocumentSnapshotRequest, UpsertConnectionProfileRequest,
+};
 use sift_metadata::{
-    ApiTokenId, ConnectionProfile, ConnectionProfileId, CrdtType, CredentialMode, Document,
-    DocumentId, QueryHistory, Room, RoomId, RoomKind, RoomMember, RoomRole, TenantId,
-    TenantMembership,
+    ApiTokenId, ConnectionProfile, ConnectionProfileId, Document, DocumentId, QueryHistory, Room,
+    RoomId, RoomMember, TenantId, TenantMembership,
 };
 use sift_protocol::{
     BeginTransactionRequest, BulkInsertRequest, BulkInsertResponse, CancelRequest, ConnectionId,
-    ConnectionInfo, CursorId, EndTransactionRequest, Engine, ExecuteRequestHttp, ExecuteResponse,
-    Health, OpenConnectionRequest, OpenSessionRequest, Page, Readiness, SchemaSnapshot, ServerInfo,
+    ConnectionInfo, CursorId, EndTransactionRequest, ExecuteRequestHttp, ExecuteResponse, Health,
+    OpenConnectionRequest, OpenSessionRequest, Page, Readiness, SchemaSnapshot, ServerInfo,
     SessionId, SessionInfo, TextDocumentOperation, TransactionInfo, TxHandleRef, TxId, TxMode,
     Value, WsClientMessage, WsServerMessage,
 };
-
-#[derive(Debug, Clone, Serialize)]
-pub struct CreateRoomRequest {
-    pub tenant_id: i64,
-    pub name: String,
-    pub kind: RoomKind,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct AddRoomMemberRequest {
-    pub principal_id: i64,
-    pub role: RoomRole,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct CreateDocumentRequest {
-    pub kind: String,
-    pub title: String,
-    pub crdt_type: CrdtType,
-    pub crdt_state: Vec<u8>,
-    pub position: i64,
-    pub connection_profile_id: Option<i64>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct UpdateDocumentSnapshotRequest {
-    pub crdt_state: Vec<u8>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct UpsertConnectionProfileRequest {
-    pub tenant_id: i64,
-    pub name: String,
-    pub engine: Engine,
-    pub spec: sift_protocol::ConnectionSpec,
-    pub credential_mode: CredentialMode,
-    #[serde(default)]
-    pub tags: Vec<String>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct SetCredentialRequest {
-    pub secret: String,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct OpenConnectionFromProfileRequest {
-    pub tenant_id: i64,
-    pub profile_id: i64,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct IssueTokenRequest {
-    pub name: String,
-    pub tenant_id: Option<i64>,
-    pub expires_at: Option<DateTime<Utc>>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct IssueTokenResponse {
-    pub token: sift_metadata::ApiTokenRow,
-    pub plaintext: String,
-}
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {

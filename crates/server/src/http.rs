@@ -9,10 +9,9 @@ use axum::middleware::{from_fn, from_fn_with_state, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post, put};
 use axum::{Json, Router};
-use chrono::{DateTime, Utc};
 use futures::{SinkExt, StreamExt};
 use schemars::{schema_for, JsonSchema};
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use serde_json::json;
 use std::sync::{Arc, OnceLock};
 use std::time::Instant;
@@ -20,13 +19,13 @@ use tokio::sync::Semaphore;
 
 use sift_doc::{CrdtKind, DocumentSnapshot, TextDocument, TextOperation};
 use sift_metadata::{
-    ApiTokenId, ConnectionProfileId, CrdtType, CredentialMode, Document, DocumentId, MetadataStore,
+    ApiTokenId, ConnectionProfileId, CrdtType, Document, DocumentId, MetadataStore,
     NewConnectionProfile, NewDocument, NewQueryHistory, NewRoom, PrincipalId, QueryHistory,
     QueryStatus, Room, RoomId, RoomKind, RoomMember, RoomRole, TenantId, TenantMembership,
 };
 use sift_protocol::{
     AuditEntry, BeginTransactionRequest, BulkInsertRequest, CancelRequest,
-    DocumentOperationEnvelope, EndTransactionRequest, Engine, ExecuteRequest, ExecuteRequestHttp,
+    DocumentOperationEnvelope, EndTransactionRequest, ExecuteRequest, ExecuteRequestHttp,
     Health, ObjectPath, OpenConnectionRequest, OpenSessionRequest, Operation, OperationStatus,
     Readiness, RoomClientMessage, RoomQueryResult, RoomQueryStatus, RoomServerMessage,
     SavepointRequest, SchemaFilter, SchemaScope, WsClientMessage, WsServerMessage,
@@ -345,68 +344,11 @@ struct HistoryQuery {
     limit: Option<u32>,
 }
 
-#[derive(Deserialize, JsonSchema)]
-struct CreateRoomRequest {
-    tenant_id: i64,
-    name: String,
-    kind: RoomKind,
-}
-
-#[derive(Deserialize, JsonSchema)]
-struct AddRoomMemberRequest {
-    principal_id: i64,
-    role: RoomRole,
-}
-
-#[derive(Deserialize, JsonSchema)]
-struct CreateDocumentRequest {
-    kind: String,
-    title: String,
-    crdt_type: CrdtType,
-    crdt_state: Vec<u8>,
-    position: i64,
-    connection_profile_id: Option<i64>,
-}
-
-#[derive(Deserialize, JsonSchema)]
-struct UpdateDocumentSnapshotRequest {
-    crdt_state: Vec<u8>,
-}
-
-#[derive(Deserialize, JsonSchema)]
-struct UpsertConnectionProfileRequest {
-    tenant_id: i64,
-    name: String,
-    engine: Engine,
-    spec: sift_protocol::ConnectionSpec,
-    credential_mode: CredentialMode,
-    #[serde(default)]
-    tags: Vec<String>,
-}
-
-#[derive(Deserialize, JsonSchema)]
-struct SetCredentialRequest {
-    secret: String,
-}
-
-#[derive(Deserialize, JsonSchema)]
-struct OpenConnectionFromProfileRequest {
-    tenant_id: i64,
-    profile_id: i64,
-}
-
-#[derive(Deserialize, JsonSchema)]
-struct IssueTokenRequest {
-    name: String,
-    tenant_id: Option<i64>,
-    expires_at: Option<DateTime<Utc>>,
-}
-
-#[derive(Serialize, JsonSchema)]
-struct IssueTokenResponse {
-    token: sift_metadata::ApiTokenRow,
-    plaintext: String,
-}
+use sift_metadata::http::{
+    AddRoomMemberRequest, CreateDocumentRequest, CreateRoomRequest, IssueTokenRequest,
+    IssueTokenResponse, OpenConnectionFromProfileRequest, SetCredentialRequest,
+    UpdateDocumentSnapshotRequest, UpsertConnectionProfileRequest,
+};
 
 fn metadata_store(state: &AppState) -> ApiResult<&MetadataStore> {
     state.metadata.as_ref().ok_or(ApiError::MetadataUnavailable)

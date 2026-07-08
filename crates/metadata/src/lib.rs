@@ -12,6 +12,7 @@ use rusqlite::{params, Connection, OptionalExtension};
 use sift_protocol::ConnectionSpec;
 use uuid::Uuid;
 
+pub mod http;
 pub mod schema;
 pub mod secrets;
 

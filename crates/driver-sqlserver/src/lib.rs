@@ -1338,8 +1338,8 @@ mod tests {
     }
 
     #[test]
-    fn mssql_literal_escapes_text_and_maps_empty_to_null() {
-        assert_eq!(mssql_literal(""), "NULL");
+    fn mssql_literal_escapes_text_and_preserves_empty() {
+        assert_eq!(mssql_literal(""), "N''");
         assert_eq!(mssql_literal("O'Reilly"), "N'O''Reilly'");
     }
 
