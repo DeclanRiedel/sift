@@ -16,7 +16,9 @@ pub mod schema;
 pub mod secrets;
 
 pub use schema::*;
-pub use secrets::{MemorySecretStore, SecretStore};
+#[cfg(feature = "os-keychain")]
+pub use secrets::OsKeychainSecretStore;
+pub use secrets::{FileSecretStore, MemorySecretStore, SecretStore};
 
 mod migrations {
     refinery::embed_migrations!("migrations");

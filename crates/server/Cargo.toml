@@ -32,6 +32,11 @@ tower-http = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 
+[features]
+# Forwards to sift-metadata: enables the OS keychain secret backend. Off by
+# default (needs a platform credential service, unavailable in headless CI).
+os-keychain = ["sift-metadata/os-keychain"]
+
 [dev-dependencies]
 sift-client-sdk = { workspace = true }
 sift-driver-api = { workspace = true, features = ["mock"] }

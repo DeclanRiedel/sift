@@ -20,6 +20,8 @@ pub struct Config {
     pub metadata: MetadataConfig,
     /// Audit/replay log configuration.
     pub audit: AuditConfig,
+    /// Result-size limits for synchronous responses.
+    pub limits: LimitsConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -68,10 +70,28 @@ pub struct MetadataConfig {
     pub enabled: bool,
     /// Optional SQLite path. Defaults to the platform-local state path.
     pub path: Option<String>,
-    /// Secret backend. Only `memory` exists today; keyring/file land later.
+    /// Secret backend: `memory` | `file` | `keychain`. `keychain` requires the
+    /// server to be built with the `os-keychain` feature.
     pub secret_backend: String,
+    /// Path to the 32-byte key file for the `file` secret backend. Required
+    /// when `secret_backend = "file"`. Set via `SIFT_METADATA__SECRET_KEY_FILE`
+    /// (the nix dev shell exports it).
+    pub secret_key_file: Option<String>,
     /// Bootstrap implicit local tenant/principal when the DB is empty.
     pub bootstrap_local: bool,
+    /// Persist raw SQL text in query history. When false, only a normalized
+    /// fingerprint is stored (the audit/replay trail is always fingerprinted).
+    pub store_sql: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct LimitsConfig {
+    /// Max rows a synchronous HTTP execute may return before `ResultTooLarge`.
+    pub max_http_result_rows: usize,
+    /// Max approximate bytes a synchronous HTTP execute may return before
+    /// `ResultTooLarge`. Guards against a few very wide rows OOMing the server.
+    pub max_http_result_bytes: usize,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -91,6 +111,16 @@ impl Default for Config {
             auth: AuthConfig::default(),
             metadata: MetadataConfig::default(),
             audit: AuditConfig::default(),
+            limits: LimitsConfig::default(),
+        }
+    }
+}
+
+impl Default for LimitsConfig {
+    fn default() -> Self {
+        Self {
+            max_http_result_rows: 10_000,
+            max_http_result_bytes: 16 * 1024 * 1024,
         }
     }
 }
@@ -127,7 +157,9 @@ impl Default for MetadataConfig {
             enabled: true,
             path: None,
             secret_backend: "memory".to_string(),
+            secret_key_file: None,
             bootstrap_local: true,
+            store_sql: true,
         }
     }
 }

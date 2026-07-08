@@ -11,8 +11,12 @@ sift-protocol = { workspace = true }
 anyhow = { workspace = true }
 argon2 = { workspace = true }
 async-trait = { workspace = true }
+chacha20poly1305 = { workspace = true }
 chrono = { workspace = true }
+getrandom = { workspace = true }
+keyring = { workspace = true, optional = true }
 rand_core = { workspace = true }
+sha2 = { workspace = true }
 refinery = { workspace = true }
 rusqlite = { workspace = true }
 schemars = { workspace = true }
@@ -21,5 +25,11 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 uuid = { workspace = true }
 
+[features]
+# OS keychain secret backend. Off by default: it pulls a platform credential
+# store (Secret Service / D-Bus on Linux) that is unavailable in headless CI.
+os-keychain = ["dep:keyring"]
+
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt"] }
+tempfile = { workspace = true }

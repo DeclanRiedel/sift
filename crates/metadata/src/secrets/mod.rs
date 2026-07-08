@@ -5,6 +5,14 @@ use async_trait::async_trait;
 
 use crate::Result;
 
+pub mod file;
+pub use file::FileSecretStore;
+
+#[cfg(feature = "os-keychain")]
+pub mod keychain;
+#[cfg(feature = "os-keychain")]
+pub use keychain::OsKeychainSecretStore;
+
 #[async_trait]
 pub trait SecretStore: Send + Sync {
     async fn put(&self, namespace: &str, handle: &str, secret: &[u8]) -> Result<()>;
