@@ -283,11 +283,36 @@ impl Driver for MssqlDriver {
                 .with_engine(Engine::SqlServer));
             }
         }
-        let Some((_, (_, task))) = self.inner.cursors.remove(&cursor.0) else {
+        let Some((_, (conn_id, task))) = self.inner.cursors.remove(&cursor.0) else {
             return Err(DriverError::new(Code::CursorNotFound, "cursor not active")
                 .with_engine(Engine::SqlServer));
         };
         task.abort();
+        // Aborting the task drops the MssqlConn owned by its future, so
+        // nothing will ever reinsert into `inner.conns` for this conn_id.
+        // Evict any residue so the driver's internal invariant matches the
+        // "abort+discard" contract (SqlServer cancel = connection dies):
+        // remove the conns map entry (defensive; `take_conn` in execute()
+        // already removed it), and drop any other cursors that were
+        // registered against the same conn_id.
+        self.inner.conns.lock().await.remove(&conn_id);
+        let stray: Vec<u64> = self
+            .inner
+            .cursors
+            .iter()
+            .filter_map(|entry| {
+                if entry.value().0 == conn_id {
+                    Some(*entry.key())
+                } else {
+                    None
+                }
+            })
+            .collect();
+        for cid in stray {
+            if let Some((_, (_, t))) = self.inner.cursors.remove(&cid) {
+                t.abort();
+            }
+        }
         Ok(())
     }
 
