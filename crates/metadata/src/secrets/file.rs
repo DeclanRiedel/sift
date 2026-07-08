@@ -49,40 +49,77 @@ impl FileSecretStore {
         })
     }
 
-    fn persist(&self, entries: &HashMap<(String, String), Vec<u8>>) -> Result<()> {
-        let rows: Vec<StoredEntry> = entries
-            .iter()
-            .map(|((namespace, handle), secret)| StoredEntry {
-                namespace: namespace.clone(),
-                handle: handle.clone(),
-                secret: secret.clone(),
-            })
-            .collect();
-        let plaintext = serde_json::to_vec(&rows).map_err(MetadataError::Json)?;
-
-        let mut nonce_bytes = [0u8; NONCE_LEN];
-        getrandom::getrandom(&mut nonce_bytes)
-            .map_err(|error| MetadataError::SecretStore(format!("rng failure: {error}")))?;
-        let ciphertext = self
-            .cipher
-            .encrypt(Nonce::from_slice(&nonce_bytes), plaintext.as_slice())
-            .map_err(|_| MetadataError::SecretStore("secret encryption failed".into()))?;
-
-        let mut blob = Vec::with_capacity(NONCE_LEN + ciphertext.len());
-        blob.extend_from_slice(&nonce_bytes);
-        blob.extend_from_slice(&ciphertext);
-
-        if let Some(parent) = self.path.parent() {
-            std::fs::create_dir_all(parent)
-                .map_err(|error| MetadataError::SecretStore(error.to_string()))?;
-        }
-        let tmp = self.path.with_extension("tmp");
-        std::fs::write(&tmp, &blob)
-            .map_err(|error| MetadataError::SecretStore(error.to_string()))?;
-        std::fs::rename(&tmp, &self.path)
-            .map_err(|error| MetadataError::SecretStore(error.to_string()))?;
-        Ok(())
+    /// Snapshot the map under the mutex, then perform the (blocking)
+    /// encrypt + write on a dedicated blocking task so we don't stall a
+    /// tokio worker thread on slow filesystems.
+    async fn persist(&self, entries: HashMap<(String, String), Vec<u8>>) -> Result<()> {
+        let path = self.path.clone();
+        let cipher = self.cipher.clone();
+        tokio::task::spawn_blocking(move || persist_blocking(&path, &cipher, &entries))
+            .await
+            .map_err(|error| {
+                MetadataError::SecretStore(format!("secret persist task failed: {error}"))
+            })?
     }
+}
+
+fn persist_blocking(
+    path: &Path,
+    cipher: &ChaCha20Poly1305,
+    entries: &HashMap<(String, String), Vec<u8>>,
+) -> Result<()> {
+    let rows: Vec<StoredEntry> = entries
+        .iter()
+        .map(|((namespace, handle), secret)| StoredEntry {
+            namespace: namespace.clone(),
+            handle: handle.clone(),
+            secret: secret.clone(),
+        })
+        .collect();
+    let plaintext = serde_json::to_vec(&rows).map_err(MetadataError::Json)?;
+
+    let mut nonce_bytes = [0u8; NONCE_LEN];
+    getrandom::getrandom(&mut nonce_bytes)
+        .map_err(|error| MetadataError::SecretStore(format!("rng failure: {error}")))?;
+    let ciphertext = cipher
+        .encrypt(Nonce::from_slice(&nonce_bytes), plaintext.as_slice())
+        .map_err(|_| MetadataError::SecretStore("secret encryption failed".into()))?;
+
+    let mut blob = Vec::with_capacity(NONCE_LEN + ciphertext.len());
+    blob.extend_from_slice(&nonce_bytes);
+    blob.extend_from_slice(&ciphertext);
+
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|error| MetadataError::SecretStore(error.to_string()))?;
+    }
+    let tmp = path.with_extension("tmp");
+    // Write, fsync the file, atomic rename, then fsync the parent dir so
+    // the dirent update itself is durable. Without the parent fsync a
+    // crash between the rename and dirent flush can revert or drop the
+    // secret store — the ADR-008 "no secrets in SQLite" guarantee is
+    // load-bearing on this file.
+    {
+        use std::io::Write as _;
+        let mut f = std::fs::File::create(&tmp)
+            .map_err(|error| MetadataError::SecretStore(error.to_string()))?;
+        f.write_all(&blob)
+            .map_err(|error| MetadataError::SecretStore(error.to_string()))?;
+        f.sync_all()
+            .map_err(|error| MetadataError::SecretStore(error.to_string()))?;
+    }
+    std::fs::rename(&tmp, path)
+        .map_err(|error| MetadataError::SecretStore(error.to_string()))?;
+    if let Some(parent) = path.parent() {
+        if let Ok(dir) = std::fs::File::open(parent) {
+            // Best-effort: not every filesystem supports directory fsync
+            // (notably some FUSE mounts); log and continue if it fails.
+            if let Err(error) = dir.sync_all() {
+                tracing::debug!(%error, "secret store parent dir fsync failed");
+            }
+        }
+    }
+    Ok(())
 }
 
 fn read_key(key_file: &Path) -> Result<[u8; 32]> {
@@ -141,9 +178,12 @@ fn load(path: &Path, cipher: &ChaCha20Poly1305) -> Result<HashMap<(String, Strin
 #[async_trait]
 impl SecretStore for FileSecretStore {
     async fn put(&self, namespace: &str, handle: &str, secret: &[u8]) -> Result<()> {
-        let mut entries = self.entries.lock().unwrap();
-        entries.insert((namespace.to_string(), handle.to_string()), secret.to_vec());
-        self.persist(&entries)
+        let snapshot = {
+            let mut entries = self.entries.lock().unwrap();
+            entries.insert((namespace.to_string(), handle.to_string()), secret.to_vec());
+            entries.clone()
+        };
+        self.persist(snapshot).await
     }
 
     async fn get(&self, namespace: &str, handle: &str) -> Result<Option<Vec<u8>>> {
@@ -156,9 +196,12 @@ impl SecretStore for FileSecretStore {
     }
 
     async fn delete(&self, namespace: &str, handle: &str) -> Result<()> {
-        let mut entries = self.entries.lock().unwrap();
-        entries.remove(&(namespace.to_string(), handle.to_string()));
-        self.persist(&entries)
+        let snapshot = {
+            let mut entries = self.entries.lock().unwrap();
+            entries.remove(&(namespace.to_string(), handle.to_string()));
+            entries.clone()
+        };
+        self.persist(snapshot).await
     }
 }
 
