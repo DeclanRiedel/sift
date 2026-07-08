@@ -1036,6 +1036,20 @@ async fn bulk_insert_csv(conn: &mut MssqlConn, op: BulkOp) -> Result<BulkResult,
             .with_engine(Engine::SqlServer));
         }
         let row_sql = csv_record_values(&record);
+        // Reject a single row that exceeds the byte cap even before the
+        // first flush; otherwise a >BULK_INSERT_MAX_SQL_BYTES row would
+        // bypass the cap and could OOM the driver.
+        if insert_prefix.len() + row_sql.len() > BULK_INSERT_MAX_SQL_BYTES {
+            return Err(DriverError::new(
+                Code::InvalidParameterValue,
+                format!(
+                    "single CSV row exceeds bulk insert byte cap ({} > {})",
+                    insert_prefix.len() + row_sql.len(),
+                    BULK_INSERT_MAX_SQL_BYTES
+                ),
+            )
+            .with_engine(Engine::SqlServer));
+        }
         if rows_in_batch > 0
             && (rows_in_batch >= BULK_INSERT_BATCH_ROWS
                 || sql.len() + row_sql.len() + 2 > BULK_INSERT_MAX_SQL_BYTES)
@@ -1084,9 +1098,10 @@ fn csv_record_values(record: &csv::StringRecord) -> String {
 }
 
 fn mssql_literal(value: &str) -> String {
-    if value.is_empty() {
-        return "NULL".to_string();
-    }
+    // Do NOT collapse "" to NULL — an empty string is a legitimate value
+    // and CSV can't distinguish it from NULL anyway. Emit N'' so the
+    // column receives an empty string; callers that need NULL support
+    // should use a format that can express it.
     format!("N'{}'", value.replace('\'', "''"))
 }
 
