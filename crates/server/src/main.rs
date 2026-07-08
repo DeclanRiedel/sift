@@ -33,6 +33,10 @@ async fn main() -> anyhow::Result<()> {
     };
     sessions.set_request_timeout(std::time::Duration::from_secs(cfg.timeouts.request_secs));
     sessions.set_store_sql(cfg.metadata.store_sql);
+    sessions.set_result_limits(
+        cfg.limits.max_http_result_rows,
+        cfg.limits.max_http_result_bytes,
+    );
     let metadata = build_metadata_store(&cfg)?;
     if let Some(store) = &metadata {
         sessions.set_audit_store(store.clone());

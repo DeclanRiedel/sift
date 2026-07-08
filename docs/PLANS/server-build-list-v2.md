@@ -336,15 +336,13 @@ are safety holes, not just polish.
       `into_make_service_with_connect_info::<SocketAddr>`. Regression test:
       `tests/api_smoke.rs::loopback_bypass_rejects_non_loopback_peer`
       covers loopback allow, remote deny, and header-spoof deny.
-- [ ] [Implement] Constant-time bearer-token comparison. `auth_middleware`
-      (`http.rs:194-199`) uses plain `==` on the bearer token — timing
-      oracle. API-token verification uses Argon2 (`metadata/src/lib.rs:286`)
-      which is fine; the static bearer path is not.
-- [ ] [Implement] Result-byte / row-count cap. `drain_stream`
-      (`session.rs:649-682`) collects **all** rows into a `Vec<Row>` with
-      no upper bound on the HTTP execute path — a giant result OOMs the
-      server. (The WS path streams with backpressure; the HTTP path does
-      not.)
+- [x] [Implement] Constant-time bearer-token comparison: done. The static
+      bearer path hashes both sides (SHA-256) and compares with a
+      difference-accumulating loop, so neither length nor content leaks via
+      timing.
+- [x] [Implement] Result-byte / row-count cap: done. `drain_stream` enforces
+      both a row cap and a total-bytes cap (`config.limits`, defaults 10k rows
+      / 16 MiB); exceeding either returns `ResultTooLarge`.
 
 ## Phase C — Performance & snappiness
 

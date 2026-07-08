@@ -6,7 +6,7 @@
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Duration;
@@ -30,11 +30,14 @@ use sift_metadata::{MetadataStore, NewOperationAudit, PrincipalId};
 use crate::error::{ApiError, ApiResult};
 use crate::registry::DriverRegistry;
 
-const MAX_HTTP_EXECUTE_ROWS: usize = 10_000;
-
 /// Fallback per-request timeout used until the server wires
 /// `config.timeouts.request_secs` in via [`SessionStore::set_request_timeout`].
 const DEFAULT_REQUEST_TIMEOUT_MS: u64 = 30_000;
+
+/// Default synchronous-execute result caps until the server wires
+/// `config.limits` in via [`SessionStore::set_result_limits`].
+const DEFAULT_MAX_RESULT_ROWS: usize = 10_000;
+const DEFAULT_MAX_RESULT_BYTES: usize = 16 * 1024 * 1024;
 
 /// Server-owned session state. Clonable because handlers share it via
 /// `Arc<SessionStore>` from axum state.
@@ -61,6 +64,10 @@ struct SessionStoreInner {
     /// Persist raw SQL in query history. When false, only a fingerprint is
     /// stored. The audit/replay trail is always fingerprinted regardless.
     store_sql: AtomicBool,
+    /// Synchronous HTTP execute result caps (`config.limits`). Exceeding
+    /// either returns `Code::ResultTooLarge`.
+    max_result_rows: AtomicUsize,
+    max_result_bytes: AtomicUsize,
 }
 
 struct OperationLog {
@@ -83,6 +90,8 @@ impl SessionStore {
                 request_timeout_ms: AtomicU64::new(DEFAULT_REQUEST_TIMEOUT_MS),
                 audit_tx: Mutex::new(None),
                 store_sql: AtomicBool::new(true),
+                max_result_rows: AtomicUsize::new(DEFAULT_MAX_RESULT_ROWS),
+                max_result_bytes: AtomicUsize::new(DEFAULT_MAX_RESULT_BYTES),
             }),
         }
     }
@@ -110,6 +119,8 @@ impl SessionStore {
                 request_timeout_ms: AtomicU64::new(DEFAULT_REQUEST_TIMEOUT_MS),
                 audit_tx: Mutex::new(None),
                 store_sql: AtomicBool::new(true),
+                max_result_rows: AtomicUsize::new(DEFAULT_MAX_RESULT_ROWS),
+                max_result_bytes: AtomicUsize::new(DEFAULT_MAX_RESULT_BYTES),
             }),
         })
     }
@@ -157,6 +168,23 @@ impl SessionStore {
 
     pub fn store_sql(&self) -> bool {
         self.inner.store_sql.load(Ordering::Relaxed)
+    }
+
+    /// Set the synchronous-execute result caps from `config.limits`.
+    pub fn set_result_limits(&self, max_rows: usize, max_bytes: usize) {
+        self.inner
+            .max_result_rows
+            .store(max_rows, Ordering::Relaxed);
+        self.inner
+            .max_result_bytes
+            .store(max_bytes, Ordering::Relaxed);
+    }
+
+    fn result_limits(&self) -> (usize, usize) {
+        (
+            self.inner.max_result_rows.load(Ordering::Relaxed),
+            self.inner.max_result_bytes.load(Ordering::Relaxed),
+        )
     }
 
     /// Run a driver future on its own task, bounded by the request timeout.
@@ -517,6 +545,7 @@ impl SessionStore {
         let driver = entry.driver.clone();
         let handle = entry.handle.clone();
         let dur = self.request_timeout();
+        let (max_rows, max_bytes) = self.result_limits();
 
         // The driver's execute + full drain runs on its own task. The cursor
         // id is only known once `execute` returns, so we stash it in a shared
@@ -527,7 +556,7 @@ impl SessionStore {
         let task = tokio::spawn(async move {
             let stream = driver.execute(handle, exec).await?;
             *slot.lock().unwrap() = Some(stream.cursor_id);
-            drain_stream(stream).await
+            drain_stream(stream, max_rows, max_bytes).await
         });
 
         if dur.is_zero() {
@@ -1142,7 +1171,11 @@ fn read_operation_log(path: &Path) -> std::io::Result<Vec<OperationAuditEntry>> 
 
 /// Result type returned by the HTTP execute handler. Public so the WS
 /// streaming layer can re-use the drain logic.
-pub async fn drain_stream(stream: ResultSetStream) -> Result<ExecuteResponse, DriverError> {
+pub async fn drain_stream(
+    stream: ResultSetStream,
+    max_rows: usize,
+    max_bytes: usize,
+) -> Result<ExecuteResponse, DriverError> {
     let cursor_id = stream.cursor_id;
     let rx = stream.rows;
     tokio::pin!(rx);
@@ -1152,6 +1185,7 @@ pub async fn drain_stream(stream: ResultSetStream) -> Result<ExecuteResponse, Dr
     let mut affected_rows: Option<u64> = None;
     let mut warnings: Vec<DriverWarning> = Vec::new();
     let mut saw_result_set = false;
+    let mut total_bytes: usize = 0;
 
     while let Some(page) = rx.recv().await {
         match page {
@@ -1166,11 +1200,20 @@ pub async fn drain_stream(stream: ResultSetStream) -> Result<ExecuteResponse, Dr
                 columns = cols;
             }
             Page::Rows { rows: r } => {
-                if rows.len().saturating_add(r.len()) > MAX_HTTP_EXECUTE_ROWS {
+                if rows.len().saturating_add(r.len()) > max_rows {
                     return Err(DriverError::new(
                         Code::ResultTooLarge,
                         format!(
-                            "HTTP execute row cap exceeded ({MAX_HTTP_EXECUTE_ROWS}); use WebSocket streaming"
+                            "HTTP execute row cap exceeded ({max_rows}); use WebSocket streaming"
+                        ),
+                    ));
+                }
+                total_bytes = total_bytes.saturating_add(r.iter().map(row_bytes).sum());
+                if total_bytes > max_bytes {
+                    return Err(DriverError::new(
+                        Code::ResultTooLarge,
+                        format!(
+                            "HTTP execute byte cap exceeded ({max_bytes} bytes); use WebSocket streaming"
                         ),
                     ));
                 }
@@ -1195,6 +1238,24 @@ pub async fn drain_stream(stream: ResultSetStream) -> Result<ExecuteResponse, Dr
         warnings,
         has_more: false,
     })
+}
+
+/// Approximate in-memory size of a row, for the HTTP result byte cap. Only the
+/// variable-length variants (text/blob/decimal/json) are measured precisely;
+/// fixed-width scalars use a small constant. This is an OOM guard, not an exact
+/// accounting, so an estimate is sufficient.
+fn row_bytes(row: &Row) -> usize {
+    row.values.iter().map(value_bytes).sum::<usize>() + 8
+}
+
+fn value_bytes(value: &sift_protocol::Value) -> usize {
+    use sift_protocol::Value;
+    match value {
+        Value::Text(s) | Value::Decimal(s) => s.len(),
+        Value::Blob(b) => b.len(),
+        Value::Json(j) => j.to_string().len(),
+        _ => 16,
+    }
 }
 
 /// Human-readable label for a connection spec. Used in `ConnectionInfo`

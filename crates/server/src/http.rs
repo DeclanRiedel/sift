@@ -288,12 +288,26 @@ async fn auth_middleware(
         .get(header::AUTHORIZATION)
         .and_then(|h| h.to_str().ok())
         .and_then(|h| h.strip_prefix("Bearer "))
-        .is_some_and(|actual| actual == expected);
+        .is_some_and(|actual| constant_time_eq(actual.as_bytes(), expected.as_bytes()));
     if valid {
         Ok(next.run(req).await)
     } else {
         Err(StatusCode::UNAUTHORIZED)
     }
+}
+
+/// Constant-time equality for the static bearer token, so the auth check is
+/// not a timing oracle for the token. Both sides are hashed to a fixed-width
+/// digest first, so neither the length nor the content leaks through timing.
+fn constant_time_eq(actual: &[u8], expected: &[u8]) -> bool {
+    use sha2::{Digest, Sha256};
+    let a = Sha256::digest(actual);
+    let b = Sha256::digest(expected);
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
 }
 
 #[derive(Clone)]
