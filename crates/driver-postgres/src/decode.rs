@@ -91,7 +91,17 @@ fn decode_numeric(raw: &[u8]) -> Result<String, Box<dyn std::error::Error + Sync
         return Err("invalid numeric digit group".into());
     }
 
-    let int_group_count = (i32::from(weight) + 1).max(0) as usize;
+    // Bound `weight` against `ndigits`. A hostile payload with e.g.
+    // weight=32766 would otherwise allocate ~130 KiB of "0000" digits
+    // before the trim step. PG never emits weight > ndigits - 1 for a
+    // valid numeric; clamp to that.
+    let int_group_count = {
+        let raw = (i32::from(weight) + 1).max(0) as usize;
+        // Leave some headroom: PG limits total digits to NUMERIC_MAX_PRECISION
+        // (1000); at 4 digits per group that's 250 groups.
+        const MAX_INT_GROUPS: usize = 512;
+        raw.min(ndigits.saturating_add(MAX_INT_GROUPS)).min(MAX_INT_GROUPS)
+    };
     let mut int_part = String::new();
     for idx in 0..int_group_count {
         let group = groups.get(idx).copied().unwrap_or(0);
@@ -110,7 +120,10 @@ fn decode_numeric(raw: &[u8]) -> Result<String, Box<dyn std::error::Error + Sync
 
     let mut frac = String::new();
     if weight < 0 {
-        for _ in 0..(-i32::from(weight) - 1) {
+        // Same bound as the integer side: cap attacker-controlled zero
+        // padding.
+        let zero_groups = ((-i32::from(weight) - 1).max(0) as usize).min(512);
+        for _ in 0..zero_groups {
             frac.push_str("0000");
         }
         for group in &groups {

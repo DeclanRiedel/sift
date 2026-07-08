@@ -257,15 +257,28 @@ impl PgDriver {
         })
     }
 
+    /// Take a conn for a non-transactional op. Rejects InTx slots so
+    /// `restore_after_op` can safely put the conn back as Free; a caller
+    /// that legitimately wants to run under a tx must use the tx APIs
+    /// (`take_in_tx`/`put_in_tx`) explicitly.
     pub(crate) async fn take_for_op(&self, c: &ConnHandle) -> Result<PooledConn, DriverError> {
-        Ok(self.inner.take_for_op(c).await?.0)
+        let (conn, slot) = self.inner.take_for_op(c).await?;
+        match slot {
+            SlotKind::Free => Ok(conn),
+            SlotKind::InTx(tx_id) => {
+                // Put the slot back the way we found it before returning.
+                self.inner.put_in_tx(c.id(), tx_id, conn).await;
+                Err(DriverError::new(
+                    Code::DriverInternal,
+                    "connection has an active transaction; use the tx API instead of ping/schema/execute",
+                )
+                .with_engine(sift_protocol::Engine::Postgres))
+            }
+        }
     }
 
     pub(crate) async fn restore_after_op(&self, c: &ConnHandle, conn: PooledConn) {
-        // We took it from some slot; we put it back as Free. If it was InTx
-        // before, that's a logic error — the tx APIs use take_in_tx/put_in_tx
-        // explicitly, not this method. For ping/schema/execute the slot was
-        // always Free at entry, so restoring as Free is correct.
+        // Safe to put as Free because take_for_op rejects InTx slots.
         self.inner.put_free(c.id(), conn).await;
     }
 }
@@ -301,8 +314,21 @@ pub(crate) fn native_tls_connector() -> Result<tokio_postgres_rustls::MakeRustls
         })
 }
 
-/// Canonical pool key. Serialization failure is an internal error because
-/// `ConnectionSpec` is a protocol type with derived Serialize.
+/// Canonical pool key. Uses SHA-256 of the serde-JSON so the password is
+/// not held in the DashMap key indefinitely (the map is process-lived
+/// and never evicts). Collision-safe across the population size we care
+/// about; the JSON itself was only used for equality, never inspected.
 fn spec_key(spec: &ConnectionSpec) -> Result<String, DriverError> {
-    serde_json::to_string(spec).map_err(|e| DriverError::new(Code::DriverInternal, e.to_string()))
+    use sha2::{Digest, Sha256};
+    let json = serde_json::to_string(spec)
+        .map_err(|e| DriverError::new(Code::DriverInternal, e.to_string()))?;
+    let mut hasher = Sha256::new();
+    hasher.update(json.as_bytes());
+    let hash = hasher.finalize();
+    let mut out = String::with_capacity(64);
+    for byte in hash {
+        use std::fmt::Write as _;
+        let _ = write!(out, "{byte:02x}");
+    }
+    Ok(out)
 }
