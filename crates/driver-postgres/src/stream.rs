@@ -72,16 +72,23 @@ pub(crate) async fn execute_query(
 }
 
 async fn run_query(job: QueryJob) {
-    // Catch panics so a panicking decode path produces a Page::Done with a
-    // diagnostic instead of silently dropping the channel.
+    // Catch panics so a panicking decode path produces a Page::Error with a
+    // diagnostic instead of silently dropping the channel. On panic the
+    // conn owned by `job` is lost as the stack unwinds, so the slot is
+    // stuck in `ConnState::Taken` and the cursor entry never leaves
+    // `inner.cursors`. Extract enough state to evict both before running,
+    // then run under `catch_unwind`.
     let cursor_id_num = job.cursor_id_num;
+    let conn_id = job.conn_id;
+    let inner = Arc::clone(&job.inner);
     let page_tx = job.page_tx.clone();
     let fut = AssertUnwindSafe(run_query_inner(job));
     match fut.catch_unwind().await {
         Ok(()) => {}
         Err(panic) => {
             let msg = panic_message(panic);
-            tracing::error!(cursor_id_num, "query task panicked: {msg}");
+            tracing::error!(cursor_id_num, conn_id, "query task panicked: {msg}");
+            evict_after_panic(&inner, conn_id, cursor_id_num).await;
             let _ = page_tx
                 .send(Page::Error {
                     error: DriverError::new(
@@ -92,6 +99,17 @@ async fn run_query(job: QueryJob) {
                 .await;
         }
     }
+}
+
+/// Panic recovery: `run_query_inner` consumed the `PooledConn`, and the
+/// unwind dropped it. The slot is left in `ConnState::Taken` and the
+/// cursor entry is still live. Evict both so future ops on this
+/// `ConnHandle` fail cleanly with "no conn for handle" rather than
+/// "connection is busy with another op".
+async fn evict_after_panic(inner: &Arc<PgDriverInner>, conn_id: u64, cursor_id_num: u64) {
+    inner.cursors.remove(&cursor_id_num);
+    let mut guard = inner.conns.lock().await;
+    guard.remove(&conn_id);
 }
 
 async fn run_query_inner(job: QueryJob) {
