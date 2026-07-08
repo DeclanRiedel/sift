@@ -6,7 +6,7 @@
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Duration;
@@ -58,6 +58,9 @@ struct SessionStoreInner {
     /// never waits on the SQLite write; every recorded operation still lands
     /// synchronously in the in-memory/JSONL log below.
     audit_tx: Mutex<Option<std::sync::mpsc::Sender<NewOperationAudit>>>,
+    /// Persist raw SQL in query history. When false, only a fingerprint is
+    /// stored. The audit/replay trail is always fingerprinted regardless.
+    store_sql: AtomicBool,
 }
 
 struct OperationLog {
@@ -79,6 +82,7 @@ impl SessionStore {
                 registry,
                 request_timeout_ms: AtomicU64::new(DEFAULT_REQUEST_TIMEOUT_MS),
                 audit_tx: Mutex::new(None),
+                store_sql: AtomicBool::new(true),
             }),
         }
     }
@@ -105,6 +109,7 @@ impl SessionStore {
                 registry,
                 request_timeout_ms: AtomicU64::new(DEFAULT_REQUEST_TIMEOUT_MS),
                 audit_tx: Mutex::new(None),
+                store_sql: AtomicBool::new(true),
             }),
         })
     }
@@ -143,6 +148,15 @@ impl SessionStore {
             })
             .expect("spawn audit writer thread");
         *self.inner.audit_tx.lock().unwrap() = Some(tx);
+    }
+
+    /// Whether raw SQL is persisted in query history (`metadata.store_sql`).
+    pub fn set_store_sql(&self, store_sql: bool) {
+        self.inner.store_sql.store(store_sql, Ordering::Relaxed);
+    }
+
+    pub fn store_sql(&self) -> bool {
+        self.inner.store_sql.load(Ordering::Relaxed)
     }
 
     /// Run a driver future on its own task, bounded by the request timeout.
@@ -229,6 +243,10 @@ impl SessionStore {
         error_message: Option<String>,
     ) {
         const MAX_OPERATION_ROWS: usize = 10_000;
+        // Sanitize before the operation is stored anywhere (in-memory ring,
+        // JSONL log, or durable audit): SQL is reduced to a fingerprint and
+        // secrets/bind values are stripped, so no audit surface carries them.
+        let operation = sanitize_operation(operation);
         let summary = operation.audit_summary();
         {
             let mut log = self.inner.operations.lock().unwrap();
@@ -1015,6 +1033,43 @@ pub struct ConnectionEntry {
 pub struct TransactionEntry {
     pub info: TransactionInfo,
     pub handle: TxHandle,
+}
+
+/// Strip secrets and bind values from an operation before it is recorded on
+/// any audit surface (ADR-009): SQL text becomes a fingerprint, execute params
+/// are cleared, connection passwords are redacted, and bulk payloads dropped.
+/// The audit trail correlates *what happened* without persisting *what data*.
+fn sanitize_operation(operation: Operation) -> Operation {
+    match operation {
+        Operation::ExecuteQuery { session, request } => {
+            let request = ExecuteRequestHttp {
+                sql: crate::fingerprint::sql(&request.sql),
+                params: Vec::new(),
+                ..request
+            };
+            Operation::ExecuteQuery { session, request }
+        }
+        Operation::OpenConnection {
+            session,
+            mut request,
+        } => {
+            request.spec.password = None;
+            Operation::OpenConnection { session, request }
+        }
+        Operation::BulkInsert {
+            session,
+            connection,
+            mut request,
+        } => {
+            request.data = Vec::new();
+            Operation::BulkInsert {
+                session,
+                connection,
+                request,
+            }
+        }
+        other => other,
+    }
 }
 
 /// Whether a driver failure signals a broken connection that is safe to

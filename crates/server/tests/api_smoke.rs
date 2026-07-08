@@ -2047,10 +2047,14 @@ async fn execute_stream_error_maps_to_http_error() {
             .into_body(),
     )
     .await;
+    // The operation trail records the failed execute, but SQL is fingerprinted
+    // (never raw) per the audit-sanitization contract.
     assert!(ops.iter().any(|entry| matches!(
         &entry.operation,
         sift_protocol::Operation::ExecuteQuery { request, .. }
-            if request.sql == "BAD" && entry.status == sift_protocol::OperationStatus::Failed
+            if request.sql.starts_with("sqlfp:")
+                && request.params.is_empty()
+                && entry.status == sift_protocol::OperationStatus::Failed
     )));
 }
 

@@ -129,8 +129,21 @@ a durable vocabulary of user-visible actions.
 **Decision.** Public user actions are represented as `Operation` variants or
 metadata operation entries and are recorded in the operation audit.
 
+Audit records are **sanitized before they are stored** on any surface (the
+in-memory `/v1/operations` view, the JSONL log, and the durable
+`operation_audit` table): SQL text is reduced to a normalized fingerprint
+(`sqlfp:…`), execute bind values are cleared, connection passwords are
+redacted, and bulk payloads are dropped. The audit trail is therefore a record
+of *what happened*, not a verbatim source that can replay query bodies with
+their original data. Raw SQL for a user's own history lives only in
+`query_history` (no bind values), and can itself be reduced to a fingerprint
+with `metadata.store_sql = false`.
+
 **Consequences.** New product actions should add protocol-visible operation
-shape instead of disappearing into ad hoc handler logic.
+shape instead of disappearing into ad hoc handler logic. Anything sensitive a
+new `Operation` variant carries must be added to the audit sanitizer, so the
+trail never becomes a secret/bind-value sink. Full-fidelity replay of query
+bodies is intentionally out of scope for the audit trail.
 
 ---
 

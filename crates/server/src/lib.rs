@@ -8,6 +8,7 @@
 pub mod config;
 pub mod correlation;
 pub mod error;
+pub mod fingerprint;
 pub mod http;
 pub mod registry;
 pub mod room_runtime;

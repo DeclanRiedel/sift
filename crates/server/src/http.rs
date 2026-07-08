@@ -1996,7 +1996,14 @@ async fn execute_query(
                 RoomServerMessage::QueryResult { result: summary },
             );
         }
-        record_execute_history(context, sql_text, duration_ms, &result).await;
+        // Query history keeps raw SQL by default; when store_sql is off it
+        // stores only the fingerprint (audit trail is always fingerprinted).
+        let history_sql = if state.sessions.store_sql() {
+            sql_text
+        } else {
+            crate::fingerprint::sql(&sql_text)
+        };
+        record_execute_history(context, history_sql, duration_ms, &result).await;
     }
     match result {
         Ok(resp) => {

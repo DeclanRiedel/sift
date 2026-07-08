@@ -240,6 +240,84 @@ async fn response_generates_correlation_id_when_absent() {
 }
 
 #[tokio::test]
+async fn operation_trail_is_fingerprinted_and_secret_free() {
+    let secret = "hunter2";
+    let driver = MockDriver::builder()
+        .engine(Engine::Postgres)
+        .execute_ok(success_pages())
+        .build();
+    let app = app(audited_state(driver));
+
+    // Open a session and a connection *with a password*.
+    let res = app
+        .clone()
+        .oneshot(post("/v1/sessions", serde_json::json!({})))
+        .await
+        .unwrap();
+    let session: SessionInfo = body_json(res.into_body()).await;
+    let res = app
+        .clone()
+        .oneshot(post(
+            &format!("/v1/sessions/{}/connections", session.id),
+            serde_json::json!({
+                "engine": "postgres", "host": "mock", "user": "mock", "password": secret
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let conn: sift_protocol::ConnectionInfo = body_json(res.into_body()).await;
+
+    // Execute a query whose SQL embeds the secret.
+    let res = app
+        .clone()
+        .oneshot(post(
+            &format!("/v1/sessions/{}/queries", session.id),
+            serde_json::json!({
+                "connection": conn.id,
+                "sql": format!("select * from t where token = '{secret}'")
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+
+    // The replayable operation trail (/v1/operations) is synchronous.
+    let res = app
+        .oneshot(Request::get("/v1/operations").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    let ops: Vec<serde_json::Value> = body_json(res.into_body()).await;
+
+    let exec = ops
+        .iter()
+        .find(|e| e["operation"]["op"] == "execute_query")
+        .expect("execute_query recorded");
+    let sql = exec["operation"]["request"]["sql"].as_str().unwrap();
+    assert!(
+        sql.starts_with("sqlfp:"),
+        "SQL should be fingerprinted, got {sql}"
+    );
+    assert_eq!(
+        exec["operation"]["request"]["params"],
+        serde_json::json!([])
+    );
+
+    let open = ops
+        .iter()
+        .find(|e| e["operation"]["op"] == "open_connection")
+        .expect("open_connection recorded");
+    assert!(
+        open["operation"]["request"]["password"].is_null(),
+        "connection password must be redacted"
+    );
+
+    // Belt and suspenders: the secret appears nowhere in the trail.
+    let whole = serde_json::to_string(&ops).unwrap();
+    assert!(!whole.contains(secret), "operation trail leaked a secret");
+}
+
+#[tokio::test]
 async fn metadata_operation_records_actor() {
     let app = app(audited_state_loopback(
         MockDriver::builder().engine(Engine::Postgres).build(),

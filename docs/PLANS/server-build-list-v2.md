@@ -283,14 +283,10 @@ are safety holes, not just polish.
       mutating work never auto-retries. See `phase-b-next-steps.md` step 6.
 - [x] [Design] Health vs readiness split: done. `/v1/ready` added; checks
       not-draining + drivers registered + (enabled) metadata reachable.
-- [ ] [Design] Audit granularity. HTTP-level audit (`session.rs:115-127`)
-      is an in-memory ring buffer (cap 10 000) + optional JSONL
-      (`operation_log_path`). Operation-level audit (`session.rs:129-151`)
-      carries `{ at, operation, status }` only — **no actor, no rows, no
-      result code beyond `Succeeded`/`Failed`, no correlation id**, and
-      `status` is hard-coded `Succeeded` at every call site (grep confirms
-      `OperationStatus::Failed` is defined at `protocol/src/session.rs:202`
-      but never constructed). No SQLite audit table exists in `metadata`.
+- [x] [Design] Audit granularity: done. A durable `operation_audit` SQLite
+      table now carries actor, target, result_code, row_count, correlation_id,
+      and error_message; the failure path is recorded; success and failure go
+      through one helper. See the operation-level audit implement item below.
 - [ ] [Design] Secret backends. Only `MemorySecretStore` is wired
       (`main.rs:115-120` hard-errors on any other `secret_backend` value).
       Define `OsKeychain` (keyring/security-framework), `File` (encrypted,
@@ -317,12 +313,11 @@ are safety holes, not just polish.
       (`push_operation_full`); exposed at `GET /v1/operations/audit`.
 - [ ] [Implement] OS-keychain `SecretStore` backend; never log secret
       bytes; redaction in audit + tracing; round-trip put/get/delete test.
-- [ ] [Implement] Audit redaction + query fingerprinting: never persist or
-      log bound parameter values. `query_history` already omits bind values
-      (`metadata/src/lib.rs:814-837`), but the JSONL operation log
-      serializes `Operation::ExecuteQuery` verbatim (`session.rs:137-145`)
-      which can carry bind values through `ExecuteRequest` — flag for
-      redaction at the audit boundary.
+- [x] [Implement] Audit redaction + query fingerprinting: done. Operations are
+      sanitized before storage on every surface — SQL becomes a `sqlfp:` hash,
+      execute params cleared, connection passwords redacted, bulk payloads
+      dropped. `query_history` keeps raw SQL by default; `metadata.store_sql =
+      false` fingerprints it too. ADR-009 updated.
 - [x] [Implement] Correlation IDs: accept-or-generate `x-correlation-id`,
       carried on a task-local, echoed in the response header, error body,
       tracing span, and durable audit rows (HTTP and WebSocket).
