@@ -553,26 +553,41 @@ impl SessionStore {
         // in-flight cursor (which also drives SQL Server's discard-on-cancel).
         let cursor_slot: Arc<Mutex<Option<CursorId>>> = Arc::new(Mutex::new(None));
         let slot = cursor_slot.clone();
-        let task = tokio::spawn(async move {
+        let mut task = tokio::spawn(async move {
             let stream = driver.execute(handle, exec).await?;
             *slot.lock().unwrap() = Some(stream.cursor_id);
             drain_stream(stream, max_rows, max_bytes).await
         });
 
         if dur.is_zero() {
-            return match task.await {
+            return match (&mut task).await {
                 Ok(res) => res.map_err(ApiError::Driver),
                 Err(join) => Err(ApiError::Internal(format!("execute task failed: {join}"))),
             };
         }
 
-        match tokio::time::timeout(dur, task).await {
+        match tokio::time::timeout(dur, &mut task).await {
             Ok(Ok(res)) => res.map_err(ApiError::Driver),
             Ok(Err(join)) => Err(ApiError::Internal(format!("execute task failed: {join}"))),
             Err(_) => {
                 let cursor = *cursor_slot.lock().unwrap();
                 if let Some(cursor) = cursor {
+                    // Cursor exists: driver returned the stream and the task
+                    // is draining rows. Cancel through the cursor so the
+                    // driver's abort+discard rules run.
                     self.cancel_after_timeout(session_id, conn_id, cursor).await;
+                } else {
+                    // Task is hung inside driver.execute before any cursor
+                    // was produced. There is nothing to cancel through the
+                    // driver; abort the task itself so it doesn't outlive
+                    // the handler and hold the ConnHandle busy indefinitely
+                    // (which would also block Shutdown::await_drain).
+                    task.abort();
+                    tracing::warn!(
+                        session_id = %session_id,
+                        conn_id = %conn_id,
+                        "aborted execute task after pre-cursor timeout"
+                    );
                 }
                 Err(timeout_error("execute"))
             }
