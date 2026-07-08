@@ -15,8 +15,9 @@ locked (confirmed 2026-07-07); the plan is the agreed implementation shape.
 
 Every commit passed `cargo fmt`, `clippy --workspace --all-targets -D
 warnings`, and `cargo test --workspace`. The `os-keychain` feature is off by
-default (needs libdbus); its code is API-verified against keyring 3.6.3 and
-compiles via the no-dbus backend.
+default; it is a pure-Rust build (zbus-based Secret Service on Linux, no system
+libdbus) verified with `cargo check -p sift-server --features os-keychain`, and
+gated only because it needs a running credential service at runtime.
 
 ## Locked decisions
 
@@ -65,8 +66,8 @@ compiles via the no-dbus backend.
   a per-write random nonce, atomically replaced (`write tmp + rename`). Loads +
   decrypts on open; re-seals on each mutation. Key comes from the keyfile.
 - `OsKeychainSecretStore`: `keyring` entries under service `sift`, account
-  `"{namespace}:{handle}"`. Round-trips bytes as base64 (keyring stores
-  strings).
+  `"{namespace}:{handle}"`, using keyring's binary `set_secret`/`get_secret`.
+  Pure-Rust build (zbus Secret Service on Linux; no system libdbus).
 - `main.rs::build_metadata_store`: match `secret_backend` → construct the
   chosen store; `file` requires `secret_key_file`; unknown value errors as
   today.

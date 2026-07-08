@@ -26,8 +26,10 @@ thiserror = { workspace = true }
 uuid = { workspace = true }
 
 [features]
-# OS keychain secret backend. Off by default: it pulls a platform credential
-# store (Secret Service / D-Bus on Linux) that is unavailable in headless CI.
+# OS keychain secret backend (keyring). Pure-Rust build (no system libdbus).
+# Off by default because it needs a running platform credential service at
+# *runtime* (Secret Service daemon on Linux, Keychain on macOS), which headless
+# CI lacks — so it is compile-checked but not exercised there.
 os-keychain = ["dep:keyring"]
 
 [dev-dependencies]

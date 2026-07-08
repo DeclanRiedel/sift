@@ -34,8 +34,9 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 
 [features]
-# Forwards to sift-metadata: enables the OS keychain secret backend. Off by
-# default (needs a platform credential service, unavailable in headless CI).
+# Forwards to sift-metadata: enables the OS keychain secret backend (pure-Rust,
+# no system libdbus). Off by default — it needs a running credential service at
+# runtime, which headless CI lacks.
 os-keychain = ["sift-metadata/os-keychain"]
 
 [dev-dependencies]

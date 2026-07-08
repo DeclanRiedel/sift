@@ -33,7 +33,6 @@
           openssl
           postgresql.lib        # libpq headers — needed by tokio-postgres / sqlx at build time
           postgresql            # psql client + ability to run a local dev instance
-          dbus                  # libdbus — needed only for the `os-keychain` feature (Secret Service)
         ];
 
         # Rust + adjacent dev tooling.

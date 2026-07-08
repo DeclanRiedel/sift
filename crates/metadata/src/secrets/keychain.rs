@@ -1,8 +1,9 @@
 //! `OsKeychainSecretStore` — a [`SecretStore`] backed by the OS credential
 //! store via the `keyring` crate. Compiled only under the `os-keychain`
-//! feature; the backend needs a platform credential service (Secret Service /
-//! D-Bus on Linux) that is unavailable in headless CI, so it is verified
-//! manually rather than in automated tests.
+//! feature. The build is pure-Rust (a zbus-based Secret Service client on
+//! Linux, no system libdbus), but at *runtime* it needs a credential service
+//! (Secret Service daemon on Linux, Keychain on macOS), which headless CI
+//! lacks — so the round-trip test below is `#[ignore]`d there.
 
 use async_trait::async_trait;
 use keyring::{Entry, Error as KeyringError};
@@ -50,5 +51,28 @@ impl SecretStore for OsKeychainSecretStore {
             Ok(()) | Err(KeyringError::NoEntry) => Ok(()),
             Err(error) => Err(map_err(error)),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Requires a running Secret Service / Keychain, so it is ignored in CI.
+    // Run locally with: cargo test -p sift-metadata --features os-keychain
+    //   -- --ignored keychain
+    #[tokio::test]
+    #[ignore = "needs a running OS credential service"]
+    async fn round_trips_through_os_store() {
+        let store = OsKeychainSecretStore::new();
+        let ns = "sift.test";
+        let handle = "keychain-roundtrip";
+        store.put(ns, handle, b"s3cr3t").await.unwrap();
+        assert_eq!(
+            store.get(ns, handle).await.unwrap().as_deref(),
+            Some(&b"s3cr3t"[..])
+        );
+        store.delete(ns, handle).await.unwrap();
+        assert_eq!(store.get(ns, handle).await.unwrap(), None);
     }
 }
