@@ -1,7 +1,7 @@
 //! Ad-hoc perf measurement against a live PG. Gated behind `live-pg`.
 //!
-//! Run: `cargo run -p sift-driver-postgres --release --features live-pg
-//! --example bench -- --nocapture`.
+//! Run: `SIFT_PG_HOST=/tmp/sift-pg-socket SIFT_PG_PORT=5433 cargo run
+//! -p sift-driver-postgres --release --features live-pg --example bench`.
 
 #![cfg(feature = "live-pg")]
 
@@ -11,18 +11,23 @@ use sift_driver_api::Driver;
 use sift_driver_postgres::PgDriver;
 use sift_protocol::{ConnectionSpec, ExecuteRequest, SchemaScope, SslMode};
 
-const PG_HOST: &str = "/tmp/opencode/sift-pg-socket";
-const PG_PORT: u16 = 5433;
-const PG_USER: &str = "sift";
-const PG_DB: &str = "sifttest";
+const DEFAULT_PG_HOST: &str = "/tmp/opencode/sift-pg-socket";
+const DEFAULT_PG_PORT: u16 = 5433;
+const DEFAULT_PG_USER: &str = "sift";
+const DEFAULT_PG_DB: &str = "sifttest";
 
 fn spec() -> ConnectionSpec {
     ConnectionSpec {
-        host: PG_HOST.to_string(),
-        port: Some(PG_PORT),
-        database: Some(PG_DB.to_string()),
-        user: PG_USER.to_string(),
-        password: None,
+        host: std::env::var("SIFT_PG_HOST").unwrap_or_else(|_| DEFAULT_PG_HOST.to_string()),
+        port: Some(
+            std::env::var("SIFT_PG_PORT")
+                .ok()
+                .and_then(|p| p.parse().ok())
+                .unwrap_or(DEFAULT_PG_PORT),
+        ),
+        database: Some(std::env::var("SIFT_PG_DB").unwrap_or_else(|_| DEFAULT_PG_DB.to_string())),
+        user: std::env::var("SIFT_PG_USER").unwrap_or_else(|_| DEFAULT_PG_USER.to_string()),
+        password: std::env::var("SIFT_PG_PASSWORD").ok(),
         ssl_mode: Some(SslMode::Disable),
         engine_specific: None,
     }
@@ -62,7 +67,7 @@ where
 
 #[tokio::main]
 async fn main() {
-    println!("sift-driver-postgres perf bench (PG 17.10 over unix socket)");
+    println!("sift-driver-postgres perf bench");
     println!();
     let driver = PgDriver::new();
 

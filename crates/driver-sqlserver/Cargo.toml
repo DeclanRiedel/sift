@@ -23,3 +23,8 @@ tiberius = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 uuid = { workspace = true }
+
+[[example]]
+name = "bench"
+path = "examples/bench.rs"
+required-features = ["live-mssql"]
