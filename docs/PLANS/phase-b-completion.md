@@ -4,6 +4,20 @@ Closes out the remaining Phase B items after the reliability list, driver
 isolation (ADR-013), and versioning (ADR-016) landed. Decisions below are
 locked (confirmed 2026-07-07); the plan is the agreed implementation shape.
 
+## Status — all done
+
+- [x] Secret backends: encrypted-file + OS-keychain (`207eb67`), dev-env
+      wiring (`c9cce1b`).
+- [x] SQL fingerprinting + audit sanitization, configurable `store_sql`
+      (`53a6acc`); ADR-009 updated.
+- [x] HTTP result byte cap (+ configurable row cap) and constant-time bearer
+      comparison (`a5434c2`).
+
+Every commit passed `cargo fmt`, `clippy --workspace --all-targets -D
+warnings`, and `cargo test --workspace`. The `os-keychain` feature is off by
+default (needs libdbus); its code is API-verified against keyring 3.6.3 and
+compiles via the no-dbus backend.
+
 ## Locked decisions
 
 1. **Secret backends: both.** Ship an encrypted-file backend (tested,
