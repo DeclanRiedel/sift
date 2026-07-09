@@ -446,8 +446,12 @@ Goal: the server side of every daily-driver and power-user IDE feature, so
 a GUI later is just rendering. Every item below is verified absent from the
 `Operation` enum and the route table.
 
-- [ ] [Design] Autocomplete API: server endpoint returning ranked
+- [x] [Design] Autocomplete API: server endpoint returning ranked
       candidates scoped to connection + schema + cursor position.
+      Server-side composition on top of `SchemaCache` + a new
+      `sift-completion` workspace crate housing sqlparser-rs tokenization,
+      context detection, keyword/function tables, and the ranker — no
+      new `Driver` method (ADR-017 preserved). Shape mirrors `ddl.rs`.
 - [ ] [Design] Export pipeline: server-side CSV/JSON/TSV generation from a
       cursor; streaming over HTTP chunked or WS; NULL display policy;
       type-aware cell formatting. (PG `COPY` exists at the driver layer
@@ -471,8 +475,13 @@ a GUI later is just rendering. Every item below is verified absent from the
 - [ ] [Design] CSV import → table (server-side ingest, type inference,
       conflict policy). Ties to PG `COPY FROM STDIN` (`PgExt::copy` Import)
       and SQL Server `BULK INSERT` (`MssqlExt::bulk_insert`).
-- [ ] [Implement] Autocomplete endpoint + driver method; engine-specific
-      function/keyword tables in `protocol`; cached against schema snapshot.
+- [x] [Implement] Autocomplete endpoint. **Deviation from original
+      plan:** no driver method (would break ADR-017's trait lock); the
+      whole feature composes over `Driver::schema` via `SchemaCache`.
+      Engine-specific keyword and builtin-function tables live in
+      `sift-completion` (`keywords.rs`), not `sift-protocol`, so the
+      protocol crate stays pure serde. Route: `POST /v1/sessions/:id/
+      connections/:conn_id/complete`; audit `Operation::Complete`.
 - [ ] [Implement] Export over HTTP chunked + WS; format selection; NULL +
       type-aware rendering hints.
 - [ ] [Implement] DDL generation driver methods; OpenAPI coverage;

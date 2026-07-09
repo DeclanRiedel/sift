@@ -490,3 +490,40 @@ if either invalidator fails silently, correctness is preserved with at
 most 60s of staleness. A future ADR may introduce a coarser
 "schema-changed" hint from the client (e.g. after an executed DDL
 statement) to invalidate immediately without the trigger dependency.
+
+## ADR-lite — Server-side composition for Phase D headless features
+
+**Context.** Phase D adds three headless features (DDL generation,
+autocomplete, and — later — inline-edit DML) that could each be
+expressed either as a new `Driver` trait method or composed on the
+server over the existing eight verbs. ADR-017 locked the trait around
+those eight; every trait addition breaks the lock and forces a protocol
+bump.
+
+**Decision.** Compose them server-side. DDL generation
+(`crates/server/src/ddl.rs`) established the pattern: fetch what's
+needed via `Driver::schema` + `Driver::execute`, format the result in
+server code. Autocomplete follows the same rule with one wrinkle —
+the SQL context parser is non-trivial and belongs in its own pure-Rust
+workspace crate (`sift-completion`) so a future desktop client can
+share it without pulling in the server. `sift-completion` depends only
+on `sift-protocol` (for wire types + `SchemaSnapshot`) and
+`sqlparser-rs` (for tokenization); no I/O, no tokio.
+
+The engine-specific keyword and builtin-function tables originally
+called out for `sift-protocol` in the Phase D plan instead live in
+`sift-completion::keywords`. Protocol stays pure serde (ADR-004); the
+tables aren't wire types, they're data the ranker consumes.
+
+**Consequences.** ADR-017 stays intact — no signature change, no
+protocol bump on either feature. `sift-completion` is reusable by the
+eventual desktop client and the wasm client (its interface takes a
+`SchemaSnapshot`, not a live driver). Inline-edit DML will follow the
+same shape when it lands. The trade-off: server-side composition means
+the server does work an engine could arguably do faster in-native
+(catalog joins on the server side rather than pushed down). For DDL
+and autocomplete this is a wash — the DB calls are the same shape
+`RefreshSchema` already makes and the cache absorbs them. If a future
+feature genuinely needs an engine-native pass (e.g. plan capture), it
+graduates to a trait extension via an explicit ADR then, not by
+grandfather.
