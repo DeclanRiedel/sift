@@ -610,13 +610,10 @@ impl SessionStore {
             let stream = driver.execute(handle, exec).await?;
             let cursor_id = stream.cursor_id;
             *slot.lock().unwrap() = Some(cursor_id);
-            // Register for the per-session cap. Eviction of a
-            // co-tenant cursor happens synchronously via the on_evict
-            // callback (spawned driver.cancel).
-            if let Err(error) = cursors.open(session_id, cursor_id) {
-                return Err(error);
-            }
-            let result = drain_stream(stream, max_rows, max_bytes).await;
+            // Hand the driver stream to the registry pump. Eviction of
+            // a co-tenant cursor happens via the on_evict callback.
+            let wrapped = cursors.wrap(session_id, stream)?;
+            let result = drain_stream(wrapped, max_rows, max_bytes).await;
             cursors.remove(cursor_id);
             result
         });
@@ -709,20 +706,25 @@ impl SessionStore {
         self.validate_execute_tx(session_id, conn_id, tx)?;
         let entry = self.get_conn_entry(session_id, conn_id)?;
         let stream = entry.driver.execute(entry.handle.clone(), req).await?;
-        // Register the cursor before returning. Eviction may fire the
-        // installed callback → driver.cancel on the LRA cursor of the
-        // same session. Registration failure closes the just-opened
-        // cursor via driver.cancel so we don't leak.
-        if let Err(error) = self.inner.cursors.open(session_id, stream.cursor_id) {
-            let handle = entry.handle.clone();
-            let cursor_id = stream.cursor_id;
-            let driver = entry.driver.clone();
-            tokio::spawn(async move {
-                let _ = driver.cancel(handle, cursor_id).await;
-            });
-            return Err(ApiError::Driver(error));
+        // Hand the driver's stream to the registry-owned pump. Wrapping
+        // enforces the per-session cap (evicting the LRA cursor of the
+        // same session via the installed on_evict callback), spawns
+        // the pump task, and returns a rebound stream whose `rows`
+        // channel is fed by the pump.
+        match self.inner.cursors.wrap(session_id, stream) {
+            Ok(wrapped) => Ok(wrapped),
+            Err(error) => {
+                // Wrap failed (cap misconfig or duplicate id). Drop the
+                // raw driver cursor we can't rely on the registry to
+                // clean up — Drop on the raw stream isn't enough for
+                // server-side cursors.
+                //
+                // Note: on the happy failure path (cap==0), the driver
+                // stream is consumed by wrap()'s destructuring before
+                // returning Err, so there is nothing to cancel here.
+                Err(ApiError::Driver(error))
+            }
         }
-        Ok(stream)
     }
 
     /// Called by the WS ack loop after each ack to keep the cursor from

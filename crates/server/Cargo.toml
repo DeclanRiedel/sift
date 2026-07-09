@@ -42,6 +42,7 @@ os-keychain = ["sift-metadata/os-keychain"]
 [dev-dependencies]
 sift-client-sdk = { workspace = true }
 sift-driver-api = { workspace = true, features = ["mock"] }
+tempfile = { workspace = true }
 tokio = { workspace = true, features = ["full", "test-util"] }
 tokio-tungstenite = { workspace = true }
 tower = { workspace = true, features = ["util"] }

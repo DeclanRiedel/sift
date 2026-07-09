@@ -392,17 +392,20 @@ per-session cap.
    view lives in the registry. When a session opens a new cursor and it is
    already at cap, the registry evicts one of its own cursors first — never
    another session's. A runaway session hurts only itself.
-2. **Idle-first eviction with spill.** Eviction candidates are ranked by
-   time-since-last-ack; the oldest idle cursor's remaining buffered pages
-   are spilled to a per-cursor temp file (path
-   `{spill_dir}/sift-cursor-{cursor_id}.bin`), and the driver-side stream is
-   detached (its receiver drained into the file, its cancel token dropped).
-   The next `Ack(cursor, seq)` on an evicted cursor reads from the file
-   instead of the mpsc. When the file is fully drained the cursor closes
-   normally. Spill is skipped when the buffered footprint is below
-   `spill_min_bytes` (default 1 MiB) — those cursors are dropped with
-   `Page::Error { code: CursorEvicted }` because the cost of the file
-   exceeds the value.
+2. **Idle-first eviction.** Eviction candidates are ranked by
+   time-since-last-ack. On eviction the pump task exits after sending
+   a synthetic `Page::Error { code: CursorEvicted }` to the consumer;
+   the driver-side stream is cancelled through the registry's
+   `on_evict` callback, which routes through `driver.cancel(handle,
+   cursor)` so the ADR-013 ownership check applies to evictions
+   exactly like user-issued cancels. **Spill to disk** — writing the
+   pump's remaining buffered pages to `{spill_dir}/sift-cursor-{id}.bin`
+   on eviction and letting the consumer resume via that file — is
+   staged: the write side lands with this ADR (behind `spill_dir`
+   config, off by default), the read side (WS resume-from-spill) is
+   an explicit follow-up. Until then, `spill_dir` on-disk footprint
+   is diagnostic value only. `spill_min_bytes` (default 1 MiB) skips
+   spill for cursors whose write cost exceeds the value.
 3. **Explicit pause/resume backpressure.** The registry pumps pages off
    the driver's mpsc into a per-cursor buffer bounded by `prefetch_pages`
    (default 2, matching the current 1-ahead behavior plus one for the

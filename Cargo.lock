@@ -2894,6 +2894,7 @@ dependencies = [
  "sift-driver-sqlserver",
  "sift-metadata",
  "sift-protocol",
+ "tempfile",
  "thiserror 1.0.69",
  "tokio",
  "tokio-tungstenite 0.26.2",

@@ -95,6 +95,13 @@ pub struct LimitsConfig {
     /// Max simultaneously-open cursors per session (ADR-011). Opening a
     /// new cursor when at cap evicts the session's LRA cursor.
     pub max_cursors_per_session: usize,
+    /// Pages the cursor pump buffers ahead of the consumer (ADR-011).
+    /// Also sets automatic backpressure — a slow consumer stalls the
+    /// pump at this depth.
+    pub cursor_prefetch_pages: usize,
+    /// Directory for on-eviction cursor spill files (ADR-011). Empty
+    /// disables spill. Read-back is a documented follow-up.
+    pub cursor_spill_dir: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -125,6 +132,8 @@ impl Default for LimitsConfig {
             max_http_result_rows: 10_000,
             max_http_result_bytes: 16 * 1024 * 1024,
             max_cursors_per_session: 32,
+            cursor_prefetch_pages: 2,
+            cursor_spill_dir: None,
         }
     }
 }
