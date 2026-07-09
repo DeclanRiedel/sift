@@ -27,6 +27,7 @@ use sift_protocol::{
 
 use sift_metadata::{MetadataStore, NewOperationAudit, PrincipalId};
 
+use crate::cursors::CursorRegistry;
 use crate::error::{ApiError, ApiResult};
 use crate::registry::DriverRegistry;
 
@@ -68,6 +69,10 @@ struct SessionStoreInner {
     /// either returns `Code::ResultTooLarge`.
     max_result_rows: AtomicUsize,
     max_result_bytes: AtomicUsize,
+    /// Server-side cursor registry (ADR-011). Tracks every open cursor
+    /// across all sessions; enforces per-session caps; routes eviction
+    /// through `driver.cancel`.
+    cursors: CursorRegistry,
 }
 
 struct OperationLog {
@@ -77,7 +82,7 @@ struct OperationLog {
 
 impl SessionStore {
     pub fn new(registry: DriverRegistry) -> Self {
-        Self {
+        let store = Self {
             inner: Arc::new(SessionStoreInner {
                 sessions: DashMap::new(),
                 audit: Mutex::new(Vec::new()),
@@ -92,8 +97,11 @@ impl SessionStore {
                 store_sql: AtomicBool::new(true),
                 max_result_rows: AtomicUsize::new(DEFAULT_MAX_RESULT_ROWS),
                 max_result_bytes: AtomicUsize::new(DEFAULT_MAX_RESULT_BYTES),
+                cursors: CursorRegistry::default(),
             }),
-        }
+        };
+        store.install_eviction_callback();
+        store
     }
 
     pub fn new_with_operation_log_path(
@@ -106,7 +114,7 @@ impl SessionStore {
         }
         let entries = read_operation_log(path)?;
         let writer = OpenOptions::new().create(true).append(true).open(path)?;
-        Ok(Self {
+        let store = Self {
             inner: Arc::new(SessionStoreInner {
                 sessions: DashMap::new(),
                 audit: Mutex::new(Vec::new()),
@@ -121,8 +129,52 @@ impl SessionStore {
                 store_sql: AtomicBool::new(true),
                 max_result_rows: AtomicUsize::new(DEFAULT_MAX_RESULT_ROWS),
                 max_result_bytes: AtomicUsize::new(DEFAULT_MAX_RESULT_BYTES),
+                cursors: CursorRegistry::default(),
             }),
-        })
+        };
+        store.install_eviction_callback();
+        Ok(store)
+    }
+
+    /// Wire the cursor registry's eviction hook back into this store so
+    /// evicted cursors take the same driver.cancel path as an
+    /// explicit user cancel. Called once, at construction.
+    fn install_eviction_callback(&self) {
+        let inner = Arc::downgrade(&self.inner);
+        self.inner.cursors.set_on_evict(Arc::new(move |session, cursor| {
+            let Some(inner) = inner.upgrade() else {
+                return;
+            };
+            // Best-effort: cancel via the driver on a background task so
+            // the caller (which is inside `open`) doesn't await here.
+            // Look up the connection that owns this cursor. In the
+            // current data model cursors are keyed only by id — we scan
+            // the session's connections and let driver.cancel run
+            // against each; the driver-side ownership check filters
+            // out non-owners cheaply.
+            let store = SessionStore {
+                inner: Arc::clone(&inner),
+            };
+            tokio::spawn(async move {
+                let conn_ids: Vec<ConnectionId> = match store.inner.sessions.get(&session) {
+                    Some(s) => s.connections.iter().map(|e| e.id).collect(),
+                    None => return,
+                };
+                for conn in conn_ids {
+                    let Ok(entry) = store.get_conn_entry(session, conn) else {
+                        continue;
+                    };
+                    // Best-effort — an error means the cursor wasn't
+                    // owned by this handle (driver returns CursorNotFound).
+                    let _ = entry.driver.cancel(entry.handle, cursor).await;
+                }
+            });
+        }));
+    }
+
+    /// Access the cursor registry (for tests and future wiring).
+    pub fn cursor_registry(&self) -> &CursorRegistry {
+        &self.inner.cursors
     }
 
     pub fn registry(&self) -> &DriverRegistry {
@@ -553,10 +605,20 @@ impl SessionStore {
         // in-flight cursor (which also drives SQL Server's discard-on-cancel).
         let cursor_slot: Arc<Mutex<Option<CursorId>>> = Arc::new(Mutex::new(None));
         let slot = cursor_slot.clone();
+        let cursors = self.inner.cursors.clone();
         let mut task = tokio::spawn(async move {
             let stream = driver.execute(handle, exec).await?;
-            *slot.lock().unwrap() = Some(stream.cursor_id);
-            drain_stream(stream, max_rows, max_bytes).await
+            let cursor_id = stream.cursor_id;
+            *slot.lock().unwrap() = Some(cursor_id);
+            // Register for the per-session cap. Eviction of a
+            // co-tenant cursor happens synchronously via the on_evict
+            // callback (spawned driver.cancel).
+            if let Err(error) = cursors.open(session_id, cursor_id) {
+                return Err(error);
+            }
+            let result = drain_stream(stream, max_rows, max_bytes).await;
+            cursors.remove(cursor_id);
+            result
         });
 
         if dur.is_zero() {
@@ -646,7 +708,33 @@ impl SessionStore {
     ) -> ApiResult<ResultSetStream> {
         self.validate_execute_tx(session_id, conn_id, tx)?;
         let entry = self.get_conn_entry(session_id, conn_id)?;
-        Ok(entry.driver.execute(entry.handle.clone(), req).await?)
+        let stream = entry.driver.execute(entry.handle.clone(), req).await?;
+        // Register the cursor before returning. Eviction may fire the
+        // installed callback → driver.cancel on the LRA cursor of the
+        // same session. Registration failure closes the just-opened
+        // cursor via driver.cancel so we don't leak.
+        if let Err(error) = self.inner.cursors.open(session_id, stream.cursor_id) {
+            let handle = entry.handle.clone();
+            let cursor_id = stream.cursor_id;
+            let driver = entry.driver.clone();
+            tokio::spawn(async move {
+                let _ = driver.cancel(handle, cursor_id).await;
+            });
+            return Err(ApiError::Driver(error));
+        }
+        Ok(stream)
+    }
+
+    /// Called by the WS ack loop after each ack to keep the cursor from
+    /// looking idle to the eviction policy.
+    pub fn cursor_touch(&self, cursor_id: CursorId) {
+        self.inner.cursors.touch(cursor_id);
+    }
+
+    /// Called after a cursor terminates or is cancelled to drop its
+    /// registry bookkeeping. Idempotent.
+    pub fn cursor_remove(&self, cursor_id: CursorId) {
+        self.inner.cursors.remove(cursor_id);
     }
 
     pub async fn listen_pg(
@@ -676,6 +764,10 @@ impl SessionStore {
     ) -> ApiResult<()> {
         let entry = self.get_conn_entry(session_id, conn_id)?;
         entry.driver.cancel(entry.handle.clone(), cursor).await?;
+        // Drop the registry entry so the per-session cap slot frees
+        // up. Terminal-page cleanup calls `cursor_remove` on the same
+        // path; this is idempotent.
+        self.inner.cursors.remove(cursor);
         if entry.driver.engine() == Engine::SqlServer {
             self.with_session(&session_id, |s| s.connections.remove(&conn_id))?;
             // Also invoke driver.close so the driver-level socket/FD is

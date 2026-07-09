@@ -92,6 +92,9 @@ pub struct LimitsConfig {
     /// Max approximate bytes a synchronous HTTP execute may return before
     /// `ResultTooLarge`. Guards against a few very wide rows OOMing the server.
     pub max_http_result_bytes: usize,
+    /// Max simultaneously-open cursors per session (ADR-011). Opening a
+    /// new cursor when at cap evicts the session's LRA cursor.
+    pub max_cursors_per_session: usize,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -121,6 +124,7 @@ impl Default for LimitsConfig {
         Self {
             max_http_result_rows: 10_000,
             max_http_result_bytes: 16 * 1024 * 1024,
+            max_cursors_per_session: 32,
         }
     }
 }

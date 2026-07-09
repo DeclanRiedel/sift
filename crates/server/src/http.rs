@@ -2530,11 +2530,21 @@ async fn stream_pages_with_ack(
         )
         .await?;
         if terminal {
+            // Terminal page delivered: cursor is done. Drop the
+            // registry entry so the per-session slot frees up.
+            sessions.cursor_remove(cursor_id);
             break;
         }
         match wait_for_ack(receiver, sessions, session_id, connection, cursor_id, seq).await? {
-            AckOutcome::Acked => {}
-            AckOutcome::Cancelled => break,
+            AckOutcome::Acked => {
+                // Fresh ack — bump the cursor's last-ack so it is not
+                // ranked as idle by the eviction policy.
+                sessions.cursor_touch(cursor_id);
+            }
+            AckOutcome::Cancelled => {
+                sessions.cursor_remove(cursor_id);
+                break;
+            }
         }
         seq += 1;
     }

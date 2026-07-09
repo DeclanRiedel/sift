@@ -371,3 +371,59 @@ cancelling every straggler cursor at the deadline rather than relying on
 per-query timeout plus connection close — is documented and deferred to a
 cursor-registry pass. Adding `shutdown_drain_secs` is additive config; no
 protocol shape changes.
+
+## ADR-011 — Server-Side Cursor Registry
+
+**Context.** Cursors live inside each driver today (PG `cursors: DashMap`, SQL
+Server `cursors: DashMap` of `JoinHandle`). There is no server-side registry,
+no per-session cap, no eviction, and no coordination point between the WS ack
+loop and future work like predictive prefetch or large-result spill. The
+Phase C follow-ups (bounded memory for a 1M-row result, page-N+1 prefetch,
+spill to disk) all need a shared place to stand.
+
+**Decision.** A `CursorRegistry` sits in `SessionStore` above the drivers,
+proxying every `execute_stream`. The driver still produces a raw
+`ResultSetStream`; the registry wraps it, buffers up to `N` pages ahead of
+the last-acked seq, exposes `pause` / `resume` / `cancel`, and enforces a
+per-session cap.
+
+1. **Per-session cap only, no global cap.** Each `Session` carries
+   `max_cursors` (default 32) and a `SessionId → { CursorId → CursorEntry }`
+   view lives in the registry. When a session opens a new cursor and it is
+   already at cap, the registry evicts one of its own cursors first — never
+   another session's. A runaway session hurts only itself.
+2. **Idle-first eviction with spill.** Eviction candidates are ranked by
+   time-since-last-ack; the oldest idle cursor's remaining buffered pages
+   are spilled to a per-cursor temp file (path
+   `{spill_dir}/sift-cursor-{cursor_id}.bin`), and the driver-side stream is
+   detached (its receiver drained into the file, its cancel token dropped).
+   The next `Ack(cursor, seq)` on an evicted cursor reads from the file
+   instead of the mpsc. When the file is fully drained the cursor closes
+   normally. Spill is skipped when the buffered footprint is below
+   `spill_min_bytes` (default 1 MiB) — those cursors are dropped with
+   `Page::Error { code: CursorEvicted }` because the cost of the file
+   exceeds the value.
+3. **Explicit pause/resume backpressure.** The registry pumps pages off
+   the driver's mpsc into a per-cursor buffer bounded by `prefetch_pages`
+   (default 2, matching the current 1-ahead behavior plus one for the
+   prefetch step). When the buffer is full the pump `await`s a pause
+   condvar; the WS ack loop calls `resume(cursor)` after each ack. Pause is
+   the primary mechanism; the underlying mpsc `channel(1)` is the backstop.
+4. **Cancel goes through the registry.** `SessionStore::cancel` now looks
+   up the registry entry, calls `driver.cancel(handle, cursor_id)`, and
+   removes the buffer + spill file. The driver-side ownership check
+   (ADR-lite from P0 #4) remains authoritative for cross-user protection.
+5. **Registry is a server layer, not a trait method.** Drivers stay
+   unchanged; they keep producing `ResultSetStream`. The registry lives in
+   `crates/server/src/cursors.rs` and is composed into `SessionStore`.
+   Adding a trait method would put the eviction/spill policy in every
+   driver — the exact spread we're trying to avoid.
+
+**Consequences.** Bounded memory per session becomes a real invariant, not
+a hope; a client that leaks cursors caps itself at 32. Spill gives an
+evicted-but-still-live cursor a resume path so an idle browser tab does not
+lose its results. Backpressure gets a first-class knob that the WS ack loop
+already knows about; the mpsc bound remains as a defense against a
+misbehaving pump. Drivers stay simple and the ADR-013 driver isolation
+boundary is undisturbed. The remaining gap — a global cap for the hosted
+tenant story — is documented and left for a hosted-topology ADR (Phase H).

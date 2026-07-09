@@ -37,6 +37,12 @@ async fn main() -> anyhow::Result<()> {
         cfg.limits.max_http_result_rows,
         cfg.limits.max_http_result_bytes,
     );
+    // Wire ADR-011 cursor registry cap.
+    {
+        let mut cursor_cfg = sessions.cursor_registry().config();
+        cursor_cfg.max_per_session = cfg.limits.max_cursors_per_session;
+        sessions.cursor_registry().set_config(cursor_cfg);
+    }
     let metadata = build_metadata_store(&cfg)?;
     if let Some(store) = &metadata {
         sessions.set_audit_store(store.clone());

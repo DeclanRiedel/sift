@@ -7,6 +7,7 @@
 
 pub mod config;
 pub mod correlation;
+pub mod cursors;
 pub mod error;
 pub mod fingerprint;
 pub mod http;

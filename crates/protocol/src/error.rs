@@ -45,6 +45,12 @@ pub enum Code {
     #[error("cursor not found")]
     CursorNotFound,
 
+    #[error("cursor evicted by per-session cap")]
+    CursorEvicted,
+
+    #[error("per-session cursor cap reached")]
+    CursorLimitReached,
+
     #[error("transaction not found")]
     TransactionNotFound,
 
