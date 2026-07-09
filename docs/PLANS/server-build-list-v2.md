@@ -484,8 +484,13 @@ a GUI later is just rendering. Every item below is verified absent from the
       connections/:conn_id/complete`; audit `Operation::Complete`.
 - [ ] [Implement] Export over HTTP chunked + WS; format selection; NULL +
       type-aware rendering hints.
-- [ ] [Implement] DDL generation driver methods; OpenAPI coverage;
-      round-trip test (DDL → object → DDL).
+- [x] [Implement] DDL generation. **Deviation from original plan:** no
+      driver methods — server-side composition over
+      `Driver::schema` + `Driver::execute` preserves the ADR-017 trait
+      lock (see `crates/server/src/ddl.rs`). OpenAPI covers
+      `GET .../ddl`; PG-side round-trip test lives in
+      `crates/server/tests/ddl_round_trip.rs` (behind `live-pg`).
+      Known gaps tracked in `docs/PLANS/ddl-gaps.md`.
 - [ ] [Implement] Inline-edit envelope; transactions panel server state;
       saved-query routes; schema-search; data-search; plan capture +
       structured `PlanNode`; process-list + kill; capability query; CSV
