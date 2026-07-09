@@ -39,6 +39,17 @@ impl Driver for PgDriver {
         let id = self.inner.conn_id.next();
         self.inner.put_free(id, conn).await;
         self.inner.put_spec(id, spec.clone());
+        // Pre-warm additional pool slots when the spec requests it. Best-
+        // effort: a pre-warm failure is logged, not surfaced — `open`
+        // has already produced one working conn and the caller can proceed.
+        if let Some(sift_protocol::EngineConnectionSpec::Postgres(p)) = &spec.engine_specific {
+            if let Some(min) = p.pool_min_size {
+                let extra = (min as usize).saturating_sub(1);
+                if extra > 0 {
+                    self.prewarm_pool(spec, extra).await;
+                }
+            }
+        }
         Ok(ConnHandle::new(id, Engine::Postgres))
     }
 

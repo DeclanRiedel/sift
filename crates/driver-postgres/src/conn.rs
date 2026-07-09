@@ -116,6 +116,7 @@ impl PgDriverInner {
         let ssl_mode = spec.ssl_mode.unwrap_or(SslMode::Prefer);
         cfg.ssl_mode = Some(map_ssl_mode(ssl_mode));
 
+        let mut pool_max_size: usize = 8;
         if let Some(sift_protocol::EngineConnectionSpec::Postgres(p)) = &spec.engine_specific {
             if let Some(s) = &p.search_path {
                 // `options` propagates as `-c search_path=...` on connect.
@@ -124,9 +125,12 @@ impl PgDriverInner {
             if let Some(t) = p.connect_timeout_secs {
                 cfg.connect_timeout = Some(std::time::Duration::from_secs(t as u64));
             }
+            if let Some(mx) = p.pool_max_size {
+                pool_max_size = (mx as usize).max(1);
+            }
         }
         cfg.pool = Some(deadpool_postgres::PoolConfig {
-            max_size: 8,
+            max_size: pool_max_size,
             timeouts: deadpool_postgres::Timeouts {
                 wait: Some(std::time::Duration::from_secs(15)),
                 create: Some(std::time::Duration::from_secs(15)),
@@ -276,6 +280,39 @@ impl PgDriver {
             deadpool_postgres::PoolError::Backend(backend) => crate::pg_err(backend),
             other => DriverError::new(Code::PoolExhausted, other.to_string()),
         })
+    }
+
+    /// Pre-warm `extra` additional connections against the pool for
+    /// `spec`. Best-effort: pulls conns concurrently and returns them
+    /// immediately so deadpool holds them as idle. Individual failures
+    /// are logged, not surfaced.
+    pub(crate) async fn prewarm_pool(&self, spec: &ConnectionSpec, extra: usize) {
+        let (_key, pool) = match self.inner.pool_for(spec).await {
+            Ok(pair) => pair,
+            Err(error) => {
+                tracing::warn!(%error, "pg prewarm skipped: pool_for failed");
+                return;
+            }
+        };
+        let futures = (0..extra).map(|_| {
+            let pool = Arc::clone(&pool);
+            async move { pool.get().await }
+        });
+        let results = futures::future::join_all(futures).await;
+        let mut ok = 0usize;
+        for r in results {
+            match r {
+                Ok(conn) => {
+                    ok += 1;
+                    // Dropping the PooledConn returns it to the deadpool.
+                    drop(conn);
+                }
+                Err(error) => {
+                    tracing::debug!(%error, "pg prewarm conn failed");
+                }
+            }
+        }
+        tracing::debug!(prewarmed = ok, requested = extra, "pg pool prewarm complete");
     }
 
     /// Take a conn for a non-transactional op. Rejects InTx slots so

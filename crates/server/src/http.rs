@@ -166,6 +166,10 @@ pub fn app(state: AppState) -> Router {
         .layer(from_fn_with_state(state.sessions.clone(), audit_middleware))
         .layer(from_fn(protocol_version_middleware))
         .layer(from_fn(correlation_middleware))
+        // gzip/br compression on HTTP responses when the client advertises
+        // support via Accept-Encoding. WS frames are untouched (upgraded
+        // connections bypass response compression layers).
+        .layer(tower_http::compression::CompressionLayer::new().gzip(true).br(true))
         .with_state(state)
 }
 

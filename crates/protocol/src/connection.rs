@@ -47,6 +47,12 @@ pub struct PgConnectionSpec {
     pub application_name: Option<String>,
     /// Connect timeout per attempt.
     pub connect_timeout_secs: Option<u32>,
+    /// Deadpool max_size override. Defaults to 8.
+    pub pool_max_size: Option<u32>,
+    /// Number of connections to pre-warm at `open` time so the first
+    /// query does not pay the connect handshake. Best-effort; `open`
+    /// still succeeds if pre-warm fails (e.g. temporary DB pressure).
+    pub pool_min_size: Option<u32>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]

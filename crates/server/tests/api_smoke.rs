@@ -881,6 +881,48 @@ async fn bearer_token_auth_is_enforced_when_configured() {
 }
 
 #[tokio::test]
+async fn responses_are_gzipped_when_client_advertises_gzip() {
+    let app = app(test_state());
+    let res = app
+        .oneshot(
+            Request::get("/v1/openapi.json")
+                .header("accept-encoding", "gzip")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let encoding = res
+        .headers()
+        .get("content-encoding")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    assert!(
+        encoding.contains("gzip"),
+        "expected gzip content-encoding, got {encoding:?}"
+    );
+}
+
+#[tokio::test]
+async fn responses_are_uncompressed_when_client_does_not_advertise() {
+    let app = app(test_state());
+    let res = app
+        .oneshot(
+            Request::get("/v1/openapi.json")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    assert!(
+        res.headers().get("content-encoding").is_none(),
+        "unexpected content-encoding on non-negotiated response"
+    );
+}
+
+#[tokio::test]
 async fn metadata_room_document_lifecycle_uses_local_principal() {
     let app = app(test_state_with_metadata(true));
 
