@@ -134,12 +134,16 @@ async fn bulk_insert_csv_round_trip() {
         .expect("bulk insert");
     assert_eq!(result.rows_inserted, 3);
 
+    // Verify each row landed with the correct value. Post-P1-#9,
+    // mssql_literal("") emits N'' (empty string), not NULL — so the
+    // third row's name is '', not NULL. Count matches for Bob (comma
+    // quoting) OR the empty-string row.
     let pages = drain(
         driver
             .execute(
                 conn.clone(),
                 ExecuteRequest::new(format!(
-                    "SELECT COUNT(*) AS ct FROM dbo.[{table}] WHERE name IS NULL OR name LIKE N'Bob,%'"
+                    "SELECT COUNT(*) AS ct FROM dbo.[{table}] WHERE name = N'' OR name LIKE N'Bob,%'"
                 )),
             )
             .await
