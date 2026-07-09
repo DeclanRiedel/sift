@@ -261,10 +261,8 @@ impl Client {
         session: SessionId,
         connection: ConnectionId,
     ) -> Result<()> {
-        self.delete(&format!(
-            "/v1/sessions/{session}/connections/{connection}"
-        ))
-        .await
+        self.delete(&format!("/v1/sessions/{session}/connections/{connection}"))
+            .await
     }
 
     pub async fn create_savepoint(
@@ -323,6 +321,40 @@ impl Client {
 
     pub async fn openapi(&self) -> Result<serde_json::Value> {
         self.get("/v1/openapi.json").await
+    }
+
+    /// Read the next batch of pages from an evicted cursor's spill
+    /// file (ADR-011). The `resume_url` returned on
+    /// `Page::Error { code: CursorEvicted }` points at this endpoint.
+    /// The optional `from_seq` must equal the entry's current
+    /// pages_read — the spill file is append-only forward-read.
+    pub async fn read_spilled_pages(
+        &self,
+        cursor: CursorId,
+        from_seq: Option<usize>,
+        limit: Option<usize>,
+    ) -> Result<serde_json::Value> {
+        let mut query = Vec::new();
+        if let Some(seq) = from_seq {
+            query.push(format!("from_seq={seq}"));
+        }
+        if let Some(limit) = limit {
+            query.push(format!("limit={limit}"));
+        }
+        let suffix = if query.is_empty() {
+            String::new()
+        } else {
+            format!("?{}", query.join("&"))
+        };
+        self.get(&format!("/v1/cursors/{}/pages{suffix}", cursor.0))
+            .await
+    }
+
+    /// Delete a spilled cursor's file explicitly. Idempotent — returns
+    /// ok even if the entry has already been reaped by TTL or fully
+    /// drained.
+    pub async fn delete_spilled_cursor(&self, cursor: CursorId) -> Result<()> {
+        self.delete(&format!("/v1/cursors/{}", cursor.0)).await
     }
 
     pub async fn tenants(&self) -> Result<Vec<TenantMembership>> {

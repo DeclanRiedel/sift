@@ -71,9 +71,7 @@ impl ApiError {
                     (StatusCode::NOT_FOUND, "not_found")
                 }
                 Code::CursorEvicted => (StatusCode::GONE, "cursor_evicted"),
-                Code::CursorLimitReached => {
-                    (StatusCode::TOO_MANY_REQUESTS, "cursor_limit_reached")
-                }
+                Code::CursorLimitReached => (StatusCode::TOO_MANY_REQUESTS, "cursor_limit_reached"),
                 Code::Other { .. } | Code::DriverInternal => {
                     (StatusCode::INTERNAL_SERVER_ERROR, "driver_internal")
                 }

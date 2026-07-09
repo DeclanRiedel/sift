@@ -87,12 +87,7 @@ impl MssqlDriver {
     /// Spawn a background top-up task for the given spec. Idempotent:
     /// the `refilling` flag prevents multiple concurrent tasks from
     /// piling into the same pool.
-    fn ensure_warm(
-        &self,
-        spec: ConnectionSpec,
-        pool_key: String,
-        min_size: usize,
-    ) {
+    fn ensure_warm(&self, spec: ConnectionSpec, pool_key: String, min_size: usize) {
         let inner = Arc::clone(&self.inner);
         tokio::spawn(async move {
             let pool = inner
@@ -1367,31 +1362,30 @@ async fn connect_fresh(spec: &ConnectionSpec) -> Result<MssqlConn, DriverError> 
         spec.password.clone().unwrap_or_default(),
     ));
 
-    let connect_timeout = if let Some(sift_protocol::EngineConnectionSpec::SqlServer(ms)) =
-        &spec.engine_specific
-    {
-        if ms.mars {
-            return Err(DriverError::new(
-                Code::UnsupportedForEngine,
-                "SQL Server MARS is not supported by the current driver backend",
-            )
-            .with_engine(Engine::SqlServer));
-        }
-        if let Some(encrypt) = ms.encrypt {
-            config.encryption(if encrypt {
-                EncryptionLevel::Required
-            } else {
-                EncryptionLevel::Off
-            });
-        }
-        if ms.trust_server_certificate.unwrap_or(false) {
-            config.trust_cert();
-        }
-        ms.connect_timeout_secs
-            .map(|secs| Duration::from_secs(secs as u64))
-    } else {
-        None
-    };
+    let connect_timeout =
+        if let Some(sift_protocol::EngineConnectionSpec::SqlServer(ms)) = &spec.engine_specific {
+            if ms.mars {
+                return Err(DriverError::new(
+                    Code::UnsupportedForEngine,
+                    "SQL Server MARS is not supported by the current driver backend",
+                )
+                .with_engine(Engine::SqlServer));
+            }
+            if let Some(encrypt) = ms.encrypt {
+                config.encryption(if encrypt {
+                    EncryptionLevel::Required
+                } else {
+                    EncryptionLevel::Off
+                });
+            }
+            if ms.trust_server_certificate.unwrap_or(false) {
+                config.trust_cert();
+            }
+            ms.connect_timeout_secs
+                .map(|secs| Duration::from_secs(secs as u64))
+        } else {
+            None
+        };
 
     let tcp = timeout_io(connect_timeout, TcpStream::connect(config.get_addr()))
         .await

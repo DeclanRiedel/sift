@@ -704,8 +704,9 @@ async fn websocket_mid_stream_cancel_stops_paging() {
 
     // Started + first page (columns).
     let started = match ws.next().await.unwrap().unwrap() {
-        Message::Text(text) => serde_json::from_str::<sift_protocol::WsServerMessage>(&text)
-            .unwrap(),
+        Message::Text(text) => {
+            serde_json::from_str::<sift_protocol::WsServerMessage>(&text).unwrap()
+        }
         other => panic!("unexpected {other:?}"),
     };
     let cursor_id = match started {
@@ -713,8 +714,9 @@ async fn websocket_mid_stream_cancel_stops_paging() {
         other => panic!("expected Started, got {other:?}"),
     };
     let first = match ws.next().await.unwrap().unwrap() {
-        Message::Text(text) => serde_json::from_str::<sift_protocol::WsServerMessage>(&text)
-            .unwrap(),
+        Message::Text(text) => {
+            serde_json::from_str::<sift_protocol::WsServerMessage>(&text).unwrap()
+        }
         other => panic!("unexpected {other:?}"),
     };
     assert!(matches!(first, sift_protocol::WsServerMessage::Page { .. }));
@@ -2400,9 +2402,7 @@ async fn ws_streaming_bounded_memory_across_many_pages() {
         .filter(|p| matches!(p, Page::Rows { .. }))
         .count();
     assert_eq!(rows_pages, 10_000);
-    assert!(pages_back
-        .iter()
-        .any(|p| matches!(p, Page::Done { .. })));
+    assert!(pages_back.iter().any(|p| matches!(p, Page::Done { .. })));
 
     server.abort();
 }
@@ -2453,10 +2453,7 @@ async fn ws_streaming_bounded_memory_across_one_million_pages() {
     });
 
     let client = sift_client_sdk::Client::new(format!("http://{addr}"));
-    let session = client
-        .open_session(Some("stress-1m".into()))
-        .await
-        .unwrap();
+    let session = client.open_session(Some("stress-1m".into())).await.unwrap();
     let conn = client
         .open_connection(
             session.id,
@@ -2477,9 +2474,7 @@ async fn ws_streaming_bounded_memory_across_one_million_pages() {
         .filter(|p| matches!(p, Page::Rows { .. }))
         .count();
     assert_eq!(rows_pages, N);
-    assert!(pages_back
-        .iter()
-        .any(|p| matches!(p, Page::Done { .. })));
+    assert!(pages_back.iter().any(|p| matches!(p, Page::Done { .. })));
 
     server.abort();
 }

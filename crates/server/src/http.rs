@@ -25,11 +25,10 @@ use sift_metadata::{
 };
 use sift_protocol::{
     AuditEntry, BeginTransactionRequest, BulkInsertRequest, CancelRequest,
-    DocumentOperationEnvelope, EndTransactionRequest, ExecuteRequest, ExecuteRequestHttp,
-    Health, ObjectPath, OpenConnectionRequest, OpenSessionRequest, Operation, OperationStatus,
-    Readiness, RoomClientMessage, RoomQueryResult, RoomQueryStatus, RoomServerMessage,
-    SavepointRequest, SchemaFilter, SchemaScope, WsClientMessage, WsServerMessage,
-    PROTOCOL_VERSION,
+    DocumentOperationEnvelope, EndTransactionRequest, ExecuteRequest, ExecuteRequestHttp, Health,
+    ObjectPath, OpenConnectionRequest, OpenSessionRequest, Operation, OperationStatus, Readiness,
+    RoomClientMessage, RoomQueryResult, RoomQueryStatus, RoomServerMessage, SavepointRequest,
+    SchemaFilter, SchemaScope, WsClientMessage, WsServerMessage, PROTOCOL_VERSION,
 };
 
 use crate::error::{ApiError, ApiResult};
@@ -162,10 +161,7 @@ pub fn app(state: AppState) -> Router {
             post(cancel_query),
         )
         .route("/v1/cursors/:cursor_id/pages", get(read_spill_pages))
-        .route(
-            "/v1/cursors/:cursor_id",
-            delete(delete_spilled_cursor),
-        )
+        .route("/v1/cursors/:cursor_id", delete(delete_spilled_cursor))
         .layer(from_fn_with_state(state.auth.clone(), auth_middleware))
         .layer(from_fn(inject_peer_addr))
         .layer(from_fn_with_state(state.sessions.clone(), audit_middleware))
@@ -174,7 +170,11 @@ pub fn app(state: AppState) -> Router {
         // gzip/br compression on HTTP responses when the client advertises
         // support via Accept-Encoding. WS frames are untouched (upgraded
         // connections bypass response compression layers).
-        .layer(tower_http::compression::CompressionLayer::new().gzip(true).br(true))
+        .layer(
+            tower_http::compression::CompressionLayer::new()
+                .gzip(true)
+                .br(true),
+        )
         .with_state(state)
 }
 
@@ -975,6 +975,20 @@ async fn openapi() -> Json<serde_json::Value> {
                     "operationId": "openapi",
                     "summary": "OpenAPI document",
                     "responses": { "200": { "description": "OpenAPI document" } }
+                }
+            },
+            "/v1/cursors/{cursor_id}/pages": {
+                "get": {
+                    "operationId": "readSpilledCursorPages",
+                    "summary": "Read pages from a spilled (evicted) cursor. Query params: `from_seq` (optional, must equal current pages_read), `limit` (default 32, max 256).",
+                    "responses": { "200": { "description": "Batch of pages + done flag" } }
+                }
+            },
+            "/v1/cursors/{cursor_id}": {
+                "delete": {
+                    "operationId": "deleteSpilledCursor",
+                    "summary": "Delete a spilled cursor's file explicitly (idempotent). Reaper handles this on TTL too.",
+                    "responses": { "200": { "description": "Ok" } }
                 }
             },
             "/v1/metadata/tenants": {

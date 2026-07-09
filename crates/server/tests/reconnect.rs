@@ -19,7 +19,7 @@ fn server_info() -> ServerInfo {
         server_version: "MockDB 0.1".into(),
         current_database: "mock".into(),
         current_user: "mock".into(),
-            pool_warm_slots: None,
+        pool_warm_slots: None,
     }
 }
 

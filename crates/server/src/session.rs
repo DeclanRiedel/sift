@@ -146,35 +146,37 @@ impl SessionStore {
     /// explicit user cancel. Called once, at construction.
     fn install_eviction_callback(&self) {
         let inner = Arc::downgrade(&self.inner);
-        self.inner.cursors.set_on_evict(Arc::new(move |session, cursor| {
-            let Some(inner) = inner.upgrade() else {
-                return;
-            };
-            // Best-effort: cancel via the driver on a background task so
-            // the caller (which is inside `open`) doesn't await here.
-            // Look up the connection that owns this cursor. In the
-            // current data model cursors are keyed only by id — we scan
-            // the session's connections and let driver.cancel run
-            // against each; the driver-side ownership check filters
-            // out non-owners cheaply.
-            let store = SessionStore {
-                inner: Arc::clone(&inner),
-            };
-            tokio::spawn(async move {
-                let conn_ids: Vec<ConnectionId> = match store.inner.sessions.get(&session) {
-                    Some(s) => s.connections.iter().map(|e| e.id).collect(),
-                    None => return,
+        self.inner
+            .cursors
+            .set_on_evict(Arc::new(move |session, cursor| {
+                let Some(inner) = inner.upgrade() else {
+                    return;
                 };
-                for conn in conn_ids {
-                    let Ok(entry) = store.get_conn_entry(session, conn) else {
-                        continue;
+                // Best-effort: cancel via the driver on a background task so
+                // the caller (which is inside `open`) doesn't await here.
+                // Look up the connection that owns this cursor. In the
+                // current data model cursors are keyed only by id — we scan
+                // the session's connections and let driver.cancel run
+                // against each; the driver-side ownership check filters
+                // out non-owners cheaply.
+                let store = SessionStore {
+                    inner: Arc::clone(&inner),
+                };
+                tokio::spawn(async move {
+                    let conn_ids: Vec<ConnectionId> = match store.inner.sessions.get(&session) {
+                        Some(s) => s.connections.iter().map(|e| e.id).collect(),
+                        None => return,
                     };
-                    // Best-effort — an error means the cursor wasn't
-                    // owned by this handle (driver returns CursorNotFound).
-                    let _ = entry.driver.cancel(entry.handle, cursor).await;
-                }
-            });
-        }));
+                    for conn in conn_ids {
+                        let Ok(entry) = store.get_conn_entry(session, conn) else {
+                            continue;
+                        };
+                        // Best-effort — an error means the cursor wasn't
+                        // owned by this handle (driver returns CursorNotFound).
+                        let _ = entry.driver.cancel(entry.handle, cursor).await;
+                    }
+                });
+            }));
     }
 
     /// Access the cursor registry (for tests and future wiring).

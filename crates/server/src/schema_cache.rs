@@ -200,9 +200,7 @@ impl SchemaCache {
     }
 
     pub fn cache_misses(&self) -> u64 {
-        self.inner
-            .misses
-            .load(std::sync::atomic::Ordering::Relaxed)
+        self.inner.misses.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     pub fn invalidation_count(&self) -> u64 {
@@ -269,7 +267,9 @@ impl SchemaCache {
         let cache = self.clone();
         let poll = self.config().mssql_poll_interval;
         let task = match engine {
-            Engine::Postgres => tokio::spawn(pg_listen_task(spec_clone, driver, cache, spec_hash.clone())),
+            Engine::Postgres => {
+                tokio::spawn(pg_listen_task(spec_clone, driver, cache, spec_hash.clone()))
+            }
             Engine::SqlServer => tokio::spawn(mssql_poll_task(
                 spec_clone,
                 driver,
@@ -280,11 +280,7 @@ impl SchemaCache {
         };
         // Race-safe insert: if another caller inserted a handle
         // meanwhile, abort the one we just spawned.
-        match self
-            .inner
-            .invalidators
-            .entry(spec_hash)
-        {
+        match self.inner.invalidators.entry(spec_hash) {
             dashmap::mapref::entry::Entry::Occupied(_) => {
                 task.abort();
             }
@@ -542,6 +538,9 @@ mod tests {
         let cache = SchemaCache::new(SchemaCacheConfig::default());
         let mut b = spec();
         b.host = "other".into();
-        assert_ne!(cache.spec_hash(&spec()).unwrap(), cache.spec_hash(&b).unwrap());
+        assert_ne!(
+            cache.spec_hash(&spec()).unwrap(),
+            cache.spec_hash(&b).unwrap()
+        );
     }
 }

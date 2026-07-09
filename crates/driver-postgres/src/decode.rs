@@ -100,7 +100,8 @@ fn decode_numeric(raw: &[u8]) -> Result<String, Box<dyn std::error::Error + Sync
         // Leave some headroom: PG limits total digits to NUMERIC_MAX_PRECISION
         // (1000); at 4 digits per group that's 250 groups.
         const MAX_INT_GROUPS: usize = 512;
-        raw.min(ndigits.saturating_add(MAX_INT_GROUPS)).min(MAX_INT_GROUPS)
+        raw.min(ndigits.saturating_add(MAX_INT_GROUPS))
+            .min(MAX_INT_GROUPS)
     };
     let mut int_part = String::new();
     for idx in 0..int_group_count {

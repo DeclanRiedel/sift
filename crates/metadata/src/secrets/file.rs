@@ -108,8 +108,7 @@ fn persist_blocking(
         f.sync_all()
             .map_err(|error| MetadataError::SecretStore(error.to_string()))?;
     }
-    std::fs::rename(&tmp, path)
-        .map_err(|error| MetadataError::SecretStore(error.to_string()))?;
+    std::fs::rename(&tmp, path).map_err(|error| MetadataError::SecretStore(error.to_string()))?;
     if let Some(parent) = path.parent() {
         if let Ok(dir) = std::fs::File::open(parent) {
             // Best-effort: not every filesystem supports directory fsync

@@ -324,7 +324,11 @@ impl PgDriver {
                 }
             }
         }
-        tracing::debug!(prewarmed = ok, requested = extra, "pg pool prewarm complete");
+        tracing::debug!(
+            prewarmed = ok,
+            requested = extra,
+            "pg pool prewarm complete"
+        );
     }
 
     /// Take a conn for a non-transactional op. Rejects InTx slots so

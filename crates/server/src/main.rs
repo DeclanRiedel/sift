@@ -48,8 +48,7 @@ async fn main() -> anyhow::Result<()> {
             .as_ref()
             .filter(|s| !s.is_empty())
             .map(std::path::PathBuf::from);
-        cursor_cfg.spill_ttl =
-            std::time::Duration::from_secs(cfg.limits.cursor_spill_ttl_secs);
+        cursor_cfg.spill_ttl = std::time::Duration::from_secs(cfg.limits.cursor_spill_ttl_secs);
         sessions.cursor_registry().set_config(cursor_cfg);
     }
     // Wire schema cache config.

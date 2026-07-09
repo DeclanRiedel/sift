@@ -314,12 +314,7 @@ impl CursorRegistry {
         let mut file = std::fs::OpenOptions::new()
             .read(true)
             .open(&entry_snapshot.path)
-            .map_err(|e| {
-                DriverError::new(
-                    Code::DriverInternal,
-                    format!("open spill file: {e}"),
-                )
-            })?;
+            .map_err(|e| DriverError::new(Code::DriverInternal, format!("open spill file: {e}")))?;
         use std::io::{Read as _, Seek as _, SeekFrom};
         file.seek(SeekFrom::Start(entry_snapshot.read_offset))
             .map_err(|e| DriverError::new(Code::DriverInternal, e.to_string()))?;
@@ -338,9 +333,8 @@ impl CursorRegistry {
             }
             let len = u32::from_be_bytes(len_buf) as usize;
             let mut bytes = vec![0u8; len];
-            file.read_exact(&mut bytes).map_err(|e| {
-                DriverError::new(Code::DriverInternal, format!("spill read: {e}"))
-            })?;
+            file.read_exact(&mut bytes)
+                .map_err(|e| DriverError::new(Code::DriverInternal, format!("spill read: {e}")))?;
             let page: Page = serde_json::from_slice(&bytes).map_err(|e| {
                 DriverError::new(Code::DriverInternal, format!("spill decode: {e}"))
             })?;
@@ -401,7 +395,6 @@ pub struct SpillInfo {
 }
 
 impl CursorRegistry {
-
     fn select_victims(&self, session_id: SessionId, cap: usize) -> Vec<CursorId> {
         let ids: Vec<CursorId> = self
             .inner
@@ -462,13 +455,21 @@ async fn pump_task(
         let cancel = control.cancel_notify.notified();
         tokio::pin!(cancel);
         if control.cancel.load(Ordering::Acquire) {
-            emit_terminal(&control, &consumer_tx, session_id, cursor_id, &mut spillover, &inner).await;
+            emit_terminal(
+                &control,
+                &consumer_tx,
+                session_id,
+                cursor_id,
+                &spillover,
+                &inner,
+            )
+            .await;
             return;
         }
         let page = tokio::select! {
             biased;
             _ = &mut cancel => {
-                emit_terminal(&control, &consumer_tx, session_id, cursor_id, &mut spillover, &inner).await;
+                emit_terminal(&control, &consumer_tx, session_id, cursor_id, &spillover, &inner).await;
                 return;
             }
             maybe = driver_rx.recv() => {
@@ -496,7 +497,15 @@ async fn pump_task(
             }
             if control.cancel.load(Ordering::Acquire) {
                 spillover.push(page);
-                emit_terminal(&control, &consumer_tx, session_id, cursor_id, &mut spillover, &inner).await;
+                emit_terminal(
+                    &control,
+                    &consumer_tx,
+                    session_id,
+                    cursor_id,
+                    &spillover,
+                    &inner,
+                )
+                .await;
                 return;
             }
             tokio::select! {
@@ -507,7 +516,15 @@ async fn pump_task(
         }
         if control.cancel.load(Ordering::Acquire) {
             spillover.push(page);
-            emit_terminal(&control, &consumer_tx, session_id, cursor_id, &mut spillover, &inner).await;
+            emit_terminal(
+                &control,
+                &consumer_tx,
+                session_id,
+                cursor_id,
+                &spillover,
+                &inner,
+            )
+            .await;
             return;
         }
 
@@ -518,7 +535,7 @@ async fn pump_task(
             biased;
             _ = control.cancel_notify.notified() => {
                 spillover.push(page);
-                emit_terminal(&control, &consumer_tx, session_id, cursor_id, &mut spillover, &inner).await;
+                emit_terminal(&control, &consumer_tx, session_id, cursor_id, &spillover, &inner).await;
                 return;
             }
             res = &mut send_fut => res.is_ok(),
@@ -537,7 +554,7 @@ async fn emit_terminal(
     consumer_tx: &mpsc::Sender<Page>,
     session_id: SessionId,
     cursor_id: CursorId,
-    spillover: &mut Vec<Page>,
+    spillover: &[Page],
     inner: &Arc<Inner>,
 ) {
     let mut reason = control
@@ -567,8 +584,8 @@ async fn emit_terminal(
                                 pages_read: 0,
                             },
                         );
-                        reason = reason
-                            .with_resume_url(format!("/v1/cursors/{}/pages", cursor_id.0));
+                        reason =
+                            reason.with_resume_url(format!("/v1/cursors/{}/pages", cursor_id.0));
                     }
                     Err(error) => {
                         tracing::debug!(?cursor_id, %error, "cursor spill write failed");
@@ -1053,12 +1070,10 @@ mod tests {
 
         // Drain c1's channel until we hit the terminal Error.
         let mut resume_url = None;
-        while let Some(page) = tokio::time::timeout(
-            std::time::Duration::from_millis(500),
-            c1.rows.recv(),
-        )
-        .await
-        .unwrap_or(None)
+        while let Some(page) =
+            tokio::time::timeout(std::time::Duration::from_millis(500), c1.rows.recv())
+                .await
+                .unwrap_or(None)
         {
             if let Page::Error { error } = &page {
                 if error.code == Code::CursorEvicted {
