@@ -1156,6 +1156,22 @@ impl SessionStore {
         Ok(result)
     }
 
+    /// Compute completion candidates for `request.sql` at
+    /// `request.cursor` on the connection identified by
+    /// `(session_id, conn_id)`. Delegates to
+    /// [`crate::autocomplete::generate_completion`], which composes
+    /// schema snapshots and the `sift-completion` ranker.
+    pub async fn complete(
+        &self,
+        session_id: SessionId,
+        conn_id: ConnectionId,
+        request: sift_protocol::completion::CompletionRequest,
+    ) -> ApiResult<sift_protocol::completion::CompletionResponse> {
+        let entry = self.get_conn_entry(session_id, conn_id)?;
+        let engine = entry.driver.engine();
+        crate::autocomplete::generate_completion(self, session_id, conn_id, engine, request).await
+    }
+
     fn get_conn_entry(
         &self,
         session_id: SessionId,

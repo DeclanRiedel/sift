@@ -149,6 +149,10 @@ pub fn app(state: AppState) -> Router {
             get(get_object_ddl),
         )
         .route(
+            "/v1/sessions/:id/connections/:conn_id/complete",
+            post(post_completion),
+        )
+        .route(
             "/v1/sessions/:id/connections/:conn_id/export",
             post(export_query),
         )
@@ -1022,6 +1026,14 @@ async fn openapi() -> Json<serde_json::Value> {
                     "responses": { "200": { "description": "ObjectDdl", "content": json_content("ObjectDdl") } }
                 }
             },
+            "/v1/sessions/{id}/connections/{conn_id}/complete": {
+                "post": {
+                    "operationId": "postCompletion",
+                    "summary": "Compute ranked autocomplete candidates for a SQL text + cursor position on the connection's engine.",
+                    "requestBody": json_body("CompletionRequest"),
+                    "responses": { "200": { "description": "CompletionResponse", "content": json_content("CompletionResponse") } }
+                }
+            },
             "/v1/sessions/{id}/connections/{conn_id}/export": {
                 "post": {
                     "operationId": "exportQuery",
@@ -1268,6 +1280,14 @@ fn protocol_schema_refs() -> serde_json::Value {
     add_schema::<sift_protocol::SavepointRequest>("SavepointRequest", &mut schemas);
     add_schema::<sift_protocol::SchemaSnapshot>("SchemaSnapshot", &mut schemas);
     add_schema::<sift_protocol::ObjectDdl>("ObjectDdl", &mut schemas);
+    add_schema::<sift_protocol::completion::CompletionRequest>("CompletionRequest", &mut schemas);
+    add_schema::<sift_protocol::completion::CompletionResponse>("CompletionResponse", &mut schemas);
+    add_schema::<sift_protocol::completion::CompletionCandidate>(
+        "CompletionCandidate",
+        &mut schemas,
+    );
+    add_schema::<sift_protocol::completion::CompletionKind>("CompletionKind", &mut schemas);
+    add_schema::<sift_protocol::completion::CompletionContext>("CompletionContext", &mut schemas);
     add_schema::<sift_protocol::ExportRequest>("ExportRequest", &mut schemas);
     add_schema::<sift_protocol::ServerInfo>("ServerInfo", &mut schemas);
     add_schema::<sift_protocol::SessionInfo>("SessionInfo", &mut schemas);
@@ -2255,6 +2275,23 @@ async fn get_object_ddl(
         OperationStatus::Succeeded,
     );
     Ok(Json(ddl))
+}
+
+async fn post_completion(
+    State(state): State<AppState>,
+    Path((id, conn_id)): Path<(sift_protocol::SessionId, sift_protocol::ConnectionId)>,
+    Json(req): Json<sift_protocol::completion::CompletionRequest>,
+) -> ApiResult<Json<sift_protocol::completion::CompletionResponse>> {
+    let resp = state.sessions.complete(id, conn_id, req.clone()).await?;
+    state.sessions.push_operation(
+        Operation::Complete {
+            session: id,
+            connection: conn_id,
+            request: req,
+        },
+        OperationStatus::Succeeded,
+    );
+    Ok(Json(resp))
 }
 
 async fn get_schema(

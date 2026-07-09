@@ -8,6 +8,7 @@ members = [
     "crates/driver-sqlserver",
     "crates/metadata",
     "crates/doc",
+    "crates/completion",
     "crates/server",
     "crates/client-sdk",
 ]
@@ -28,6 +29,7 @@ sift-driver-postgres = { path = "crates/driver-postgres", version = "0.1.0" }
 sift-driver-sqlserver = { path = "crates/driver-sqlserver", version = "0.1.0" }
 sift-metadata = { path = "crates/metadata", version = "0.1.0" }
 sift-doc = { path = "crates/doc", version = "0.1.0" }
+sift-completion = { path = "crates/completion", version = "0.1.0" }
 sift-server = { path = "crates/server", version = "0.1.0" }
 sift-client-sdk = { path = "crates/client-sdk", version = "0.1.0" }
 
@@ -81,6 +83,7 @@ rustls = { version = "0.23", default-features = false, features = ["ring"] }
 tiberius = { version = "0.12", default-features = false, features = ["rustls", "tds73", "chrono"] }
 tokio-postgres-rustls = { version = "0.14", features = ["native-certs", "ring"] }
 tokio-tungstenite = { version = "0.26", default-features = false, features = ["connect", "rustls-tls-webpki-roots"] }
+sqlparser = { version = "0.52", default-features = false }
 
 [profile.dev]
 split-debuginfo = "unpacked"

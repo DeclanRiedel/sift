@@ -10,6 +10,7 @@
 pub const PROTOCOL_VERSION: &str = "1";
 
 pub mod column;
+pub mod completion;
 pub mod connection;
 pub mod engine;
 pub mod error;

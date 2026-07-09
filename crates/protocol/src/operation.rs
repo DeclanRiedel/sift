@@ -5,9 +5,9 @@
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    BeginTransactionRequest, BulkInsertRequest, CancelRequest, ConnectionId, EndTransactionRequest,
-    ExecuteRequestHttp, OpenConnectionRequest, OpenSessionRequest, SavepointRequest, SchemaScope,
-    SessionId, TextDocumentOperation,
+    completion::CompletionRequest, BeginTransactionRequest, BulkInsertRequest, CancelRequest,
+    ConnectionId, EndTransactionRequest, ExecuteRequestHttp, OpenConnectionRequest,
+    OpenSessionRequest, SavepointRequest, SchemaScope, SessionId, TextDocumentOperation,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
@@ -36,6 +36,11 @@ pub enum Operation {
     ExecuteQuery {
         session: SessionId,
         request: ExecuteRequestHttp,
+    },
+    Complete {
+        session: SessionId,
+        connection: ConnectionId,
+        request: CompletionRequest,
     },
     CancelQuery {
         session: SessionId,
@@ -133,6 +138,9 @@ impl Operation {
             }
             Operation::ExecuteQuery { session, .. } => {
                 summary("execute", "query", Some(session.0 as i64))
+            }
+            Operation::Complete { session, .. } => {
+                summary("complete", "query", Some(session.0 as i64))
             }
             Operation::CancelQuery { session, .. } => {
                 summary("cancel", "query", Some(session.0 as i64))
