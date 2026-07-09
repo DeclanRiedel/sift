@@ -126,6 +126,35 @@ impl Client {
         .await
     }
 
+    /// Export a query result as CSV / TSV / JSON Lines / JSON Array.
+    /// Returns the full response body as bytes; caller writes to file
+    /// or parses. For very large results, prefer calling the endpoint
+    /// directly with reqwest and streaming the body — this convenience
+    /// method buffers the whole payload.
+    pub async fn export_query(
+        &self,
+        session: SessionId,
+        connection: ConnectionId,
+        request: sift_protocol::ExportRequest,
+    ) -> Result<Vec<u8>> {
+        let mut req = self
+            .http
+            .post(self.url(&format!(
+                "/v1/sessions/{session}/connections/{connection}/export"
+            )))
+            .json(&request);
+        if let Some(token) = &self.token {
+            req = req.bearer_auth(token);
+        }
+        let resp = req.send().await?;
+        let status = resp.status();
+        if !status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            return Err(Error::Server { status, body });
+        }
+        Ok(resp.bytes().await?.to_vec())
+    }
+
     /// Generate DDL for a database object. `path.name` is required;
     /// `path.schema` and `path.kind` are optional (kind defaults to
     /// table server-side). The response includes the object's

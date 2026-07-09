@@ -2530,6 +2530,127 @@ async fn schema_cache_serves_second_call_without_touching_driver() {
 }
 
 #[tokio::test]
+async fn export_query_csv_and_json_streaming() {
+    // Two rows with a mix of scalar types, plus a NULL and a text
+    // value that needs CSV quoting. Prove all four formats.
+    let cols = vec![
+        ColumnMetadata {
+            name: "id".into(),
+            type_ref: TypeRef::Primitive(PrimitiveType::Int32),
+            nullable: Nullability::NotNullable,
+            auto_increment: false,
+            primary_key: false,
+            facets: Default::default(),
+        },
+        ColumnMetadata {
+            name: "name".into(),
+            type_ref: TypeRef::Primitive(PrimitiveType::Text),
+            nullable: Nullability::Nullable,
+            auto_increment: false,
+            primary_key: false,
+            facets: Default::default(),
+        },
+    ];
+    let pages = vec![
+        Page::NextResult { columns: cols },
+        Page::Rows {
+            rows: vec![
+                Row::new(vec![Value::Int32(1), Value::Text("alice".into())]),
+                Row::new(vec![Value::Int32(2), Value::Text("bob, jr.".into())]),
+                Row::new(vec![Value::Int32(3), Value::Null]),
+            ],
+        },
+        Page::Done {
+            affected_rows: Some(3),
+            warnings: Vec::new(),
+        },
+    ];
+
+    // A helper to spin up a fresh server (MockDriver.execute_ok
+    // consumes its canned pages once, so each format needs its own
+    // server).
+    async fn run(format: sift_protocol::ExportFormat, pages: Vec<Page>) -> Vec<u8> {
+        let driver = MockDriver::builder()
+            .engine(Engine::Postgres)
+            .execute_ok(pages)
+            .build();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                app(test_state_with_driver(driver)).into_make_service(),
+            )
+            .await
+            .unwrap();
+        });
+        let client = sift_client_sdk::Client::new(format!("http://{addr}"));
+        let session = client.open_session(Some("export".into())).await.unwrap();
+        let conn = client
+            .open_connection(
+                session.id,
+                sift_protocol::OpenConnectionRequest {
+                    engine: Engine::Postgres,
+                    spec: pg_spec(),
+                },
+            )
+            .await
+            .unwrap();
+        let bytes = client
+            .export_query(
+                session.id,
+                conn.id,
+                sift_protocol::ExportRequest {
+                    sql: "SELECT id, name FROM users".into(),
+                    params: Vec::new(),
+                    format,
+                    header: true,
+                    null_display: None,
+                },
+            )
+            .await
+            .unwrap();
+        server.abort();
+        bytes
+    }
+
+    // CSV: header row, quoted "bob, jr.", empty NULL.
+    let csv =
+        String::from_utf8(run(sift_protocol::ExportFormat::Csv, pages.clone()).await).unwrap();
+    assert!(csv.starts_with("id,name\n"), "csv header: {csv:?}");
+    assert!(csv.contains("1,alice\n"));
+    assert!(csv.contains("2,\"bob, jr.\"\n"));
+    assert!(csv.contains("3,\n"));
+
+    // TSV: tab delimiter, no quoting needed.
+    let tsv =
+        String::from_utf8(run(sift_protocol::ExportFormat::Tsv, pages.clone()).await).unwrap();
+    assert!(tsv.starts_with("id\tname\n"));
+    assert!(tsv.contains("2\tbob, jr.\n"));
+
+    // JSON Lines: one object per line, NULL → null.
+    let ndjson =
+        String::from_utf8(run(sift_protocol::ExportFormat::JsonLines, pages.clone()).await)
+            .unwrap();
+    let lines: Vec<&str> = ndjson.trim().split('\n').collect();
+    assert_eq!(lines.len(), 3);
+    let first: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
+    assert_eq!(first["id"], 1);
+    assert_eq!(first["name"], "alice");
+    let third: serde_json::Value = serde_json::from_str(lines[2]).unwrap();
+    assert_eq!(third["id"], 3);
+    assert!(third["name"].is_null());
+
+    // JSON Array: single valid JSON document.
+    let json_array =
+        String::from_utf8(run(sift_protocol::ExportFormat::JsonArray, pages).await).unwrap();
+    let doc: serde_json::Value = serde_json::from_str(&json_array).unwrap();
+    assert!(doc.is_array());
+    assert_eq!(doc.as_array().unwrap().len(), 3);
+    assert_eq!(doc[1]["name"], "bob, jr.");
+}
+
+#[tokio::test]
 async fn ddl_generation_view_uses_execute_pg_get_viewdef() {
     // View path calls driver.execute("SELECT pg_get_viewdef(...)")
     // and expects the first scalar of the first row back. Feed the

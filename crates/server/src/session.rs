@@ -1127,6 +1127,17 @@ impl SessionStore {
         Ok(tx)
     }
 
+    /// Public accessor for the (driver, handle) tuple of a session's
+    /// connection. Used by the export streaming path in `http.rs`
+    /// which needs the driver to spawn its own execute stream.
+    pub fn conn_entry(
+        &self,
+        session_id: SessionId,
+        conn_id: ConnectionId,
+    ) -> ApiResult<ConnectionEntryClone> {
+        self.get_conn_entry(session_id, conn_id)
+    }
+
     /// Generate DDL for `object` on the connection identified by
     /// `(session_id, conn_id)`. Delegates to
     /// [`crate::ddl::generate_ddl`] which orchestrates existing

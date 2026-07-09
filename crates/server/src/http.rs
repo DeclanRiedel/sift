@@ -148,6 +148,10 @@ pub fn app(state: AppState) -> Router {
             "/v1/sessions/:id/connections/:conn_id/ddl",
             get(get_object_ddl),
         )
+        .route(
+            "/v1/sessions/:id/connections/:conn_id/export",
+            post(export_query),
+        )
         .route("/v1/sessions/:id/queries", post(execute_query))
         .route("/v1/sessions/:id/transactions", post(begin_transaction))
         .route(
@@ -1018,6 +1022,14 @@ async fn openapi() -> Json<serde_json::Value> {
                     "responses": { "200": { "description": "ObjectDdl", "content": json_content("ObjectDdl") } }
                 }
             },
+            "/v1/sessions/{id}/connections/{conn_id}/export": {
+                "post": {
+                    "operationId": "exportQuery",
+                    "summary": "Stream a query result as CSV / TSV / JSON Lines / JSON Array. Response is chunked; Content-Type depends on the requested format.",
+                    "requestBody": json_body("ExportRequest"),
+                    "responses": { "200": { "description": "Streamed export body" } }
+                }
+            },
             "/v1/cursors/{cursor_id}/pages": {
                 "get": {
                     "operationId": "readSpilledCursorPages",
@@ -1256,6 +1268,7 @@ fn protocol_schema_refs() -> serde_json::Value {
     add_schema::<sift_protocol::SavepointRequest>("SavepointRequest", &mut schemas);
     add_schema::<sift_protocol::SchemaSnapshot>("SchemaSnapshot", &mut schemas);
     add_schema::<sift_protocol::ObjectDdl>("ObjectDdl", &mut schemas);
+    add_schema::<sift_protocol::ExportRequest>("ExportRequest", &mut schemas);
     add_schema::<sift_protocol::ServerInfo>("ServerInfo", &mut schemas);
     add_schema::<sift_protocol::SessionInfo>("SessionInfo", &mut schemas);
     add_schema::<sift_protocol::TransactionInfo>("TransactionInfo", &mut schemas);
@@ -2177,6 +2190,45 @@ struct DdlQuery {
     /// etc. Defaults to `table` if omitted.
     #[serde(default)]
     kind: Option<sift_protocol::ObjectKind>,
+}
+
+async fn export_query(
+    State(state): State<AppState>,
+    Path((id, conn_id)): Path<(sift_protocol::SessionId, sift_protocol::ConnectionId)>,
+    Json(req): Json<sift_protocol::ExportRequest>,
+) -> ApiResult<Response> {
+    use axum::body::Body;
+    use axum::response::IntoResponse;
+    let entry = state.sessions.conn_entry(id, conn_id)?;
+    let driver = entry.driver.clone();
+    let handle = entry.handle.clone();
+    let format = req.format;
+    let stream = crate::export::run_export(
+        driver,
+        handle,
+        req.sql.clone(),
+        req.params,
+        req.format,
+        req.header,
+        req.null_display,
+    )
+    .await?;
+    let content_type = crate::export::content_type(format);
+    state.sessions.push_operation(
+        Operation::Metadata {
+            action: "export.stream".into(),
+            target: format!("{format:?}"),
+            id: None,
+        },
+        OperationStatus::Succeeded,
+    );
+    let body = Body::from_stream(stream);
+    let mut resp = body.into_response();
+    resp.headers_mut().insert(
+        axum::http::header::CONTENT_TYPE,
+        content_type.parse().unwrap(),
+    );
+    Ok(resp)
 }
 
 async fn get_object_ddl(

@@ -86,6 +86,49 @@ pub struct ExecuteRequestHttp {
     pub connection_profile_id: Option<i64>,
 }
 
+/// Server-side export format for
+/// `POST /v1/sessions/:id/connections/:conn_id/export`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ExportFormat {
+    /// RFC 4180 CSV. Fields containing `,`, `"`, `\r`, or `\n` are
+    /// double-quoted with `"` escaped as `""`.
+    Csv,
+    /// Tab-separated values. Tabs, `\r`, `\n`, `\\` in field values
+    /// are backslash-escaped (`\t`, `\r`, `\n`, `\\`).
+    Tsv,
+    /// JSON Lines / NDJSON. One JSON object per line, keyed by
+    /// column name.
+    JsonLines,
+    /// Single JSON array wrapping all rows. Each element is an
+    /// object keyed by column name.
+    JsonArray,
+}
+
+/// Body of `POST /v1/sessions/:id/connections/:conn_id/export`. The
+/// response streams the result of `sql` in `format`, chunked at row
+/// boundaries. Content-type: `text/csv`, `text/tab-separated-values`,
+/// or `application/json`.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct ExportRequest {
+    pub sql: String,
+    #[serde(default)]
+    pub params: Vec<Value>,
+    pub format: ExportFormat,
+    /// For CSV/TSV: emit the column header as the first line.
+    /// Defaults to true. Ignored for JSON formats.
+    #[serde(default = "default_true")]
+    pub header: bool,
+    /// For CSV/TSV: string to emit in place of a NULL. Defaults to
+    /// empty. JSON formats always emit `null` regardless.
+    #[serde(default)]
+    pub null_display: Option<String>,
+}
+
+fn default_true() -> bool {
+    true
+}
+
 /// Reference to an open transaction. Returned by the transactions endpoint;
 /// carried back by the client on subsequent queries.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]

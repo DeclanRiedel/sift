@@ -15,8 +15,10 @@ sift-driver-sqlserver = { workspace = true }
 sift-doc = { workspace = true }
 sift-metadata = { workspace = true }
 anyhow = { workspace = true }
+async-stream = "0.3"
 async-trait = { workspace = true }
 axum = { workspace = true }
+bytes = { workspace = true }
 chrono = { workspace = true }
 dashmap = { workspace = true }
 figment = { workspace = true }

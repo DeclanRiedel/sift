@@ -10,6 +10,7 @@ pub mod correlation;
 pub mod cursors;
 pub mod ddl;
 pub mod error;
+pub mod export;
 pub mod fingerprint;
 pub mod http;
 pub mod registry;
