@@ -432,6 +432,16 @@ misbehaving pump. Drivers stay simple and the ADR-013 driver isolation
 boundary is undisturbed. The remaining gap — a global cap for the hosted
 tenant story — is documented and left for a hosted-topology ADR (Phase H).
 
+**Scope note — adaptive prefetch depth.** The pump ships with fixed-depth
+prefetch (`prefetch_pages`, default 2), which delivers the "page N+1
+buffered when the client asks for it" behavior the Phase C plan
+originally sketched. **Scaling that depth adaptively based on measured
+ack velocity is explicitly out of scope** for this ADR. A future ADR
+will introduce it if telemetry shows the fixed depth is a real
+bottleneck; until then, operators tune `prefetch_pages` via server
+config. This is a deliberate choice not to build a self-tuning knob
+before there is measured evidence it moves the needle.
+
 ## ADR-012 — Schema Cache with TTL Ceiling and Engine-Specific Invalidators
 
 **Context.** Every `RefreshSchema` / `get_schema` call hit the driver, which

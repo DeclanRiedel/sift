@@ -56,6 +56,7 @@ impl Driver for PgDriver {
     #[tracing::instrument(skip_all, fields(engine = "postgres", conn = c.id()))]
     async fn ping(&self, c: ConnHandle) -> Result<ServerInfo, DriverError> {
         let conn = self.take_for_op(&c).await?;
+        let warm_slots = self.inner.pool_warm_slots_for(c.id());
         let result = async {
             let row = conn
                 .query_one("SELECT version(), current_user, current_database()", &[])
@@ -66,6 +67,7 @@ impl Driver for PgDriver {
                 server_version: row.try_get::<_, String>(0).map_err(pg_err)?,
                 current_user: row.try_get::<_, String>(1).map_err(pg_err)?,
                 current_database: row.try_get::<_, String>(2).map_err(pg_err)?,
+                pool_warm_slots: warm_slots,
             })
         }
         .await;

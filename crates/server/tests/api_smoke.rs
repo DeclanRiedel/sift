@@ -51,6 +51,7 @@ fn mock_postgres_driver() -> MockDriver {
             server_version: "MockDB 0.1".into(),
             current_database: "mock".into(),
             current_user: "mock".into(),
+            pool_warm_slots: None,
         })
         .schema_ok(SchemaSnapshot::empty(SchemaScope::shallow()))
         .execute_ok(vec![
@@ -2399,6 +2400,83 @@ async fn ws_streaming_bounded_memory_across_many_pages() {
         .filter(|p| matches!(p, Page::Rows { .. }))
         .count();
     assert_eq!(rows_pages, 10_000);
+    assert!(pages_back
+        .iter()
+        .any(|p| matches!(p, Page::Done { .. })));
+
+    server.abort();
+}
+
+#[cfg(feature = "stress-1m")]
+#[tokio::test]
+async fn ws_streaming_bounded_memory_across_one_million_pages() {
+    // Same shape as the 10k test above but at 1M pages. Slow —
+    // gated behind `stress-1m`. What we're proving: the cursor
+    // pump's bounded consumer channel (prefetch_pages) keeps
+    // steady-state memory bounded regardless of driver throughput
+    // vs consumer speed. If the pump were unbounded, a 1M-page
+    // buffer would OOM the test runner.
+    const N: usize = 1_000_000;
+    let mut pages = Vec::with_capacity(N + 2);
+    pages.push(Page::NextResult {
+        columns: vec![ColumnMetadata {
+            name: "n".into(),
+            type_ref: TypeRef::Primitive(PrimitiveType::Int32),
+            nullable: Nullability::NotNullable,
+            auto_increment: false,
+            primary_key: false,
+            facets: Default::default(),
+        }],
+    });
+    for i in 0..(N as i32) {
+        pages.push(Page::Rows {
+            rows: vec![Row::new(vec![Value::Int32(i)])],
+        });
+    }
+    pages.push(Page::Done {
+        affected_rows: None,
+        warnings: Vec::new(),
+    });
+    let driver = MockDriver::builder()
+        .engine(Engine::Postgres)
+        .execute_ok(pages)
+        .build();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        axum::serve(
+            listener,
+            app(test_state_with_driver(driver)).into_make_service(),
+        )
+        .await
+        .unwrap();
+    });
+
+    let client = sift_client_sdk::Client::new(format!("http://{addr}"));
+    let session = client
+        .open_session(Some("stress-1m".into()))
+        .await
+        .unwrap();
+    let conn = client
+        .open_connection(
+            session.id,
+            sift_protocol::OpenConnectionRequest {
+                engine: Engine::Postgres,
+                spec: pg_spec(),
+            },
+        )
+        .await
+        .unwrap();
+
+    let pages_back = client
+        .stream_query(session.id, conn.id, "SELECT n FROM huge")
+        .await
+        .unwrap();
+    let rows_pages = pages_back
+        .iter()
+        .filter(|p| matches!(p, Page::Rows { .. }))
+        .count();
+    assert_eq!(rows_pages, N);
     assert!(pages_back
         .iter()
         .any(|p| matches!(p, Page::Done { .. })));

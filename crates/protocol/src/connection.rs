@@ -80,6 +80,14 @@ pub struct ServerInfo {
     pub server_version: String,
     pub current_database: String,
     pub current_user: String,
+    /// Number of pre-warmed idle connections currently sitting in the
+    /// driver's per-spec pool for the spec this handle came from.
+    /// `Some(0)` means the pool is cold; `Some(n)` means the next
+    /// `open()` for the same spec will be served from a warm slot.
+    /// `None` when the driver doesn't track warmth (older drivers, or
+    /// a driver whose pool concept doesn't apply).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pool_warm_slots: Option<u32>,
 }
 
 /// Connection access mode at open time (read-only vs read-write). Distinct

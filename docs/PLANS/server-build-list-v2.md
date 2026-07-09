@@ -396,9 +396,11 @@ completion.
       TTL reap, per-session isolation. Integration tests in
       `tests/api_smoke.rs`:
       `websocket_mid_stream_cancel_stops_paging` and
-      `ws_streaming_bounded_memory_across_many_pages` (10k pages
-      streamed end-to-end verifies the prefetch buffer stays
-      bounded regardless of driver throughput).
+      `ws_streaming_bounded_memory_across_many_pages` (10k pages,
+      always-on). The 1M-row target from the original plan is
+      covered by `ws_streaming_bounded_memory_across_one_million_pages`,
+      gated behind the `stress-1m` cargo feature (runs ~3min; passes
+      with steady memory).
 - [x] [Implement] Schema cache + invalidation —
       `crates/server/src/schema_cache.rs`. Cache hit returns from a
       `DashMap.get` in <1ms. Engine invalidator tasks lazy-spawn on
@@ -411,17 +413,17 @@ completion.
 - [x] [Implement] Predictive page-N+1 prefetch — the cursor pump's
       bounded consumer channel (default 2 slots) provides exactly
       this: page N+1 is pumped as soon as N is consumed, waiting
-      on the ack cadence. Adaptive depth based on ack velocity is a
-      documented enhancement, not shipped.
+      on the ack cadence. ADR-011 explicitly scopes out adaptive
+      depth-scaling (velocity-based) — see the ADR-011 scope note.
 - [x] [Implement] Pre-warm pool on `OpenConnection`/profile-open —
       both engines. PG uses `PgConnectionSpec.pool_min_size` +
       deadpool. SQL Server gains a per-spec warm-idle pool
       (`crates/driver-sqlserver/src/lib.rs::MssqlPool`): `open()`
       first tries the warm pool before opening a fresh TDS session;
       each miss spawns a background top-up that refills to
-      `pool_min_size`. Cold-start budget reporting via `ping()` is
-      an explicit follow-up; today the warmth is observed only via
-      lower connection latency on subsequent opens.
+      `pool_min_size`. Cold-start budget reported via
+      `ServerInfo.pool_warm_slots` — both drivers populate it on
+      `ping()`.
 - [x] [Implement] Large-result spill to disk — write side and
       read-back side both landed. On eviction the pump writes
       remaining pages to `{spill_dir}/sift-cursor-{id}.bin`

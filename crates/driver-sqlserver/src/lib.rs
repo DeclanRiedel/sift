@@ -47,6 +47,9 @@ struct MssqlInner {
     /// the pool before opening a fresh TDS session. Populated
     /// lazily by a background top-up task after each pop.
     pools: DashMap<String, Arc<Mutex<MssqlPool>>>,
+    /// conn_id → pool key that owns this conn's spec. Used to
+    /// report `pool_warm_slots` on `ping()`.
+    conn_pool_key: DashMap<u64, String>,
 }
 
 struct MssqlPool {
@@ -69,6 +72,7 @@ impl MssqlDriver {
                 cursor_id: IdCounter::new(),
                 cursors: DashMap::new(),
                 pools: DashMap::new(),
+                conn_pool_key: DashMap::new(),
             }),
         }
     }
@@ -137,6 +141,16 @@ impl MssqlDriver {
         });
     }
 
+    /// Number of warm-idle conns sitting in the pool for the spec that
+    /// opened `conn_id`. Returns `None` if we've lost the mapping
+    /// (post-close) or no pool exists yet for that spec.
+    async fn pool_warm_slots_for(&self, conn_id: u64) -> Option<u32> {
+        let key = self.inner.conn_pool_key.get(&conn_id).map(|s| s.clone())?;
+        let pool = self.inner.pools.get(&key)?.clone();
+        let guard = pool.lock().await;
+        Some(guard.idle.len().min(u32::MAX as usize) as u32)
+    }
+
     async fn take_conn(&self, c: &ConnHandle) -> Result<MssqlConn, DriverError> {
         self.inner
             .conns
@@ -175,6 +189,7 @@ impl Driver for MssqlDriver {
         };
         let id = self.inner.conn_id.next();
         self.inner.conns.lock().await.insert(id, conn);
+        self.inner.conn_pool_key.insert(id, pool_key.clone());
         // Kick off a background top-up so subsequent opens for this
         // spec find a warm entry.
         if min_size > 0 {
@@ -186,6 +201,7 @@ impl Driver for MssqlDriver {
     #[tracing::instrument(skip_all, fields(engine = "sql_server", conn = c.id()))]
     async fn ping(&self, c: ConnHandle) -> Result<ServerInfo, DriverError> {
         let mut conn = self.take_conn(&c).await?;
+        let warm_slots = self.pool_warm_slots_for(c.id()).await;
         let result = async {
             let row = conn
                 .query(
@@ -203,6 +219,7 @@ impl Driver for MssqlDriver {
                 server_version: row.try_get::<&str, _>(0).map_err(ms_err)?.unwrap_or_default().to_string(),
                 current_database: row.try_get::<&str, _>(1).map_err(ms_err)?.unwrap_or_default().to_string(),
                 current_user: row.try_get::<&str, _>(2).map_err(ms_err)?.unwrap_or_default().to_string(),
+                pool_warm_slots: warm_slots,
             })
         }
         .await;
@@ -388,6 +405,7 @@ impl Driver for MssqlDriver {
         // to complete its final `conns.insert` before we clear.
         tokio::task::yield_now().await;
         self.inner.conns.lock().await.remove(&c.id());
+        self.inner.conn_pool_key.remove(&c.id());
         Ok(())
     }
 

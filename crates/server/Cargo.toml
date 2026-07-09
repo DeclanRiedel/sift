@@ -38,6 +38,9 @@ tracing-subscriber = { workspace = true }
 # no system libdbus). Off by default — it needs a running credential service at
 # runtime, which headless CI lacks.
 os-keychain = ["sift-metadata/os-keychain"]
+# Enables the 1M-row bounded-memory stress test in api_smoke. Slow
+# (~10s+) so off by default; run manually or in nightly CI.
+stress-1m = []
 
 [dev-dependencies]
 sift-client-sdk = { workspace = true }

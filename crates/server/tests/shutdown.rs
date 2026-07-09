@@ -26,6 +26,7 @@ fn mock_driver() -> MockDriver {
             server_version: "MockDB 0.1".into(),
             current_database: "mock".into(),
             current_user: "mock".into(),
+            pool_warm_slots: None,
         })
         .schema_ok(SchemaSnapshot::empty(SchemaScope::shallow()))
         .build()

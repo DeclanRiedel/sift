@@ -139,6 +139,7 @@ fn build_registry(cfg: &Config) -> DriverRegistry {
             server_version: "MockDB 0.1".to_string(),
             current_database: "mock".to_string(),
             current_user: "mock".to_string(),
+            pool_warm_slots: None,
         };
         let schema = sift_protocol::SchemaSnapshot::empty(SchemaScope::shallow());
         let mut mock =

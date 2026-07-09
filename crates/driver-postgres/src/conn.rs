@@ -169,6 +169,18 @@ impl PgDriverInner {
         Ok((key, arc))
     }
 
+    /// Warm-idle slot count for the pool this conn's spec belongs to.
+    /// Reports `pool.status().available` — the number of PooledConn
+    /// objects sitting in deadpool that a subsequent `open` for the
+    /// same spec would draw from. `None` if we can't resolve the
+    /// spec (conn was closed, or open bookkeeping lost).
+    pub(crate) fn pool_warm_slots_for(&self, conn_id: u64) -> Option<u32> {
+        let spec = self.specs.get(&conn_id)?.clone();
+        let key = spec_key(&spec).ok()?;
+        let pool = self.pools.get(&key)?;
+        Some(pool.status().available.min(u32::MAX as usize) as u32)
+    }
+
     pub(crate) async fn put_free(&self, id: u64, conn: PooledConn) {
         self.conns.lock().await.insert(id, ConnState::Free(conn));
     }
