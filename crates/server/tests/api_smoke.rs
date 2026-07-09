@@ -2530,6 +2530,178 @@ async fn schema_cache_serves_second_call_without_touching_driver() {
 }
 
 #[tokio::test]
+async fn ddl_generation_view_uses_execute_pg_get_viewdef() {
+    // View path calls driver.execute("SELECT pg_get_viewdef(...)")
+    // and expects the first scalar of the first row back. Feed the
+    // MockDriver that shape directly.
+    let driver = MockDriver::builder()
+        .engine(Engine::Postgres)
+        .execute_ok(vec![
+            Page::NextResult {
+                columns: vec![ColumnMetadata {
+                    name: "def".into(),
+                    type_ref: TypeRef::Primitive(PrimitiveType::Text),
+                    nullable: Nullability::Nullable,
+                    auto_increment: false,
+                    primary_key: false,
+                    facets: Default::default(),
+                }],
+            },
+            Page::Rows {
+                rows: vec![Row::new(vec![Value::Text(
+                    "SELECT id, name FROM users WHERE active;".into(),
+                )])],
+            },
+            Page::Done {
+                affected_rows: None,
+                warnings: Vec::new(),
+            },
+        ])
+        .build();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        axum::serve(
+            listener,
+            app(test_state_with_driver(driver)).into_make_service(),
+        )
+        .await
+        .unwrap();
+    });
+    let client = sift_client_sdk::Client::new(format!("http://{addr}"));
+    let session = client.open_session(Some("ddl".into())).await.unwrap();
+    let conn = client
+        .open_connection(
+            session.id,
+            sift_protocol::OpenConnectionRequest {
+                engine: Engine::Postgres,
+                spec: pg_spec(),
+            },
+        )
+        .await
+        .unwrap();
+    let ddl = client
+        .object_ddl(
+            session.id,
+            conn.id,
+            &sift_protocol::ObjectPath {
+                catalog: None,
+                schema: Some("public".into()),
+                name: "active_users".into(),
+                kind: Some(sift_protocol::ObjectKind::View),
+            },
+        )
+        .await
+        .unwrap();
+    assert!(ddl.ddl.contains("CREATE OR REPLACE VIEW"));
+    assert!(ddl.ddl.contains("active_users"));
+    assert!(ddl.ddl.contains("SELECT id, name FROM users"));
+    server.abort();
+}
+
+#[tokio::test]
+async fn ddl_generation_table_composes_from_deep_schema() {
+    // Table path calls driver.schema(Deep) and formats a
+    // CREATE TABLE from the returned ObjectInfo. Prime MockDriver
+    // with a snapshot describing a users table with an id PK column
+    // and a name column.
+    use sift_protocol::{
+        ConstraintInfo, ConstraintKind, ObjectInfo, ObjectKind, ObjectPath, SchemaScope,
+        SchemaSnapshot, SchemaTree,
+    };
+    let mut snap = SchemaSnapshot::empty(SchemaScope::deep(ObjectPath {
+        catalog: None,
+        schema: Some("public".into()),
+        name: "users".into(),
+        kind: Some(ObjectKind::Table),
+    }));
+    snap.trees.push(sift_protocol::CatalogTree {
+        name: "sifttest".into(),
+        schemas: vec![SchemaTree {
+            name: "public".into(),
+            objects: vec![ObjectInfo {
+                name: "users".into(),
+                kind: ObjectKind::Table,
+                columns: vec![
+                    ColumnMetadata {
+                        name: "id".into(),
+                        type_ref: TypeRef::Primitive(PrimitiveType::Int64),
+                        nullable: Nullability::NotNullable,
+                        auto_increment: true,
+                        primary_key: true,
+                        facets: Default::default(),
+                    },
+                    ColumnMetadata {
+                        name: "name".into(),
+                        type_ref: TypeRef::Primitive(PrimitiveType::Text),
+                        nullable: Nullability::Nullable,
+                        auto_increment: false,
+                        primary_key: false,
+                        facets: Default::default(),
+                    },
+                ],
+                indexes: Vec::new(),
+                constraints: vec![ConstraintInfo {
+                    name: "users_pkey".into(),
+                    kind: ConstraintKind::PrimaryKey,
+                    columns: vec!["id".into()],
+                    definition: Some("PRIMARY KEY (id)".into()),
+                    references: None,
+                }],
+                triggers: Vec::new(),
+            }],
+        }],
+    });
+    let driver = MockDriver::builder()
+        .engine(Engine::Postgres)
+        .schema_ok(snap)
+        .build();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        axum::serve(
+            listener,
+            app(test_state_with_driver(driver)).into_make_service(),
+        )
+        .await
+        .unwrap();
+    });
+    let client = sift_client_sdk::Client::new(format!("http://{addr}"));
+    let session = client.open_session(Some("ddl".into())).await.unwrap();
+    let conn = client
+        .open_connection(
+            session.id,
+            sift_protocol::OpenConnectionRequest {
+                engine: Engine::Postgres,
+                spec: pg_spec(),
+            },
+        )
+        .await
+        .unwrap();
+    let ddl = client
+        .object_ddl(
+            session.id,
+            conn.id,
+            &ObjectPath {
+                catalog: None,
+                schema: Some("public".into()),
+                name: "users".into(),
+                kind: Some(ObjectKind::Table),
+            },
+        )
+        .await
+        .unwrap();
+    assert!(ddl.ddl.contains("CREATE TABLE"));
+    assert!(ddl.ddl.contains("\"public\".\"users\""));
+    assert!(ddl.ddl.contains("\"id\" bigint NOT NULL"));
+    assert!(ddl.ddl.contains("\"name\" text"));
+    assert!(ddl
+        .ddl
+        .contains("CONSTRAINT \"users_pkey\" PRIMARY KEY (id)"));
+    server.abort();
+}
+
+#[tokio::test]
 async fn saved_queries_lifecycle_personal_and_shared() {
     // Local bootstrap creates a tenant + local principal with Owner
     // role, so this principal can both mint tenant-shared queries

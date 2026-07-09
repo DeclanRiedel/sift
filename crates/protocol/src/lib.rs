@@ -38,9 +38,9 @@ pub use room::{
     RoomServerMessage, TextDocumentOperation,
 };
 pub use schema::{
-    CatalogTree, ConstraintInfo, ConstraintKind, IndexInfo, IndexKind, ObjectInfo, ObjectKind,
-    ObjectPath, SchemaDepth, SchemaFilter, SchemaScope, SchemaSnapshot, SchemaTree, TriggerEvent,
-    TriggerInfo, TriggerTiming,
+    CatalogTree, ConstraintInfo, ConstraintKind, IndexInfo, IndexKind, ObjectDdl, ObjectInfo,
+    ObjectKind, ObjectPath, SchemaDepth, SchemaFilter, SchemaScope, SchemaSnapshot, SchemaTree,
+    TriggerEvent, TriggerInfo, TriggerTiming,
 };
 pub use session::{
     Ack, AuditEntry, BeginTransactionRequest, BulkInsertFormat, BulkInsertRequest,

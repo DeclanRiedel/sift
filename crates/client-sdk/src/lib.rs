@@ -126,6 +126,35 @@ impl Client {
         .await
     }
 
+    /// Generate DDL for a database object. `path.name` is required;
+    /// `path.schema` and `path.kind` are optional (kind defaults to
+    /// table server-side). The response includes the object's
+    /// canonical `path` and a `ddl` string containing the CREATE
+    /// statement(s); for tables, standalone CREATE INDEX statements
+    /// for non-constraint indexes follow the CREATE TABLE.
+    pub async fn object_ddl(
+        &self,
+        session: SessionId,
+        connection: ConnectionId,
+        path: &sift_protocol::ObjectPath,
+    ) -> Result<sift_protocol::ObjectDdl> {
+        let mut query = vec![format!("name={}", urlencoding_replace(&path.name))];
+        if let Some(schema) = &path.schema {
+            query.push(format!("schema={}", urlencoding_replace(schema)));
+        }
+        if let Some(kind) = &path.kind {
+            let kind_str = serde_json::to_string(kind).map_err(Error::Json)?;
+            // Strip the surrounding quotes serde_json emits for enums.
+            let cleaned = kind_str.trim_matches('"');
+            query.push(format!("kind={cleaned}"));
+        }
+        self.get(&format!(
+            "/v1/sessions/{session}/connections/{connection}/ddl?{}",
+            query.join("&")
+        ))
+        .await
+    }
+
     pub async fn bulk_insert(
         &self,
         session: SessionId,

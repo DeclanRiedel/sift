@@ -144,6 +144,10 @@ pub fn app(state: AppState) -> Router {
             "/v1/sessions/:id/connections/:conn_id/schema",
             get(get_schema),
         )
+        .route(
+            "/v1/sessions/:id/connections/:conn_id/ddl",
+            get(get_object_ddl),
+        )
         .route("/v1/sessions/:id/queries", post(execute_query))
         .route("/v1/sessions/:id/transactions", post(begin_transaction))
         .route(
@@ -1007,6 +1011,13 @@ async fn openapi() -> Json<serde_json::Value> {
                     "responses": { "200": { "description": "OpenAPI document" } }
                 }
             },
+            "/v1/sessions/{id}/connections/{conn_id}/ddl": {
+                "get": {
+                    "operationId": "getObjectDdl",
+                    "summary": "Generate DDL (CREATE statement) for a database object. Query params: `name` (required), `schema`, `kind` (defaults to `table`).",
+                    "responses": { "200": { "description": "ObjectDdl", "content": json_content("ObjectDdl") } }
+                }
+            },
             "/v1/cursors/{cursor_id}/pages": {
                 "get": {
                     "operationId": "readSpilledCursorPages",
@@ -1244,6 +1255,7 @@ fn protocol_schema_refs() -> serde_json::Value {
     add_schema::<sift_protocol::Readiness>("Readiness", &mut schemas);
     add_schema::<sift_protocol::SavepointRequest>("SavepointRequest", &mut schemas);
     add_schema::<sift_protocol::SchemaSnapshot>("SchemaSnapshot", &mut schemas);
+    add_schema::<sift_protocol::ObjectDdl>("ObjectDdl", &mut schemas);
     add_schema::<sift_protocol::ServerInfo>("ServerInfo", &mut schemas);
     add_schema::<sift_protocol::SessionInfo>("SessionInfo", &mut schemas);
     add_schema::<sift_protocol::TransactionInfo>("TransactionInfo", &mut schemas);
@@ -2151,6 +2163,46 @@ struct SchemaQuery {
     schema: Option<String>,
     object: Option<String>,
     name_pattern: Option<String>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+struct DdlQuery {
+    /// Object schema. Optional — engines with a single schema per DB
+    /// (rare) skip it.
+    #[serde(default)]
+    schema: Option<String>,
+    /// Object name. Required.
+    name: String,
+    /// Object kind: `table`, `view`, `procedure`, `scalar_function`,
+    /// etc. Defaults to `table` if omitted.
+    #[serde(default)]
+    kind: Option<sift_protocol::ObjectKind>,
+}
+
+async fn get_object_ddl(
+    State(state): State<AppState>,
+    Path((id, conn_id)): Path<(sift_protocol::SessionId, sift_protocol::ConnectionId)>,
+    Query(q): Query<DdlQuery>,
+) -> ApiResult<Json<sift_protocol::ObjectDdl>> {
+    let path = ObjectPath {
+        catalog: None,
+        schema: q.schema,
+        name: q.name,
+        kind: q.kind,
+    };
+    let ddl = state.sessions.ddl_for(id, conn_id, path.clone()).await?;
+    state.sessions.push_operation(
+        Operation::Metadata {
+            action: "ddl.generate".into(),
+            target: format!(
+                "{:?}",
+                path.kind.unwrap_or(sift_protocol::ObjectKind::Table)
+            ),
+            id: None,
+        },
+        OperationStatus::Succeeded,
+    );
+    Ok(Json(ddl))
 }
 
 async fn get_schema(

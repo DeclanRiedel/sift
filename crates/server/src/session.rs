@@ -1127,6 +1127,24 @@ impl SessionStore {
         Ok(tx)
     }
 
+    /// Generate DDL for `object` on the connection identified by
+    /// `(session_id, conn_id)`. Delegates to
+    /// [`crate::ddl::generate_ddl`] which orchestrates existing
+    /// driver calls (`schema` + `execute`) rather than adding a new
+    /// method to the `Driver` trait.
+    pub async fn ddl_for(
+        &self,
+        session_id: SessionId,
+        conn_id: ConnectionId,
+        object: sift_protocol::ObjectPath,
+    ) -> ApiResult<sift_protocol::ObjectDdl> {
+        let entry = self.get_conn_entry(session_id, conn_id)?;
+        let driver = entry.driver.clone();
+        let handle = entry.handle.clone();
+        let result = crate::ddl::generate_ddl(&*driver, handle, object).await?;
+        Ok(result)
+    }
+
     fn get_conn_entry(
         &self,
         session_id: SessionId,

@@ -247,3 +247,13 @@ impl ObjectInfo {
         }
     }
 }
+
+/// DDL text for a database object, plus the resolved object path.
+/// Response body of the DDL generation endpoint (Phase D).
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct ObjectDdl {
+    pub path: ObjectPath,
+    /// Complete CREATE statement (for tables, includes any owned
+    /// indexes and triggers as separate statements separated by `;\n`).
+    pub ddl: String,
+}
