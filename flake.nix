@@ -397,6 +397,16 @@
           text = devCommand ''sh scripts/dev-secret-key.sh'';
         };
 
+        devMssql = pkgs.writeShellApplication {
+          name = "sift-dev-mssql";
+          # docker is intentionally not in runtimeInputs — the container
+          # runtime is the user's host docker, not a nix-managed pkg.
+          # The script checks for docker on PATH and errors out cleanly
+          # if it's missing.
+          runtimeInputs = with pkgs; [ coreutils openssl gawk ];
+          text = devCommand ''sh scripts/dev-mssql.sh "$@"'';
+        };
+
         siftHelp = pkgs.writeShellApplication {
           name = "sift-help";
           text = ''
@@ -417,6 +427,9 @@
               sift-test                 Run cargo nextest for the whole workspace.
               sift-check                Run cargo check for the whole workspace.
               sift-dev-secret-key       Generate the ignored local metadata secret key file.
+              sift-dev-mssql            Manage a local SQL Server docker container for live-mssql tests.
+                                        Sub: start | stop | reset | password | status. Password is
+                                        generated and persisted to .env on first start.
 
             Typical flow:
               nix develop
@@ -511,6 +524,10 @@
           dev-secret-key = {
             type = "app";
             program = "${devSecretKey}/bin/sift-dev-secret-key";
+          };
+          dev-mssql = {
+            type = "app";
+            program = "${devMssql}/bin/sift-dev-mssql";
           };
         };
       });
