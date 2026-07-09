@@ -38,13 +38,12 @@ pub async fn generate_ddl(
     let kind = object.kind.unwrap_or(ObjectKind::Table);
     let engine = driver.engine();
     let ddl = match kind {
-        ObjectKind::Table
-        | ObjectKind::PartitionedTable
-        | ObjectKind::ForeignTable
-        | ObjectKind::MaterializedView => {
+        ObjectKind::Table | ObjectKind::PartitionedTable | ObjectKind::ForeignTable => {
             generate_table_ddl(driver, handle, &object, engine).await?
         }
-        ObjectKind::View => generate_view_ddl(driver, handle, &object, engine).await?,
+        ObjectKind::View | ObjectKind::MaterializedView => {
+            generate_view_ddl(driver, handle, &object, engine, kind).await?
+        }
         ObjectKind::Procedure | ObjectKind::ScalarFunction | ObjectKind::TableValuedFunction => {
             generate_routine_ddl(driver, handle, &object, engine).await?
         }
@@ -195,23 +194,46 @@ async fn generate_view_ddl(
     handle: sift_driver_api::ConnHandle,
     object: &ObjectPath,
     engine: Engine,
+    kind: ObjectKind,
 ) -> Result<String, DriverError> {
     let qname = qualified_name(object, engine);
-    let (sql, prefix) = match engine {
-        Engine::Postgres => (
+    let is_materialized = matches!(kind, ObjectKind::MaterializedView);
+    let (sql, prefix) = match (engine, is_materialized) {
+        (Engine::Postgres, false) => (
             format!(
                 "SELECT pg_get_viewdef('{}'::regclass, true)",
                 qname.replace('\'', "''")
             ),
             format!("CREATE OR REPLACE VIEW {qname} AS\n"),
         ),
-        Engine::SqlServer => (
+        (Engine::Postgres, true) => (
+            // `pg_get_viewdef` works on materialized views too — it
+            // returns the view body (SELECT ...). `CREATE OR REPLACE`
+            // is not supported for materialized views; a caller who
+            // wants to redeploy must DROP + CREATE.
+            format!(
+                "SELECT pg_get_viewdef('{}'::regclass, true)",
+                qname.replace('\'', "''")
+            ),
+            format!("CREATE MATERIALIZED VIEW {qname} AS\n"),
+        ),
+        (Engine::SqlServer, false) => (
             format!(
                 "SELECT OBJECT_DEFINITION(OBJECT_ID(N'{}'))",
                 qname.replace('\'', "''")
             ),
             String::new(),
         ),
+        (Engine::SqlServer, true) => {
+            // SQL Server has no materialized views (indexed views are a
+            // distinct concept and don't round-trip cleanly). Signal
+            // the caller rather than emit misleading DDL.
+            return Err(DriverError::new(
+                Code::UnsupportedForEngine,
+                "SQL Server does not have materialized views",
+            )
+            .with_engine(engine));
+        }
     };
     let body = fetch_scalar_text(driver, handle, sql).await?;
     Ok(format!("{prefix}{body}"))

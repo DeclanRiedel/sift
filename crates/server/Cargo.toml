@@ -44,6 +44,11 @@ os-keychain = ["sift-metadata/os-keychain"]
 # Enables the 1M-row bounded-memory stress test in api_smoke. Slow
 # (~10s+) so off by default; run manually or in nightly CI.
 stress-1m = []
+# Enables live-PG integration tests that require a running Postgres
+# (ddl_round_trip). Off by default so `cargo test` in a bare devshell
+# stays green; local invocation follows the same instructions as
+# `sift-driver-postgres --features live-pg`.
+live-pg = []
 
 [dev-dependencies]
 sift-client-sdk = { workspace = true }
