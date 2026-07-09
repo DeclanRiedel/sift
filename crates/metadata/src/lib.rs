@@ -62,6 +62,8 @@ pub enum MetadataError {
     DocumentNotFound(DocumentId),
     #[error("room attachment {0:?} not found")]
     RoomAttachmentNotFound(RoomAttachmentId),
+    #[error("saved query {0:?} not found")]
+    SavedQueryNotFound(SavedQueryId),
     #[error("secret store error: {0}")]
     SecretStore(String),
 }
@@ -949,6 +951,152 @@ impl MetadataStore {
         history
     }
 
+    // -----------------------------------------------------------------
+    // Saved queries
+    // -----------------------------------------------------------------
+
+    /// Insert a saved query. Caller has already resolved
+    /// `owner_principal_id` (None = tenant-shared).
+    pub fn insert_saved_query(&self, input: NewSavedQuery) -> Result<SavedQuery> {
+        let now = now_text();
+        let tags_json = serde_json::to_string(&input.tags).map_err(MetadataError::Json)?;
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO saved_query
+             (tenant_id, principal_id, name, sql_text, connection_profile_id,
+              tags_json, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7)",
+            params![
+                input.tenant_id.0,
+                input.owner_principal_id.map(|p| p.0),
+                input.name,
+                input.sql_text,
+                input.connection_profile_id.map(|c| c.0),
+                tags_json,
+                now,
+            ],
+        )?;
+        let id = SavedQueryId(conn.last_insert_rowid());
+        self.saved_query_by_id_locked(&conn, id)
+    }
+
+    /// Fetch a saved query by id. Caller is responsible for the
+    /// visibility check (owner or tenant member) before returning to
+    /// an untrusted principal.
+    pub fn get_saved_query(&self, id: SavedQueryId) -> Result<SavedQuery> {
+        let conn = self.conn.lock().unwrap();
+        self.saved_query_by_id_locked(&conn, id)
+    }
+
+    /// List saved queries visible to `principal` in the filter's
+    /// tenant. Visibility rule: personal queries owned by
+    /// `principal`, OR tenant-shared queries. Filter narrows further
+    /// via optional FTS pattern `q`, tag set, and scope.
+    pub fn list_saved_queries(
+        &self,
+        principal: PrincipalId,
+        filter: SavedQueryFilter,
+    ) -> Result<Vec<SavedQuery>> {
+        let conn = self.conn.lock().unwrap();
+        // Compose SQL dynamically. Base visibility is fixed; scope,
+        // q, and tags are optional refinements.
+        let mut sql = String::from(
+            "SELECT id, tenant_id, principal_id, name, sql_text,
+                    connection_profile_id, tags_json, created_at, updated_at
+             FROM saved_query
+             WHERE tenant_id = ?1
+               AND (principal_id = ?2 OR principal_id IS NULL)",
+        );
+        let mut params_dyn: Vec<Box<dyn rusqlite::ToSql>> =
+            vec![Box::new(filter.tenant_id.0), Box::new(principal.0)];
+        match filter.scope {
+            Some(SavedQueryScope::Personal) => {
+                sql.push_str(" AND principal_id = ?2");
+            }
+            Some(SavedQueryScope::Shared) => {
+                sql.push_str(" AND principal_id IS NULL");
+            }
+            Some(SavedQueryScope::All) | None => {}
+        }
+        if let Some(q) = filter.q.as_ref().filter(|s| !s.trim().is_empty()) {
+            // Restrict to FTS matches. Users type free-text; append a
+            // trailing `*` to each token so partial words match as
+            // prefixes. Callers who want exact FTS syntax can send it
+            // through unchanged by including a colon or quote.
+            let pattern = fts_pattern(q);
+            sql.push_str(
+                " AND id IN (SELECT rowid FROM saved_query_fts WHERE saved_query_fts MATCH ?)",
+            );
+            params_dyn.push(Box::new(pattern));
+        }
+        for tag in &filter.tags {
+            // tags_json is a JSON array — use json_each to test
+            // containment.
+            sql.push_str(" AND EXISTS (SELECT 1 FROM json_each(tags_json) WHERE value = ?)");
+            params_dyn.push(Box::new(tag.clone()));
+        }
+        sql.push_str(" ORDER BY updated_at DESC, id DESC");
+        let mut stmt = conn.prepare(&sql)?;
+        let refs: Vec<&dyn rusqlite::ToSql> = params_dyn.iter().map(|b| b.as_ref()).collect();
+        let iter = stmt.query_map(refs.as_slice(), saved_query_from_row)?;
+        rows(iter)
+    }
+
+    /// Update a saved query. Caller has already checked authorization.
+    /// Any `None` field is left unchanged.
+    pub fn update_saved_query(
+        &self,
+        id: SavedQueryId,
+        update: UpdateSavedQuery,
+    ) -> Result<SavedQuery> {
+        let now = now_text();
+        let conn = self.conn.lock().unwrap();
+        let existing = self.saved_query_by_id_locked(&conn, id)?;
+        let name = update.name.unwrap_or(existing.name);
+        let sql_text = update.sql_text.unwrap_or(existing.sql_text);
+        let connection_profile_id = update
+            .connection_profile_id
+            .unwrap_or(existing.connection_profile_id);
+        let tags = update.tags.unwrap_or(existing.tags);
+        let tags_json = serde_json::to_string(&tags).map_err(MetadataError::Json)?;
+        conn.execute(
+            "UPDATE saved_query
+             SET name = ?1, sql_text = ?2, connection_profile_id = ?3,
+                 tags_json = ?4, updated_at = ?5
+             WHERE id = ?6",
+            params![
+                name,
+                sql_text,
+                connection_profile_id.map(|c| c.0),
+                tags_json,
+                now,
+                id.0,
+            ],
+        )?;
+        self.saved_query_by_id_locked(&conn, id)
+    }
+
+    /// Delete a saved query. Caller has already checked authorization.
+    /// Returns `true` if a row was deleted, `false` if the id was
+    /// absent (idempotent).
+    pub fn delete_saved_query(&self, id: SavedQueryId) -> Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        let deleted = conn.execute("DELETE FROM saved_query WHERE id = ?1", params![id.0])?;
+        Ok(deleted > 0)
+    }
+
+    fn saved_query_by_id_locked(&self, conn: &Connection, id: SavedQueryId) -> Result<SavedQuery> {
+        conn.query_row(
+            "SELECT id, tenant_id, principal_id, name, sql_text,
+                    connection_profile_id, tags_json, created_at, updated_at
+             FROM saved_query WHERE id = ?1",
+            params![id.0],
+            saved_query_from_row,
+        )
+        .optional()?
+        .ok_or(MetadataError::SavedQueryNotFound(id))
+    }
+
     fn api_token_by_id_locked(&self, conn: &Connection, id: ApiTokenId) -> Result<ApiTokenRow> {
         conn.query_row(
             "SELECT id, principal_id, tenant_id, name, created_at, updated_at,
@@ -1230,6 +1378,50 @@ fn operation_audit_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Operati
         error_message: row.get(9)?,
         correlation_id: row.get(10)?,
     })
+}
+
+fn saved_query_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SavedQuery> {
+    let tags_json: String = row.get(6)?;
+    let tags: Vec<String> = serde_json::from_str(&tags_json).map_err(sql_conversion_error)?;
+    Ok(SavedQuery {
+        id: SavedQueryId(row.get(0)?),
+        tenant_id: TenantId(row.get(1)?),
+        owner_principal_id: row.get::<_, Option<i64>>(2)?.map(PrincipalId),
+        name: row.get(3)?,
+        sql_text: row.get(4)?,
+        connection_profile_id: row.get::<_, Option<i64>>(5)?.map(ConnectionProfileId),
+        tags,
+        created_at: parse_time_sql(row.get(7)?)?,
+        updated_at: parse_time_sql(row.get(8)?)?,
+    })
+}
+
+/// Translate a free-text query into an FTS5 MATCH pattern. Each
+/// whitespace-separated token becomes a prefix match; non-alphanumeric
+/// characters are stripped so callers can't inject FTS5 operators.
+/// Empty input returns `*` (matches nothing meaningful; the caller
+/// should have skipped MATCH entirely).
+fn fts_pattern(q: &str) -> String {
+    let tokens: Vec<String> = q
+        .split_whitespace()
+        .map(|token| {
+            let clean: String = token
+                .chars()
+                .filter(|c| c.is_alphanumeric() || *c == '_')
+                .collect();
+            if clean.is_empty() {
+                String::new()
+            } else {
+                format!("{clean}*")
+            }
+        })
+        .filter(|t| !t.is_empty())
+        .collect();
+    if tokens.is_empty() {
+        "*".to_string()
+    } else {
+        tokens.join(" ")
+    }
 }
 
 fn parse_time_sql(value: String) -> rusqlite::Result<DateTime<Utc>> {

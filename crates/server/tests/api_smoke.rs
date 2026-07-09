@@ -2530,6 +2530,148 @@ async fn schema_cache_serves_second_call_without_touching_driver() {
 }
 
 #[tokio::test]
+async fn saved_queries_lifecycle_personal_and_shared() {
+    // Local bootstrap creates a tenant + local principal with Owner
+    // role, so this principal can both mint tenant-shared queries
+    // AND own personal ones. Loopback bypass gives us the principal
+    // without a bearer token.
+    let app = app(test_state_with_metadata(true));
+
+    // Create a personal query owned by the caller (principal_id=1).
+    let create_personal = serde_json::json!({
+        "tenant_id": 1,
+        "owner_principal_id": 1,
+        "name": "my daily count",
+        "sql_text": "select count(*) from users",
+        "tags": ["daily", "users"],
+    });
+    let res = app
+        .clone()
+        .oneshot(
+            Request::post("/v1/metadata/saved-queries")
+                .header("content-type", "application/json")
+                .body(Body::from(create_personal.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let personal: serde_json::Value = body_json(res.into_body()).await;
+    assert_eq!(personal["owner_principal_id"], 1);
+    assert_eq!(personal["tags"], serde_json::json!(["daily", "users"]));
+    let personal_id = personal["id"].as_i64().unwrap();
+
+    // Create a tenant-shared query (owner_principal_id omitted).
+    let create_shared = serde_json::json!({
+        "tenant_id": 1,
+        "name": "monthly revenue",
+        "sql_text": "select sum(amount) from orders where paid = true",
+        "tags": ["finance"],
+    });
+    let res = app
+        .clone()
+        .oneshot(
+            Request::post("/v1/metadata/saved-queries")
+                .header("content-type", "application/json")
+                .body(Body::from(create_shared.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let shared: serde_json::Value = body_json(res.into_body()).await;
+    assert!(shared["owner_principal_id"].is_null());
+    let shared_id = shared["id"].as_i64().unwrap();
+
+    // List with an FTS query — should hit only one, and prove FTS
+    // works against sql_text (not just name).
+    let res = app
+        .clone()
+        .oneshot(
+            Request::get("/v1/metadata/saved-queries?tenant=1&q=revenue")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let hits: serde_json::Value = body_json(res.into_body()).await;
+    assert_eq!(hits.as_array().unwrap().len(), 1);
+    assert_eq!(hits[0]["id"], shared_id);
+
+    // Scope=personal returns only the personal one.
+    let res = app
+        .clone()
+        .oneshot(
+            Request::get("/v1/metadata/saved-queries?tenant=1&scope=personal")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let hits: serde_json::Value = body_json(res.into_body()).await;
+    assert_eq!(hits.as_array().unwrap().len(), 1);
+    assert_eq!(hits[0]["id"], personal_id);
+
+    // Tag filter across both would match neither ("daily" only on
+    // personal, "finance" only on shared).
+    let res = app
+        .clone()
+        .oneshot(
+            Request::get("/v1/metadata/saved-queries?tenant=1&tags=daily,finance")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let hits: serde_json::Value = body_json(res.into_body()).await;
+    assert_eq!(hits.as_array().unwrap().len(), 0);
+
+    // Update the personal query — rename it, keep tags.
+    let update = serde_json::json!({ "name": "my daily user count" });
+    let res = app
+        .clone()
+        .oneshot(
+            Request::put(format!("/v1/metadata/saved-queries/{personal_id}"))
+                .header("content-type", "application/json")
+                .body(Body::from(update.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let updated: serde_json::Value = body_json(res.into_body()).await;
+    assert_eq!(updated["name"], "my daily user count");
+    assert_eq!(updated["tags"], serde_json::json!(["daily", "users"]));
+
+    // Delete both.
+    for id in [personal_id, shared_id] {
+        let res = app
+            .clone()
+            .oneshot(
+                Request::delete(format!("/v1/metadata/saved-queries/{id}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+    }
+
+    // Nothing left.
+    let res = app
+        .oneshot(
+            Request::get("/v1/metadata/saved-queries?tenant=1")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let hits: serde_json::Value = body_json(res.into_body()).await;
+    assert_eq!(hits.as_array().unwrap().len(), 0);
+}
+
+#[tokio::test]
 async fn loopback_bypass_rejects_non_loopback_peer() {
     use axum::extract::ConnectInfo;
     use std::net::SocketAddr;

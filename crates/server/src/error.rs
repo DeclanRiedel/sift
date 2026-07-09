@@ -93,7 +93,8 @@ impl ApiError {
                 MetadataError::ConnectionProfileNotFound(_)
                 | MetadataError::RoomNotFound(_)
                 | MetadataError::DocumentNotFound(_)
-                | MetadataError::RoomAttachmentNotFound(_) => (StatusCode::NOT_FOUND, "not_found"),
+                | MetadataError::RoomAttachmentNotFound(_)
+                | MetadataError::SavedQueryNotFound(_) => (StatusCode::NOT_FOUND, "not_found"),
                 MetadataError::TenantMismatch(_, _) => (StatusCode::FORBIDDEN, "forbidden"),
                 MetadataError::MissingCredential(_, _)
                 | MetadataError::BrokerCredentialUnsupported(_) => {

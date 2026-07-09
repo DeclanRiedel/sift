@@ -30,6 +30,9 @@ pub struct QueryHistoryId(pub i64);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 pub struct OperationAuditId(pub i64);
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+pub struct SavedQueryId(pub i64);
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum TenantKind {
@@ -406,6 +409,74 @@ pub(crate) fn parse_crdt_type(value: String) -> crate::Result<CrdtType> {
             value,
         }),
     }
+}
+
+/// A named, reusable SQL snippet a principal or tenant has saved.
+/// Sharing model: `owner_principal_id = Some` → personal (only the
+/// owner sees/edits); `None` → tenant-shared (any tenant member sees;
+/// only tenant admins edit).
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct SavedQuery {
+    pub id: SavedQueryId,
+    pub tenant_id: TenantId,
+    /// `None` means the query is tenant-shared. `Some` means it's a
+    /// personal query owned by that principal.
+    pub owner_principal_id: Option<PrincipalId>,
+    pub name: String,
+    pub sql_text: String,
+    pub connection_profile_id: Option<ConnectionProfileId>,
+    pub tags: Vec<String>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct NewSavedQuery {
+    pub tenant_id: TenantId,
+    /// `None` = tenant-shared (visible to whole tenant); `Some` =
+    /// personal (only that principal sees it).
+    pub owner_principal_id: Option<PrincipalId>,
+    pub name: String,
+    pub sql_text: String,
+    pub connection_profile_id: Option<ConnectionProfileId>,
+    #[serde(default)]
+    pub tags: Vec<String>,
+}
+
+/// Partial update for a saved query. Fields set to `Some` are applied;
+/// `None` leaves the existing value untouched. Tags is `Option<Vec>`
+/// so callers can clear tags by sending `Some(vec![])`.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Default)]
+pub struct UpdateSavedQuery {
+    pub name: Option<String>,
+    pub sql_text: Option<String>,
+    pub connection_profile_id: Option<Option<ConnectionProfileId>>,
+    pub tags: Option<Vec<String>>,
+}
+
+/// Query filter for `list_saved_queries`. `q` is a full-text search
+/// pattern over name + sql_text (FTS5 MATCH); `tag` restricts to
+/// entries whose `tags` array contains all of these values;
+/// `scope` narrows visibility to personal-only or shared-only.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct SavedQueryFilter {
+    pub tenant_id: TenantId,
+    pub q: Option<String>,
+    #[serde(default)]
+    pub tags: Vec<String>,
+    #[serde(default)]
+    pub scope: Option<SavedQueryScope>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum SavedQueryScope {
+    /// Only the caller's personal queries.
+    Personal,
+    /// Only tenant-shared queries.
+    Shared,
+    /// Personal + shared, as visible to the caller.
+    All,
 }
 
 pub(crate) fn parse_query_status(value: String) -> crate::Result<QueryStatus> {

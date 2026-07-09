@@ -5,13 +5,13 @@
 // consumers can build requests without depending on sift_metadata::http
 // directly.
 pub use sift_metadata::http::{
-    AddRoomMemberRequest, CreateDocumentRequest, CreateRoomRequest, IssueTokenRequest,
-    IssueTokenResponse, OpenConnectionFromProfileRequest, SetCredentialRequest,
-    UpdateDocumentSnapshotRequest, UpsertConnectionProfileRequest,
+    AddRoomMemberRequest, CreateDocumentRequest, CreateRoomRequest, CreateSavedQueryRequest,
+    IssueTokenRequest, IssueTokenResponse, OpenConnectionFromProfileRequest, SetCredentialRequest,
+    UpdateDocumentSnapshotRequest, UpdateSavedQueryRequest, UpsertConnectionProfileRequest,
 };
 use sift_metadata::{
     ApiTokenId, ConnectionProfile, ConnectionProfileId, Document, DocumentId, QueryHistory, Room,
-    RoomId, RoomMember, TenantId, TenantMembership,
+    RoomId, RoomMember, SavedQuery, SavedQueryId, SavedQueryScope, TenantId, TenantMembership,
 };
 use sift_protocol::{
     BeginTransactionRequest, BulkInsertRequest, BulkInsertResponse, CancelRequest, ConnectionId,
@@ -508,6 +508,60 @@ impl Client {
         self.get(&format!("/v1/metadata/history{suffix}")).await
     }
 
+    /// List saved queries visible to the caller. `q` is a full-text
+    /// search over name + sql_text; `tags` restrict to entries
+    /// containing all listed tags; `scope` narrows to personal-only
+    /// or shared-only.
+    pub async fn saved_queries(
+        &self,
+        tenant: TenantId,
+        q: Option<&str>,
+        tags: &[String],
+        scope: Option<SavedQueryScope>,
+    ) -> Result<Vec<SavedQuery>> {
+        let mut query = vec![format!("tenant={}", tenant.0)];
+        if let Some(s) = q {
+            query.push(format!("q={}", urlencoding_replace(s)));
+        }
+        if !tags.is_empty() {
+            let joined: Vec<String> = tags.iter().map(|t| urlencoding_replace(t)).collect();
+            query.push(format!("tags={}", joined.join(",")));
+        }
+        if let Some(scope) = scope {
+            let s = match scope {
+                SavedQueryScope::Personal => "personal",
+                SavedQueryScope::Shared => "shared",
+                SavedQueryScope::All => "all",
+            };
+            query.push(format!("scope={s}"));
+        }
+        self.get(&format!("/v1/metadata/saved-queries?{}", query.join("&")))
+            .await
+    }
+
+    pub async fn saved_query(&self, id: SavedQueryId) -> Result<SavedQuery> {
+        self.get(&format!("/v1/metadata/saved-queries/{}", id.0))
+            .await
+    }
+
+    pub async fn create_saved_query(&self, request: CreateSavedQueryRequest) -> Result<SavedQuery> {
+        self.post("/v1/metadata/saved-queries", &request).await
+    }
+
+    pub async fn update_saved_query(
+        &self,
+        id: SavedQueryId,
+        request: UpdateSavedQueryRequest,
+    ) -> Result<SavedQuery> {
+        self.put(&format!("/v1/metadata/saved-queries/{}", id.0), &request)
+            .await
+    }
+
+    pub async fn delete_saved_query(&self, id: SavedQueryId) -> Result<()> {
+        self.delete(&format!("/v1/metadata/saved-queries/{}", id.0))
+            .await
+    }
+
     pub async fn auth_tokens(&self) -> Result<Vec<sift_metadata::ApiTokenRow>> {
         self.get("/v1/auth/tokens").await
     }
@@ -853,4 +907,24 @@ where
             Message::Ping(_) | Message::Pong(_) | Message::Binary(_) | Message::Frame(_) => {}
         }
     }
+}
+
+/// Minimal percent-encoding for query-string values. Only encodes
+/// characters that would actually break parsing (`&`, `=`, `#`, `+`,
+/// `%`, whitespace). Sufficient for typed SDK callers, which don't
+/// produce hostile input.
+fn urlencoding_replace(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '&' => out.push_str("%26"),
+            '=' => out.push_str("%3D"),
+            '#' => out.push_str("%23"),
+            '+' => out.push_str("%2B"),
+            '%' => out.push_str("%25"),
+            ' ' => out.push_str("%20"),
+            _ => out.push(c),
+        }
+    }
+    out
 }

@@ -20,8 +20,9 @@ use tokio::sync::Semaphore;
 use sift_doc::{CrdtKind, DocumentSnapshot, TextDocument, TextOperation};
 use sift_metadata::{
     ApiTokenId, ConnectionProfileId, CrdtType, Document, DocumentId, MetadataStore,
-    NewConnectionProfile, NewDocument, NewQueryHistory, NewRoom, PrincipalId, QueryHistory,
-    QueryStatus, Room, RoomId, RoomKind, RoomMember, RoomRole, TenantId, TenantMembership,
+    NewConnectionProfile, NewDocument, NewQueryHistory, NewRoom, NewSavedQuery, PrincipalId,
+    QueryHistory, QueryStatus, Room, RoomId, RoomKind, RoomMember, RoomRole, SavedQuery,
+    SavedQueryFilter, SavedQueryId, SavedQueryScope, TenantId, TenantMembership, UpdateSavedQuery,
 };
 use sift_protocol::{
     AuditEntry, BeginTransactionRequest, BulkInsertRequest, CancelRequest,
@@ -102,6 +103,16 @@ pub fn app(state: AppState) -> Router {
             post(set_metadata_connection_credential),
         )
         .route("/v1/metadata/history", get(list_metadata_history))
+        .route(
+            "/v1/metadata/saved-queries",
+            get(list_metadata_saved_queries).post(create_metadata_saved_query),
+        )
+        .route(
+            "/v1/metadata/saved-queries/:id",
+            get(get_metadata_saved_query)
+                .put(update_metadata_saved_query)
+                .delete(delete_metadata_saved_query),
+        )
         .route(
             "/v1/auth/tokens",
             get(list_auth_tokens).post(issue_auth_token),
@@ -363,9 +374,9 @@ struct HistoryQuery {
 }
 
 use sift_metadata::http::{
-    AddRoomMemberRequest, CreateDocumentRequest, CreateRoomRequest, IssueTokenRequest,
-    IssueTokenResponse, OpenConnectionFromProfileRequest, SetCredentialRequest,
-    UpdateDocumentSnapshotRequest, UpsertConnectionProfileRequest,
+    AddRoomMemberRequest, CreateDocumentRequest, CreateRoomRequest, CreateSavedQueryRequest,
+    IssueTokenRequest, IssueTokenResponse, OpenConnectionFromProfileRequest, SetCredentialRequest,
+    UpdateDocumentSnapshotRequest, UpdateSavedQueryRequest, UpsertConnectionProfileRequest,
 };
 
 fn metadata_store(state: &AppState) -> ApiResult<&MetadataStore> {
@@ -515,6 +526,25 @@ fn api_token_id(id: i64) -> ApiResult<ApiTokenId> {
     } else {
         Err(ApiError::BadRequest("token id must be positive".into()))
     }
+}
+
+fn saved_query_id(id: i64) -> ApiResult<SavedQueryId> {
+    if id > 0 {
+        Ok(SavedQueryId(id))
+    } else {
+        Err(ApiError::BadRequest(
+            "saved query id must be positive".into(),
+        ))
+    }
+}
+
+/// True if the caller has an elevated role (Owner or Admin) in
+/// `tenant`. Used to gate tenant-shared saved-query edits.
+fn is_tenant_admin(auth: &AuthContext, tenant: TenantId) -> bool {
+    use sift_metadata::MembershipRole;
+    auth.tenants.iter().any(|m| {
+        m.tenant.id == tenant && matches!(m.role, MembershipRole::Owner | MembershipRole::Admin)
+    })
 }
 
 fn principal_id(id: i64) -> ApiResult<PrincipalId> {
@@ -1661,6 +1691,223 @@ async fn list_metadata_history(
         })
         .await?,
     ))
+}
+
+#[derive(Deserialize, JsonSchema)]
+struct SavedQueryListQuery {
+    tenant: i64,
+    #[serde(default)]
+    q: Option<String>,
+    /// Comma-separated tag list (axum's default query deserializer
+    /// doesn't handle repeated keys). Empty entries are ignored.
+    #[serde(default)]
+    tags: Option<String>,
+    #[serde(default)]
+    scope: Option<SavedQueryScope>,
+}
+
+async fn list_metadata_saved_queries(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<SavedQueryListQuery>,
+) -> ApiResult<Json<Vec<SavedQuery>>> {
+    let metadata = metadata_store_cloned(&state)?;
+    let auth = resolve_auth_context_blocking(state, headers).await?;
+    let tenant = tenant_id(query.tenant)?;
+    ensure_tenant(&auth, tenant)?;
+    let tags: Vec<String> = query
+        .tags
+        .as_deref()
+        .map(|s| {
+            s.split(',')
+                .map(|t| t.trim().to_string())
+                .filter(|t| !t.is_empty())
+                .collect()
+        })
+        .unwrap_or_default();
+    let filter = SavedQueryFilter {
+        tenant_id: tenant,
+        q: query.q,
+        tags,
+        scope: query.scope,
+    };
+    let principal = auth.principal_id;
+    Ok(Json(
+        metadata_blocking(move || {
+            metadata
+                .list_saved_queries(principal, filter)
+                .map_err(Into::into)
+        })
+        .await?,
+    ))
+}
+
+async fn get_metadata_saved_query(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+) -> ApiResult<Json<SavedQuery>> {
+    let metadata = metadata_store_cloned(&state)?;
+    let auth = resolve_auth_context_blocking(state, headers).await?;
+    let sq_id = saved_query_id(id)?;
+    let sq = metadata_blocking(move || metadata.get_saved_query(sq_id).map_err(Into::into)).await?;
+    ensure_saved_query_visible(&auth, &sq)?;
+    Ok(Json(sq))
+}
+
+async fn create_metadata_saved_query(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(req): Json<CreateSavedQueryRequest>,
+) -> ApiResult<Json<SavedQuery>> {
+    let metadata = metadata_store_cloned(&state)?;
+    let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
+    let tenant = tenant_id(req.tenant_id)?;
+    ensure_tenant(&auth, tenant)?;
+    // Sharing rules on create:
+    // - If owner_principal_id is None, the query is tenant-shared —
+    //   creator must be a tenant admin (Owner/Admin role).
+    // - If owner_principal_id is Some, it must equal the caller's
+    //   principal_id. A caller cannot mint a personal query owned by
+    //   someone else.
+    let owner = match req.owner_principal_id {
+        Some(p) => {
+            let p = principal_id(p)?;
+            if p != auth.principal_id {
+                return Err(ApiError::Forbidden(
+                    "cannot create a personal saved query owned by another principal".into(),
+                ));
+            }
+            Some(p)
+        }
+        None => {
+            if !is_tenant_admin(&auth, tenant) {
+                return Err(ApiError::Forbidden(
+                    "creating a tenant-shared saved query requires Owner or Admin role".into(),
+                ));
+            }
+            None
+        }
+    };
+    let new = NewSavedQuery {
+        tenant_id: tenant,
+        owner_principal_id: owner,
+        name: req.name.clone(),
+        sql_text: req.sql_text,
+        connection_profile_id: req.connection_profile_id.map(ConnectionProfileId),
+        tags: req.tags,
+    };
+    let saved =
+        metadata_blocking(move || metadata.insert_saved_query(new).map_err(Into::into)).await?;
+    state.sessions.push_operation(
+        Operation::Metadata {
+            action: "saved_query.create".into(),
+            target: "saved_query".into(),
+            id: Some(saved.id.0),
+        },
+        OperationStatus::Succeeded,
+    );
+    Ok(Json(saved))
+}
+
+async fn update_metadata_saved_query(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+    Json(req): Json<UpdateSavedQueryRequest>,
+) -> ApiResult<Json<SavedQuery>> {
+    let metadata = metadata_store_cloned(&state)?;
+    let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
+    let sq_id = saved_query_id(id)?;
+    let existing = {
+        let metadata = metadata.clone();
+        metadata_blocking(move || metadata.get_saved_query(sq_id).map_err(Into::into)).await?
+    };
+    ensure_saved_query_editable(&auth, &existing)?;
+    let update = UpdateSavedQuery {
+        name: req.name,
+        sql_text: req.sql_text,
+        connection_profile_id: req
+            .connection_profile_id
+            .map(|opt| opt.map(ConnectionProfileId)),
+        tags: req.tags,
+    };
+    let updated = metadata_blocking(move || {
+        metadata
+            .update_saved_query(sq_id, update)
+            .map_err(Into::into)
+    })
+    .await?;
+    state.sessions.push_operation(
+        Operation::Metadata {
+            action: "saved_query.update".into(),
+            target: "saved_query".into(),
+            id: Some(updated.id.0),
+        },
+        OperationStatus::Succeeded,
+    );
+    Ok(Json(updated))
+}
+
+async fn delete_metadata_saved_query(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let metadata = metadata_store_cloned(&state)?;
+    let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
+    let sq_id = saved_query_id(id)?;
+    let existing = {
+        let metadata = metadata.clone();
+        metadata_blocking(move || metadata.get_saved_query(sq_id).map_err(Into::into)).await?
+    };
+    ensure_saved_query_editable(&auth, &existing)?;
+    let deleted =
+        metadata_blocking(move || metadata.delete_saved_query(sq_id).map_err(Into::into)).await?;
+    state.sessions.push_operation(
+        Operation::Metadata {
+            action: "saved_query.delete".into(),
+            target: "saved_query".into(),
+            id: Some(sq_id.0),
+        },
+        OperationStatus::Succeeded,
+    );
+    Ok(Json(json!({ "ok": true, "deleted": deleted })))
+}
+
+fn ensure_saved_query_visible(auth: &AuthContext, sq: &SavedQuery) -> ApiResult<()> {
+    ensure_tenant(auth, sq.tenant_id)?;
+    match sq.owner_principal_id {
+        Some(owner) if owner != auth.principal_id => Err(ApiError::Forbidden(
+            "saved query is personal to another principal".into(),
+        )),
+        _ => Ok(()),
+    }
+}
+
+fn ensure_saved_query_editable(auth: &AuthContext, sq: &SavedQuery) -> ApiResult<()> {
+    ensure_tenant(auth, sq.tenant_id)?;
+    match sq.owner_principal_id {
+        Some(owner) => {
+            if owner == auth.principal_id {
+                Ok(())
+            } else {
+                Err(ApiError::Forbidden(
+                    "personal saved queries can only be edited by their owner".into(),
+                ))
+            }
+        }
+        None => {
+            if is_tenant_admin(auth, sq.tenant_id) {
+                Ok(())
+            } else {
+                Err(ApiError::Forbidden(
+                    "tenant-shared saved queries can only be edited by tenant Owner or Admin"
+                        .into(),
+                ))
+            }
+        }
+    }
 }
 
 async fn list_auth_tokens(
