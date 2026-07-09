@@ -2329,6 +2329,56 @@ async fn savepoint_routes_dispatch_to_ext_traits() {
 }
 
 #[tokio::test]
+async fn schema_cache_serves_second_call_without_touching_driver() {
+    // MockDriver.schema queue has a single canned snapshot. Without a
+    // cache, the second schema() call would return
+    // "MockDriver: no canned result for `schema`" (DriverInternal). We
+    // prove the cache is doing its job by asserting the second call
+    // succeeds and returns the same snapshot.
+    let driver = MockDriver::builder()
+        .engine(Engine::Postgres)
+        .schema_ok(SchemaSnapshot::empty(SchemaScope::shallow()))
+        .build();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        axum::serve(
+            listener,
+            app(test_state_with_driver(driver)).into_make_service(),
+        )
+        .await
+        .unwrap();
+    });
+
+    let client = sift_client_sdk::Client::new(format!("http://{addr}"));
+    let session = client
+        .open_session(Some("schema-cache".into()))
+        .await
+        .unwrap();
+    let conn = client
+        .open_connection(
+            session.id,
+            sift_protocol::OpenConnectionRequest {
+                engine: Engine::Postgres,
+                spec: pg_spec(),
+            },
+        )
+        .await
+        .unwrap();
+
+    let first = client.schema(session.id, conn.id).await.unwrap();
+    // Second call: driver's schema queue is empty; must be served from
+    // cache.
+    let second = client.schema(session.id, conn.id).await.unwrap();
+    assert_eq!(
+        serde_json::to_string(&first).unwrap(),
+        serde_json::to_string(&second).unwrap()
+    );
+
+    server.abort();
+}
+
+#[tokio::test]
 async fn loopback_bypass_rejects_non_loopback_peer() {
     use axum::extract::ConnectInfo;
     use std::net::SocketAddr;

@@ -13,6 +13,7 @@ pub mod fingerprint;
 pub mod http;
 pub mod registry;
 pub mod room_runtime;
+pub mod schema_cache;
 pub mod session;
 pub mod shutdown;
 

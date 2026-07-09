@@ -431,3 +431,52 @@ already knows about; the mpsc bound remains as a defense against a
 misbehaving pump. Drivers stay simple and the ADR-013 driver isolation
 boundary is undisturbed. The remaining gap — a global cap for the hosted
 tenant story — is documented and left for a hosted-topology ADR (Phase H).
+
+## ADR-012 — Schema Cache with TTL Ceiling and Engine-Specific Invalidators
+
+**Context.** Every `RefreshSchema` / `get_schema` call hit the driver, which
+hit the DB — a ~30ms round-trip on the happy path (up to a few hundred ms
+for a `deep` scope). Data-tool UIs poll schema on every panel refresh, tree
+expand, autocomplete cache warm; the DB round-trip became the dominant
+latency in the schema panel. There was no cache and no invalidation
+contract.
+
+**Decision.** Introduce a per-spec schema cache above the driver layer.
+Key = `(spec_hash, canonical_scope_json)`; the same spec+scope from
+different connections shares the cached entry. TTL is 60 seconds by
+default and is the ultimate ceiling — every entry is refetched at least
+once per TTL regardless of invalidation.
+
+Two engine-specific invalidator strategies run alongside the TTL:
+
+1. **PG: LISTEN/NOTIFY on `sift_schema_change`.** The registry opens a
+   dedicated connection per unique spec and calls `PgExt::listen` on the
+   fixed channel. The user opts in by installing a DDL event trigger that
+   `NOTIFY`s the channel on `ddl_command_end`. Without the trigger, the
+   listener is quiet and the TTL alone bounds staleness.
+2. **SQL Server: poll `MAX(modify_date)` on `sys.objects` every 30s.**
+   Cheap in the steady state (single scalar). On change, invalidate every
+   cached entry for that spec.
+
+Invalidator tasks are lifetime-tied to the process — one per unique spec,
+spawned lazily on first cache insert, aborted on server drop. If the
+dedicated connection fails to open (auth error, DB unreachable) the task
+exits quietly and the cache falls back to TTL-only.
+
+Cache lookup returns immediately on hit; miss goes through the existing
+`SessionStore::schema` path and inserts the result on Ok. Hit/miss/
+invalidation counters are exposed as atomics for metrics.
+
+**Consequences.** The steady-state schema-panel latency drops from a DB
+round-trip to a `DashMap.get` — under 1ms. Users on either engine see
+snappy schema navigation without any user-visible flag. DDL changes are
+reflected as fast as the invalidator observes them (immediately for PG
+with the trigger; within 30s for MSSQL); worst case, TTL closes the gap at
+60s. Memory cost is bounded by (unique specs) × (unique scopes) × snapshot
+size — small in practice. The trade-off: the PG fast path depends on the
+user installing the trigger, and MSSQL polling adds a small periodic DB
+load per unique spec. The 60s TTL means neither surface is load-bearing —
+if either invalidator fails silently, correctness is preserved with at
+most 60s of staleness. A future ADR may introduce a coarser
+"schema-changed" hint from the client (e.g. after an executed DDL
+statement) to invalidate immediately without the trigger dependency.

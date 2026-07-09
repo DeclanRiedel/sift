@@ -105,6 +105,12 @@ pub struct LimitsConfig {
     /// Time-to-live in seconds for spill files. Reaped after this if
     /// the client never resumes. Default 600 (10 min).
     pub cursor_spill_ttl_secs: u64,
+    /// Schema cache TTL in seconds. Cached SchemaSnapshot entries expire
+    /// after this even if invalidation is missed. Default 60.
+    pub schema_cache_ttl_secs: u64,
+    /// Poll interval in seconds for the SQL Server schema invalidator
+    /// (`sys.objects.modify_date`). Default 30.
+    pub schema_mssql_poll_secs: u64,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -138,6 +144,8 @@ impl Default for LimitsConfig {
             cursor_prefetch_pages: 2,
             cursor_spill_dir: None,
             cursor_spill_ttl_secs: 600,
+            schema_cache_ttl_secs: 60,
+            schema_mssql_poll_secs: 30,
         }
     }
 }

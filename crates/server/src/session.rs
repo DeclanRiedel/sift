@@ -30,6 +30,7 @@ use sift_metadata::{MetadataStore, NewOperationAudit, PrincipalId};
 use crate::cursors::CursorRegistry;
 use crate::error::{ApiError, ApiResult};
 use crate::registry::DriverRegistry;
+use crate::schema_cache::SchemaCache;
 
 /// Fallback per-request timeout used until the server wires
 /// `config.timeouts.request_secs` in via [`SessionStore::set_request_timeout`].
@@ -73,6 +74,8 @@ struct SessionStoreInner {
     /// across all sessions; enforces per-session caps; routes eviction
     /// through `driver.cancel`.
     cursors: CursorRegistry,
+    /// Per-spec schema cache with TTL + engine-specific invalidators.
+    schema_cache: SchemaCache,
 }
 
 struct OperationLog {
@@ -98,6 +101,7 @@ impl SessionStore {
                 max_result_rows: AtomicUsize::new(DEFAULT_MAX_RESULT_ROWS),
                 max_result_bytes: AtomicUsize::new(DEFAULT_MAX_RESULT_BYTES),
                 cursors: CursorRegistry::default(),
+                schema_cache: SchemaCache::default(),
             }),
         };
         store.install_eviction_callback();
@@ -130,6 +134,7 @@ impl SessionStore {
                 max_result_rows: AtomicUsize::new(DEFAULT_MAX_RESULT_ROWS),
                 max_result_bytes: AtomicUsize::new(DEFAULT_MAX_RESULT_BYTES),
                 cursors: CursorRegistry::default(),
+                schema_cache: SchemaCache::default(),
             }),
         };
         store.install_eviction_callback();
@@ -175,6 +180,11 @@ impl SessionStore {
     /// Access the cursor registry (for tests and future wiring).
     pub fn cursor_registry(&self) -> &CursorRegistry {
         &self.inner.cursors
+    }
+
+    /// Access the schema cache (for tests, metrics, and config wiring).
+    pub fn schema_cache(&self) -> &SchemaCache {
+        &self.inner.schema_cache
     }
 
     pub fn registry(&self) -> &DriverRegistry {
@@ -512,6 +522,12 @@ impl SessionStore {
         scope: SchemaScope,
     ) -> ApiResult<SchemaSnapshot> {
         let entry = self.get_conn_entry(session_id, conn_id)?;
+        let spec = self.spec_for_conn(session_id, conn_id)?;
+        // Cache lookup: return immediately if a fresh snapshot exists
+        // for this (spec, scope).
+        if let Some(cached) = self.inner.schema_cache.get(&spec, &scope) {
+            return Ok(cached);
+        }
         let driver = entry.driver.clone();
         let handle = entry.handle.clone();
         let first = {
@@ -520,15 +536,42 @@ impl SessionStore {
             self.run_bounded("schema", async move { driver.schema(handle, scope).await })
                 .await
         };
-        match first {
+        let driver_for_retry = driver.clone();
+        let result = match first {
             Err(ApiError::Driver(error)) if is_reconnectable(&error) => {
                 // Schema introspection is idempotent: reconnect and retry once.
                 let handle = self.reconnect(session_id, conn_id).await?;
-                self.run_bounded("schema", async move { driver.schema(handle, scope).await })
-                    .await
+                let scope = scope.clone();
+                self.run_bounded("schema", async move {
+                    driver_for_retry.schema(handle, scope).await
+                })
+                .await
             }
             other => other,
+        };
+        if let Ok(snapshot) = &result {
+            self.inner
+                .schema_cache
+                .insert(&spec, &scope, snapshot.clone(), driver);
         }
+        result
+    }
+
+    fn spec_for_conn(
+        &self,
+        session_id: SessionId,
+        conn_id: ConnectionId,
+    ) -> ApiResult<ConnectionSpec> {
+        let session = self
+            .inner
+            .sessions
+            .get(&session_id)
+            .ok_or(ApiError::SessionNotFound(session_id))?;
+        let entry = session
+            .connections
+            .get(&conn_id)
+            .ok_or(ApiError::ConnectionNotFound(conn_id))?;
+        Ok(entry.spec.clone())
     }
 
     /// Re-establish a broken connection in place: open a fresh backend session

@@ -52,6 +52,14 @@ async fn main() -> anyhow::Result<()> {
             std::time::Duration::from_secs(cfg.limits.cursor_spill_ttl_secs);
         sessions.cursor_registry().set_config(cursor_cfg);
     }
+    // Wire schema cache config.
+    {
+        let mut cfg2 = sessions.schema_cache().config();
+        cfg2.ttl = std::time::Duration::from_secs(cfg.limits.schema_cache_ttl_secs);
+        cfg2.mssql_poll_interval =
+            std::time::Duration::from_secs(cfg.limits.schema_mssql_poll_secs);
+        sessions.schema_cache().set_config(cfg2);
+    }
     // Periodic reaper for expired spill files. Ticks at spill_ttl/6
     // (min 30s) so an abandoned file is closed within roughly 20% of
     // its TTL past deadline.
