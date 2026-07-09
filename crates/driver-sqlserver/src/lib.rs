@@ -43,6 +43,20 @@ struct MssqlInner {
     tx_id: IdCounter,
     cursor_id: IdCounter,
     cursors: DashMap<u64, (u64, tokio::task::JoinHandle<()>)>,
+    /// Per-spec warm-idle pool. `open` first tries to pop from
+    /// the pool before opening a fresh TDS session. Populated
+    /// lazily by a background top-up task after each pop.
+    pools: DashMap<String, Arc<Mutex<MssqlPool>>>,
+}
+
+struct MssqlPool {
+    idle: std::collections::VecDeque<MssqlConn>,
+    /// Target warm size. When idle drops below this, a background
+    /// top-up task refills.
+    min_size: usize,
+    /// True while a top-up task is running so we don't spawn many
+    /// concurrent refills.
+    refilling: bool,
 }
 
 impl MssqlDriver {
@@ -54,8 +68,73 @@ impl MssqlDriver {
                 tx_id: IdCounter::new(),
                 cursor_id: IdCounter::new(),
                 cursors: DashMap::new(),
+                pools: DashMap::new(),
             }),
         }
+    }
+
+    /// Pop a warm-idle connection from the per-spec pool if any.
+    async fn pop_warm(&self, pool_key: &str) -> Option<MssqlConn> {
+        let pool = self.inner.pools.get(pool_key)?.clone();
+        let mut guard = pool.lock().await;
+        guard.idle.pop_front()
+    }
+
+    /// Spawn a background top-up task for the given spec. Idempotent:
+    /// the `refilling` flag prevents multiple concurrent tasks from
+    /// piling into the same pool.
+    fn ensure_warm(
+        &self,
+        spec: ConnectionSpec,
+        pool_key: String,
+        min_size: usize,
+    ) {
+        let inner = Arc::clone(&self.inner);
+        tokio::spawn(async move {
+            let pool = inner
+                .pools
+                .entry(pool_key.clone())
+                .or_insert_with(|| {
+                    Arc::new(Mutex::new(MssqlPool {
+                        idle: std::collections::VecDeque::new(),
+                        min_size,
+                        refilling: false,
+                    }))
+                })
+                .clone();
+            {
+                let mut guard = pool.lock().await;
+                if guard.refilling || guard.idle.len() >= min_size {
+                    guard.min_size = min_size;
+                    return;
+                }
+                guard.refilling = true;
+                guard.min_size = min_size;
+            }
+            // Connect outside the lock; retry until we hit min_size or
+            // an error occurs.
+            loop {
+                let need = {
+                    let g = pool.lock().await;
+                    min_size.saturating_sub(g.idle.len())
+                };
+                if need == 0 {
+                    break;
+                }
+                match connect_fresh(&spec).await {
+                    Ok(conn) => {
+                        let mut g = pool.lock().await;
+                        g.idle.push_back(conn);
+                    }
+                    Err(error) => {
+                        tracing::debug!(%error, "mssql pool refill failed");
+                        break;
+                    }
+                }
+            }
+            let mut g = pool.lock().await;
+            g.refilling = false;
+        });
     }
 
     async fn take_conn(&self, c: &ConnHandle) -> Result<MssqlConn, DriverError> {
@@ -86,54 +165,21 @@ impl Driver for MssqlDriver {
 
     #[tracing::instrument(skip_all, fields(engine = "sql_server", host = %spec.host))]
     async fn open(&self, spec: &ConnectionSpec) -> Result<ConnHandle, DriverError> {
-        let mut config = Config::new();
-        config.host(&spec.host);
-        if let Some(port) = spec.port {
-            config.port(port);
-        }
-        if let Some(database) = &spec.database {
-            config.database(database);
-        }
-        config.application_name("sift");
-        config.authentication(AuthMethod::sql_server(
-            spec.user.clone(),
-            spec.password.clone().unwrap_or_default(),
-        ));
-
-        let connect_timeout = if let Some(sift_protocol::EngineConnectionSpec::SqlServer(ms)) =
-            &spec.engine_specific
-        {
-            if ms.mars {
-                return Err(DriverError::new(
-                    Code::UnsupportedForEngine,
-                    "SQL Server MARS is not supported by the current driver backend",
-                )
-                .with_engine(Engine::SqlServer));
-            }
-            if let Some(encrypt) = ms.encrypt {
-                config.encryption(if encrypt {
-                    EncryptionLevel::Required
-                } else {
-                    EncryptionLevel::Off
-                });
-            }
-            if ms.trust_server_certificate.unwrap_or(false) {
-                config.trust_cert();
-            }
-            ms.connect_timeout_secs
-                .map(|secs| Duration::from_secs(secs as u64))
+        // Try the warm-idle pool first. Fall back to a fresh TDS
+        // session on miss.
+        let (pool_key, min_size) = pool_config(spec);
+        let conn = if let Some(warm) = self.pop_warm(&pool_key).await {
+            warm
         } else {
-            None
+            connect_fresh(spec).await?
         };
-
-        let tcp = timeout_io(connect_timeout, TcpStream::connect(config.get_addr()))
-            .await
-            .map_err(io_err)?;
-        tcp.set_nodelay(true).map_err(io_err)?;
-        let conn =
-            timeout_tds(connect_timeout, Client::connect(config, tcp.compat_write())).await?;
         let id = self.inner.conn_id.next();
         self.inner.conns.lock().await.insert(id, conn);
+        // Kick off a background top-up so subsequent opens for this
+        // spec find a warm entry.
+        if min_size > 0 {
+            self.ensure_warm(spec.clone(), pool_key, min_size);
+        }
         Ok(ConnHandle::new(id, Engine::SqlServer))
     }
 
@@ -1284,6 +1330,77 @@ fn validate_ident(name: &str) -> Result<(), DriverError> {
             "invalid identifier",
         ))
     }
+}
+
+/// Open a fresh MSSQL connection against `spec`. Extracted from
+/// `open` so the pool refill path can reuse it. No handle bookkeeping.
+async fn connect_fresh(spec: &ConnectionSpec) -> Result<MssqlConn, DriverError> {
+    let mut config = Config::new();
+    config.host(&spec.host);
+    if let Some(port) = spec.port {
+        config.port(port);
+    }
+    if let Some(database) = &spec.database {
+        config.database(database);
+    }
+    config.application_name("sift");
+    config.authentication(AuthMethod::sql_server(
+        spec.user.clone(),
+        spec.password.clone().unwrap_or_default(),
+    ));
+
+    let connect_timeout = if let Some(sift_protocol::EngineConnectionSpec::SqlServer(ms)) =
+        &spec.engine_specific
+    {
+        if ms.mars {
+            return Err(DriverError::new(
+                Code::UnsupportedForEngine,
+                "SQL Server MARS is not supported by the current driver backend",
+            )
+            .with_engine(Engine::SqlServer));
+        }
+        if let Some(encrypt) = ms.encrypt {
+            config.encryption(if encrypt {
+                EncryptionLevel::Required
+            } else {
+                EncryptionLevel::Off
+            });
+        }
+        if ms.trust_server_certificate.unwrap_or(false) {
+            config.trust_cert();
+        }
+        ms.connect_timeout_secs
+            .map(|secs| Duration::from_secs(secs as u64))
+    } else {
+        None
+    };
+
+    let tcp = timeout_io(connect_timeout, TcpStream::connect(config.get_addr()))
+        .await
+        .map_err(io_err)?;
+    tcp.set_nodelay(true).map_err(io_err)?;
+    timeout_tds(connect_timeout, Client::connect(config, tcp.compat_write())).await
+}
+
+/// Canonicalize a ConnectionSpec into a stable pool key and pull out
+/// the per-spec warm-idle target. SHA-256 of the JSON so the password
+/// isn't held in the DashMap key indefinitely.
+fn pool_config(spec: &ConnectionSpec) -> (String, usize) {
+    use sha2::{Digest, Sha256};
+    let json = serde_json::to_string(spec).unwrap_or_default();
+    let hash = Sha256::digest(json.as_bytes());
+    let mut key = String::with_capacity(64);
+    for b in hash {
+        use std::fmt::Write as _;
+        let _ = write!(key, "{b:02x}");
+    }
+    let min = match &spec.engine_specific {
+        Some(sift_protocol::EngineConnectionSpec::SqlServer(ms)) => {
+            ms.pool_min_size.unwrap_or(0) as usize
+        }
+        _ => 0,
+    };
+    (key, min)
 }
 
 async fn timeout_io<T>(

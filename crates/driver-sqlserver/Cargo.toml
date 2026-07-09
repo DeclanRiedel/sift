@@ -21,6 +21,8 @@ tokio = { workspace = true }
 tokio-util = { workspace = true }
 tiberius = { workspace = true }
 thiserror = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
 tracing = { workspace = true }
 uuid = { workspace = true }
 

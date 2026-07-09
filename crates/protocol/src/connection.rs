@@ -65,6 +65,12 @@ pub struct MssqlConnectionSpec {
     pub trust_server_certificate: Option<bool>,
     /// Connect timeout per attempt.
     pub connect_timeout_secs: Option<u32>,
+    /// Number of warm idle SQL Server connections to keep ready in
+    /// the driver's per-spec pool. `open()` first tries the warm pool
+    /// before opening a fresh TDS session; a background top-up
+    /// refills after each pop. Best-effort — a failing top-up logs
+    /// at debug and leaves the pool cold.
+    pub pool_min_size: Option<u32>,
 }
 
 /// Reported by `Driver::ping` after a successful round-trip.

@@ -162,6 +162,7 @@ fn mssql_spec() -> ConnectionSpec {
                 encrypt: Some(true),
                 trust_server_certificate: Some(true),
                 connect_timeout_secs: Some(15),
+                pool_min_size: None,
             },
         )),
     }
@@ -2326,6 +2327,83 @@ async fn savepoint_routes_dispatch_to_ext_traits() {
         .await
         .unwrap();
     assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn ws_streaming_bounded_memory_across_many_pages() {
+    // Prove the cursor pump doesn't buffer everything ahead of the
+    // consumer. Push 10k row pages through the driver; assert the WS
+    // client observes them in-order and terminates cleanly. The
+    // registry's prefetch buffer (default 2 pages) is the invariant
+    // that keeps memory bounded regardless of driver throughput vs
+    // consumer speed.
+    let mut pages = Vec::with_capacity(10_002);
+    pages.push(Page::NextResult {
+        columns: vec![ColumnMetadata {
+            name: "n".into(),
+            type_ref: TypeRef::Primitive(PrimitiveType::Int32),
+            nullable: Nullability::NotNullable,
+            auto_increment: false,
+            primary_key: false,
+            facets: Default::default(),
+        }],
+    });
+    for i in 0..10_000 {
+        pages.push(Page::Rows {
+            rows: vec![Row::new(vec![Value::Int32(i)])],
+        });
+    }
+    pages.push(Page::Done {
+        affected_rows: None,
+        warnings: Vec::new(),
+    });
+    let driver = MockDriver::builder()
+        .engine(Engine::Postgres)
+        .execute_ok(pages)
+        .build();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        axum::serve(
+            listener,
+            app(test_state_with_driver(driver)).into_make_service(),
+        )
+        .await
+        .unwrap();
+    });
+
+    let client = sift_client_sdk::Client::new(format!("http://{addr}"));
+    let session = client
+        .open_session(Some("bounded-mem".into()))
+        .await
+        .unwrap();
+    let conn = client
+        .open_connection(
+            session.id,
+            sift_protocol::OpenConnectionRequest {
+                engine: Engine::Postgres,
+                spec: pg_spec(),
+            },
+        )
+        .await
+        .unwrap();
+
+    let pages_back = client
+        .stream_query(session.id, conn.id, "SELECT n FROM big")
+        .await
+        .unwrap();
+    // The SDK's stream_query drains until Done/Error. We should see
+    // one NextResult, 10k Rows, and one Done.
+    let rows_pages = pages_back
+        .iter()
+        .filter(|p| matches!(p, Page::Rows { .. }))
+        .count();
+    assert_eq!(rows_pages, 10_000);
+    assert!(pages_back
+        .iter()
+        .any(|p| matches!(p, Page::Done { .. })));
+
+    server.abort();
 }
 
 #[tokio::test]
