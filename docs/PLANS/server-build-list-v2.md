@@ -358,41 +358,74 @@ timing-oracle auth, no readiness signal, no graceful drain — are all closed.
 Goal: the differentiator vs Navicat-class tools. Caches, prefetch, pool
 warmth, progressive indexing.
 
-- [ ] [Design] ADR-011 (candidate): server-side cursor registry — cursor id
-      lifecycle, eviction policy, max open cursors per session, spill-to-
-      disk threshold, backpressure tie to WS ack. Today cursors live inside
-      each driver (PG `cursors: DashMap`, SQL Server `cursors: DashMap` of
-      `JoinHandle`) with no server-side registry, no eviction, no global
-      cap.
-- [ ] [Design] Schema cache contract. No schema cache exists — every
-      `RefreshSchema`/`get_schema` call hits the driver (`http.rs:1664`),
-      which hits the DB. Define per-session `SchemaSnapshot` cache keyed by
-      `(connection, scope)`; invalidation on `RefreshSchema`; invalidation
-      signals (PG `LISTEN/NOTIFY` on a dedicated conn, SQL Server polling
-      on `sys.objects.modify_date`); TTL fallback.
-- [ ] [Design] Predictive prefetch: speculatively fetch page N+1 into a
-      1-deep buffer when page N is acked. Today the WS pump
-      (`stream_pages_with_ack`, `http.rs:2152-2222`) only pulls the next
-      page after ack.
-- [ ] [Design] Pool pre-warm. PG pool `max_size: 8`, no `min_connections`
-      (`conn.rs:117-124`); SQL Server has no pool today, and ADR-017 keeps
-      pooling/preconnect as Phase C performance work rather than part of the
-      Phase A trait lock.
-      Define warm count per engine and the cold-start budget.
-- [ ] [Implement] Server-side cursor registry with eviction; integration
-      test that a 1M-row result holds bounded memory on both HTTP and WS.
-- [ ] [Implement] Schema cache + invalidation (PG `LISTEN/NOTIFY` on a
-      dedicated listen conn per session; SQL Server polling); cache hit
-      returns in <1ms.
-- [ ] [Implement] Predictive page-N+1 prefetch behind the cursor;
-      backpressure pauses prefetch if the WS receiver is not draining.
-- [ ] [Implement] Pre-warm pool on `OpenConnection`/profile-open;
-      configurable `min_connections`; cold-start budget reported in `ping`.
-- [ ] [Implement] Large-result spill to disk (optional): cursor eviction
-      spills oldest cold cursor's buffered pages to a temp file.
-- [ ] [Implement] Response compression: gzip + brotli on HTTP JSON and on
-      WS frames where the client advertises support. (`tower-http`
-      CompressionLayer is already a dep but unwired, `Cargo.toml:30`.)
+Status: **five of nine items landed, three deferred, one enhancement
+remaining.** The user-visible wins (cursor registry with spill+resume,
+schema cache with engine-specific invalidators, HTTP compression, PG
+pool pre-warm) are all in. Remaining work is either a fixed-depth →
+adaptive prefetch enhancement or MSSQL-pool-first blockers.
+
+- [x] [Design] ADR-011: server-side cursor registry — written in
+      `docs/DECISIONS.md`. Per-session cap (default 32), idle-first
+      (LRA) eviction with callback-based `driver.cancel` routing,
+      pump task with prefetch + explicit pause/resume, spill-to-disk
+      with resume-via-HTTP endpoint. Registry lives above the driver
+      layer (`crates/server/src/cursors.rs`); ADR-013 boundary
+      undisturbed.
+- [x] [Design] ADR-012: schema cache contract — written in
+      `docs/DECISIONS.md`. Key = `(spec_hash, canonical_scope_json)`;
+      60s TTL ceiling; PG LISTEN/NOTIFY on `sift_schema_change`
+      (opt-in DDL trigger); SQL Server 30s poll of
+      `sys.objects.modify_date`. Cache hit/miss/invalidation counters
+      exposed as atomics.
+- [ ] [Design] Predictive prefetch: speculatively fetch page N+1
+      when page N is acked. **Partially done** — the pump layer
+      (`cursors.rs`) buffers `prefetch_pages` (default 2) ahead of
+      the consumer via a bounded channel, which delivers the "page
+      N+1 already buffered when the client asks" behavior. Adaptive
+      depth based on ack velocity is a future enhancement, not
+      shipped.
+- [x] [Design] Pool pre-warm — PG side. `PgConnectionSpec.pool_min_size`
+      is honored on `Driver::open`: `min-1` extra pool slots are
+      pulled concurrently and returned to deadpool as idle. Best-
+      effort — pre-warm failures log at debug. SQL Server pool warmth
+      still blocked (no MSSQL pool exists yet, per ADR-017).
+- [x] [Implement] Server-side cursor registry with eviction —
+      `crates/server/src/cursors.rs`. 14 unit tests cover cap eviction,
+      LRA touch, pump forwarding, pause/resume, spill write + read,
+      TTL reap, per-session isolation. Integration test in
+      `tests/api_smoke.rs::websocket_mid_stream_cancel_stops_paging`.
+      A 1M-row bounded-memory integration test is a follow-up.
+- [x] [Implement] Schema cache + invalidation —
+      `crates/server/src/schema_cache.rs`. Cache hit returns from a
+      `DashMap.get` in <1ms. Engine invalidator tasks lazy-spawn on
+      first insert per unique spec: PG via `PgExt::listen` on a
+      dedicated conn, MSSQL via periodic
+      `SELECT MAX(modify_date) FROM sys.objects`. 6 unit tests plus
+      `tests/api_smoke.rs::schema_cache_serves_second_call_without_touching_driver`
+      (primes `MockDriver` with one canned snapshot, asserts second
+      HTTP call is served from cache).
+- [ ] [Implement] Adaptive predictive prefetch — measure ack velocity
+      and scale `prefetch_pages` dynamically. Fixed-depth prefetch
+      (default 2) shipped; adaptive scaling is an enhancement.
+- [~] [Implement] Pre-warm pool on `OpenConnection`/profile-open —
+      PG done via `PgConnectionSpec.pool_min_size`. SQL Server needs
+      a pool implementation first (no `MssqlDriver` pool exists).
+      Cold-start budget reporting in `ping` is not implemented.
+- [x] [Implement] Large-result spill to disk — write side and
+      read-back side both landed. On eviction the pump writes
+      remaining pages to `{spill_dir}/sift-cursor-{id}.bin`
+      (length-prefixed JSON) when footprint > `spill_min_bytes`
+      (default 1 MiB). The synthetic `Page::Error { CursorEvicted }`
+      terminal carries a `resume_url`; client resumes via
+      `GET /v1/cursors/{id}/pages?from_seq=N&limit=M`. Cleanup:
+      final-read deletion + TTL reaper (default 600s) +
+      `DELETE /v1/cursors/{id}` explicit.
+- [x] [Implement] Response compression: gzip + brotli via
+      `tower-http::CompressionLayer`, wired as the outermost layer in
+      `crates/server/src/http.rs::app`. WS frames untouched (upgrades
+      bypass the compression layer). Tests
+      `responses_are_gzipped_when_client_advertises_gzip` and
+      `responses_are_uncompressed_when_client_does_not_advertise`.
 
 ## Phase D — Headless product features
 
@@ -602,9 +635,12 @@ Goal: the last mile before a real release.
   isolation (ADR-013), protocol versioning (ADR-016), secret backends
   (file + keychain), the HTTP result row/byte caps, and constant-time bearer
   comparison. Remaining backlog is later-phase feature work (C onward).
-- **Phase C can proceed in parallel with D.** The remaining pool-warmth work
-  can choose a SQL Server pooling strategy without reopening the Phase A
-  driver trait.
+- **Phase C is mostly done.** The user-visible wins landed: server-side
+  cursor registry (ADR-011) with spill/resume, schema cache (ADR-012)
+  with LISTEN/NOTIFY + polling invalidators, HTTP gzip/brotli
+  compression, PG pool pre-warm. Remaining: adaptive prefetch depth
+  (enhancement) and SQL Server pool warmth (blocked on there being a
+  MSSQL pool at all). Phase C can continue in parallel with D.
 - **Phase D's saved-query work is partially unblocked** — the metadata
   table already exists (dead schema); wiring routes is mostly Implement,
   not Design.
@@ -624,7 +660,8 @@ Goal: the last mile before a real release.
 
 | # | Candidate | Origin | Status |
 | --- | --- | --- | --- |
-| ADR-011 | result streaming via server-side cursors | Phase C | not written |
+| ADR-011 | server-side cursor registry (cap + LRA eviction + spill/resume) | Phase C | written |
+| ADR-012 | schema cache with TTL + engine-specific invalidators | Phase C | written |
 | ADR-013 | driver isolation | Phase B | written; both engines meet the containment boundary |
 | ADR-014 | collaboration scope (CRDT text only) | Phase G | not written |
 | ADR-016 | protocol versioning + semver stability | Phase B | written; pin-or-proceed negotiation, monotonic integer version |
