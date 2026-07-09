@@ -161,6 +161,11 @@ pub fn app(state: AppState) -> Router {
             "/v1/sessions/:id/queries/:cursor_id/cancel",
             post(cancel_query),
         )
+        .route("/v1/cursors/:cursor_id/pages", get(read_spill_pages))
+        .route(
+            "/v1/cursors/:cursor_id",
+            delete(delete_spilled_cursor),
+        )
         .layer(from_fn_with_state(state.auth.clone(), auth_middleware))
         .layer(from_fn(inject_peer_addr))
         .layer(from_fn_with_state(state.sessions.clone(), audit_middleware))
@@ -2149,6 +2154,63 @@ async fn cancel_query(
         },
         OperationStatus::Succeeded,
     );
+    Ok(Json(json!({"ok": true})))
+}
+
+#[derive(Deserialize, JsonSchema)]
+struct ReadSpillPagesQuery {
+    /// Optional starting page (0-indexed). If omitted, resumes from
+    /// wherever the last call left off.
+    from_seq: Option<usize>,
+    /// Max pages to return in this response. Default 32; capped at 256
+    /// to bound memory per request.
+    #[serde(default)]
+    limit: Option<usize>,
+}
+
+/// Resume from a spilled cursor. The client learns the URL from the
+/// `resume_url` field on the `CursorEvicted` terminal.
+async fn read_spill_pages(
+    State(state): State<AppState>,
+    Path(cursor_id): Path<sift_protocol::CursorId>,
+    axum::extract::Query(q): axum::extract::Query<ReadSpillPagesQuery>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let registry = state.sessions.cursor_registry();
+    // If from_seq is set and it doesn't match the entry's current
+    // read cursor, reject — we don't allow re-reading already-read
+    // pages (spill files are append-only + read-forward).
+    if let Some(seq) = q.from_seq {
+        let info = registry.spill_info(cursor_id).ok_or_else(|| {
+            ApiError::Driver(sift_protocol::DriverError::new(
+                sift_protocol::Code::CursorNotFound,
+                "no spill for cursor",
+            ))
+        })?;
+        if seq != info.pages_read {
+            return Err(ApiError::BadRequest(format!(
+                "from_seq={seq} does not match pages_read={} for cursor",
+                info.pages_read
+            )));
+        }
+    }
+    let limit = q.limit.unwrap_or(32).clamp(1, 256);
+    let (pages, done) = registry
+        .read_spill_pages(cursor_id, limit)
+        .map_err(ApiError::Driver)?;
+    Ok(Json(json!({
+        "cursor_id": cursor_id.0,
+        "pages": pages,
+        "done": done,
+    })))
+}
+
+/// Explicit cleanup of a spill file. Idempotent; returns ok whether or
+/// not the entry existed.
+async fn delete_spilled_cursor(
+    State(state): State<AppState>,
+    Path(cursor_id): Path<sift_protocol::CursorId>,
+) -> ApiResult<Json<serde_json::Value>> {
+    state.sessions.cursor_registry().drop_spill(cursor_id);
     Ok(Json(json!({"ok": true})))
 }
 

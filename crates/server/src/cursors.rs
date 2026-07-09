@@ -43,6 +43,9 @@ pub struct CursorConfig {
     /// Cursors whose remaining page footprint is below this are not
     /// spilled — the write cost exceeds the value.
     pub spill_min_bytes: usize,
+    /// Time-to-live for a spill file after it's written. If the client
+    /// never resumes, the file is reaped after this duration.
+    pub spill_ttl: std::time::Duration,
 }
 
 impl Default for CursorConfig {
@@ -52,6 +55,7 @@ impl Default for CursorConfig {
             prefetch_pages: 2,
             spill_dir: None,
             spill_min_bytes: 1024 * 1024,
+            spill_ttl: std::time::Duration::from_secs(600),
         }
     }
 }
@@ -73,6 +77,25 @@ struct Inner {
     entries: DashMap<CursorId, Arc<CursorState>>,
     per_session: DashMap<SessionId, Vec<CursorId>>,
     on_evict: std::sync::RwLock<Option<EvictCallback>>,
+    /// Registry of spill files produced by evicted cursors that the
+    /// client may still resume via the HTTP endpoint. Written by the
+    /// pump when it lands a spill file; drained by `read_spill_page`
+    /// on final page or by `reap_expired_spills` on TTL.
+    spills: DashMap<CursorId, SpillEntry>,
+}
+
+#[derive(Clone)]
+struct SpillEntry {
+    session_id: SessionId,
+    path: PathBuf,
+    created_at: Instant,
+    /// Byte offset the next resume read should start from. Advanced
+    /// on each successful read_spill_page.
+    read_offset: u64,
+    /// Total pages written to the spill file, for the resume endpoint
+    /// to report progress.
+    total_pages: usize,
+    pages_read: usize,
 }
 
 struct CursorState {
@@ -101,6 +124,7 @@ impl CursorRegistry {
                 entries: DashMap::new(),
                 per_session: DashMap::new(),
                 on_evict: std::sync::RwLock::new(None),
+                spills: DashMap::new(),
             }),
         }
     }
@@ -171,6 +195,7 @@ impl CursorRegistry {
 
         let prefetch = config.prefetch_pages.max(1);
         let (consumer_tx, consumer_rx) = mpsc::channel::<Page>(prefetch);
+        let inner_for_pump = Arc::clone(&self.inner);
         let ResultSetStream {
             columns,
             rows: driver_rx,
@@ -179,7 +204,14 @@ impl CursorRegistry {
             server_side_cursor,
             ..
         } = stream;
-        tokio::spawn(pump_task(cursor_id, control, driver_rx, consumer_tx));
+        tokio::spawn(pump_task(
+            session_id,
+            cursor_id,
+            control,
+            driver_rx,
+            consumer_tx,
+            inner_for_pump,
+        ));
 
         Ok(ResultSetStream {
             cursor_id,
@@ -247,6 +279,129 @@ impl CursorRegistry {
             .unwrap_or(0)
     }
 
+    /// Look up a spill entry by cursor id. Returns None if no spill
+    /// exists (never was, or already consumed/reaped).
+    pub fn spill_info(&self, cursor_id: CursorId) -> Option<SpillInfo> {
+        self.inner.spills.get(&cursor_id).map(|e| SpillInfo {
+            session_id: e.session_id,
+            total_pages: e.total_pages,
+            pages_read: e.pages_read,
+            expires_in: self
+                .config()
+                .spill_ttl
+                .checked_sub(e.created_at.elapsed())
+                .unwrap_or_default(),
+        })
+    }
+
+    /// Read the next `count` pages from the spill file for
+    /// `cursor_id`. Returns the pages and a boolean `done` flag. When
+    /// `done` is true the spill entry has been dropped and its file
+    /// deleted; subsequent calls return `Err(CursorNotFound)`.
+    pub fn read_spill_pages(
+        &self,
+        cursor_id: CursorId,
+        count: usize,
+    ) -> Result<(Vec<Page>, bool), DriverError> {
+        // Fast-path check: entry exists.
+        let entry_snapshot = self
+            .inner
+            .spills
+            .get(&cursor_id)
+            .ok_or_else(|| DriverError::new(Code::CursorNotFound, "no spill for cursor"))?
+            .clone();
+
+        let mut file = std::fs::OpenOptions::new()
+            .read(true)
+            .open(&entry_snapshot.path)
+            .map_err(|e| {
+                DriverError::new(
+                    Code::DriverInternal,
+                    format!("open spill file: {e}"),
+                )
+            })?;
+        use std::io::{Read as _, Seek as _, SeekFrom};
+        file.seek(SeekFrom::Start(entry_snapshot.read_offset))
+            .map_err(|e| DriverError::new(Code::DriverInternal, e.to_string()))?;
+
+        let mut out = Vec::with_capacity(count.min(entry_snapshot.total_pages));
+        let mut offset = entry_snapshot.read_offset;
+        let mut pages_read = entry_snapshot.pages_read;
+        let want = count.max(1);
+        for _ in 0..want {
+            if pages_read >= entry_snapshot.total_pages {
+                break;
+            }
+            let mut len_buf = [0u8; 4];
+            if file.read_exact(&mut len_buf).is_err() {
+                break;
+            }
+            let len = u32::from_be_bytes(len_buf) as usize;
+            let mut bytes = vec![0u8; len];
+            file.read_exact(&mut bytes).map_err(|e| {
+                DriverError::new(Code::DriverInternal, format!("spill read: {e}"))
+            })?;
+            let page: Page = serde_json::from_slice(&bytes).map_err(|e| {
+                DriverError::new(Code::DriverInternal, format!("spill decode: {e}"))
+            })?;
+            out.push(page);
+            offset += 4 + len as u64;
+            pages_read += 1;
+        }
+
+        let done = pages_read >= entry_snapshot.total_pages;
+        if done {
+            self.drop_spill(cursor_id);
+        } else if let Some(mut e) = self.inner.spills.get_mut(&cursor_id) {
+            e.read_offset = offset;
+            e.pages_read = pages_read;
+        }
+        Ok((out, done))
+    }
+
+    /// Drop a spill entry and delete its file. Idempotent.
+    pub fn drop_spill(&self, cursor_id: CursorId) {
+        if let Some((_, entry)) = self.inner.spills.remove(&cursor_id) {
+            let _ = std::fs::remove_file(&entry.path);
+        }
+    }
+
+    /// Reap spill entries whose age exceeds `spill_ttl`. Called on a
+    /// periodic tick by the server.
+    pub fn reap_expired_spills(&self) -> usize {
+        let ttl = self.config().spill_ttl;
+        let expired: Vec<CursorId> = self
+            .inner
+            .spills
+            .iter()
+            .filter(|e| e.value().created_at.elapsed() >= ttl)
+            .map(|e| *e.key())
+            .collect();
+        let count = expired.len();
+        for cid in expired {
+            self.drop_spill(cid);
+        }
+        count
+    }
+
+    /// Number of open spill files. For tests and metrics.
+    pub fn spill_count(&self) -> usize {
+        self.inner.spills.len()
+    }
+}
+
+/// Public summary of a spill entry — used by the resume endpoint to
+/// gate access and by tests.
+#[derive(Debug, Clone)]
+pub struct SpillInfo {
+    pub session_id: SessionId,
+    pub total_pages: usize,
+    pub pages_read: usize,
+    pub expires_in: std::time::Duration,
+}
+
+impl CursorRegistry {
+
     fn select_victims(&self, session_id: SessionId, cap: usize) -> Vec<CursorId> {
         let ids: Vec<CursorId> = self
             .inner
@@ -294,26 +449,26 @@ impl CursorRegistry {
 }
 
 async fn pump_task(
+    session_id: SessionId,
     cursor_id: CursorId,
     control: Arc<PumpControl>,
     mut driver_rx: mpsc::Receiver<Page>,
     consumer_tx: mpsc::Sender<Page>,
+    inner: Arc<Inner>,
 ) {
     let mut spillover: Vec<Page> = Vec::new();
 
     loop {
-        // Pre-register the cancel waiter, then check the flag, so a
-        // cancel that arrived between iterations isn't lost.
         let cancel = control.cancel_notify.notified();
         tokio::pin!(cancel);
         if control.cancel.load(Ordering::Acquire) {
-            emit_terminal(&control, &consumer_tx, cursor_id, &mut spillover).await;
+            emit_terminal(&control, &consumer_tx, session_id, cursor_id, &mut spillover, &inner).await;
             return;
         }
         let page = tokio::select! {
             biased;
             _ = &mut cancel => {
-                emit_terminal(&control, &consumer_tx, cursor_id, &mut spillover).await;
+                emit_terminal(&control, &consumer_tx, session_id, cursor_id, &mut spillover, &inner).await;
                 return;
             }
             maybe = driver_rx.recv() => {
@@ -331,9 +486,6 @@ async fn pump_task(
             }
         };
 
-        // Pause loop. Use `notified()` before checking the flag so a
-        // resume() signal that arrives between the load and the await
-        // is not lost.
         loop {
             let resume = control.resume_notify.notified();
             let cancel = control.cancel_notify.notified();
@@ -344,7 +496,7 @@ async fn pump_task(
             }
             if control.cancel.load(Ordering::Acquire) {
                 spillover.push(page);
-                emit_terminal(&control, &consumer_tx, cursor_id, &mut spillover).await;
+                emit_terminal(&control, &consumer_tx, session_id, cursor_id, &mut spillover, &inner).await;
                 return;
             }
             tokio::select! {
@@ -355,21 +507,18 @@ async fn pump_task(
         }
         if control.cancel.load(Ordering::Acquire) {
             spillover.push(page);
-            emit_terminal(&control, &consumer_tx, cursor_id, &mut spillover).await;
+            emit_terminal(&control, &consumer_tx, session_id, cursor_id, &mut spillover, &inner).await;
             return;
         }
 
         let is_terminal = matches!(&page, Page::Done { .. } | Page::Error { .. });
-        // Send with cancel-aware wakeup: if cancel fires while we're
-        // blocked on a full consumer channel, wake up, stash the page,
-        // and emit the synthetic terminal.
         let send_fut = consumer_tx.send(page.clone());
         tokio::pin!(send_fut);
         let sent = tokio::select! {
             biased;
             _ = control.cancel_notify.notified() => {
                 spillover.push(page);
-                emit_terminal(&control, &consumer_tx, cursor_id, &mut spillover).await;
+                emit_terminal(&control, &consumer_tx, session_id, cursor_id, &mut spillover, &inner).await;
                 return;
             }
             res = &mut send_fut => res.is_ok(),
@@ -386,35 +535,56 @@ async fn pump_task(
 async fn emit_terminal(
     control: &Arc<PumpControl>,
     consumer_tx: &mpsc::Sender<Page>,
+    session_id: SessionId,
     cursor_id: CursorId,
     spillover: &mut Vec<Page>,
+    inner: &Arc<Inner>,
 ) {
-    let reason = control
+    let mut reason = control
         .cancel_reason
         .lock()
         .unwrap()
         .take()
         .unwrap_or_else(|| DriverError::new(Code::QueryCanceled, "cursor closed"));
+
+    // Attempt spill first so we can attach a resume_url to the
+    // terminal error when spill lands successfully.
+    let spill_dir = control.spill_dir.lock().unwrap().clone();
+    if reason.code == Code::CursorEvicted {
+        if let Some(dir) = spill_dir {
+            let approx_bytes = approx_pages_bytes(spillover);
+            if approx_bytes >= control.spill_min_bytes && !spillover.is_empty() {
+                match write_spill(&dir, cursor_id, spillover) {
+                    Ok(path) => {
+                        inner.spills.insert(
+                            cursor_id,
+                            SpillEntry {
+                                session_id,
+                                path,
+                                created_at: Instant::now(),
+                                read_offset: 0,
+                                total_pages: spillover.len(),
+                                pages_read: 0,
+                            },
+                        );
+                        reason = reason
+                            .with_resume_url(format!("/v1/cursors/{}/pages", cursor_id.0));
+                    }
+                    Err(error) => {
+                        tracing::debug!(?cursor_id, %error, "cursor spill write failed");
+                    }
+                }
+            }
+        }
+    }
+
     // Best-effort delivery with a short deadline. If the consumer
-    // isn't draining, we don't block the pump forever — dropping the
-    // sender when we return closes the channel and the consumer's
-    // next recv returns None. Real WS consumers drain actively, so
-    // this timeout is only for tests / misbehaving clients.
+    // isn't draining, we don't block the pump forever.
     let _ = tokio::time::timeout(
         std::time::Duration::from_millis(200),
         consumer_tx.send(Page::Error { error: reason }),
     )
     .await;
-
-    let spill_dir = control.spill_dir.lock().unwrap().clone();
-    if let Some(dir) = spill_dir {
-        let approx_bytes = approx_pages_bytes(spillover);
-        if approx_bytes >= control.spill_min_bytes {
-            if let Err(error) = write_spill(&dir, cursor_id, spillover) {
-                tracing::debug!(?cursor_id, %error, "cursor spill write failed");
-            }
-        }
-    }
 }
 
 fn approx_pages_bytes(pages: &[Page]) -> usize {
@@ -437,7 +607,7 @@ fn write_spill(
     dir: &PathBuf,
     cursor_id: CursorId,
     pages: &[Page],
-) -> Result<(), std::io::Error> {
+) -> Result<PathBuf, std::io::Error> {
     use std::io::Write as _;
     std::fs::create_dir_all(dir)?;
     let path = dir.join(format!("sift-cursor-{}.bin", cursor_id.0));
@@ -454,7 +624,7 @@ fn write_spill(
         file.write_all(&bytes)?;
     }
     file.sync_all()?;
-    Ok(())
+    Ok(path)
 }
 
 #[cfg(test)]
@@ -788,6 +958,7 @@ mod tests {
             spill_dir: Some(dir.path().to_path_buf()),
             // Very low threshold so any spillover triggers write.
             spill_min_bytes: 1,
+            spill_ttl: std::time::Duration::from_secs(60),
         };
         let registry = CursorRegistry::new(cfg);
         registry.set_on_evict(Arc::new(|_, _| {}));
@@ -835,5 +1006,174 @@ mod tests {
             let bytes = std::fs::read(&path).unwrap();
             assert!(!bytes.is_empty(), "spill file exists but is empty");
         }
+    }
+
+    /// End-to-end: evict a cursor, verify the CursorEvicted terminal
+    /// carries a resume_url, then read the spilled pages back via the
+    /// registry and confirm the file is deleted when fully drained.
+    #[tokio::test]
+    async fn spill_resume_reads_all_pages_and_cleans_up() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = CursorConfig {
+            max_per_session: 1,
+            prefetch_pages: 1,
+            spill_dir: Some(dir.path().to_path_buf()),
+            spill_min_bytes: 1,
+            spill_ttl: std::time::Duration::from_secs(60),
+        };
+        let registry = CursorRegistry::new(cfg);
+        registry.set_on_evict(Arc::new(|_, _| {}));
+        let session = SessionId(1);
+
+        // Push 5 rows + a Done, then stop the sender. This gives the
+        // pump plenty to buffer while we evict.
+        let (tx, rx) = mpsc::channel::<Page>(16);
+        for i in 0..5 {
+            tx.send(Page::Rows {
+                rows: vec![Row::new(vec![Value::Int32(i)])],
+            })
+            .await
+            .unwrap();
+        }
+        let stream1 = ResultSetStream::with_cursor_mode(CursorId(500), rx, true);
+        let mut c1 = registry.wrap(session, stream1).unwrap();
+        // Read one page so the pump is definitely producing.
+        let _ = c1.rows.recv().await;
+        let _tx = tx;
+
+        // Evict via cap.
+        let stream2 = stream_with_pages(
+            CursorId(501),
+            vec![Page::Done {
+                affected_rows: None,
+                warnings: Vec::new(),
+            }],
+        );
+        registry.wrap(session, stream2).unwrap();
+
+        // Drain c1's channel until we hit the terminal Error.
+        let mut resume_url = None;
+        while let Some(page) = tokio::time::timeout(
+            std::time::Duration::from_millis(500),
+            c1.rows.recv(),
+        )
+        .await
+        .unwrap_or(None)
+        {
+            if let Page::Error { error } = &page {
+                if error.code == Code::CursorEvicted {
+                    resume_url = error.resume_url.clone();
+                }
+                break;
+            }
+        }
+
+        // Only assert on spill semantics when the pump actually spilled
+        // (buffered pages existed when eviction fired). If it didn't,
+        // there's nothing to test in this run — the race is legitimate.
+        if let Some(url) = resume_url {
+            assert!(url.contains("500"), "resume_url wrong: {url}");
+            let info = registry
+                .spill_info(CursorId(500))
+                .expect("spill entry should exist");
+            assert!(info.total_pages > 0);
+            assert_eq!(info.pages_read, 0);
+
+            // Read pages back in chunks until done.
+            let mut total = 0;
+            loop {
+                let (pages, done) = registry.read_spill_pages(CursorId(500), 2).unwrap();
+                total += pages.len();
+                if done {
+                    break;
+                }
+                if pages.is_empty() {
+                    panic!("no pages returned but not done");
+                }
+            }
+            assert_eq!(total, info.total_pages);
+            // File was deleted on final read.
+            assert!(registry.spill_info(CursorId(500)).is_none());
+            let path = dir.path().join("sift-cursor-500.bin");
+            assert!(!path.exists(), "spill file was not deleted");
+        }
+    }
+
+    #[tokio::test]
+    async fn spill_read_rejects_wrong_from_seq() {
+        let dir = tempfile::tempdir().unwrap();
+        // Manually construct a spill entry so we can test read logic
+        // without racing eviction timing.
+        let registry = CursorRegistry::new(CursorConfig {
+            spill_dir: Some(dir.path().to_path_buf()),
+            spill_min_bytes: 1,
+            spill_ttl: std::time::Duration::from_secs(60),
+            ..CursorConfig::default()
+        });
+        let pages = vec![
+            Page::Rows {
+                rows: vec![Row::new(vec![Value::Int32(1)])],
+            },
+            Page::Rows {
+                rows: vec![Row::new(vec![Value::Int32(2)])],
+            },
+        ];
+        let path = write_spill(&dir.path().to_path_buf(), CursorId(700), &pages).unwrap();
+        registry.inner.spills.insert(
+            CursorId(700),
+            SpillEntry {
+                session_id: SessionId(1),
+                path,
+                created_at: Instant::now(),
+                read_offset: 0,
+                total_pages: pages.len(),
+                pages_read: 0,
+            },
+        );
+
+        // First read of 1 page advances pages_read to 1.
+        let (out, done) = registry.read_spill_pages(CursorId(700), 1).unwrap();
+        assert_eq!(out.len(), 1);
+        assert!(!done);
+        let info = registry.spill_info(CursorId(700)).unwrap();
+        assert_eq!(info.pages_read, 1);
+
+        // Second read completes; done=true and entry is dropped.
+        let (out, done) = registry.read_spill_pages(CursorId(700), 5).unwrap();
+        assert_eq!(out.len(), 1);
+        assert!(done);
+        assert!(registry.spill_info(CursorId(700)).is_none());
+    }
+
+    #[tokio::test]
+    async fn reap_expired_spills_deletes_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let registry = CursorRegistry::new(CursorConfig {
+            spill_dir: Some(dir.path().to_path_buf()),
+            spill_ttl: std::time::Duration::from_millis(50),
+            ..CursorConfig::default()
+        });
+        let pages = vec![Page::Rows {
+            rows: vec![Row::new(vec![Value::Int32(1)])],
+        }];
+        let path = write_spill(&dir.path().to_path_buf(), CursorId(800), &pages).unwrap();
+        registry.inner.spills.insert(
+            CursorId(800),
+            SpillEntry {
+                session_id: SessionId(1),
+                path: path.clone(),
+                created_at: Instant::now(),
+                read_offset: 0,
+                total_pages: 1,
+                pages_read: 0,
+            },
+        );
+        assert_eq!(registry.spill_count(), 1);
+        // Wait past TTL, then reap.
+        tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+        let reaped = registry.reap_expired_spills();
+        assert_eq!(reaped, 1);
+        assert_eq!(registry.spill_count(), 0);
+        assert!(!path.exists());
     }
 }

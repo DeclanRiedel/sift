@@ -48,7 +48,28 @@ async fn main() -> anyhow::Result<()> {
             .as_ref()
             .filter(|s| !s.is_empty())
             .map(std::path::PathBuf::from);
+        cursor_cfg.spill_ttl =
+            std::time::Duration::from_secs(cfg.limits.cursor_spill_ttl_secs);
         sessions.cursor_registry().set_config(cursor_cfg);
+    }
+    // Periodic reaper for expired spill files. Ticks at spill_ttl/6
+    // (min 30s) so an abandoned file is closed within roughly 20% of
+    // its TTL past deadline.
+    {
+        let registry = sessions.cursor_registry().clone();
+        let ttl_secs = cfg.limits.cursor_spill_ttl_secs.max(60);
+        let tick = std::time::Duration::from_secs((ttl_secs / 6).max(30));
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(tick);
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                interval.tick().await;
+                let reaped = registry.reap_expired_spills();
+                if reaped > 0 {
+                    tracing::debug!(reaped, "cursor spill reaper");
+                }
+            }
+        });
     }
     let metadata = build_metadata_store(&cfg)?;
     if let Some(store) = &metadata {

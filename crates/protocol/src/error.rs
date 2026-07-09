@@ -80,6 +80,12 @@ pub struct DriverError {
     /// clients that want to dispatch on the engine's native classification
     /// without re-parsing `message`.
     pub engine_sqlstate: Option<String>,
+    /// Set on `Code::CursorEvicted` errors when the server spilled the
+    /// cursor's remaining pages to disk. The client can `GET` this URL
+    /// (with an optional `?from_seq=N` query) to resume streaming
+    /// from the spill file. `None` when spill was skipped (dropped).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resume_url: Option<String>,
 }
 
 impl DriverError {
@@ -89,6 +95,7 @@ impl DriverError {
             message: message.into(),
             engine: None,
             engine_sqlstate: None,
+            resume_url: None,
         }
     }
 
@@ -99,6 +106,11 @@ impl DriverError {
 
     pub fn with_sqlstate(mut self, sqlstate: impl Into<String>) -> Self {
         self.engine_sqlstate = Some(sqlstate.into());
+        self
+    }
+
+    pub fn with_resume_url(mut self, url: impl Into<String>) -> Self {
+        self.resume_url = Some(url.into());
         self
     }
 }

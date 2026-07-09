@@ -392,20 +392,21 @@ per-session cap.
    view lives in the registry. When a session opens a new cursor and it is
    already at cap, the registry evicts one of its own cursors first — never
    another session's. A runaway session hurts only itself.
-2. **Idle-first eviction.** Eviction candidates are ranked by
-   time-since-last-ack. On eviction the pump task exits after sending
-   a synthetic `Page::Error { code: CursorEvicted }` to the consumer;
-   the driver-side stream is cancelled through the registry's
+2. **Idle-first eviction with spill.** Eviction candidates are ranked
+   by time-since-last-ack. On eviction the pump task writes any
+   still-buffered pages to `{spill_dir}/sift-cursor-{id}.bin`
+   (length-prefixed JSON) if `spill_dir` is set AND the footprint
+   exceeds `spill_min_bytes` (default 1 MiB), then sends a synthetic
+   `Page::Error { code: CursorEvicted, resume_url }` to the consumer.
+   The driver-side stream is cancelled through the registry's
    `on_evict` callback, which routes through `driver.cancel(handle,
    cursor)` so the ADR-013 ownership check applies to evictions
-   exactly like user-issued cancels. **Spill to disk** — writing the
-   pump's remaining buffered pages to `{spill_dir}/sift-cursor-{id}.bin`
-   on eviction and letting the consumer resume via that file — is
-   staged: the write side lands with this ADR (behind `spill_dir`
-   config, off by default), the read side (WS resume-from-spill) is
-   an explicit follow-up. Until then, `spill_dir` on-disk footprint
-   is diagnostic value only. `spill_min_bytes` (default 1 MiB) skips
-   spill for cursors whose write cost exceeds the value.
+   exactly like user-issued cancels. The client resumes by `GET`ing
+   the `resume_url` (`/v1/cursors/{id}/pages?from_seq=N`), which
+   returns a batch of pages and a `done` flag. Spill files are
+   deleted on the final read, on explicit
+   `DELETE /v1/cursors/{id}`, or after `spill_ttl` (default 10 min)
+   whichever happens first; a background reaper enforces the TTL.
 3. **Explicit pause/resume backpressure.** The registry pumps pages off
    the driver's mpsc into a per-cursor buffer bounded by `prefetch_pages`
    (default 2, matching the current 1-ahead behavior plus one for the

@@ -100,8 +100,11 @@ pub struct LimitsConfig {
     /// pump at this depth.
     pub cursor_prefetch_pages: usize,
     /// Directory for on-eviction cursor spill files (ADR-011). Empty
-    /// disables spill. Read-back is a documented follow-up.
+    /// disables spill.
     pub cursor_spill_dir: Option<String>,
+    /// Time-to-live in seconds for spill files. Reaped after this if
+    /// the client never resumes. Default 600 (10 min).
+    pub cursor_spill_ttl_secs: u64,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -134,6 +137,7 @@ impl Default for LimitsConfig {
             max_cursors_per_session: 32,
             cursor_prefetch_pages: 2,
             cursor_spill_dir: None,
+            cursor_spill_ttl_secs: 600,
         }
     }
 }
