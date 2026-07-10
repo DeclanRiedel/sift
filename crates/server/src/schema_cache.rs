@@ -115,34 +115,30 @@ impl SchemaCache {
             return None;
         };
         let ttl = self.config().ttl;
-        let (found, expired) = match self.inner.entries.get(&key) {
-            Some(entry) => (true, entry.inserted_at.elapsed() >= ttl),
-            None => (false, false),
+        let mut expired = false;
+        let snap = match self.inner.entries.get(&key) {
+            Some(entry) if entry.inserted_at.elapsed() < ttl => Some(entry.snapshot.clone()),
+            Some(_) => {
+                expired = true;
+                None
+            }
+            None => None,
         };
-        if !found {
+        let Some(snap) = snap else {
+            if expired {
+                drop(self.inner.entries.remove(&key));
+            }
             self.inner
                 .misses
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             return None;
-        }
-        if expired {
-            self.inner.entries.remove(&key);
-            self.inner
-                .misses
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            return None;
-        }
-        let snap = self.inner.entries.get(&key).map(|e| e.snapshot.clone());
-        if snap.is_some() {
+        };
+        {
             self.inner
                 .hits
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        } else {
-            self.inner
-                .misses
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
-        snap
+        Some(snap)
     }
 
     /// Insert a fresh snapshot. Spawns an invalidator task for the
@@ -243,7 +239,24 @@ impl SchemaCache {
 
     fn spec_hash(&self, spec: &ConnectionSpec) -> Result<String, serde_json::Error> {
         use sha2::{Digest, Sha256};
-        let json = serde_json::to_string(spec)?;
+        #[derive(serde::Serialize)]
+        struct CacheIdentity<'a> {
+            host: &'a str,
+            port: Option<u16>,
+            database: Option<&'a str>,
+            user: &'a str,
+            ssl_mode: Option<sift_protocol::SslMode>,
+            engine_specific: Option<&'a sift_protocol::EngineConnectionSpec>,
+        }
+        let identity = CacheIdentity {
+            host: &spec.host,
+            port: spec.port,
+            database: spec.database.as_deref(),
+            user: &spec.user,
+            ssl_mode: spec.ssl_mode,
+            engine_specific: spec.engine_specific.as_ref(),
+        };
+        let json = serde_json::to_string(&identity)?;
         let hash = Sha256::digest(json.as_bytes());
         let mut out = String::with_capacity(64);
         for b in hash {
@@ -541,6 +554,19 @@ mod tests {
         assert_ne!(
             cache.spec_hash(&spec()).unwrap(),
             cache.spec_hash(&b).unwrap()
+        );
+    }
+
+    #[test]
+    fn spec_hash_ignores_password() {
+        let cache = SchemaCache::new(SchemaCacheConfig::default());
+        let mut without_password = spec();
+        without_password.password = None;
+        let mut rotated_password = spec();
+        rotated_password.password = Some("rotated".into());
+        assert_eq!(
+            cache.spec_hash(&without_password).unwrap(),
+            cache.spec_hash(&rotated_password).unwrap()
         );
     }
 }

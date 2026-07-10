@@ -320,17 +320,16 @@ fn decode_cell(
     cursor_id_num: u64,
     warnings: &mut Vec<DriverWarning>,
 ) -> Value {
-    let col_name = row.columns().get(i).map(|c| c.name().to_string());
     match row.try_get::<_, Option<PgValue>>(i) {
         Ok(Some(pv)) => pv.0,
         Ok(None) => Value::Null,
         Err(e) => {
+            let col_name = row.columns().get(i).map(|c| c.name()).unwrap_or("?");
             let msg = e.to_string();
             tracing::warn!(cursor_id_num, idx = i, "cell decode error: {msg}");
             warnings.push(DriverWarning::new(format!(
                 "cell {} ({}): decode error: {msg}",
-                i,
-                col_name.as_deref().unwrap_or("?")
+                i, col_name
             )));
             Value::Engine {
                 engine: sift_protocol::Engine::Postgres,

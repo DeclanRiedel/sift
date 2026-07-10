@@ -16,6 +16,9 @@ use sqlparser::tokenizer::{Token, Tokenizer, Whitespace, Word};
 /// replace on accept.
 pub struct ContextResult {
     pub context: CompletionContext,
+    /// Sanitized byte offset used for detection. This is clamped to `sql.len()`
+    /// and floored to a UTF-8 char boundary.
+    pub cursor: usize,
     /// Byte offset where the partial identifier starts. `cursor` marks
     /// its end.
     pub prefix_start: usize,
@@ -26,7 +29,7 @@ pub struct ContextResult {
 }
 
 pub fn detect_context(sql: &str, cursor: usize, engine: Engine) -> ContextResult {
-    let cursor = usize::min(cursor, sql.len());
+    let cursor = floor_char_boundary(sql, usize::min(cursor, sql.len()));
     let (prefix_start, prefix) = extract_prefix(sql, cursor);
     let prefix_lower = prefix.to_ascii_lowercase();
 
@@ -48,6 +51,7 @@ pub fn detect_context(sql: &str, cursor: usize, engine: Engine) -> ContextResult
 
     ContextResult {
         context,
+        cursor,
         prefix_start,
         prefix,
         prefix_lower,
@@ -85,10 +89,14 @@ fn classify(tokens: &[Token], _prefix: &str) -> CompletionContext {
                 .get(tokens.len().wrapping_sub(3))
                 .and_then(word_value)
                 .unwrap_or_default();
-            if is_table_slot_lead(&before_qualifier) {
-                return CompletionContext::ExpectingObjectInSchema { schema: q };
+            if is_table_slot_lead(before_qualifier) {
+                return CompletionContext::ExpectingObjectInSchema {
+                    schema: q.to_string(),
+                };
             }
-            return CompletionContext::ExpectingColumn { qualifier: Some(q) };
+            return CompletionContext::ExpectingColumn {
+                qualifier: Some(q.to_string()),
+            };
         }
     }
 
@@ -104,20 +112,13 @@ fn classify(tokens: &[Token], _prefix: &str) -> CompletionContext {
         // (Commas are their own token — Token::Comma — not caught by
         // word_value, so they simply don't match here and we keep
         // walking.)
-        let up = kw.to_ascii_uppercase();
-        if is_table_slot_lead(&up) {
+        if is_table_slot_lead(kw) {
             return CompletionContext::ExpectingTable;
         }
-        if matches!(
-            up.as_str(),
-            "SELECT" | "WHERE" | "SET" | "BY" | "ON" | "HAVING"
-        ) {
+        if matches_case_insensitive(kw, &["SELECT", "WHERE", "SET", "BY", "ON", "HAVING"]) {
             return CompletionContext::ExpectingColumn { qualifier: None };
         }
-        if matches!(
-            up.as_str(),
-            "AND" | "OR" | "NOT" | "IS" | "IN" | "LIKE" | "BETWEEN"
-        ) {
+        if matches_case_insensitive(kw, &["AND", "OR", "NOT", "IS", "IN", "LIKE", "BETWEEN"]) {
             return CompletionContext::ExpectingColumn { qualifier: None };
         }
         // A different keyword — we haven't landed in a slot we know.
@@ -132,13 +133,17 @@ fn classify(tokens: &[Token], _prefix: &str) -> CompletionContext {
     }
 }
 
-fn is_table_slot_lead(upper: &str) -> bool {
-    matches!(upper, "FROM" | "JOIN" | "INTO" | "UPDATE" | "TABLE")
+fn is_table_slot_lead(word: &str) -> bool {
+    matches_case_insensitive(word, &["FROM", "JOIN", "INTO", "UPDATE", "TABLE"])
 }
 
-fn word_value(t: &Token) -> Option<String> {
+fn matches_case_insensitive(word: &str, values: &[&str]) -> bool {
+    values.iter().any(|value| word.eq_ignore_ascii_case(value))
+}
+
+fn word_value(t: &Token) -> Option<&str> {
     match t {
-        Token::Word(Word { value, .. }) => Some(value.clone()),
+        Token::Word(Word { value, .. }) => Some(value.as_str()),
         _ => None,
     }
 }
@@ -172,6 +177,34 @@ fn extract_prefix(sql: &str, cursor: usize) -> (usize, String) {
     (start, text)
 }
 
+fn floor_char_boundary(value: &str, mut index: usize) -> usize {
+    while index > 0 && !value.is_char_boundary(index) {
+        index -= 1;
+    }
+    index
+}
+
 fn is_ident_byte(c: u8) -> bool {
     c.is_ascii_alphanumeric() || c == b'_' || c >= 0x80
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mid_utf8_cursor_is_clamped_to_char_boundary() {
+        let result = detect_context("SELECT 😀", 9, Engine::Postgres);
+        assert_eq!(result.prefix, "");
+        assert_eq!(result.prefix_start, 7);
+    }
+
+    #[test]
+    fn lowercase_schema_qualified_table_slot_is_detected() {
+        let result = detect_context("select * from public.", 21, Engine::Postgres);
+        assert!(matches!(
+            result.context,
+            CompletionContext::ExpectingObjectInSchema { ref schema } if schema == "public"
+        ));
+    }
 }

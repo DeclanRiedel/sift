@@ -529,8 +529,8 @@ async fn pump_task(
         }
 
         let is_terminal = matches!(&page, Page::Done { .. } | Page::Error { .. });
-        let send_fut = consumer_tx.send(page.clone());
-        tokio::pin!(send_fut);
+        let reserve_fut = consumer_tx.reserve();
+        tokio::pin!(reserve_fut);
         let sent = tokio::select! {
             biased;
             _ = control.cancel_notify.notified() => {
@@ -538,7 +538,15 @@ async fn pump_task(
                 emit_terminal(&control, &consumer_tx, session_id, cursor_id, &spillover, &inner).await;
                 return;
             }
-            res = &mut send_fut => res.is_ok(),
+            res = &mut reserve_fut => {
+                match res {
+                    Ok(permit) => {
+                        permit.send(page);
+                        true
+                    }
+                    Err(_) => false,
+                }
+            },
         };
         if !sent {
             return;

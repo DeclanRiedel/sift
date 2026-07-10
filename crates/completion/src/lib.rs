@@ -40,7 +40,7 @@ pub fn complete(
         candidates,
         replaced_range: sift_protocol::completion::Range {
             start: ctx.prefix_start as u32,
-            end: cursor as u32,
+            end: ctx.cursor as u32,
         },
         context: ctx.context,
     }

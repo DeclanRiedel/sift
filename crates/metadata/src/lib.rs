@@ -1021,13 +1021,16 @@ impl MetadataStore {
         if let Some(q) = filter.q.as_ref().filter(|s| !s.trim().is_empty()) {
             // Restrict to FTS matches. Users type free-text; append a
             // trailing `*` to each token so partial words match as
-            // prefixes. Callers who want exact FTS syntax can send it
-            // through unchanged by including a colon or quote.
-            let pattern = fts_pattern(q);
-            sql.push_str(
-                " AND id IN (SELECT rowid FROM saved_query_fts WHERE saved_query_fts MATCH ?)",
-            );
-            params_dyn.push(Box::new(pattern));
+            // prefixes. If all user input is punctuation, keep the
+            // filter restrictive instead of turning it into MATCH '*'.
+            if let Some(pattern) = fts_pattern(q) {
+                sql.push_str(
+                    " AND id IN (SELECT rowid FROM saved_query_fts WHERE saved_query_fts MATCH ?)",
+                );
+                params_dyn.push(Box::new(pattern));
+            } else {
+                sql.push_str(" AND 0");
+            }
         }
         for tag in &filter.tags {
             // tags_json is a JSON array — use json_each to test
@@ -1207,6 +1210,8 @@ impl MetadataStore {
 fn configure_connection(conn: &Connection) -> Result<()> {
     conn.pragma_update(None, "foreign_keys", "ON")?;
     conn.pragma_update(None, "journal_mode", "WAL")?;
+    conn.busy_timeout(std::time::Duration::from_secs(5))?;
+    conn.pragma_update(None, "synchronous", "NORMAL")?;
     Ok(())
 }
 
@@ -1399,9 +1404,9 @@ fn saved_query_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SavedQuery>
 /// Translate a free-text query into an FTS5 MATCH pattern. Each
 /// whitespace-separated token becomes a prefix match; non-alphanumeric
 /// characters are stripped so callers can't inject FTS5 operators.
-/// Empty input returns `*` (matches nothing meaningful; the caller
-/// should have skipped MATCH entirely).
-fn fts_pattern(q: &str) -> String {
+/// Empty or all-punctuation input returns `None`; the caller should
+/// avoid running a MATCH clause that would broaden the query.
+fn fts_pattern(q: &str) -> Option<String> {
     let tokens: Vec<String> = q
         .split_whitespace()
         .map(|token| {
@@ -1418,9 +1423,9 @@ fn fts_pattern(q: &str) -> String {
         .filter(|t| !t.is_empty())
         .collect();
     if tokens.is_empty() {
-        "*".to_string()
+        None
     } else {
-        tokens.join(" ")
+        Some(tokens.join(" "))
     }
 }
 

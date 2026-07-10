@@ -2892,6 +2892,21 @@ async fn saved_queries_lifecycle_personal_and_shared() {
     assert_eq!(hits.as_array().unwrap().len(), 1);
     assert_eq!(hits[0]["id"], shared_id);
 
+    // Punctuation-only searches should stay restrictive. They should
+    // not collapse into an FTS match-all and leak every visible query.
+    let res = app
+        .clone()
+        .oneshot(
+            Request::get("/v1/metadata/saved-queries?tenant=1&q=***")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let hits: serde_json::Value = body_json(res.into_body()).await;
+    assert_eq!(hits.as_array().unwrap().len(), 0);
+
     // Scope=personal returns only the personal one.
     let res = app
         .clone()

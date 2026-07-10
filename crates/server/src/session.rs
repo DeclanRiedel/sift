@@ -1452,7 +1452,7 @@ pub async fn drain_stream(
 }
 
 /// Approximate in-memory size of a row, for the HTTP result byte cap. Only the
-/// variable-length variants (text/blob/decimal/json) are measured precisely;
+/// variable-length variants (text/blob/decimal) are measured precisely;
 /// fixed-width scalars use a small constant. This is an OOM guard, not an exact
 /// accounting, so an estimate is sufficient.
 fn row_bytes(row: &Row) -> usize {
@@ -1464,7 +1464,7 @@ fn value_bytes(value: &sift_protocol::Value) -> usize {
     match value {
         Value::Text(s) | Value::Decimal(s) => s.len(),
         Value::Blob(b) => b.len(),
-        Value::Json(j) => j.to_string().len(),
+        Value::Json(_) => 16,
         _ => 16,
     }
 }

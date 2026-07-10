@@ -246,14 +246,29 @@ fn score_match(candidate: &str, prefix: &str) -> Option<i32> {
     if candidate.starts_with(prefix) {
         return Some(1000);
     }
-    let cl = candidate.to_ascii_lowercase();
-    if cl.starts_with(prefix) {
+    if starts_with_ignore_ascii_case(candidate, prefix) {
         return Some(800);
     }
-    if cl.contains(prefix) {
+    if contains_ignore_ascii_case(candidate, prefix) {
         return Some(300);
     }
     None
+}
+
+fn starts_with_ignore_ascii_case(candidate: &str, prefix: &str) -> bool {
+    candidate
+        .as_bytes()
+        .get(..prefix.len())
+        .is_some_and(|head| head.eq_ignore_ascii_case(prefix.as_bytes()))
+}
+
+fn contains_ignore_ascii_case(candidate: &str, needle: &str) -> bool {
+    let needle = needle.as_bytes();
+    !needle.is_empty()
+        && candidate
+            .as_bytes()
+            .windows(needle.len())
+            .any(|window| window.eq_ignore_ascii_case(needle))
 }
 
 /// Quote an identifier if it isn't already a simple lowercase word.
