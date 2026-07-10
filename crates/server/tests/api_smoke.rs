@@ -2543,6 +2543,57 @@ async fn schema_cache_serves_second_call_without_touching_driver() {
 }
 
 #[tokio::test]
+async fn schema_cache_coalesces_concurrent_misses() {
+    // The driver has exactly one schema result. Concurrent cache misses must
+    // singleflight behind that one fetch; otherwise the extra callers hit the
+    // empty mock queue and fail with DriverInternal.
+    let driver = MockDriver::builder()
+        .engine(Engine::Postgres)
+        .schema_ok(SchemaSnapshot::empty(SchemaScope::shallow()))
+        .build();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        axum::serve(
+            listener,
+            app(test_state_with_driver(driver)).into_make_service(),
+        )
+        .await
+        .unwrap();
+    });
+
+    let base = format!("http://{addr}");
+    let client = sift_client_sdk::Client::new(base.clone());
+    let session = client
+        .open_session(Some("schema-singleflight".into()))
+        .await
+        .unwrap();
+    let conn = client
+        .open_connection(
+            session.id,
+            sift_protocol::OpenConnectionRequest {
+                engine: Engine::Postgres,
+                spec: pg_spec(),
+            },
+        )
+        .await
+        .unwrap();
+
+    let mut tasks = Vec::new();
+    for _ in 0..10 {
+        let client = sift_client_sdk::Client::new(base.clone());
+        tasks.push(tokio::spawn(async move {
+            client.schema(session.id, conn.id).await
+        }));
+    }
+    for task in tasks {
+        task.await.unwrap().unwrap();
+    }
+
+    server.abort();
+}
+
+#[tokio::test]
 async fn export_query_csv_and_json_streaming() {
     // Two rows with a mix of scalar types, plus a NULL and a text
     // value that needs CSV quoting. Prove all four formats.

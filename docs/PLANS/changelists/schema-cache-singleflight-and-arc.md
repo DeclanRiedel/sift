@@ -1,5 +1,13 @@
 # Schema cache singleflight and clone cost
 
+## Status
+
+Implemented in the working tree: schema cache entries store
+`Arc<SchemaSnapshot>` and `Arc<Dictionary>`, and concurrent misses for the
+same `(spec, scope)` are coalesced behind a per-key fetch gate. Existing
+owned protocol responses still materialize an owned `SchemaSnapshot` at the
+HTTP/session boundary.
+
 ## Issue
 
 Schema cache misses are not coalesced, and cache hits clone the full `SchemaSnapshot`.

@@ -553,6 +553,14 @@ impl SessionStore {
         if let Some(cached) = self.inner.schema_cache.get_cached(&spec, &scope) {
             return Ok(cached);
         }
+        let fetch_gate = self.inner.schema_cache.fetch_gate(&spec, &scope).ok();
+        let _fetch_guard = match fetch_gate.as_ref() {
+            Some(gate) => Some(gate.lock().await),
+            None => None,
+        };
+        if let Some(cached) = self.inner.schema_cache.get_cached(&spec, &scope) {
+            return Ok(cached);
+        }
         let driver = entry.driver.clone();
         let handle = entry.handle.clone();
         let first = {
@@ -580,8 +588,14 @@ impl SessionStore {
                     .schema_cache
                     .insert(&spec, &scope, snapshot.clone(), driver)
             {
+                if let Some(gate) = &fetch_gate {
+                    self.inner.schema_cache.clear_fetch_gate(gate);
+                }
                 return Ok(cached);
             }
+        }
+        if let Some(gate) = &fetch_gate {
+            self.inner.schema_cache.clear_fetch_gate(gate);
         }
         result.map(CachedSchema::new_uncached)
     }

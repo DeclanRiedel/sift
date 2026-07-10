@@ -56,6 +56,7 @@ pub struct SchemaCache {
 struct Inner {
     config: std::sync::RwLock<SchemaCacheConfig>,
     entries: DashMap<CacheKey, CachedEntry>,
+    in_flight: DashMap<CacheKey, Arc<tokio::sync::Mutex<()>>>,
     /// `spec_hash → invalidator task`. Tasks are spawned lazily on
     /// first `insert` for a spec; kept alive for the process lifetime.
     invalidators: DashMap<String, InvalidatorHandle>,
@@ -89,6 +90,17 @@ impl CachedSchema {
             snapshot: Arc::new(snapshot),
             dictionary,
         }
+    }
+}
+
+pub struct SchemaFetchGate {
+    key: CacheKey,
+    gate: Arc<tokio::sync::Mutex<()>>,
+}
+
+impl SchemaFetchGate {
+    pub async fn lock(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        self.gate.lock().await
     }
 }
 
@@ -188,6 +200,32 @@ impl SchemaCache {
         // Ensure invalidator is running for this spec.
         self.ensure_invalidator(spec, spec_hash, driver);
         Some(schema)
+    }
+
+    pub fn fetch_gate(
+        &self,
+        spec: &ConnectionSpec,
+        scope: &SchemaScope,
+    ) -> Result<SchemaFetchGate, serde_json::Error> {
+        let key = self.key_for(spec, scope)?;
+        let gate = self
+            .inner
+            .in_flight
+            .entry(key.clone())
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+            .clone();
+        Ok(SchemaFetchGate { key, gate })
+    }
+
+    pub fn clear_fetch_gate(&self, gate: &SchemaFetchGate) {
+        let should_remove = self
+            .inner
+            .in_flight
+            .get(&gate.key)
+            .is_some_and(|current| Arc::ptr_eq(&current, &gate.gate));
+        if should_remove {
+            self.inner.in_flight.remove(&gate.key);
+        }
     }
 
     /// Invalidate every cached entry for a spec. Called by the
