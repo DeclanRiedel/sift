@@ -31,11 +31,21 @@ pub fn complete(
     snapshot: &SchemaSnapshot,
     engine: Engine,
 ) -> CompletionResponse {
+    let dict = dictionary::Dictionary::from_snapshot(snapshot);
+    complete_with_dictionary(req, &dict, engine)
+}
+
+/// Compute ranked completions using a prebuilt dictionary. Server hot paths
+/// use this when the schema cache already owns the dictionary for a snapshot.
+pub fn complete_with_dictionary(
+    req: &CompletionRequest,
+    dict: &Dictionary,
+    engine: Engine,
+) -> CompletionResponse {
     let cursor = usize::min(req.cursor as usize, req.sql.len());
     let ctx = context::detect_context(&req.sql, cursor, engine);
-    let dict = dictionary::Dictionary::from_snapshot(snapshot);
     let limit = req.limit.map(|l| usize::min(l as usize, 200)).unwrap_or(50);
-    let candidates = rank::rank(&ctx, &dict, engine, limit);
+    let candidates = rank::rank(&ctx, dict, engine, limit);
     CompletionResponse {
         candidates,
         replaced_range: sift_protocol::completion::Range {

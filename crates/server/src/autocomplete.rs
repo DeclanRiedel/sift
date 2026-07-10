@@ -36,20 +36,25 @@ pub async fn generate_completion(
     req: CompletionRequest,
 ) -> ApiResult<CompletionResponse> {
     let shallow = registry
-        .schema(session_id, conn_id, SchemaScope::shallow())
+        .schema_cached(session_id, conn_id, SchemaScope::shallow())
         .await?;
-    let shallow_response = sift_completion::complete(&req, &shallow, engine);
+    let shallow_response =
+        sift_completion::complete_with_dictionary(&req, &shallow.dictionary, engine);
 
     // If we're expecting a column and the qualifier resolves to a
     // shallow-known table, upgrade to a deep snapshot for that object.
     if let CompletionContext::ExpectingColumn { qualifier: Some(q) } = &shallow_response.context {
-        if let Some(path) = resolve_object_path(&shallow, q) {
+        if let Some(path) = resolve_object_path(&shallow.snapshot, q) {
             let deep_scope = SchemaScope {
                 depth: SchemaDepth::Deep { object: path },
                 filter: None,
             };
-            if let Ok(deep) = registry.schema(session_id, conn_id, deep_scope).await {
-                let merged = merge_deep_into_shallow(shallow, deep);
+            if let Ok(deep) = registry
+                .schema_cached(session_id, conn_id, deep_scope)
+                .await
+            {
+                let merged =
+                    merge_deep_into_shallow((*shallow.snapshot).clone(), (*deep.snapshot).clone());
                 return Ok(sift_completion::complete(&req, &merged, engine));
             }
         }

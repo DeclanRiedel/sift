@@ -30,7 +30,7 @@ use sift_metadata::{MetadataStore, NewOperationAudit, PrincipalId};
 use crate::cursors::CursorRegistry;
 use crate::error::{ApiError, ApiResult};
 use crate::registry::DriverRegistry;
-use crate::schema_cache::SchemaCache;
+use crate::schema_cache::{CachedSchema, SchemaCache};
 
 /// Fallback per-request timeout used until the server wires
 /// `config.timeouts.request_secs` in via [`SessionStore::set_request_timeout`].
@@ -523,11 +523,21 @@ impl SessionStore {
         conn_id: ConnectionId,
         scope: SchemaScope,
     ) -> ApiResult<SchemaSnapshot> {
+        let cached = self.schema_cached(session_id, conn_id, scope).await?;
+        Ok((*cached.snapshot).clone())
+    }
+
+    pub async fn schema_cached(
+        &self,
+        session_id: SessionId,
+        conn_id: ConnectionId,
+        scope: SchemaScope,
+    ) -> ApiResult<CachedSchema> {
         let entry = self.get_conn_entry(session_id, conn_id)?;
         let spec = self.spec_for_conn(session_id, conn_id)?;
         // Cache lookup: return immediately if a fresh snapshot exists
         // for this (spec, scope).
-        if let Some(cached) = self.inner.schema_cache.get(&spec, &scope) {
+        if let Some(cached) = self.inner.schema_cache.get_cached(&spec, &scope) {
             return Ok(cached);
         }
         let driver = entry.driver.clone();
@@ -552,11 +562,15 @@ impl SessionStore {
             other => other,
         };
         if let Ok(snapshot) = &result {
-            self.inner
-                .schema_cache
-                .insert(&spec, &scope, snapshot.clone(), driver);
+            if let Some(cached) =
+                self.inner
+                    .schema_cache
+                    .insert(&spec, &scope, snapshot.clone(), driver)
+            {
+                return Ok(cached);
+            }
         }
-        result
+        result.map(CachedSchema::new_uncached)
     }
 
     fn spec_for_conn(

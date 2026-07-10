@@ -1,5 +1,13 @@
 # Completion hot-path dictionary rebuild
 
+## Status
+
+Core cache fix implemented in the working tree: `SchemaCache` now builds a
+`sift_completion::Dictionary` once per inserted snapshot, stores it behind an
+`Arc`, and the autocomplete endpoint ranks against the cached dictionary on
+cache hits. Follow-up still open from the original changelist: criterion
+benchmarks and any additional prefix-index tuning.
+
 ## Issue
 
 Autocomplete rebuilds a full `Dictionary` from the schema snapshot on every request.

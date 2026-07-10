@@ -20,6 +20,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use dashmap::DashMap;
+use sift_completion::Dictionary;
 use sift_driver_api::{Driver, ResultSetStream};
 use sift_protocol::{
     ConnectionSpec, Engine, ExecuteRequest, Page, SchemaScope, SchemaSnapshot, Value,
@@ -71,8 +72,24 @@ struct CacheKey {
 }
 
 struct CachedEntry {
-    snapshot: SchemaSnapshot,
+    schema: CachedSchema,
     inserted_at: Instant,
+}
+
+#[derive(Clone)]
+pub struct CachedSchema {
+    pub snapshot: Arc<SchemaSnapshot>,
+    pub dictionary: Arc<Dictionary>,
+}
+
+impl CachedSchema {
+    pub fn new_uncached(snapshot: SchemaSnapshot) -> Self {
+        let dictionary = Arc::new(Dictionary::from_snapshot(&snapshot));
+        Self {
+            snapshot: Arc::new(snapshot),
+            dictionary,
+        }
+    }
 }
 
 struct InvalidatorHandle {
@@ -108,6 +125,12 @@ impl SchemaCache {
     /// Look up a cached snapshot. Returns `None` on miss or expired
     /// (TTL-based). Expired entries are dropped as a side effect.
     pub fn get(&self, spec: &ConnectionSpec, scope: &SchemaScope) -> Option<SchemaSnapshot> {
+        self.get_cached(spec, scope)
+            .map(|cached| (*cached.snapshot).clone())
+    }
+
+    /// Look up a cached snapshot with its prebuilt completion dictionary.
+    pub fn get_cached(&self, spec: &ConnectionSpec, scope: &SchemaScope) -> Option<CachedSchema> {
         let Ok(key) = self.key_for(spec, scope) else {
             self.inner
                 .misses
@@ -117,7 +140,7 @@ impl SchemaCache {
         let ttl = self.config().ttl;
         let mut expired = false;
         let snap = match self.inner.entries.get(&key) {
-            Some(entry) if entry.inserted_at.elapsed() < ttl => Some(entry.snapshot.clone()),
+            Some(entry) if entry.inserted_at.elapsed() < ttl => Some(entry.schema.clone()),
             Some(_) => {
                 expired = true;
                 None
@@ -149,20 +172,22 @@ impl SchemaCache {
         scope: &SchemaScope,
         snapshot: SchemaSnapshot,
         driver: Arc<dyn Driver>,
-    ) {
+    ) -> Option<CachedSchema> {
         let (key, spec_hash) = match self.key_for_with_hash(spec, scope) {
             Ok(pair) => pair,
-            Err(_) => return, // serialization failure — skip caching
+            Err(_) => return None, // serialization failure — skip caching
         };
+        let schema = CachedSchema::new_uncached(snapshot);
         self.inner.entries.insert(
             key,
             CachedEntry {
-                snapshot,
+                schema: schema.clone(),
                 inserted_at: Instant::now(),
             },
         );
         // Ensure invalidator is running for this spec.
         self.ensure_invalidator(spec, spec_hash, driver);
+        Some(schema)
     }
 
     /// Invalidate every cached entry for a spec. Called by the
@@ -468,7 +493,7 @@ mod tests {
         cache.inner.entries.insert(
             key,
             CachedEntry {
-                snapshot: snap.clone(),
+                schema: CachedSchema::new_uncached(snap.clone()),
                 inserted_at: Instant::now(),
             },
         );
@@ -482,6 +507,25 @@ mod tests {
     }
 
     #[test]
+    fn cached_dictionary_is_reused_across_hits() {
+        let cache = SchemaCache::new(SchemaCacheConfig::default());
+        let (key, _) = cache.key_for_with_hash(&spec(), &scope()).unwrap();
+        cache.inner.entries.insert(
+            key,
+            CachedEntry {
+                schema: CachedSchema::new_uncached(SchemaSnapshot::empty(scope())),
+                inserted_at: Instant::now(),
+            },
+        );
+
+        let first = cache.get_cached(&spec(), &scope()).unwrap();
+        let second = cache.get_cached(&spec(), &scope()).unwrap();
+
+        assert!(Arc::ptr_eq(&first.dictionary, &second.dictionary));
+        assert!(Arc::ptr_eq(&first.snapshot, &second.snapshot));
+    }
+
+    #[test]
     fn expired_entry_is_evicted_on_get() {
         let cache = SchemaCache::new(SchemaCacheConfig {
             ttl: Duration::from_millis(1),
@@ -491,7 +535,7 @@ mod tests {
         cache.inner.entries.insert(
             key.clone(),
             CachedEntry {
-                snapshot: SchemaSnapshot::empty(scope()),
+                schema: CachedSchema::new_uncached(SchemaSnapshot::empty(scope())),
                 inserted_at: Instant::now() - Duration::from_millis(100),
             },
         );
@@ -525,7 +569,7 @@ mod tests {
             cache.inner.entries.insert(
                 k.clone(),
                 CachedEntry {
-                    snapshot: SchemaSnapshot::empty(scope()),
+                    schema: CachedSchema::new_uncached(SchemaSnapshot::empty(scope())),
                     inserted_at: Instant::now(),
                 },
             );
