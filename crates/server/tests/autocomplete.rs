@@ -58,6 +58,23 @@ fn snapshot() -> SchemaSnapshot {
     }
 }
 
+fn shallow_snapshot() -> SchemaSnapshot {
+    let users = ObjectInfo::new("users", ObjectKind::Table);
+    let orders = ObjectInfo::new("orders", ObjectKind::Table);
+    SchemaSnapshot {
+        trees: vec![CatalogTree {
+            name: "mock".into(),
+            schemas: vec![SchemaTree {
+                name: "public".into(),
+                objects: vec![users, orders],
+            }],
+        }],
+        fetched_at: chrono::Utc::now(),
+        scope: SchemaScope::shallow(),
+        incomplete: false,
+    }
+}
+
 fn mock_driver() -> MockDriver {
     MockDriver::builder()
         .engine(Engine::Postgres)
@@ -74,6 +91,10 @@ fn mock_driver() -> MockDriver {
 
 fn state() -> AppState {
     let registry = DriverRegistry::builder().register(mock_driver()).build();
+    state_with_registry(registry)
+}
+
+fn state_with_registry(registry: DriverRegistry) -> AppState {
     AppState {
         sessions: SessionStore::new(registry),
         rooms: RoomRuntime::default(),
@@ -101,7 +122,17 @@ async fn setup() -> (
     sift_protocol::SessionId,
     sift_protocol::ConnectionId,
 ) {
-    let router = app(state());
+    setup_with_state(state()).await
+}
+
+async fn setup_with_state(
+    state: AppState,
+) -> (
+    axum::Router,
+    sift_protocol::SessionId,
+    sift_protocol::ConnectionId,
+) {
+    let router = app(state);
 
     let res = router
         .clone()
@@ -163,7 +194,20 @@ async fn complete_after_from_returns_users() {
 
 #[tokio::test]
 async fn complete_dotted_returns_columns() {
-    let (router, sid, cid) = setup().await;
+    let driver = MockDriver::builder()
+        .engine(Engine::Postgres)
+        .ping_ok(ServerInfo {
+            engine: Engine::Postgres,
+            server_version: "MockDB 0.1".into(),
+            current_database: "mock".into(),
+            current_user: "mock".into(),
+            pool_warm_slots: None,
+        })
+        .schema_ok(shallow_snapshot())
+        .schema_ok(snapshot())
+        .build();
+    let registry = DriverRegistry::builder().register(driver).build();
+    let (router, sid, cid) = setup_with_state(state_with_registry(registry)).await;
     let req = CompletionRequest {
         sql: "SELECT users. FROM users".into(),
         cursor: 13,

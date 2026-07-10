@@ -1,5 +1,12 @@
 # Completion dotted deep-merge path
 
+## Status
+
+Implemented in the working tree: completion can rank from an already detected
+context, object-path resolution lives on the completion dictionary, and deep
+schema merges match by `(catalog, schema, name)`. Tests cover a shallow/deep
+mock-driver completion path and duplicate object names across schemas.
+
 ## Issue
 
 The server autocomplete path runs completion twice for qualified column completion and merges deep schema data into a shallow snapshot with an O(shallow * deep) name-only scan.

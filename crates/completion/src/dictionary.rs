@@ -7,7 +7,7 @@
 
 use std::collections::HashMap;
 
-use sift_protocol::{ObjectInfo, ObjectKind, SchemaSnapshot};
+use sift_protocol::{ObjectInfo, ObjectKind, ObjectPath, SchemaSnapshot};
 
 /// A schema-qualified object in the connected database.
 #[derive(Debug, Clone)]
@@ -16,6 +16,7 @@ pub struct ObjectEntry {
     pub schema: Option<String>,
     pub name: String,
     pub kind: ObjectKind,
+    pub routine_args: Option<Vec<String>>,
     /// Populated only if the snapshot was fetched with `SchemaDepth::Deep`
     /// for this object. Empty otherwise.
     pub columns: Vec<ColumnEntry>,
@@ -88,6 +89,19 @@ impl Dictionary {
         let key = (schema.to_ascii_lowercase(), name.to_ascii_lowercase());
         self.by_qualified.get(&key).map(|i| &self.objects[*i])
     }
+
+    /// Resolve an unqualified object name to the fully qualified path needed
+    /// for a deep schema fetch. Returns `None` when absent or ambiguous.
+    pub fn resolve_object_path(&self, name: &str) -> Option<ObjectPath> {
+        let obj = self.resolve_by_name(name)?;
+        Some(ObjectPath {
+            catalog: obj.catalog.clone(),
+            schema: obj.schema.clone(),
+            name: obj.name.clone(),
+            kind: Some(obj.kind),
+            routine_args: obj.routine_args.clone(),
+        })
+    }
 }
 
 fn object_entry(obj: &ObjectInfo, catalog: Option<&str>, schema: Option<&str>) -> ObjectEntry {
@@ -106,6 +120,7 @@ fn object_entry(obj: &ObjectInfo, catalog: Option<&str>, schema: Option<&str>) -
         schema: schema.map(str::to_string),
         name: obj.name.clone(),
         kind: obj.kind,
+        routine_args: obj.routine_args.clone(),
         columns,
     }
 }

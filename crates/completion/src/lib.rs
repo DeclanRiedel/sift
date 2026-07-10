@@ -44,14 +44,26 @@ pub fn complete_with_dictionary(
 ) -> CompletionResponse {
     let cursor = usize::min(req.cursor as usize, req.sql.len());
     let ctx = context::detect_context(&req.sql, cursor, engine);
+    complete_with_context(req, &ctx, dict, engine)
+}
+
+/// Rank completions from a context that has already been detected. This keeps
+/// server orchestration from recomputing SQL context when it upgrades a shallow
+/// completion with deep schema data.
+pub fn complete_with_context(
+    req: &CompletionRequest,
+    ctx: &ContextResult,
+    dict: &Dictionary,
+    engine: Engine,
+) -> CompletionResponse {
     let limit = req.limit.map(|l| usize::min(l as usize, 200)).unwrap_or(50);
-    let candidates = rank::rank(&ctx, dict, engine, limit);
+    let candidates = rank::rank(ctx, dict, engine, limit);
     CompletionResponse {
         candidates,
         replaced_range: sift_protocol::completion::Range {
             start: ctx.prefix_start as u32,
             end: ctx.cursor as u32,
         },
-        context: ctx.context,
+        context: ctx.context.clone(),
     }
 }
