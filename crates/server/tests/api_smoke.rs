@@ -467,9 +467,22 @@ async fn operation_log_replays_from_disk() {
         .unwrap();
     assert_eq!(res.status(), StatusCode::OK);
 
-    let replayed = test_state_with_operation_log(&path)
-        .sessions
-        .list_operations();
+    let mut replayed = Vec::new();
+    for _ in 0..200 {
+        replayed = test_state_with_operation_log(&path)
+            .sessions
+            .list_operations();
+        if replayed.iter().any(|row| {
+            matches!(
+                &row.operation,
+                sift_protocol::Operation::OpenSession { request }
+                    if request.tag.as_deref() == Some("durable")
+            )
+        }) {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
     assert!(replayed.iter().any(|row| matches!(
         &row.operation,
         sift_protocol::Operation::OpenSession { request }

@@ -1,5 +1,13 @@
 # Operation log synchronous writes
 
+## Status
+
+Implemented in the working tree: JSONL persistence now uses a dedicated
+bounded writer thread with `BufWriter`; `push_operation_full` updates the
+in-memory ring under the operations mutex and enqueues disk writes after
+releasing it. A stress test records operations concurrently with
+`list_operations`.
+
 ## Issue
 
 The in-memory operation log and optional JSONL writer sit behind one process-global mutex. Appending an operation writes JSON, writes a newline, and flushes while holding that lock.

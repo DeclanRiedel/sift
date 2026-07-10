@@ -4,11 +4,13 @@
 //! it holds zero or more open connections.
 
 use std::fs::{File, OpenOptions};
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::mpsc::{SyncSender, TrySendError};
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::thread::JoinHandle;
 use std::time::Duration;
 
 use dashmap::DashMap;
@@ -80,7 +82,12 @@ struct SessionStoreInner {
 
 struct OperationLog {
     entries: Vec<OperationAuditEntry>,
-    writer: Option<File>,
+    writer: Option<OperationLogWriter>,
+}
+
+struct OperationLogWriter {
+    tx: SyncSender<OperationAuditEntry>,
+    _task: JoinHandle<()>,
 }
 
 impl SessionStore {
@@ -118,6 +125,7 @@ impl SessionStore {
         }
         let entries = read_operation_log(path)?;
         let writer = OpenOptions::new().create(true).append(true).open(path)?;
+        let writer = spawn_operation_log_writer(writer);
         let store = Self {
             inner: Arc::new(SessionStoreInner {
                 sessions: DashMap::new(),
@@ -340,26 +348,31 @@ impl SessionStore {
         // secrets/bind values are stripped, so no audit surface carries them.
         let operation = sanitize_operation(operation);
         let summary = operation.audit_summary();
-        {
+        let entry = OperationAuditEntry {
+            at: chrono::Utc::now(),
+            operation,
+            status,
+        };
+        let writer = {
             let mut log = self.inner.operations.lock().unwrap();
-            let entry = OperationAuditEntry {
-                at: chrono::Utc::now(),
-                operation,
-                status,
-            };
-            if let Some(writer) = &mut log.writer {
-                match serde_json::to_writer(&mut *writer, &entry)
-                    .and_then(|_| writer.write_all(b"\n").map_err(serde_json::Error::io))
-                    .and_then(|_| writer.flush().map_err(serde_json::Error::io))
-                {
-                    Ok(()) => {}
-                    Err(error) => tracing::error!(%error, "operation audit append failed"),
-                }
-            }
-            log.entries.push(entry);
+            let writer = log.writer.as_ref().map(|writer| writer.tx.clone());
+            log.entries.push(entry.clone());
             if log.entries.len() > MAX_OPERATION_ROWS {
                 let overflow = log.entries.len() - MAX_OPERATION_ROWS;
                 log.entries.drain(0..overflow);
+            }
+            writer
+        };
+
+        if let Some(writer) = writer {
+            match writer.try_send(entry) {
+                Ok(()) => {}
+                Err(TrySendError::Full(_)) => {
+                    tracing::error!("operation audit writer queue is full; dropping JSONL row");
+                }
+                Err(TrySendError::Disconnected(_)) => {
+                    tracing::error!("operation audit writer is stopped; dropping JSONL row");
+                }
             }
         }
 
@@ -1353,6 +1366,43 @@ fn timeout_error(op: &str) -> ApiError {
     ))
 }
 
+fn spawn_operation_log_writer(file: File) -> OperationLogWriter {
+    const OPERATION_LOG_QUEUE: usize = 1024;
+    let (tx, rx) = std::sync::mpsc::sync_channel::<OperationAuditEntry>(OPERATION_LOG_QUEUE);
+    let task = std::thread::Builder::new()
+        .name("sift-operation-log-writer".into())
+        .spawn(move || {
+            let mut writer = BufWriter::new(file);
+            while let Ok(entry) = rx.recv() {
+                if let Err(error) = write_operation_log_entry(&mut writer, &entry) {
+                    tracing::error!(%error, "operation audit append failed");
+                    continue;
+                }
+                while let Ok(entry) = rx.try_recv() {
+                    if let Err(error) = write_operation_log_entry(&mut writer, &entry) {
+                        tracing::error!(%error, "operation audit append failed");
+                    }
+                }
+                if let Err(error) = writer.flush() {
+                    tracing::error!(%error, "operation audit flush failed");
+                }
+            }
+            if let Err(error) = writer.flush() {
+                tracing::error!(%error, "operation audit final flush failed");
+            }
+        })
+        .expect("operation log writer thread starts");
+    OperationLogWriter { tx, _task: task }
+}
+
+fn write_operation_log_entry(
+    writer: &mut BufWriter<File>,
+    entry: &OperationAuditEntry,
+) -> std::io::Result<()> {
+    serde_json::to_writer(&mut *writer, entry).map_err(std::io::Error::other)?;
+    writer.write_all(b"\n")
+}
+
 fn drain_connection_transactions(s: &Session, conn_id: ConnectionId) -> Vec<TransactionEntry> {
     let tx_ids: Vec<TxId> = s
         .transactions
@@ -1499,4 +1549,61 @@ fn display_name_for(spec: &ConnectionSpec) -> String {
         format!("{}{port}/{db}", spec.host)
     };
     format!("{}@{}", spec.user, host)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn recording_operations_while_listing_does_not_lose_memory_rows() {
+        const WRITERS: usize = 8;
+        const PER_WRITER: usize = 250;
+
+        let path = std::env::temp_dir().join(format!(
+            "sift-operation-log-stress-{}.jsonl",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let store = Arc::new(
+            SessionStore::new_with_operation_log_path(DriverRegistry::new(), &path)
+                .expect("operation log opens"),
+        );
+        let done = Arc::new(AtomicBool::new(false));
+
+        let reader_store = Arc::clone(&store);
+        let reader_done = Arc::clone(&done);
+        let reader = std::thread::spawn(move || {
+            while !reader_done.load(Ordering::Relaxed) {
+                let _ = reader_store.list_operations();
+            }
+        });
+
+        let mut writers = Vec::new();
+        for writer_id in 0..WRITERS {
+            let store = Arc::clone(&store);
+            writers.push(std::thread::spawn(move || {
+                for i in 0..PER_WRITER {
+                    store.push_operation(
+                        Operation::OpenSession {
+                            request: OpenSessionRequest {
+                                tag: Some(format!("writer-{writer_id}-{i}")),
+                            },
+                        },
+                        OperationStatus::Succeeded,
+                    );
+                }
+            }));
+        }
+        for writer in writers {
+            writer.join().unwrap();
+        }
+        done.store(true, Ordering::Relaxed);
+        reader.join().unwrap();
+
+        assert_eq!(store.list_operations().len(), WRITERS * PER_WRITER);
+        let _ = std::fs::remove_file(path);
+    }
 }
