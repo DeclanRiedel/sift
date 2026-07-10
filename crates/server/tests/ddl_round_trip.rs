@@ -27,7 +27,7 @@ use sift_driver_api::{ConnHandle, Driver};
 use sift_driver_postgres::PgDriver;
 use sift_protocol::{
     ConnectionSpec, ConstraintInfo, ExecuteRequest, IndexInfo, ObjectInfo, ObjectKind, ObjectPath,
-    Page, SchemaDepth, SchemaScope, SslMode,
+    Page, SchemaDepth, SchemaFilter, SchemaScope, SslMode,
 };
 use sift_server::ddl::generate_ddl;
 
@@ -101,6 +101,7 @@ async fn introspect(
                 schema: Some(schema.into()),
                 name: name.into(),
                 kind: Some(kind),
+                routine_args: None,
             },
         },
         filter: None,
@@ -230,6 +231,7 @@ async fn round_trip_table_with_pk_fk_check_unique_index() {
             schema: Some(src.clone()),
             name: name.into(),
             kind: Some(ObjectKind::Table),
+            routine_args: None,
         };
         let generated = generate_ddl(&driver, conn.clone(), path)
             .await
@@ -286,6 +288,7 @@ async fn round_trip_view() {
         schema: Some(src.clone()),
         name: "expensive_items".into(),
         kind: Some(ObjectKind::View),
+        routine_args: None,
     };
     let ddl = generate_ddl(&driver, conn.clone(), path)
         .await
@@ -331,6 +334,7 @@ async fn round_trip_materialized_view() {
         schema: Some(src.clone()),
         name: "event_counts".into(),
         kind: Some(ObjectKind::MaterializedView),
+        routine_args: None,
     };
     let ddl = generate_ddl(&driver, conn.clone(), path)
         .await
@@ -362,8 +366,116 @@ async fn round_trip_materialized_view() {
     driver.close(conn).await.unwrap();
 }
 
-// NOTE: A `round_trip_procedure` case is deliberately absent.
-// `pg_get_functiondef` requires the argument-types signature (via a
-// `regprocedure` cast) but `ObjectPath.name` today is a bare name.
-// Round-tripping functions needs the caller (or the generator) to
-// supply the signature — filed in docs/PLANS/ddl-gaps.md.
+#[tokio::test]
+async fn round_trip_functions_with_argument_signatures() {
+    let driver = PgDriver::new();
+    let conn = driver.open(&spec()).await.expect("open");
+    let src = unique_schema("src_fn");
+    let dst = unique_schema("dst_fn");
+
+    exec_many(
+        &driver,
+        &conn,
+        &[
+            format!("CREATE SCHEMA \"{src}\""),
+            format!("CREATE SCHEMA \"{dst}\""),
+            format!(
+                "CREATE FUNCTION \"{src}\".\"answer\"()
+                 RETURNS integer
+                 LANGUAGE sql
+                 AS $$ SELECT 42 $$"
+            ),
+            format!(
+                "CREATE FUNCTION \"{src}\".\"identity_int\"(x integer)
+                 RETURNS integer
+                 LANGUAGE sql
+                 AS $$ SELECT x $$"
+            ),
+            format!(
+                "CREATE FUNCTION \"{src}\".\"overloaded\"(x integer)
+                 RETURNS text
+                 LANGUAGE sql
+                 AS $$ SELECT 'int:' || x::text $$"
+            ),
+            format!(
+                "CREATE FUNCTION \"{src}\".\"overloaded\"(x text)
+                 RETURNS text
+                 LANGUAGE sql
+                 AS $$ SELECT 'text:' || x $$"
+            ),
+        ],
+    )
+    .await;
+
+    let shallow = driver
+        .schema(
+            conn.clone(),
+            SchemaScope {
+                depth: SchemaDepth::Shallow,
+                filter: Some(SchemaFilter {
+                    schemas: Some(vec![src.clone()]),
+                    kinds: Some(vec![
+                        ObjectKind::ScalarFunction,
+                        ObjectKind::TableValuedFunction,
+                    ]),
+                    ..Default::default()
+                }),
+            },
+        )
+        .await
+        .expect("shallow schema with routines");
+    let routines: Vec<_> = shallow
+        .trees
+        .iter()
+        .flat_map(|tree| &tree.schemas)
+        .flat_map(|schema| &schema.objects)
+        .map(|object| (object.name.as_str(), object.routine_args.clone()))
+        .collect();
+    assert!(
+        routines.contains(&("answer", Some(Vec::new()))),
+        "nullary routine args missing: {routines:?}"
+    );
+    assert!(
+        routines.contains(&("identity_int", Some(vec!["integer".into()]))),
+        "one-arg routine args missing: {routines:?}"
+    );
+    assert!(
+        routines.contains(&("overloaded", Some(vec!["integer".into()])))
+            && routines.contains(&("overloaded", Some(vec!["text".into()]))),
+        "overload routine args missing: {routines:?}"
+    );
+
+    for (name, args) in [
+        ("answer", Vec::new()),
+        ("identity_int", vec!["integer".to_string()]),
+        ("overloaded", vec!["integer".to_string()]),
+        ("overloaded", vec!["text".to_string()]),
+    ] {
+        let path = ObjectPath {
+            catalog: None,
+            schema: Some(src.clone()),
+            name: name.into(),
+            kind: Some(ObjectKind::ScalarFunction),
+            routine_args: Some(args),
+        };
+        let ddl = generate_ddl(&driver, conn.clone(), path)
+            .await
+            .unwrap_or_else(|error| panic!("generate function DDL for {name}: {error}"))
+            .ddl;
+        exec(&driver, &conn, retarget_schema(&ddl, &src, &dst)).await;
+    }
+
+    exec(
+        &driver,
+        &conn,
+        format!(
+            "SELECT \"{dst}\".\"answer\"(),
+                    \"{dst}\".\"identity_int\"(41),
+                    \"{dst}\".\"overloaded\"(1),
+                    \"{dst}\".\"overloaded\"('x'::text)"
+        ),
+    )
+    .await;
+
+    driver.close(conn).await.unwrap();
+}

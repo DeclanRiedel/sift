@@ -1,14 +1,18 @@
 # DDL routine signatures
 
+## Status
+
+Implemented in the working tree after checkpoint `ef60127`.
+
 ## Issue
 
-Postgres routine DDL uses `pg_get_functiondef('<qualified_name>'::regprocedure)`, but `ObjectPath` only carries catalog/schema/name/kind. Overloaded or non-nullary functions require the full `schema.name(argtype, ...)` regprocedure signature, so routine DDL fails or resolves ambiguously.
+Postgres routine DDL used `pg_get_functiondef('<qualified_name>'::regprocedure)`, but `ObjectPath` only carried catalog/schema/name/kind. Overloaded or non-nullary functions require the full `schema.name(argtype, ...)` regprocedure signature, so routine DDL failed or resolved ambiguously.
 
-## Current proof
+## Original proof
 
-- `crates/protocol/src/schema.rs` `ObjectPath` has no argument-type field.
-- `crates/server/src/ddl.rs` formats only `qualified_name(object, engine)` into the `regprocedure` cast.
-- `crates/driver-postgres/src/schema.rs` shallow introspection does not enumerate `pg_proc` routines, so it cannot provide signatures.
+- `crates/protocol/src/schema.rs` `ObjectPath` had no argument-type field.
+- `crates/server/src/ddl.rs` formatted only `qualified_name(object, engine)` into the `regprocedure` cast.
+- `crates/driver-postgres/src/schema.rs` shallow introspection did not enumerate `pg_proc` routines, so it could not provide signatures.
 
 ## Failure mode
 
@@ -16,7 +20,7 @@ Postgres routine DDL uses `pg_get_functiondef('<qualified_name>'::regprocedure)`
 
 ## Changelist
 
-- Extend the protocol with a routine signature field, preferably `ObjectPath.routine_args: Option<Vec<String>>`.
-- Teach Postgres shallow schema introspection to enumerate `pg_proc` routines and populate the argument type list from `pg_get_function_identity_arguments`.
-- Update `generate_routine_ddl` to cast `schema.name(args)` for Postgres and keep SQL Server on `OBJECT_ID`.
-- Add live PG coverage for a nullary function, one-arg function, and overloaded functions.
+- Added `routine_args: Option<Vec<String>>` to `ObjectPath` and `ObjectInfo`.
+- Taught Postgres shallow schema introspection to enumerate `pg_proc` routines and populate input argument type names.
+- Updated `generate_routine_ddl` to cast `schema.name(args)` for Postgres and keep SQL Server on `OBJECT_ID`.
+- Added live PG coverage for a nullary function, one-arg function, and overloaded functions.

@@ -247,16 +247,27 @@ async fn generate_routine_ddl(
 ) -> Result<String, DriverError> {
     let qname = qualified_name(object, engine);
     let sql = match engine {
-        Engine::Postgres => format!(
-            "SELECT pg_get_functiondef('{}'::regprocedure)",
-            qname.replace('\'', "''")
-        ),
+        Engine::Postgres => {
+            let regprocedure = pg_regprocedure_name(object);
+            format!(
+                "SELECT pg_get_functiondef('{}'::regprocedure)",
+                regprocedure.replace('\'', "''")
+            )
+        }
         Engine::SqlServer => format!(
             "SELECT OBJECT_DEFINITION(OBJECT_ID(N'{}'))",
             qname.replace('\'', "''")
         ),
     };
     fetch_scalar_text(driver, handle, sql).await
+}
+
+fn pg_regprocedure_name(object: &ObjectPath) -> String {
+    let qname = qualified_name(object, Engine::Postgres);
+    match &object.routine_args {
+        Some(args) => format!("{qname}({})", args.join(", ")),
+        None => qname,
+    }
 }
 
 /// Drain an execute stream and return the first column of the first
@@ -377,5 +388,37 @@ fn primitive_to_sql(p: sift_protocol::PrimitiveType, engine: Engine) -> String {
     match engine {
         Engine::Postgres => pg.to_string(),
         Engine::SqlServer => ms.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pg_regprocedure_name_includes_argument_signature() {
+        let path = ObjectPath {
+            catalog: None,
+            schema: Some("public".into()),
+            name: "overloaded".into(),
+            kind: Some(ObjectKind::ScalarFunction),
+            routine_args: Some(vec!["integer".into(), "text".into()]),
+        };
+        assert_eq!(
+            pg_regprocedure_name(&path),
+            "\"public\".\"overloaded\"(integer, text)"
+        );
+    }
+
+    #[test]
+    fn pg_regprocedure_name_handles_nullary_signature() {
+        let path = ObjectPath {
+            catalog: None,
+            schema: Some("public".into()),
+            name: "answer".into(),
+            kind: Some(ObjectKind::ScalarFunction),
+            routine_args: Some(Vec::new()),
+        };
+        assert_eq!(pg_regprocedure_name(&path), "\"public\".\"answer\"()");
     }
 }

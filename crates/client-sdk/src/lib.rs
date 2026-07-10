@@ -177,6 +177,11 @@ impl Client {
             let cleaned = kind_str.trim_matches('"');
             query.push(format!("kind={cleaned}"));
         }
+        if let Some(args) = &path.routine_args {
+            for arg in args {
+                query.push(format!("routine_args={}", urlencoding_replace(arg)));
+            }
+        }
         self.get(&format!(
             "/v1/sessions/{session}/connections/{connection}/ddl?{}",
             query.join("&")

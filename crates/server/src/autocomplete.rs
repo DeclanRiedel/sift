@@ -76,6 +76,7 @@ fn resolve_object_path(snapshot: &SchemaSnapshot, name: &str) -> Option<ObjectPa
                         schema: Some(schema.name.clone()),
                         name: obj.name.clone(),
                         kind: Some(obj.kind),
+                        routine_args: obj.routine_args.clone(),
                     });
                 }
             }
@@ -104,6 +105,7 @@ fn merge_deep_into_shallow(mut shallow: SchemaSnapshot, deep: SchemaSnapshot) ->
                     obj.indexes = d.indexes.clone();
                     obj.constraints = d.constraints.clone();
                     obj.triggers = d.triggers.clone();
+                    obj.routine_args = d.routine_args.clone();
                 }
             }
         }

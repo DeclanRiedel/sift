@@ -180,6 +180,7 @@ async fn main() {
         schema: Some("dbo".into()),
         name: "sift_bench".into(),
         kind: Some(ObjectKind::Table),
+        routine_args: None,
     });
     let _ = time_n("schema (Deep)", 50, || async {
         driver.schema(conn.clone(), deep.clone()).await

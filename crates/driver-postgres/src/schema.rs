@@ -55,7 +55,7 @@ async fn shallow_tree(
     let schemas_filter: Option<Vec<String>> = filter.and_then(|f| f.schemas.clone());
     let kinds_filter: Option<Vec<ObjectKind>> = filter.and_then(|f| f.kinds.clone());
 
-    let rows = if let Some(schemas) = schemas_filter.as_ref() {
+    let rel_rows = if let Some(schemas) = schemas_filter.as_ref() {
         conn.query(
             "SELECT n.nspname AS schema_name,
                     c.relname AS object_name,
@@ -90,8 +90,59 @@ async fn shallow_tree(
         .map_err(pg_err)?
     };
 
+    let proc_rows = if let Some(schemas) = schemas_filter.as_ref() {
+        conn.query(
+            "SELECT n.nspname AS schema_name,
+                    p.proname AS object_name,
+                    p.prokind,
+                    p.proretset,
+                    ARRAY(
+                        SELECT format_type(arg_oid::oid, NULL)
+                        FROM unnest(string_to_array(p.proargtypes::text, ' '))
+                             WITH ORDINALITY AS args(arg_oid, ord)
+                        WHERE arg_oid <> ''
+                        ORDER BY ord
+                    ) AS arg_types
+             FROM pg_proc p
+             JOIN pg_namespace n ON n.oid = p.pronamespace
+             WHERE n.nspname NOT IN ('pg_catalog', 'information_schema')
+               AND n.nspname NOT LIKE 'pg_toast%'
+               AND p.prokind IN ('f', 'p')
+               AND p.proname LIKE $1
+               AND n.nspname = ANY($2::text[])
+             ORDER BY 1, 2",
+            &[&like, schemas],
+        )
+        .await
+        .map_err(pg_err)?
+    } else {
+        conn.query(
+            "SELECT n.nspname AS schema_name,
+                    p.proname AS object_name,
+                    p.prokind,
+                    p.proretset,
+                    ARRAY(
+                        SELECT format_type(arg_oid::oid, NULL)
+                        FROM unnest(string_to_array(p.proargtypes::text, ' '))
+                             WITH ORDINALITY AS args(arg_oid, ord)
+                        WHERE arg_oid <> ''
+                        ORDER BY ord
+                    ) AS arg_types
+             FROM pg_proc p
+             JOIN pg_namespace n ON n.oid = p.pronamespace
+             WHERE n.nspname NOT IN ('pg_catalog', 'information_schema')
+               AND n.nspname NOT LIKE 'pg_toast%'
+               AND p.prokind IN ('f', 'p')
+               AND p.proname LIKE $1
+             ORDER BY 1, 2",
+            &[&like],
+        )
+        .await
+        .map_err(pg_err)?
+    };
+
     let mut by_schema: BTreeMap<String, Vec<ObjectInfo>> = BTreeMap::new();
-    for row in rows {
+    for row in rel_rows {
         let schema_name: String = row.get(0);
         let object_name: String = row.get(1);
         let relkind: i8 = row.get(2);
@@ -107,6 +158,24 @@ async fn shallow_tree(
             .entry(schema_name)
             .or_default()
             .push(ObjectInfo::new(object_name, kind));
+    }
+    for row in proc_rows {
+        let schema_name: String = row.get(0);
+        let object_name: String = row.get(1);
+        let prokind: i8 = row.get(2);
+        let proretset: bool = row.get(3);
+        let routine_args: Vec<String> = row.get(4);
+        let Some(kind) = prokind_to_kind(prokind as u8, proretset) else {
+            continue;
+        };
+        if let Some(kinds) = kinds_filter.as_ref() {
+            if !kinds.contains(&kind) {
+                continue;
+            }
+        }
+        let mut info = ObjectInfo::new(object_name, kind);
+        info.routine_args = Some(routine_args);
+        by_schema.entry(schema_name).or_default().push(info);
     }
 
     let schemas = by_schema
@@ -147,6 +216,7 @@ async fn deep_tree(
     let object_info = ObjectInfo {
         name: object_name.clone(),
         kind,
+        routine_args: object.routine_args.clone(),
         columns,
         indexes,
         constraints,
@@ -489,6 +559,15 @@ fn relkind_to_kind(byte: u8) -> Option<ObjectKind> {
         b'm' => Some(ObjectKind::MaterializedView),
         b'S' => Some(ObjectKind::Sequence),
         b'f' => Some(ObjectKind::ForeignTable),
+        _ => None,
+    }
+}
+
+fn prokind_to_kind(byte: u8, returns_set: bool) -> Option<ObjectKind> {
+    match byte {
+        b'p' => Some(ObjectKind::Procedure),
+        b'f' if returns_set => Some(ObjectKind::TableValuedFunction),
+        b'f' => Some(ObjectKind::ScalarFunction),
         _ => None,
     }
 }

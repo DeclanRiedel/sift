@@ -61,6 +61,12 @@ pub struct ObjectPath {
     pub name: String,
     #[serde(default)]
     pub kind: Option<ObjectKind>,
+    /// Input argument type names for routines. Required by PostgreSQL
+    /// `regprocedure` lookup when a function/procedure is overloaded or has
+    /// arguments. Empty means a nullary routine; `None` means not a routine or
+    /// not known.
+    #[serde(default)]
+    pub routine_args: Option<Vec<String>>,
 }
 
 impl ObjectPath {
@@ -70,6 +76,7 @@ impl ObjectPath {
             schema: None,
             name: name.into(),
             kind: None,
+            routine_args: None,
         }
     }
 }
@@ -221,6 +228,10 @@ pub struct SchemaTree {
 pub struct ObjectInfo {
     pub name: String,
     pub kind: ObjectKind,
+    /// Input argument type names for routines. Empty means a nullary routine;
+    /// `None` means not a routine or not known.
+    #[serde(default)]
+    pub routine_args: Option<Vec<String>>,
     /// Populated only for `SchemaDepth::Deep` requests targeting this object.
     #[serde(default)]
     pub columns: Vec<ColumnMetadata>,
@@ -240,6 +251,7 @@ impl ObjectInfo {
         Self {
             name: name.into(),
             kind,
+            routine_args: None,
             columns: Vec::new(),
             indexes: Vec::new(),
             constraints: Vec::new(),

@@ -151,6 +151,7 @@ async fn main() {
         schema: Some("public".into()),
         name: "bench".into(),
         kind: Some(sift_protocol::ObjectKind::Table),
+        routine_args: None,
     });
     let _ = time_n("schema (Deep)", 50, || async {
         driver.schema(conn.clone(), deep.clone()).await

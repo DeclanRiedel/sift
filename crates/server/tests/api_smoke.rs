@@ -2710,6 +2710,7 @@ async fn ddl_generation_view_uses_execute_pg_get_viewdef() {
                 schema: Some("public".into()),
                 name: "active_users".into(),
                 kind: Some(sift_protocol::ObjectKind::View),
+                routine_args: None,
             },
         )
         .await
@@ -2735,6 +2736,7 @@ async fn ddl_generation_table_composes_from_deep_schema() {
         schema: Some("public".into()),
         name: "users".into(),
         kind: Some(ObjectKind::Table),
+        routine_args: None,
     }));
     snap.trees.push(sift_protocol::CatalogTree {
         name: "sifttest".into(),
@@ -2743,6 +2745,7 @@ async fn ddl_generation_table_composes_from_deep_schema() {
             objects: vec![ObjectInfo {
                 name: "users".into(),
                 kind: ObjectKind::Table,
+                routine_args: None,
                 columns: vec![
                     ColumnMetadata {
                         name: "id".into(),
@@ -2808,6 +2811,7 @@ async fn ddl_generation_table_composes_from_deep_schema() {
                 schema: Some("public".into()),
                 name: "users".into(),
                 kind: Some(ObjectKind::Table),
+                routine_args: None,
             },
         )
         .await

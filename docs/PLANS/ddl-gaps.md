@@ -13,16 +13,13 @@ of what already works.
 
 ## Priority 1 — fix soon (real bugs on shipped surface)
 
-1. **Functions/procedures need the argument-type signature.**
-   `pg_get_functiondef` takes a `regprocedure` cast which requires the
-   full signature (`schema.name(argtypes)`). Today's caller passes only
-   the bare name and the cast fails with `22P02` for anything past a
-   nullary function. **Fix shape:** extend `ObjectPath` (or add a
-   sibling field) to carry an optional argument-type list, and have the
-   PG schema introspection populate it when reporting
-   `ScalarFunction` / `TableValuedFunction` / `Procedure` entries. The
-   MSSQL side is unaffected (`OBJECT_DEFINITION` takes an
-   `OBJECT_ID` that doesn't need the signature).
+1. **Resolved — functions/procedures carry the argument-type signature.**
+   `ObjectPath` / `ObjectInfo` now carry `routine_args`, PG shallow
+   introspection enumerates `pg_proc` routines with input argument type
+   names, and routine DDL casts `schema.name(argtypes)` to
+   `regprocedure`. Live PG coverage exists for nullary, one-arg, and
+   overloaded functions. The MSSQL side remains on `OBJECT_DEFINITION`
+   via `OBJECT_ID`.
 
 2. **`ForeignTable` currently emits `CREATE TABLE`.** The routing
    drops through the table branch; there's no SERVER / OPTIONS clause.

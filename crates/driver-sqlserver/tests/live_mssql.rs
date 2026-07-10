@@ -256,6 +256,7 @@ async fn schema_deep_and_transactions() {
                 schema: Some("dbo".into()),
                 name: table.clone(),
                 kind: None,
+                routine_args: None,
             }),
         )
         .await

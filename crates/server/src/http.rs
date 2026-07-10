@@ -2210,6 +2210,11 @@ struct DdlQuery {
     /// etc. Defaults to `table` if omitted.
     #[serde(default)]
     kind: Option<sift_protocol::ObjectKind>,
+    /// Routine input argument types. Repeat `routine_args=...` for each
+    /// argument. Empty/omitted means not supplied; use no values for a nullary
+    /// routine from typed clients via `ObjectPath.routine_args = Some(vec![])`.
+    #[serde(default)]
+    routine_args: Option<Vec<String>>,
 }
 
 async fn export_query(
@@ -2261,6 +2266,7 @@ async fn get_object_ddl(
         schema: q.schema,
         name: q.name,
         kind: q.kind,
+        routine_args: q.routine_args,
     };
     let ddl = state.sessions.ddl_for(id, conn_id, path.clone()).await?;
     state.sessions.push_operation(
@@ -2338,6 +2344,7 @@ fn build_scope(q: SchemaQuery) -> ApiResult<SchemaScope> {
                 schema: Some(schema),
                 name: object,
                 kind: None,
+                routine_args: None,
             }))
         }
         other => Err(ApiError::BadRequest(format!(

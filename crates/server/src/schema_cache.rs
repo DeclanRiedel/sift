@@ -512,6 +512,7 @@ mod tests {
                     schema: Some("public".into()),
                     name: "users".into(),
                     kind: None,
+                    routine_args: None,
                 },
             },
             filter: None,

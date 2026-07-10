@@ -290,6 +290,7 @@ async fn schema_deep_lists_columns_pk_indexes_constraints() {
         schema: Some(schema),
         name: "users".into(),
         kind: Some(ObjectKind::Table),
+        routine_args: None,
     });
     let snap = driver
         .schema(conn.clone(), scope)
