@@ -33,25 +33,50 @@ fn map_err(error: KeyringError) -> MetadataError {
 #[async_trait]
 impl SecretStore for OsKeychainSecretStore {
     async fn put(&self, namespace: &str, handle: &str, secret: &[u8]) -> Result<()> {
-        Self::entry(namespace, handle)?
-            .set_secret(secret)
-            .map_err(map_err)
+        let namespace = namespace.to_string();
+        let handle = handle.to_string();
+        let secret = secret.to_vec();
+        keychain_blocking(move || {
+            Self::entry(&namespace, &handle)?
+                .set_secret(&secret)
+                .map_err(map_err)
+        })
+        .await
     }
 
     async fn get(&self, namespace: &str, handle: &str) -> Result<Option<Vec<u8>>> {
-        match Self::entry(namespace, handle)?.get_secret() {
-            Ok(bytes) => Ok(Some(bytes)),
-            Err(KeyringError::NoEntry) => Ok(None),
-            Err(error) => Err(map_err(error)),
-        }
+        let namespace = namespace.to_string();
+        let handle = handle.to_string();
+        keychain_blocking(
+            move || match Self::entry(&namespace, &handle)?.get_secret() {
+                Ok(bytes) => Ok(Some(bytes)),
+                Err(KeyringError::NoEntry) => Ok(None),
+                Err(error) => Err(map_err(error)),
+            },
+        )
+        .await
     }
 
     async fn delete(&self, namespace: &str, handle: &str) -> Result<()> {
-        match Self::entry(namespace, handle)?.delete_credential() {
-            Ok(()) | Err(KeyringError::NoEntry) => Ok(()),
-            Err(error) => Err(map_err(error)),
-        }
+        let namespace = namespace.to_string();
+        let handle = handle.to_string();
+        keychain_blocking(
+            move || match Self::entry(&namespace, &handle)?.delete_credential() {
+                Ok(()) | Err(KeyringError::NoEntry) => Ok(()),
+                Err(error) => Err(map_err(error)),
+            },
+        )
+        .await
     }
+}
+
+async fn keychain_blocking<T>(f: impl FnOnce() -> Result<T> + Send + 'static) -> Result<T>
+where
+    T: Send + 'static,
+{
+    tokio::task::spawn_blocking(f)
+        .await
+        .map_err(|error| MetadataError::BlockingTask(error.to_string()))?
 }
 
 #[cfg(test)]

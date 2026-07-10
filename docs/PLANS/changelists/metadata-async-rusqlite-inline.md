@@ -1,5 +1,11 @@
 # Metadata async methods run SQLite inline
 
+## Status
+
+Implemented in the working tree: the async connection-profile methods now run
+their rusqlite sections through `tokio::task::spawn_blocking` while keeping
+secret-store awaits outside the SQLite lock.
+
 ## Issue
 
 Several `async fn` metadata methods perform synchronous rusqlite work on the async caller before or after awaiting secret-store calls. This leaks blocking SQLite work back onto tokio worker threads.

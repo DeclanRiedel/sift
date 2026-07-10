@@ -1,5 +1,10 @@
 # OS keychain blocking calls
 
+## Status
+
+Implemented in the working tree: `OsKeychainSecretStore` now wraps keyring
+put/get/delete operations in `tokio::task::spawn_blocking`.
+
 ## Issue
 
 The `OsKeychainSecretStore` implements async trait methods but calls the `keyring` crate synchronously inside them.

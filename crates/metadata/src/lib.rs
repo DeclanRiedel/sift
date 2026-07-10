@@ -66,6 +66,8 @@ pub enum MetadataError {
     SavedQueryNotFound(SavedQueryId),
     #[error("secret store error: {0}")]
     SecretStore(String),
+    #[error("blocking metadata task failed: {0}")]
+    BlockingTask(String),
 }
 
 #[derive(Clone)]
@@ -410,8 +412,10 @@ impl MetadataStore {
         let now = now_text();
         let spec_json = serde_json::to_string(&input.spec)?;
         let tags_json = serde_json::to_string(&input.tags)?;
-        let db_result: Result<(ConnectionProfile, Option<String>)> = {
-            let mut conn = self.conn.lock().unwrap();
+        let conn = Arc::clone(&self.conn);
+        let db_shared_secret_handle = new_shared_secret_handle.clone();
+        let db_result: Result<(ConnectionProfile, Option<String>)> = sqlite_blocking(move || {
+            let mut conn = conn.lock().unwrap();
             let tx = conn.transaction()?;
             let old_shared_secret_handle: Option<String> = tx
                 .query_row(
@@ -439,7 +443,7 @@ impl MetadataStore {
                     input.engine.as_str(),
                     spec_json,
                     input.credential_mode.as_str(),
-                    new_shared_secret_handle.as_deref(),
+                    db_shared_secret_handle.as_deref(),
                     tags_json,
                     actor.0,
                     now
@@ -454,10 +458,11 @@ impl MetadataStore {
                     |row| row.get(0),
                 )?);
                 tx.commit()?;
-                let profile = self.connection_profile_by_id_locked(&conn, id)?;
+                let profile = connection_profile_by_id_locked(&conn, id)?;
                 Ok((profile, old_shared_secret_handle))
             }
-        };
+        })
+        .await;
         let (profile, old_shared_secret_handle) = match db_result {
             Ok(result) => result,
             Err(error) => {
@@ -483,8 +488,9 @@ impl MetadataStore {
         tenant: TenantId,
         id: ConnectionProfileId,
     ) -> Result<()> {
-        let handles = {
-            let mut conn = self.conn.lock().unwrap();
+        let conn = Arc::clone(&self.conn);
+        let handles = sqlite_blocking(move || {
+            let mut conn = conn.lock().unwrap();
             let tx = conn.transaction()?;
             let mut handles = Vec::new();
             if let Some(handle) = tx
@@ -513,8 +519,9 @@ impl MetadataStore {
                 return Err(MetadataError::ConnectionProfileNotFound(id));
             }
             tx.commit()?;
-            handles
-        };
+            Ok(handles)
+        })
+        .await?;
         for handle in handles {
             let _ = self.secrets.delete(SECRET_NAMESPACE, &handle).await;
         }
@@ -530,8 +537,10 @@ impl MetadataStore {
         let handle = Uuid::new_v4().to_string();
         self.secrets.put(SECRET_NAMESPACE, &handle, secret).await?;
         let now = now_text();
-        let db_result: Result<Option<String>> = {
-            let mut conn = self.conn.lock().unwrap();
+        let conn = Arc::clone(&self.conn);
+        let db_handle = handle.clone();
+        let db_result: Result<Option<String>> = sqlite_blocking(move || {
+            let mut conn = conn.lock().unwrap();
             let tx = conn.transaction()?;
             let old_handle: Option<String> = tx
                 .query_row(
@@ -548,7 +557,7 @@ impl MetadataStore {
                  ON CONFLICT(connection_profile_id, principal_id) DO UPDATE SET
                     secret_handle = excluded.secret_handle,
                     updated_at = excluded.updated_at",
-                params![profile_id.0, principal_id.0, handle, now],
+                params![profile_id.0, principal_id.0, db_handle, now],
             );
             if let Err(error) = write_result {
                 Err(error.into())
@@ -556,7 +565,8 @@ impl MetadataStore {
                 tx.commit()?;
                 Ok(old_handle)
             }
-        };
+        })
+        .await;
         let old_handle = match db_result {
             Ok(old_handle) => old_handle,
             Err(error) => {
@@ -578,9 +588,10 @@ impl MetadataStore {
         principal: PrincipalId,
         id: ConnectionProfileId,
     ) -> Result<ConnectionSpec> {
-        let (profile, handle) = {
-            let conn = self.conn.lock().unwrap();
-            let profile = self.connection_profile_by_id_locked(&conn, id)?;
+        let conn = Arc::clone(&self.conn);
+        let (profile, handle) = sqlite_blocking(move || {
+            let conn = conn.lock().unwrap();
+            let profile = connection_profile_by_id_locked(&conn, id)?;
             if profile.tenant_id != tenant {
                 return Err(MetadataError::TenantMismatch(id, tenant));
             }
@@ -600,8 +611,9 @@ impl MetadataStore {
                     return Err(MetadataError::BrokerCredentialUnsupported(id))
                 }
             };
-            (profile, handle)
-        };
+            Ok((profile, handle))
+        })
+        .await?;
         let mut spec = profile.spec;
         if let Some(handle) = handle {
             let secret = self
@@ -1116,15 +1128,7 @@ impl MetadataStore {
         conn: &Connection,
         id: ConnectionProfileId,
     ) -> Result<ConnectionProfile> {
-        conn.query_row(
-            "SELECT id, tenant_id, name, engine, spec_json, credential_mode,
-                    shared_secret_handle, tags_json, created_by, created_at, updated_at
-             FROM connection_profile WHERE id = ?1",
-            params![id.0],
-            connection_profile_from_row,
-        )
-        .optional()?
-        .ok_or(MetadataError::ConnectionProfileNotFound(id))
+        connection_profile_by_id_locked(conn, id)
     }
 
     fn room_by_id_locked(&self, conn: &Connection, id: RoomId) -> Result<Room> {
@@ -1237,6 +1241,30 @@ fn rows<T>(
         out.push(row?);
     }
     Ok(out)
+}
+
+async fn sqlite_blocking<T>(f: impl FnOnce() -> Result<T> + Send + 'static) -> Result<T>
+where
+    T: Send + 'static,
+{
+    tokio::task::spawn_blocking(f)
+        .await
+        .map_err(|error| MetadataError::BlockingTask(error.to_string()))?
+}
+
+fn connection_profile_by_id_locked(
+    conn: &Connection,
+    id: ConnectionProfileId,
+) -> Result<ConnectionProfile> {
+    conn.query_row(
+        "SELECT id, tenant_id, name, engine, spec_json, credential_mode,
+                    shared_secret_handle, tags_json, created_by, created_at, updated_at
+             FROM connection_profile WHERE id = ?1",
+        params![id.0],
+        connection_profile_from_row,
+    )
+    .optional()?
+    .ok_or(MetadataError::ConnectionProfileNotFound(id))
 }
 
 fn principal_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Principal> {
