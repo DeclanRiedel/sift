@@ -159,19 +159,6 @@ them. Re-verified against current source:
 - Fix: per-driver/connection semaphore; on timeout call `driver.cancel`
   (only `execute_http` does this at `session.rs:682`).
 
-#### P1-mem-3. Pump task and eviction callbacks are detached with no supervision
-- Files: `crates/server/src/cursors.rs:207` (`tokio::spawn(pump_task(…))`),
-  `crates/server/src/session.rs:165` (`install_eviction_callback`)
-- Detail: JoinHandle dropped. If the pump panics, `consumer_tx` drops,
-  the consumer sees stream-end-without-terminal, but **the cursor entry
-  in `self.inner.entries` is never removed** (only `cursors.remove()`
-  removes it, called after a terminal arrives — which never does).
-- **Why it matters:** the per-session cursor slot leaks permanently;
-  after `max_per_session` (default 32) panics, the session can't open
-  any new cursor. Same pattern in eviction callbacks.
-- Fix: supervise pumps; on pump exit self-remove from the registry.
-  Consider `JoinSet` owned by the registry.
-
 ### Lock contention
 
 #### P1-lock-1. Global audit/operations Mutex serializes every operation

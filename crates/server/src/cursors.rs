@@ -21,6 +21,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use dashmap::DashMap;
+use futures::FutureExt;
 use sift_driver_api::ResultSetStream;
 use sift_protocol::{Code, CursorId, DriverError, Page, SessionId};
 use tokio::sync::{mpsc, Notify};
@@ -204,7 +205,7 @@ impl CursorRegistry {
             server_side_cursor,
             ..
         } = stream;
-        tokio::spawn(pump_task(
+        tokio::spawn(supervise_pump_task(
             session_id,
             cursor_id,
             control,
@@ -438,6 +439,43 @@ impl CursorRegistry {
                 list.retain(|c| *c != cursor_id);
             }
         }
+    }
+}
+
+async fn supervise_pump_task(
+    session_id: SessionId,
+    cursor_id: CursorId,
+    control: Arc<PumpControl>,
+    driver_rx: mpsc::Receiver<Page>,
+    consumer_tx: mpsc::Sender<Page>,
+    inner: Arc<Inner>,
+) {
+    let panic_tx = consumer_tx.clone();
+    let panic_inner = Arc::clone(&inner);
+    let result = std::panic::AssertUnwindSafe(pump_task(
+        session_id,
+        cursor_id,
+        control,
+        driver_rx,
+        consumer_tx,
+        inner,
+    ))
+    .catch_unwind()
+    .await;
+    if result.is_err() {
+        remove_cursor_state(&panic_inner, session_id, cursor_id);
+        let _ = panic_tx
+            .send(Page::Error {
+                error: DriverError::new(Code::DriverInternal, "cursor pump task panicked"),
+            })
+            .await;
+    }
+}
+
+fn remove_cursor_state(inner: &Arc<Inner>, session_id: SessionId, cursor_id: CursorId) {
+    inner.entries.remove(&cursor_id);
+    if let Some(mut list) = inner.per_session.get_mut(&session_id) {
+        list.retain(|c| *c != cursor_id);
     }
 }
 
