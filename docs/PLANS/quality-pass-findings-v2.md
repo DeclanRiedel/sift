@@ -304,24 +304,6 @@ P0-6 and P1-driver-3 below.
 - Fix: store the `JoinHandle` in the `cursors` DashMap value; `abort()`
   from `remove_conn`. Mirror MSSQL's `close`.
 
-#### P1-driver-2. PG `search_path` GUC injection
-- Files: `crates/driver-postgres/src/lib.rs:500`,
-  `crates/driver-postgres/src/conn.rs:123`
-- Detail: `cfg.options(format!("-c search_path={}", search_path.join(",")))`.
-  libpq parses `options` as space-separated `-c key=value` flags.
-  `PgConnectionSpec.search_path: Vec<String>` is caller-controlled and
-  **never validated**.
-- **Why it matters:** a schema name containing a space (PG permits
-  arbitrary identifiers when double-quoted at creation) injects a
-  second startup flag: `search_path = ["public", "x -c
-  statement_timeout=0 -c"]` → `"-c search_path=public,x -c
-  statement_timeout=0 -c"`. Attacker-controlled GUCs at session start,
-  including `statement_timeout=0`, `role=...`,
-  `session_preload_libraries=...`. **P0 if `ConnectionSpec` ever flows
-  from end-user input (RCE via `session_preload_libraries`); P1 today
-  (admin-supplied).**
-- Fix: `validate_ident` each schema before formatting.
-
 #### P1-driver-3. PG cancel leaves `SslMode::Require` on NoTls (v1 #5 residual)
 - File: `crates/driver-postgres/src/lib.rs:159-175`
 - Detail: SSL mode is pulled from `spec_for(c.id())` and TLS used for
@@ -924,9 +906,8 @@ P0-6 and P1-driver-3 below.
    autocomplete and "Zed-class."
 4. **P1-io-1 / P1-io-2** (spill I/O `spawn_blocking`) — prevents worker
    stalls on evicted cursors.
-5. **P1-driver-1** (PG close-leak) + **P1-driver-2** (search_path
-    validation) — silent resource leak + the only finding with RCE
-    potential under "connect to your own DB."
+5. **P1-driver-1** (PG close-leak) — silent resource leak on
+   close-mid-stream cycles.
 6. **P1-meta-1 / P1-meta-2** (connection pool + HMAC tokens) — the
     scalability ceiling for any multi-user deployment.
 7. **Refactor splits** (http.rs / mssql lib.rs / metadata lib.rs) —

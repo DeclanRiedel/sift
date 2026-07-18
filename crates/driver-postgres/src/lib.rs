@@ -207,7 +207,7 @@ impl PgExt for PgDriver {
                 .with_engine(Engine::Postgres)
         })?;
         let (tx, rx) = tokio::sync::mpsc::channel(128);
-        let cfg = pg_connect_config(&spec);
+        let cfg = pg_connect_config(&spec)?;
         let ssl_mode = spec.ssl_mode.unwrap_or(sift_protocol::SslMode::Prefer);
         let channels_set: std::collections::HashSet<String> = channels.iter().cloned().collect();
         let client = if matches!(
@@ -467,7 +467,7 @@ fn begin_sql(mode: &TxMode) -> String {
     format!("BEGIN ISOLATION LEVEL {iso}{access}")
 }
 
-fn pg_connect_config(spec: &ConnectionSpec) -> tokio_postgres::Config {
+fn pg_connect_config(spec: &ConnectionSpec) -> Result<tokio_postgres::Config, DriverError> {
     let mut cfg = tokio_postgres::Config::new();
     if spec.host.starts_with('/') {
         cfg.host_path(&spec.host);
@@ -497,13 +497,13 @@ fn pg_connect_config(spec: &ConnectionSpec) -> tokio_postgres::Config {
 
     if let Some(sift_protocol::EngineConnectionSpec::Postgres(pg)) = &spec.engine_specific {
         if let Some(search_path) = &pg.search_path {
-            cfg.options(format!("-c search_path={}", search_path.join(",")));
+            cfg.options(format_search_path_option(search_path)?);
         }
         if let Some(timeout) = pg.connect_timeout_secs {
             cfg.connect_timeout(std::time::Duration::from_secs(timeout as u64));
         }
     }
-    cfg
+    Ok(cfg)
 }
 
 async fn listen_channels(client: &Client, channels: Vec<String>) -> Result<(), DriverError> {
@@ -583,6 +583,25 @@ fn quote_ident(name: &str) -> Result<String, DriverError> {
     Ok(format!("\"{name}\""))
 }
 
+pub(crate) fn format_search_path_option(search_path: &[String]) -> Result<String, DriverError> {
+    if search_path.is_empty() {
+        return Err(DriverError::new(
+            Code::InvalidParameterValue,
+            "search_path must contain at least one schema",
+        ));
+    }
+    let mut entries = Vec::with_capacity(search_path.len());
+    for entry in search_path {
+        if entry == "$user" {
+            entries.push("\"$user\"".to_string());
+        } else {
+            validate_ident(entry)?;
+            entries.push(entry.clone());
+        }
+    }
+    Ok(format!("-c search_path={}", entries.join(",")))
+}
+
 fn quote_qualified_ident(name: &str) -> Result<String, DriverError> {
     let parts: Vec<&str> = name.split('.').collect();
     if parts.is_empty() || parts.len() > 2 {
@@ -637,6 +656,27 @@ mod tests {
         assert!(validate_ident("a'b").is_err());
         assert!(validate_ident("a--b").is_err());
         assert!(validate_ident("a/*b*/").is_err());
+    }
+
+    #[test]
+    fn format_search_path_option_accepts_safe_entries() {
+        let option = format_search_path_option(&["$user".into(), "public".into()]).unwrap();
+        assert_eq!(option, r#"-c search_path="$user",public"#);
+    }
+
+    #[test]
+    fn format_search_path_option_rejects_startup_option_injection() {
+        for entry in [
+            "has space",
+            "public,evil",
+            "x -c statement_timeout=0",
+            "\"quoted\"",
+        ] {
+            assert!(
+                format_search_path_option(&[entry.to_string()]).is_err(),
+                "{entry:?} should be rejected"
+            );
+        }
     }
 
     #[test]

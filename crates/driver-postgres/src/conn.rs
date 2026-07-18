@@ -120,7 +120,7 @@ impl PgDriverInner {
         if let Some(sift_protocol::EngineConnectionSpec::Postgres(p)) = &spec.engine_specific {
             if let Some(s) = &p.search_path {
                 // `options` propagates as `-c search_path=...` on connect.
-                cfg.options = Some(format!("-c search_path={}", s.join(",")));
+                cfg.options = Some(crate::format_search_path_option(s)?);
             }
             if let Some(t) = p.connect_timeout_secs {
                 cfg.connect_timeout = Some(std::time::Duration::from_secs(t as u64));
