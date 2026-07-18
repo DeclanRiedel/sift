@@ -16,6 +16,7 @@ use crate::decode::{col_to_metadata, PgValue};
 use crate::{pg_err, PgDriver};
 
 const ROW_BATCH_SIZE: usize = 128;
+const MAX_DECODE_WARNINGS: usize = 100;
 
 struct QueryJob {
     inner: Arc<PgDriverInner>,
@@ -170,7 +171,7 @@ async fn run_streaming(job: QueryJob) {
 
     tokio::pin!(stream);
 
-    let mut warnings = Vec::new();
+    let mut warnings = DecodeWarnings::default();
     let mut columns_sent = false;
     let mut row_batch = Vec::with_capacity(ROW_BATCH_SIZE);
 
@@ -197,7 +198,7 @@ async fn run_streaming(job: QueryJob) {
                 }
             }
             Err(e) => {
-                warnings.push(DriverWarning::new(e.to_string()));
+                warnings.push(e.to_string());
             }
         }
     }
@@ -212,7 +213,7 @@ async fn run_streaming(job: QueryJob) {
             // SELECT-class queries don't produce a meaningful "affected"
             // count anyway. For DML...RETURNING the caller can count rows.
             affected_rows: None,
-            warnings,
+            warnings: warnings.into_warnings(),
         })
         .await;
 
@@ -325,7 +326,7 @@ fn decode_cell(
     row: &tokio_postgres::Row,
     i: usize,
     cursor_id_num: u64,
-    warnings: &mut Vec<DriverWarning>,
+    warnings: &mut DecodeWarnings,
 ) -> Value {
     match row.try_get::<_, Option<PgValue>>(i) {
         Ok(Some(pv)) => pv.0,
@@ -334,16 +335,39 @@ fn decode_cell(
             let col_name = row.columns().get(i).map(|c| c.name()).unwrap_or("?");
             let msg = e.to_string();
             tracing::warn!(cursor_id_num, idx = i, "cell decode error: {msg}");
-            warnings.push(DriverWarning::new(format!(
-                "cell {} ({}): decode error: {msg}",
-                i, col_name
-            )));
+            warnings.push(format!("cell {} ({}): decode error: {msg}", i, col_name));
             Value::Engine {
                 engine: sift_protocol::Engine::Postgres,
                 type_name: "?".to_string(),
                 display_text: "<decode error>".to_string(),
             }
         }
+    }
+}
+
+#[derive(Default)]
+struct DecodeWarnings {
+    warnings: Vec<DriverWarning>,
+    suppressed: usize,
+}
+
+impl DecodeWarnings {
+    fn push(&mut self, message: String) {
+        if self.warnings.len() < MAX_DECODE_WARNINGS {
+            self.warnings.push(DriverWarning::new(message));
+        } else {
+            self.suppressed = self.suppressed.saturating_add(1);
+        }
+    }
+
+    fn into_warnings(mut self) -> Vec<DriverWarning> {
+        if self.suppressed > 0 {
+            self.warnings.push(DriverWarning::new(format!(
+                "{} additional Postgres decode warnings suppressed",
+                self.suppressed
+            )));
+        }
+        self.warnings
     }
 }
 

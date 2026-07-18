@@ -139,16 +139,6 @@ them. Re-verified against current source:
 - Fix: explicit arms for `Money`/`Money4`/`DatetimeOffset`. For
   `SqlVariant`, fall through to `Value::Engine`, not NULL.
 
-#### P1-driver-12. PG `run_streaming` accumulates decode-error warnings without bound
-- File: `crates/driver-postgres/src/stream.rs:166, 192-194, 329-334`
-- Detail: every errored cell pushes a `DriverWarning::new(format!(…))`
-  into `warnings: Vec<DriverWarning>`, held until `Page::Done`.
-- **Why it matters:** for a 1M-row query with one unsupported column,
-  this is 1M String allocations held in memory simultaneously. Pathological
-  but realistic (`SELECT *` from a table with one undecoded column).
-- Fix: cap at e.g. 100 entries; once full, increment a
-  `suppressed_count` and emit a final summary warning.
-
 ### Metadata scalability ceiling
 
 #### P1-meta-1. Single `Connection` behind `std::sync::Mutex` serializes all metadata access
