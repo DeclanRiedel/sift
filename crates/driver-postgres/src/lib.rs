@@ -146,14 +146,14 @@ impl Driver for PgDriver {
             // belong to this ConnHandle. Cursor ids are monotonic across
             // all conns, so without this an authenticated caller with any
             // ConnHandle could cancel another user's query by guessing.
-            if entry.0 != c.id() {
+            if entry.conn_id != c.id() {
                 return Err(DriverError::new(
                     Code::CursorNotFound,
                     "cursor does not belong to this connection",
                 )
                 .with_engine(Engine::Postgres));
             }
-            entry.1.clone()
+            entry.cancel_token.clone()
         };
         // Match the SSL mode the original conn used. Postgres deployments
         // configured with `hostssl` reject a NoTls cancel socket, and the

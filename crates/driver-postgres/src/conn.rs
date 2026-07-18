@@ -9,6 +9,7 @@ use dashmap::DashMap;
 use sift_driver_api::{ConnHandle, IdCounter};
 use sift_protocol::{Code, ConnectionSpec, DriverError, SslMode, TxId};
 use tokio::sync::Mutex;
+use tokio::task::JoinHandle;
 
 use deadpool_postgres::{Pool, Runtime};
 
@@ -28,9 +29,10 @@ pub(crate) struct PgDriverInner {
     /// `tx_id` inline, and `find_conn_in_tx` iterates the map. Acceptable at
     /// current connection counts; revisit only if profiling shows contention.
     pub(crate) conns: Mutex<HashMap<u64, ConnState>>,
-    /// cursor_id → (owning conn_id, cancel token). `conn_id` is carried so
-    /// `close` can drain live cursors belonging to the conn.
-    pub(crate) cursors: DashMap<u64, (u64, tokio_postgres::CancelToken)>,
+    /// cursor_id → owning conn, cancel token, and spawned query task.
+    /// `conn_id` is carried so `close` can drain live cursors belonging
+    /// to the conn.
+    pub(crate) cursors: DashMap<u64, CursorEntry>,
     /// conn_id → dedicated LISTEN clients + the channels each subscribed
     /// to. Each `listen` call spawns its own connection and appends an
     /// entry here so `unlisten` can issue UNLISTEN against only the
@@ -57,6 +59,12 @@ pub(crate) enum ConnState {
     Free(PooledConn),
     InTx { conn: PooledConn, tx_id: u64 },
     Taken,
+}
+
+pub(crate) struct CursorEntry {
+    pub(crate) conn_id: u64,
+    pub(crate) cancel_token: tokio_postgres::CancelToken,
+    pub(crate) task: std::sync::Mutex<Option<JoinHandle<()>>>,
 }
 
 /// Remembered when a conn is taken for an op, so the spawned task knows how
@@ -261,7 +269,7 @@ impl PgDriverInner {
             .cursors
             .iter()
             .filter_map(|entry| {
-                if entry.value().0 == c.id() {
+                if entry.value().conn_id == c.id() {
                     Some(*entry.key())
                 } else {
                     None
@@ -269,7 +277,11 @@ impl PgDriverInner {
             })
             .collect();
         for cursor_id in to_remove {
-            self.cursors.remove(&cursor_id);
+            if let Some((_, entry)) = self.cursors.remove(&cursor_id) {
+                if let Some(task) = entry.task.lock().unwrap().take() {
+                    task.abort();
+                }
+            }
         }
         // Drop any LISTEN clients tied to this conn. Dropping the Arc
         // ends their notification pumps at the next `poll_message`.

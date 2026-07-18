@@ -11,7 +11,7 @@ use tokio::sync::mpsc;
 use tokio_postgres::types::ToSql;
 use tokio_postgres::SimpleQueryMessage;
 
-use crate::conn::{PgDriverInner, PooledConn, SlotKind};
+use crate::conn::{CursorEntry, PgDriverInner, PooledConn, SlotKind};
 use crate::decode::{col_to_metadata, PgValue};
 use crate::{pg_err, PgDriver};
 
@@ -44,20 +44,24 @@ pub(crate) async fn execute_query(
     // result sets in memory.
     let (page_tx, page_rx) = mpsc::channel::<Page>(1);
 
-    // Register the (conn_id, cancel token) tuple before spawning so cancel()
-    // racing the query's start still finds the entry, and so close() can
-    // drain cursors belonging to a conn.
+    // Register before spawning so cancel() racing the query's start still
+    // finds the entry, and so close() can abort/drain cursors belonging to
+    // a conn.
     let conn_id = c.id();
     let cancel_token = conn.cancel_token();
-    driver
-        .inner
-        .cursors
-        .insert(cursor_id_num, (conn_id, cancel_token));
+    driver.inner.cursors.insert(
+        cursor_id_num,
+        CursorEntry {
+            conn_id,
+            cancel_token,
+            task: std::sync::Mutex::new(None),
+        },
+    );
 
     let inner = Arc::clone(&driver.inner);
     let ExecuteRequest { sql, params } = req;
 
-    tokio::spawn(run_query(QueryJob {
+    let task = tokio::spawn(run_query(QueryJob {
         inner,
         conn_id,
         slot_kind,
@@ -67,6 +71,9 @@ pub(crate) async fn execute_query(
         sql,
         params,
     }));
+    if let Some(entry) = driver.inner.cursors.get(&cursor_id_num) {
+        *entry.task.lock().unwrap() = Some(task);
+    }
 
     Ok(ResultSetStream::with_cursor_mode(cursor_id, page_rx, false))
 }
@@ -363,8 +370,16 @@ async fn finish(
     conn: PooledConn,
     cursor_id_num: u64,
 ) {
-    inner.cursors.remove(&cursor_id_num);
-    inner.restore(conn_id, slot_kind, conn).await;
+    if inner.cursors.remove(&cursor_id_num).is_some() {
+        inner.restore(conn_id, slot_kind, conn).await;
+    } else {
+        tracing::debug!(
+            conn_id,
+            cursor_id_num,
+            "postgres query finished after cursor was closed; dropping conn"
+        );
+        drop((slot_kind, conn));
+    }
 }
 
 /// Extract a usable message from a panic payload.

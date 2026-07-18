@@ -78,25 +78,6 @@ them. Re-verified against current source:
 
 ### Drivers — new findings (all 11 v1 items confirmed fixed)
 
-#### P1-driver-1. PG `close` while a query is in-flight leaks the conn back into the map
-- Files: `crates/driver-postgres/src/conn.rs:256-282` (close) +
-  `stream.rs:360-369` (`finish`)
-- Detail: `close` removes the `ConnState::Taken` slot and the cursor,
-  but **does not abort the spawned query task**. When that task later
-  completes naturally, `finish` calls `inner.restore(conn_id,
-  slot_kind, conn)`, which **re-inserts** `ConnState::Free(conn)` under
-  the now-"closed" `conn_id`. The conn (a `deadpool_postgres::Object`)
-  is orphaned in the map forever.
-- **Why it matters:** the conn counts against `deadpool`'s `max_size`
-  for the pool, is never returned to the idle queue, and accumulates
-  over the process lifetime. This is the **exact symmetric race** MSSQL
-  closed (by storing the `JoinHandle` and calling `task.abort()`). PG
-  never stores the handle. Repeated `execute → close-mid-stream` cycles
-  (typical of WS disconnect during streaming) grow `conns`
-  monotonically and silently exhaust the pool.
-- Fix: store the `JoinHandle` in the `cursors` DashMap value; `abort()`
-  from `remove_conn`. Mirror MSSQL's `close`.
-
 #### P1-driver-4. PG `CopyOp::Export` discards the exported data
 - File: `crates/driver-postgres/src/lib.rs:285-295`
 - Detail: `conn.copy_out(&sql).await?.try_fold(0_u64, |total, chunk|
@@ -642,11 +623,9 @@ them. Re-verified against current source:
    eliminates a global serialization point.
 2. **P1-comp-9** (protocol `Cow`) — the difference between current
    autocomplete and "Zed-class."
-3. **P1-driver-1** (PG close-leak) — silent resource leak on
-   close-mid-stream cycles.
-4. **P1-meta-1 / P1-meta-2** (connection pool + HMAC tokens) — the
+3. **P1-meta-1 / P1-meta-2** (connection pool + HMAC tokens) — the
     scalability ceiling for any multi-user deployment.
-5. **Refactor splits** (http.rs / mssql lib.rs / metadata lib.rs) —
+4. **Refactor splits** (http.rs / mssql lib.rs / metadata lib.rs) —
     mechanical, unblock future review. Do last.
 
 The two themes (sync I/O on async, per-row allocation) are worth
