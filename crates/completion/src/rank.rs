@@ -61,8 +61,11 @@ pub fn rank(
         CompletionContext::ExpectingObjectInSchema { schema } => {
             let schema_l = schema.to_ascii_lowercase();
             for obj in &dict.objects {
-                let obj_schema = obj.schema.as_deref().map(str::to_ascii_lowercase);
-                if obj_schema.as_deref() == Some(schema_l.as_str()) {
+                if obj
+                    .schema
+                    .as_deref()
+                    .is_some_and(|obj_schema| obj_schema.eq_ignore_ascii_case(&schema_l))
+                {
                     if let Some(cand) = object_candidate(obj, prefix, engine, 80) {
                         out.push(cand);
                     }
@@ -143,7 +146,7 @@ fn push_tables_and_views(
     engine: Engine,
     bonus: i32,
 ) {
-    for obj in &dict.objects {
+    for obj in table_view_candidates(dict, prefix) {
         if !matches!(
             obj.kind,
             ObjectKind::Table
@@ -162,7 +165,7 @@ fn push_tables_and_views(
 
 fn push_columns(out: &mut Vec<CompletionCandidate>, obj: &ObjectEntry, prefix: &str, bonus: i32) {
     for c in &obj.columns {
-        let Some(match_score) = score_match(&c.name, prefix) else {
+        let Some(match_score) = score_match_with_lower(&c.name, &c.name_lower, prefix) else {
             continue;
         };
         out.push(column_candidate(c, obj, match_score + bonus));
@@ -202,7 +205,7 @@ fn object_candidate(
     engine: Engine,
     bonus: i32,
 ) -> Option<CompletionCandidate> {
-    let match_score = score_match(&obj.name, prefix)?;
+    let match_score = score_match_with_lower(&obj.name, &obj.name_lower, prefix)?;
     let kind = match obj.kind {
         ObjectKind::Table | ObjectKind::PartitionedTable | ObjectKind::ForeignTable => {
             CompletionKind::Table
@@ -233,6 +236,25 @@ fn object_candidate(
     })
 }
 
+fn table_view_candidates<'a>(
+    dict: &'a Dictionary,
+    prefix: &str,
+) -> Box<dyn Iterator<Item = &'a ObjectEntry> + 'a> {
+    if prefix.is_empty() {
+        return Box::new(dict.objects.iter());
+    }
+    let start = dict
+        .objects_by_name
+        .partition_point(|idx| dict.objects[*idx].name_lower.as_str() < prefix);
+    let end = dict.objects_by_name[start..]
+        .partition_point(|idx| dict.objects[*idx].name_lower.starts_with(prefix));
+    Box::new(
+        dict.objects_by_name[start..start + end]
+            .iter()
+            .map(|idx| &dict.objects[*idx]),
+    )
+}
+
 fn qualified_name(obj: &ObjectEntry) -> Option<String> {
     obj.schema.as_ref().map(|s| format!("{}.{}", s, obj.name))
 }
@@ -252,6 +274,22 @@ fn score_match(candidate: &str, prefix: &str) -> Option<i32> {
         return Some(800);
     }
     if contains_ignore_ascii_case(candidate, prefix) {
+        return Some(300);
+    }
+    None
+}
+
+fn score_match_with_lower(candidate: &str, candidate_lower: &str, prefix: &str) -> Option<i32> {
+    if prefix.is_empty() {
+        return Some(500);
+    }
+    if candidate.starts_with(prefix) {
+        return Some(1000);
+    }
+    if candidate_lower.starts_with(prefix) {
+        return Some(800);
+    }
+    if candidate_lower.contains(prefix) {
         return Some(300);
     }
     None

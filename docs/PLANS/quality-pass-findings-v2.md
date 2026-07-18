@@ -65,19 +65,6 @@ them. Re-verified against current source:
 
 ### Completion hot path (the "Zed-class snappiness" goal)
 
-#### P1-comp-8. Keyword/object scans are linear; no prefix index
-- File: `crates/completion/src/rank.rs:89-167`
-- Detail: every producer loops the entire candidate list calling
-  `score_match` on each. `push_tables_and_views` walks all objects on
-  every keystroke even if the user's prefix is "zzz" and nothing can
-  match.
-- **Why it matters:** for objects in a large schema this is the wrong
-  complexity. The prefix case (score 1000/800) is the common case and
-  the only case the user feels latency on.
-- Fix: keep `objects` sorted by `name_lower`; use `partition_point` to
-  find the prefix window in O(log n). For keyword tables, consider an
-  `fst` automaton at build time.
-
 #### P1-comp-9. `push_keywords` allocates `label`/`insert` Strings even for static `&'static str`
 - File: `crates/completion/src/rank.rs:94-101`
 - Detail: `kw.to_string()` for static string literals, forced by

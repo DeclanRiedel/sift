@@ -15,6 +15,7 @@ pub struct ObjectEntry {
     pub catalog: Option<String>,
     pub schema: Option<String>,
     pub name: String,
+    pub name_lower: String,
     pub kind: ObjectKind,
     pub routine_args: Option<Vec<String>>,
     /// Populated only if the snapshot was fetched with `SchemaDepth::Deep`
@@ -25,6 +26,7 @@ pub struct ObjectEntry {
 #[derive(Debug, Clone)]
 pub struct ColumnEntry {
     pub name: String,
+    pub name_lower: String,
     /// Rendered type text — engine-native when known, otherwise a
     /// primitive-to-SQL mapping.
     pub type_display: String,
@@ -46,6 +48,9 @@ pub struct Dictionary {
     /// after the alias resolves to `users` — we look `users` up here
     /// without knowing its schema).
     pub by_name: HashMap<String, Vec<usize>>,
+    /// Object indices sorted by lowercased object name. Used for O(log n)
+    /// prefix windows in the common table/object completion path.
+    pub objects_by_name: Vec<usize>,
 }
 
 impl Dictionary {
@@ -64,11 +69,13 @@ impl Dictionary {
         }
         let by_qualified = build_qualified_index(&objects);
         let by_name = build_name_index(&objects);
+        let objects_by_name = build_sorted_name_index(&objects);
         Self {
             schemas,
             objects,
             by_qualified,
             by_name,
+            objects_by_name,
         }
     }
 
@@ -110,6 +117,7 @@ fn object_entry(obj: &ObjectInfo, catalog: Option<&str>, schema: Option<&str>) -
         .iter()
         .map(|c| ColumnEntry {
             name: c.name.clone(),
+            name_lower: c.name.to_ascii_lowercase(),
             type_display: type_display(&c.type_ref),
             not_null: matches!(c.nullable, sift_protocol::Nullability::NotNullable),
             primary_key: c.primary_key,
@@ -119,10 +127,22 @@ fn object_entry(obj: &ObjectInfo, catalog: Option<&str>, schema: Option<&str>) -
         catalog: catalog.map(str::to_string),
         schema: schema.map(str::to_string),
         name: obj.name.clone(),
+        name_lower: obj.name.to_ascii_lowercase(),
         kind: obj.kind,
         routine_args: obj.routine_args.clone(),
         columns,
     }
+}
+
+fn build_sorted_name_index(objects: &[ObjectEntry]) -> Vec<usize> {
+    let mut out: Vec<usize> = (0..objects.len()).collect();
+    out.sort_by(|a, b| {
+        objects[*a]
+            .name_lower
+            .cmp(&objects[*b].name_lower)
+            .then_with(|| objects[*a].name.cmp(&objects[*b].name))
+    });
+    out
 }
 
 fn type_display(t: &sift_protocol::TypeRef) -> String {
