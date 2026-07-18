@@ -151,18 +151,25 @@ them. Re-verified against current source:
 
 ### Lock contention
 
-#### P1-lock-1. Global audit/operations Mutex serializes every operation
-- File: `crates/server/src/session.rs:301-313, 388-390`
+#### P1-lock-1. Global audit/operations Mutex serializes every operation — RESOLVED
+- File: `crates/server/src/session.rs`
 - Detail: `audit: Mutex<Vec<AuditEntry>>`, `operations: Mutex<OperationLog>`
-  — both process-global. `list_audit` and `list_operations` clone the
+  — both process-global. `list_audit` and `list_operations` cloned the
   entire Vec under the lock.
-- **Why it matters:** for the 10,000-entry cap that's 10,000 clones
-  while every concurrent operation waits. Every operation across every
-  session still acquires `operations`, even though disk persistence no
-  longer happens in the lock body.
-- Fix: shard by session; `parking_lot::Mutex` + `Arc<Vec>` snapshot
-  (replace under lock, clone outside); feed the in-memory ring from the
-  writer thread.
+- **Why it mattered:** for the 10,000-entry cap that was 10,000 clones
+  while every concurrent operation waited. Worse, at the cap each push did
+  a `Vec::drain(0..1)` that memmoved ~10k elements. Every operation across
+  every session acquired `operations`.
+- **Fix applied:** introduced `RingLog<T>` = `Mutex<Arc<VecDeque<T>>>`.
+  Append is O(1) amortized (`push_back` + a single `pop_front` at the cap);
+  a read clones the `Arc` under the lock and materializes the `Vec`
+  *outside* it, so a `list` never blocks appends for the length of the
+  copy. `Arc::make_mut` copies once on the first append after a snapshot is
+  handed out — reads are rare (admin endpoints), so that copy is paid at
+  most once per read. The JSONL operation-log writer moved out of the
+  ring's mutex into its own immutable field, so a `list_operations`
+  snapshot never contends with it. Covered by `ring_log_*` unit tests plus
+  the existing read-while-write stress test.
 
 #### P1-lock-2. `select_victims` full clone + N mutex locks on every `wrap` at cap
 - File: `crates/server/src/cursors.rs:398-420`
@@ -505,8 +512,8 @@ them. Re-verified against current source:
 
 ## Suggested sequencing
 
-1. **P1-lock-1** (reduce global operation-log lock scope) —
-   eliminates a global serialization point.
+1. ~~**P1-lock-1** (reduce global operation-log lock scope)~~ — DONE
+   (RingLog snapshot); eliminated a global serialization point.
 2. **P1-comp-9** (protocol `Cow`) — the difference between current
    autocomplete and "Zed-class."
 3. ~~**P1-meta-1** (metadata connection concurrency)~~ — DONE (WAL
