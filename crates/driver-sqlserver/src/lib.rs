@@ -1007,6 +1007,16 @@ fn ms_value(row: &tiberius::Row, idx: usize) -> Value {
             .ok()
             .flatten()
             .map(Value::Float64),
+        ColumnType::Money => match row.try_get::<f64, _>(idx) {
+            Ok(Some(v)) => Some(Value::Decimal(format!("{v:.4}"))),
+            Ok(None) => Some(Value::Null),
+            Err(error) => Some(ms_decode_error_value(ty, error)),
+        },
+        ColumnType::Money4 => match row.try_get::<f32, _>(idx) {
+            Ok(Some(v)) => Some(Value::Decimal(format!("{v:.4}"))),
+            Ok(None) => Some(Value::Null),
+            Err(error) => Some(ms_decode_error_value(ty, error)),
+        },
         ColumnType::BigVarBin | ColumnType::BigBinary | ColumnType::Image => row
             .try_get::<&[u8], _>(idx)
             .ok()
@@ -1035,6 +1045,18 @@ fn ms_value(row: &tiberius::Row, idx: usize) -> Value {
             .ok()
             .flatten()
             .map(Value::Timestamp),
+        ColumnType::DatetimeOffsetn => {
+            match row.try_get::<chrono::DateTime<chrono::FixedOffset>, _>(idx) {
+                Ok(Some(v)) => Some(Value::TimestampTz(v.into())),
+                Ok(None) => Some(Value::Null),
+                Err(error) => Some(ms_decode_error_value(ty, error)),
+            }
+        }
+        ColumnType::SSVariant | ColumnType::Udt => Some(Value::Engine {
+            engine: Engine::SqlServer,
+            type_name: format!("{ty:?}"),
+            display_text: format!("<undecoded {ty:?}>"),
+        }),
         _ => row
             .try_get::<&str, _>(idx)
             .ok()
@@ -1042,6 +1064,14 @@ fn ms_value(row: &tiberius::Row, idx: usize) -> Value {
             .map(|v| Value::Text(v.to_string())),
     }
     .unwrap_or(Value::Null)
+}
+
+fn ms_decode_error_value(ty: ColumnType, error: tiberius::error::Error) -> Value {
+    Value::Engine {
+        engine: Engine::SqlServer,
+        type_name: format!("{ty:?}"),
+        display_text: format!("<decode error: {error}>"),
+    }
 }
 
 fn params_to_mssql(params: Vec<Value>) -> Result<Vec<Box<dyn ToSql>>, DriverError> {
@@ -1225,6 +1255,7 @@ fn ms_type_ref(ty: ColumnType) -> TypeRef {
         | ColumnType::Datetime2
         | ColumnType::Datetime4
         | ColumnType::Datetimen => Some(PrimitiveType::Timestamp),
+        ColumnType::DatetimeOffsetn => Some(PrimitiveType::TimestampTz),
         ColumnType::Guid => Some(PrimitiveType::Uuid),
         ColumnType::Xml => Some(PrimitiveType::Text),
         ColumnType::BigVarChar

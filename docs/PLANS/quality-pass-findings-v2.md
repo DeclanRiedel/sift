@@ -78,21 +78,6 @@ them. Re-verified against current source:
 
 ### Drivers — new findings (all 11 v1 items confirmed fixed)
 
-#### P1-driver-10. MSSQL silently drops Money / DatetimeOffset / SmallDateTime / SqlVariant to NULL
-- File: `crates/driver-sqlserver/src/lib.rs:974-1035` (`ms_value`)
-- Detail: `ms_type_ref` (`:1206`) maps `Money | Money4` →
-  `PrimitiveType::Decimal`, but `ms_value` has **no decode arm** for
-  these. They fall through to the catch-all (`:1028-1032`):
-  `row.try_get::<&str, _>(idx).ok().flatten().map(...).unwrap_or(Value::Null)`.
-  tiberius can't satisfy `&str` for binary-typed money → `.ok()`
-  swallows → `.flatten()` is `None` → cell becomes `Value::Null`
-  silently.
-- **Why it matters:** the column metadata claims `Decimal`/`TimestampTz`,
-  so the client renders a NULL where there's actually data. **Data
-  correctness bug masquerading as a type gap.**
-- Fix: explicit arms for `Money`/`Money4`/`DatetimeOffset`. For
-  `SqlVariant`, fall through to `Value::Engine`, not NULL.
-
 ### Metadata scalability ceiling
 
 #### P1-meta-1. Single `Connection` behind `std::sync::Mutex` serializes all metadata access
