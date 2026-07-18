@@ -251,7 +251,10 @@ impl PgExt for PgDriver {
         // Snapshot the (client, its channels) tuples out of the DashMap
         // so we don't hold a shard lock across the .await. Also update
         // each entry's channel set in place before releasing.
-        let targets: Vec<(Arc<tokio_postgres::Client>, Vec<String>)> = {
+        let (targets, remove_conn_listens): (
+            Vec<(Arc<tokio_postgres::Client>, Vec<String>)>,
+            bool,
+        ) = {
             let Some(mut entry) = self.inner.listens.get_mut(&c.id()) else {
                 return Ok(());
             };
@@ -266,8 +269,15 @@ impl PgExt for PgDriver {
                     out.push((Arc::clone(&listen.client), hits));
                 }
             }
-            out
+            entry
+                .value_mut()
+                .retain(|listen| !listen.channels.is_empty());
+            let empty = entry.value().is_empty();
+            (out, empty)
         };
+        if remove_conn_listens {
+            self.inner.listens.remove(&c.id());
+        }
         for (client, chans) in &targets {
             for channel in chans {
                 client

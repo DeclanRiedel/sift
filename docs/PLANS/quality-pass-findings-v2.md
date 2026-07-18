@@ -376,21 +376,6 @@ P0-6 and P1-driver-3 below.
 - Fix: explicit arms for `Money`/`Money4`/`DatetimeOffset`. For
   `SqlVariant`, fall through to `Value::Engine`, not NULL.
 
-#### P1-driver-11. PG `unlisten` doesn't reclaim the `ListenEntry` when channel set empties
-- File: `crates/driver-postgres/src/lib.rs:245-278`
-- Detail: `unlisten` removes named channels from each
-  `ListenEntry.channels` set but leaves the entry in the `Vec` even
-  when empty. The entry still holds `Arc<Client>` (a dedicated LISTEN
-  TCP connection); the pump task keeps running.
-- **Why it matters:** a ConnHandle that does `listen(["a"])` then
-  `unlisten(["a"])` expects to release the LISTEN conn — but it stays
-  open for the ConnHandle's lifetime. Worse, each subsequent
-  `listen(["b"])` *appends* a new entry (`lib.rs:237`), so repeated
-  listen/unlisten of different channels leaks LISTEN sockets.
-- Fix: after updating channel sets, `retain(|e| !e.channels.is_empty())`;
-  if empty, `DashMap::remove(&c.id())` so the client drops and the pump
-  exits.
-
 #### P1-driver-12. PG `run_streaming` accumulates decode-error warnings without bound
 - File: `crates/driver-postgres/src/stream.rs:166, 192-194, 329-334`
 - Detail: every errored cell pushes a `DriverWarning::new(format!(…))`
