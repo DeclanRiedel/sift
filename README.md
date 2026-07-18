@@ -1,6 +1,6 @@
 # sift
 
-A server-first, collaboration-native database IDE. 
+A server-first, collaboration-native database IDE.
 
 The **server is the product**. `sift-server` owns all product behavior:
 connections, sessions, schema, execution, history, audit, and collaboration.
@@ -8,12 +8,12 @@ Clients (desktop / web / automation) are thin, stateless renderers over a
 single versioned HTTP + WebSocket protocol.
 
 **Local-first by default, hosted-capable:** one binary runs in-process next to
-a desktop client *or* as a daemon for hosted multi-user — same code, same
+a desktop client _or_ as a daemon for hosted multi-user — same code, same
 model. Single-user local mode is a one-member room; multiplayer is the same
 model with more members.
 
 **Collaboration is built in, not bolted on:** the durable unit is a room.
-CRDT is used *only* for shared SQL editor text; results, schema, sessions, and
+CRDT is used _only_ for shared SQL editor text; results, schema, sessions, and
 connections stay server-authoritative.
 
 **The protocol is pure serde, public, and semver-stable from v0.1:** a third
@@ -47,6 +47,6 @@ load-bearing decisions, see `docs/DECISIONS.md`.
    and consumable by native and wasm clients. OpenAPI is a release artifact,
    not an afterthought; a 3rd-party UI is a valid target, not a threat.
 
-
 ## consider
-https://github.com/pavi2410/based 
+
+<https://github.com/pavi2410/based>
