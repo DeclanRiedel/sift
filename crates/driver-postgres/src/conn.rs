@@ -222,19 +222,14 @@ impl PgDriverInner {
         }
     }
 
-    /// Find and take the conn bound to a transaction. Single-lock iteration
-    /// of the map (was a two-map dance before). Caller restores via
+    /// Find and take the conn bound to a transaction. Caller restores via
     /// `put_in_tx` or `put_free`.
-    pub(crate) async fn take_in_tx(&self, tx_id: &TxId) -> Option<(u64, PooledConn)> {
+    pub(crate) async fn take_in_tx(&self, conn_id: u64, tx_id: &TxId) -> Option<(u64, PooledConn)> {
         let mut guard = self.conns.lock().await;
-        let conn_id = guard.iter().find_map(|(id, state)| match state {
-            ConnState::InTx { tx_id: t, .. } if *t == tx_id.0 => Some(*id),
-            _ => None,
-        })?;
         let entry = guard.get_mut(&conn_id)?;
         let slot = std::mem::replace(entry, ConnState::Taken);
         match slot {
-            ConnState::InTx { conn, .. } => Some((conn_id, conn)),
+            ConnState::InTx { conn, tx_id: t } if t == tx_id.0 => Some((conn_id, conn)),
             // Slot wasn't actually InTx — put it back how we found it.
             other => {
                 tracing::error!(conn_id, "expected InTx slot, got {:?}", other);

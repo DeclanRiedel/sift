@@ -286,6 +286,7 @@ pub enum AdvisoryKey {
 #[derive(Debug, Clone)]
 pub struct PgSavepoint {
     pub tx: TxId,
+    pub conn: ConnHandle,
     pub name: String,
 }
 

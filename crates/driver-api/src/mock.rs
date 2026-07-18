@@ -410,9 +410,10 @@ impl PgExt for MockDriver {
         Ok(())
     }
 
-    async fn savepoint(&self, _t: &TxHandle, name: &str) -> Result<PgSavepoint, DriverError> {
+    async fn savepoint(&self, t: &TxHandle, name: &str) -> Result<PgSavepoint, DriverError> {
         Ok(PgSavepoint {
             tx: sift_protocol::TxId::new(0),
+            conn: t.conn.clone(),
             name: name.to_string(),
         })
     }

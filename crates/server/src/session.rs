@@ -1020,7 +1020,12 @@ impl SessionStore {
                     let pg = driver
                         .as_pg()
                         .ok_or_else(|| missing_ext(Engine::Postgres, "PgExt"))?;
-                    pg.rollback_to(PgSavepoint { tx: tx_id, name }).await
+                    pg.rollback_to(PgSavepoint {
+                        tx: tx_id,
+                        conn: tx_handle.conn.clone(),
+                        name,
+                    })
+                    .await
                 }
                 Engine::SqlServer => {
                     let mssql = driver
@@ -1045,7 +1050,7 @@ impl SessionStore {
         req: SavepointRequest,
     ) -> ApiResult<()> {
         // Validate tx is active on the connection before dispatching.
-        let _ = self.tx_handle_for(session_id, req.connection, req.tx_id)?;
+        let tx_handle = self.tx_handle_for(session_id, req.connection, req.tx_id)?;
         let entry = self.get_conn_entry(session_id, req.connection)?;
         let driver = entry.driver.clone();
         let name = req.name;
@@ -1056,7 +1061,12 @@ impl SessionStore {
                     let pg = driver
                         .as_pg()
                         .ok_or_else(|| missing_ext(Engine::Postgres, "PgExt"))?;
-                    pg.release_savepoint(PgSavepoint { tx: tx_id, name }).await
+                    pg.release_savepoint(PgSavepoint {
+                        tx: tx_id,
+                        conn: tx_handle.conn.clone(),
+                        name,
+                    })
+                    .await
                 }
                 Engine::SqlServer => Err(DriverError::new(
                     Code::UnsupportedForEngine,

@@ -102,10 +102,11 @@ impl Driver for PgDriver {
 
     #[tracing::instrument(skip_all, fields(engine = "postgres", tx = t.tx_id.0))]
     async fn commit(&self, t: TxHandle) -> Result<(), DriverError> {
-        let (conn_id, conn) =
-            self.inner.take_in_tx(&t.tx_id).await.ok_or_else(|| {
-                DriverError::new(Code::TransactionNotFound, "transaction not open")
-            })?;
+        let (conn_id, conn) = self
+            .inner
+            .take_in_tx(t.conn.id(), &t.tx_id)
+            .await
+            .ok_or_else(|| DriverError::new(Code::TransactionNotFound, "transaction not open"))?;
         let result = conn.execute("COMMIT", &[]).await.map_err(pg_err);
         self.inner.put_free(conn_id, conn).await;
         result.map(|_| ())
@@ -113,10 +114,11 @@ impl Driver for PgDriver {
 
     #[tracing::instrument(skip_all, fields(engine = "postgres", tx = t.tx_id.0))]
     async fn rollback(&self, t: TxHandle) -> Result<(), DriverError> {
-        let (conn_id, conn) =
-            self.inner.take_in_tx(&t.tx_id).await.ok_or_else(|| {
-                DriverError::new(Code::TransactionNotFound, "transaction not open")
-            })?;
+        let (conn_id, conn) = self
+            .inner
+            .take_in_tx(t.conn.id(), &t.tx_id)
+            .await
+            .ok_or_else(|| DriverError::new(Code::TransactionNotFound, "transaction not open"))?;
         let result = conn.execute("ROLLBACK", &[]).await.map_err(pg_err);
         self.inner.put_free(conn_id, conn).await;
         result.map(|_| ())
@@ -369,16 +371,18 @@ impl PgExt for PgDriver {
     #[tracing::instrument(skip_all, fields(engine = "postgres", tx = t.tx_id.0, name = %name))]
     async fn savepoint(&self, t: &TxHandle, name: &str) -> Result<PgSavepoint, DriverError> {
         validate_ident(name)?;
-        let (conn_id, conn) =
-            self.inner.take_in_tx(&t.tx_id).await.ok_or_else(|| {
-                DriverError::new(Code::TransactionNotFound, "transaction not open")
-            })?;
+        let (conn_id, conn) = self
+            .inner
+            .take_in_tx(t.conn.id(), &t.tx_id)
+            .await
+            .ok_or_else(|| DriverError::new(Code::TransactionNotFound, "transaction not open"))?;
         let sql = format!("SAVEPOINT {name}");
         let result = conn.execute(&sql, &[]).await.map_err(pg_err);
         self.inner.put_in_tx(conn_id, t.tx_id.0, conn).await;
         result.map(|_| ())?;
         Ok(PgSavepoint {
             tx: t.tx_id,
+            conn: t.conn.clone(),
             name: name.to_string(),
         })
     }
@@ -386,10 +390,11 @@ impl PgExt for PgDriver {
     #[tracing::instrument(skip_all, fields(engine = "postgres", tx = sp.tx.0, name = %sp.name))]
     async fn rollback_to(&self, sp: PgSavepoint) -> Result<(), DriverError> {
         validate_ident(&sp.name)?;
-        let (conn_id, conn) =
-            self.inner.take_in_tx(&sp.tx).await.ok_or_else(|| {
-                DriverError::new(Code::TransactionNotFound, "transaction not open")
-            })?;
+        let (conn_id, conn) = self
+            .inner
+            .take_in_tx(sp.conn.id(), &sp.tx)
+            .await
+            .ok_or_else(|| DriverError::new(Code::TransactionNotFound, "transaction not open"))?;
         let sql = format!("ROLLBACK TO SAVEPOINT {}", sp.name);
         let result = conn.execute(&sql, &[]).await.map_err(pg_err);
         self.inner.put_in_tx(conn_id, sp.tx.0, conn).await;
@@ -399,10 +404,11 @@ impl PgExt for PgDriver {
     #[tracing::instrument(skip_all, fields(engine = "postgres", tx = sp.tx.0, name = %sp.name))]
     async fn release_savepoint(&self, sp: PgSavepoint) -> Result<(), DriverError> {
         validate_ident(&sp.name)?;
-        let (conn_id, conn) =
-            self.inner.take_in_tx(&sp.tx).await.ok_or_else(|| {
-                DriverError::new(Code::TransactionNotFound, "transaction not open")
-            })?;
+        let (conn_id, conn) = self
+            .inner
+            .take_in_tx(sp.conn.id(), &sp.tx)
+            .await
+            .ok_or_else(|| DriverError::new(Code::TransactionNotFound, "transaction not open"))?;
         let sql = format!("RELEASE SAVEPOINT {}", sp.name);
         let result = conn.execute(&sql, &[]).await.map_err(pg_err);
         self.inner.put_in_tx(conn_id, sp.tx.0, conn).await;

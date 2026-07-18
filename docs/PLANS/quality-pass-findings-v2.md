@@ -340,19 +340,6 @@ P0-6 and P1-driver-3 below.
 - Fix: `arrayvec::ArrayVec<u16, 64>`; write digit groups into one
   pre-sized String with manual div/mul; drop the redundant copy.
 
-#### P1-driver-6. PG single conn-state Mutex + O(N) transaction lookup
-- Files: `crates/driver-postgres/src/conn.rs:30` (`conns: Mutex<HashMap<…>>`),
-  `:228-245` (`take_in_tx`)
-- Detail: every conn-state mutation serializes on one mutex. `take_in_tx`
-  (called by every `commit`/`rollback`/`savepoint`) **iterates the
-  entire `conns` map** under that lock to find the conn whose
-  `ConnState::InTx` matches `tx_id`.
-- **Why it matters:** with N=10k open connections and 1k tx ops/sec,
-  that's 10M map iterations/sec under a single mutex, also blocking
-  every other conn's `ping`/`schema`/`execute` setup.
-- Fix: carry `conn_id` on `TxHandle` (it already does via
-  `TxHandle::conn`) and index directly by `conn_id`.
-
 #### P1-driver-7. MSSQL `pools` map is unbounded (same bug class as the fixed PG one)
 - File: `crates/driver-sqlserver/src/lib.rs:49`
 - Detail: `DashMap<String, Arc<Mutex<MssqlPool>>>` with no cap, no
