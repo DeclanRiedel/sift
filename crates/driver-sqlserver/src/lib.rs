@@ -30,6 +30,7 @@ use tokio_util::compat::{Compat, TokioAsyncWriteCompatExt};
 const ROW_BATCH_SIZE: usize = 128;
 const BULK_INSERT_BATCH_ROWS: usize = 256;
 const BULK_INSERT_MAX_SQL_BYTES: usize = 512 * 1024;
+const MAX_POOLS: usize = 64;
 
 type MssqlConn = Client<Compat<TcpStream>>;
 
@@ -80,8 +81,16 @@ impl MssqlDriver {
     /// Pop a warm-idle connection from the per-spec pool if any.
     async fn pop_warm(&self, pool_key: &str) -> Option<MssqlConn> {
         let pool = self.inner.pools.get(pool_key)?.clone();
-        let mut guard = pool.lock().await;
-        guard.idle.pop_front()
+        loop {
+            let mut conn = {
+                let mut guard = pool.lock().await;
+                guard.idle.pop_front()?
+            };
+            if validate_warm_conn(&mut conn).await.is_ok() {
+                return Some(conn);
+            }
+            tracing::debug!(pool_key, "discarding stale MSSQL warm connection");
+        }
     }
 
     /// Spawn a background top-up task for the given spec. Idempotent:
@@ -90,6 +99,7 @@ impl MssqlDriver {
     fn ensure_warm(&self, spec: ConnectionSpec, pool_key: String, min_size: usize) {
         let inner = Arc::clone(&self.inner);
         tokio::spawn(async move {
+            enforce_pool_bound(&inner);
             let pool = inner
                 .pools
                 .entry(pool_key.clone())
@@ -1413,6 +1423,37 @@ fn pool_config(spec: &ConnectionSpec) -> (String, usize) {
         _ => 0,
     };
     (key, min)
+}
+
+fn enforce_pool_bound(inner: &Arc<MssqlInner>) {
+    if inner.pools.len() < MAX_POOLS {
+        return;
+    }
+    let victims: Vec<String> = inner
+        .pools
+        .iter()
+        .filter_map(|entry| {
+            if Arc::strong_count(entry.value()) == 1 {
+                Some(entry.key().clone())
+            } else {
+                None
+            }
+        })
+        .take(inner.pools.len().saturating_sub(MAX_POOLS) + 1)
+        .collect();
+    for key in victims {
+        inner.pools.remove(&key);
+    }
+}
+
+async fn validate_warm_conn(conn: &mut MssqlConn) -> Result<(), DriverError> {
+    conn.query("SELECT 1", &[])
+        .await
+        .map_err(ms_err)?
+        .into_row()
+        .await
+        .map_err(ms_err)?;
+    Ok(())
 }
 
 async fn timeout_io<T>(

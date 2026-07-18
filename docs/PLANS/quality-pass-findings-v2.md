@@ -78,27 +78,6 @@ them. Re-verified against current source:
 
 ### Drivers — new findings (all 11 v1 items confirmed fixed)
 
-#### P1-driver-7. MSSQL `pools` map is unbounded (same bug class as the fixed PG one)
-- File: `crates/driver-sqlserver/src/lib.rs:49`
-- Detail: `DashMap<String, Arc<Mutex<MssqlPool>>>` with no cap, no
-  eviction. PG has `MAX_POOLS = 64` + best-effort eviction.
-- **Why it matters:** every distinct `ConnectionSpec` creates a
-  permanent entry, each holding `min_size` warm TCP connections. With
-  many specs (multi-tenant, exploration tool, rotated credentials),
-  the map grows without bound, each entry holding FDs.
-- Fix: mirror PG — `MAX_POOLS` cap, evict `strong_count == 1` entries.
-
-#### P1-driver-8. MSSQL warm pool has no validation on `pop_warm`
-- File: `crates/driver-sqlserver/src/lib.rs:81-85`
-- Detail: `pop_warm` just pops; no liveness probe. PG relies on
-  `deadpool-postgres`'s `recycle` (ping on `get()`).
-- **Why it matters:** after a backend restart, network blip, or
-  server-side idle timeout, `open` returns a dead conn, the user's
-  first query fails with an opaque transport error, and the conn is
-  dropped — no retry. `pool_warm_slots_for` over-reports usable slots.
-- Fix: issue `SELECT 1` (or use tiberius's lazy-reconnect) before
-  handing the conn out; on failure discard and try the next.
-
 #### P1-driver-10. MSSQL silently drops Money / DatetimeOffset / SmallDateTime / SqlVariant to NULL
 - File: `crates/driver-sqlserver/src/lib.rs:974-1035` (`ms_value`)
 - Detail: `ms_type_ref` (`:1206`) maps `Money | Money4` →
