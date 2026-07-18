@@ -144,19 +144,6 @@ them. Re-verified against current source:
 
 ### Memory bounds / task supervision
 
-#### P1-mem-1. HTTP execute materializes the entire result before responding
-- File: `crates/server/src/session.rs:1385-1452` (`drain_stream`)
-- Detail: accumulates `rows: Vec<Row>` up to `max_result_rows` (10k) /
-  `max_result_bytes` (16 MB), then returns `ExecuteResponse { rows, … }`.
-  The handler at `http.rs:2384-2395` wraps in `Json(resp)` — so the full
-  result is held in memory **twice** (Vec + serialized JSON String).
-- **Why it matters:** for a 10k-row × 1 KB-row result that's ~10 MB held
-  twice = 20 MB per concurrent HTTP execute. With 50 concurrent
-  executes that's 1 GB. Plus `rows.extend(r)` reallocs the destination
-  on each grow.
-- Fix: cap lower by default for HTTP (the WS path exists for big
-  results); pre-reserve `rows`; consider `Body::from_stream`.
-
 #### P1-mem-2. Wedged driver tasks accumulate with no bound
 - File: `crates/server/src/session.rs:260-278` (`run_bounded`)
 - Detail: on timeout the spawned task is detached (not aborted) so the

@@ -40,8 +40,8 @@ const DEFAULT_REQUEST_TIMEOUT_MS: u64 = 30_000;
 
 /// Default synchronous-execute result caps until the server wires
 /// `config.limits` in via [`SessionStore::set_result_limits`].
-const DEFAULT_MAX_RESULT_ROWS: usize = 10_000;
-const DEFAULT_MAX_RESULT_BYTES: usize = 16 * 1024 * 1024;
+const DEFAULT_MAX_RESULT_ROWS: usize = 5_000;
+const DEFAULT_MAX_RESULT_BYTES: usize = 8 * 1024 * 1024;
 
 /// Server-owned session state. Clonable because handlers share it via
 /// `Arc<SessionStore>` from axum state.
@@ -1518,6 +1518,9 @@ pub async fn drain_stream(
                 columns = cols;
             }
             Page::Rows { rows: r } => {
+                if rows.capacity() == 0 {
+                    rows.reserve(max_rows.min(r.len().saturating_mul(2)));
+                }
                 if rows.len().saturating_add(r.len()) > max_rows {
                     return Err(DriverError::new(
                         Code::ResultTooLarge,
