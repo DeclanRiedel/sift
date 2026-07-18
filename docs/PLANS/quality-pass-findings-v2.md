@@ -78,18 +78,6 @@ them. Re-verified against current source:
 
 ### Drivers — new findings (all 11 v1 items confirmed fixed)
 
-#### P1-driver-4. PG `CopyOp::Export` discards the exported data
-- File: `crates/driver-postgres/src/lib.rs:285-295`
-- Detail: `conn.copy_out(&sql).await?.try_fold(0_u64, |total, chunk|
-  async move { Ok(total + chunk.len() as u64) }).await?;` — folds the
-  COPY-out stream into a byte count and **throws away every chunk**.
-  `CopyResult` has no field for the data.
-- **Why it matters:** the export path is completely non-functional —
-  the trait method exists and returns `Ok`, but the caller gets
-  `"exported N bytes"` with no payload. Misleading API.
-- Fix: extend `CopyResult` with `data: Bytes`, or — preferred for large
-  exports — add a streaming variant returning `Stream<Bytes>`.
-
 #### P1-driver-5. PG NUMERIC decoder is allocation-heavy on the per-cell hot path
 - File: `crates/driver-postgres/src/decode.rs:64-150`
 - Detail: per NUMERIC cell: `Vec<u16>` collect; `String::new()` then

@@ -508,6 +508,7 @@ async fn copy_import_export_round_trip() {
         .await
         .expect("copy export");
     assert!(exported.bytes >= b"1\talice\n2\tbob\n".len() as u64);
+    assert_eq!(exported.data, b"1\talice\n2\tbob\n");
 
     driver.close(conn).await.unwrap();
 }

@@ -307,16 +307,21 @@ impl PgExt for PgDriver {
         let result = async {
             match op {
                 CopyOp::Export { sql } => {
-                    let bytes = conn
+                    let data = conn
                         .copy_out(&sql)
                         .await
                         .map_err(pg_err)?
-                        .try_fold(0_u64, |total, chunk| async move {
-                            Ok::<_, tokio_postgres::Error>(total + chunk.len() as u64)
+                        .try_fold(Vec::new(), |mut out, chunk| async move {
+                            out.extend_from_slice(&chunk);
+                            Ok::<_, tokio_postgres::Error>(out)
                         })
                         .await
                         .map_err(pg_err)?;
-                    Ok(CopyResult { bytes, rows: None })
+                    Ok(CopyResult {
+                        bytes: data.len() as u64,
+                        rows: None,
+                        data,
+                    })
                 }
                 CopyOp::Import { table, data } => {
                     let table = quote_qualified_ident(&table)?;
@@ -331,6 +336,7 @@ impl PgExt for PgDriver {
                     Ok(CopyResult {
                         bytes,
                         rows: Some(rows),
+                        data: Vec::new(),
                     })
                 }
             }

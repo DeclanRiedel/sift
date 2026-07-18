@@ -274,6 +274,7 @@ pub enum CopyOp {
 pub struct CopyResult {
     pub bytes: u64,
     pub rows: Option<u64>,
+    pub data: Vec<u8>,
 }
 
 /// Advisory lock key. PG supports both 32+32-bit and 64-bit forms.
