@@ -272,15 +272,6 @@ P0-6 and P1-driver-3 below.
 - Fix: short term, memoize the tokenized prefix on the server keyed by
   `Arc<str>` of the SQL. Longer term, an incremental lexer.
 
-#### P1-comp-6. `word_value` clones a String per token, including ones never inspected
-- File: `crates/completion/src/context.rs:139-144`
-- Detail: returns `Option<String>` by cloning the token's value. The
-  walk at `context.rs:97-125` calls it on each token, often only to
-  throw the result away. Plus `kw.to_ascii_uppercase()` at line 107
-  allocates a second time.
-- **Why it matters:** per-token heap allocations on the keystroke path.
-- Fix: return `Option<&str>`; compare with `eq_ignore_ascii_case`.
-
 #### P1-comp-7. `keywords_for` allocates a fresh Vec and copies ~50 pointers per call
 - File: `crates/completion/src/keywords.rs:231-240`
 - Detail: builds a `Vec<&'static str>` from compile-time constant
@@ -311,17 +302,6 @@ P0-6 and P1-driver-3 below.
 - Fix: change the protocol types to `Cow<'static, str>` (or
   `SmolStr`/`CompactString`). The protocol is brand-new and only
   consumed here — cheap breaking change now, expensive later.
-
-#### P1-comp-10. `resolve_object_path` duplicates Dictionary's `by_name` index by hand
-- File: `crates/server/src/autocomplete.rs:64-85`
-- Detail: the Dictionary already builds `by_name: HashMap<String,
-  Vec<usize>>` (`dictionary.rs:130-136`) including the
-  "ambiguous-across-schemas → None" rule. The server reaches past the
-  completion crate and re-walks `snapshot.trees`.
-- **Why it matters:** layering violation — the server parses
-  `SchemaSnapshot` internals that should be the completion crate's job.
-  The two implementations can drift.
-- Fix: expose `Dictionary::resolve_path`.
 
 ### Drivers — new findings (all 11 v1 items confirmed fixed)
 
