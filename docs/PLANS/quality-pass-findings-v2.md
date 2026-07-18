@@ -144,21 +144,6 @@ them. Re-verified against current source:
 
 ### Memory bounds / task supervision
 
-#### P1-mem-2. Wedged driver tasks accumulate with no bound
-- File: `crates/server/src/session.rs:260-278` (`run_bounded`)
-- Detail: on timeout the spawned task is detached (not aborted) so the
-  driver reaches a safe point. But there's no bound on how many such
-  detached tasks can exist.
-- **Why it matters:** a driver that wedges (network partition, DB lock
-  wait) under sustained load produces one detached task per timed-out
-  request, each holding a `ConnHandle` and pinning driver state. The
-  tokio blocking pool has a default cap of 512; once exhausted, new
-  spawns compete for worker threads. Combined with the lack of a
-  per-connection concurrency bound, a single wedged DB can starve the
-  whole runtime.
-- Fix: per-driver/connection semaphore; on timeout call `driver.cancel`
-  (only `execute_http` does this at `session.rs:682`).
-
 ### Lock contention
 
 #### P1-lock-1. Global audit/operations Mutex serializes every operation

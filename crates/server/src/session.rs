@@ -37,6 +37,7 @@ use crate::schema_cache::{CachedSchema, SchemaCache};
 /// Fallback per-request timeout used until the server wires
 /// `config.timeouts.request_secs` in via [`SessionStore::set_request_timeout`].
 const DEFAULT_REQUEST_TIMEOUT_MS: u64 = 30_000;
+const MAX_DRIVER_TASKS: usize = 256;
 
 /// Default synchronous-execute result caps until the server wires
 /// `config.limits` in via [`SessionStore::set_result_limits`].
@@ -72,6 +73,7 @@ struct SessionStoreInner {
     /// either returns `Code::ResultTooLarge`.
     max_result_rows: AtomicUsize,
     max_result_bytes: AtomicUsize,
+    driver_tasks: AtomicUsize,
     /// Server-side cursor registry (ADR-011). Tracks every open cursor
     /// across all sessions; enforces per-session caps; routes eviction
     /// through `driver.cancel`.
@@ -88,6 +90,14 @@ struct OperationLog {
 struct OperationLogWriter {
     tx: SyncSender<OperationAuditEntry>,
     _task: JoinHandle<()>,
+}
+
+struct DriverTaskPermit(Arc<SessionStoreInner>);
+
+impl Drop for DriverTaskPermit {
+    fn drop(&mut self) {
+        self.0.driver_tasks.fetch_sub(1, Ordering::Release);
+    }
 }
 
 impl SessionStore {
@@ -107,6 +117,7 @@ impl SessionStore {
                 store_sql: AtomicBool::new(true),
                 max_result_rows: AtomicUsize::new(DEFAULT_MAX_RESULT_ROWS),
                 max_result_bytes: AtomicUsize::new(DEFAULT_MAX_RESULT_BYTES),
+                driver_tasks: AtomicUsize::new(0),
                 cursors: CursorRegistry::default(),
                 schema_cache: SchemaCache::default(),
             }),
@@ -141,6 +152,7 @@ impl SessionStore {
                 store_sql: AtomicBool::new(true),
                 max_result_rows: AtomicUsize::new(DEFAULT_MAX_RESULT_ROWS),
                 max_result_bytes: AtomicUsize::new(DEFAULT_MAX_RESULT_BYTES),
+                driver_tasks: AtomicUsize::new(0),
                 cursors: CursorRegistry::default(),
                 schema_cache: SchemaCache::default(),
             }),
@@ -271,7 +283,24 @@ impl SessionStore {
         T: Send + 'static,
     {
         let dur = self.request_timeout();
-        let task = tokio::spawn(fut);
+        if self
+            .inner
+            .driver_tasks
+            .fetch_update(Ordering::Acquire, Ordering::Relaxed, |current| {
+                (current < MAX_DRIVER_TASKS).then_some(current + 1)
+            })
+            .is_err()
+        {
+            return Err(ApiError::Driver(DriverError::new(
+                Code::PoolExhausted,
+                "driver task limit reached",
+            )));
+        }
+        let permit = DriverTaskPermit(Arc::clone(&self.inner));
+        let task = tokio::spawn(async move {
+            let _permit = permit;
+            fut.await
+        });
         if dur.is_zero() {
             return match task.await {
                 Ok(res) => res.map_err(ApiError::Driver),
