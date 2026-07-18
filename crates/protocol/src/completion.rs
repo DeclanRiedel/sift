@@ -6,6 +6,8 @@
 //! Behavior — parsing, ranking, engine-specific keyword tables — lives in
 //! `sift-completion`. The protocol crate only defines shapes (ADR-004).
 
+use std::borrow::Cow;
+
 use serde::{Deserialize, Serialize};
 
 /// Client asks: "what can I complete at `cursor` in this SQL?"
@@ -45,11 +47,14 @@ pub struct Range {
 pub struct CompletionCandidate {
     /// Text shown in the completion list. For identifiers this is the raw
     /// name (unquoted); for keywords it's the upper-cased form.
-    pub label: String,
+    ///
+    /// `Cow` so the ranker can hand back `&'static str` for the fixed
+    /// keyword/function tables without allocating on every keystroke.
+    pub label: Cow<'static, str>,
     /// Text to actually insert. May differ from `label` when the
     /// identifier requires engine-specific quoting (`"MyTable"` on PG,
     /// `[MyTable]` on SQL Server).
-    pub insert: String,
+    pub insert: Cow<'static, str>,
     pub kind: CompletionKind,
     /// Optional inline hint — e.g. `text NOT NULL` for a column,
     /// `(a int) -> int` for a function.

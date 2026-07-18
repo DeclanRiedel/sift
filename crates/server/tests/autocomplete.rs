@@ -222,7 +222,7 @@ async fn complete_dotted_returns_columns() {
         .unwrap();
     assert_eq!(res.status(), StatusCode::OK);
     let resp: CompletionResponse = body_json(res.into_body()).await;
-    let labels: Vec<&str> = resp.candidates.iter().map(|c| c.label.as_str()).collect();
+    let labels: Vec<&str> = resp.candidates.iter().map(|c| c.label.as_ref()).collect();
     assert!(labels.contains(&"id"), "id absent in {labels:?}");
     assert!(labels.contains(&"email"), "email absent in {labels:?}");
     // Every column candidate carries a column kind.

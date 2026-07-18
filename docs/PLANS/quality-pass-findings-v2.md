@@ -65,16 +65,23 @@ them. Re-verified against current source:
 
 ### Completion hot path (the "Zed-class snappiness" goal)
 
-#### P1-comp-9. `push_keywords` allocates `label`/`insert` Strings even for static `&'static str`
+#### P1-comp-9. `push_keywords` allocates `label`/`insert` Strings even for static `&'static str` — RESOLVED
 - File: `crates/completion/src/rank.rs:94-101`
 - Detail: `kw.to_string()` for static string literals, forced by
   `CompletionCandidate.label`/`.insert` being `String`
   (`protocol/src/completion.rs:48-49`).
-- **Why it matters:** for a 90-keyword list with 20 prefix matches per
+- **Why it mattered:** for a 90-keyword list with 20 prefix matches per
   keystroke, 40 allocations that could be zero.
-- Fix: change the protocol types to `Cow<'static, str>` (or
-  `SmolStr`/`CompactString`). The protocol is brand-new and only
-  consumed here — cheap breaking change now, expensive later.
+- **Fix applied:** `CompletionCandidate.label`/`.insert` are now
+  `Cow<'static, str>`. `push_keywords` hands back `Cow::Borrowed(*kw)`
+  for both fields and `push_functions` borrows the label
+  (`insert` stays `Cow::Owned` for the `f(` form) — zero allocation for
+  every keyword match and every function label. Dictionary-derived
+  candidates (schemas, columns, tables) construct `Cow::Owned` via
+  `.into()`, identical cost to before. `Cow<'static, str>` round-trips
+  through serde (deserializes to `Owned`) and `schemars` (delegates to
+  the `str` schema), so the wire format and OpenAPI are unchanged.
+  Covered by the existing completion/autocomplete suites (green).
 
 ### Drivers — new findings (all 11 v1 items confirmed fixed)
 

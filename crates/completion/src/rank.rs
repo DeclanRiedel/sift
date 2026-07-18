@@ -14,6 +14,8 @@
 //! over keywords; inside `ExpectingColumn`, columns win. Ties break
 //! alphabetically for stable output.
 
+use std::borrow::Cow;
+
 use sift_protocol::completion::{CompletionCandidate, CompletionContext, CompletionKind};
 use sift_protocol::{Engine, ObjectKind};
 
@@ -96,8 +98,8 @@ fn push_keywords(out: &mut Vec<CompletionCandidate>, engine: Engine, prefix: &st
                 continue;
             };
             out.push(CompletionCandidate {
-                label: kw.to_string(),
-                insert: kw.to_string(),
+                label: Cow::Borrowed(*kw),
+                insert: Cow::Borrowed(*kw),
                 kind: CompletionKind::Keyword,
                 detail: None,
                 qualified_name: None,
@@ -113,8 +115,8 @@ fn push_functions(out: &mut Vec<CompletionCandidate>, engine: Engine, prefix: &s
             continue;
         };
         out.push(CompletionCandidate {
-            label: f.to_string(),
-            insert: format!("{f}("),
+            label: Cow::Borrowed(*f),
+            insert: Cow::Owned(format!("{f}(")),
             kind: CompletionKind::Function,
             detail: Some("built-in".into()),
             qualified_name: None,
@@ -129,8 +131,8 @@ fn push_schemas(out: &mut Vec<CompletionCandidate>, dict: &Dictionary, prefix: &
             continue;
         };
         out.push(CompletionCandidate {
-            label: s.clone(),
-            insert: s.clone(),
+            label: s.clone().into(),
+            insert: s.clone().into(),
             kind: CompletionKind::Schema,
             detail: None,
             qualified_name: None,
@@ -190,8 +192,8 @@ fn column_candidate(c: &ColumnEntry, owner: &ObjectEntry, score: i32) -> Complet
         c.type_display.clone()
     };
     CompletionCandidate {
-        label: c.name.clone(),
-        insert: c.name.clone(),
+        label: c.name.clone().into(),
+        insert: c.name.clone().into(),
         kind: CompletionKind::Column,
         detail: Some(detail),
         qualified_name: qualified_name(owner),
@@ -227,8 +229,8 @@ fn object_candidate(
         _ => 0,
     };
     Some(CompletionCandidate {
-        label: obj.name.clone(),
-        insert: quote_ident_if_needed(&obj.name, engine),
+        label: obj.name.clone().into(),
+        insert: quote_ident_if_needed(&obj.name, engine).into(),
         kind,
         detail: obj.schema.clone(),
         qualified_name: qualified_name(obj),

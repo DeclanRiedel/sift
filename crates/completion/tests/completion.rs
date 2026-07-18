@@ -83,7 +83,7 @@ fn dotted_qualifier_returns_columns_of_resolved_table() {
         }
         other => panic!("expected ExpectingColumn, got {other:?}"),
     }
-    let labels: Vec<&str> = resp.candidates.iter().map(|c| c.label.as_str()).collect();
+    let labels: Vec<&str> = resp.candidates.iter().map(|c| c.label.as_ref()).collect();
     assert!(labels.contains(&"id"));
     assert!(labels.contains(&"email"));
 }
@@ -99,7 +99,7 @@ fn prefix_beats_substring() {
     // Both `users` (prefix `user`) and `user_events` (prefix `user`) are
     // prefix matches; `users` still wins alphabetically over
     // `user_events` on a tie.
-    let labels: Vec<&str> = resp.candidates.iter().map(|c| c.label.as_str()).collect();
+    let labels: Vec<&str> = resp.candidates.iter().map(|c| c.label.as_ref()).collect();
     let users_at = labels.iter().position(|l| *l == "users").unwrap();
     let ue_at = labels.iter().position(|l| *l == "user_events").unwrap();
     assert!(
