@@ -260,20 +260,6 @@ P0-6 and P1-driver-3 below.
 - Fix: precompute `name_lower` at Dictionary-build time on
   `ObjectEntry`/`ColumnEntry`; static keyword tables need no fold.
 
-#### P1-comp-4. `from public.<cursor>` misclassified (case bug)
-- File: `crates/completion/src/context.rs:84-90`
-- Detail: `word_value` returns the token's value as-is without
-  case-folding, and `is_table_slot_lead` (`context.rs:135-137`) matches
-  uppercase `"FROM" | "JOIN" | "INTO" | "UPDATE" | "TABLE"` only.
-  Lowercase `from public.` falls through to
-  `ExpectingColumn { qualifier: Some("public") }`, which then fails
-  `resolve_by_name`, producing **zero candidates** for a perfectly
-  ordinary query. The very next branch (`context.rs:107-108`) does
-  `to_ascii_uppercase()` — clearly an oversight.
-- **Why it matters:** PG users very commonly type lowercase. Zero
-  candidates on a routine completion looks broken.
-- Fix: `eq_ignore_ascii_case` at line 88.
-
 #### P1-comp-5. Full re-tokenize of preceding SQL every keystroke
 - File: `crates/completion/src/context.rs:40-45`
 - Detail: `Tokenizer::new(...).tokenize()` re-lexes the entire SQL
