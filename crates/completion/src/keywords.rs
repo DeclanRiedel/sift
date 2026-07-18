@@ -228,15 +228,12 @@ pub const MSSQL_FUNCTIONS: &[&str] = &[
     "HASHBYTES",
 ];
 
-pub fn keywords_for(engine: Engine) -> Vec<&'static str> {
-    let mut out: Vec<&'static str> = Vec::new();
-    out.extend(STATEMENT_LEADS);
-    out.extend(COMMON_KEYWORDS);
-    match engine {
-        Engine::Postgres => out.extend(PG_KEYWORDS),
-        Engine::SqlServer => out.extend(MSSQL_KEYWORDS),
-    }
-    out
+pub fn keyword_groups_for(engine: Engine) -> [&'static [&'static str]; 3] {
+    let engine_keywords = match engine {
+        Engine::Postgres => PG_KEYWORDS,
+        Engine::SqlServer => MSSQL_KEYWORDS,
+    };
+    [STATEMENT_LEADS, COMMON_KEYWORDS, engine_keywords]
 }
 
 pub fn functions_for(engine: Engine) -> &'static [&'static str] {

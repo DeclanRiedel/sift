@@ -252,13 +252,6 @@ P0-6 below.
 - Fix: short term, memoize the tokenized prefix on the server keyed by
   `Arc<str>` of the SQL. Longer term, an incremental lexer.
 
-#### P1-comp-7. `keywords_for` allocates a fresh Vec and copies ~50 pointers per call
-- File: `crates/completion/src/keywords.rs:231-240`
-- Detail: builds a `Vec<&'static str>` from compile-time constant
-  slices. Called up to three times per request in some contexts.
-- Fix: return `&'static [&'static str]` via `OnceLock`, or iterate the
-  three slices directly in `push_keywords`.
-
 #### P1-comp-8. Keyword/object scans are linear; no prefix index
 - File: `crates/completion/src/rank.rs:89-167`
 - Detail: every producer loops the entire candidate list calling

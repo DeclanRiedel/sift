@@ -19,7 +19,7 @@ use sift_protocol::{Engine, ObjectKind};
 
 use crate::context::ContextResult;
 use crate::dictionary::{ColumnEntry, Dictionary, ObjectEntry};
-use crate::keywords::{functions_for, keywords_for};
+use crate::keywords::{functions_for, keyword_groups_for};
 
 pub fn rank(
     ctx: &ContextResult,
@@ -87,18 +87,20 @@ pub fn rank(
 // ----------------------------------------------------------------------------
 
 fn push_keywords(out: &mut Vec<CompletionCandidate>, engine: Engine, prefix: &str, bonus: i32) {
-    for kw in keywords_for(engine) {
-        let Some(match_score) = score_match(kw, prefix) else {
-            continue;
-        };
-        out.push(CompletionCandidate {
-            label: kw.to_string(),
-            insert: kw.to_string(),
-            kind: CompletionKind::Keyword,
-            detail: None,
-            qualified_name: None,
-            score: match_score + bonus,
-        });
+    for group in keyword_groups_for(engine) {
+        for kw in group {
+            let Some(match_score) = score_match(kw, prefix) else {
+                continue;
+            };
+            out.push(CompletionCandidate {
+                label: kw.to_string(),
+                insert: kw.to_string(),
+                kind: CompletionKind::Keyword,
+                detail: None,
+                qualified_name: None,
+                score: match_score + bonus,
+            });
+        }
     }
 }
 
