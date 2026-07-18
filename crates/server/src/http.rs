@@ -13,9 +13,7 @@ use futures::{SinkExt, StreamExt};
 use schemars::{schema_for, JsonSchema};
 use serde::Deserialize;
 use serde_json::json;
-use std::sync::{Arc, OnceLock};
 use std::time::Instant;
-use tokio::sync::Semaphore;
 
 use sift_doc::{CrdtKind, DocumentSnapshot, TextDocument, TextOperation};
 use sift_metadata::{
@@ -36,9 +34,6 @@ use crate::error::{ApiError, ApiResult};
 use crate::room_runtime::RoomRuntime;
 use crate::session::SessionStore;
 use crate::VERSION;
-
-const MAX_METADATA_BLOCKING_TASKS: usize = 16;
-static METADATA_BLOCKING_PERMITS: OnceLock<Arc<Semaphore>> = OnceLock::new();
 
 #[derive(Clone)]
 pub struct AppState {
@@ -403,16 +398,9 @@ async fn metadata_blocking<T>(f: impl FnOnce() -> ApiResult<T> + Send + 'static)
 where
     T: Send + 'static,
 {
-    let permit = METADATA_BLOCKING_PERMITS
-        .get_or_init(|| Arc::new(Semaphore::new(MAX_METADATA_BLOCKING_TASKS)))
-        .clone()
-        .acquire_owned()
-        .await
-        .map_err(|error| ApiError::Internal(format!("metadata runtime closed: {error}")))?;
     let result = tokio::task::spawn_blocking(f)
         .await
         .map_err(|error| ApiError::Internal(format!("metadata task failed: {error}")))?;
-    drop(permit);
     result
 }
 

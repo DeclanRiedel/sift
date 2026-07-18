@@ -61,23 +61,6 @@ them. Re-verified against current source:
 
 ### Sync I/O on async path
 
-#### P1-io-4. Single 16-permit semaphore ceiling on every metadata op
-- File: `crates/server/src/http.rs:40-41, 402-417`
-- Detail: `MAX_METADATA_BLOCKING_TASKS = 16` gates every
-  `metadata_blocking(...)` call — used for auth lookup on every
-  authenticated request, room/profile permission checks, query-history
-  writes, and the WS room upgrade path. The permit is acquired **before**
-  `spawn_blocking`, so a slow SQLite write holds a permit during the
-  entire blocking op.
-- **Why it matters:** every `execute_query` calls
-  `execute_metadata_context` → one permit held across the auth DB lookup.
-  With auth-on-every-request + a few concurrent metadata writes, the
-  server's effective concurrent-execute ceiling is ~16 regardless of
-  worker count. Under load this manifests as request latency jumping
-  from ms to seconds with no obvious CPU saturation.
-- Fix: split into separate read/write pools, or drop the gate and let
-  `spawn_blocking`'s own pool bound concurrency.
-
 ### Schema cache
 
 #### P1-cache-3. PG invalidator silently dies on connection blip
@@ -268,9 +251,8 @@ them. Re-verified against current source:
 - File: `crates/metadata/src/lib.rs:73`
 - Detail: one SQLite connection, one mutex. Every read and every write
   across every spawn_blocking task and the audit-writer thread contends
-  on this lock. `MAX_METADATA_BLOCKING_TASKS = 16` permits 16 concurrent
-  blocking tasks but at most one can hold the mutex — the other 15 sit
-  parked.
+  on this lock. Concurrent blocking tasks still serialize once they
+  reach the metadata store.
 - **Why it matters:** SQLite in WAL mode supports concurrent readers, but
   this design forfeits that entirely. A long-running read
   (`list_operation_audit(limit=...)` over a growing table) blocks every
