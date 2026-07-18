@@ -83,12 +83,10 @@ fn decode_numeric(raw: &[u8]) -> Result<String, Box<dyn std::error::Error + Sync
         return Err("invalid numeric sign".into());
     }
 
-    let groups: Vec<u16> = raw[8..]
-        .chunks_exact(2)
-        .map(|chunk| u16::from_be_bytes([chunk[0], chunk[1]]))
-        .collect();
-    if groups.iter().any(|group| *group >= 10_000) {
-        return Err("invalid numeric digit group".into());
+    for idx in 0..ndigits {
+        if numeric_group(raw, idx) >= 10_000 {
+            return Err("invalid numeric digit group".into());
+        }
     }
 
     // Bound `weight` against `ndigits`. A hostile payload with e.g.
@@ -103,23 +101,37 @@ fn decode_numeric(raw: &[u8]) -> Result<String, Box<dyn std::error::Error + Sync
         raw.min(ndigits.saturating_add(MAX_INT_GROUPS))
             .min(MAX_INT_GROUPS)
     };
-    let mut int_part = String::new();
+    let mut out = String::with_capacity(
+        usize::from(sign == SIGN_NEG)
+            + int_group_count.saturating_mul(4).max(1)
+            + usize::from(dscale > 0)
+            + dscale,
+    );
+    if sign == SIGN_NEG {
+        out.push('-');
+    }
+    let mut wrote_int = false;
     for idx in 0..int_group_count {
-        let group = groups.get(idx).copied().unwrap_or(0);
-        if idx == 0 {
-            int_part.push_str(&group.to_string());
+        let group = if idx < ndigits {
+            numeric_group(raw, idx)
         } else {
-            int_part.push_str(&format!("{group:04}"));
+            0
+        };
+        if !wrote_int {
+            if group == 0 && idx + 1 < int_group_count {
+                continue;
+            }
+            append_group_unpadded(&mut out, group);
+            wrote_int = true;
+        } else {
+            append_group_padded(&mut out, group);
         }
     }
-    let int_part = int_part.trim_start_matches('0');
-    let mut out = if int_part.is_empty() {
-        "0".to_string()
-    } else {
-        int_part.to_string()
-    };
+    if !wrote_int {
+        out.push('0');
+    }
 
-    let mut frac = String::new();
+    let mut frac = String::with_capacity(dscale.max(4));
     if weight < 0 {
         // Same bound as the integer side: cap attacker-controlled zero
         // padding.
@@ -127,12 +139,12 @@ fn decode_numeric(raw: &[u8]) -> Result<String, Box<dyn std::error::Error + Sync
         for _ in 0..zero_groups {
             frac.push_str("0000");
         }
-        for group in &groups {
-            frac.push_str(&format!("{group:04}"));
+        for idx in 0..ndigits {
+            append_group_padded(&mut frac, numeric_group(raw, idx));
         }
     } else {
-        for group in groups.iter().skip(int_group_count) {
-            frac.push_str(&format!("{group:04}"));
+        for idx in int_group_count..ndigits {
+            append_group_padded(&mut frac, numeric_group(raw, idx));
         }
     }
     if dscale > 0 {
@@ -143,10 +155,27 @@ fn decode_numeric(raw: &[u8]) -> Result<String, Box<dyn std::error::Error + Sync
         out.push('.');
         out.push_str(&frac);
     }
-    if sign == SIGN_NEG && out != "0" && !out.starts_with('-') {
-        out.insert(0, '-');
+    if out == "-0" {
+        out.remove(0);
     }
     Ok(out)
+}
+
+fn numeric_group(raw: &[u8], idx: usize) -> u16 {
+    let offset = 8 + idx * 2;
+    u16::from_be_bytes([raw[offset], raw[offset + 1]])
+}
+
+fn append_group_unpadded(out: &mut String, group: u16) {
+    use std::fmt::Write as _;
+    let _ = write!(out, "{group}");
+}
+
+fn append_group_padded(out: &mut String, group: u16) {
+    out.push(char::from(b'0' + ((group / 1000) % 10) as u8));
+    out.push(char::from(b'0' + ((group / 100) % 10) as u8));
+    out.push(char::from(b'0' + ((group / 10) % 10) as u8));
+    out.push(char::from(b'0' + (group % 10) as u8));
 }
 
 fn decode_interval(raw: &[u8]) -> Result<Value, Box<dyn std::error::Error + Sync + Send>> {

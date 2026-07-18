@@ -78,19 +78,6 @@ them. Re-verified against current source:
 
 ### Drivers — new findings (all 11 v1 items confirmed fixed)
 
-#### P1-driver-5. PG NUMERIC decoder is allocation-heavy on the per-cell hot path
-- File: `crates/driver-postgres/src/decode.rs:64-150`
-- Detail: per NUMERIC cell: `Vec<u16>` collect; `String::new()` then
-  `push_str(&group.to_string())` and `push_str(&format!("{group:04}"))`
-  per digit group; redundant `int_part.to_string()` after
-  `trim_start_matches`; same per-group `format!` for `frac`; final
-  `out.insert(0, '-')` is O(n).
-- **Why it matters:** for a 1M-row result with one numeric column,
-  roughly 5–10M heap allocations just for numerics. Worst per-cell
-  allocation pattern in either driver.
-- Fix: `arrayvec::ArrayVec<u16, 64>`; write digit groups into one
-  pre-sized String with manual div/mul; drop the redundant copy.
-
 #### P1-driver-7. MSSQL `pools` map is unbounded (same bug class as the fixed PG one)
 - File: `crates/driver-sqlserver/src/lib.rs:49`
 - Detail: `DashMap<String, Arc<Mutex<MssqlPool>>>` with no cap, no
