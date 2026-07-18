@@ -63,44 +63,6 @@ them. Re-verified against current source:
 
 ### Schema cache
 
-#### P1-cache-3. PG invalidator silently dies on connection blip
-- File: `crates/server/src/schema_cache.rs:298-333`
-- Detail: when the LISTEN stream ends (driver dropped it after a
-  transient failure, server restart, idle timeout), the loop exits and
-  the task dies. But `invalidators` still holds the `InvalidatorHandle`,
-  so `ensure_invalidator`'s fast-path `contains_key` check returns
-  `true` and the task is **never restarted**. PG invalidation silently
-  falls back to 60 s TTL for the rest of the process lifetime.
-- **Why it matters:** silent staleness — DDL changes don't invalidate
-  the cache for up to 60 s, with no operator-visible signal. Same
-  defect in `mssql_poll_task` (`:356-378`): dead connection → every poll
-  errors and `continue`s, task stays alive doing nothing forever.
-- Fix: on loop exit remove the entry from `invalidators` so the next
-  `insert` respawns it; add reconnect-with-backoff.
-
-#### P1-cache-4. Unbounded connection fan-out + no max_entries on cache
-- File: `crates/server/src/schema_cache.rs:256-291`
-- Detail: `ensure_invalidator` spawns **one dedicated driver
-  connection + one tokio task per spec, forever**. `entries: DashMap`
-  has no max-entries bound.
-- **Why it matters:** a multi-tenant server with M distinct connection
-  specs holds M extra DB connections open purely for invalidation.
-  Because there is no entry or invalidator cap, this remains an
-  unbounded resource leak. 100 connections × ~10 deep-scope objects =
-  1,000 cached snapshots with no eviction other than TTL.
-- Fix: bound `entries` (LRU on top of DashMap, or `mini-moka`/`moka`);
-  bound `invalidators`; share one poller per (host, port, database).
-
-#### P1-cache-5. Invalidation is a full O(N) scan with key clones
-- File: `crates/server/src/schema_cache.rs:182-196`
-- Detail: `invalidate_spec_by_hash` iterates the entire `entries` map,
-  filters, clones matching keys into a Vec, then removes.
-- **Why it matters:** with 1,000 cached scopes and frequent DDL, this
-  is 1,000 iterations + N allocations per invalidation event, holding
-  DashMap shard read locks during iteration. PG can fire on every
-  `NOTIFY`.
-- Fix: maintain a secondary index `spec_hash → Vec<CacheKey>`.
-
 ### Completion hot path (the "Zed-class snappiness" goal)
 
 #### P1-comp-1. `score_match` calls `to_ascii_lowercase()` once per candidate per keystroke

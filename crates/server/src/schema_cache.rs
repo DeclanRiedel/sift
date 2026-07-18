@@ -36,6 +36,10 @@ pub struct SchemaCacheConfig {
     /// Polling interval for the SQL Server invalidator. Ignored for
     /// PG connections (which use LISTEN/NOTIFY).
     pub mssql_poll_interval: Duration,
+    /// Maximum cached schema snapshots across all specs.
+    pub max_entries: usize,
+    /// Maximum dedicated invalidator tasks/connections.
+    pub max_invalidators: usize,
 }
 
 impl Default for SchemaCacheConfig {
@@ -43,6 +47,8 @@ impl Default for SchemaCacheConfig {
         Self {
             ttl: Duration::from_secs(60),
             mssql_poll_interval: Duration::from_secs(30),
+            max_entries: 1024,
+            max_invalidators: 64,
         }
     }
 }
@@ -56,6 +62,7 @@ pub struct SchemaCache {
 struct Inner {
     config: std::sync::RwLock<SchemaCacheConfig>,
     entries: DashMap<CacheKey, CachedEntry>,
+    entries_by_spec: DashMap<String, Vec<CacheKey>>,
     in_flight: DashMap<CacheKey, Arc<tokio::sync::Mutex<()>>>,
     /// `spec_hash → invalidator task`. Tasks are spawned lazily on
     /// first `insert` for a spec; kept alive for the process lifetime.
@@ -161,7 +168,7 @@ impl SchemaCache {
         };
         let Some(snap) = snap else {
             if expired {
-                drop(self.inner.entries.remove(&key));
+                self.remove_entry(&key);
             }
             self.inner
                 .misses
@@ -191,12 +198,14 @@ impl SchemaCache {
         };
         let schema = CachedSchema::new_uncached(snapshot);
         self.inner.entries.insert(
-            key,
+            key.clone(),
             CachedEntry {
                 schema: schema.clone(),
                 inserted_at: Instant::now(),
             },
         );
+        self.index_entry(spec_hash.clone(), key);
+        self.enforce_entry_bound();
         // Ensure invalidator is running for this spec.
         self.ensure_invalidator(spec, spec_hash, driver);
         Some(schema)
@@ -239,15 +248,18 @@ impl SchemaCache {
     }
 
     fn invalidate_spec_by_hash(&self, spec_hash: &str) {
-        let victims: Vec<CacheKey> = self
-            .inner
-            .entries
-            .iter()
-            .filter(|e| e.key().spec_hash == spec_hash)
-            .map(|e| e.key().clone())
-            .collect();
-        for k in victims {
-            self.inner.entries.remove(&k);
+        let victims = if let Some((_, victims)) = self.inner.entries_by_spec.remove(spec_hash) {
+            victims
+        } else {
+            self.inner
+                .entries
+                .iter()
+                .filter(|entry| entry.key().spec_hash == spec_hash)
+                .map(|entry| entry.key().clone())
+                .collect()
+        };
+        for key in victims {
+            self.inner.entries.remove(&key);
         }
         self.inner
             .invalidations
@@ -338,21 +350,29 @@ impl SchemaCache {
         if self.inner.invalidators.contains_key(&spec_hash) {
             return;
         }
+        if self.inner.invalidators.len() >= self.config().max_invalidators {
+            tracing::debug!(
+                spec_hash,
+                max_invalidators = self.config().max_invalidators,
+                "schema invalidator cap reached"
+            );
+            return;
+        }
         let engine = driver.engine();
         let spec_clone = spec.clone();
         let cache = self.clone();
         let poll = self.config().mssql_poll_interval;
+        let task_cache = self.clone();
+        let task_spec_hash = spec_hash.clone();
         let task = match engine {
-            Engine::Postgres => {
-                tokio::spawn(pg_listen_task(spec_clone, driver, cache, spec_hash.clone()))
-            }
-            Engine::SqlServer => tokio::spawn(mssql_poll_task(
-                spec_clone,
-                driver,
-                cache,
-                spec_hash.clone(),
-                poll,
-            )),
+            Engine::Postgres => tokio::spawn(async move {
+                pg_listen_task(spec_clone, driver, cache, task_spec_hash.clone()).await;
+                task_cache.inner.invalidators.remove(&task_spec_hash);
+            }),
+            Engine::SqlServer => tokio::spawn(async move {
+                mssql_poll_task(spec_clone, driver, cache, task_spec_hash.clone(), poll).await;
+                task_cache.inner.invalidators.remove(&task_spec_hash);
+            }),
         };
         // Race-safe insert: if another caller inserted a handle
         // meanwhile, abort the one we just spawned.
@@ -363,6 +383,47 @@ impl SchemaCache {
             dashmap::mapref::entry::Entry::Vacant(v) => {
                 v.insert(InvalidatorHandle { _task: task });
             }
+        }
+    }
+
+    fn index_entry(&self, spec_hash: String, key: CacheKey) {
+        let mut keys = self.inner.entries_by_spec.entry(spec_hash).or_default();
+        if !keys.contains(&key) {
+            keys.push(key);
+        }
+    }
+
+    fn remove_entry(&self, key: &CacheKey) {
+        self.inner.entries.remove(key);
+        if let Some(mut keys) = self.inner.entries_by_spec.get_mut(&key.spec_hash) {
+            keys.retain(|candidate| candidate != key);
+            if keys.is_empty() {
+                drop(keys);
+                self.inner.entries_by_spec.remove(&key.spec_hash);
+            }
+        }
+    }
+
+    fn enforce_entry_bound(&self) {
+        let max_entries = self.config().max_entries;
+        if max_entries == 0 {
+            let keys: Vec<CacheKey> = self.inner.entries.iter().map(|e| e.key().clone()).collect();
+            for key in keys {
+                self.remove_entry(&key);
+            }
+            return;
+        }
+        while self.inner.entries.len() > max_entries {
+            let Some(oldest) = self
+                .inner
+                .entries
+                .iter()
+                .min_by_key(|entry| entry.inserted_at)
+                .map(|entry| entry.key().clone())
+            else {
+                break;
+            };
+            self.remove_entry(&oldest);
         }
     }
 }
@@ -426,6 +487,7 @@ async fn mssql_poll_task(
         }
     };
     let mut last: Option<String> = None;
+    let mut consecutive_errors = 0_u8;
     let mut ticker = tokio::time::interval(poll_interval);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     ticker.tick().await; // consume the immediate first tick
@@ -436,9 +498,17 @@ async fn mssql_poll_task(
             params: Vec::new(),
         };
         let value = match read_first_scalar(&*driver, handle.clone(), req).await {
-            Ok(v) => v,
+            Ok(v) => {
+                consecutive_errors = 0;
+                v
+            }
             Err(error) => {
+                consecutive_errors = consecutive_errors.saturating_add(1);
                 tracing::debug!(%error, "schema invalidator: MSSQL poll failed");
+                if consecutive_errors >= 3 {
+                    let _ = driver.close(handle).await;
+                    return;
+                }
                 continue;
             }
         };
@@ -618,6 +688,63 @@ mod tests {
         assert!(!cache.inner.entries.contains_key(&kab));
         assert!(cache.inner.entries.contains_key(&kbb));
         assert_eq!(cache.invalidation_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn insert_enforces_max_entries_and_updates_index() {
+        let cache = SchemaCache::new(SchemaCacheConfig {
+            max_entries: 1,
+            ..Default::default()
+        });
+        let driver = Arc::new(sift_driver_api::mock::MockDriver::builder().build());
+        let mut second_scope = scope();
+        second_scope.filter = Some(sift_protocol::SchemaFilter {
+            catalogs: None,
+            schemas: Some(vec!["public".into()]),
+            kinds: None,
+            name_pattern: None,
+        });
+
+        cache.insert(
+            &spec(),
+            &scope(),
+            SchemaSnapshot::empty(scope()),
+            driver.clone(),
+        );
+        cache.insert(
+            &spec(),
+            &second_scope,
+            SchemaSnapshot::empty(second_scope.clone()),
+            driver,
+        );
+
+        assert_eq!(cache.entry_count(), 1);
+        let spec_hash = cache.spec_hash(&spec()).unwrap();
+        assert_eq!(
+            cache.inner.entries_by_spec.get(&spec_hash).unwrap().len(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn indexed_invalidation_drops_only_matching_spec() {
+        let cache = SchemaCache::new(SchemaCacheConfig::default());
+        let driver = Arc::new(sift_driver_api::mock::MockDriver::builder().build());
+        let mut spec_b = spec();
+        spec_b.host = "other".into();
+
+        cache.insert(
+            &spec(),
+            &scope(),
+            SchemaSnapshot::empty(scope()),
+            driver.clone(),
+        );
+        cache.insert(&spec_b, &scope(), SchemaSnapshot::empty(scope()), driver);
+
+        cache.invalidate_spec(&spec());
+        assert_eq!(cache.entry_count(), 1);
+        assert!(cache.get(&spec(), &scope()).is_none());
+        assert!(cache.get(&spec_b, &scope()).is_some());
     }
 
     #[test]
