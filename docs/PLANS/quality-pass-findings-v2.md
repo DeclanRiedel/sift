@@ -65,18 +65,6 @@ them. Re-verified against current source:
 
 ### Completion hot path (the "Zed-class snappiness" goal)
 
-#### P1-comp-5. Full re-tokenize of preceding SQL every keystroke
-- File: `crates/completion/src/context.rs:40-45`
-- Detail: `Tokenizer::new(...).tokenize()` re-lexes the entire SQL
-  preceding the cursor from offset 0 and collects into a fresh
-  `Vec<Token>` on every keystroke.
-- **Why it matters:** for a 50 KB query this is a lot of work, repeated
-  once per keystroke, mostly producing the same token sequence as the
-  last call. Single biggest CPU item on the keystroke path after the
-  Dictionary rebuild.
-- Fix: short term, memoize the tokenized prefix on the server keyed by
-  `Arc<str>` of the SQL. Longer term, an incremental lexer.
-
 #### P1-comp-8. Keyword/object scans are linear; no prefix index
 - File: `crates/completion/src/rank.rs:89-167`
 - Detail: every producer loops the entire candidate list calling
@@ -665,8 +653,7 @@ them. Re-verified against current source:
 
 1. **P1-lock-1** (reduce global operation-log lock scope) —
    eliminates a global serialization point.
-2. **P1-comp-5 / P1-comp-9** (memoize tokenize + protocol `Cow`) —
-   the difference between current
+2. **P1-comp-9** (protocol `Cow`) — the difference between current
    autocomplete and "Zed-class."
 3. **P1-driver-1** (PG close-leak) — silent resource leak on
    close-mid-stream cycles.

@@ -10,6 +10,24 @@ use sift_protocol::completion::CompletionContext;
 use sift_protocol::Engine;
 use sqlparser::dialect::{Dialect, MsSqlDialect, PostgreSqlDialect};
 use sqlparser::tokenizer::{Token, Tokenizer, Whitespace, Word};
+use std::collections::{HashMap, VecDeque};
+use std::sync::{Mutex, OnceLock};
+
+const TOKEN_CACHE_MAX_ENTRIES: usize = 128;
+
+static TOKEN_CACHE: OnceLock<Mutex<TokenCache>> = OnceLock::new();
+
+#[derive(Hash, PartialEq, Eq, Clone)]
+struct TokenCacheKey {
+    engine: Engine,
+    preceding: String,
+}
+
+#[derive(Default)]
+struct TokenCache {
+    entries: HashMap<TokenCacheKey, Vec<Token>>,
+    order: VecDeque<TokenCacheKey>,
+}
 
 /// Output of context detection: the classified context plus the byte
 /// range of the partial identifier at the cursor that a client should
@@ -36,6 +54,29 @@ pub fn detect_context(sql: &str, cursor: usize, engine: Engine) -> ContextResult
     // Tokenize everything up to the prefix. The prefix itself may be an
     // incomplete identifier that would confuse token classification.
     let preceding = &sql[..prefix_start];
+    let tokens = tokenize_preceding(preceding, engine);
+
+    let context = classify(&tokens, &prefix);
+
+    ContextResult {
+        context,
+        cursor,
+        prefix_start,
+        prefix,
+        prefix_lower,
+    }
+}
+
+fn tokenize_preceding(preceding: &str, engine: Engine) -> Vec<Token> {
+    let key = TokenCacheKey {
+        engine,
+        preceding: preceding.to_string(),
+    };
+    let cache = TOKEN_CACHE.get_or_init(|| Mutex::new(TokenCache::default()));
+    if let Some(tokens) = cache.lock().unwrap().entries.get(&key).cloned() {
+        return tokens;
+    }
+
     let dialect: Box<dyn Dialect> = match engine {
         Engine::Postgres => Box::new(PostgreSqlDialect {}),
         Engine::SqlServer => Box::new(MsSqlDialect {}),
@@ -47,15 +88,15 @@ pub fn detect_context(sql: &str, cursor: usize, engine: Engine) -> ContextResult
         .filter(|t| !is_ignorable(t))
         .collect();
 
-    let context = classify(&tokens, &prefix);
-
-    ContextResult {
-        context,
-        cursor,
-        prefix_start,
-        prefix,
-        prefix_lower,
+    let mut cache = cache.lock().unwrap();
+    cache.entries.insert(key.clone(), tokens.clone());
+    cache.order.push_back(key);
+    while cache.order.len() > TOKEN_CACHE_MAX_ENTRIES {
+        if let Some(oldest) = cache.order.pop_front() {
+            cache.entries.remove(&oldest);
+        }
     }
+    tokens
 }
 
 fn is_ignorable(t: &Token) -> bool {
