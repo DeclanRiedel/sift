@@ -61,22 +61,6 @@ P0-6 and P1-driver-3 below.
 
 ## P0 — real correctness / DoS / security (fix before any user ship)
 
-### P0-1. Completion panic on mid-UTF-8 cursor (DoS)
-- File: `crates/completion/src/context.rs:151-173`
-- Detail: `detect_context` clamps `cursor` only to `sql.len()`
-  (`lib.rs:34`, `context.rs:29`). It never validates that `cursor` is on
-  a UTF-8 char boundary. `extract_prefix` walks back byte-by-byte
-  (`bytes[start-1]`) and finally does `sql[start..cursor]`. If a client
-  sends a cursor inside a multi-byte UTF-8 sequence (e.g. byte 3 of a
-  4-byte emoji), the slice panics in `str::slice_error_fail`.
-- **Why it matters:** the server hands the request straight to
-  `complete()` (`autocomplete.rs:41`). Any user who can hit
-  `POST /v1/sessions/.../complete` can crash the axum worker thread —
-  per-request DoS at minimum, process crash if the panic propagates.
-  Trivially exploitable: `{"sql":"😀bc","cursor":3}`.
-- Fix: `cursor = sql.floor_char_boundary(cursor.min(sql.len()))` and
-  `sql.get(start..cursor).unwrap_or("")`.
-
 ### P0-4. Password flows through SHA-256 on every schema-cache lookup
 - File: `crates/server/src/schema_cache.rs:244-254`
 - Detail: `spec_hash` does `serde_json::to_string(spec)` (which
@@ -738,11 +722,11 @@ P0-6 and P1-driver-3 below.
   tests; substring fallback (score 300); case-insensitive prefix (800);
   empty prefix; limit clamp; MSSQL-specific keyword/function tables
   (`TOP`, `OUTPUT`, `GETDATE`, `DATEADD`); `ExpectingObjectInSchema`
-  (the buggy path from P1-comp-4); `Unknown` context; `ExpectingTable`
-  after `INTO`/`UPDATE`/`TABLE`; `resolve_by_name` ambiguity;
+  follow-ups beyond the lowercase schema-qualified case; `Unknown`
+  context; `ExpectingTable` after `INTO`/`UPDATE`/`TABLE`;
+  `resolve_by_name` ambiguity;
   `resolve_qualified`; `quote_ident_if_needed` edge cases (PG identifier
-  containing `"`, empty name); Unicode identifier (the branch that
-  triggers P0-1); SQL inside string literals/comments. **Worst:** the
+  containing `"`, empty name); SQL inside string literals/comments. **Worst:** the
   deep-snapshot merge test `complete_dotted_returns_columns` does NOT
   verify the deep fetch ran — `MockDriver::schema` ignores its `_scope`
   parameter, so the test passes even if the deep-fetch+merge path is
@@ -985,25 +969,23 @@ P0-6 and P1-driver-3 below.
 
 ## Suggested sequencing
 
-1. **P0-1** (completion UTF-8 panic) — one-line `floor_char_boundary`,
-   blocks a DoS. Do first.
-2. **P0-4** (password in schema-cache hash) — security + cache
+1. **P0-4** (password in schema-cache hash) — security + cache
    correctness, ~5-line change.
-3. **P1-lock-1** (reduce global operation-log lock scope) —
+2. **P1-lock-1** (reduce global operation-log lock scope) —
    eliminates a global serialization point.
-4. **P1-alloc-1** (`page.clone()` in pump) — single-line change,
+3. **P1-alloc-1** (`page.clone()` in pump) — single-line change,
    removes ~10M allocs per large query.
-5. **P1-comp-1 / P1-comp-5 / P1-comp-9** (lowercase precompute +
+4. **P1-comp-1 / P1-comp-5 / P1-comp-9** (lowercase precompute +
    memoize tokenize + protocol `Cow`) — the difference between current
    autocomplete and "Zed-class."
-6. **P1-io-1 / P1-io-2** (spill I/O `spawn_blocking`) — prevents worker
+5. **P1-io-1 / P1-io-2** (spill I/O `spawn_blocking`) — prevents worker
    stalls on evicted cursors.
-7. **P1-driver-1** (PG close-leak) + **P1-driver-2** (search_path
+6. **P1-driver-1** (PG close-leak) + **P1-driver-2** (search_path
     validation) — silent resource leak + the only finding with RCE
     potential under "connect to your own DB."
-8. **P1-meta-1 / P1-meta-2** (connection pool + HMAC tokens) — the
+7. **P1-meta-1 / P1-meta-2** (connection pool + HMAC tokens) — the
     scalability ceiling for any multi-user deployment.
-9. **Refactor splits** (http.rs / mssql lib.rs / metadata lib.rs) —
+8. **Refactor splits** (http.rs / mssql lib.rs / metadata lib.rs) —
     mechanical, unblock future review. Do last.
 
 The two themes (sync I/O on async, per-row allocation) are worth
