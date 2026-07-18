@@ -95,19 +95,6 @@ P0-6 below.
 - Fix: move `page` into the send future by value; clone lazily only in
   the cancel arm.
 
-#### P1-alloc-2. Per-cell `String` allocation just to compute the byte cap
-- File: `crates/server/src/session.rs:1462-1470`
-- Detail: `Value::Json(j) => j.to_string().len()` in `value_bytes`,
-  called once per cell per page from `drain_stream`.
-- **Why it matters:** for a 10-column result with 4 JSON cells on a
-  10,000-row HTTP execute, that's 40,000 `serde_json::Value::to_string()`
-  allocations purely to measure size — and the result is discarded
-  immediately. The string is recomputed later during response
-  serialization. The docstring admits this is "an OOM guard, not an
-  exact accounting" — so approximating as 16 like the other variants is
-  fine.
-- Fix: `Value::Json(_) => 16`, or walk the JSON without allocating.
-
 #### P1-alloc-3. Export path: per-row + per-cell allocations, no buffering
 - Files: `crates/server/src/export.rs:141-184` (`encode_row`),
   `:193-214` (`value_to_text`), `:256-269` (`row_as_json`)
