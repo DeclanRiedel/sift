@@ -628,9 +628,35 @@ fn approx_pages_bytes(pages: &[Page]) -> usize {
 
 fn approx_page_bytes(page: &Page) -> usize {
     match page {
-        Page::Rows { rows } => rows.len().saturating_mul(64),
-        Page::NextResult { columns } => columns.len().saturating_mul(64),
+        Page::Rows { rows } => rows.iter().map(approx_row_bytes).sum(),
+        Page::NextResult { columns } => columns
+            .iter()
+            .map(|column| column.name.len().saturating_add(64))
+            .sum(),
         _ => 64,
+    }
+}
+
+fn approx_row_bytes(row: &sift_protocol::Row) -> usize {
+    row.values
+        .iter()
+        .map(approx_value_bytes)
+        .sum::<usize>()
+        .saturating_add(8)
+}
+
+fn approx_value_bytes(value: &sift_protocol::Value) -> usize {
+    use sift_protocol::Value;
+    match value {
+        Value::Text(s) | Value::Decimal(s) => s.len(),
+        Value::Blob(bytes) => bytes.len(),
+        Value::Json(value) => value.to_string().len(),
+        Value::Engine {
+            type_name,
+            display_text,
+            ..
+        } => type_name.len().saturating_add(display_text.len()),
+        _ => 16,
     }
 }
 
@@ -1172,6 +1198,18 @@ mod tests {
         assert_eq!(out.len(), 1);
         assert!(done);
         assert!(registry.spill_info(CursorId(700)).is_none());
+    }
+
+    #[test]
+    fn approx_page_bytes_accounts_for_wide_values() {
+        let narrow = Page::Rows {
+            rows: vec![Row::new(vec![Value::Int32(1)])],
+        };
+        let wide = Page::Rows {
+            rows: vec![Row::new(vec![Value::Text("x".repeat(1024))])],
+        };
+        assert!(approx_page_bytes(&wide) > approx_page_bytes(&narrow));
+        assert!(approx_page_bytes(&wide) >= 1024);
     }
 
     #[tokio::test]

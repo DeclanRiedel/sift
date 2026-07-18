@@ -215,11 +215,6 @@ them. Re-verified against current source:
   `metadata_handlers.rs` / `session_handlers.rs` / `ws.rs` /
   `openapi.rs` (and generate the OpenAPI blob from `schemars`).
 
-- **`approx_page_bytes` magic 64-byte-per-row estimate drives the spill
-  threshold** (`cursors.rs:615-621`). For wide rows (50 columns) this is
-  off by ~50x, causing spills to fire 50x more often than
-  `spill_min_bytes` is tuned for. Make config-driven or `Value`-aware.
-
 - **Export bypasses the cursor registry entirely** (`export.rs:34-49`).
   `run_export` calls `driver.execute` and consumes `stream.rows` directly.
   No per-session cursor cap enforcement (a client can spam exports to
