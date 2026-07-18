@@ -16,7 +16,7 @@
 //! ADR-013 driver-isolation boundary is undisturbed.
 
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -77,6 +77,12 @@ struct Inner {
     config: std::sync::RwLock<CursorConfig>,
     entries: DashMap<CursorId, Arc<CursorState>>,
     per_session: DashMap<SessionId, Vec<CursorId>>,
+    /// Monotonic tick handed out on cursor creation and on every `touch`.
+    /// A cursor's `last_ack` sequence is its rank; the lowest is the
+    /// least-recently-acked (LRA) victim. A single relaxed atomic
+    /// replaces a per-cursor `Mutex<Instant>`, so `select_victims` reads
+    /// ranks without taking any lock.
+    clock: AtomicU64,
     on_evict: std::sync::RwLock<Option<EvictCallback>>,
     /// Registry of spill files produced by evicted cursors that the
     /// client may still resume via the HTTP endpoint. Written by the
@@ -103,7 +109,10 @@ struct CursorState {
     #[allow(dead_code)]
     cursor_id: CursorId,
     session_id: SessionId,
-    last_ack: std::sync::Mutex<Instant>,
+    /// LRA rank: the `Inner::clock` tick as of the last `touch` (or
+    /// creation). Lower = older. Relaxed ordering is sufficient — the
+    /// value is only used to pick an eviction victim, not to synchronize.
+    last_ack: AtomicU64,
     control: Arc<PumpControl>,
 }
 
@@ -117,6 +126,15 @@ struct PumpControl {
     spill_min_bytes: usize,
 }
 
+impl Inner {
+    /// Hand out the next monotonic LRA tick. Relaxed is fine — we only
+    /// need a total order among ticks, not synchronization with other
+    /// memory.
+    fn next_seq(&self) -> u64 {
+        self.clock.fetch_add(1, Ordering::Relaxed)
+    }
+}
+
 impl CursorRegistry {
     pub fn new(config: CursorConfig) -> Self {
         Self {
@@ -124,6 +142,7 @@ impl CursorRegistry {
                 config: std::sync::RwLock::new(config),
                 entries: DashMap::new(),
                 per_session: DashMap::new(),
+                clock: AtomicU64::new(0),
                 on_evict: std::sync::RwLock::new(None),
                 spills: DashMap::new(),
             }),
@@ -184,7 +203,7 @@ impl CursorRegistry {
         let state = Arc::new(CursorState {
             cursor_id,
             session_id,
-            last_ack: std::sync::Mutex::new(Instant::now()),
+            last_ack: AtomicU64::new(self.inner.next_seq()),
             control: Arc::clone(&control),
         });
         self.inner.entries.insert(cursor_id, state);
@@ -226,7 +245,9 @@ impl CursorRegistry {
 
     pub fn touch(&self, cursor_id: CursorId) {
         if let Some(state) = self.inner.entries.get(&cursor_id) {
-            *state.last_ack.lock().unwrap() = Instant::now();
+            state
+                .last_ack
+                .store(self.inner.next_seq(), Ordering::Relaxed);
         }
     }
 
@@ -397,25 +418,28 @@ pub struct SpillInfo {
 
 impl CursorRegistry {
     fn select_victims(&self, session_id: SessionId, cap: usize) -> Vec<CursorId> {
-        let ids: Vec<CursorId> = self
-            .inner
-            .per_session
-            .get(&session_id)
-            .map(|v| v.clone())
-            .unwrap_or_default();
+        let Some(ids) = self.inner.per_session.get(&session_id) else {
+            return Vec::new();
+        };
         if ids.len() < cap {
             return Vec::new();
         }
-        let mut ranked: Vec<(CursorId, Instant)> = ids
-            .into_iter()
-            .filter_map(|c| {
+        // Read each cursor's LRA rank directly off its atomic — no
+        // per-cursor lock, no clone of the id list. We hold the
+        // per-session shard guard only for the length of this cheap
+        // scan, and drop it before `evict` (which takes the same map's
+        // `get_mut`) runs in the caller.
+        let mut ranked: Vec<(CursorId, u64)> = ids
+            .iter()
+            .filter_map(|&c| {
                 self.inner
                     .entries
                     .get(&c)
-                    .map(|s| (c, *s.last_ack.lock().unwrap()))
+                    .map(|s| (c, s.last_ack.load(Ordering::Relaxed)))
             })
             .collect();
-        ranked.sort_by_key(|(_, ts)| *ts);
+        drop(ids);
+        ranked.sort_by_key(|(_, seq)| *seq);
         let excess = ranked.len().saturating_sub(cap.saturating_sub(1));
         ranked.into_iter().take(excess).map(|(c, _)| c).collect()
     }

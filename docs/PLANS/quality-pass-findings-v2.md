@@ -178,15 +178,25 @@ them. Re-verified against current source:
   snapshot never contends with it. Covered by `ring_log_*` unit tests plus
   the existing read-while-write stress test.
 
-#### P1-lock-2. `select_victims` full clone + N mutex locks on every `wrap` at cap
+#### P1-lock-2. `select_victims` full clone + N mutex locks on every `wrap` at cap — RESOLVED
 - File: `crates/server/src/cursors.rs:398-420`
-- Detail: clones the cursor-id list, then acquires `last_ack` Mutex once
+- Detail: cloned the cursor-id list, then acquired `last_ack` Mutex once
   per cursor.
-- **Why it matters:** only fires at the per-session cap, but for a
-  session at the 32-cursor cap that's 32 mutex acquisitions on the open
-  path.
-- Fix: track LRA via a single `AtomicU64` per session, or a
-  `BinaryHeap` in a Mutex.
+- **Why it mattered:** only fired at the per-session cap, but for a
+  session at the 32-cursor cap that was 32 mutex acquisitions plus a
+  Vec clone on the open path.
+- **Fix applied:** `CursorState.last_ack` is now an `AtomicU64` LRA rank
+  instead of a `Mutex<Instant>`. A registry-wide `Inner::clock`
+  (`AtomicU64`) hands out a monotonic tick on cursor creation and on
+  every `touch`; the lowest rank is the LRA victim. `select_victims`
+  reads each rank with a single relaxed atomic load and no longer clones
+  the id list — it iterates the `per_session` shard guard directly and
+  drops it before the caller's `evict` takes `get_mut` on the same map.
+  Relaxed ordering is sufficient (the value only picks a victim, it does
+  not synchronize). `touch` drops from a mutex to one relaxed store.
+  Covered by `per_session_cap_evicts_oldest` and `touch_updates_lra_rank`
+  (both green; ordering now comes from the monotonic clock rather than
+  wall-clock `Instant`, so the tests no longer depend on sleep timing).
 
 ---
 
