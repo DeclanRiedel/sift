@@ -47,24 +47,12 @@ fn success_pages() -> Vec<Page> {
 }
 
 /// State with a metadata store wired as the durable audit sink, like `main`.
+///
+/// Loopback auth bypass is on (the production default). In-process `oneshot`
+/// requests are treated as loopback, so session/connection/metadata calls
+/// resolve to the bootstrapped local principal (id 1) — which routes now
+/// require when a metadata store is configured.
 fn audited_state(driver: MockDriver) -> AppState {
-    let registry = DriverRegistry::builder().register(driver).build();
-    let sessions = SessionStore::new(registry);
-    let metadata = MetadataStore::open_in_memory(Arc::new(MemorySecretStore::new())).unwrap();
-    metadata.bootstrap_local("local user").unwrap();
-    sessions.set_audit_store(metadata.clone());
-    AppState {
-        sessions,
-        rooms: RoomRuntime::default(),
-        auth: AuthState::default(),
-        metadata: Some(metadata),
-        shutdown: Shutdown::default(),
-    }
-}
-
-/// Like [`audited_state`] but with loopback auth bypass so metadata mutations
-/// resolve to the bootstrapped local principal (id 1).
-fn audited_state_loopback(driver: MockDriver) -> AppState {
     let registry = DriverRegistry::builder().register(driver).build();
     let sessions = SessionStore::new(registry);
     let metadata = MetadataStore::open_in_memory(Arc::new(MemorySecretStore::new())).unwrap();
@@ -319,7 +307,7 @@ async fn operation_trail_is_fingerprinted_and_secret_free() {
 
 #[tokio::test]
 async fn metadata_operation_records_actor() {
-    let app = app(audited_state_loopback(
+    let app = app(audited_state(
         MockDriver::builder().engine(Engine::Postgres).build(),
     ));
     let res = app
