@@ -483,6 +483,33 @@ async fn resolve_auth_context_blocking(
     metadata_blocking(move || resolve_auth_context(&state, &headers)).await
 }
 
+async fn optional_auth_context_blocking(
+    state: AppState,
+    headers: HeaderMap,
+) -> ApiResult<Option<AuthContext>> {
+    if state.metadata.is_none() {
+        return Ok(None);
+    }
+    match resolve_auth_context_blocking(state, headers).await {
+        Ok(auth) => Ok(Some(auth)),
+        Err(ApiError::Unauthorized) => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+async fn session_auth_context_blocking(
+    state: AppState,
+    headers: HeaderMap,
+) -> ApiResult<Option<AuthContext>> {
+    if state.metadata.is_some() {
+        resolve_auth_context_blocking(state, headers)
+            .await
+            .map(Some)
+    } else {
+        Ok(None)
+    }
+}
+
 fn ensure_tenant(auth: &AuthContext, tenant: TenantId) -> ApiResult<()> {
     if auth
         .tenants
@@ -2070,6 +2097,7 @@ async fn open_connection_from_profile(
 
 async fn create_session(
     State(state): State<AppState>,
+    headers: HeaderMap,
     body: Option<Json<OpenSessionRequest>>,
 ) -> ApiResult<Json<sift_protocol::SessionInfo>> {
     if state.shutdown.is_draining() {
@@ -2079,10 +2107,18 @@ async fn create_session(
         Some(Json(b)) => b,
         None => OpenSessionRequest { tag: None },
     };
-    let info = state.sessions.open_session(req.clone());
-    state.sessions.push_operation(
+    let auth = session_auth_context_blocking(state.clone(), headers).await?;
+    let actor = auth.as_ref().map(|auth| auth.principal_id.0);
+    let info = state
+        .sessions
+        .open_session_with_owner(req.clone(), auth.map(|auth| auth.principal_id));
+    state.sessions.push_operation_full(
         Operation::OpenSession { request: req },
         OperationStatus::Succeeded,
+        actor,
+        None,
+        None,
+        None,
     );
     Ok(Json(info))
 }
@@ -2547,6 +2583,7 @@ async fn release_savepoint(
 
 async fn cancel_query(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Path((id, cursor_id)): Path<(sift_protocol::SessionId, sift_protocol::CursorId)>,
     Json(req): Json<CancelRequest>,
 ) -> ApiResult<Json<serde_json::Value>> {
@@ -2555,13 +2592,29 @@ async fn cancel_query(
             "`cursor` body value must match cursor id in path".into(),
         ));
     }
+    let auth = optional_auth_context_blocking(state.clone(), headers).await?;
+    let actor = auth.as_ref().map(|auth| auth.principal_id.0);
+    if let Some(owner) = state.sessions.session_owner(id)? {
+        let Some(auth) = auth.as_ref() else {
+            return Err(ApiError::Unauthorized);
+        };
+        if auth.principal_id != owner {
+            return Err(ApiError::Forbidden(
+                "cannot cancel a cursor owned by another principal".into(),
+            ));
+        }
+    }
     state.sessions.cancel(id, req.connection, cursor_id).await?;
-    state.sessions.push_operation(
+    state.sessions.push_operation_full(
         Operation::CancelQuery {
             session: id,
             request: req,
         },
         OperationStatus::Succeeded,
+        actor,
+        None,
+        None,
+        None,
     );
     Ok(Json(json!({"ok": true})))
 }

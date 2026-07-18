@@ -1412,7 +1412,13 @@ async fn http_execute_records_room_scoped_query_history() {
 
     let session: sift_protocol::SessionInfo = body_json(
         app.clone()
-            .oneshot(post_json_str("/v1/sessions", r#"{"tag":"history"}"#))
+            .oneshot(
+                Request::post("/v1/sessions")
+                    .header("authorization", format!("Bearer {token}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"tag":"history"}"#))
+                    .unwrap(),
+            )
             .await
             .unwrap()
             .into_body(),
@@ -2169,6 +2175,97 @@ async fn cancel_rejects_cursor_body_path_mismatch() {
         .unwrap();
 
     assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn cancel_rejects_different_session_owner() {
+    let mut state = test_state_with_metadata(true);
+    let metadata = state.metadata.as_ref().unwrap();
+    let owner = metadata
+        .create_principal("test:cancel-owner", "Cancel Owner", None)
+        .unwrap();
+    let other = metadata
+        .create_principal("test:cancel-other", "Cancel Other", None)
+        .unwrap();
+    for principal in [owner.id, other.id] {
+        metadata
+            .upsert_tenant_membership(TenantId(1), principal, MembershipRole::Member)
+            .unwrap();
+    }
+    let (_, owner_token) = metadata
+        .issue_api_token(owner.id, Some(TenantId(1)), "owner", None)
+        .unwrap();
+    let (_, other_token) = metadata
+        .issue_api_token(other.id, Some(TenantId(1)), "other", None)
+        .unwrap();
+    state.auth.loopback_bypass = false;
+    let app = app(state);
+
+    let session: sift_protocol::SessionInfo = body_json(
+        app.clone()
+            .oneshot(
+                Request::post("/v1/sessions")
+                    .header("authorization", format!("Bearer {owner_token}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"tag":"cancel-owner"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+            .into_body(),
+    )
+    .await;
+    let conn: sift_protocol::ConnectionInfo = body_json(
+        app.clone()
+            .oneshot(post_json(
+                format!("/v1/sessions/{}/connections", session.id),
+                sift_protocol::OpenConnectionRequest {
+                    engine: Engine::Postgres,
+                    spec: pg_spec(),
+                },
+            ))
+            .await
+            .unwrap()
+            .into_body(),
+    )
+    .await;
+
+    let res = app
+        .clone()
+        .oneshot(
+            Request::post(format!("/v1/sessions/{}/queries/1/cancel", session.id))
+                .header("authorization", format!("Bearer {other_token}"))
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::to_vec(&serde_json::json!({
+                        "connection": conn.id,
+                        "cursor": 1,
+                    }))
+                    .unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::FORBIDDEN);
+
+    let res = app
+        .oneshot(
+            Request::post(format!("/v1/sessions/{}/queries/1/cancel", session.id))
+                .header("authorization", format!("Bearer {owner_token}"))
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::to_vec(&serde_json::json!({
+                        "connection": conn.id,
+                        "cursor": 1,
+                    }))
+                    .unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
 }
 
 #[tokio::test]

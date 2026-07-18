@@ -286,12 +286,21 @@ impl SessionStore {
     }
 
     pub fn open_session(&self, req: OpenSessionRequest) -> SessionInfo {
+        self.open_session_with_owner(req, None)
+    }
+
+    pub fn open_session_with_owner(
+        &self,
+        req: OpenSessionRequest,
+        owner_principal_id: Option<PrincipalId>,
+    ) -> SessionInfo {
         let id = SessionId(self.inner.next_id.fetch_add(1, Ordering::Relaxed));
         let now = chrono::Utc::now();
         let session = Session {
             id,
             created_at: now,
             tag: req.tag.clone(),
+            owner_principal_id,
             connections: DashMap::new(),
             transactions: DashMap::new(),
             next_conn_id: AtomicU64::new(1),
@@ -430,6 +439,15 @@ impl SessionStore {
             .get(&id)
             .ok_or(ApiError::SessionNotFound(id))?;
         Ok(session.info())
+    }
+
+    pub fn session_owner(&self, id: SessionId) -> ApiResult<Option<PrincipalId>> {
+        let session = self
+            .inner
+            .sessions
+            .get(&id)
+            .ok_or(ApiError::SessionNotFound(id))?;
+        Ok(session.owner_principal_id)
     }
 
     pub async fn open_connection(
@@ -1293,6 +1311,7 @@ pub struct Session {
     pub id: SessionId,
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub tag: Option<String>,
+    pub owner_principal_id: Option<PrincipalId>,
     pub connections: DashMap<ConnectionId, ConnectionEntry>,
     pub transactions: DashMap<TxId, TransactionEntry>,
     pub next_conn_id: AtomicU64,

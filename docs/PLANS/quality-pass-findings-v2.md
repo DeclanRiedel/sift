@@ -36,7 +36,6 @@ them. Re-verified against current source:
 | 1 | WS Cancel never reaches driver | FIXED | `http.rs:3046-3057`, `session.rs:813` |
 | 2 | PG stream panic wedges ConnHandle | FIXED | `stream.rs:86-101, 109-113` (`evict_after_panic`) |
 | 3 | execute_http timeout leaks task | FIXED | `session.rs:676-695` (pre-cursor `task.abort()`) |
-| 4 | cancel_query doesn't authenticate caller | **PARTIAL** | driver-layer check only (`lib.rs:146-152`, `mssql:336-342`); HTTP handler has zero caller-scoping |
 | 5 | PG cancel always uses NoTls | FIXED | `Require`/`VerifyCa`/`VerifyFull` use TLS; cancel is timeout-bounded |
 | 6 | MSSQL cancel leaves dead conn map entry | FIXED | `lib.rs:344-373` (defensive remove + stray-cursor sweep) |
 | 7 | PG shallow schema filter partially applied | FIXED | `schema.rs:51-91` (LIKE + `ANY($2::text[])`) |
@@ -53,28 +52,6 @@ them. Re-verified against current source:
 | P2 | cancel doesn't call driver.close | FIXED | `session.rs:818-831` (MSSQL-only, correct) |
 | P2 | Operation::Metadata free-form strings | STILL | `operation.rs:84-88`; now documented-as-intentional |
 | P2 | Stale file:line citations in plan doc | PARTIAL | route count fixed (39); four function-position citations re-staled to new wrong values |
-
-The remaining **PARTIAL P0 residual (#4)** is worth re-opening — see
-P0-6 below.
-
----
-
-## P0 — real correctness / DoS / security (fix before any user ship)
-
-### P0-6. `cancel_query` HTTP handler still has no caller-scoping (v1 #4 residual)
-- File: `crates/server/src/http.rs:2541-2559`
-- Detail: v1 #4 was "partially fixed" — the ownership check moved to
-  the driver layer (cursor's recorded `conn_id` must match the passed
-  `ConnHandle`). The HTTP handler records `Operation::CancelQuery` with
-  the caller's `req` but performs no principal / room / connection-owner
-  check.
-- **Why it matters:** effective against the documented threat (a caller
-  can only supply their own session's `ConnHandle`), but
-  defense-in-depth-light. Any future bug that lets two sessions share a
-  `ConnHandle` id silently passes the check. Cursor ids are numeric,
-  monotonic, and small — enumeration is trivial.
-- Fix: add an HTTP-level ownership assertion (cursor belongs to a
-  session owned by the caller's principal).
 
 ---
 
