@@ -1447,8 +1447,52 @@ fn io_err(e: std::io::Error) -> DriverError {
     DriverError::new(Code::ConnectionFailed, e.to_string()).with_engine(Engine::SqlServer)
 }
 
+/// Map a tiberius error to a `DriverError`, mirroring the granularity of the
+/// Postgres driver's `pg_err`. Server-side failures carry a SQL Server error
+/// number (`Error::code()`) which we classify via [`mssql_error_code`];
+/// transport/parse failures are classified by tiberius `Error` variant.
 fn ms_err(e: tiberius::error::Error) -> DriverError {
-    DriverError::new(Code::DriverInternal, e.to_string()).with_engine(Engine::SqlServer)
+    use tiberius::error::Error as T;
+    let native_code = e.code();
+    let code = match native_code {
+        // Server responded with a numbered error; classify by number.
+        Some(number) => mssql_error_code(number),
+        // No server error number: classify by transport/parse variant.
+        None => match &e {
+            T::Io { .. } | T::Tls(_) | T::Routing { .. } => Code::ConnectionFailed,
+            T::Conversion(_) | T::BulkInput(_) => Code::InvalidParameterValue,
+            _ => Code::DriverInternal,
+        },
+    };
+    let err = DriverError::new(code, e.to_string()).with_engine(Engine::SqlServer);
+    match native_code {
+        Some(number) => err.with_sqlstate(number.to_string()),
+        None => err,
+    }
+}
+
+/// Classify a SQL Server error number into a driver `Code`. Numbers are the
+/// engine's documented message IDs; grouped by the closest protocol category.
+fn mssql_error_code(number: u32) -> Code {
+    match number {
+        // Login/permission failures.
+        18456 | 18452 | 4064 | 916 => Code::AuthFailed,
+        // Database/connection unavailable.
+        4060 | 40613 | 10054 | 10060 | 233 => Code::ConnectionFailed,
+        // Timeouts (lock request / query wait).
+        1222 => Code::QueryTimedOut,
+        // Deadlock victim — the batch was aborted by the server.
+        1205 => Code::QueryCanceled,
+        // Syntax errors.
+        102 | 105 | 156 | 170 => Code::SyntaxError,
+        // Missing object / column / procedure.
+        207 | 208 | 2812 | 4701 | 3701 => Code::UndefinedObject,
+        // Object/constraint already exists (incl. unique-key violations).
+        2627 | 2601 | 2714 | 1913 | 1779 => Code::DuplicateObject,
+        // Value/type problems: constraints, conversion, overflow, truncation.
+        220 | 232 | 245 | 547 | 8114 | 8115 | 8152 => Code::InvalidParameterValue,
+        _ => Code::DriverInternal,
+    }
 }
 
 #[cfg(test)]
@@ -1476,6 +1520,48 @@ mod tests {
     fn mssql_literal_escapes_text_and_preserves_empty() {
         assert_eq!(mssql_literal(""), "N''");
         assert_eq!(mssql_literal("O'Reilly"), "N'O''Reilly'");
+    }
+
+    #[test]
+    fn mssql_error_code_classifies_known_numbers() {
+        assert_eq!(mssql_error_code(18456), Code::AuthFailed);
+        assert_eq!(mssql_error_code(4060), Code::ConnectionFailed);
+        assert_eq!(mssql_error_code(1222), Code::QueryTimedOut);
+        assert_eq!(mssql_error_code(1205), Code::QueryCanceled);
+        assert_eq!(mssql_error_code(102), Code::SyntaxError);
+        assert_eq!(mssql_error_code(208), Code::UndefinedObject);
+        assert_eq!(mssql_error_code(2627), Code::DuplicateObject);
+        assert_eq!(mssql_error_code(547), Code::InvalidParameterValue);
+        assert_eq!(mssql_error_code(8114), Code::InvalidParameterValue);
+    }
+
+    #[test]
+    fn mssql_error_code_falls_back_to_internal() {
+        assert_eq!(mssql_error_code(999999), Code::DriverInternal);
+    }
+
+    #[test]
+    fn ms_err_classifies_transport_variants() {
+        let io = tiberius::error::Error::Io {
+            kind: std::io::ErrorKind::ConnectionReset,
+            message: "reset".into(),
+        };
+        assert_eq!(ms_err(io).code, Code::ConnectionFailed);
+
+        let conv = tiberius::error::Error::Conversion("bad cast".into());
+        assert_eq!(ms_err(conv).code, Code::InvalidParameterValue);
+
+        let proto = tiberius::error::Error::Protocol("garbled".into());
+        assert_eq!(ms_err(proto).code, Code::DriverInternal);
+    }
+
+    #[test]
+    fn ms_err_tags_engine() {
+        let io = tiberius::error::Error::Io {
+            kind: std::io::ErrorKind::ConnectionReset,
+            message: "reset".into(),
+        };
+        assert_eq!(ms_err(io).engine, Some(Engine::SqlServer));
     }
 
     #[test]

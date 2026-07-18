@@ -579,20 +579,6 @@ P0-6 and P1-driver-3 below.
 - Fix: issue `SELECT 1` (or use tiberius's lazy-reconnect) before
   handing the conn out; on failure discard and try the next.
 
-#### P1-driver-9. MSSQL `ms_err` collapses every error to `Code::DriverInternal`
-- File: `crates/driver-sqlserver/src/lib.rs:1450-1452`
-- Detail: `fn ms_err(e: tiberius::error::Error) -> DriverError {
-  DriverError::new(Code::DriverInternal, e.to_string())... }`. PG has a
-  granular mapping (`lib.rs:422-451`).
-- **Why it matters:** tiberius exposes rich error codes (`TokenError::code()`
-  as `u32`): `18456` = login failed, `208` = invalid object name,
-  `2627`/`2714` = duplicate object, `547` = check constraint,
-  `1205` = deadlock victim. The driver collapses all to
-  `DriverInternal`, so the server cannot surface auth-failure vs.
-  syntax-error vs. dead backend to the client.
-- Fix: `match` on `tiberius::error::Error` variants; map
-  `TokenStream` errors by first `TokenError::code`.
-
 #### P1-driver-10. MSSQL silently drops Money / DatetimeOffset / SmallDateTime / SqlVariant to NULL
 - File: `crates/driver-sqlserver/src/lib.rs:974-1035` (`ms_value`)
 - Detail: `ms_type_ref` (`:1206`) maps `Money | Money4` →
