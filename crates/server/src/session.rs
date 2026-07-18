@@ -62,10 +62,15 @@ struct SessionStoreInner {
     /// store is constructed and shared behind an `Arc`.
     request_timeout_ms: AtomicU64,
     /// Sender to the background durable-audit writer thread. `None` when
-    /// metadata is disabled. Sending is non-blocking, so the request path
-    /// never waits on the SQLite write; every recorded operation still lands
-    /// synchronously in the in-memory/JSONL log below.
-    audit_tx: Mutex<Option<std::sync::mpsc::Sender<NewOperationAudit>>>,
+    /// metadata is disabled. The channel is bounded and sends are
+    /// non-blocking (`try_send`), so the request path never waits on the
+    /// SQLite write and a stalled writer cannot grow the queue without bound;
+    /// every recorded operation still lands synchronously in the
+    /// in-memory/JSONL log below.
+    audit_tx: Mutex<Option<SyncSender<NewOperationAudit>>>,
+    /// Count of durable-audit rows dropped because the bounded channel above
+    /// was full. Surfaced in the overflow log so the drop is never silent.
+    audit_dropped: AtomicU64,
     /// Persist raw SQL in query history. When false, only a fingerprint is
     /// stored. The audit/replay trail is always fingerprinted regardless.
     store_sql: AtomicBool,
@@ -114,6 +119,7 @@ impl SessionStore {
                 registry,
                 request_timeout_ms: AtomicU64::new(DEFAULT_REQUEST_TIMEOUT_MS),
                 audit_tx: Mutex::new(None),
+                audit_dropped: AtomicU64::new(0),
                 store_sql: AtomicBool::new(true),
                 max_result_rows: AtomicUsize::new(DEFAULT_MAX_RESULT_ROWS),
                 max_result_bytes: AtomicUsize::new(DEFAULT_MAX_RESULT_BYTES),
@@ -149,6 +155,7 @@ impl SessionStore {
                 registry,
                 request_timeout_ms: AtomicU64::new(DEFAULT_REQUEST_TIMEOUT_MS),
                 audit_tx: Mutex::new(None),
+                audit_dropped: AtomicU64::new(0),
                 store_sql: AtomicBool::new(true),
                 max_result_rows: AtomicUsize::new(DEFAULT_MAX_RESULT_ROWS),
                 max_result_bytes: AtomicUsize::new(DEFAULT_MAX_RESULT_BYTES),
@@ -230,7 +237,22 @@ impl SessionStore {
     /// request path, so a slow disk never stalls an async worker. Called by
     /// the server at startup when a metadata store is configured.
     pub fn set_audit_store(&self, store: MetadataStore) {
-        let (tx, rx) = std::sync::mpsc::channel::<NewOperationAudit>();
+        const AUDIT_QUEUE: usize = 1024;
+        // Give the writer its own SQLite connection so its INSERT doesn't hold
+        // the request-path metadata mutex (P1-meta-5). For file-backed stores
+        // WAL lets the separate connection write concurrently; in-memory
+        // stores share the connection (no separate DB is possible).
+        let store = match store.reopen() {
+            Ok(store) => store,
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    "audit writer: dedicated metadata connection failed; sharing primary"
+                );
+                store
+            }
+        };
+        let (tx, rx) = std::sync::mpsc::sync_channel::<NewOperationAudit>(AUDIT_QUEUE);
         std::thread::Builder::new()
             .name("sift-audit-writer".to_string())
             .spawn(move || {
@@ -429,10 +451,19 @@ impl SessionStore {
                 error_message,
                 correlation_id: crate::correlation::current(),
             };
-            // Hand off to the writer thread; the request path does not wait on
-            // the SQLite write. Send only fails if the writer died, already
-            // logged there.
-            let _ = tx.send(record);
+            // Hand off to the writer thread without blocking the request path.
+            // On a full queue we drop and count rather than wait on the SQLite
+            // write; a disconnected writer was already logged at spawn.
+            match tx.try_send(record) {
+                Ok(()) => {}
+                Err(TrySendError::Full(_)) => {
+                    let dropped = self.inner.audit_dropped.fetch_add(1, Ordering::Relaxed) + 1;
+                    tracing::error!(dropped, "durable audit queue full; dropping row");
+                }
+                Err(TrySendError::Disconnected(_)) => {
+                    tracing::error!("durable audit writer is stopped; dropping row");
+                }
+            }
         }
     }
 

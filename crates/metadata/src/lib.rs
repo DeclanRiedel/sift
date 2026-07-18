@@ -73,10 +73,22 @@ pub enum MetadataError {
     BlockingTask(String),
 }
 
+/// How a [`MetadataStore`]'s connection was opened, so [`MetadataStore::reopen`]
+/// can produce an independent connection to the same database.
+#[derive(Clone)]
+enum ConnectionSource {
+    File(PathBuf),
+    /// A private in-memory database. A second `Connection::open_in_memory`
+    /// would be a *different* empty DB, so in-memory stores cannot hand out an
+    /// independent connection — `reopen` shares the existing one.
+    Memory,
+}
+
 #[derive(Clone)]
 pub struct MetadataStore {
     conn: Arc<Mutex<Connection>>,
     secrets: Arc<dyn SecretStore>,
+    source: ConnectionSource,
 }
 
 impl MetadataStore {
@@ -91,6 +103,7 @@ impl MetadataStore {
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
             secrets,
+            source: ConnectionSource::File(path.to_path_buf()),
         })
     }
 
@@ -101,7 +114,30 @@ impl MetadataStore {
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
             secrets,
+            source: ConnectionSource::Memory,
         })
+    }
+
+    /// Open an independent handle to the same database with its own SQLite
+    /// connection. For a file-backed store this yields a genuinely separate
+    /// connection: in WAL mode it can write without contending on the primary
+    /// connection's mutex, which is how the audit writer stays off the
+    /// request-path lock (P1-meta-5). The database is already migrated, so
+    /// this only configures the connection. In-memory stores share no file,
+    /// so this returns a clone backed by the existing connection.
+    pub fn reopen(&self) -> Result<MetadataStore> {
+        match &self.source {
+            ConnectionSource::File(path) => {
+                let conn = Connection::open(path)?;
+                configure_connection(&conn)?;
+                Ok(MetadataStore {
+                    conn: Arc::new(Mutex::new(conn)),
+                    secrets: Arc::clone(&self.secrets),
+                    source: self.source.clone(),
+                })
+            }
+            ConnectionSource::Memory => Ok(self.clone()),
+        }
     }
 
     pub fn default_local_path() -> PathBuf {
@@ -1681,6 +1717,49 @@ mod tests {
         assert_eq!(rows[1].actor_principal_id, Some(PrincipalId(1)));
         assert_eq!(rows[1].row_count, Some(42));
         assert_eq!(rows[1].correlation_id.as_deref(), Some("corr-1"));
+    }
+
+    #[test]
+    fn reopen_file_store_writes_visible_across_connections() {
+        // The audit writer uses `reopen()` to get its own connection; a write
+        // through that connection must be visible from the primary (WAL,
+        // separate connection) — this is the P1-meta-5 fix in miniature.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("metadata.sqlite");
+        let secrets = Arc::new(MemorySecretStore::new());
+        let primary = MetadataStore::open(&path, secrets).unwrap();
+        primary.bootstrap_local("local user").unwrap();
+
+        let writer = primary.reopen().unwrap();
+        // A genuinely independent connection: not the same Arc.
+        assert!(!Arc::ptr_eq(&primary.conn, &writer.conn));
+
+        writer
+            .record_operation_audit(NewOperationAudit {
+                actor_principal_id: Some(PrincipalId(1)),
+                action: "execute".into(),
+                target: "query".into(),
+                target_id: Some(7),
+                status: "succeeded".into(),
+                result_code: None,
+                row_count: Some(42),
+                error_message: None,
+                correlation_id: Some("corr-1".into()),
+            })
+            .unwrap();
+
+        let rows = primary.list_operation_audit(10).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].correlation_id.as_deref(), Some("corr-1"));
+    }
+
+    #[test]
+    fn reopen_in_memory_store_shares_connection() {
+        // In-memory stores have no shared file, so `reopen` shares the
+        // existing connection rather than opening a second empty database.
+        let primary = store();
+        let handle = primary.reopen().unwrap();
+        assert!(Arc::ptr_eq(&primary.conn, &handle.conn));
     }
 
     #[test]

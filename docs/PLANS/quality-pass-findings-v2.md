@@ -83,9 +83,11 @@ them. Re-verified against current source:
 #### P1-meta-1. Single `Connection` behind `std::sync::Mutex` serializes all metadata access
 - File: `crates/metadata/src/lib.rs:73`
 - Detail: one SQLite connection, one mutex. Every read and every write
-  across every spawn_blocking task and the audit-writer thread contends
-  on this lock. Concurrent blocking tasks still serialize once they
-  reach the metadata store.
+  across every spawn_blocking task contends on this lock. Concurrent
+  blocking tasks still serialize once they reach the metadata store.
+  (The audit writer now runs on its own connection — see P1-meta-5 —
+  so it is no longer part of this contention, but all request-path
+  metadata access still shares the single connection.)
 - **Why it matters:** SQLite in WAL mode supports concurrent readers, but
   this design forfeits that entirely. A long-running read
   (`list_operation_audit(limit=...)` over a growing table) blocks every
@@ -112,18 +114,28 @@ them. Re-verified against current source:
   (delete connection profile, set/revoke credential, revoke token),
   write the audit row inside the same tx.
 
-#### P1-meta-5. Audit-writer thread shares the single connection via unbounded mpsc
-- Files: `crates/server/src/session.rs:212-226`,
-  `crates/metadata/src/lib.rs:873-903` (`record_operation_audit`)
-- Detail: same mutex, different thread. Channel is `std::sync::mpsc` —
+#### P1-meta-5. Audit-writer thread shares the single connection via unbounded mpsc — RESOLVED
+- Files: `crates/server/src/session.rs`,
+  `crates/metadata/src/lib.rs` (`record_operation_audit`, `reopen`)
+- Detail: same mutex, different thread. Channel was `std::sync::mpsc` —
   unbounded.
-- **Why it matters:** (1) under load, if the writer stalls on the mutex,
-  the channel grows without bound — memory growth under pressure.
-  (2) When the audit writer is running its INSERT, every request-path
-  metadata call blocks behind it. Compounds P1-meta-1.
-- Fix: give the audit writer its own `Connection`; bound the channel
-  and drop+count on overflow; or move audit into the per-method tx
-  (P1-meta-4).
+- **Why it mattered:** (1) under load, if the writer stalled on the mutex,
+  the channel grew without bound — memory growth under pressure.
+  (2) When the audit writer ran its INSERT, every request-path
+  metadata call blocked behind it. Compounded P1-meta-1.
+- **Fix applied:**
+  - `MetadataStore::reopen()` opens an independent SQLite connection to
+    the same file for the audit writer; in WAL mode its INSERT no longer
+    contends on the request-path mutex. (In-memory stores share the
+    connection — no separate DB is possible, and contention is a
+    file-backed/production concern only.)
+  - `set_audit_store` now uses a bounded `sync_channel(1024)`; the send
+    site uses `try_send` and drops+counts on overflow (logged via
+    `audit_dropped`), so a stalled writer can't grow the queue.
+  - Covered by `reopen_file_store_writes_visible_across_connections` and
+    `reopen_in_memory_store_shares_connection`.
+  - Note: the *broad* single-connection serialization of all request-path
+    metadata access remains — that is P1-meta-1 (next).
 
 ### Memory bounds / task supervision
 
