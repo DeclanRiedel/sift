@@ -18,8 +18,8 @@ Two systemic themes run through almost every P1 below:
    handlers."*
 2. **Per-row / per-cell allocation on hot paths.** `Page::clone()` on
    every pump page, `format!` per NUMERIC digit group, `to_string()` per
-   cell for column names only used in error arms, `to_ascii_lowercase()`
-   per completion candidate per keystroke. Individually small, together
+   cell for column names only used in error arms, repeated candidate
+   string construction per keystroke. Individually small, together
    they are the gap between the current code and the stated
    "Zed-class snappiness" product goal.
 
@@ -64,20 +64,6 @@ them. Re-verified against current source:
 ### Schema cache
 
 ### Completion hot path (the "Zed-class snappiness" goal)
-
-#### P1-comp-1. `score_match` calls `to_ascii_lowercase()` once per candidate per keystroke
-- File: `crates/completion/src/rank.rs:249`
-- Detail: `let cl = candidate.to_ascii_lowercase();` heap-allocates a
-  fresh String for case-folding, for every keyword (~90 PG / ~90 MSSQL),
-  every function (~55 / ~55), every object, and every column on every
-  keystroke.
-- **Why it matters:** with a 1k-table schema and an unqualified-column
-  walk (`ExpectingColumn { qualifier: None }` → `push_all_columns` →
-  `push_columns` → `score_match` per column), this is easily 50k+
-  allocations per keystroke. The lowercased form is invariant across
-  keystrokes.
-- Fix: precompute `name_lower` at Dictionary-build time on
-  `ObjectEntry`/`ColumnEntry`; static keyword tables need no fold.
 
 #### P1-comp-5. Full re-tokenize of preceding SQL every keystroke
 - File: `crates/completion/src/context.rs:40-45`
@@ -679,8 +665,8 @@ them. Re-verified against current source:
 
 1. **P1-lock-1** (reduce global operation-log lock scope) —
    eliminates a global serialization point.
-2. **P1-comp-1 / P1-comp-5 / P1-comp-9** (lowercase precompute +
-   memoize tokenize + protocol `Cow`) — the difference between current
+2. **P1-comp-5 / P1-comp-9** (memoize tokenize + protocol `Cow`) —
+   the difference between current
    autocomplete and "Zed-class."
 3. **P1-driver-1** (PG close-leak) — silent resource leak on
    close-mid-stream cycles.
