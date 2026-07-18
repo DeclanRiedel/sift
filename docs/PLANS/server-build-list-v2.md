@@ -378,13 +378,6 @@ completion.
       (opt-in DDL trigger); SQL Server 30s poll of
       `sys.objects.modify_date`. Cache hit/miss/invalidation counters
       exposed as atomics.
-- [ ] [Design] Predictive prefetch: speculatively fetch page N+1
-      when page N is acked. **Partially done** — the pump layer
-      (`cursors.rs`) buffers `prefetch_pages` (default 2) ahead of
-      the consumer via a bounded channel, which delivers the "page
-      N+1 already buffered when the client asks" behavior. Adaptive
-      depth based on ack velocity is a future enhancement, not
-      shipped.
 - [x] [Design] Pool pre-warm — PG + SQL Server. `PgConnectionSpec.pool_min_size`
       is honored on `Driver::open`: `min-1` extra pool slots are
       pulled concurrently and returned to deadpool as idle.
