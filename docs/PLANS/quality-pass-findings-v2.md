@@ -436,18 +436,6 @@ P0-6 and P1-driver-3 below.
   HMAC-SHA256 keyed over `(lookup_prefix || random_part)`, constant-time
   compare. Decouple `last_used_at` from the verify path (debounce).
 
-#### P1-meta-3. No `busy_timeout`, no `synchronous=NORMAL`
-- File: `crates/metadata/src/lib.rs:1207-1211` (`configure_connection`)
-- Detail: only `foreign_keys=ON` and `journal_mode=WAL` are set.
-- **Why it matters:** (1) No `busy_timeout` — if anything outside this
-  process opens the DB file (`sqlite3` CLI, backup tool, `VACUUM`, a
-  second sift process, litestream), the very next query returns
-  `SQLITE_BUSY` immediately instead of waiting. (2) `synchronous=FULL`
-  means every commit fsyncs the WAL; `synchronous=NORMAL` under WAL is
-  the documented sweet spot (no corruption on power loss, only
-  last-tx loss).
-- Fix: `busy_timeout=5000`; `synchronous=NORMAL`.
-
 #### P1-meta-4. Audit row not written in the same transaction as the mutation
 - Files: `crates/metadata/src/lib.rs:617-639` (`create_room`),
   `:481-522` (`delete_connection_profile`), `:680-695` (`add_room_member`),
