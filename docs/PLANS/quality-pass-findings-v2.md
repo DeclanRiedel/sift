@@ -59,19 +59,6 @@ them. Re-verified against current source:
 
 ### Hot-path allocation (server)
 
-#### P1-alloc-1. Every page deep-cloned on the pump happy path
-- File: `crates/server/src/cursors.rs:532`
-- Detail: `let send_fut = consumer_tx.send(page.clone());` — the clone
-  exists only so `page` survives into the rare cancel branch's
-  `spillover.push(page)` (line 537). The clone happens on every page.
-- **Why it matters:** a 5,000-row page × 10 `Value::Text(64B)` cells =
-  ~3.3 MB of row data; the clone memcpy's that plus ~5,000 Vec header
-  allocations + ~50,000 String clones. For a 1M-row query batched 5k/page
-  that's ~200 clones ≈ **660 MB of transient allocation and ~10M small
-  heap allocs per large query**.
-- Fix: move `page` into the send future by value; clone lazily only in
-  the cancel arm.
-
 #### P1-alloc-3. Export path: per-row + per-cell allocations, no buffering
 - Files: `crates/server/src/export.rs:141-184` (`encode_row`),
   `:193-214` (`value_to_text`), `:256-269` (`row_as_json`)
@@ -95,7 +82,7 @@ them. Re-verified against current source:
   Vec<Row> } }` is serialized into one contiguous String before any byte
   hits the socket. For a wide 5,000-row page this is a multi-MB
   allocation, then a copy into the WS frame buffer. Lower priority than
-  P1-alloc-1/2/3 (pages aren't per-row) but real on wide rows.
+  the per-row export allocations but real on wide rows.
 - Fix: serialize into a `BytesMut`, or use `serde_json::to_writer` over
   the socket sink.
 
@@ -805,18 +792,16 @@ them. Re-verified against current source:
 
 1. **P1-lock-1** (reduce global operation-log lock scope) —
    eliminates a global serialization point.
-2. **P1-alloc-1** (`page.clone()` in pump) — single-line change,
-   removes ~10M allocs per large query.
-3. **P1-comp-1 / P1-comp-5 / P1-comp-9** (lowercase precompute +
+2. **P1-comp-1 / P1-comp-5 / P1-comp-9** (lowercase precompute +
    memoize tokenize + protocol `Cow`) — the difference between current
    autocomplete and "Zed-class."
-4. **P1-io-1 / P1-io-2** (spill I/O `spawn_blocking`) — prevents worker
+3. **P1-io-1 / P1-io-2** (spill I/O `spawn_blocking`) — prevents worker
    stalls on evicted cursors.
-5. **P1-driver-1** (PG close-leak) — silent resource leak on
+4. **P1-driver-1** (PG close-leak) — silent resource leak on
    close-mid-stream cycles.
-6. **P1-meta-1 / P1-meta-2** (connection pool + HMAC tokens) — the
+5. **P1-meta-1 / P1-meta-2** (connection pool + HMAC tokens) — the
     scalability ceiling for any multi-user deployment.
-7. **Refactor splits** (http.rs / mssql lib.rs / metadata lib.rs) —
+6. **Refactor splits** (http.rs / mssql lib.rs / metadata lib.rs) —
     mechanical, unblock future review. Do last.
 
 The two themes (sync I/O on async, per-row allocation) are worth
