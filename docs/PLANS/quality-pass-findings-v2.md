@@ -59,21 +59,6 @@ them. Re-verified against current source:
 
 ### Hot-path allocation (server)
 
-#### P1-alloc-3. Export path: per-row + per-cell allocations, no buffering
-- Files: `crates/server/src/export.rs:141-184` (`encode_row`),
-  `:193-214` (`value_to_text`), `:256-269` (`row_as_json`)
-- Detail: `encode_row` allocates a fresh `String::new()` per row, grows
-  it char-by-char, then `Bytes::from(out)` (heap copy #2 per row).
-  `value_to_text` does `i.to_string()` per numeric cell.
-  `row_as_json` clones every column name string as the JSON key for
-  every row.
-- **Why it matters:** a 1M-row CSV export with 10 columns allocates
-  ~10M small Strings for cells + 1M row Strings + 1M Bytes conversions
-  ≈ **12M heap allocations for the encoding alone**, on top of driver
-  row production cost.
-- Fix: reuse a `String` buffer across rows; write ints via `itoa`
-  (zero-alloc); precompute column-name `Arc<str>` once for JSON.
-
 #### P1-alloc-4. Full-page serialization to one String before every WS send
 - File: `crates/server/src/http.rs:3078-3087`
 - Detail: `send_json` does `serde_json::to_string(value)` then
