@@ -3139,9 +3139,9 @@ async fn send_json<T: serde::Serialize>(
     sender: &mut futures::stream::SplitSink<WebSocket, Message>,
     value: &T,
 ) -> ApiResult<()> {
-    let text = serde_json::to_string(value).map_err(|e| ApiError::Internal(e.to_string()))?;
+    let bytes = serde_json::to_vec(value).map_err(|e| ApiError::Internal(e.to_string()))?;
     sender
-        .send(Message::Text(text))
+        .send(Message::Binary(bytes))
         .await
         .map_err(|e| ApiError::BadRequest(e.to_string()))
 }

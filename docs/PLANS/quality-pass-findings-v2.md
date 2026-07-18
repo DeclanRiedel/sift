@@ -59,18 +59,6 @@ them. Re-verified against current source:
 
 ### Hot-path allocation (server)
 
-#### P1-alloc-4. Full-page serialization to one String before every WS send
-- File: `crates/server/src/http.rs:3078-3087`
-- Detail: `send_json` does `serde_json::to_string(value)` then
-  `sender.send(Message::Text(text))`.
-- **Why it matters:** `WsServerMessage::Page { page: Page::Rows { rows:
-  Vec<Row> } }` is serialized into one contiguous String before any byte
-  hits the socket. For a wide 5,000-row page this is a multi-MB
-  allocation, then a copy into the WS frame buffer. Lower priority than
-  the per-row export allocations but real on wide rows.
-- Fix: serialize into a `BytesMut`, or use `serde_json::to_writer` over
-  the socket sink.
-
 ### Sync I/O on async path
 
 #### P1-io-1. Spill write does `serde_json::to_vec` + `write_all` + `sync_all` on the pump task

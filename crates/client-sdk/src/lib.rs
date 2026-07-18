@@ -942,8 +942,9 @@ where
         };
         match message? {
             Message::Text(text) => return Ok(serde_json::from_str(&text)?),
+            Message::Binary(bytes) => return Ok(serde_json::from_slice(&bytes)?),
             Message::Close(_) => return Err(Error::Protocol("websocket closed".into())),
-            Message::Ping(_) | Message::Pong(_) | Message::Binary(_) | Message::Frame(_) => {}
+            Message::Ping(_) | Message::Pong(_) | Message::Frame(_) => {}
         }
     }
 }
@@ -966,8 +967,9 @@ where
         };
         match message? {
             Message::Text(text) => return Ok(serde_json::from_str(&text)?),
+            Message::Binary(bytes) => return Ok(serde_json::from_slice(&bytes)?),
             Message::Close(_) => return Err(Error::Protocol("websocket closed".into())),
-            Message::Ping(_) | Message::Pong(_) | Message::Binary(_) | Message::Frame(_) => {}
+            Message::Ping(_) | Message::Pong(_) | Message::Frame(_) => {}
         }
     }
 }

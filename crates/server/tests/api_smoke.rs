@@ -78,6 +78,16 @@ fn test_state() -> AppState {
     }
 }
 
+fn ws_json<T: serde::de::DeserializeOwned>(message: tokio_tungstenite::tungstenite::Message) -> T {
+    match message {
+        tokio_tungstenite::tungstenite::Message::Text(text) => serde_json::from_str(&text).unwrap(),
+        tokio_tungstenite::tungstenite::Message::Binary(bytes) => {
+            serde_json::from_slice(&bytes).unwrap()
+        }
+        other => panic!("unexpected websocket message: {other:?}"),
+    }
+}
+
 fn test_state_with_driver(driver: MockDriver) -> AppState {
     let registry = DriverRegistry::builder().register(driver).build();
     AppState {
@@ -716,22 +726,12 @@ async fn websocket_mid_stream_cancel_stops_paging() {
     .unwrap();
 
     // Started + first page (columns).
-    let started = match ws.next().await.unwrap().unwrap() {
-        Message::Text(text) => {
-            serde_json::from_str::<sift_protocol::WsServerMessage>(&text).unwrap()
-        }
-        other => panic!("unexpected {other:?}"),
-    };
+    let started: sift_protocol::WsServerMessage = ws_json(ws.next().await.unwrap().unwrap());
     let cursor_id = match started {
         sift_protocol::WsServerMessage::Started { cursor_id, .. } => cursor_id,
         other => panic!("expected Started, got {other:?}"),
     };
-    let first = match ws.next().await.unwrap().unwrap() {
-        Message::Text(text) => {
-            serde_json::from_str::<sift_protocol::WsServerMessage>(&text).unwrap()
-        }
-        other => panic!("unexpected {other:?}"),
-    };
+    let first: sift_protocol::WsServerMessage = ws_json(ws.next().await.unwrap().unwrap());
     assert!(matches!(first, sift_protocol::WsServerMessage::Page { .. }));
 
     // Send Cancel instead of Ack. Server must route to driver.cancel and
@@ -755,6 +755,13 @@ async fn websocket_mid_stream_cancel_stops_paging() {
         Ok(Some(Ok(Message::Close(_)))) | Ok(None) => {}
         Ok(Some(Ok(Message::Text(text)))) => {
             let msg: sift_protocol::WsServerMessage = serde_json::from_str(&text).unwrap();
+            assert!(
+                !matches!(msg, sift_protocol::WsServerMessage::Page { .. }),
+                "server sent another Page after Cancel: {msg:?}"
+            );
+        }
+        Ok(Some(Ok(Message::Binary(bytes)))) => {
+            let msg: sift_protocol::WsServerMessage = serde_json::from_slice(&bytes).unwrap();
             assert!(
                 !matches!(msg, sift_protocol::WsServerMessage::Page { .. }),
                 "server sent another Page after Cancel: {msg:?}"
@@ -815,10 +822,7 @@ async fn websocket_execute_requires_active_tx_ref() {
     .await
     .unwrap();
 
-    let message: sift_protocol::WsServerMessage = match ws.next().await.unwrap().unwrap() {
-        Message::Text(text) => serde_json::from_str(&text).unwrap(),
-        other => panic!("unexpected websocket message: {other:?}"),
-    };
+    let message: sift_protocol::WsServerMessage = ws_json(ws.next().await.unwrap().unwrap());
     assert!(matches!(
         message,
         sift_protocol::WsServerMessage::Error {
@@ -1533,10 +1537,7 @@ async fn room_websocket_applies_and_broadcasts_document_operations() {
     ))
     .await
     .unwrap();
-    let attached: RoomServerMessage = match ws.next().await.unwrap().unwrap() {
-        Message::Text(text) => serde_json::from_str(&text).unwrap(),
-        other => panic!("unexpected websocket message: {other:?}"),
-    };
+    let attached: RoomServerMessage = ws_json(ws.next().await.unwrap().unwrap());
     assert!(matches!(attached, RoomServerMessage::Attached { .. }));
 
     ws.send(Message::Text(
@@ -1555,10 +1556,7 @@ async fn room_websocket_applies_and_broadcasts_document_operations() {
 
     let mut saw_operation = false;
     for _ in 0..4 {
-        let message: RoomServerMessage = match ws.next().await.unwrap().unwrap() {
-            Message::Text(text) => serde_json::from_str(&text).unwrap(),
-            other => panic!("unexpected websocket message: {other:?}"),
-        };
+        let message: RoomServerMessage = ws_json(ws.next().await.unwrap().unwrap());
         if matches!(
             message,
             RoomServerMessage::DocumentOperation { operation }
