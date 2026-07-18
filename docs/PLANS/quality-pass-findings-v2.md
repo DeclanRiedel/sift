@@ -80,22 +80,34 @@ them. Re-verified against current source:
 
 ### Metadata scalability ceiling
 
-#### P1-meta-1. Single `Connection` behind `std::sync::Mutex` serializes all metadata access
-- File: `crates/metadata/src/lib.rs:73`
+#### P1-meta-1. Single `Connection` behind `std::sync::Mutex` serializes all metadata access — RESOLVED
+- File: `crates/metadata/src/lib.rs`
 - Detail: one SQLite connection, one mutex. Every read and every write
-  across every spawn_blocking task contends on this lock. Concurrent
-  blocking tasks still serialize once they reach the metadata store.
-  (The audit writer now runs on its own connection — see P1-meta-5 —
-  so it is no longer part of this contention, but all request-path
-  metadata access still shares the single connection.)
-- **Why it matters:** SQLite in WAL mode supports concurrent readers, but
-  this design forfeits that entirely. A long-running read
-  (`list_operation_audit(limit=...)` over a growing table) blocks every
+  across every spawn_blocking task contended on this lock. Concurrent
+  blocking tasks serialized once they reached the metadata store.
+- **Why it mattered:** SQLite in WAL mode supports concurrent readers, but
+  the single-connection design forfeited that entirely. A long-running read
+  (`list_operation_audit(limit=...)` over a growing table) blocked every
   write and every other read for its duration. Under a burst of
-  `GET /v1/metadata/rooms` the latency floor is `(N requests) ×
+  `GET /v1/metadata/rooms` the latency floor was `(N requests) ×
   (per-request query time)`, not `(N / R) × query time`.
-- Fix: `r2d2_sqlite`/`deadpool-sqlite` pool with WAL; or an actor model;
-  or minimum: `parking_lot::Mutex` + split read-only connection.
+- **Fix applied:** file-backed stores now use a small hand-rolled WAL
+  connection pool (`ConnectionPool`); each metadata call checks out its own
+  connection for the duration of the operation, so reads run concurrently
+  and writers serialize only via SQLite's own `busy_timeout`. The `idle`
+  mutex is held only to pop/push a connection, never across a query.
+  Connections are created on demand (checkout never blocks) with up to
+  `MAX_IDLE_CONNECTIONS` (16) kept warm; live connections are naturally
+  capped by Tokio's bounded blocking pool. In-memory stores keep the single
+  mutex-guarded connection (a second `open_in_memory` is a different empty
+  DB, so it cannot be pooled). A `Backend`/`ConnHandle` deref shim keeps the
+  ~45 call sites backend-agnostic. Covered by
+  `pooled_store_writes_visible_across_connections` and
+  `pool_reuses_idle_connections`.
+  - Chose a hand-rolled pool over `r2d2_sqlite`/`deadpool-sqlite` to avoid a
+    second `rusqlite` version in the tree (the workspace pins 0.32 with the
+    `bundled` feature) and because the logic needed is ~60 lines. `deadpool`
+    is async; metadata runs in `spawn_blocking`, so a sync pool is the fit.
 
 #### P1-meta-4. Audit row not written in the same transaction as the mutation
 - Files: `crates/metadata/src/lib.rs:617-639` (`create_room`),
@@ -116,7 +128,7 @@ them. Re-verified against current source:
 
 #### P1-meta-5. Audit-writer thread shares the single connection via unbounded mpsc — RESOLVED
 - Files: `crates/server/src/session.rs`,
-  `crates/metadata/src/lib.rs` (`record_operation_audit`, `reopen`)
+  `crates/metadata/src/lib.rs` (`record_operation_audit`)
 - Detail: same mutex, different thread. Channel was `std::sync::mpsc` —
   unbounded.
 - **Why it mattered:** (1) under load, if the writer stalled on the mutex,
@@ -124,18 +136,16 @@ them. Re-verified against current source:
   (2) When the audit writer ran its INSERT, every request-path
   metadata call blocked behind it. Compounded P1-meta-1.
 - **Fix applied:**
-  - `MetadataStore::reopen()` opens an independent SQLite connection to
-    the same file for the audit writer; in WAL mode its INSERT no longer
-    contends on the request-path mutex. (In-memory stores share the
-    connection — no separate DB is possible, and contention is a
-    file-backed/production concern only.)
+  - The audit writer's INSERT runs on its own pooled connection (it checks
+    one out per call, like every other file-backed metadata call — see
+    P1-meta-1), so in WAL mode it no longer contends on the request path.
+    (In-memory stores share the single connection — no separate DB is
+    possible, and contention is a file-backed/production concern only.)
+    An initial fix used a dedicated `reopen()` connection; that was
+    subsumed by the P1-meta-1 pool and removed.
   - `set_audit_store` now uses a bounded `sync_channel(1024)`; the send
     site uses `try_send` and drops+counts on overflow (logged via
     `audit_dropped`), so a stalled writer can't grow the queue.
-  - Covered by `reopen_file_store_writes_visible_across_connections` and
-    `reopen_in_memory_store_shares_connection`.
-  - Note: the *broad* single-connection serialization of all request-path
-    metadata access remains — that is P1-meta-1 (next).
 
 ### Memory bounds / task supervision
 
@@ -499,8 +509,8 @@ them. Re-verified against current source:
    eliminates a global serialization point.
 2. **P1-comp-9** (protocol `Cow`) — the difference between current
    autocomplete and "Zed-class."
-3. **P1-meta-1** (metadata connection concurrency) — the
-    scalability ceiling for any multi-user deployment.
+3. ~~**P1-meta-1** (metadata connection concurrency)~~ — DONE (WAL
+    connection pool); was the scalability ceiling for multi-user.
 4. **Refactor splits** (http.rs / mssql lib.rs / metadata lib.rs) —
     mechanical, unblock future review. Do last.
 

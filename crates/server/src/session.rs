@@ -238,20 +238,10 @@ impl SessionStore {
     /// the server at startup when a metadata store is configured.
     pub fn set_audit_store(&self, store: MetadataStore) {
         const AUDIT_QUEUE: usize = 1024;
-        // Give the writer its own SQLite connection so its INSERT doesn't hold
-        // the request-path metadata mutex (P1-meta-5). For file-backed stores
-        // WAL lets the separate connection write concurrently; in-memory
-        // stores share the connection (no separate DB is possible).
-        let store = match store.reopen() {
-            Ok(store) => store,
-            Err(error) => {
-                tracing::warn!(
-                    %error,
-                    "audit writer: dedicated metadata connection failed; sharing primary"
-                );
-                store
-            }
-        };
+        // The writer's INSERT runs on its own pooled connection (file-backed
+        // stores check one out per call), so it never holds the request-path
+        // connection (P1-meta-5, P1-meta-1). In-memory stores share the single
+        // connection, which is fine for their low volume.
         let (tx, rx) = std::sync::mpsc::sync_channel::<NewOperationAudit>(AUDIT_QUEUE);
         std::thread::Builder::new()
             .name("sift-audit-writer".to_string())

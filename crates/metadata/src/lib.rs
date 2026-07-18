@@ -1,8 +1,9 @@
 //! Local metadata persistence for tenants, principals, connection profiles,
 //! rooms, documents, and room-scoped history.
 
+use std::ops::{Deref, DerefMut};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use argon2::password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString};
 use argon2::Argon2;
@@ -73,22 +74,135 @@ pub enum MetadataError {
     BlockingTask(String),
 }
 
-/// How a [`MetadataStore`]'s connection was opened, so [`MetadataStore::reopen`]
-/// can produce an independent connection to the same database.
+/// Maximum idle connections the file-backed pool retains. Connections are
+/// created on demand (checkout never blocks), but only this many are kept
+/// warm; the rest are closed on check-in. Metadata calls run on Tokio's
+/// bounded blocking pool, so live connections are naturally capped by that.
+const MAX_IDLE_CONNECTIONS: usize = 16;
+
+/// A tiny SQLite connection pool for file-backed stores. In WAL mode multiple
+/// connections read concurrently and writers serialize via `busy_timeout`, so
+/// spreading metadata calls across connections lifts the single-mutex
+/// serialization ceiling (P1-meta-1). The `idle` mutex is held only to pop or
+/// push a connection, never across a query.
+struct ConnectionPool {
+    path: PathBuf,
+    idle: Mutex<Vec<Connection>>,
+}
+
+impl ConnectionPool {
+    fn new(path: PathBuf) -> Self {
+        Self {
+            path,
+            idle: Mutex::new(Vec::new()),
+        }
+    }
+
+    /// Take a warm connection or open a fresh one. Never blocks on other
+    /// callers beyond the brief `idle` lock.
+    fn checkout(self: &Arc<Self>) -> Result<PooledConn> {
+        let reused = self.idle.lock().unwrap().pop();
+        let conn = match reused {
+            Some(conn) => conn,
+            None => {
+                let conn = Connection::open(&self.path)?;
+                configure_connection(&conn)?;
+                conn
+            }
+        };
+        Ok(PooledConn {
+            conn: Some(conn),
+            pool: Arc::clone(self),
+        })
+    }
+
+    fn checkin(&self, conn: Connection) {
+        let mut idle = self.idle.lock().unwrap();
+        if idle.len() < MAX_IDLE_CONNECTIONS {
+            idle.push(conn);
+        }
+        // Otherwise drop `conn`, closing it.
+    }
+}
+
+/// A connection borrowed from a [`ConnectionPool`]. Returned to the pool on
+/// drop. Derefs to [`Connection`] so call sites use it like a plain handle.
+struct PooledConn {
+    conn: Option<Connection>,
+    pool: Arc<ConnectionPool>,
+}
+
+impl Drop for PooledConn {
+    fn drop(&mut self) {
+        if let Some(conn) = self.conn.take() {
+            self.pool.checkin(conn);
+        }
+    }
+}
+
+impl Deref for PooledConn {
+    type Target = Connection;
+    fn deref(&self) -> &Connection {
+        self.conn.as_ref().expect("connection present until drop")
+    }
+}
+
+impl DerefMut for PooledConn {
+    fn deref_mut(&mut self) -> &mut Connection {
+        self.conn.as_mut().expect("connection present until drop")
+    }
+}
+
+/// Backing store for a [`MetadataStore`]. File-backed stores use a WAL
+/// connection pool; in-memory stores keep a single connection behind a mutex
+/// (a second `open_in_memory` is a different empty DB, so it cannot be pooled).
 #[derive(Clone)]
-enum ConnectionSource {
-    File(PathBuf),
-    /// A private in-memory database. A second `Connection::open_in_memory`
-    /// would be a *different* empty DB, so in-memory stores cannot hand out an
-    /// independent connection — `reopen` shares the existing one.
-    Memory,
+enum Backend {
+    Pool(Arc<ConnectionPool>),
+    Memory(Arc<Mutex<Connection>>),
+}
+
+impl Backend {
+    /// Borrow a connection for one operation. Pooled connections return to the
+    /// pool when the handle drops; the in-memory guard releases its mutex.
+    fn conn(&self) -> Result<ConnHandle<'_>> {
+        match self {
+            Backend::Pool(pool) => Ok(ConnHandle::Pooled(pool.checkout()?)),
+            Backend::Memory(conn) => Ok(ConnHandle::Memory(conn.lock().unwrap())),
+        }
+    }
+}
+
+/// A connection handle over either backend, deref-able to [`Connection`] so
+/// the ~45 call sites are backend-agnostic.
+enum ConnHandle<'a> {
+    Pooled(PooledConn),
+    Memory(MutexGuard<'a, Connection>),
+}
+
+impl Deref for ConnHandle<'_> {
+    type Target = Connection;
+    fn deref(&self) -> &Connection {
+        match self {
+            ConnHandle::Pooled(conn) => conn,
+            ConnHandle::Memory(conn) => conn,
+        }
+    }
+}
+
+impl DerefMut for ConnHandle<'_> {
+    fn deref_mut(&mut self) -> &mut Connection {
+        match self {
+            ConnHandle::Pooled(conn) => conn,
+            ConnHandle::Memory(conn) => conn,
+        }
+    }
 }
 
 #[derive(Clone)]
 pub struct MetadataStore {
-    conn: Arc<Mutex<Connection>>,
+    backend: Backend,
     secrets: Arc<dyn SecretStore>,
-    source: ConnectionSource,
 }
 
 impl MetadataStore {
@@ -97,13 +211,15 @@ impl MetadataStore {
             std::fs::create_dir_all(parent)
                 .map_err(|error| MetadataError::SecretStore(error.to_string()))?;
         }
-        let mut conn = Connection::open(path)?;
-        configure_connection(&conn)?;
-        migrations::migrations::runner().run(&mut conn)?;
+        let pool = Arc::new(ConnectionPool::new(path.to_path_buf()));
+        // Migrate once on a pooled connection; it returns to the pool after.
+        {
+            let mut conn = pool.checkout()?;
+            migrations::migrations::runner().run(&mut *conn)?;
+        }
         Ok(Self {
-            conn: Arc::new(Mutex::new(conn)),
+            backend: Backend::Pool(pool),
             secrets,
-            source: ConnectionSource::File(path.to_path_buf()),
         })
     }
 
@@ -112,32 +228,14 @@ impl MetadataStore {
         configure_connection(&conn)?;
         migrations::migrations::runner().run(&mut conn)?;
         Ok(Self {
-            conn: Arc::new(Mutex::new(conn)),
+            backend: Backend::Memory(Arc::new(Mutex::new(conn))),
             secrets,
-            source: ConnectionSource::Memory,
         })
     }
 
-    /// Open an independent handle to the same database with its own SQLite
-    /// connection. For a file-backed store this yields a genuinely separate
-    /// connection: in WAL mode it can write without contending on the primary
-    /// connection's mutex, which is how the audit writer stays off the
-    /// request-path lock (P1-meta-5). The database is already migrated, so
-    /// this only configures the connection. In-memory stores share no file,
-    /// so this returns a clone backed by the existing connection.
-    pub fn reopen(&self) -> Result<MetadataStore> {
-        match &self.source {
-            ConnectionSource::File(path) => {
-                let conn = Connection::open(path)?;
-                configure_connection(&conn)?;
-                Ok(MetadataStore {
-                    conn: Arc::new(Mutex::new(conn)),
-                    secrets: Arc::clone(&self.secrets),
-                    source: self.source.clone(),
-                })
-            }
-            ConnectionSource::Memory => Ok(self.clone()),
-        }
+    /// Borrow a connection for a single operation. See [`Backend::conn`].
+    fn conn(&self) -> Result<ConnHandle<'_>> {
+        self.backend.conn()
     }
 
     pub fn default_local_path() -> PathBuf {
@@ -166,14 +264,14 @@ impl MetadataStore {
     /// the store. Returns an error if the connection is poisoned or the query
     /// fails.
     pub fn health_check(&self) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn()?;
         conn.query_row("SELECT 1", [], |row| row.get::<_, i64>(0))?;
         Ok(())
     }
 
     pub fn bootstrap_local(&self, display_name: &str) -> Result<()> {
         let now = now_text();
-        let mut conn = self.conn.lock().unwrap();
+        let mut conn = self.conn()?;
         let tx = conn.transaction()?;
         let tenant_count: i64 =
             tx.query_row("SELECT COUNT(*) FROM tenant", [], |row| row.get(0))?;
@@ -201,7 +299,7 @@ impl MetadataStore {
     }
 
     pub fn resolve_principal_by_external_id(&self, external_id: &str) -> Result<Option<Principal>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn()?;
         conn.query_row(
             "SELECT id, external_id, display_name, email, created_at, updated_at
              FROM principal WHERE external_id = ?1",
@@ -219,7 +317,7 @@ impl MetadataStore {
         email: Option<&str>,
     ) -> Result<Principal> {
         let now = now_text();
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn()?;
         conn.execute(
             "INSERT INTO principal (external_id, display_name, email, created_at, updated_at)
              VALUES (?1, ?2, ?3, ?4, ?4)",
@@ -237,7 +335,7 @@ impl MetadataStore {
 
     pub fn create_tenant(&self, name: &str, kind: TenantKind) -> Result<Tenant> {
         let now = now_text();
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn()?;
         conn.execute(
             "INSERT INTO tenant (name, kind, created_at, updated_at)
              VALUES (?1, ?2, ?3, ?3)",
@@ -260,7 +358,7 @@ impl MetadataStore {
         role: MembershipRole,
     ) -> Result<TenantMembership> {
         let now = now_text();
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn()?;
         conn.execute(
             "INSERT INTO membership (tenant_id, principal_id, role, created_at, updated_at)
              VALUES (?1, ?2, ?3, ?4, ?4)
@@ -282,7 +380,7 @@ impl MetadataStore {
     }
 
     pub fn list_principal_tenants(&self, principal: PrincipalId) -> Result<Vec<TenantMembership>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn()?;
         let mut stmt = conn.prepare(
             "SELECT t.id, t.name, t.kind, t.created_at, t.updated_at,
                     m.principal_id, m.role, m.created_at, m.updated_at
@@ -316,7 +414,7 @@ impl MetadataStore {
             .to_string();
         let now = now_text();
         let expires_at_text = expires_at.map(|dt| dt.to_rfc3339());
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn()?;
         conn.execute(
             "INSERT INTO api_token
              (principal_id, tenant_id, token_lookup, token_hash, token_mac, name, created_at, updated_at, expires_at)
@@ -342,7 +440,7 @@ impl MetadataStore {
             return Ok(None);
         };
         let now = Utc::now();
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn()?;
         let candidate = conn
             .query_row(
                 "SELECT id, token_hash, token_mac, last_used_at FROM api_token
@@ -383,7 +481,7 @@ impl MetadataStore {
     }
 
     pub fn list_api_tokens(&self, principal: PrincipalId) -> Result<Vec<ApiTokenRow>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn()?;
         let mut stmt = conn.prepare(
             "SELECT id, principal_id, tenant_id, name, created_at, updated_at,
                     last_used_at, expires_at, revoked_at
@@ -397,7 +495,7 @@ impl MetadataStore {
 
     pub fn revoke_api_token(&self, id: ApiTokenId) -> Result<()> {
         let now = now_text();
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn()?;
         conn.execute(
             "UPDATE api_token
              SET revoked_at = COALESCE(revoked_at, ?1), updated_at = ?1
@@ -408,7 +506,7 @@ impl MetadataStore {
     }
 
     pub fn list_connection_profiles(&self, tenant: TenantId) -> Result<Vec<ConnectionProfile>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn()?;
         let mut stmt = conn.prepare(
             "SELECT id, tenant_id, name, engine, spec_json, credential_mode,
                     shared_secret_handle, tags_json, created_by, created_at, updated_at
@@ -425,7 +523,7 @@ impl MetadataStore {
         tenant: TenantId,
         id: ConnectionProfileId,
     ) -> Result<ConnectionProfile> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn()?;
         let profile = self.connection_profile_by_id_locked(&conn, id)?;
         if profile.tenant_id != tenant {
             return Err(MetadataError::TenantMismatch(id, tenant));
@@ -437,7 +535,7 @@ impl MetadataStore {
         &self,
         id: ConnectionProfileId,
     ) -> Result<ConnectionProfile> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn()?;
         self.connection_profile_by_id_locked(&conn, id)
     }
 
@@ -462,10 +560,10 @@ impl MetadataStore {
         let now = now_text();
         let spec_json = serde_json::to_string(&input.spec)?;
         let tags_json = serde_json::to_string(&input.tags)?;
-        let conn = Arc::clone(&self.conn);
+        let backend = self.backend.clone();
         let db_shared_secret_handle = new_shared_secret_handle.clone();
         let db_result: Result<(ConnectionProfile, Option<String>)> = sqlite_blocking(move || {
-            let mut conn = conn.lock().unwrap();
+            let mut conn = backend.conn()?;
             let tx = conn.transaction()?;
             let old_shared_secret_handle: Option<String> = tx
                 .query_row(
@@ -538,9 +636,9 @@ impl MetadataStore {
         tenant: TenantId,
         id: ConnectionProfileId,
     ) -> Result<()> {
-        let conn = Arc::clone(&self.conn);
+        let backend = self.backend.clone();
         let handles = sqlite_blocking(move || {
-            let mut conn = conn.lock().unwrap();
+            let mut conn = backend.conn()?;
             let tx = conn.transaction()?;
             let mut handles = Vec::new();
             if let Some(handle) = tx
@@ -587,10 +685,10 @@ impl MetadataStore {
         let handle = Uuid::new_v4().to_string();
         self.secrets.put(SECRET_NAMESPACE, &handle, secret).await?;
         let now = now_text();
-        let conn = Arc::clone(&self.conn);
+        let backend = self.backend.clone();
         let db_handle = handle.clone();
         let db_result: Result<Option<String>> = sqlite_blocking(move || {
-            let mut conn = conn.lock().unwrap();
+            let mut conn = backend.conn()?;
             let tx = conn.transaction()?;
             let old_handle: Option<String> = tx
                 .query_row(
@@ -638,9 +736,9 @@ impl MetadataStore {
         principal: PrincipalId,
         id: ConnectionProfileId,
     ) -> Result<ConnectionSpec> {
-        let conn = Arc::clone(&self.conn);
+        let backend = self.backend.clone();
         let (profile, handle) = sqlite_blocking(move || {
-            let conn = conn.lock().unwrap();
+            let conn = backend.conn()?;
             let profile = connection_profile_by_id_locked(&conn, id)?;
             if profile.tenant_id != tenant {
                 return Err(MetadataError::TenantMismatch(id, tenant));
@@ -683,7 +781,7 @@ impl MetadataStore {
         input: NewRoom,
     ) -> Result<Room> {
         let now = now_text();
-        let mut conn = self.conn.lock().unwrap();
+        let mut conn = self.conn()?;
         let tx = conn.transaction()?;
         tx.execute(
             "INSERT INTO room (tenant_id, name, kind, created_by, created_at, updated_at)
@@ -705,7 +803,7 @@ impl MetadataStore {
         tenant: TenantId,
         principal: PrincipalId,
     ) -> Result<Vec<Room>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn()?;
         let mut stmt = conn.prepare(
             "SELECT r.id, r.tenant_id, r.name, r.kind, r.created_by, r.created_at, r.updated_at
              FROM room r
@@ -718,7 +816,7 @@ impl MetadataStore {
     }
 
     pub fn get_room(&self, id: RoomId) -> Result<Room> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn()?;
         self.room_by_id_locked(&conn, id)
     }
 
@@ -727,7 +825,7 @@ impl MetadataStore {
         tenant: TenantId,
         principal: PrincipalId,
     ) -> Result<Vec<Room>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn()?;
         let mut stmt = conn.prepare(
             "SELECT r.id, r.tenant_id, r.name, r.kind, r.created_by, r.created_at, r.updated_at
              FROM room r
@@ -746,7 +844,7 @@ impl MetadataStore {
         role: RoomRole,
     ) -> Result<RoomMember> {
         let now = now_text();
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn()?;
         conn.execute(
             "INSERT INTO room_member (room_id, principal_id, role, joined_at)
              VALUES (?1, ?2, ?3, ?4)
@@ -757,7 +855,7 @@ impl MetadataStore {
     }
 
     pub fn list_room_members(&self, room: RoomId) -> Result<Vec<RoomMember>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn()?;
         let mut stmt = conn.prepare(
             "SELECT room_id, principal_id, role, joined_at
              FROM room_member
@@ -773,12 +871,12 @@ impl MetadataStore {
         room: RoomId,
         principal: PrincipalId,
     ) -> Result<Option<RoomMember>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn()?;
         self.room_member_optional_locked(&conn, room, principal)
     }
 
     pub fn remove_room_member(&self, room: RoomId, principal: PrincipalId) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn()?;
         conn.execute(
             "DELETE FROM room_member WHERE room_id = ?1 AND principal_id = ?2",
             params![room.0, principal.0],
@@ -787,7 +885,7 @@ impl MetadataStore {
     }
 
     pub fn delete_room(&self, room: RoomId) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn()?;
         let deleted = conn.execute("DELETE FROM room WHERE id = ?1", params![room.0])?;
         if deleted == 0 {
             return Err(MetadataError::RoomNotFound(room));
@@ -797,7 +895,7 @@ impl MetadataStore {
 
     pub fn create_document(&self, room: RoomId, input: NewDocument) -> Result<Document> {
         let now = now_text();
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn()?;
         conn.execute(
             "INSERT INTO document
              (room_id, kind, title, crdt_type, crdt_state, position, connection_profile_id, created_at, updated_at)
@@ -818,7 +916,7 @@ impl MetadataStore {
     }
 
     pub fn list_documents(&self, room: RoomId) -> Result<Vec<Document>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn()?;
         let mut stmt = conn.prepare(
             "SELECT id, room_id, kind, title, crdt_type, crdt_state, position,
                     connection_profile_id, created_at, updated_at
@@ -831,7 +929,7 @@ impl MetadataStore {
     }
 
     pub fn get_document(&self, id: DocumentId) -> Result<Document> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn()?;
         self.document_by_id_locked(&conn, id)
     }
 
@@ -841,7 +939,7 @@ impl MetadataStore {
         crdt_state: Vec<u8>,
     ) -> Result<Document> {
         let now = now_text();
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn()?;
         let updated = conn.execute(
             "UPDATE document SET crdt_state = ?1, updated_at = ?2 WHERE id = ?3",
             params![crdt_state, now, document.0],
@@ -853,7 +951,7 @@ impl MetadataStore {
     }
 
     pub fn delete_document(&self, document: DocumentId) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn()?;
         let deleted = conn.execute("DELETE FROM document WHERE id = ?1", params![document.0])?;
         if deleted == 0 {
             return Err(MetadataError::DocumentNotFound(document));
@@ -868,7 +966,7 @@ impl MetadataStore {
         client_id: &str,
     ) -> Result<RoomAttachment> {
         let now = now_text();
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn()?;
         conn.execute(
             "INSERT INTO room_attachment (room_id, principal_id, client_id, attached_at, detached_at)
              VALUES (?1, ?2, ?3, ?4, NULL)",
@@ -880,7 +978,7 @@ impl MetadataStore {
 
     pub fn detach_room(&self, attachment: RoomAttachmentId) -> Result<RoomAttachment> {
         let now = now_text();
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn()?;
         let updated = conn.execute(
             "UPDATE room_attachment
              SET detached_at = COALESCE(detached_at, ?1)
@@ -894,7 +992,7 @@ impl MetadataStore {
     }
 
     pub fn list_active_room_attachments(&self, room: RoomId) -> Result<Vec<RoomAttachment>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn()?;
         let mut stmt = conn.prepare(
             "SELECT id, room_id, principal_id, client_id, attached_at, detached_at
              FROM room_attachment
@@ -907,7 +1005,7 @@ impl MetadataStore {
 
     pub fn record_query_history(&self, input: NewQueryHistory) -> Result<QueryHistory> {
         let now = now_text();
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn()?;
         conn.execute(
             "INSERT INTO query_history
              (principal_id, connection_profile_id, sql_text, started_at, duration_ms,
@@ -934,7 +1032,7 @@ impl MetadataStore {
     /// failure paths so the audit trail is complete.
     pub fn record_operation_audit(&self, input: NewOperationAudit) -> Result<OperationAudit> {
         let now = now_text();
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn()?;
         conn.execute(
             "INSERT INTO operation_audit
              (at, actor_principal_id, action, target, target_id, status, result_code,
@@ -965,7 +1063,7 @@ impl MetadataStore {
     }
 
     pub fn list_operation_audit(&self, limit: u32) -> Result<Vec<OperationAudit>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn()?;
         let mut stmt = conn.prepare(
             "SELECT id, at, actor_principal_id, action, target, target_id, status,
                     result_code, row_count, error_message, correlation_id
@@ -982,7 +1080,7 @@ impl MetadataStore {
         room: RoomId,
         limit: u32,
     ) -> Result<Vec<QueryHistory>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn()?;
         let mut stmt = conn.prepare(
             "SELECT id, principal_id, connection_profile_id, sql_text, started_at,
                     duration_ms, row_count, status, error_code, error_message, room_id
@@ -1000,7 +1098,7 @@ impl MetadataStore {
         principal: PrincipalId,
         limit: u32,
     ) -> Result<Vec<QueryHistory>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn()?;
         let mut stmt = conn.prepare(
             "SELECT id, principal_id, connection_profile_id, sql_text, started_at,
                     duration_ms, row_count, status, error_code, error_message, room_id
@@ -1022,7 +1120,7 @@ impl MetadataStore {
     pub fn insert_saved_query(&self, input: NewSavedQuery) -> Result<SavedQuery> {
         let now = now_text();
         let tags_json = serde_json::to_string(&input.tags).map_err(MetadataError::Json)?;
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn()?;
         conn.execute(
             "INSERT INTO saved_query
              (tenant_id, principal_id, name, sql_text, connection_profile_id,
@@ -1046,7 +1144,7 @@ impl MetadataStore {
     /// visibility check (owner or tenant member) before returning to
     /// an untrusted principal.
     pub fn get_saved_query(&self, id: SavedQueryId) -> Result<SavedQuery> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn()?;
         self.saved_query_by_id_locked(&conn, id)
     }
 
@@ -1059,7 +1157,7 @@ impl MetadataStore {
         principal: PrincipalId,
         filter: SavedQueryFilter,
     ) -> Result<Vec<SavedQuery>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn()?;
         // Compose SQL dynamically. Base visibility is fixed; scope,
         // q, and tags are optional refinements.
         let mut sql = String::from(
@@ -1115,7 +1213,7 @@ impl MetadataStore {
         update: UpdateSavedQuery,
     ) -> Result<SavedQuery> {
         let now = now_text();
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn()?;
         let existing = self.saved_query_by_id_locked(&conn, id)?;
         let name = update.name.unwrap_or(existing.name);
         let sql_text = update.sql_text.unwrap_or(existing.sql_text);
@@ -1145,7 +1243,7 @@ impl MetadataStore {
     /// Returns `true` if a row was deleted, `false` if the id was
     /// absent (idempotent).
     pub fn delete_saved_query(&self, id: SavedQueryId) -> Result<bool> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn()?;
         let deleted = conn.execute("DELETE FROM saved_query WHERE id = ?1", params![id.0])?;
         Ok(deleted > 0)
     }
@@ -1720,21 +1818,21 @@ mod tests {
     }
 
     #[test]
-    fn reopen_file_store_writes_visible_across_connections() {
-        // The audit writer uses `reopen()` to get its own connection; a write
-        // through that connection must be visible from the primary (WAL,
-        // separate connection) — this is the P1-meta-5 fix in miniature.
+    fn pooled_store_writes_visible_across_connections() {
+        // A file-backed store spreads calls across pooled WAL connections. A
+        // write on one checkout must be visible from a later checkout — this
+        // is the P1-meta-1 concurrency change exercised end to end.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("metadata.sqlite");
         let secrets = Arc::new(MemorySecretStore::new());
-        let primary = MetadataStore::open(&path, secrets).unwrap();
-        primary.bootstrap_local("local user").unwrap();
+        let store = MetadataStore::open(&path, secrets).unwrap();
+        store.bootstrap_local("local user").unwrap();
+        // Warm several connections so the read below is served by a different
+        // one than the write (checkout drains the idle pool first).
+        let handles: Vec<_> = (0..4).map(|_| store.conn().unwrap()).collect();
+        drop(handles);
 
-        let writer = primary.reopen().unwrap();
-        // A genuinely independent connection: not the same Arc.
-        assert!(!Arc::ptr_eq(&primary.conn, &writer.conn));
-
-        writer
+        store
             .record_operation_audit(NewOperationAudit {
                 actor_principal_id: Some(PrincipalId(1)),
                 action: "execute".into(),
@@ -1748,18 +1846,71 @@ mod tests {
             })
             .unwrap();
 
-        let rows = primary.list_operation_audit(10).unwrap();
+        let rows = store.list_operation_audit(10).unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].correlation_id.as_deref(), Some("corr-1"));
     }
 
     #[test]
-    fn reopen_in_memory_store_shares_connection() {
-        // In-memory stores have no shared file, so `reopen` shares the
-        // existing connection rather than opening a second empty database.
-        let primary = store();
-        let handle = primary.reopen().unwrap();
-        assert!(Arc::ptr_eq(&primary.conn, &handle.conn));
+    fn pool_reuses_idle_connections() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("metadata.sqlite");
+        let secrets = Arc::new(MemorySecretStore::new());
+        let store = MetadataStore::open(&path, secrets).unwrap();
+        let Backend::Pool(pool) = &store.backend else {
+            panic!("file-backed store should use the pool backend");
+        };
+        // A checked-in connection is retained and handed back out.
+        let conn = pool.checkout().unwrap();
+        drop(conn);
+        assert_eq!(pool.idle.lock().unwrap().len(), 1);
+        let _conn = pool.checkout().unwrap();
+        assert_eq!(pool.idle.lock().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn pool_handles_concurrent_readers_and_writers() {
+        // The point of the pool (P1-meta-1): many threads hit the same
+        // file-backed store at once without deadlock, and concurrent writers
+        // serialize via busy_timeout rather than erroring.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("metadata.sqlite");
+        let store = MetadataStore::open(&path, Arc::new(MemorySecretStore::new())).unwrap();
+        store.bootstrap_local("local user").unwrap();
+
+        const THREADS: usize = 8;
+        const WRITES_PER_THREAD: usize = 10;
+        let store = Arc::new(store);
+        let handles: Vec<_> = (0..THREADS)
+            .map(|t| {
+                let store = Arc::clone(&store);
+                std::thread::spawn(move || {
+                    for i in 0..WRITES_PER_THREAD {
+                        store
+                            .record_operation_audit(NewOperationAudit {
+                                actor_principal_id: Some(PrincipalId(1)),
+                                action: "execute".into(),
+                                target: "query".into(),
+                                target_id: Some((t * 100 + i) as i64),
+                                status: "succeeded".into(),
+                                result_code: None,
+                                row_count: Some(1),
+                                error_message: None,
+                                correlation_id: None,
+                            })
+                            .expect("concurrent write succeeds");
+                        // Interleave a read on a different pooled connection.
+                        store.list_operation_audit(5).expect("concurrent read succeeds");
+                    }
+                })
+            })
+            .collect();
+        for handle in handles {
+            handle.join().unwrap();
+        }
+
+        let rows = store.list_operation_audit((THREADS * WRITES_PER_THREAD * 2) as u32).unwrap();
+        assert_eq!(rows.len(), THREADS * WRITES_PER_THREAD);
     }
 
     #[test]
@@ -1805,7 +1956,7 @@ mod tests {
         let (row, plaintext) = store
             .issue_api_token(PrincipalId(1), Some(TenantId(1)), "test", None)
             .unwrap();
-        let conn = store.conn.lock().unwrap();
+        let conn = store.conn().unwrap();
         let mac: Option<String> = conn
             .query_row(
                 "SELECT token_mac FROM api_token WHERE id = ?1",
@@ -1840,7 +1991,7 @@ mod tests {
             .to_string();
         let now = now_text();
         {
-            let conn = store.conn.lock().unwrap();
+            let conn = store.conn().unwrap();
             conn.execute(
                 "INSERT INTO api_token
                  (principal_id, tenant_id, token_lookup, token_hash, token_mac, name, created_at, updated_at)
