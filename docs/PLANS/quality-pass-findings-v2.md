@@ -77,40 +77,6 @@ P0-6 and P1-driver-3 below.
 - Fix: `cursor = sql.floor_char_boundary(cursor.min(sql.len()))` and
   `sql.get(start..cursor).unwrap_or("")`.
 
-### P0-2. `async` metadata methods run rusqlite inline on the tokio worker
-- Files: `crates/metadata/src/lib.rs:392` (`upsert_connection_profile`),
-  `:481` (`delete_connection_profile`), `:524` (`set_per_user_credential`),
-  `:575` (`resolve_connection_spec`).
-- Detail: these four methods are declared `async` (they await
-  `self.secrets.put/get/delete`), so callers cannot wrap them in
-  `spawn_blocking`. The body runs synchronously up to the first await:
-  `self.conn.lock().unwrap()` + `transaction()` / `prepare()` /
-  `execute()` / `query_row()` on the calling tokio worker. Reached on
-  the **query open paths** at `http.rs:2054-2056`.
-- **Why it matters:** directly violates the AGENTS.md non-negotiable
-  cited above. Concurrent `POST /v1/metadata/connections` and
-  `POST /v1/sessions/:id/connections` stall the workers they land on.
-  Under load the runtime's worker pool starves, and unrelated futures
-  (websocket pumps, broadcast fan-out, query result streaming) miss
-  their deadlines. The metadata crate is currently the one place that
-  rule leaks, because the methods look async-friendly but aren't.
-- Fix: make them `pub fn`, accept a sync `SecretStore` handle, let
-  callers wrap in `metadata_blocking` like every other call. The
-  async-ness is only there because the trait is async.
-
-### P0-3. `OsKeychainSecretStore` does blocking system calls inline on async
-- File: `crates/metadata/src/secrets/keychain.rs:35-54`
-- Detail: every method calls `keyring::Entry::{set_secret,get_secret,
-  delete_credential}` synchronously inside the `async` trait body. On
-  Linux `keyring` issues a zbus D-Bus round-trip to the Secret Service
-  daemon; on macOS it calls the Keychain API. None are `spawn_blocking`'d,
-  unlike `FileSecretStore::persist` (`file.rs:58`).
-- **Why it matters:** the feature is off by default but is the
-  documented production-recommended backend (`Cargo.toml:30-35`). Same
-  rule violation as P0-2. D-Bus hiccups under load freeze workers.
-- Fix: wrap each `Entry::*` call in `spawn_blocking`, or — cleaner —
-  make `SecretStore` sync and let the caller decide.
-
 ### P0-4. Password flows through SHA-256 on every schema-cache lookup
 - File: `crates/server/src/schema_cache.rs:244-254`
 - Detail: `spec_hash` does `serde_json::to_string(spec)` (which
@@ -129,24 +95,6 @@ P0-6 and P1-driver-3 below.
   cache entries and N spawned invalidator tasks (see P1-cache-3).
 - Fix: hash over `(host, port, database, user)` only. Add a regression
   test that two specs differing only in `password` produce the same hash.
-
-### P0-5. Completion Dictionary rebuilt from scratch on every keystroke
-- File: `crates/completion/src/lib.rs:36`
-- Detail: `let dict = dictionary::Dictionary::from_snapshot(snapshot);`
-  clones every object name, schema name, column name, type-display
-  string, plus two `HashMap`s (`dictionary.rs:51-72`, `:93-111`).
-- **Why it matters:** product goal #4 is "Zed-class snappiness." On a
-  real 1k-table schema (exactly what an IDE user has) this is multiple
-  MB of allocation per keystroke. At 10 keystrokes/sec that's tens of
-  MB/sec of allocation churn for an index that only changes when the
-  snapshot changes (every 60 s TTL or on DDL invalidation). The
-  docstring claims it's cheap because the upstream `SchemaCache`
-  deduplicates — but `SchemaCache::get` returns a clone of the snapshot
-  (`schema_cache.rs:135`), so the chain pays one full snapshot clone
-  AND then `from_snapshot` clones every owned string again.
-- Fix: cache the `Dictionary` next to the `SchemaSnapshot` in
-  `CachedEntry` (`schema_cache.rs:73`), compute it once on insert,
-  hand out by `Arc`.
 
 ### P0-6. `cancel_query` HTTP handler still has no caller-scoping (v1 #4 residual)
 - File: `crates/server/src/http.rs:2541-2559`
@@ -254,22 +202,6 @@ P0-6 and P1-driver-3 below.
 - Fix: `spawn_blocking` the file read; stream the response as NDJSON via
   `Body::from_stream`.
 
-#### P1-io-3. Operation audit JSON-written + flushed under a global Mutex on every op
-- File: `crates/server/src/session.rs:343-364`
-- Detail: `OperationLog.writer: Option<File>` — **no `BufWriter`**. Every
-  audit row = at least 2 syscalls (write JSON, write `"\n"`); `flush()`
-  on a raw `File` is a no-op. The work happens under
-  `self.inner.operations` — the **one** global lock for every operation
-  across every session. All concurrent operations serialize on this
-  lock + the disk write.
-- **Why it matters:** at 1,000 queries/sec across all sessions, the
-  lock forces 1,000 serial syscalls/sec just for audit; any disk hiccup
-  backs up the entire server. A single slow disk write stalls every
-  concurrent query's audit close-out.
-- Fix: `BufWriter::new(File)`; drop the `flush()`; move the write off
-  the request path onto the existing `audit_tx` writer thread
-  (`session.rs:212-226`) or a dedicated `JsonlWriter` task.
-
 #### P1-io-4. Single 16-permit semaphore ceiling on every metadata op
 - File: `crates/server/src/http.rs:40-41, 402-417`
 - Detail: `MAX_METADATA_BLOCKING_TASKS = 16` gates every
@@ -288,32 +220,6 @@ P0-6 and P1-driver-3 below.
   `spawn_blocking`'s own pool bound concurrency.
 
 ### Schema cache
-
-#### P1-cache-1. No singleflight on miss; N concurrent requests for the same scope spawn N driver.schema() calls
-- File: `crates/server/src/session.rs:530-559`
-- Detail: on cache miss every concurrent caller runs `driver.schema()`
-  independently.
-- **Why it matters:** for SQL Server a deep schema scan is seconds of
-  backend load; for PG `schema(Deep)` does many round-trips. 10 clients
-  opening the schema panel simultaneously = 10× the backend load and
-  10× the latency for the same answer.
-- Fix: singleflight — `Arc<Shared<...>>` keyed by `(spec_hash, scope)`,
-  or a per-key `Mutex<Option<JoinHandle>>`.
-
-#### P1-cache-2. Per-lookup cost far higher than it looks; deep clone on every hit
-- File: `crates/server/src/schema_cache.rs:110-146`
-- Detail: `get` does `serde_json::to_string(scope)` (allocates) +
-  `spec_hash` (JSON-serialize spec including password + SHA-256) +
-  `RwLock::read()` + clone of whole config + DashMap shard read lock +
-  a **second** DashMap lock just to `e.snapshot.clone()` +
-  `e.snapshot.clone()` (a `SchemaSnapshot` is a deep tree — catalogs →
-  schemas → objects → columns/indexes/constraints/triggers).
-- **Why it matters:** at 1,000 schema lookups/sec on a Deep snapshot,
-  the `.clone()` alone is megabytes/sec of allocation. A Deep snapshot
-  can be hundreds of KB.
-- Fix: store `Arc<SchemaSnapshot>` so `get` returns a cheap `Arc::clone`;
-  memoize the `CacheKey` on the connection entry; acquire the DashMap
-  shard lock once.
 
 #### P1-cache-3. PG invalidator silently dies on connection blip
 - File: `crates/server/src/schema_cache.rs:298-333`
@@ -369,29 +275,6 @@ P0-6 and P1-driver-3 below.
   keystrokes.
 - Fix: precompute `name_lower` at Dictionary-build time on
   `ObjectEntry`/`ColumnEntry`; static keyword tables need no fold.
-
-#### P1-comp-2. Server runs the entire ranker twice on the dotted-column path
-- File: `crates/server/src/autocomplete.rs:41-53`
-- Detail: the dotted-qualifier column path — one of the two most common
-  completion UX flows — pays the full cost of `detect_context` +
-  Dictionary rebuild + ranking twice. The context
-  (`ExpectingColumn { qualifier }`) is identical between the two calls;
-  only the Dictionary changed (one object gained a column list).
-- **Why it matters:** doubles autocomplete latency on the most common
-  "type a dot" UX.
-- Fix: split `complete` into `detect` + `rank`; on the dotted path
-  detect once, fetch deep, merge into the dictionary only, re-rank.
-
-#### P1-comp-3. `merge_deep_into_shallow` is O(shallow × deep) with no index
-- File: `crates/server/src/autocomplete.rs:96-110`
-- Detail: triple-nested loop with a `.find()` inside. Also only matches
-  by `name`, ignoring schema/catalog — `public.orders` and
-  `sales.orders` both get overwritten with whichever deep object
-  `.find` hit first.
-- **Why it matters:** on a 5k-table schema this is 5k × deep scans per
-  keystroke. The name-only match is a latent correctness bug.
-- Fix: build `HashMap<&str, &ObjectInfo>` from `deep_objects` once;
-  match on (schema, name).
 
 #### P1-comp-4. `from public.<cursor>` misclassified (case bug)
 - File: `crates/completion/src/context.rs:84-90`
@@ -748,8 +631,8 @@ P0-6 and P1-driver-3 below.
   entire Vec under the lock.
 - **Why it matters:** for the 10,000-entry cap that's 10,000 clones
   while every concurrent operation waits. Every operation across every
-  session acquires `operations`. Combined with P1-io-3 (sync file write
-  in the lock body).
+  session still acquires `operations`, even though disk persistence no
+  longer happens in the lock body.
 - Fix: shard by session; `parking_lot::Mutex` + `Arc<Vec>` snapshot
   (replace under lock, clone outside); feed the in-memory ring from the
   writer thread.
@@ -1104,29 +987,23 @@ P0-6 and P1-driver-3 below.
 
 1. **P0-1** (completion UTF-8 panic) — one-line `floor_char_boundary`,
    blocks a DoS. Do first.
-2. **P0-2 / P0-3** (sync metadata on async worker) — fixes a
-   non-negotiable rule violation; affects query-open hot path.
-3. **P0-4** (password in schema-cache hash) — security + cache
+2. **P0-4** (password in schema-cache hash) — security + cache
    correctness, ~5-line change.
-4. **P0-5** (Dictionary caching) — single biggest win for autocomplete
-   latency.
-5. **P1-io-3 + P1-lock-1** (audit `BufWriter` + move off lock) —
+3. **P1-lock-1** (reduce global operation-log lock scope) —
    eliminates a global serialization point.
-6. **P1-alloc-1** (`page.clone()` in pump) — single-line change,
+4. **P1-alloc-1** (`page.clone()` in pump) — single-line change,
    removes ~10M allocs per large query.
-7. **P1-cache-2** (`Arc<SchemaSnapshot>`) — turns every cache hit from
-   deep clone into an Arc bump.
-8. **P1-comp-1 / P1-comp-5 / P1-comp-9** (lowercase precompute +
+5. **P1-comp-1 / P1-comp-5 / P1-comp-9** (lowercase precompute +
    memoize tokenize + protocol `Cow`) — the difference between current
    autocomplete and "Zed-class."
-9. **P1-io-1 / P1-io-2** (spill I/O `spawn_blocking`) — prevents worker
+6. **P1-io-1 / P1-io-2** (spill I/O `spawn_blocking`) — prevents worker
    stalls on evicted cursors.
-10. **P1-driver-1** (PG close-leak) + **P1-driver-2** (search_path
+7. **P1-driver-1** (PG close-leak) + **P1-driver-2** (search_path
     validation) — silent resource leak + the only finding with RCE
     potential under "connect to your own DB."
-11. **P1-meta-1 / P1-meta-2** (connection pool + HMAC tokens) — the
+8. **P1-meta-1 / P1-meta-2** (connection pool + HMAC tokens) — the
     scalability ceiling for any multi-user deployment.
-12. **Refactor splits** (http.rs / mssql lib.rs / metadata lib.rs) —
+9. **Refactor splits** (http.rs / mssql lib.rs / metadata lib.rs) —
     mechanical, unblock future review. Do last.
 
 The two themes (sync I/O on async, per-row allocation) are worth
