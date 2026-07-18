@@ -12,6 +12,7 @@ mod stream;
 pub use conn::PgDriver;
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -163,18 +164,29 @@ impl Driver for PgDriver {
             .spec_for(c.id())
             .and_then(|s| s.ssl_mode)
             .unwrap_or(sift_protocol::SslMode::Prefer);
-        match ssl_mode {
-            sift_protocol::SslMode::VerifyCa | sift_protocol::SslMode::VerifyFull => {
-                let tls = conn::native_tls_connector()?;
-                token.cancel_query(tls).await.map_err(pg_err)?;
+        let cancel = async {
+            match ssl_mode {
+                sift_protocol::SslMode::Require
+                | sift_protocol::SslMode::VerifyCa
+                | sift_protocol::SslMode::VerifyFull => {
+                    let tls = conn::native_tls_connector()?;
+                    token.cancel_query(tls).await.map_err(pg_err)?;
+                }
+                _ => {
+                    token
+                        .cancel_query(tokio_postgres::NoTls)
+                        .await
+                        .map_err(pg_err)?;
+                }
             }
-            _ => {
-                token
-                    .cancel_query(tokio_postgres::NoTls)
-                    .await
-                    .map_err(pg_err)?;
-            }
-        }
+            Ok::<_, DriverError>(())
+        };
+        tokio::time::timeout(Duration::from_secs(5), cancel)
+            .await
+            .map_err(|_| {
+                DriverError::new(Code::QueryTimedOut, "Postgres cancel timed out")
+                    .with_engine(Engine::Postgres)
+            })??;
         Ok(())
     }
 

@@ -37,7 +37,7 @@ them. Re-verified against current source:
 | 2 | PG stream panic wedges ConnHandle | FIXED | `stream.rs:86-101, 109-113` (`evict_after_panic`) |
 | 3 | execute_http timeout leaks task | FIXED | `session.rs:676-695` (pre-cursor `task.abort()`) |
 | 4 | cancel_query doesn't authenticate caller | **PARTIAL** | driver-layer check only (`lib.rs:146-152`, `mssql:336-342`); HTTP handler has zero caller-scoping |
-| 5 | PG cancel always uses NoTls | **PARTIAL** | `VerifyCa`/`VerifyFull` honored; **`SslMode::Require` still falls through to `NoTls`** (`lib.rs:169`) |
+| 5 | PG cancel always uses NoTls | FIXED | `Require`/`VerifyCa`/`VerifyFull` use TLS; cancel is timeout-bounded |
 | 6 | MSSQL cancel leaves dead conn map entry | FIXED | `lib.rs:344-373` (defensive remove + stray-cursor sweep) |
 | 7 | PG shallow schema filter partially applied | FIXED | `schema.rs:51-91` (LIKE + `ANY($2::text[])`) |
 | 8 | PG unlisten is a no-op | FIXED | `lib.rs:245-278` (issues `UNLISTEN`) |
@@ -54,8 +54,8 @@ them. Re-verified against current source:
 | P2 | Operation::Metadata free-form strings | STILL | `operation.rs:84-88`; now documented-as-intentional |
 | P2 | Stale file:line citations in plan doc | PARTIAL | route count fixed (39); four function-position citations re-staled to new wrong values |
 
-The two **PARTIAL P0 residuals (#4, #5)** are worth re-opening — see
-P0-6 and P1-driver-3 below.
+The remaining **PARTIAL P0 residual (#4)** is worth re-opening — see
+P0-6 below.
 
 ---
 
@@ -303,17 +303,6 @@ P0-6 and P1-driver-3 below.
   monotonically and silently exhaust the pool.
 - Fix: store the `JoinHandle` in the `cursors` DashMap value; `abort()`
   from `remove_conn`. Mirror MSSQL's `close`.
-
-#### P1-driver-3. PG cancel leaves `SslMode::Require` on NoTls (v1 #5 residual)
-- File: `crates/driver-postgres/src/lib.rs:159-175`
-- Detail: SSL mode is pulled from `spec_for(c.id())` and TLS used for
-  `VerifyCa`/`VerifyFull`, but **`SslMode::Require` falls through to
-  the `_ => NoTls` arm** (line 169-174).
-- **Why it matters:** a user who set `ssl_mode = Require` against a
-  `hostssl` server still gets their cancel rejected — exactly the v1
-  failure scenario for that subset of users. `Require` is the most
-  common "TLS wanted, cert not checked" setting.
-- Fix: branch `Require` to TLS-without-verification.
 
 #### P1-driver-4. PG `CopyOp::Export` discards the exported data
 - File: `crates/driver-postgres/src/lib.rs:285-295`
