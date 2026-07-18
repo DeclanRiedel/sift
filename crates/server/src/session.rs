@@ -3,6 +3,7 @@
 //! `Arc<dyn Driver>` directly. A session is a logical workspace (ADR-002);
 //! it holds zero or more open connections.
 
+use std::collections::VecDeque;
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::Path;
@@ -39,6 +40,10 @@ use crate::schema_cache::{CachedSchema, SchemaCache};
 const DEFAULT_REQUEST_TIMEOUT_MS: u64 = 30_000;
 const MAX_DRIVER_TASKS: usize = 256;
 
+/// In-memory ring caps for the request-audit and operation-replay logs.
+const MAX_AUDIT_ROWS: usize = 10_000;
+const MAX_OPERATION_ROWS: usize = 10_000;
+
 /// Default synchronous-execute result caps until the server wires
 /// `config.limits` in via [`SessionStore::set_result_limits`].
 const DEFAULT_MAX_RESULT_ROWS: usize = 5_000;
@@ -53,8 +58,16 @@ pub struct SessionStore {
 
 struct SessionStoreInner {
     sessions: DashMap<SessionId, Session>,
-    audit: Mutex<Vec<AuditEntry>>,
-    operations: Mutex<OperationLog>,
+    /// Legacy request audit ring (`/v1/audit`).
+    audit: RingLog<AuditEntry>,
+    /// Replayable operation ring (`/v1/operations`). The durable JSONL sink is
+    /// a separate immutable field so a `list_operations` snapshot never
+    /// contends with the writer.
+    operations: RingLog<OperationAuditEntry>,
+    /// Append-only JSONL sink for the operation ring. `None` when no operation
+    /// log path is configured. Immutable after construction, so it lives
+    /// outside the ring's lock.
+    operation_writer: Option<OperationLogWriter>,
     next_id: AtomicU64,
     registry: DriverRegistry,
     /// Per-request driver deadline in milliseconds. `0` disables the bound.
@@ -87,9 +100,51 @@ struct SessionStoreInner {
     schema_cache: SchemaCache,
 }
 
-struct OperationLog {
-    entries: Vec<OperationAuditEntry>,
-    writer: Option<OperationLogWriter>,
+/// An append-mostly in-memory ring with cheap snapshot reads. Appends are
+/// O(1) amortized (`VecDeque` push-back + a single pop-front at the cap).
+/// Reads clone the backing `Arc` under the lock and materialize the `Vec`
+/// *outside* it, so a `list` — up to 10k entries — never blocks appends for
+/// the length of the copy (P1-lock-1). `Arc::make_mut` copies once on the
+/// first append after a snapshot was handed out; since reads are rare
+/// (admin/debug endpoints) that copy is paid at most once per read.
+struct RingLog<T> {
+    entries: Mutex<Arc<VecDeque<T>>>,
+    cap: usize,
+}
+
+impl<T: Clone> RingLog<T> {
+    fn new(cap: usize) -> Self {
+        Self {
+            entries: Mutex::new(Arc::new(VecDeque::new())),
+            cap,
+        }
+    }
+
+    fn from_iter(cap: usize, items: impl IntoIterator<Item = T>) -> Self {
+        let mut ring: VecDeque<T> = items.into_iter().collect();
+        while ring.len() > cap {
+            ring.pop_front();
+        }
+        Self {
+            entries: Mutex::new(Arc::new(ring)),
+            cap,
+        }
+    }
+
+    fn push(&self, entry: T) {
+        let mut guard = self.entries.lock().unwrap();
+        let ring = Arc::make_mut(&mut guard);
+        ring.push_back(entry);
+        while ring.len() > self.cap {
+            ring.pop_front();
+        }
+    }
+
+    /// O(1) snapshot: clone the `Arc` under the lock, materialize outside it.
+    fn to_vec(&self) -> Vec<T> {
+        let snapshot = Arc::clone(&self.entries.lock().unwrap());
+        snapshot.iter().cloned().collect()
+    }
 }
 
 struct OperationLogWriter {
@@ -110,11 +165,9 @@ impl SessionStore {
         let store = Self {
             inner: Arc::new(SessionStoreInner {
                 sessions: DashMap::new(),
-                audit: Mutex::new(Vec::new()),
-                operations: Mutex::new(OperationLog {
-                    entries: Vec::new(),
-                    writer: None,
-                }),
+                audit: RingLog::new(MAX_AUDIT_ROWS),
+                operations: RingLog::new(MAX_OPERATION_ROWS),
+                operation_writer: None,
                 next_id: AtomicU64::new(1),
                 registry,
                 request_timeout_ms: AtomicU64::new(DEFAULT_REQUEST_TIMEOUT_MS),
@@ -146,11 +199,9 @@ impl SessionStore {
         let store = Self {
             inner: Arc::new(SessionStoreInner {
                 sessions: DashMap::new(),
-                audit: Mutex::new(Vec::new()),
-                operations: Mutex::new(OperationLog {
-                    entries,
-                    writer: Some(writer),
-                }),
+                audit: RingLog::new(MAX_AUDIT_ROWS),
+                operations: RingLog::from_iter(MAX_OPERATION_ROWS, entries),
+                operation_writer: Some(writer),
                 next_id: AtomicU64::new(1),
                 registry,
                 request_timeout_ms: AtomicU64::new(DEFAULT_REQUEST_TIMEOUT_MS),
@@ -357,17 +408,11 @@ impl SessionStore {
     }
 
     pub fn push_audit(&self, entry: AuditEntry) {
-        const MAX_AUDIT_ROWS: usize = 10_000;
-        let mut audit = self.inner.audit.lock().unwrap();
-        audit.push(entry);
-        if audit.len() > MAX_AUDIT_ROWS {
-            let overflow = audit.len() - MAX_AUDIT_ROWS;
-            audit.drain(0..overflow);
-        }
+        self.inner.audit.push(entry);
     }
 
     pub fn list_audit(&self) -> Vec<AuditEntry> {
-        self.inner.audit.lock().unwrap().clone()
+        self.inner.audit.to_vec()
     }
 
     /// Record an operation with only its status known (actor, row count, and
@@ -392,7 +437,6 @@ impl SessionStore {
         row_count: Option<i64>,
         error_message: Option<String>,
     ) {
-        const MAX_OPERATION_ROWS: usize = 10_000;
         // Sanitize before the operation is stored anywhere (in-memory ring,
         // JSONL log, or durable audit): SQL is reduced to a fingerprint and
         // secrets/bind values are stripped, so no audit surface carries them.
@@ -403,19 +447,10 @@ impl SessionStore {
             operation,
             status,
         };
-        let writer = {
-            let mut log = self.inner.operations.lock().unwrap();
-            let writer = log.writer.as_ref().map(|writer| writer.tx.clone());
-            log.entries.push(entry.clone());
-            if log.entries.len() > MAX_OPERATION_ROWS {
-                let overflow = log.entries.len() - MAX_OPERATION_ROWS;
-                log.entries.drain(0..overflow);
-            }
-            writer
-        };
+        self.inner.operations.push(entry.clone());
 
-        if let Some(writer) = writer {
-            match writer.try_send(entry) {
+        if let Some(writer) = &self.inner.operation_writer {
+            match writer.tx.try_send(entry) {
                 Ok(()) => {}
                 Err(TrySendError::Full(_)) => {
                     tracing::error!("operation audit writer queue is full; dropping JSONL row");
@@ -458,7 +493,7 @@ impl SessionStore {
     }
 
     pub fn list_operations(&self) -> Vec<OperationAuditEntry> {
-        self.inner.operations.lock().unwrap().entries.clone()
+        self.inner.operations.to_vec()
     }
 
     pub fn close_session(&self, id: SessionId) -> ApiResult<()> {
@@ -1650,6 +1685,33 @@ fn display_name_for(spec: &ConnectionSpec) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ring_log_trims_to_cap_keeping_newest() {
+        let ring = RingLog::new(3);
+        for n in 0..5 {
+            ring.push(n);
+        }
+        // Oldest (0, 1) dropped; newest three retained in order.
+        assert_eq!(ring.to_vec(), vec![2, 3, 4]);
+    }
+
+    #[test]
+    fn ring_log_from_iter_trims_overflow() {
+        let ring = RingLog::from_iter(2, vec!['a', 'b', 'c', 'd']);
+        assert_eq!(ring.to_vec(), vec!['c', 'd']);
+    }
+
+    #[test]
+    fn ring_log_snapshot_is_independent_of_later_pushes() {
+        let ring = RingLog::new(10);
+        ring.push(1);
+        let snapshot = ring.to_vec();
+        ring.push(2);
+        // The snapshot taken before the second push is unchanged (COW).
+        assert_eq!(snapshot, vec![1]);
+        assert_eq!(ring.to_vec(), vec![1, 2]);
+    }
 
     #[test]
     fn recording_operations_while_listing_does_not_lose_memory_rows() {
