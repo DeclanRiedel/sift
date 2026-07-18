@@ -27,9 +27,9 @@ Two systemic themes run through almost every P1 below:
 
 ## Status of v1 findings
 
-The v1 doc (`quality-pass-findings.md`) listed 12 P0/P1 issues and 8 P2
-items. Commits `ab4b115`, `c2eb41b`, `a1112db`, `163acbb` addressed most
-of them. Re-verified against current source:
+The superseded v1 quality pass listed 12 P0/P1 issues and 8 P2 items.
+Commits `ab4b115`, `c2eb41b`, `a1112db`, `163acbb` addressed most of
+them. Re-verified against current source:
 
 | v1 # | Finding | Status | Current proof |
 |------|---------|--------|---------------|
