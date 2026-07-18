@@ -2637,7 +2637,7 @@ async fn read_spill_pages(
     Path(cursor_id): Path<sift_protocol::CursorId>,
     axum::extract::Query(q): axum::extract::Query<ReadSpillPagesQuery>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let registry = state.sessions.cursor_registry();
+    let registry = state.sessions.cursor_registry().clone();
     // If from_seq is set and it doesn't match the entry's current
     // read cursor, reject — we don't allow re-reading already-read
     // pages (spill files are append-only + read-forward).
@@ -2656,9 +2656,11 @@ async fn read_spill_pages(
         }
     }
     let limit = q.limit.unwrap_or(32).clamp(1, 256);
-    let (pages, done) = registry
-        .read_spill_pages(cursor_id, limit)
-        .map_err(ApiError::Driver)?;
+    let (pages, done) =
+        tokio::task::spawn_blocking(move || registry.read_spill_pages(cursor_id, limit))
+            .await
+            .map_err(|e| ApiError::Internal(format!("spill read task failed: {e}")))?
+            .map_err(ApiError::Driver)?;
     Ok(Json(json!({
         "cursor_id": cursor_id.0,
         "pages": pages,

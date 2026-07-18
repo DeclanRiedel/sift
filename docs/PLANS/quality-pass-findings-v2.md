@@ -61,36 +61,6 @@ them. Re-verified against current source:
 
 ### Sync I/O on async path
 
-#### P1-io-1. Spill write does `serde_json::to_vec` + `write_all` + `sync_all` on the pump task
-- File: `crates/server/src/cursors.rs:623-645`
-- Detail: `write_spill` opens a file, JSON-encodes every page
-  (`serde_json::to_vec(page)` — re-encoding data that was already
-  JSON-serialized on the way in), writes it, and **`file.sync_all()`** —
-  a hard fsync — all on the pump task with no `spawn_blocking`.
-- **Why it matters:** fsync on a normal SSD is 5–30 ms; on EBS / NFS
-  it's 50–500 ms. **The entire tokio worker thread is blocked for that
-  window.** With N concurrent evictions, N workers stall simultaneously.
-  Worse, the spill threshold check at `cursors.rs:617`
-  (`rows.len().saturating_mul(64)`) underestimates wide-row pages by
-  50–100x, so spills fire far more often than `spill_min_bytes` intends.
-- Fix: wrap in `spawn_blocking`; use a binary format (postcard/bincode)
-  to skip the re-encode and base64 expansion of `Value::Blob`; make
-  `sync_all` opt-in.
-
-#### P1-io-2. Spill read path fully synchronous, called from async HTTP handler
-- File: `crates/server/src/cursors.rs:301-354`, called from
-  `http.rs:2599-2601`
-- Detail: `read_spill_pages` does `OpenOptions::open`, `file.seek`, and
-  a `read_exact` loop with `serde_json::from_slice` per page — all
-  blocking, no `spawn_blocking`. With `limit=256` pages × multi-MB pages
-  this blocks a worker for seconds. The handler then wraps the result in
-  `Json::from(json!({ "pages": pages, ... }))` — all 256 pages held in
-  memory at once AND serialized as one giant JSON blob.
-- **Why it matters:** for a spilled cursor (by definition a large one),
-  multi-hundred-MB allocations are reachable. Worker stall on the read.
-- Fix: `spawn_blocking` the file read; stream the response as NDJSON via
-  `Body::from_stream`.
-
 #### P1-io-4. Single 16-permit semaphore ceiling on every metadata op
 - File: `crates/server/src/http.rs:40-41, 402-417`
 - Detail: `MAX_METADATA_BLOCKING_TASKS = 16` gates every
@@ -768,13 +738,11 @@ them. Re-verified against current source:
 2. **P1-comp-1 / P1-comp-5 / P1-comp-9** (lowercase precompute +
    memoize tokenize + protocol `Cow`) — the difference between current
    autocomplete and "Zed-class."
-3. **P1-io-1 / P1-io-2** (spill I/O `spawn_blocking`) — prevents worker
-   stalls on evicted cursors.
-4. **P1-driver-1** (PG close-leak) — silent resource leak on
+3. **P1-driver-1** (PG close-leak) — silent resource leak on
    close-mid-stream cycles.
-5. **P1-meta-1 / P1-meta-2** (connection pool + HMAC tokens) — the
+4. **P1-meta-1 / P1-meta-2** (connection pool + HMAC tokens) — the
     scalability ceiling for any multi-user deployment.
-6. **Refactor splits** (http.rs / mssql lib.rs / metadata lib.rs) —
+5. **Refactor splits** (http.rs / mssql lib.rs / metadata lib.rs) —
     mechanical, unblock future review. Do last.
 
 The two themes (sync I/O on async, per-row allocation) are worth

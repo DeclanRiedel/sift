@@ -579,7 +579,13 @@ async fn emit_terminal(
         if let Some(dir) = spill_dir {
             let approx_bytes = approx_pages_bytes(spillover);
             if approx_bytes >= control.spill_min_bytes && !spillover.is_empty() {
-                match write_spill(&dir, cursor_id, spillover) {
+                let pages = spillover.to_vec();
+                let write_result =
+                    tokio::task::spawn_blocking(move || write_spill(&dir, cursor_id, &pages))
+                        .await
+                        .map_err(std::io::Error::other)
+                        .and_then(|result| result);
+                match write_result {
                     Ok(path) => {
                         inner.spills.insert(
                             cursor_id,
