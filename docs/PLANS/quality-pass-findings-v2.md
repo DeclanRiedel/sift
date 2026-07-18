@@ -61,25 +61,6 @@ P0-6 and P1-driver-3 below.
 
 ## P0 — real correctness / DoS / security (fix before any user ship)
 
-### P0-4. Password flows through SHA-256 on every schema-cache lookup
-- File: `crates/server/src/schema_cache.rs:244-254`
-- Detail: `spec_hash` does `serde_json::to_string(spec)` (which
-  serializes `ConnectionSpec.password`) and feeds it to SHA-256, on
-  every `get` and every `insert`.
-- **Why it matters:** two compounding problems.
-  (1) **Security/spirit-of-the-rules:** AGENTS.md says *"Never log
-  secret bytes."* This isn't logging, but it pushes the cleartext
-  password through `serde_json`'s string encoder and the SHA-256
-  compression function on every schema call. Any future panic hook /
-  core dump / allocator introspection captures the password.
-  (2) **Cache correctness:** the module docstring (`schema_cache.rs:5-7`)
-  promises *"two connections to the same DB share cache entries."* They
-  do not — spec A with `password=Some("p")` and spec B with
-  `password=None` hash differently, so the same DB gets N independent
-  cache entries and N spawned invalidator tasks (see P1-cache-3).
-- Fix: hash over `(host, port, database, user)` only. Add a regression
-  test that two specs differing only in `password` produce the same hash.
-
 ### P0-6. `cancel_query` HTTP handler still has no caller-scoping (v1 #4 residual)
 - File: `crates/server/src/http.rs:2541-2559`
 - Detail: v1 #4 was "partially fixed" — the ownership check moved to
@@ -227,10 +208,9 @@ P0-6 and P1-driver-3 below.
   has no max-entries bound.
 - **Why it matters:** a multi-tenant server with M distinct connection
   specs holds M extra DB connections open purely for invalidation.
-  Combined with P0-4 (password in the hash inflates distinct spec
-  count), this is an unbounded resource leak. 100 connections × ~10
-  deep-scope objects = 1,000 cached snapshots with no eviction other
-  than TTL.
+  Because there is no entry or invalidator cap, this remains an
+  unbounded resource leak. 100 connections × ~10 deep-scope objects =
+  1,000 cached snapshots with no eviction other than TTL.
 - Fix: bound `entries` (LRU on top of DashMap, or `mini-moka`/`moka`);
   bound `invalidators`; share one poller per (host, port, database).
 
@@ -935,23 +915,21 @@ P0-6 and P1-driver-3 below.
 
 ## Suggested sequencing
 
-1. **P0-4** (password in schema-cache hash) — security + cache
-   correctness, ~5-line change.
-2. **P1-lock-1** (reduce global operation-log lock scope) —
+1. **P1-lock-1** (reduce global operation-log lock scope) —
    eliminates a global serialization point.
-3. **P1-alloc-1** (`page.clone()` in pump) — single-line change,
+2. **P1-alloc-1** (`page.clone()` in pump) — single-line change,
    removes ~10M allocs per large query.
-4. **P1-comp-1 / P1-comp-5 / P1-comp-9** (lowercase precompute +
+3. **P1-comp-1 / P1-comp-5 / P1-comp-9** (lowercase precompute +
    memoize tokenize + protocol `Cow`) — the difference between current
    autocomplete and "Zed-class."
-5. **P1-io-1 / P1-io-2** (spill I/O `spawn_blocking`) — prevents worker
+4. **P1-io-1 / P1-io-2** (spill I/O `spawn_blocking`) — prevents worker
    stalls on evicted cursors.
-6. **P1-driver-1** (PG close-leak) + **P1-driver-2** (search_path
+5. **P1-driver-1** (PG close-leak) + **P1-driver-2** (search_path
     validation) — silent resource leak + the only finding with RCE
     potential under "connect to your own DB."
-7. **P1-meta-1 / P1-meta-2** (connection pool + HMAC tokens) — the
+6. **P1-meta-1 / P1-meta-2** (connection pool + HMAC tokens) — the
     scalability ceiling for any multi-user deployment.
-8. **Refactor splits** (http.rs / mssql lib.rs / metadata lib.rs) —
+7. **Refactor splits** (http.rs / mssql lib.rs / metadata lib.rs) —
     mechanical, unblock future review. Do last.
 
 The two themes (sync I/O on async, per-row allocation) are worth
