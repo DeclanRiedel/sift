@@ -95,23 +95,6 @@ them. Re-verified against current source:
 - Fix: `r2d2_sqlite`/`deadpool-sqlite` pool with WAL; or an actor model;
   or minimum: `parking_lot::Mutex` + split read-only connection.
 
-#### P1-meta-2. Argon2 (default cost) on every bearer-authed request, plus a write per verify
-- File: `crates/metadata/src/lib.rs:297-331` (`verify_api_token`)
-- Detail: `Argon2::default()` is Argon2id with `m_cost=19 MiB,
-  t_cost=2, p=1` — ~50–150 ms of CPU. Every authed request calls
-  `verify_api_token` (consuming a blocking permit for ~100 ms) AND
-  issues `UPDATE api_token SET last_used_at = ?1 … WHERE id = ?2`
-  (`lib.rs:326-329`), turning every GET into a WAL write.
-- **Why it matters:** sustained API throughput bounded by
-  `1 / argon2_verify_time × num_blocking_permits` ≈ `16 / 0.1s` =
-  ~160 req/s absolute ceiling, and the per-request UPDATE serializes
-  through the mutex. A burst of 50 concurrent requests adds ~30 s of
-  tail latency. Combined with P1-meta-1, the audit-writer thread blocks
-  behind every verify's UPDATE.
-- Fix: token verification should not use a password-hashing KDF — use
-  HMAC-SHA256 keyed over `(lookup_prefix || random_part)`, constant-time
-  compare. Decouple `last_used_at` from the verify path (debounce).
-
 #### P1-meta-4. Audit row not written in the same transaction as the mutation
 - Files: `crates/metadata/src/lib.rs:617-639` (`create_room`),
   `:481-522` (`delete_connection_profile`), `:680-695` (`add_room_member`),
@@ -137,7 +120,7 @@ them. Re-verified against current source:
 - **Why it matters:** (1) under load, if the writer stalls on the mutex,
   the channel grows without bound — memory growth under pressure.
   (2) When the audit writer is running its INSERT, every request-path
-  metadata call blocks behind it. Compounds P1-meta-1 and P1-meta-2.
+  metadata call blocks behind it. Compounds P1-meta-1.
 - Fix: give the audit writer its own `Connection`; bound the channel
   and drop+count on overflow; or move audit into the per-method tx
   (P1-meta-4).
@@ -484,9 +467,7 @@ them. Re-verified against current source:
   and `cargo test --workspace` both green at HEAD.
 - **Bind values never persisted** to audit rows (see P2-metadata note).
 - **ChaCha20-Poly1305** uses a fresh 96-bit random nonce per persist;
-  wrong-key decrypt path is test-covered; Argon2id parameters meet
-  OWASP tiers (though Argon2id is the wrong algorithm for token verify
-  — see P1-meta-2).
+  wrong-key decrypt path is test-covered.
 - **Constant-time bearer compare**, **correlation-id propagation on WS
   handler tasks**, **drain gate** (`/v1/ready`), **protocol-version
   middleware** — all behave as claimed and are test-covered.
@@ -506,7 +487,7 @@ them. Re-verified against current source:
    eliminates a global serialization point.
 2. **P1-comp-9** (protocol `Cow`) — the difference between current
    autocomplete and "Zed-class."
-3. **P1-meta-1 / P1-meta-2** (connection pool + HMAC tokens) — the
+3. **P1-meta-1** (metadata connection concurrency) — the
     scalability ceiling for any multi-user deployment.
 4. **Refactor splits** (http.rs / mssql lib.rs / metadata lib.rs) —
     mechanical, unblock future review. Do last.

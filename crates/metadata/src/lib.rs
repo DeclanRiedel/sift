@@ -9,6 +9,7 @@ use argon2::Argon2;
 use chrono::{DateTime, Utc};
 use rand_core::OsRng;
 use rusqlite::{params, Connection, OptionalExtension};
+use sha2::{Digest, Sha256};
 use sift_protocol::ConnectionSpec;
 use uuid::Uuid;
 
@@ -28,6 +29,8 @@ mod migrations {
 const SECRET_NAMESPACE: &str = "sift.local";
 const API_TOKEN_PREFIX: &str = "sift_";
 const API_TOKEN_LOOKUP_LEN: usize = 12;
+const API_TOKEN_LAST_USED_DEBOUNCE_SECS: i64 = 300;
+const API_TOKEN_MAC_KEY: &[u8] = b"sift.metadata.api-token.v1";
 
 pub type Result<T> = std::result::Result<T, MetadataError>;
 
@@ -269,6 +272,7 @@ impl MetadataStore {
             "{API_TOKEN_PREFIX}{token_lookup}_{}",
             Uuid::new_v4().simple()
         );
+        let token_mac = token_mac(&plaintext);
         let salt = SaltString::generate(&mut OsRng);
         let token_hash = Argon2::default()
             .hash_password(plaintext.as_bytes(), &salt)
@@ -279,13 +283,14 @@ impl MetadataStore {
         let conn = self.conn.lock().unwrap();
         conn.execute(
             "INSERT INTO api_token
-             (principal_id, tenant_id, token_lookup, token_hash, name, created_at, updated_at, expires_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6, ?7)",
+             (principal_id, tenant_id, token_lookup, token_hash, token_mac, name, created_at, updated_at, expires_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7, ?8)",
             params![
                 principal.0,
                 scope.map(|id| id.0),
                 token_lookup,
                 token_hash,
+                token_mac,
                 name,
                 now,
                 expires_at_text
@@ -304,31 +309,40 @@ impl MetadataStore {
         let conn = self.conn.lock().unwrap();
         let candidate = conn
             .query_row(
-                "SELECT id, token_hash FROM api_token
+                "SELECT id, token_hash, token_mac, last_used_at FROM api_token
                  WHERE token_lookup = ?1
                    AND revoked_at IS NULL
                    AND (expires_at IS NULL OR expires_at > ?2)",
                 params![token_lookup, now.to_rfc3339()],
-                |row| Ok((ApiTokenId(row.get(0)?), row.get::<_, String>(1)?)),
+                |row| {
+                    Ok((
+                        ApiTokenId(row.get(0)?),
+                        row.get::<_, String>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                        row.get::<_, Option<String>>(3)?,
+                    ))
+                },
             )
             .optional()?;
-        let Some((id, hash)) = candidate else {
+        let Some((id, hash, mac, last_used_at)) = candidate else {
             return Ok(None);
         };
 
-        let parsed = PasswordHash::new(&hash).map_err(password_hash_error)?;
-        if Argon2::default()
-            .verify_password(presented.as_bytes(), &parsed)
-            .is_err()
-        {
+        let verified = mac
+            .as_deref()
+            .is_some_and(|mac| constant_time_eq(mac.as_bytes(), token_mac(presented).as_bytes()))
+            || verify_legacy_token(presented, &hash)?;
+        if !verified {
             return Ok(None);
         }
 
-        let used_at = now.to_rfc3339();
-        conn.execute(
-            "UPDATE api_token SET last_used_at = ?1, updated_at = ?1 WHERE id = ?2",
-            params![used_at, id.0],
-        )?;
+        if should_touch_token(last_used_at.as_deref(), now) {
+            let used_at = now.to_rfc3339();
+            conn.execute(
+                "UPDATE api_token SET last_used_at = ?1, updated_at = ?1 WHERE id = ?2",
+                params![used_at, id.0],
+            )?;
+        }
         self.api_token_by_id_locked(&conn, id).map(Some)
     }
 
@@ -1521,6 +1535,75 @@ fn token_lookup_from_presented(presented: &str) -> Option<&str> {
     Some(&body[..API_TOKEN_LOOKUP_LEN])
 }
 
+fn token_mac(token: &str) -> String {
+    hex_encode(&hmac_sha256(API_TOKEN_MAC_KEY, token.as_bytes()))
+}
+
+fn hmac_sha256(key: &[u8], message: &[u8]) -> [u8; 32] {
+    const BLOCK: usize = 64;
+    let mut key_block = [0u8; BLOCK];
+    if key.len() > BLOCK {
+        key_block[..32].copy_from_slice(&Sha256::digest(key));
+    } else {
+        key_block[..key.len()].copy_from_slice(key);
+    }
+
+    let mut outer = [0x5c_u8; BLOCK];
+    let mut inner = [0x36_u8; BLOCK];
+    for idx in 0..BLOCK {
+        outer[idx] ^= key_block[idx];
+        inner[idx] ^= key_block[idx];
+    }
+
+    let mut inner_hash = Sha256::new();
+    inner_hash.update(inner);
+    inner_hash.update(message);
+    let inner_result = inner_hash.finalize();
+
+    let mut outer_hash = Sha256::new();
+    outer_hash.update(outer);
+    outer_hash.update(inner_result);
+    outer_hash.finalize().into()
+}
+
+fn hex_encode(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        out.push(char::from(HEX[(byte >> 4) as usize]));
+        out.push(char::from(HEX[(byte & 0x0f) as usize]));
+    }
+    out
+}
+
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (a, b) in a.iter().zip(b) {
+        diff |= a ^ b;
+    }
+    diff == 0
+}
+
+fn verify_legacy_token(presented: &str, hash: &str) -> Result<bool> {
+    let parsed = PasswordHash::new(hash).map_err(password_hash_error)?;
+    Ok(Argon2::default()
+        .verify_password(presented.as_bytes(), &parsed)
+        .is_ok())
+}
+
+fn should_touch_token(last_used_at: Option<&str>, now: DateTime<Utc>) -> bool {
+    let Some(last_used_at) = last_used_at else {
+        return true;
+    };
+    let Ok(last_used_at) = parse_time(last_used_at.to_string()) else {
+        return true;
+    };
+    now.signed_duration_since(last_used_at).num_seconds() >= API_TOKEN_LAST_USED_DEBOUNCE_SECS
+}
+
 impl From<std::io::Error> for MetadataError {
     fn from(error: std::io::Error) -> Self {
         Self::SecretStore(error.to_string())
@@ -1633,6 +1716,63 @@ mod tests {
         let verified = store.verify_api_token(&plaintext).unwrap().unwrap();
         assert_eq!(verified.id, row.id);
         assert!(store.verify_api_token("sift_wrong").unwrap().is_none());
+    }
+
+    #[test]
+    fn api_token_uses_mac_and_debounces_last_used_at() {
+        let store = store();
+        store.bootstrap_local("local user").unwrap();
+
+        let (row, plaintext) = store
+            .issue_api_token(PrincipalId(1), Some(TenantId(1)), "test", None)
+            .unwrap();
+        let conn = store.conn.lock().unwrap();
+        let mac: Option<String> = conn
+            .query_row(
+                "SELECT token_mac FROM api_token WHERE id = ?1",
+                params![row.id.0],
+                |row| row.get(0),
+            )
+            .unwrap();
+        drop(conn);
+        assert_eq!(mac.as_deref(), Some(token_mac(&plaintext).as_str()));
+
+        let first = store.verify_api_token(&plaintext).unwrap().unwrap();
+        let second = store.verify_api_token(&plaintext).unwrap().unwrap();
+        assert_eq!(first.last_used_at, second.last_used_at);
+    }
+
+    #[test]
+    fn legacy_argon2_api_token_still_verifies() {
+        let store = store();
+        store.bootstrap_local("local user").unwrap();
+
+        let lookup_seed = Uuid::new_v4().simple().to_string();
+        let token_lookup = &lookup_seed[..API_TOKEN_LOOKUP_LEN];
+        let plaintext = format!(
+            "{API_TOKEN_PREFIX}{token_lookup}_{}",
+            Uuid::new_v4().simple()
+        );
+        let salt = SaltString::generate(&mut OsRng);
+        let token_hash = Argon2::default()
+            .hash_password(plaintext.as_bytes(), &salt)
+            .map_err(password_hash_error)
+            .unwrap()
+            .to_string();
+        let now = now_text();
+        {
+            let conn = store.conn.lock().unwrap();
+            conn.execute(
+                "INSERT INTO api_token
+                 (principal_id, tenant_id, token_lookup, token_hash, token_mac, name, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, NULL, ?5, ?6, ?6)",
+                params![1_i64, 1_i64, token_lookup, token_hash, "legacy", now],
+            )
+            .unwrap();
+        }
+
+        let verified = store.verify_api_token(&plaintext).unwrap().unwrap();
+        assert_eq!(verified.name, "legacy");
     }
 
     #[tokio::test]
