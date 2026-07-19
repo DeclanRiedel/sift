@@ -223,6 +223,40 @@ them. Re-verified against current source:
 
 ## P2 — defer / refactor / hygiene / slow-under-extremes
 
+### P2 status (post-P1 pass)
+
+A follow-up pass worked the correctness/security/reliability P2s. Status
+against the items below:
+
+| P2 finding | Status | Note |
+|------------|--------|------|
+| CTE-wrapped / parameterized DML loses `affected_rows` (PG) | FIXED | streaming path reports `RowStream::rows_affected()` when no result set is produced |
+| MSSQL ` OUTPUT ` space-literal routing | FIXED | `is_pure_dml` matches OUTPUT on any whitespace; unit-tested |
+| MSSQL `ms_value` swallows decode errors as NULL | FIXED | shared `ms_decode` surfaces `Value::Engine` + warn log |
+| MSSQL `bulk_insert_csv` not transactional | FIXED | wrapped in BEGIN/COMMIT with ROLLBACK on error |
+| Secret delete errors swallowed | FIXED | `delete_secret_best_effort` logs handle + call site |
+| PG `prewarm_pool` blocks `open` | FIXED | spawned; `open` returns immediately |
+| MSSQL `ensure_warm` `refilling` not reset on panic | FIXED | `catch_unwind` guarantees reset |
+| MSSQL close/`yield_now` race | FIXED | joins aborted tasks deterministically |
+| `update_saved_query` non-atomic RMW | FIXED | BEGIN IMMEDIATE transaction |
+| `revoke_api_token` no tx | FIXED | now transactional (via P1-meta-4) |
+| Per-cell column-name String alloc (PG) | ALREADY FIXED | already inside the `Err` arm, `&str` |
+| PG `cancel_query` no internal timeout | ALREADY FIXED | already wrapped in `timeout(5s, …)` |
+| `fts_pattern` collapses punctuation to `*` | ALREADY FIXED | returns `None` → caller appends `AND 0` |
+| Prepared-statement cache unmanaged (PG) | DEFERRED | deadpool-postgres 0.14 `StatementCache` has no capacity setter; bounding it means hooking connection recycle — a deliberate change |
+| Export bypasses cursor registry | OPEN | security; needs cap + cancel + timeout plumbing |
+| NULL params typed as TEXT (PG/MSSQL) | OPEN | needs an untyped-NULL `ToSql`; non-trivial |
+| PG type coverage gaps (arrays/cidr/xml/…) | OPEN | additive; currently returns `Value::Engine` placeholder |
+| MSSQL cancel orphans ConnHandle | OPEN | surface `QueryCanceled` / document |
+| `list_saved_queries` mixed `?N`/`?` placeholders | OPEN | hygiene |
+| `create_principal`/`create_tenant` no tx | OPEN | hygiene |
+| `detach_room` quiet no-op | OPEN | hygiene |
+| `MetadataError::Io` vs `SecretStore` collapse | OPEN | clarity |
+| Broker credential accepted at upsert | OPEN | validation |
+| Dead `principal_key` schema / V006 destructive migration | OPEN | doc/migration |
+| Large-file refactor splits (http.rs / mssql / metadata) | OPEN | "do last" per sequencing |
+| "flag the scaling cliff" notes (write amp, room_runtime clone, O(N²) dedup, …) | N/A | doc-only, no code change intended |
+
 ### Server
 
 - **`http.rs` is 3,087 lines in one file** (`crates/server/src/http.rs`).
