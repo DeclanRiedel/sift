@@ -990,86 +990,66 @@ fn ms_row(row: &tiberius::Row) -> Row {
 fn ms_value(row: &tiberius::Row, idx: usize) -> Value {
     let ty = row.columns()[idx].column_type();
     match ty {
-        ColumnType::Bit | ColumnType::Bitn => {
-            row.try_get::<bool, _>(idx).ok().flatten().map(Value::Bool)
+        ColumnType::Bit | ColumnType::Bitn => ms_decode::<bool>(row, idx, ty, Value::Bool),
+        ColumnType::Int1 => ms_decode::<u8>(row, idx, ty, |v| Value::Int16(v as i16)),
+        ColumnType::Int2 => ms_decode::<i16>(row, idx, ty, Value::Int16),
+        ColumnType::Int4 | ColumnType::Intn => ms_decode::<i32>(row, idx, ty, Value::Int32),
+        ColumnType::Int8 => ms_decode::<i64>(row, idx, ty, Value::Int64),
+        ColumnType::Float4 | ColumnType::Floatn => ms_decode::<f32>(row, idx, ty, Value::Float32),
+        ColumnType::Float8 => ms_decode::<f64>(row, idx, ty, Value::Float64),
+        ColumnType::Money => ms_decode::<f64>(row, idx, ty, |v| Value::Decimal(format!("{v:.4}"))),
+        ColumnType::Money4 => ms_decode::<f32>(row, idx, ty, |v| Value::Decimal(format!("{v:.4}"))),
+        ColumnType::BigVarBin | ColumnType::BigBinary | ColumnType::Image => {
+            ms_decode::<&[u8]>(row, idx, ty, |v| Value::Blob(v.to_vec()))
         }
-        ColumnType::Int1 => row
-            .try_get::<u8, _>(idx)
-            .ok()
-            .flatten()
-            .map(|v| Value::Int16(v as i16)),
-        ColumnType::Int2 => row.try_get::<i16, _>(idx).ok().flatten().map(Value::Int16),
-        ColumnType::Int4 | ColumnType::Intn => {
-            row.try_get::<i32, _>(idx).ok().flatten().map(Value::Int32)
-        }
-        ColumnType::Int8 => row.try_get::<i64, _>(idx).ok().flatten().map(Value::Int64),
-        ColumnType::Float4 | ColumnType::Floatn => row
-            .try_get::<f32, _>(idx)
-            .ok()
-            .flatten()
-            .map(Value::Float32),
-        ColumnType::Float8 => row
-            .try_get::<f64, _>(idx)
-            .ok()
-            .flatten()
-            .map(Value::Float64),
-        ColumnType::Money => match row.try_get::<f64, _>(idx) {
-            Ok(Some(v)) => Some(Value::Decimal(format!("{v:.4}"))),
-            Ok(None) => Some(Value::Null),
-            Err(error) => Some(ms_decode_error_value(ty, error)),
-        },
-        ColumnType::Money4 => match row.try_get::<f32, _>(idx) {
-            Ok(Some(v)) => Some(Value::Decimal(format!("{v:.4}"))),
-            Ok(None) => Some(Value::Null),
-            Err(error) => Some(ms_decode_error_value(ty, error)),
-        },
-        ColumnType::BigVarBin | ColumnType::BigBinary | ColumnType::Image => row
-            .try_get::<&[u8], _>(idx)
-            .ok()
-            .flatten()
-            .map(|v| Value::Blob(v.to_vec())),
-        ColumnType::Guid => row
-            .try_get::<uuid::Uuid, _>(idx)
-            .ok()
-            .flatten()
-            .map(Value::Uuid),
-        ColumnType::Daten => row
-            .try_get::<chrono::NaiveDate, _>(idx)
-            .ok()
-            .flatten()
-            .map(Value::Date),
-        ColumnType::Timen => row
-            .try_get::<chrono::NaiveTime, _>(idx)
-            .ok()
-            .flatten()
-            .map(Value::Time),
+        ColumnType::Guid => ms_decode::<uuid::Uuid>(row, idx, ty, Value::Uuid),
+        ColumnType::Daten => ms_decode::<chrono::NaiveDate>(row, idx, ty, Value::Date),
+        ColumnType::Timen => ms_decode::<chrono::NaiveTime>(row, idx, ty, Value::Time),
         ColumnType::Datetime
         | ColumnType::Datetime2
         | ColumnType::Datetime4
-        | ColumnType::Datetimen => row
-            .try_get::<chrono::NaiveDateTime, _>(idx)
-            .ok()
-            .flatten()
-            .map(Value::Timestamp),
-        ColumnType::DatetimeOffsetn => {
-            match row.try_get::<chrono::DateTime<chrono::FixedOffset>, _>(idx) {
-                Ok(Some(v)) => Some(Value::TimestampTz(v.into())),
-                Ok(None) => Some(Value::Null),
-                Err(error) => Some(ms_decode_error_value(ty, error)),
-            }
+        | ColumnType::Datetimen => {
+            ms_decode::<chrono::NaiveDateTime>(row, idx, ty, Value::Timestamp)
         }
-        ColumnType::SSVariant | ColumnType::Udt => Some(Value::Engine {
+        ColumnType::DatetimeOffsetn => {
+            ms_decode::<chrono::DateTime<chrono::FixedOffset>>(row, idx, ty, |v| {
+                Value::TimestampTz(v.into())
+            })
+        }
+        ColumnType::SSVariant | ColumnType::Udt => Value::Engine {
             engine: Engine::SqlServer,
             type_name: format!("{ty:?}"),
             display_text: format!("<undecoded {ty:?}>"),
-        }),
-        _ => row
-            .try_get::<&str, _>(idx)
-            .ok()
-            .flatten()
-            .map(|v| Value::Text(v.to_string())),
+        },
+        _ => ms_decode::<&str>(row, idx, ty, |v| Value::Text(v.to_string())),
     }
-    .unwrap_or(Value::Null)
+}
+
+/// Decode one cell as `T` and map it to a [`Value`]. A decode *error* is
+/// surfaced as a `Value::Engine { "<decode error: …>" }` placeholder plus
+/// a warning log — never silently swallowed to `Null`. This matches the
+/// Postgres driver's contract (`decode_cell`); the previous
+/// `.ok().flatten()` arms turned every decode failure into an
+/// indistinguishable `NULL` (e.g. an `nvarchar(MAX)` that fails UTF-8
+/// conversion decoded as `NULL` with no diagnostic). A genuine SQL NULL
+/// still maps to `Value::Null`.
+fn ms_decode<'a, T>(
+    row: &'a tiberius::Row,
+    idx: usize,
+    ty: ColumnType,
+    to_value: impl FnOnce(T) -> Value,
+) -> Value
+where
+    T: tiberius::FromSql<'a>,
+{
+    match row.try_get::<T, _>(idx) {
+        Ok(Some(v)) => to_value(v),
+        Ok(None) => Value::Null,
+        Err(error) => {
+            tracing::warn!(idx, ?ty, %error, "sqlserver cell decode error");
+            ms_decode_error_value(ty, error)
+        }
+    }
 }
 
 fn ms_decode_error_value(ty: ColumnType, error: tiberius::error::Error) -> Value {
@@ -1133,13 +1113,45 @@ async fn bulk_insert_csv(conn: &mut MssqlConn, op: BulkOp) -> Result<BulkResult,
     }
 
     let insert_prefix = format!("INSERT INTO {table} ({}) VALUES ", headers.join(", "));
+
+    // Wrap every batch in one transaction so a mid-run failure leaves no
+    // partially-committed rows. Previously batch 3 of 5 failing left
+    // batches 1-2 committed with no rollback, and the returned
+    // `rows_inserted` reflected rows *attempted*, not committed.
+    execute_sql_batch(conn, "BEGIN TRANSACTION").await?;
+    match bulk_insert_batches(conn, &insert_prefix, headers.len(), &mut reader).await {
+        Ok(rows_inserted) => {
+            execute_sql_batch(conn, "COMMIT TRANSACTION").await?;
+            Ok(BulkResult { rows_inserted })
+        }
+        Err(error) => {
+            // Best-effort rollback; surface the original failure. If the
+            // rollback itself fails (e.g. the connection is gone), the
+            // server will reclaim the aborted transaction on disconnect.
+            if let Err(rollback_error) = execute_sql_batch(conn, "ROLLBACK TRANSACTION").await {
+                tracing::warn!(%rollback_error, "sqlserver bulk-insert rollback failed");
+            }
+            Err(error)
+        }
+    }
+}
+
+/// Stream CSV records into batched multi-row INSERTs. Runs inside the
+/// transaction opened by [`bulk_insert_csv`]; on any error the caller
+/// rolls the whole run back.
+async fn bulk_insert_batches(
+    conn: &mut MssqlConn,
+    insert_prefix: &str,
+    header_len: usize,
+    reader: &mut csv::Reader<&[u8]>,
+) -> Result<u64, DriverError> {
     let mut sql = String::with_capacity(insert_prefix.len() + 8192);
     let mut rows_in_batch = 0usize;
     let mut rows_inserted = 0u64;
 
     for record in reader.records() {
         let record = record.map_err(csv_err)?;
-        if record.len() != headers.len() {
+        if record.len() != header_len {
             return Err(DriverError::new(
                 Code::InvalidParameterValue,
                 "CSV record width does not match header width",
@@ -1170,7 +1182,7 @@ async fn bulk_insert_csv(conn: &mut MssqlConn, op: BulkOp) -> Result<BulkResult,
             rows_in_batch = 0;
         }
         if rows_in_batch == 0 {
-            sql.push_str(&insert_prefix);
+            sql.push_str(insert_prefix);
         } else {
             sql.push_str(", ");
         }
@@ -1182,7 +1194,7 @@ async fn bulk_insert_csv(conn: &mut MssqlConn, op: BulkOp) -> Result<BulkResult,
     if rows_in_batch > 0 {
         execute_sql_batch(conn, &sql).await?;
     }
-    Ok(BulkResult { rows_inserted })
+    Ok(rows_inserted)
 }
 
 async fn execute_sql_batch(conn: &mut MssqlConn, sql: &str) -> Result<(), DriverError> {
@@ -1598,6 +1610,26 @@ mod tests {
     fn mssql_literal_escapes_text_and_preserves_empty() {
         assert_eq!(mssql_literal(""), "N''");
         assert_eq!(mssql_literal("O'Reilly"), "N'O''Reilly'");
+    }
+
+    #[test]
+    fn is_pure_dml_routes_dml_and_keeps_output_and_row_producers_streaming() {
+        // Plain DML with no OUTPUT → execute() path (affected_rows).
+        assert!(is_pure_dml("INSERT INTO t (a) VALUES (1)"));
+        assert!(is_pure_dml("update t set a = 1 where id = 2"));
+        assert!(is_pure_dml("DELETE FROM t WHERE id = 3"));
+        assert!(is_pure_dml("MERGE t USING s ON t.id = s.id WHEN MATCHED THEN UPDATE SET a = 1"));
+
+        // OUTPUT clause streams rows — must stay on the query() path
+        // regardless of the whitespace delimiting the keyword. The old
+        // ` OUTPUT ` substring check missed tab/newline forms.
+        assert!(!is_pure_dml("INSERT INTO t (a) OUTPUT inserted.a VALUES (1)"));
+        assert!(!is_pure_dml("INSERT INTO t (a)\tOUTPUT\tinserted.a VALUES (1)"));
+        assert!(!is_pure_dml("DELETE FROM t\nOUTPUT deleted.id\nWHERE id = 3"));
+
+        // Row-producing statements are never "pure DML".
+        assert!(!is_pure_dml("SELECT * FROM t"));
+        assert!(!is_pure_dml("WITH c AS (SELECT 1) SELECT * FROM c"));
     }
 
     #[test]
