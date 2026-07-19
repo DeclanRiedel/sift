@@ -1242,8 +1242,14 @@ impl MetadataStore {
         update: UpdateSavedQuery,
     ) -> Result<SavedQuery> {
         let now = now_text();
-        let conn = self.conn()?;
-        let existing = self.saved_query_by_id_locked(&conn, id)?;
+        let mut conn = self.conn()?;
+        // BEGIN IMMEDIATE so the read-modify-write is atomic. Each metadata
+        // call runs on its own pooled connection (P1-meta-1), so without a
+        // write-locking transaction two concurrent *partial* updates both
+        // read the old row and last-writer-wins — e.g. a tags-only update
+        // silently clobbers a concurrent sql_text-only update.
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let existing = self.saved_query_by_id_locked(&tx, id)?;
         let name = update.name.unwrap_or(existing.name);
         let sql_text = update.sql_text.unwrap_or(existing.sql_text);
         let connection_profile_id = update
@@ -1251,7 +1257,7 @@ impl MetadataStore {
             .unwrap_or(existing.connection_profile_id);
         let tags = update.tags.unwrap_or(existing.tags);
         let tags_json = serde_json::to_string(&tags).map_err(MetadataError::Json)?;
-        conn.execute(
+        tx.execute(
             "UPDATE saved_query
              SET name = ?1, sql_text = ?2, connection_profile_id = ?3,
                  tags_json = ?4, updated_at = ?5
@@ -1265,7 +1271,9 @@ impl MetadataStore {
                 id.0,
             ],
         )?;
-        self.saved_query_by_id_locked(&conn, id)
+        let updated = self.saved_query_by_id_locked(&tx, id)?;
+        tx.commit()?;
+        Ok(updated)
     }
 
     /// Delete a saved query. Caller has already checked authorization.

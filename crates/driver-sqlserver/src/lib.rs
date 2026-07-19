@@ -413,14 +413,20 @@ impl Driver for MssqlDriver {
                 }
             })
             .collect();
+        let mut aborted = Vec::new();
         for cursor_id in cursors {
             if let Some((_, (_, task))) = self.inner.cursors.remove(&cursor_id) {
                 task.abort();
+                aborted.push(task);
             }
         }
-        // Yield once so any task that raced past the abort has a chance
-        // to complete its final `conns.insert` before we clear.
-        tokio::task::yield_now().await;
+        // Deterministically join the aborted tasks so any that raced past
+        // the abort point finish their final `conns.insert` before we clear
+        // the map. This replaces a best-effort single `yield_now()`, which
+        // only *hoped* the racing task got scheduled in that one yield.
+        for task in aborted {
+            let _ = task.await;
+        }
         self.inner.conns.lock().await.remove(&c.id());
         self.inner.conn_pool_key.remove(&c.id());
         Ok(())
