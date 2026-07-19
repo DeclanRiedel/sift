@@ -70,6 +70,8 @@ pub enum MetadataError {
     SavedQueryNotFound(SavedQueryId),
     #[error("secret store error: {0}")]
     SecretStore(String),
+    #[error("io error: {0}")]
+    Io(#[from] std::io::Error),
     #[error("blocking metadata task failed: {0}")]
     BlockingTask(String),
 }
@@ -208,8 +210,11 @@ pub struct MetadataStore {
 impl MetadataStore {
     pub fn open(path: &Path, secrets: Arc<dyn SecretStore>) -> Result<Self> {
         if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)
-                .map_err(|error| MetadataError::SecretStore(error.to_string()))?;
+            // A failure here is the SQLite DB *parent directory* being
+            // uncreatable — an IO error, not a secret-store error. The old
+            // `SecretStore` label showed the operator "secret store error:
+            // Permission denied" while the real fault was the DB path.
+            std::fs::create_dir_all(parent).map_err(MetadataError::Io)?;
         }
         let pool = Arc::new(ConnectionPool::new(path.to_path_buf()));
         // Migrate once on a pooled connection; it returns to the pool after.
@@ -1804,12 +1809,6 @@ fn should_touch_token(last_used_at: Option<&str>, now: DateTime<Utc>) -> bool {
         return true;
     };
     now.signed_duration_since(last_used_at).num_seconds() >= API_TOKEN_LAST_USED_DEBOUNCE_SECS
-}
-
-impl From<std::io::Error> for MetadataError {
-    fn from(error: std::io::Error) -> Self {
-        Self::SecretStore(error.to_string())
-    }
 }
 
 #[cfg(test)]

@@ -107,6 +107,7 @@ impl ApiError {
                 | MetadataError::Migration(_)
                 | MetadataError::PasswordHash(_)
                 | MetadataError::SecretStore(_)
+                | MetadataError::Io(_)
                 | MetadataError::BlockingTask(_) => {
                     (StatusCode::INTERNAL_SERVER_ERROR, "metadata_internal")
                 }

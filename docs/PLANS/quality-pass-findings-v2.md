@@ -251,7 +251,7 @@ against the items below:
 | `list_saved_queries` mixed `?N`/`?` placeholders | OPEN | hygiene |
 | `create_principal`/`create_tenant` no tx | OPEN | hygiene |
 | `detach_room` quiet no-op | OPEN | hygiene |
-| `MetadataError::Io` vs `SecretStore` collapse | OPEN | clarity |
+| `MetadataError::Io` vs `SecretStore` collapse | FIXED | added `Io(#[from] io::Error)`; DB-dir create now labels IO errors correctly |
 | Broker credential accepted at upsert | OPEN | validation |
 | Dead `principal_key` schema / V006 destructive migration | OPEN | doc/migration |
 | Large-file refactor splits (http.rs / mssql / metadata) | OPEN | "do last" per sequencing |
