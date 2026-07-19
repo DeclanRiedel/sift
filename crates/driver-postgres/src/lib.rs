@@ -40,14 +40,21 @@ impl Driver for PgDriver {
         let id = self.inner.conn_id.next();
         self.inner.put_free(id, conn).await;
         self.inner.put_spec(id, spec.clone());
-        // Pre-warm additional pool slots when the spec requests it. Best-
-        // effort: a pre-warm failure is logged, not surfaced — `open`
-        // has already produced one working conn and the caller can proceed.
+        // Pre-warm additional pool slots when the spec requests it.
+        // Prewarming is background work by definition, so spawn it rather
+        // than blocking `open` on `pool_min_size - 1` concurrent TCP+TLS+PG
+        // handshakes: `open` already has one working conn and the caller
+        // can proceed immediately. Best-effort — a prewarm failure is
+        // logged inside `prewarm_pool`, not surfaced.
         if let Some(sift_protocol::EngineConnectionSpec::Postgres(p)) = &spec.engine_specific {
             if let Some(min) = p.pool_min_size {
                 let extra = (min as usize).saturating_sub(1);
                 if extra > 0 {
-                    self.prewarm_pool(spec, extra).await;
+                    let driver = self.clone();
+                    let spec = spec.clone();
+                    tokio::spawn(async move {
+                        driver.prewarm_pool(&spec, extra).await;
+                    });
                 }
             }
         }
