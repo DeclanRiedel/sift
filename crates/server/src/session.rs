@@ -44,6 +44,17 @@ const MAX_DRIVER_TASKS: usize = 256;
 const MAX_AUDIT_ROWS: usize = 10_000;
 const MAX_OPERATION_ROWS: usize = 10_000;
 
+/// Whether [`SessionStore::push_operation_inner`] should enqueue the
+/// durable SQLite audit row (P1-meta-4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DurableAudit {
+    /// Hand the row to the async audit-writer thread (the default path).
+    Enqueue,
+    /// The row was already written transactionally with the mutation;
+    /// enqueuing again would duplicate it.
+    AlreadyWritten,
+}
+
 /// Default synchronous-execute result caps until the server wires
 /// `config.limits` in via [`SessionStore::set_result_limits`].
 const DEFAULT_MAX_RESULT_ROWS: usize = 5_000;
@@ -437,6 +448,54 @@ impl SessionStore {
         row_count: Option<i64>,
         error_message: Option<String>,
     ) {
+        self.push_operation_inner(
+            operation,
+            status,
+            actor_principal_id,
+            result_code,
+            row_count,
+            error_message,
+            DurableAudit::Enqueue,
+        );
+    }
+
+    /// Like [`SessionStore::push_operation_full`], but does **not** enqueue
+    /// the durable SQLite audit row — the caller has already written it
+    /// transactionally alongside the mutation (P1-meta-4), so enqueuing here
+    /// would double-write it. Still records the in-memory ring and JSONL
+    /// replay log. Use only when the metadata method wrote the audit row in
+    /// the same tx as the mutation.
+    pub fn push_operation_local(
+        &self,
+        operation: Operation,
+        status: OperationStatus,
+        actor_principal_id: Option<i64>,
+        result_code: Option<String>,
+        row_count: Option<i64>,
+        error_message: Option<String>,
+    ) {
+        self.push_operation_inner(
+            operation,
+            status,
+            actor_principal_id,
+            result_code,
+            row_count,
+            error_message,
+            DurableAudit::AlreadyWritten,
+        );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn push_operation_inner(
+        &self,
+        operation: Operation,
+        status: OperationStatus,
+        actor_principal_id: Option<i64>,
+        result_code: Option<String>,
+        row_count: Option<i64>,
+        error_message: Option<String>,
+        durable: DurableAudit,
+    ) {
         // Sanitize before the operation is stored anywhere (in-memory ring,
         // JSONL log, or durable audit): SQL is reduced to a fingerprint and
         // secrets/bind values are stripped, so no audit surface carries them.
@@ -459,6 +518,12 @@ impl SessionStore {
                     tracing::error!("operation audit writer is stopped; dropping JSONL row");
                 }
             }
+        }
+
+        if durable == DurableAudit::AlreadyWritten {
+            // The durable audit row was committed in the same tx as the
+            // mutation; enqueuing it again would duplicate it.
+            return;
         }
 
         if let Some(tx) = self.inner.audit_tx.lock().unwrap().as_ref() {

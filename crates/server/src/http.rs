@@ -18,7 +18,8 @@ use std::time::Instant;
 use sift_doc::{CrdtKind, DocumentSnapshot, TextDocument, TextOperation};
 use sift_metadata::{
     ApiTokenId, ConnectionProfileId, CrdtType, Document, DocumentId, MetadataStore,
-    NewConnectionProfile, NewDocument, NewQueryHistory, NewRoom, NewSavedQuery, PrincipalId,
+    NewConnectionProfile, NewDocument, NewOperationAudit, NewQueryHistory, NewRoom, NewSavedQuery,
+    PrincipalId,
     QueryHistory, QueryStatus, Room, RoomId, RoomKind, RoomMember, RoomRole, SavedQuery,
     SavedQueryFilter, SavedQueryId, SavedQueryScope, TenantId, TenantMembership, UpdateSavedQuery,
 };
@@ -651,6 +652,56 @@ fn push_metadata_operation(
     id: Option<i64>,
 ) {
     state.sessions.push_operation_full(
+        Operation::Metadata {
+            action: action.to_string(),
+            target: target.to_string(),
+            id,
+        },
+        OperationStatus::Succeeded,
+        Some(actor.0),
+        None,
+        None,
+        None,
+    );
+}
+
+/// Build the durable audit record for a successful security-critical
+/// metadata mutation whose audit row is written transactionally with the
+/// mutation itself (P1-meta-4). Mirrors the fields the async audit path
+/// would derive from `Operation::Metadata`, so the persisted row is
+/// identical regardless of which path wrote it. `correlation_id` is
+/// captured here in the request task — it would not survive the hop to a
+/// `spawn_blocking` thread.
+fn metadata_audit_record(
+    actor: PrincipalId,
+    action: &str,
+    target: &str,
+    id: Option<i64>,
+) -> NewOperationAudit {
+    NewOperationAudit {
+        actor_principal_id: Some(actor),
+        action: action.to_string(),
+        target: target.to_string(),
+        target_id: id,
+        status: "succeeded".to_string(),
+        result_code: None,
+        row_count: None,
+        error_message: None,
+        correlation_id: crate::correlation::current(),
+    }
+}
+
+/// Record the in-memory ring + JSONL replay entry for a metadata mutation
+/// whose durable audit row was already written transactionally
+/// (P1-meta-4). Skips the async durable enqueue to avoid double-writing.
+fn push_metadata_operation_local(
+    state: &AppState,
+    actor: PrincipalId,
+    action: &str,
+    target: &str,
+    id: Option<i64>,
+) {
+    state.sessions.push_operation_local(
         Operation::Metadata {
             action: action.to_string(),
             target: target.to_string(),
@@ -1686,8 +1737,16 @@ async fn delete_metadata_connection(
     let tenant = tenant_id(q.tenant)?;
     ensure_tenant(&auth, tenant)?;
     let profile = connection_profile_id(id)?;
-    metadata.delete_connection_profile(tenant, profile).await?;
-    push_metadata_operation(
+    let audit = metadata_audit_record(
+        auth.principal_id,
+        "delete",
+        "connection_profile",
+        Some(profile.0),
+    );
+    metadata
+        .delete_connection_profile(tenant, profile, audit)
+        .await?;
+    push_metadata_operation_local(
         &state,
         auth.principal_id,
         "delete",
@@ -1714,10 +1773,16 @@ async fn set_metadata_connection_credential(
     })
     .await?;
     ensure_tenant(&auth, profile.tenant_id)?;
+    let audit = metadata_audit_record(
+        auth.principal_id,
+        "set_credential",
+        "connection_profile",
+        Some(profile_id.0),
+    );
     metadata
-        .set_per_user_credential(profile_id, auth.principal_id, req.secret.as_bytes())
+        .set_per_user_credential(profile_id, auth.principal_id, req.secret.as_bytes(), audit)
         .await?;
-    push_metadata_operation(
+    push_metadata_operation_local(
         &state,
         auth.principal_id,
         "set_credential",
@@ -2021,6 +2086,7 @@ async fn revoke_auth_token(
     let metadata = metadata_store_cloned(&state)?;
     let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
     let token_id = api_token_id(id)?;
+    let audit = metadata_audit_record(auth.principal_id, "revoke", "api_token", Some(token_id.0));
     metadata_blocking(move || {
         if !metadata
             .list_api_tokens(auth.principal_id)?
@@ -2031,11 +2097,11 @@ async fn revoke_auth_token(
                 "cannot revoke another principal's token".into(),
             ));
         }
-        metadata.revoke_api_token(token_id)?;
+        metadata.revoke_api_token(token_id, audit)?;
         Ok(())
     })
     .await?;
-    push_metadata_operation(
+    push_metadata_operation_local(
         &state,
         auth.principal_id,
         "revoke",

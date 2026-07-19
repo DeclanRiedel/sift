@@ -527,3 +527,56 @@ and autocomplete this is a wash — the DB calls are the same shape
 feature genuinely needs an engine-native pass (e.g. plan capture), it
 graduates to a trait extension via an explicit ADR then, not by
 grandfather.
+
+---
+
+## ADR-019 — Audit Durability: Async Best-Effort, Transactional For Security-Critical Mutations
+
+**Context.** ADR-009 makes every user-visible action an audited
+`Operation`. *How* the durable `operation_audit` row is persisted was a
+separate, unstated tradeoff. The default path is asynchronous: a mutating
+metadata method commits its own SQLite transaction, and the server
+separately enqueues a `NewOperationAudit` onto a bounded channel that a
+dedicated writer thread drains on its own pooled connection (P1-meta-1,
+P1-meta-5). This keeps the durable write off the async request path — a
+slow disk never stalls a tokio worker — but it opens a window: a crash
+between the mutation commit and the audit write leaves an action that
+*happened* with no durable audit row. For most operations that window is
+acceptable; for security-critical mutations it is not.
+
+**Decision.** Audit durability is **async best-effort by default**. For a
+small set of **security-critical mutations** the audit row is instead
+written **in the same SQLite transaction as the mutation**, so the two
+commit atomically or not at all. Today that set is:
+
+- deleting a connection profile (`delete_connection_profile`)
+- setting/replacing a per-user credential (`set_per_user_credential`)
+- revoking an API token (`revoke_api_token`)
+
+These metadata methods take a `NewOperationAudit` and `INSERT` it inside
+their transaction via the shared `insert_operation_audit_row` helper (the
+same INSERT the async writer uses, so the persisted row is byte-identical
+regardless of path). On success the HTTP handler records the in-memory
+ring + JSONL replay entry through `SessionStore::push_operation_local`,
+which deliberately **skips** the async durable enqueue — the row is
+already durable, and enqueuing again would double-write it. Exactly-once
+holds because the two paths are mutually exclusive per operation.
+
+Failure of these mutations is unchanged: the transaction (audit row
+included) rolls back, and — matching prior behavior — the handler's `?`
+short-circuits before any audit is recorded. Secret-store cleanup for
+profile/credential deletion still happens after commit (the secret store
+is not part of the SQLite transaction); only the *audit trail* for the
+mutation is made atomic, not the secret I/O.
+
+**Consequences.** The crash window is closed for the mutations where a
+missing audit row is a compliance/forensic problem, at the cost of one
+extra INSERT inside those transactions (negligible; these are rare
+control-plane operations, not the query hot path). All other operations
+keep the async best-effort path and its throughput benefit. Adding a
+mutation to the security-critical set is a deliberate, reviewable step:
+give the metadata method a `NewOperationAudit` parameter, INSERT it in the
+tx, and switch the handler to `push_operation_local`. Revisit the default
+(e.g. an outbox pattern that makes *every* mutation transactional) if a
+multi-tenant or formal-compliance requirement makes the best-effort
+window unacceptable for ordinary operations.

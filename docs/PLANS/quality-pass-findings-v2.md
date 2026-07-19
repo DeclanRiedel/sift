@@ -116,22 +116,43 @@ them. Re-verified against current source:
     `bundled` feature) and because the logic needed is ~60 lines. `deadpool`
     is async; metadata runs in `spawn_blocking`, so a sync pool is the fit.
 
-#### P1-meta-4. Audit row not written in the same transaction as the mutation
-- Files: `crates/metadata/src/lib.rs:617-639` (`create_room`),
-  `:481-522` (`delete_connection_profile`), `:680-695` (`add_room_member`),
-  all mutating methods; audit goes through `server/session.rs:212-226`
-- Detail: every mutating method commits its own tx and returns. The
-  server then calls `push_metadata_operation` (e.g. `http.rs:1387,
-  1406, 1445, 1653, 1675, 1705`), which sends `NewOperationAudit` over
-  an mpsc to the audit-writer thread — separate connection, separate tx.
-- **Why it matters:** if the process crashes between commit and audit
-  write, the audit trail has a gap for a mutation that did happen.
-  Violates AGENTS.md *"Every user-visible action is an Operation variant
-  and is audited"* — auditable in *intent* but not *durably recorded*.
-  The window is small but real.
-- Fix: graduate the tradeoff to an ADR; for security-critical mutations
-  (delete connection profile, set/revoke credential, revoke token),
-  write the audit row inside the same tx.
+#### P1-meta-4. Audit row not written in the same transaction as the mutation — RESOLVED
+- Files: `crates/metadata/src/lib.rs` mutating methods; audit goes
+  through `server/session.rs` / `server/http.rs`
+- Detail: every mutating method committed its own tx and returned. The
+  server then called `push_metadata_operation`, which sent
+  `NewOperationAudit` over an mpsc to the audit-writer thread — separate
+  connection, separate tx.
+- **Why it mattered:** if the process crashed between commit and audit
+  write, the audit trail had a gap for a mutation that did happen.
+  Auditable in *intent* but not *durably recorded*. The window was small
+  but real.
+- **Fix applied** (scope: the three security-critical mutations, per
+  ADR-019):
+  - `delete_connection_profile`, `set_per_user_credential`, and
+    `revoke_api_token` now take a `NewOperationAudit` and `INSERT` it
+    **inside the same SQLite transaction** as the mutation, via a shared
+    `insert_operation_audit_row` helper (`revoke_api_token` was wrapped in
+    an explicit tx; the other two already had one). The mutation and its
+    audit row commit atomically or not at all.
+  - The audit INSERT reuses the exact statement the async writer uses, so
+    the persisted row is identical regardless of which path wrote it.
+    `record_operation_audit` was refactored onto the same helper.
+  - On success the HTTP handlers call the new
+    `SessionStore::push_operation_local` (gated by an internal
+    `DurableAudit::AlreadyWritten` flag), which records the in-memory ring
+    + JSONL replay entry but **skips** the async durable enqueue — the row
+    is already durable, so enqueuing again would double-write it.
+    Exactly-once holds because the two paths are mutually exclusive per
+    operation. `correlation_id` is captured in the request task before any
+    `spawn_blocking` hop (it would not survive the thread change).
+  - Failure behavior is unchanged: the tx (audit row included) rolls
+    back, and the handler's `?` short-circuits before recording, matching
+    prior behavior (these mutations did not audit failures before).
+  - The broader "make *every* mutation transactional" option (outbox) was
+    considered and deferred; the tradeoff is documented in
+    **ADR-019** (`docs/DECISIONS.md`). Covered by the existing metadata
+    and server suites (green).
 
 #### P1-meta-5. Audit-writer thread shares the single connection via unbounded mpsc — RESOLVED
 - Files: `crates/server/src/session.rs`,
@@ -531,12 +552,18 @@ them. Re-verified against current source:
 
 1. ~~**P1-lock-1** (reduce global operation-log lock scope)~~ — DONE
    (RingLog snapshot); eliminated a global serialization point.
-2. **P1-comp-9** (protocol `Cow`) — the difference between current
-   autocomplete and "Zed-class."
+2. ~~**P1-comp-9** (protocol `Cow`)~~ — DONE; keyword/function candidates
+   no longer allocate per keystroke.
 3. ~~**P1-meta-1** (metadata connection concurrency)~~ — DONE (WAL
     connection pool); was the scalability ceiling for multi-user.
-4. **Refactor splits** (http.rs / mssql lib.rs / metadata lib.rs) —
-    mechanical, unblock future review. Do last.
+4. ~~**P1-lock-2** (cursor LRA atomic)~~ — DONE; lock-free victim
+    selection on the cursor-open path.
+5. ~~**P1-meta-4** (transactional audit for security-critical
+    mutations)~~ — DONE; see ADR-019. Closes the crash window for
+    profile-delete / set-credential / token-revoke.
+6. **Refactor splits** (http.rs / mssql lib.rs / metadata lib.rs) —
+    mechanical, unblock future review. All P1s are now resolved; these
+    P2 refactors are the remaining large items.
 
 The two themes (sync I/O on async, per-row allocation) are worth
 graduating into ADRs in `docs/DECISIONS.md` so the patterns don't

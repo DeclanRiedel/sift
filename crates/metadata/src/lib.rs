@@ -493,15 +493,24 @@ impl MetadataStore {
         tokens
     }
 
-    pub fn revoke_api_token(&self, id: ApiTokenId) -> Result<()> {
+    /// Revoke an API token and write its audit row in the **same
+    /// transaction** as the revocation (P1-meta-4). A crash can no longer
+    /// leave a revoked token with no audit trail — the two commit
+    /// atomically or not at all. The caller must therefore skip the async
+    /// durable-audit enqueue on success (see
+    /// `SessionStore::push_operation_local`).
+    pub fn revoke_api_token(&self, id: ApiTokenId, audit: NewOperationAudit) -> Result<()> {
         let now = now_text();
-        let conn = self.conn()?;
-        conn.execute(
+        let mut conn = self.conn()?;
+        let tx = conn.transaction()?;
+        tx.execute(
             "UPDATE api_token
              SET revoked_at = COALESCE(revoked_at, ?1), updated_at = ?1
              WHERE id = ?2",
             params![now, id.0],
         )?;
+        insert_operation_audit_row(&tx, &audit)?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -631,10 +640,17 @@ impl MetadataStore {
         Ok(profile)
     }
 
+    /// Delete a connection profile and write its audit row in the **same
+    /// transaction** as the deletion (P1-meta-4). Secret-store cleanup
+    /// still happens after commit (it is not transactional), but the
+    /// durable audit trail for the deletion itself is now atomic with the
+    /// row removal. The caller must skip the async durable-audit enqueue
+    /// on success (see `SessionStore::push_operation_local`).
     pub async fn delete_connection_profile(
         &self,
         tenant: TenantId,
         id: ConnectionProfileId,
+        audit: NewOperationAudit,
     ) -> Result<()> {
         let backend = self.backend.clone();
         let handles = sqlite_blocking(move || {
@@ -666,6 +682,7 @@ impl MetadataStore {
             if deleted == 0 {
                 return Err(MetadataError::ConnectionProfileNotFound(id));
             }
+            insert_operation_audit_row(&tx, &audit)?;
             tx.commit()?;
             Ok(handles)
         })
@@ -676,11 +693,18 @@ impl MetadataStore {
         Ok(())
     }
 
+    /// Set (or replace) a per-user credential and write its audit row in
+    /// the **same transaction** as the credential upsert (P1-meta-4). The
+    /// secret bytes are persisted to the secret store first (that write is
+    /// not transactional); the DB row and its audit row then commit
+    /// atomically. The caller must skip the async durable-audit enqueue on
+    /// success (see `SessionStore::push_operation_local`).
     pub async fn set_per_user_credential(
         &self,
         profile_id: ConnectionProfileId,
         principal_id: PrincipalId,
         secret: &[u8],
+        audit: NewOperationAudit,
     ) -> Result<()> {
         let handle = Uuid::new_v4().to_string();
         self.secrets.put(SECRET_NAMESPACE, &handle, secret).await?;
@@ -710,6 +734,7 @@ impl MetadataStore {
             if let Err(error) = write_result {
                 Err(error.into())
             } else {
+                insert_operation_audit_row(&tx, &audit)?;
                 tx.commit()?;
                 Ok(old_handle)
             }
@@ -1031,27 +1056,8 @@ impl MetadataStore {
     /// Append a durable operation-audit row. Called on both the success and
     /// failure paths so the audit trail is complete.
     pub fn record_operation_audit(&self, input: NewOperationAudit) -> Result<OperationAudit> {
-        let now = now_text();
         let conn = self.conn()?;
-        conn.execute(
-            "INSERT INTO operation_audit
-             (at, actor_principal_id, action, target, target_id, status, result_code,
-              row_count, error_message, correlation_id)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
-            params![
-                now,
-                input.actor_principal_id.map(|id| id.0),
-                input.action,
-                input.target,
-                input.target_id,
-                input.status,
-                input.result_code,
-                input.row_count,
-                input.error_message,
-                input.correlation_id,
-            ],
-        )?;
-        let id = OperationAuditId(conn.last_insert_rowid());
+        let id = OperationAuditId(insert_operation_audit_row(&conn, &input)?);
         conn.query_row(
             "SELECT id, at, actor_principal_id, action, target, target_id, status,
                     result_code, row_count, error_message, correlation_id
@@ -1545,6 +1551,37 @@ fn query_history_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<QueryHist
     })
 }
 
+/// Insert a single `operation_audit` row on the given connection or
+/// transaction and return its rowid. Shared by the async writer path
+/// ([`MetadataStore::record_operation_audit`]) and the transactional
+/// audit path (security-critical mutations that write the audit row in
+/// the same tx as the mutation — P1-meta-4). `Transaction` derefs to
+/// `Connection`, so callers pass either.
+fn insert_operation_audit_row(
+    conn: &Connection,
+    input: &NewOperationAudit,
+) -> rusqlite::Result<i64> {
+    conn.execute(
+        "INSERT INTO operation_audit
+         (at, actor_principal_id, action, target, target_id, status, result_code,
+          row_count, error_message, correlation_id)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+        params![
+            now_text(),
+            input.actor_principal_id.map(|id| id.0),
+            input.action,
+            input.target,
+            input.target_id,
+            input.status,
+            input.result_code,
+            input.row_count,
+            input.error_message,
+            input.correlation_id,
+        ],
+    )?;
+    Ok(conn.last_insert_rowid())
+}
+
 fn operation_audit_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<OperationAudit> {
     Ok(OperationAudit {
         id: OperationAuditId(row.get(0)?),
@@ -1751,6 +1788,22 @@ mod tests {
 
     fn store() -> MetadataStore {
         MetadataStore::open_in_memory(Arc::new(MemorySecretStore::new())).unwrap()
+    }
+
+    /// Minimal audit record for exercising the transactional-audit path
+    /// (P1-meta-4) from tests.
+    fn test_audit(action: &str, target: &str, id: Option<i64>) -> NewOperationAudit {
+        NewOperationAudit {
+            actor_principal_id: Some(PrincipalId(1)),
+            action: action.to_string(),
+            target: target.to_string(),
+            target_id: id,
+            status: "succeeded".to_string(),
+            result_code: None,
+            row_count: None,
+            error_message: None,
+            correlation_id: None,
+        }
     }
 
     fn store_with_memory() -> (MetadataStore, Arc<MemorySecretStore>) {
@@ -2093,7 +2146,11 @@ mod tests {
         );
 
         store
-            .delete_connection_profile(TenantId(1), second.id)
+            .delete_connection_profile(
+                TenantId(1),
+                second.id,
+                test_audit("delete", "connection_profile", Some(second.id.0)),
+            )
             .await
             .unwrap();
         assert!(secrets
@@ -2131,7 +2188,12 @@ mod tests {
         ));
 
         store
-            .set_per_user_credential(profile.id, PrincipalId(1), b"user-secret")
+            .set_per_user_credential(
+                profile.id,
+                PrincipalId(1),
+                b"user-secret",
+                test_audit("set_credential", "connection_profile", Some(profile.id.0)),
+            )
             .await
             .unwrap();
         let resolved = store
