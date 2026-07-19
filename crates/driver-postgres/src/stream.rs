@@ -207,12 +207,24 @@ async fn run_streaming(job: QueryJob) {
         let _ = page_tx.send(Page::Rows { rows: row_batch }).await;
     }
 
+    let affected_rows = if columns_sent {
+        // A result set was produced (SELECT, or DML ... RETURNING). The
+        // command tag's row count isn't a meaningful "affected" number
+        // for these — the caller counts the rows it received.
+        None
+    } else {
+        // No result set. This statement reached the streaming path only
+        // because it was parameterized (`INSERT INTO t VALUES ($1)`) or
+        // CTE-wrapped (`WITH cte AS (...) INSERT ...`), both of which the
+        // old code routed here and then dropped the affected count for.
+        // `rows_affected()` carries the `CommandComplete` count once the
+        // stream is exhausted, so we no longer lose it. (An empty result
+        // set reports `Some(0)`, which is accurate.)
+        stream.rows_affected()
+    };
     let _ = page_tx
         .send(Page::Done {
-            // Extended protocol obscures the affected-row count from us;
-            // SELECT-class queries don't produce a meaningful "affected"
-            // count anyway. For DML...RETURNING the caller can count rows.
-            affected_rows: None,
+            affected_rows,
             warnings: warnings.into_warnings(),
         })
         .await;

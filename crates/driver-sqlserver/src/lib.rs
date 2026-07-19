@@ -573,12 +573,18 @@ async fn run_query(
 /// useful and we don't lose returned rows by skipping the streaming path.
 fn is_pure_dml(sql: &str) -> bool {
     let up = sql.trim_start().to_ascii_uppercase();
-    // OUTPUT clauses stream rows; keep them on the query() path.
-    if up.contains(" OUTPUT ") {
+    let mut tokens = up.split_whitespace();
+    let first = tokens.next().unwrap_or("");
+    if !matches!(first, "INSERT" | "UPDATE" | "DELETE" | "MERGE") {
         return false;
     }
-    let first = up.split_whitespace().next().unwrap_or("");
-    matches!(first, "INSERT" | "UPDATE" | "DELETE" | "MERGE")
+    // An OUTPUT clause streams rows back; keep those statements on the
+    // query() path so we don't discard the returned rows via execute().
+    // Match the keyword on any whitespace boundary — the old ` OUTPUT `
+    // substring check missed tab/newline-delimited OUTPUT (e.g.
+    // "INSERT\tOUTPUT\t..."), routing it through execute() and losing the
+    // rows entirely.
+    !tokens.any(|token| token == "OUTPUT")
 }
 
 /// Extract a usable message from a panic payload.
