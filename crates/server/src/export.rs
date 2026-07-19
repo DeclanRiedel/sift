@@ -10,12 +10,17 @@
 //! run it fresh. This keeps the surface simple and matches the
 //! "download to file" ergonomic. Interactive result streaming is
 //! already served by the WS `Execute` path.
+//!
+//! The query still runs through the server-side cursor registry (see
+//! [`crate::session::SessionStore::export_stream`]): the caller wraps the
+//! driver stream so the per-session cursor cap and the pump apply, and
+//! passes a drop-guard into [`encode_stream`] that releases the cursor
+//! when the download completes or the client disconnects.
 
 use bytes::{BufMut, Bytes, BytesMut};
 use futures::Stream;
 use serde::Serialize;
-use sift_driver_api::Driver;
-use sift_protocol::{ColumnMetadata, DriverError, ExecuteRequest, ExportFormat, Page, Row, Value};
+use sift_protocol::{ColumnMetadata, ExportFormat, Page, Row, Value};
 use std::fmt::Write as _;
 
 /// Content-Type header value for `format`.
@@ -28,35 +33,27 @@ pub fn content_type(format: ExportFormat) -> &'static str {
     }
 }
 
-/// Run `sql` on the driver and return a byte stream of the encoded
-/// export body. Errors during streaming are surfaced through the
-/// stream's `Err` yield — the HTTP layer converts the first error
-/// into a 500 header if it lands before any bytes are written,
-/// otherwise the transfer aborts mid-flight (chunked encoding).
-pub async fn run_export(
-    driver: std::sync::Arc<dyn Driver>,
-    handle: sift_driver_api::ConnHandle,
-    sql: String,
-    params: Vec<Value>,
-    format: ExportFormat,
-    header: bool,
-    null_display: Option<String>,
-) -> Result<impl Stream<Item = Result<Bytes, std::io::Error>> + Send + 'static, DriverError> {
-    let stream = driver
-        .execute(handle, ExecuteRequest { sql, params })
-        .await?;
-    let rx = stream.rows;
-    let null = null_display.unwrap_or_default();
-    Ok(encode_stream(rx, format, header, null))
-}
-
-fn encode_stream(
+/// Encode the pages arriving on `rx` (a registry-pumped cursor stream)
+/// into a byte stream of the export body. Errors during streaming are
+/// surfaced through the stream's `Err` yield — the HTTP layer converts
+/// the first error into a 500 header if it lands before any bytes are
+/// written, otherwise the transfer aborts mid-flight (chunked encoding).
+///
+/// `guard` is held for the lifetime of the returned stream and dropped
+/// when the export completes or the client disconnects. The caller uses
+/// it to release the underlying cursor from the registry (and thereby
+/// cancel the pump); `encode_stream` itself only needs to keep it alive.
+pub fn encode_stream<G: Send + 'static>(
     mut rx: tokio::sync::mpsc::Receiver<Page>,
     format: ExportFormat,
     emit_header: bool,
     null_display: String,
+    guard: G,
 ) -> impl Stream<Item = Result<Bytes, std::io::Error>> + Send + 'static {
     async_stream::try_stream! {
+        // Owned by the generator so it drops (releasing the cursor) when
+        // the stream is exhausted or the consumer is dropped.
+        let _guard = guard;
         let mut columns: Vec<ColumnMetadata> = Vec::new();
         let mut row_buf = BytesMut::with_capacity(8192);
         let mut header_sent = false;

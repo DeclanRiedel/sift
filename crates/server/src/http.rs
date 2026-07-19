@@ -2314,20 +2314,10 @@ async fn export_query(
 ) -> ApiResult<Response> {
     use axum::body::Body;
     use axum::response::IntoResponse;
-    let entry = state.sessions.conn_entry(id, conn_id)?;
-    let driver = entry.driver.clone();
-    let handle = entry.handle.clone();
     let format = req.format;
-    let stream = crate::export::run_export(
-        driver,
-        handle,
-        req.sql.clone(),
-        req.params,
-        req.format,
-        req.header,
-        req.null_display,
-    )
-    .await?;
+    // Routes through the cursor registry (per-session cap + pump), unlike
+    // the previous direct driver.execute call. See `export_stream`.
+    let stream = state.sessions.export_stream(id, conn_id, req).await?;
     let content_type = crate::export::content_type(format);
     state.sessions.push_operation(
         Operation::Metadata {

@@ -23,7 +23,8 @@ use sift_protocol::{
     AuditEntry, BeginTransactionRequest, BulkInsertFormat, BulkInsertRequest, BulkInsertResponse,
     Code, ColumnMetadata, ConnectionId, ConnectionInfo, ConnectionSpec, CursorId, DriverError,
     DriverWarning, EndTransactionRequest, Engine, ExecuteRequest, ExecuteRequestHttp,
-    ExecuteResponse, OpenSessionRequest, Operation, OperationAuditEntry, OperationStatus, Page,
+    ExecuteResponse, ExportRequest, OpenSessionRequest, Operation, OperationAuditEntry,
+    OperationStatus, Page,
     Row, SavepointRequest, SchemaScope, SchemaSnapshot, ServerInfo, SessionId, SessionInfo,
     TransactionInfo, TxHandleRef, TxId,
 };
@@ -981,6 +982,49 @@ impl SessionStore {
         }
     }
 
+    /// Run an export query and return the encoded byte stream. Unlike the
+    /// old path (which called `driver.execute` directly), this routes
+    /// through [`SessionStore::execute_stream`], so the export honors the
+    /// per-session cursor cap and runs under the registry pump — a client
+    /// can no longer spam exports to bypass the cap and exhaust DB
+    /// connections, and a client disconnect cancels the query through the
+    /// pump. A drop-guard releases the cursor from the registry when the
+    /// download completes or the consumer is dropped. The initial execute
+    /// is bounded by the request timeout so a wedged `driver.execute`
+    /// cannot hang the handler forever.
+    pub async fn export_stream(
+        &self,
+        session_id: SessionId,
+        conn_id: ConnectionId,
+        req: ExportRequest,
+    ) -> ApiResult<impl futures::Stream<Item = Result<bytes::Bytes, std::io::Error>> + Send + 'static>
+    {
+        let exec = ExecuteRequest {
+            sql: req.sql,
+            params: req.params,
+        };
+        let dur = self.request_timeout();
+        let fut = self.execute_stream(session_id, conn_id, exec, None);
+        let wrapped = if dur.is_zero() {
+            fut.await?
+        } else {
+            tokio::time::timeout(dur, fut)
+                .await
+                .map_err(|_| timeout_error("export"))??
+        };
+        let guard = CursorGuard {
+            cursors: self.inner.cursors.clone(),
+            cursor_id: wrapped.cursor_id,
+        };
+        Ok(crate::export::encode_stream(
+            wrapped.rows,
+            req.format,
+            req.header,
+            req.null_display.unwrap_or_default(),
+            guard,
+        ))
+    }
+
     /// Called by the WS ack loop after each ack to keep the cursor from
     /// looking idle to the eviction policy.
     pub fn cursor_touch(&self, cursor_id: CursorId) {
@@ -1548,6 +1592,22 @@ fn missing_ext(engine: Engine, trait_name: &str) -> DriverError {
         format!("driver does not expose {trait_name}"),
     )
     .with_engine(engine)
+}
+
+/// Releases a cursor from the registry when dropped. Used by the export
+/// path: the encoded byte stream owns one of these, so a completed
+/// download or a dropped consumer (client disconnect) removes the cursor
+/// — which also signals the registry pump to cancel — without an explicit
+/// cleanup call in the handler.
+struct CursorGuard {
+    cursors: CursorRegistry,
+    cursor_id: CursorId,
+}
+
+impl Drop for CursorGuard {
+    fn drop(&mut self) {
+        self.cursors.remove(self.cursor_id);
+    }
 }
 
 /// Build the `QueryTimedOut` driver error returned when a synchronous driver

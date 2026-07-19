@@ -244,7 +244,7 @@ against the items below:
 | PG `cancel_query` no internal timeout | ALREADY FIXED | already wrapped in `timeout(5s, …)` |
 | `fts_pattern` collapses punctuation to `*` | ALREADY FIXED | returns `None` → caller appends `AND 0` |
 | Prepared-statement cache unmanaged (PG) | DEFERRED | deadpool-postgres 0.14 `StatementCache` has no capacity setter; bounding it means hooking connection recycle — a deliberate change |
-| Export bypasses cursor registry | OPEN | security; needs cap + cancel + timeout plumbing |
+| Export bypasses cursor registry | FIXED | routes through `execute_stream` (cap + pump); drop-guard releases the cursor on completion/disconnect; setup bounded by request timeout |
 | NULL params typed as TEXT (PG/MSSQL) | OPEN | needs an untyped-NULL `ToSql`; non-trivial |
 | PG type coverage gaps (arrays/cidr/xml/…) | OPEN | additive; currently returns `Value::Engine` placeholder |
 | MSSQL cancel orphans ConnHandle | OPEN | surface `QueryCanceled` / document |
