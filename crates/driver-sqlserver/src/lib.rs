@@ -120,29 +120,41 @@ impl MssqlDriver {
                 guard.refilling = true;
                 guard.min_size = min_size;
             }
-            // Connect outside the lock; retry until we hit min_size or
-            // an error occurs.
-            loop {
-                let need = {
-                    let g = pool.lock().await;
-                    min_size.saturating_sub(g.idle.len())
-                };
-                if need == 0 {
-                    break;
-                }
-                match connect_fresh(&spec).await {
-                    Ok(conn) => {
-                        let mut g = pool.lock().await;
-                        g.idle.push_back(conn);
-                    }
-                    Err(error) => {
-                        tracing::debug!(%error, "mssql pool refill failed");
+            // Connect outside the lock; retry until we hit min_size or an
+            // error occurs. Wrap the refill in catch_unwind so a panic in
+            // the loop can't leave `refilling = true` forever — which would
+            // wedge the pool permanently cold (every later ensure_warm
+            // bails on the flag). The reset below runs on both the normal
+            // and the unwound path.
+            let refill = futures::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(async {
+                loop {
+                    let need = {
+                        let g = pool.lock().await;
+                        min_size.saturating_sub(g.idle.len())
+                    };
+                    if need == 0 {
                         break;
                     }
+                    match connect_fresh(&spec).await {
+                        Ok(conn) => {
+                            let mut g = pool.lock().await;
+                            g.idle.push_back(conn);
+                        }
+                        Err(error) => {
+                            tracing::debug!(%error, "mssql pool refill failed");
+                            break;
+                        }
+                    }
                 }
+            }))
+            .await;
+            {
+                let mut g = pool.lock().await;
+                g.refilling = false;
             }
-            let mut g = pool.lock().await;
-            g.refilling = false;
+            if refill.is_err() {
+                tracing::error!("mssql pool refill task panicked; refilling flag reset");
+            }
         });
     }
 
