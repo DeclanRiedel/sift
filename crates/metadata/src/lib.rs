@@ -624,7 +624,8 @@ impl MetadataStore {
             Ok(result) => result,
             Err(error) => {
                 if let Some(handle) = new_shared_secret_handle.as_deref() {
-                    let _ = self.secrets.delete(SECRET_NAMESPACE, handle).await;
+                    self.delete_secret_best_effort(handle, "upsert_profile_rollback")
+                        .await;
                 }
                 return Err(error);
             }
@@ -634,10 +635,29 @@ impl MetadataStore {
             new_shared_secret_handle.as_deref(),
         ) {
             if old != new {
-                let _ = self.secrets.delete(SECRET_NAMESPACE, old).await;
+                self.delete_secret_best_effort(old, "upsert_profile_replace_shared_secret")
+                    .await;
             }
         }
         Ok(profile)
+    }
+
+    /// Delete a secret handle from the store, logging on failure instead
+    /// of silently dropping the error. A failed delete here leaves an
+    /// *orphaned secret*: the DB no longer references it but the bytes
+    /// persist in the store. These calls are all cleanup after the DB row
+    /// has already been committed (or after a failed insert), so the
+    /// caller can't meaningfully recover — but the operator should at
+    /// least see it. `context` names the call site for triage.
+    async fn delete_secret_best_effort(&self, handle: &str, context: &str) {
+        if let Err(error) = self.secrets.delete(SECRET_NAMESPACE, handle).await {
+            tracing::warn!(
+                %error,
+                handle,
+                context,
+                "orphaned secret: deleting handle from secret store failed"
+            );
+        }
     }
 
     /// Delete a connection profile and write its audit row in the **same
@@ -688,7 +708,8 @@ impl MetadataStore {
         })
         .await?;
         for handle in handles {
-            let _ = self.secrets.delete(SECRET_NAMESPACE, &handle).await;
+            self.delete_secret_best_effort(&handle, "delete_connection_profile")
+                .await;
         }
         Ok(())
     }
@@ -743,13 +764,15 @@ impl MetadataStore {
         let old_handle = match db_result {
             Ok(old_handle) => old_handle,
             Err(error) => {
-                let _ = self.secrets.delete(SECRET_NAMESPACE, &handle).await;
+                self.delete_secret_best_effort(&handle, "set_per_user_credential_rollback")
+                    .await;
                 return Err(error);
             }
         };
         if let Some(old) = old_handle.as_deref() {
             if old != handle {
-                let _ = self.secrets.delete(SECRET_NAMESPACE, old).await;
+                self.delete_secret_best_effort(old, "set_per_user_credential_replace")
+                    .await;
             }
         }
         Ok(())
