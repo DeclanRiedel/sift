@@ -87,9 +87,10 @@ GUI later is just rendering. Remaining items below are verified absent from the
 - [x] [Implement] Contextual capability query. Exhaustive `OperationKind`,
       server-derived session/connection/transaction evaluation with disabled
       reasons and destructive flags, OpenAPI schema, audit entry, and SDK.
-- [ ] [Design] CSV import → table (server-side ingest, type inference,
-      conflict policy). Ties to PG `COPY FROM STDIN` (`PgExt::copy` Import)
-      and SQL Server `BULK INSERT` (`MssqlExt::bulk_insert`).
+- [x] [Design] CSV import → table (ADR-029): server-side validation and type
+      inference, optional create, atomic abort or duplicate-skip policy; PG
+      `COPY FROM STDIN` and SQL Server bulk fast paths.
+      `docs/PLANS/csv-import.md`.
 - [ ] [Implement] CSV import.
 
 ## Phase E — Hosted auth & identity

@@ -642,3 +642,25 @@ all state and authorization checks themselves.
 inventory without duplicating engine rules. The audit-log endpoint remains
 compatible. `OperationKind` adds a maintenance obligation, enforced by tests:
 new user-visible operations must join both the enum and evaluator.
+
+## ADR-029 — Server-Normalized CSV Import With Two Conflict Modes
+
+**Context.** The existing SQL Server bulk route accepts raw CSV for an existing
+table; Postgres has a dormant COPY import extension. Neither offers table
+creation, inference, a cross-engine response, or a declared conflict policy.
+
+**Decision.** The server parses and validates CSV, infers a conservative common
+type lattice from at most 1,000 rows, and optionally creates the target table
+with engine-quoted DDL. `abort` dispatches normalized CSV through Postgres COPY
+or SQL Server bulk ingest and remains atomic. `skip` dispatches parameterized
+row inserts, suppressing only unique-key conflicts; it reports inserted and
+skipped rows and may retain earlier successful rows if a later non-conflict
+error stops the request. Existing table types override inference. Payloads are
+capped at 64 MiB and excluded from audit.
+
+**Consequences.** Both real drivers share one predictable import contract and
+the driver trait signatures stay locked (only extension-operation data grows).
+Users choose between atomic failure and duplicate-tolerant progress rather
+than receiving engine-dependent implicit behavior. High-volume skip-mode
+imports trade throughput for portable conflict semantics; abort remains the
+fast path.
