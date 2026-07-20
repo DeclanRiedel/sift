@@ -301,7 +301,8 @@ async fn query_columns(
         let type_oid: u32 = row.get(1);
         let not_null: bool = row.get(2);
         let identity: i8 = row.get(3);
-        let array_dims: i32 = row.get(4);
+        // pg_attribute.attndims is an int2 catalog column.
+        let array_dims: i16 = row.get(4);
         let default_expr: Option<String> = row.get(5);
 
         // Build TypeRef from the type OID via tokio_postgres::Type::from_oid.

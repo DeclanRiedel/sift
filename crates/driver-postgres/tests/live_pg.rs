@@ -73,7 +73,8 @@ async fn setup_schema(driver: &PgDriver, conn: &ConnHandle) -> String {
             id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
             email TEXT NOT NULL UNIQUE,
             age INT CHECK (age >= 0),
-            bio TEXT
+            bio TEXT,
+            tags TEXT[]
         )"
         ),
         format!("CREATE INDEX idx_users_age ON {schema}.users (age) WHERE age IS NOT NULL"),
@@ -298,8 +299,8 @@ async fn schema_deep_lists_columns_pk_indexes_constraints() {
         .expect("deep schema");
     let obj = &snap.trees[0].schemas[0].objects[0];
 
-    // 4 columns: id, email, age, bio.
-    assert_eq!(obj.columns.len(), 4);
+    // 5 columns: id, email, age, bio, tags.
+    assert_eq!(obj.columns.len(), 5);
 
     let id = obj.columns.iter().find(|c| c.name == "id").unwrap();
     assert!(id.primary_key, "id is PK");
@@ -314,6 +315,16 @@ async fn schema_deep_lists_columns_pk_indexes_constraints() {
         email.nullable,
         sift_protocol::Nullability::NotNullable
     ));
+
+    let tags = obj.columns.iter().find(|c| c.name == "tags").unwrap();
+    assert_eq!(
+        tags.facets
+            .postgres
+            .as_ref()
+            .expect("Postgres facets")
+            .array_dims,
+        1
+    );
 
     // PK constraint + unique email + check age.
     assert!(
