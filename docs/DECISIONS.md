@@ -820,6 +820,40 @@ concurrent queries, cursors, and retained result bytes. A later distributed
 coordination backend may replace these in-memory mechanisms without changing
 the public policy model.
 
+Tenant limits cover durable connection profiles and the live counts of open
+sessions, managed connections, concurrent driver queries, open cursors, and
+retained result bytes. Retained bytes mean memory buffers, response bodies
+owned by the server, and cursor spill files; they are not cumulative query
+output, history storage, or bytes already delivered to a client. Existing
+per-session cursor and per-result size caps remain independent safety ceilings,
+so admission must satisfy both the tenant limit and the narrower existing cap.
+
+Instance configuration supplies defaults and operator ceilings. Optional
+per-tenant overrides are durable metadata, may be changed only by an instance
+administrator, and cannot exceed those ceilings; tenant owners/admins may read
+their effective limits and usage. `None` means unlimited and zero denies new
+admission. Trusted personal-loopback tenants default to unlimited tenant
+quotas. Lowering a limit below current usage does not destroy active work: new
+admission stops until usage drains, unless an administrator separately invokes
+the explicit disconnect/revocation path.
+
+Live accounting uses reservation guards acquired before expensive work and
+released on every completion, cancellation, timeout, disconnect, or task
+failure. A successful open transfers its reservation to the runtime resource;
+queries retain theirs until the driver stream ends, and result bytes remain
+charged until the owning response, cursor page, or spill file is dropped.
+Durable profile counts are enforced transactionally in metadata. Process
+restart intentionally resets only live counters and reconstructs durable
+counts from SQLite.
+
+Rate exhaustion uses `Code::RateLimited`. Live tenant-capacity exhaustion uses
+`Code::TenantResourceExhausted` with HTTP 429 and `Retry-After` only when the
+server can calculate one; durable object-count exhaustion uses the same stable
+code with HTTP 409 and no misleading retry time. Phase F exposes an authorized
+tenant-usage snapshot and internal metric hooks. Phase J owns the Prometheus
+and OpenTelemetry exporters, so tenant/principal identifiers and high-cardinality
+labels are not accidentally frozen into the Phase F wire contract.
+
 **Consequences.** Local use remains login-free and supports direct connection
 specs without creating a remote policy bypass. Hosted and collaborative paths
 gain one explainable deny-wins model, and `ListAvailableOperations` can report

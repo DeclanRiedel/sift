@@ -152,18 +152,35 @@ and tenant-resource enforcement remain absent.
       bytes. HTTP denial is 429 + `Retry-After` + `Code::RateLimited`; WebSocket
       operations use the same code. Trusted personal-loopback is exempt by
       default. Phase E retains separate login/refresh abuse throttling.
-- [ ] [Design] Tenant isolation: connection quotas, concurrent-query caps,
-      total-result-bytes-per-tenant; `Code::TenantResourceExhausted` (does
-      not exist today) instead of a crash.
+- [x] [Design] Tenant isolation: configuration defaults + operator-bounded
+      per-tenant overrides for profiles, sessions, connections, concurrent
+      queries, cursors, and retained result bytes. RAII admission guards;
+      `Code::TenantResourceExhausted`; trusted personal-loopback unlimited by
+      default. Detailed build contract: `docs/PLANS/phase-f-authorization.md`.
+- [ ] [Implement] Protocol policy/usage contracts and stable
+      `RateLimited`/`TenantResourceExhausted` errors.
+- [ ] [Implement] Metadata migration for profile policy revisions and
+      instance-admin-managed tenant limit overrides.
+- [ ] [Implement] Central authorization evaluator and conservative tenant/room
+      role matrix; capability discovery consumes the same evaluator.
+- [ ] [Implement] Runtime provenance and connection-entry closure: managed
+      connections carry principal/tenant/profile/revision; raw specs are
+      personal-loopback only.
 - [ ] [Implement] Connection-profile permissions: `read_only`,
       `allowed_ops`/`blocked_ops`, `allowed_schemas`; enforced in the
       dispatcher before routing to the driver.
+- [ ] [Implement] Policy-revision checks and hybrid revocation of active
+      connections, transactions, queries, and cursors.
 - [ ] [Implement] Rate-limit middleware keyed by principal + tenant;
-      configurable per route class.
-- [ ] [Implement] Tenant resource accounting: concurrent queries, open
-      cursors, result bytes per tenant; metrics exported.
+      configurable per route class, with bounded stream-byte pacing.
+- [ ] [Implement] Tenant resource accounting for profiles, sessions,
+      connections, concurrent queries, open cursors, and retained result
+      bytes; admin usage API and internal metric hooks.
 - [ ] [Implement] Saved-query + document namespace isolation per
       tenant/principal.
+- [ ] [Implement] SDK/OpenAPI surfaces plus role, policy, SQL-classification,
+      revocation, rate, quota-race, cleanup, and trusted-local integration
+      matrices; graduate Phase F only with all workspace gates green.
 
 ## Phase G — Collaboration depth
 
