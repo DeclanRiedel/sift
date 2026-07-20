@@ -295,6 +295,12 @@ impl MetadataStore {
             params![display_name, now],
         )?;
         tx.execute(
+            "INSERT INTO auth_identity
+             (principal_id, method, issuer, subject, created_at, updated_at)
+             VALUES (1, 'local_bypass', 'sift', 'local:1', ?1, ?1)",
+            params![now],
+        )?;
+        tx.execute(
             "INSERT INTO membership (tenant_id, principal_id, role, created_at, updated_at)
              VALUES (1, 1, 'owner', ?1, ?1)",
             params![now],
@@ -306,7 +312,8 @@ impl MetadataStore {
     pub fn resolve_principal_by_external_id(&self, external_id: &str) -> Result<Option<Principal>> {
         let conn = self.conn()?;
         conn.query_row(
-            "SELECT id, external_id, display_name, email, created_at, updated_at
+            "SELECT id, external_id, display_name, email, avatar_url, disabled_at,
+                    created_at, updated_at
              FROM principal WHERE external_id = ?1",
             params![external_id],
             principal_from_row,
@@ -322,20 +329,41 @@ impl MetadataStore {
         email: Option<&str>,
     ) -> Result<Principal> {
         let now = now_text();
-        let conn = self.conn()?;
-        conn.execute(
+        let mut conn = self.conn()?;
+        let tx = conn.transaction()?;
+        tx.execute(
             "INSERT INTO principal (external_id, display_name, email, created_at, updated_at)
              VALUES (?1, ?2, ?3, ?4, ?4)",
             params![external_id, display_name, email, now],
         )?;
-        let id = PrincipalId(conn.last_insert_rowid());
-        conn.query_row(
-            "SELECT id, external_id, display_name, email, created_at, updated_at
+        let id = PrincipalId(tx.last_insert_rowid());
+        tx.execute(
+            "INSERT INTO auth_identity
+             (principal_id, method, issuer, subject, created_at, updated_at)
+             VALUES (?1, 'legacy', 'sift', ?2, ?3, ?3)",
+            params![id.0, external_id, now],
+        )?;
+        let principal = tx.query_row(
+            "SELECT id, external_id, display_name, email, avatar_url, disabled_at,
+                    created_at, updated_at
              FROM principal WHERE id = ?1",
             params![id.0],
             principal_from_row,
-        )
-        .map_err(Into::into)
+        )?;
+        tx.commit()?;
+        Ok(principal)
+    }
+
+    pub fn list_auth_identities(&self, principal: PrincipalId) -> Result<Vec<AuthIdentity>> {
+        let conn = self.conn()?;
+        let mut statement = conn.prepare(
+            "SELECT id, principal_id, method, issuer, subject, provider_login,
+                    credential_handle, created_at, updated_at, last_used_at, disabled_at
+             FROM auth_identity WHERE principal_id = ?1 ORDER BY id",
+        )?;
+        let rows = statement.query_map(params![principal.0], auth_identity_from_row)?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
     }
 
     pub fn create_tenant(&self, name: &str, kind: TenantKind) -> Result<Tenant> {
@@ -1463,8 +1491,27 @@ fn principal_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Principal> {
         external_id: row.get(1)?,
         display_name: row.get(2)?,
         email: row.get(3)?,
-        created_at: parse_time_sql(row.get(4)?)?,
-        updated_at: parse_time_sql(row.get(5)?)?,
+        avatar_url: row.get(4)?,
+        disabled_at: parse_optional_time_sql(row.get(5)?)?,
+        created_at: parse_time_sql(row.get(6)?)?,
+        updated_at: parse_time_sql(row.get(7)?)?,
+    })
+}
+
+fn auth_identity_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AuthIdentity> {
+    let method: String = row.get(2)?;
+    Ok(AuthIdentity {
+        id: AuthIdentityId(row.get(0)?),
+        principal_id: PrincipalId(row.get(1)?),
+        method: schema::parse_auth_identity_method(method).map_err(sql_conversion_error)?,
+        issuer: row.get(3)?,
+        subject: row.get(4)?,
+        provider_login: row.get(5)?,
+        credential_handle: row.get(6)?,
+        created_at: parse_time_sql(row.get(7)?)?,
+        updated_at: parse_time_sql(row.get(8)?)?,
+        last_used_at: parse_optional_time_sql(row.get(9)?)?,
+        disabled_at: parse_optional_time_sql(row.get(10)?)?,
     })
 }
 
@@ -1854,6 +1901,39 @@ mod tests {
             ssl_mode: None,
             engine_specific: None,
         }
+    }
+
+    #[test]
+    fn bootstrap_local_creates_an_explicit_local_identity() {
+        let store = store();
+        store.bootstrap_local("local user").unwrap();
+
+        let principal = store
+            .resolve_principal_by_external_id("local:1")
+            .unwrap()
+            .unwrap();
+        assert_eq!(principal.avatar_url, None);
+        assert_eq!(principal.disabled_at, None);
+
+        let identities = store.list_auth_identities(principal.id).unwrap();
+        assert_eq!(identities.len(), 1);
+        assert_eq!(identities[0].method, AuthIdentityMethod::LocalBypass);
+        assert_eq!(identities[0].issuer, "sift");
+        assert_eq!(identities[0].subject, "local:1");
+        assert_eq!(identities[0].credential_handle, None);
+    }
+
+    #[test]
+    fn compatibility_principal_creation_is_atomic_with_legacy_identity() {
+        let store = store();
+        let principal = store
+            .create_principal("legacy:test", "test user", Some("test@example.com"))
+            .unwrap();
+
+        let identities = store.list_auth_identities(principal.id).unwrap();
+        assert_eq!(identities.len(), 1);
+        assert_eq!(identities[0].method, AuthIdentityMethod::Legacy);
+        assert_eq!(identities[0].subject, "legacy:test");
     }
 
     #[test]

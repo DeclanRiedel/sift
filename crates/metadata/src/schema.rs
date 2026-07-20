@@ -10,6 +10,15 @@ pub struct TenantId(pub i64);
 pub struct PrincipalId(pub i64);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+pub struct AuthIdentityId(pub i64);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+pub struct GithubAllowlistId(pub i64);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+pub struct TenantInvitationId(pub i64);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 pub struct ApiTokenId(pub i64);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
@@ -87,6 +96,30 @@ pub enum QueryStatus {
     Canceled,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum AuthIdentityMethod {
+    LocalBypass,
+    Password,
+    Github,
+    Oidc,
+    Legacy,
+}
+
+pub(crate) fn parse_auth_identity_method(value: String) -> crate::Result<AuthIdentityMethod> {
+    match value.as_str() {
+        "local_bypass" => Ok(AuthIdentityMethod::LocalBypass),
+        "password" => Ok(AuthIdentityMethod::Password),
+        "github" => Ok(AuthIdentityMethod::Github),
+        "oidc" => Ok(AuthIdentityMethod::Oidc),
+        "legacy" => Ok(AuthIdentityMethod::Legacy),
+        _ => Err(crate::MetadataError::InvalidEnum {
+            field: "auth_identity.method",
+            value,
+        }),
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct Tenant {
     pub id: TenantId,
@@ -102,8 +135,26 @@ pub struct Principal {
     pub external_id: String,
     pub display_name: String,
     pub email: Option<String>,
+    pub avatar_url: Option<String>,
+    pub disabled_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct AuthIdentity {
+    pub id: AuthIdentityId,
+    pub principal_id: PrincipalId,
+    pub method: AuthIdentityMethod,
+    pub issuer: String,
+    pub subject: String,
+    pub provider_login: Option<String>,
+    /// Opaque `SecretStore` handle. Never a password verifier or plaintext.
+    pub credential_handle: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    pub last_used_at: Option<DateTime<Utc>>,
+    pub disabled_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
