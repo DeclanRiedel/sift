@@ -1,7 +1,6 @@
 # Design — Inline-edit → DML generation (Phase D)
 
-> Status: **design, not yet implemented.** This is the next Phase D
-> deliverable per `server-build-list-v2.md`. It locks the contract for turning
+> Status: **implemented.** The contract and implementation turn
 > a set of result-grid edits into safe, minimal, parameterized DML with a
 > preview step and transactional apply + conflict detection.
 >
@@ -125,9 +124,9 @@ snapshot it already fetches. Apply is the only path that executes.
      `UPDATE`d; the DB assigns them. `INSERT … RETURNING <pk>` (PG) /
      `OUTPUT inserted.<pk>` (MSSQL) returns the assigned key so the grid can
      refresh the new row.
-   - Generated/computed columns (once the `default_expr`/generated work in
-     `ddl-gaps.md` lands) are likewise omitted. Until then they'll error at the
-     DB, which is acceptable pre-implementation.
+   - Generated/computed columns are not represented in metadata yet and can
+     still reach generated DML. They will error at the database. Modeling and
+     excluding them remains tracked in `ddl-gaps.md`.
 
 **4. Statement ordering within an edit set:** deletes, then updates, then
    inserts — avoids a delete+insert of the same PK colliding, and lets an

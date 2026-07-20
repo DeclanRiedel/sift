@@ -1,6 +1,6 @@
 # Design — Execution plans (Phase D)
 
-> Status: **design, not yet implemented.** Phase D feature: capture a query's
+> Status: **implemented.** Phase D feature: capture a query's
 > execution plan as a typed, engine-neutral `PlanNode` tree. Serves README
 > **Goal #5** (a typed, public plan a 3rd-party UI can render) and power-user
 > performance debugging (the companion to schema/data search — find the slow

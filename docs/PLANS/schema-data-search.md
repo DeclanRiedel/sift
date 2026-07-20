@@ -1,6 +1,6 @@
 # Design — Schema & data search (Phase D)
 
-> Status: **design, not yet implemented.** Phase D feature, chosen for its
+> Status: **implemented.** Phase D feature, chosen for its
 > weight on README **Goal #4 (Zed-class snappiness)**: instant search over a
 > large database is the feel differentiator vs Navicat/DataGrip. Composes over
 > existing primitives (SchemaCache, cursor registry, execute path) — no new

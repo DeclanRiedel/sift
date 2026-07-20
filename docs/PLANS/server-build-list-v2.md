@@ -26,6 +26,11 @@
   the cursor registry), saved-query library (full CRUD + FTS + RBAC), inline
   edits, schema/data search, execution plans, transaction state, process
   control, contextual capabilities, and CSV import.
+- **Phase D readiness was re-audited on 2026-07-20.** Runtime correctness,
+  public operation coverage, OpenAPI/SDK reachability, failure auditing, and
+  priority-one DDL fidelity were polished. The explicitly listed v1 and DDL
+  gaps are accepted follow-ups, not Phase E prerequisites. See
+  `docs/PLANS/phase-d-readiness.md`.
 - **Still dead schema:** `principal_key` and `keypair_challenge` (V001) — wire
   in Phase E or drop.
 
@@ -101,7 +106,7 @@ GUI later is just rendering.
 Goal: take auth from "bearer token + loopback bypass" to "hosted mode with
 real identity," without breaking local-first (ADR-006, ADR-010).
 
-- [ ] [Design] ADR-019 (candidate): hosted identity model — local mode
+- [ ] [Design] ADR-030 (candidate): hosted identity model — local mode
       stays loopback-bypass + API tokens; hosted mode requires GitHub OAuth
       as primary, OIDC as enterprise, keypair as programmatic.
 - [ ] [Design] OAuth flow shape (auth-code + PKCE); session token model
@@ -271,13 +276,18 @@ Goal: the last mile before a real release.
 | ADR-016 | protocol versioning + semver stability | Phase B | written; pin-or-proceed negotiation, monotonic integer version |
 | ADR-017 | driver trait shape | Phase A | written; Phase A trait lock |
 | ADR-018 | graceful shutdown contract | Phase B | written |
-| ADR-019 | hosted identity model | Phase E | not written |
+| ADR-019 | audit durability | Phase B | written |
 | ADR-020 | authorization model | Phase F | not written |
 | ADR-021 | remote topology | Phase H | not written |
 | ADR-022 | driver extensibility | Phase I | not written |
 | ADR-023 | inline-edit conflict & row-identity model | Phase D | drafted in `docs/PLANS/inline-edit-dml.md` |
 | ADR-024 | search architecture (progressive schema index + bounded data fan-out) | Phase D | drafted in `docs/PLANS/schema-data-search.md` |
 | ADR-025 | execution-plan model (typed PlanNode + XML dep + ANALYZE-rollback) | Phase D | drafted in `docs/PLANS/execution-plans.md` |
+| ADR-026 | server-owned transaction panel state | Phase D | written |
+| ADR-027 | bounded database process control | Phase D | written |
+| ADR-028 | server-derived operation capabilities | Phase D | written |
+| ADR-029 | normalized CSV import | Phase D | written |
+| ADR-030 | hosted identity model | Phase E | not written |
 
 ## Reference: what is being stolen, and what is not
 
