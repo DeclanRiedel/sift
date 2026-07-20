@@ -338,6 +338,19 @@ impl MetadataStore {
         .map_err(Into::into)
     }
 
+    pub fn principal_by_id(&self, principal: PrincipalId) -> Result<Option<Principal>> {
+        let conn = self.conn()?;
+        conn.query_row(
+            "SELECT id, external_id, display_name, email, avatar_url, disabled_at,
+                    is_instance_admin, created_at, updated_at
+             FROM principal WHERE id = ?1",
+            params![principal.0],
+            principal_from_row,
+        )
+        .optional()
+        .map_err(Into::into)
+    }
+
     pub fn create_principal(
         &self,
         external_id: &str,

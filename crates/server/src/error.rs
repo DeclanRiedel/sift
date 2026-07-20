@@ -27,6 +27,8 @@ pub enum ApiError {
 
     #[error("forbidden: {0}")]
     Forbidden(String),
+    #[error("too many authentication attempts")]
+    TooManyAuthAttempts,
 
     #[error("metadata unavailable")]
     MetadataUnavailable,
@@ -84,6 +86,9 @@ impl ApiError {
             ApiError::BadRequest(_) => (StatusCode::BAD_REQUEST, "bad_request"),
             ApiError::Unauthorized => (StatusCode::UNAUTHORIZED, "unauthorized"),
             ApiError::Forbidden(_) => (StatusCode::FORBIDDEN, "forbidden"),
+            ApiError::TooManyAuthAttempts => {
+                (StatusCode::TOO_MANY_REQUESTS, "too_many_auth_attempts")
+            }
             ApiError::MetadataUnavailable => {
                 (StatusCode::SERVICE_UNAVAILABLE, "metadata_unavailable")
             }

@@ -6,13 +6,13 @@ use axum::http::{Request, StatusCode};
 use sift_driver_api::{mock::MockDriver, BulkResult, PgNotification};
 use sift_metadata::{
     CrdtType, CredentialMode, MembershipRole, MemorySecretStore, MetadataStore,
-    NewConnectionProfile, NewDocument, NewRoom, PrincipalId, RoomKind, RoomRole, TenantId,
-    TenantKind,
+    NewConnectionProfile, NewDocument, NewOperationAudit, NewPasswordPrincipal, NewRoom,
+    PrincipalId, RoomKind, RoomRole, TenantId, TenantKind,
 };
 use sift_protocol::{
-    ColumnMetadata, ConnectionSpec, Engine, ExecuteRequestHttp, Health, Nullability, Page,
-    PrimitiveType, RoomClientMessage, RoomServerMessage, Row, SchemaScope, SchemaSnapshot,
-    ServerInfo, SslMode, TextDocumentOperation, TypeRef, Value,
+    AuthTokensResponse, ColumnMetadata, ConnectionSpec, Engine, ExecuteRequestHttp, Health,
+    Nullability, Page, PrimitiveType, RoomClientMessage, RoomServerMessage, Row, SchemaScope,
+    SchemaSnapshot, ServerInfo, SslMode, TextDocumentOperation, TypeRef, Value, WhoAmIResponse,
 };
 use sift_server::http::{app, AppState, AuthState};
 use sift_server::registry::DriverRegistry;
@@ -111,6 +111,7 @@ fn test_state_with_token(token: &str) -> AppState {
             bearer_token: Some(token.to_string()),
             loopback_bypass: false,
             deployment: Default::default(),
+            ..Default::default()
         },
         metadata: None,
     }
@@ -144,6 +145,7 @@ fn test_state_with_metadata(loopback_bypass: bool) -> AppState {
             bearer_token: None,
             loopback_bypass,
             deployment: Default::default(),
+            ..Default::default()
         },
         metadata: Some(metadata),
     }
@@ -956,6 +958,140 @@ async fn bearer_token_auth_is_enforced_when_configured() {
         .await
         .unwrap();
     assert_eq!(res.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn password_login_refresh_whoami_and_logout_are_end_to_end() {
+    let mut state = test_state_with_metadata(false);
+    let metadata = state.metadata.as_ref().unwrap();
+    let password = "correct horse battery staple";
+    let verifier = sift_server::identity::hash_password(password.as_bytes().to_vec())
+        .await
+        .unwrap();
+    let principal = metadata
+        .create_password_principal(
+            NewPasswordPrincipal {
+                username: "hosted-user",
+                display_name: "Hosted User",
+                email: Some("hosted@example.com"),
+                is_instance_admin: false,
+            },
+            verifier.as_bytes(),
+            NewOperationAudit {
+                actor_principal_id: Some(PrincipalId(1)),
+                action: "create".into(),
+                target: "principal".into(),
+                target_id: None,
+                status: "succeeded".into(),
+                result_code: None,
+                row_count: None,
+                error_message: None,
+                correlation_id: None,
+            },
+        )
+        .await
+        .unwrap();
+    state.auth.loopback_bypass = false;
+    let app = app(state);
+
+    let denied = app
+        .clone()
+        .oneshot(
+            Request::post("/v1/auth/login")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"username":"hosted-user","password":"incorrect password value"}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(denied.status(), StatusCode::UNAUTHORIZED);
+
+    let login = app
+        .clone()
+        .oneshot(
+            Request::post("/v1/auth/login")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "username": "HOSTED-USER",
+                        "password": password,
+                        "client_kind": "native",
+                        "client_label": "integration test"
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(login.status(), StatusCode::OK);
+    let first: AuthTokensResponse = body_json(login.into_body()).await;
+
+    let whoami = app
+        .clone()
+        .oneshot(
+            Request::get("/v1/auth/whoami")
+                .header("authorization", format!("Bearer {}", first.access_token))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(whoami.status(), StatusCode::OK);
+    let whoami: WhoAmIResponse = body_json(whoami.into_body()).await;
+    assert_eq!(whoami.principal.id, principal.id.0);
+    assert!(whoami.auth_session_id.is_some());
+
+    let refresh = app
+        .clone()
+        .oneshot(
+            Request::post("/v1/auth/refresh")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({"refresh_token": first.refresh_token}).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(refresh.status(), StatusCode::OK);
+    let second: AuthTokensResponse = body_json(refresh.into_body()).await;
+
+    let old_access = app
+        .clone()
+        .oneshot(
+            Request::get("/v1/auth/whoami")
+                .header("authorization", format!("Bearer {}", first.access_token))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(old_access.status(), StatusCode::UNAUTHORIZED);
+
+    let logout = app
+        .clone()
+        .oneshot(
+            Request::post("/v1/auth/logout")
+                .header("authorization", format!("Bearer {}", second.access_token))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(logout.status(), StatusCode::OK);
+    let after_logout = app
+        .oneshot(
+            Request::get("/v1/auth/whoami")
+                .header("authorization", format!("Bearer {}", second.access_token))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(after_logout.status(), StatusCode::UNAUTHORIZED);
 }
 
 #[tokio::test]

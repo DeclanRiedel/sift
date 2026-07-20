@@ -17,19 +17,21 @@ use std::time::Instant;
 
 use sift_doc::{CrdtKind, DocumentSnapshot, TextDocument, TextOperation};
 use sift_metadata::{
-    ApiTokenId, ConnectionProfileId, CrdtType, Document, DocumentId, MetadataStore,
-    NewConnectionProfile, NewDocument, NewOperationAudit, NewQueryHistory, NewRoom, NewSavedQuery,
-    PrincipalId, QueryHistory, QueryStatus, Room, RoomId, RoomKind, RoomMember, RoomRole,
-    SavedQuery, SavedQueryFilter, SavedQueryId, SavedQueryScope, TenantId, TenantMembership,
-    UpdateSavedQuery,
+    ApiTokenId, AuthClientKind as MetadataAuthClientKind, ConnectionProfileId, CrdtType, Document,
+    DocumentId, MetadataStore, NewConnectionProfile, NewDocument, NewOperationAudit,
+    NewQueryHistory, NewRoom, NewSavedQuery, PrincipalId, QueryHistory, QueryStatus,
+    RefreshAuthResult, Room, RoomId, RoomKind, RoomMember, RoomRole, SavedQuery, SavedQueryFilter,
+    SavedQueryId, SavedQueryScope, TenantId, TenantMembership, UpdateSavedQuery,
 };
 use sift_protocol::{
-    AuditEntry, BeginTransactionRequest, BulkInsertRequest, CancelRequest, CsvImportRequest,
+    AuditEntry, AuthClientKind, AuthPrincipal, AuthTenantMembership, AuthTokensResponse,
+    BeginTransactionRequest, BulkInsertRequest, CancelRequest, CsvImportRequest,
     DocumentOperationEnvelope, EndTransactionRequest, ExecuteRequest, ExecuteRequestHttp, Health,
     KillProcessRequest, ObjectPath, OpenConnectionRequest, OpenSessionRequest, Operation,
-    OperationStatus, Readiness, RoomClientMessage, RoomQueryResult, RoomQueryStatus,
-    RoomServerMessage, SavepointRequest, SchemaFilter, SchemaScope, TransactionPreviewRequest,
-    WsClientMessage, WsServerMessage, PROTOCOL_VERSION,
+    OperationStatus, PasswordLoginRequest, Readiness, RefreshAuthRequest, RoomClientMessage,
+    RoomQueryResult, RoomQueryStatus, RoomServerMessage, SavepointRequest, SchemaFilter,
+    SchemaScope, TransactionPreviewRequest, WhoAmIResponse, WsClientMessage, WsServerMessage,
+    PROTOCOL_VERSION,
 };
 
 use crate::config::DeploymentPolicy;
@@ -54,6 +56,7 @@ pub struct AuthState {
     pub bearer_token: Option<String>,
     pub loopback_bypass: bool,
     pub deployment: DeploymentPolicy,
+    pub runtime: crate::identity::AuthRuntime,
 }
 
 impl Default for AuthState {
@@ -62,6 +65,7 @@ impl Default for AuthState {
             bearer_token: None,
             loopback_bypass: true,
             deployment: DeploymentPolicy::Personal,
+            runtime: crate::identity::AuthRuntime::default(),
         }
     }
 }
@@ -75,6 +79,11 @@ pub fn app(state: AppState) -> Router {
         .route("/v1/operations/available", get(list_available_operations))
         .route("/v1/operations/audit", get(list_operation_audit_log))
         .route("/v1/openapi.json", get(openapi))
+        .route("/v1/auth/login", post(password_login))
+        .route("/v1/auth/refresh", post(refresh_auth))
+        .route("/v1/auth/logout", post(logout_auth))
+        .route("/v1/auth/logout-all", post(logout_all_auth))
+        .route("/v1/auth/whoami", get(whoami))
         .route("/v1/metadata/tenants", get(list_metadata_tenants))
         .route(
             "/v1/metadata/rooms",
@@ -441,7 +450,10 @@ async fn auth_middleware(
 }
 
 fn is_public_path(path: &str) -> bool {
-    matches!(path, "/v1/health" | "/v1/ready" | "/v1/openapi.json")
+    matches!(
+        path,
+        "/v1/health" | "/v1/ready" | "/v1/openapi.json" | "/v1/auth/login" | "/v1/auth/refresh"
+    )
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -522,6 +534,7 @@ fn constant_time_eq(actual: &[u8], expected: &[u8]) -> bool {
 struct AuthContext {
     principal_id: PrincipalId,
     tenants: Vec<TenantMembership>,
+    auth_session_id: Option<String>,
 }
 
 #[derive(Clone)]
@@ -567,6 +580,225 @@ fn metadata_store_cloned(state: &AppState) -> ApiResult<MetadataStore> {
     state.metadata.clone().ok_or(ApiError::MetadataUnavailable)
 }
 
+async fn password_login(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<PasswordLoginRequest>,
+) -> ApiResult<Json<AuthTokensResponse>> {
+    if request.client_kind == AuthClientKind::Web {
+        return Err(ApiError::BadRequest(
+            "web authentication requires the cookie/CSRF surface".into(),
+        ));
+    }
+    let source = headers
+        .get(&PEER_ADDR_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("unknown");
+    let metadata = metadata_store(&state)?;
+    let outcome = state
+        .auth
+        .runtime
+        .authenticate_password(
+            metadata,
+            source,
+            &request.username,
+            request.password.into_bytes(),
+        )
+        .await
+        .map_err(|error| ApiError::Internal(error.to_string()))?;
+    let identity = match outcome {
+        crate::identity::PasswordAuthOutcome::Authenticated(identity) => identity,
+        crate::identity::PasswordAuthOutcome::Denied => {
+            record_auth_failure(metadata, "authenticate.password", "denied")?;
+            state.sessions.push_operation_full(
+                Operation::Authenticate {
+                    method: sift_protocol::AuthenticationMethod::Password,
+                },
+                OperationStatus::Failed,
+                None,
+                Some("authentication_denied".into()),
+                None,
+                Some("authentication denied".into()),
+            );
+            return Err(ApiError::Unauthorized);
+        }
+        crate::identity::PasswordAuthOutcome::Throttled => {
+            record_auth_failure(metadata, "authenticate.password", "throttled")?;
+            return Err(ApiError::TooManyAuthAttempts);
+        }
+    };
+    let tokens = metadata
+        .issue_auth_session(
+            identity.principal.id,
+            MetadataAuthClientKind::Native,
+            request.client_label.as_deref(),
+            NewOperationAudit {
+                actor_principal_id: Some(identity.principal.id),
+                action: "authenticate.password".into(),
+                target: "auth_session".into(),
+                target_id: None,
+                status: "succeeded".into(),
+                result_code: None,
+                row_count: None,
+                error_message: None,
+                correlation_id: crate::correlation::current(),
+            },
+        )
+        .await?;
+    state.sessions.push_operation_local(
+        Operation::Authenticate {
+            method: sift_protocol::AuthenticationMethod::Password,
+        },
+        OperationStatus::Succeeded,
+        Some(identity.principal.id.0),
+        None,
+        None,
+        None,
+    );
+    Ok(Json(auth_tokens_response(tokens)))
+}
+
+async fn refresh_auth(
+    State(state): State<AppState>,
+    Json(request): Json<RefreshAuthRequest>,
+) -> ApiResult<Json<AuthTokensResponse>> {
+    let metadata = metadata_store(&state)?;
+    let audit = NewOperationAudit {
+        actor_principal_id: None,
+        action: "refresh_auth_session".into(),
+        target: "auth_session".into(),
+        target_id: None,
+        status: "succeeded".into(),
+        result_code: None,
+        row_count: None,
+        error_message: None,
+        correlation_id: crate::correlation::current(),
+    };
+    match metadata
+        .rotate_auth_refresh_token(&request.refresh_token, audit)
+        .await?
+    {
+        RefreshAuthResult::Issued(tokens) => {
+            state.sessions.push_operation_local(
+                Operation::RefreshAuthSession,
+                OperationStatus::Succeeded,
+                None,
+                None,
+                None,
+                None,
+            );
+            Ok(Json(auth_tokens_response(tokens)))
+        }
+        RefreshAuthResult::Invalid | RefreshAuthResult::ReplayDetected => {
+            Err(ApiError::Unauthorized)
+        }
+    }
+}
+
+async fn logout_auth(
+    State(state): State<AppState>,
+    Extension(auth): Extension<AuthContext>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let session_id = auth.auth_session_id.as_deref().ok_or_else(|| {
+        ApiError::BadRequest("the current credential is not an interactive session".into())
+    })?;
+    metadata_store(&state)?.revoke_auth_session(
+        session_id,
+        "logout",
+        metadata_audit_record(auth.principal_id, "logout", "auth_session", None),
+    )?;
+    state.sessions.push_operation_local(
+        Operation::Logout {
+            all_sessions: false,
+        },
+        OperationStatus::Succeeded,
+        Some(auth.principal_id.0),
+        None,
+        None,
+        None,
+    );
+    Ok(Json(json!({"ok": true})))
+}
+
+async fn logout_all_auth(
+    State(state): State<AppState>,
+    Extension(auth): Extension<AuthContext>,
+) -> ApiResult<Json<serde_json::Value>> {
+    metadata_store(&state)?.revoke_all_auth_sessions(
+        auth.principal_id,
+        "logout_all",
+        metadata_audit_record(auth.principal_id, "logout_all", "auth_session", None),
+    )?;
+    state.sessions.push_operation_local(
+        Operation::Logout { all_sessions: true },
+        OperationStatus::Succeeded,
+        Some(auth.principal_id.0),
+        None,
+        None,
+        None,
+    );
+    Ok(Json(json!({"ok": true})))
+}
+
+async fn whoami(
+    State(state): State<AppState>,
+    Extension(auth): Extension<AuthContext>,
+) -> ApiResult<Json<WhoAmIResponse>> {
+    let principal = metadata_store(&state)?
+        .principal_by_id(auth.principal_id)?
+        .ok_or(ApiError::Unauthorized)?;
+    let memberships = auth
+        .tenants
+        .iter()
+        .map(|membership| AuthTenantMembership {
+            tenant_id: membership.tenant.id.0,
+            tenant_name: membership.tenant.name.clone(),
+            role: match membership.role {
+                sift_metadata::MembershipRole::Owner => "owner",
+                sift_metadata::MembershipRole::Admin => "admin",
+                sift_metadata::MembershipRole::Member => "member",
+                sift_metadata::MembershipRole::Viewer => "viewer",
+            }
+            .into(),
+        })
+        .collect();
+    Ok(Json(WhoAmIResponse {
+        principal: AuthPrincipal {
+            id: principal.id.0,
+            display_name: principal.display_name,
+            email: principal.email,
+            avatar_url: principal.avatar_url,
+            is_instance_admin: principal.is_instance_admin,
+        },
+        memberships,
+        auth_session_id: auth.auth_session_id,
+    }))
+}
+
+fn auth_tokens_response(tokens: sift_metadata::IssuedAuthTokens) -> AuthTokensResponse {
+    AuthTokensResponse {
+        access_token: tokens.access_token,
+        access_expires_at: tokens.access_expires_at,
+        refresh_token: tokens.refresh_token,
+        refresh_expires_at: tokens.refresh_expires_at,
+    }
+}
+
+fn record_auth_failure(metadata: &MetadataStore, action: &str, code: &str) -> ApiResult<()> {
+    metadata.record_operation_audit(NewOperationAudit {
+        actor_principal_id: None,
+        action: action.into(),
+        target: "auth_session".into(),
+        target_id: None,
+        status: "failed".into(),
+        result_code: Some(code.into()),
+        row_count: None,
+        error_message: Some("authentication denied".into()),
+        correlation_id: crate::correlation::current(),
+    })?;
+    Ok(())
+}
+
 async fn metadata_blocking<T>(f: impl FnOnce() -> ApiResult<T> + Send + 'static) -> ApiResult<T>
 where
     T: Send + 'static,
@@ -595,6 +827,7 @@ fn resolve_auth_context(state: &AppState, headers: &HeaderMap) -> ApiResult<Auth
             return Ok(AuthContext {
                 principal_id: row.principal_id,
                 tenants,
+                auth_session_id: None,
             });
         }
         if state
@@ -625,6 +858,7 @@ fn local_auth_context(metadata: &MetadataStore) -> ApiResult<AuthContext> {
     Ok(AuthContext {
         principal_id: principal.id,
         tenants,
+        auth_session_id: None,
     })
 }
 
@@ -632,6 +866,21 @@ async fn resolve_auth_context_blocking(
     state: AppState,
     headers: HeaderMap,
 ) -> ApiResult<AuthContext> {
+    if let Some(token) = bearer_from_headers(&headers) {
+        if token.starts_with("sift_at_") {
+            let metadata = metadata_store(&state)?;
+            let session = metadata
+                .verify_auth_access_token(token)
+                .await?
+                .ok_or(ApiError::Unauthorized)?;
+            let tenants = metadata.list_principal_tenants(session.principal.id)?;
+            return Ok(AuthContext {
+                principal_id: session.principal.id,
+                tenants,
+                auth_session_id: Some(session.session_id),
+            });
+        }
+    }
     metadata_blocking(move || resolve_auth_context(&state, &headers)).await
 }
 
@@ -1090,6 +1339,52 @@ async fn openapi() -> Json<serde_json::Value> {
                         "200": { "description": "Ready", "content": json_content("Readiness") },
                         "503": { "description": "Not ready", "content": json_content("Readiness") }
                     }
+                }
+            },
+            "/v1/auth/login": {
+                "post": {
+                    "operationId": "passwordLogin",
+                    "summary": "Authenticate an instance-owned password identity",
+                    "security": [],
+                    "requestBody": json_body("PasswordLoginRequest"),
+                    "responses": {
+                        "200": { "description": "Opaque access and refresh credentials", "content": json_content("AuthTokensResponse") },
+                        "401": { "description": "Authentication denied" },
+                        "429": { "description": "Authentication throttled" }
+                    }
+                }
+            },
+            "/v1/auth/refresh": {
+                "post": {
+                    "operationId": "refreshAuth",
+                    "summary": "Atomically rotate an interactive refresh credential",
+                    "security": [],
+                    "requestBody": json_body("RefreshAuthRequest"),
+                    "responses": {
+                        "200": { "description": "Rotated credentials", "content": json_content("AuthTokensResponse") },
+                        "401": { "description": "Invalid, expired, or replayed refresh credential" }
+                    }
+                }
+            },
+            "/v1/auth/logout": {
+                "post": {
+                    "operationId": "logoutAuth",
+                    "summary": "Revoke the current interactive auth session",
+                    "responses": { "200": { "description": "Ack", "content": json_object_content() } }
+                }
+            },
+            "/v1/auth/logout-all": {
+                "post": {
+                    "operationId": "logoutAllAuth",
+                    "summary": "Revoke every interactive auth session for the principal",
+                    "responses": { "200": { "description": "Ack", "content": json_object_content() } }
+                }
+            },
+            "/v1/auth/whoami": {
+                "get": {
+                    "operationId": "whoAmI",
+                    "summary": "Return the authenticated principal and memberships",
+                    "responses": { "200": { "description": "Authentication context", "content": json_content("WhoAmIResponse") } }
                 }
             },
             "/v1/audit": {
@@ -1592,6 +1887,10 @@ fn json_object_content() -> serde_json::Value {
 fn protocol_schema_refs() -> serde_json::Value {
     let mut schemas = serde_json::Map::new();
     add_schema::<sift_protocol::AuditEntry>("AuditEntry", &mut schemas);
+    add_schema::<sift_protocol::PasswordLoginRequest>("PasswordLoginRequest", &mut schemas);
+    add_schema::<sift_protocol::RefreshAuthRequest>("RefreshAuthRequest", &mut schemas);
+    add_schema::<sift_protocol::AuthTokensResponse>("AuthTokensResponse", &mut schemas);
+    add_schema::<sift_protocol::WhoAmIResponse>("WhoAmIResponse", &mut schemas);
     add_schema::<sift_protocol::BeginTransactionRequest>("BeginTransactionRequest", &mut schemas);
     add_schema::<sift_protocol::BulkInsertRequest>("BulkInsertRequest", &mut schemas);
     add_schema::<sift_protocol::BulkInsertResponse>("BulkInsertResponse", &mut schemas);
