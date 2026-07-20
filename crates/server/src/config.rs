@@ -3,9 +3,32 @@
 
 use serde::{Deserialize, Serialize};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum DeploymentPolicy {
+    #[default]
+    Personal,
+    Team,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum Transport {
+    #[default]
+    Loopback,
+    Network,
+    SshProxy,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
+    /// Identity and authorization policy. Independent from how clients reach
+    /// the server (ADR-030).
+    pub deployment: DeploymentPolicy,
+    /// Client-to-server transport topology. `ssh-proxy` is reserved for the
+    /// Phase H stdio/proxy transport and is rejected until it is implemented.
+    pub transport: Transport,
     /// Socket address to bind the HTTP server on.
     pub bind: String,
     /// RUST_LOG-style filter (`sift=debug,info`).
@@ -123,6 +146,8 @@ pub struct AuditConfig {
 impl Default for Config {
     fn default() -> Self {
         Self {
+            deployment: DeploymentPolicy::default(),
+            transport: Transport::default(),
             bind: "127.0.0.1:7474".to_string(),
             log: LogConfig::default(),
             drivers: DriversConfig::default(),
@@ -132,6 +157,54 @@ impl Default for Config {
             audit: AuditConfig::default(),
             limits: LimitsConfig::default(),
         }
+    }
+}
+
+impl Config {
+    /// Reject topology/policy combinations that would broaden implicit trust.
+    ///
+    /// Team and SSH-proxy startup remain deliberately unavailable until their
+    /// fail-closed authentication paths land in the following Phase E slices.
+    pub fn validate(&self) -> anyhow::Result<()> {
+        use anyhow::{bail, Context};
+
+        let bind: std::net::SocketAddr = self
+            .bind
+            .parse()
+            .with_context(|| format!("invalid bind address: {}", self.bind))?;
+
+        if self.transport == Transport::Loopback && !bind.ip().is_loopback() {
+            bail!(
+                "transport=loopback requires a loopback bind address; got {}",
+                self.bind
+            );
+        }
+
+        if self.auth.loopback_bypass
+            && (self.deployment != DeploymentPolicy::Personal
+                || self.transport != Transport::Loopback)
+        {
+            bail!(
+                "auth.loopback_bypass is allowed only with deployment=personal and \
+                 transport=loopback"
+            );
+        }
+
+        if self.metadata.bootstrap_local && self.deployment != DeploymentPolicy::Personal {
+            bail!("metadata.bootstrap_local is allowed only with deployment=personal");
+        }
+
+        if self.transport == Transport::SshProxy {
+            bail!("transport=ssh-proxy is reserved for Phase H and is not implemented yet");
+        }
+
+        if self.deployment == DeploymentPolicy::Team {
+            bail!(
+                "deployment=team remains disabled until Phase E's fail-closed auth middleware lands"
+            );
+        }
+
+        Ok(())
     }
 }
 
@@ -198,4 +271,72 @@ pub fn load() -> anyhow::Result<Config> {
         .merge(Toml::file("sift.toml"))
         .merge(Env::prefixed("SIFT_").split("__"));
     Ok(fig.extract()?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn defaults_are_personal_loopback() {
+        let config = Config::default();
+        assert_eq!(config.deployment, DeploymentPolicy::Personal);
+        assert_eq!(config.transport, Transport::Loopback);
+        config.validate().unwrap();
+    }
+
+    #[test]
+    fn loopback_transport_rejects_network_bind() {
+        let config = Config {
+            bind: "0.0.0.0:7474".into(),
+            ..Config::default()
+        };
+        let error = config.validate().unwrap_err().to_string();
+        assert!(error.contains("transport=loopback"));
+    }
+
+    #[test]
+    fn network_transport_rejects_loopback_bypass() {
+        let config = Config {
+            transport: Transport::Network,
+            ..Config::default()
+        };
+        let error = config.validate().unwrap_err().to_string();
+        assert!(error.contains("loopback_bypass"));
+    }
+
+    #[test]
+    fn unfinished_team_and_ssh_modes_fail_closed() {
+        let team = Config {
+            deployment: DeploymentPolicy::Team,
+            auth: AuthConfig {
+                loopback_bypass: false,
+                ..AuthConfig::default()
+            },
+            metadata: MetadataConfig {
+                bootstrap_local: false,
+                ..MetadataConfig::default()
+            },
+            ..Config::default()
+        };
+        assert!(team
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("disabled"));
+
+        let ssh = Config {
+            transport: Transport::SshProxy,
+            auth: AuthConfig {
+                loopback_bypass: false,
+                ..AuthConfig::default()
+            },
+            ..Config::default()
+        };
+        assert!(ssh
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("not implemented"));
+    }
 }

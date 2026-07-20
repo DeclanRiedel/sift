@@ -20,6 +20,7 @@ use sift_server::{
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cfg = load_config().context("loading config")?;
+    cfg.validate().context("validating config")?;
     init_tracing(&cfg);
 
     tracing::info!(version = sift_server::VERSION, bind = %cfg.bind, "sift-server starting");

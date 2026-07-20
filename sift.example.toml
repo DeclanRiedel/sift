@@ -4,6 +4,8 @@
 # Do not commit `sift.toml` with real machine paths, tokens, or private DB
 # details. Environment variables with the `SIFT_` prefix override this file.
 
+deployment = "personal"
+transport = "loopback"
 bind = "127.0.0.1:7474"
 
 [log]
