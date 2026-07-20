@@ -12,7 +12,9 @@ pub enum OperationKind {
     OpenConnection,
     CloseConnection,
     RefreshSchema,
+    GenerateDdl,
     ExecuteQuery,
+    ExportQuery,
     Complete,
     CancelQuery,
     PreviewEdits,
@@ -39,7 +41,7 @@ pub enum OperationKind {
 }
 
 impl OperationKind {
-    pub const ALL: [Self; 31] = [
+    pub const ALL: [Self; 33] = [
         Self::OpenSession,
         Self::ListSessions,
         Self::ListAvailableOperations,
@@ -47,7 +49,9 @@ impl OperationKind {
         Self::OpenConnection,
         Self::CloseConnection,
         Self::RefreshSchema,
+        Self::GenerateDdl,
         Self::ExecuteQuery,
+        Self::ExportQuery,
         Self::Complete,
         Self::CancelQuery,
         Self::PreviewEdits,

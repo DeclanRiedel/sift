@@ -288,6 +288,54 @@ async fn openapi_is_published() {
     assert!(body["components"]["schemas"]["Room"].is_object());
     assert!(body["components"]["schemas"]["RoomClientMessage"].is_object());
     assert!(body["components"]["schemas"]["RoomServerMessage"].is_object());
+    for path in [
+        "/v1/operations/available",
+        "/v1/sessions/{id}/connections/{conn_id}/ddl",
+        "/v1/sessions/{id}/connections/{conn_id}/complete",
+        "/v1/sessions/{id}/connections/{conn_id}/export",
+        "/v1/sessions/{id}/connections/{conn_id}/edits/preview",
+        "/v1/sessions/{id}/connections/{conn_id}/edits/apply",
+        "/v1/sessions/{id}/connections/{conn_id}/search/schema",
+        "/v1/sessions/{id}/connections/{conn_id}/search/data",
+        "/v1/sessions/{id}/connections/{conn_id}/explain",
+        "/v1/sessions/{id}/connections/{conn_id}/processes",
+        "/v1/sessions/{id}/connections/{conn_id}/processes/kill",
+        "/v1/sessions/{id}/connections/{conn_id}/import/csv",
+        "/v1/sessions/{id}/transactions/{tx_id}/preview",
+    ] {
+        assert!(
+            body["paths"][path].is_object(),
+            "missing Phase D path {path}"
+        );
+    }
+    for schema in [
+        "CompletionRequest",
+        "CompletionResponse",
+        "PreviewEditsRequest",
+        "EditPlan",
+        "ApplyEditsRequest",
+        "ApplyEditsResult",
+        "SchemaSearchRequest",
+        "SchemaSearchResponse",
+        "DataSearchRequest",
+        "DataSearchResponse",
+        "ExplainRequest",
+        "ExplainResponse",
+        "DatabaseProcess",
+        "KillProcessRequest",
+        "KillProcessResponse",
+        "CsvImportRequest",
+        "CsvImportResponse",
+        "OperationCapability",
+        "TransactionState",
+        "TransactionPreviewRequest",
+        "TransactionPreview",
+    ] {
+        assert!(
+            body["components"]["schemas"][schema].is_object(),
+            "missing Phase D schema {schema}"
+        );
+    }
     assert!(body["components"]["schemas"]["ExecuteResponse"]["properties"]["rows"].is_object());
     assert!(
         body["components"]["schemas"]["OpenConnectionRequest"]["properties"]["engine"].is_object()

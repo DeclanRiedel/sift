@@ -14,11 +14,13 @@ use sift_metadata::{
     RoomId, RoomMember, SavedQuery, SavedQueryId, SavedQueryScope, TenantId, TenantMembership,
 };
 use sift_protocol::{
-    BeginTransactionRequest, BulkInsertRequest, BulkInsertResponse, CancelRequest, ConnectionId,
-    ConnectionInfo, CsvImportRequest, CsvImportResponse, CursorId, DatabaseProcess,
-    EndTransactionRequest, ExecuteRequestHttp, ExecuteResponse, Health, KillProcessRequest,
-    KillProcessResponse, OpenConnectionRequest, OpenSessionRequest, OperationCapability,
-    OperationCapabilityContext, Page, Readiness, SavepointRequest, SchemaSnapshot, ServerInfo,
+    ApplyEditsRequest, ApplyEditsResult, BeginTransactionRequest, BulkInsertRequest,
+    BulkInsertResponse, CancelRequest, ConnectionId, ConnectionInfo, CsvImportRequest,
+    CsvImportResponse, CursorId, DataSearchRequest, DataSearchResponse, DatabaseProcess, EditPlan,
+    EndTransactionRequest, ExecuteRequestHttp, ExecuteResponse, ExplainRequest, ExplainResponse,
+    Health, KillProcessRequest, KillProcessResponse, OpenConnectionRequest, OpenSessionRequest,
+    OperationCapability, OperationCapabilityContext, Page, PreviewEditsRequest, Readiness,
+    SavepointRequest, SchemaSearchRequest, SchemaSearchResponse, SchemaSnapshot, ServerInfo,
     SessionId, SessionInfo, TextDocumentOperation, TransactionEndAction, TransactionInfo,
     TransactionPreview, TransactionPreviewRequest, TransactionState, TxHandleRef, TxId, TxMode,
     Value, WsClientMessage, WsServerMessage,
@@ -213,6 +215,84 @@ impl Client {
             "/v1/sessions/{session}/connections/{connection}/ddl?{}",
             query.join("&")
         ))
+        .await
+    }
+
+    pub async fn complete(
+        &self,
+        session: SessionId,
+        connection: ConnectionId,
+        request: sift_protocol::completion::CompletionRequest,
+    ) -> Result<sift_protocol::completion::CompletionResponse> {
+        self.post(
+            &format!("/v1/sessions/{session}/connections/{connection}/complete"),
+            &request,
+        )
+        .await
+    }
+
+    pub async fn preview_edits(
+        &self,
+        session: SessionId,
+        connection: ConnectionId,
+        request: PreviewEditsRequest,
+    ) -> Result<EditPlan> {
+        self.post(
+            &format!("/v1/sessions/{session}/connections/{connection}/edits/preview"),
+            &request,
+        )
+        .await
+    }
+
+    pub async fn apply_edits(
+        &self,
+        session: SessionId,
+        connection: ConnectionId,
+        request: ApplyEditsRequest,
+    ) -> Result<ApplyEditsResult> {
+        self.post(
+            &format!("/v1/sessions/{session}/connections/{connection}/edits/apply"),
+            &request,
+        )
+        .await
+    }
+
+    pub async fn search_schema(
+        &self,
+        session: SessionId,
+        connection: ConnectionId,
+        request: SchemaSearchRequest,
+    ) -> Result<SchemaSearchResponse> {
+        self.post(
+            &format!("/v1/sessions/{session}/connections/{connection}/search/schema"),
+            &request,
+        )
+        .await
+    }
+
+    pub async fn search_data(
+        &self,
+        session: SessionId,
+        connection: ConnectionId,
+        request: DataSearchRequest,
+    ) -> Result<DataSearchResponse> {
+        self.post(
+            &format!("/v1/sessions/{session}/connections/{connection}/search/data"),
+            &request,
+        )
+        .await
+    }
+
+    pub async fn explain(
+        &self,
+        session: SessionId,
+        connection: ConnectionId,
+        request: ExplainRequest,
+    ) -> Result<ExplainResponse> {
+        self.post(
+            &format!("/v1/sessions/{session}/connections/{connection}/explain"),
+            &request,
+        )
         .await
     }
 

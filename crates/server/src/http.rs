@@ -348,6 +348,44 @@ async fn audit_middleware(
     response
 }
 
+fn finish_operation<T>(
+    sessions: &SessionStore,
+    operation: Operation,
+    result: ApiResult<T>,
+    row_count: impl FnOnce(&T) -> Option<i64>,
+) -> ApiResult<T> {
+    match result {
+        Ok(value) => {
+            sessions.push_operation_full(
+                operation,
+                OperationStatus::Succeeded,
+                None,
+                None,
+                row_count(&value),
+                None,
+            );
+            Ok(value)
+        }
+        Err(error) => {
+            let (result_code, message) = match &error {
+                ApiError::Driver(driver) => {
+                    (Some(driver.code.to_string()), Some(driver.message.clone()))
+                }
+                other => (None, Some(other.to_string())),
+            };
+            sessions.push_operation_full(
+                operation,
+                OperationStatus::Failed,
+                None,
+                result_code,
+                None,
+                message,
+            );
+            Err(error)
+        }
+    }
+}
+
 async fn auth_middleware(
     State(auth): State<AuthState>,
     req: Request<Body>,
@@ -920,11 +958,15 @@ async fn list_available_operations(
     State(state): State<AppState>,
     Query(context): Query<sift_protocol::OperationCapabilityContext>,
 ) -> ApiResult<Json<Vec<sift_protocol::OperationCapability>>> {
-    let capabilities = crate::capability::evaluate(&state.sessions, &context)?;
-    state.sessions.push_operation(
-        Operation::ListAvailableOperations { context },
-        OperationStatus::Succeeded,
-    );
+    let operation = Operation::ListAvailableOperations {
+        context: context.clone(),
+    };
+    let capabilities = finish_operation(
+        &state.sessions,
+        operation,
+        crate::capability::evaluate(&state.sessions, &context),
+        |_| None,
+    )?;
     Ok(Json(capabilities))
 }
 
@@ -1196,6 +1238,46 @@ async fn openapi() -> Json<serde_json::Value> {
                     "responses": { "200": { "description": "CompletionResponse", "content": json_content("CompletionResponse") } }
                 }
             },
+            "/v1/sessions/{id}/connections/{conn_id}/edits/preview": {
+                "post": {
+                    "operationId": "previewEdits",
+                    "summary": "Preview parameterized inline-edit DML",
+                    "requestBody": json_body("PreviewEditsRequest"),
+                    "responses": { "200": { "description": "Edit plan", "content": json_content("EditPlan") } }
+                }
+            },
+            "/v1/sessions/{id}/connections/{conn_id}/edits/apply": {
+                "post": {
+                    "operationId": "applyEdits",
+                    "summary": "Apply inline edits transactionally",
+                    "requestBody": json_body("ApplyEditsRequest"),
+                    "responses": { "200": { "description": "Apply result", "content": json_content("ApplyEditsResult") } }
+                }
+            },
+            "/v1/sessions/{id}/connections/{conn_id}/search/schema": {
+                "post": {
+                    "operationId": "searchSchema",
+                    "summary": "Search schema objects and columns",
+                    "requestBody": json_body("SchemaSearchRequest"),
+                    "responses": { "200": { "description": "Schema matches", "content": json_content("SchemaSearchResponse") } }
+                }
+            },
+            "/v1/sessions/{id}/connections/{conn_id}/search/data": {
+                "post": {
+                    "operationId": "searchData",
+                    "summary": "Search table data with bounded fan-out",
+                    "requestBody": json_body("DataSearchRequest"),
+                    "responses": { "200": { "description": "Data matches", "content": json_content("DataSearchResponse") } }
+                }
+            },
+            "/v1/sessions/{id}/connections/{conn_id}/explain": {
+                "post": {
+                    "operationId": "explainQuery",
+                    "summary": "Capture a typed execution plan",
+                    "requestBody": json_body("ExplainRequest"),
+                    "responses": { "200": { "description": "Execution plan", "content": json_content("ExplainResponse") } }
+                }
+            },
             "/v1/sessions/{id}/connections/{conn_id}/export": {
                 "post": {
                     "operationId": "exportQuery",
@@ -1433,6 +1515,16 @@ fn protocol_schema_refs() -> serde_json::Value {
     add_schema::<sift_protocol::ConnectionInfo>("ConnectionInfo", &mut schemas);
     add_schema::<sift_protocol::CsvImportRequest>("CsvImportRequest", &mut schemas);
     add_schema::<sift_protocol::CsvImportResponse>("CsvImportResponse", &mut schemas);
+    add_schema::<sift_protocol::PreviewEditsRequest>("PreviewEditsRequest", &mut schemas);
+    add_schema::<sift_protocol::EditPlan>("EditPlan", &mut schemas);
+    add_schema::<sift_protocol::ApplyEditsRequest>("ApplyEditsRequest", &mut schemas);
+    add_schema::<sift_protocol::ApplyEditsResult>("ApplyEditsResult", &mut schemas);
+    add_schema::<sift_protocol::SchemaSearchRequest>("SchemaSearchRequest", &mut schemas);
+    add_schema::<sift_protocol::SchemaSearchResponse>("SchemaSearchResponse", &mut schemas);
+    add_schema::<sift_protocol::DataSearchRequest>("DataSearchRequest", &mut schemas);
+    add_schema::<sift_protocol::DataSearchResponse>("DataSearchResponse", &mut schemas);
+    add_schema::<sift_protocol::ExplainRequest>("ExplainRequest", &mut schemas);
+    add_schema::<sift_protocol::ExplainResponse>("ExplainResponse", &mut schemas);
     add_schema::<sift_protocol::DatabaseProcess>("DatabaseProcess", &mut schemas);
     add_schema::<sift_protocol::EndTransactionRequest>("EndTransactionRequest", &mut schemas);
     add_schema::<sift_protocol::ExecuteRequestHttp>("ExecuteRequestHttp", &mut schemas);
@@ -2374,15 +2466,12 @@ async fn bulk_insert(
         connection: conn_id,
         request: req.clone(),
     };
-    let response = state.sessions.bulk_insert(id, conn_id, req).await?;
-    state.sessions.push_operation_full(
+    let response = finish_operation(
+        &state.sessions,
         operation,
-        OperationStatus::Succeeded,
-        None,
-        None,
-        Some(response.rows_inserted as i64),
-        None,
-    );
+        state.sessions.bulk_insert(id, conn_id, req).await,
+        |response| Some(response.rows_inserted as i64),
+    )?;
     Ok(Json(response))
 }
 
@@ -2398,15 +2487,12 @@ async fn import_csv(
         create_table: req.create_table,
         conflict_policy: req.conflict_policy,
     };
-    let response = crate::csv_import::import(&state.sessions, session, connection, req).await?;
-    state.sessions.push_operation_full(
+    let response = finish_operation(
+        &state.sessions,
         operation,
-        OperationStatus::Succeeded,
-        None,
-        None,
-        Some(response.rows_inserted as i64),
-        None,
-    );
+        crate::csv_import::import(&state.sessions, session, connection, req).await,
+        |response| Some(response.rows_inserted as i64),
+    )?;
     Ok(Json(response))
 }
 
@@ -2447,18 +2533,19 @@ async fn export_query(
     use axum::body::Body;
     use axum::response::IntoResponse;
     let format = req.format;
+    let operation = Operation::ExportQuery {
+        session: id,
+        connection: conn_id,
+    };
     // Routes through the cursor registry (per-session cap + pump), unlike
     // the previous direct driver.execute call. See `export_stream`.
-    let stream = state.sessions.export_stream(id, conn_id, req).await?;
+    let stream = finish_operation(
+        &state.sessions,
+        operation,
+        state.sessions.export_stream(id, conn_id, req).await,
+        |_| None,
+    )?;
     let content_type = crate::export::content_type(format);
-    state.sessions.push_operation(
-        Operation::Metadata {
-            action: "export.stream".into(),
-            target: format!("{format:?}"),
-            id: None,
-        },
-        OperationStatus::Succeeded,
-    );
     let body = Body::from_stream(stream);
     let mut resp = body.into_response();
     resp.headers_mut().insert(
@@ -2480,18 +2567,15 @@ async fn get_object_ddl(
         kind: q.kind,
         routine_args: q.routine_args,
     };
-    let ddl = state.sessions.ddl_for(id, conn_id, path.clone()).await?;
-    state.sessions.push_operation(
-        Operation::Metadata {
-            action: "ddl.generate".into(),
-            target: format!(
-                "{:?}",
-                path.kind.unwrap_or(sift_protocol::ObjectKind::Table)
-            ),
-            id: None,
+    let ddl = finish_operation(
+        &state.sessions,
+        Operation::GenerateDdl {
+            session: id,
+            connection: conn_id,
         },
-        OperationStatus::Succeeded,
-    );
+        state.sessions.ddl_for(id, conn_id, path).await,
+        |_| None,
+    )?;
     Ok(Json(ddl))
 }
 
@@ -2500,15 +2584,16 @@ async fn post_completion(
     Path((id, conn_id)): Path<(sift_protocol::SessionId, sift_protocol::ConnectionId)>,
     Json(req): Json<sift_protocol::completion::CompletionRequest>,
 ) -> ApiResult<Json<sift_protocol::completion::CompletionResponse>> {
-    let resp = state.sessions.complete(id, conn_id, req.clone()).await?;
-    state.sessions.push_operation(
+    let resp = finish_operation(
+        &state.sessions,
         Operation::Complete {
             session: id,
             connection: conn_id,
-            request: req,
+            request: req.clone(),
         },
-        OperationStatus::Succeeded,
-    );
+        state.sessions.complete(id, conn_id, req).await,
+        |_| None,
+    )?;
     Ok(Json(resp))
 }
 
@@ -2517,22 +2602,27 @@ async fn post_edits_preview(
     Path((id, conn_id)): Path<(sift_protocol::SessionId, sift_protocol::ConnectionId)>,
     Json(req): Json<sift_protocol::PreviewEditsRequest>,
 ) -> ApiResult<Json<sift_protocol::EditPlan>> {
-    if req.connection != conn_id {
-        return Err(ApiError::BadRequest(
-            "`connection` in body must match the path connection".into(),
-        ));
+    let result = async {
+        if req.connection != conn_id {
+            return Err(ApiError::BadRequest(
+                "`connection` in body must match the path connection".into(),
+            ));
+        }
+        state
+            .sessions
+            .preview_edits(id, conn_id, req.edit_set)
+            .await
     }
-    let plan = state
-        .sessions
-        .preview_edits(id, conn_id, req.edit_set)
-        .await?;
-    state.sessions.push_operation(
+    .await;
+    let plan = finish_operation(
+        &state.sessions,
         Operation::PreviewEdits {
             session: id,
             connection: conn_id,
         },
-        OperationStatus::Succeeded,
-    );
+        result,
+        |_| None,
+    )?;
     Ok(Json(plan))
 }
 
@@ -2541,20 +2631,25 @@ async fn post_edits_apply(
     Path((id, conn_id)): Path<(sift_protocol::SessionId, sift_protocol::ConnectionId)>,
     Json(mut req): Json<sift_protocol::ApplyEditsRequest>,
 ) -> ApiResult<Json<sift_protocol::ApplyEditsResult>> {
-    if req.connection != conn_id {
-        return Err(ApiError::BadRequest(
-            "`connection` in body must match the path connection".into(),
-        ));
+    let apply_result = async {
+        if req.connection != conn_id {
+            return Err(ApiError::BadRequest(
+                "`connection` in body must match the path connection".into(),
+            ));
+        }
+        req.connection = conn_id;
+        state.sessions.apply_edits(id, req).await
     }
-    req.connection = conn_id;
-    let result = state.sessions.apply_edits(id, req).await?;
-    state.sessions.push_operation(
+    .await;
+    let result = finish_operation(
+        &state.sessions,
         Operation::ApplyEdits {
             session: id,
             connection: conn_id,
         },
-        OperationStatus::Succeeded,
-    );
+        apply_result,
+        |result| Some(result.applied.len() as i64),
+    )?;
     Ok(Json(result))
 }
 
@@ -2563,14 +2658,15 @@ async fn post_search_schema(
     Path((id, conn_id)): Path<(sift_protocol::SessionId, sift_protocol::ConnectionId)>,
     Json(req): Json<sift_protocol::SchemaSearchRequest>,
 ) -> ApiResult<Json<sift_protocol::SchemaSearchResponse>> {
-    let resp = state.sessions.search_schema(id, conn_id, req).await?;
-    state.sessions.push_operation(
+    let resp = finish_operation(
+        &state.sessions,
         Operation::SearchSchema {
             session: id,
             connection: conn_id,
         },
-        OperationStatus::Succeeded,
-    );
+        state.sessions.search_schema(id, conn_id, req).await,
+        |response| Some(response.hits.len() as i64),
+    )?;
     Ok(Json(resp))
 }
 
@@ -2579,14 +2675,15 @@ async fn post_search_data(
     Path((id, conn_id)): Path<(sift_protocol::SessionId, sift_protocol::ConnectionId)>,
     Json(req): Json<sift_protocol::DataSearchRequest>,
 ) -> ApiResult<Json<sift_protocol::DataSearchResponse>> {
-    let resp = state.sessions.search_data(id, conn_id, req).await?;
-    state.sessions.push_operation(
+    let resp = finish_operation(
+        &state.sessions,
         Operation::SearchData {
             session: id,
             connection: conn_id,
         },
-        OperationStatus::Succeeded,
-    );
+        state.sessions.search_data(id, conn_id, req).await,
+        |response| Some(response.hits.len() as i64),
+    )?;
     Ok(Json(resp))
 }
 
@@ -2595,19 +2692,24 @@ async fn post_explain(
     Path((id, conn_id)): Path<(sift_protocol::SessionId, sift_protocol::ConnectionId)>,
     Json(req): Json<sift_protocol::ExplainRequest>,
 ) -> ApiResult<Json<sift_protocol::ExplainResponse>> {
-    if req.connection != conn_id {
-        return Err(ApiError::BadRequest(
-            "`connection` in body must match the path connection".into(),
-        ));
+    let result = async {
+        if req.connection != conn_id {
+            return Err(ApiError::BadRequest(
+                "`connection` in body must match the path connection".into(),
+            ));
+        }
+        crate::plan::explain(&state.sessions, id, conn_id, &req).await
     }
-    let resp = crate::plan::explain(&state.sessions, id, conn_id, &req).await?;
-    state.sessions.push_operation(
+    .await;
+    let resp = finish_operation(
+        &state.sessions,
         Operation::Explain {
             session: id,
             connection: conn_id,
         },
-        OperationStatus::Succeeded,
-    );
+        result,
+        |_| None,
+    )?;
     Ok(Json(resp))
 }
 
@@ -2741,10 +2843,12 @@ async fn begin_transaction(
         session: id,
         request: req.clone(),
     };
-    let tx = state.sessions.begin_transaction(id, req).await?;
-    state
-        .sessions
-        .push_operation(operation, OperationStatus::Succeeded);
+    let tx = finish_operation(
+        &state.sessions,
+        operation,
+        state.sessions.begin_transaction(id, req).await,
+        |_| None,
+    )?;
     Ok(Json(tx))
 }
 
@@ -2752,14 +2856,15 @@ async fn list_processes(
     State(state): State<AppState>,
     Path((session, connection)): Path<(sift_protocol::SessionId, sift_protocol::ConnectionId)>,
 ) -> ApiResult<Json<Vec<sift_protocol::DatabaseProcess>>> {
-    let processes = crate::process::list(&state.sessions, session, connection).await?;
-    state.sessions.push_operation(
+    let processes = finish_operation(
+        &state.sessions,
         Operation::ListProcesses {
             session,
             connection,
         },
-        OperationStatus::Succeeded,
-    );
+        crate::process::list(&state.sessions, session, connection).await,
+        |processes| Some(processes.len() as i64),
+    )?;
     Ok(Json(processes))
 }
 
@@ -2768,16 +2873,16 @@ async fn kill_process(
     Path((session, connection)): Path<(sift_protocol::SessionId, sift_protocol::ConnectionId)>,
     Json(req): Json<KillProcessRequest>,
 ) -> ApiResult<Json<sift_protocol::KillProcessResponse>> {
-    let response =
-        crate::process::kill(&state.sessions, session, connection, req.process_id).await?;
-    state.sessions.push_operation(
+    let response = finish_operation(
+        &state.sessions,
         Operation::KillProcess {
             session,
             connection,
-            request: req,
+            request: req.clone(),
         },
-        OperationStatus::Succeeded,
-    );
+        crate::process::kill(&state.sessions, session, connection, req.process_id).await,
+        |_| None,
+    )?;
     Ok(Json(response))
 }
 
@@ -2785,11 +2890,12 @@ async fn list_transactions(
     State(state): State<AppState>,
     Path(id): Path<sift_protocol::SessionId>,
 ) -> ApiResult<Json<Vec<sift_protocol::TransactionState>>> {
-    let result = state.sessions.list_transactions(id)?;
-    state.sessions.push_operation(
+    let result = finish_operation(
+        &state.sessions,
         Operation::ListTransactions { session: id },
-        OperationStatus::Succeeded,
-    );
+        state.sessions.list_transactions(id),
+        |transactions| Some(transactions.len() as i64),
+    )?;
     Ok(Json(result))
 }
 
@@ -2798,19 +2904,22 @@ async fn preview_transaction(
     Path((id, tx_id)): Path<(sift_protocol::SessionId, sift_protocol::TxId)>,
     Json(req): Json<TransactionPreviewRequest>,
 ) -> ApiResult<Json<sift_protocol::TransactionPreview>> {
-    if req.tx_id != tx_id {
-        return Err(ApiError::BadRequest(
+    let result = if req.tx_id != tx_id {
+        Err(ApiError::BadRequest(
             "`tx_id` body value must match tx id in path".into(),
-        ));
-    }
-    let result = state.sessions.preview_transaction(id, &req)?;
-    state.sessions.push_operation(
+        ))
+    } else {
+        state.sessions.preview_transaction(id, &req)
+    };
+    let result = finish_operation(
+        &state.sessions,
         Operation::PreviewTransaction {
             session: id,
-            request: req,
+            request: req.clone(),
         },
-        OperationStatus::Succeeded,
-    );
+        result,
+        |_| None,
+    )?;
     Ok(Json(result))
 }
 
@@ -2819,19 +2928,22 @@ async fn commit_transaction(
     Path((id, tx_id)): Path<(sift_protocol::SessionId, sift_protocol::TxId)>,
     Json(req): Json<EndTransactionRequest>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    if req.tx_id != tx_id {
-        return Err(ApiError::BadRequest(
+    let result = if req.tx_id != tx_id {
+        Err(ApiError::BadRequest(
             "`tx_id` body value must match tx id in path".into(),
-        ));
-    }
-    state.sessions.commit_transaction(id, req.clone()).await?;
-    state.sessions.push_operation(
+        ))
+    } else {
+        state.sessions.commit_transaction(id, req.clone()).await
+    };
+    finish_operation(
+        &state.sessions,
         Operation::CommitTransaction {
             session: id,
             request: req,
         },
-        OperationStatus::Succeeded,
-    );
+        result,
+        |_| None,
+    )?;
     Ok(Json(json!({"ok": true})))
 }
 
@@ -2840,19 +2952,22 @@ async fn rollback_transaction(
     Path((id, tx_id)): Path<(sift_protocol::SessionId, sift_protocol::TxId)>,
     Json(req): Json<EndTransactionRequest>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    if req.tx_id != tx_id {
-        return Err(ApiError::BadRequest(
+    let result = if req.tx_id != tx_id {
+        Err(ApiError::BadRequest(
             "`tx_id` body value must match tx id in path".into(),
-        ));
-    }
-    state.sessions.rollback_transaction(id, req.clone()).await?;
-    state.sessions.push_operation(
+        ))
+    } else {
+        state.sessions.rollback_transaction(id, req.clone()).await
+    };
+    finish_operation(
+        &state.sessions,
         Operation::RollbackTransaction {
             session: id,
             request: req,
         },
-        OperationStatus::Succeeded,
-    );
+        result,
+        |_| None,
+    )?;
     Ok(Json(json!({"ok": true})))
 }
 
@@ -2861,19 +2976,22 @@ async fn create_savepoint(
     Path((id, tx_id)): Path<(sift_protocol::SessionId, sift_protocol::TxId)>,
     Json(req): Json<SavepointRequest>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    if req.tx_id != tx_id {
-        return Err(ApiError::BadRequest(
+    let result = if req.tx_id != tx_id {
+        Err(ApiError::BadRequest(
             "`tx_id` body value must match tx id in path".into(),
-        ));
-    }
-    state.sessions.create_savepoint(id, req.clone()).await?;
-    state.sessions.push_operation(
+        ))
+    } else {
+        state.sessions.create_savepoint(id, req.clone()).await
+    };
+    finish_operation(
+        &state.sessions,
         Operation::Savepoint {
             session: id,
             request: req,
         },
-        OperationStatus::Succeeded,
-    );
+        result,
+        |_| None,
+    )?;
     Ok(Json(json!({"ok": true})))
 }
 
@@ -2882,22 +3000,22 @@ async fn rollback_to_savepoint(
     Path((id, tx_id)): Path<(sift_protocol::SessionId, sift_protocol::TxId)>,
     Json(req): Json<SavepointRequest>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    if req.tx_id != tx_id {
-        return Err(ApiError::BadRequest(
+    let result = if req.tx_id != tx_id {
+        Err(ApiError::BadRequest(
             "`tx_id` body value must match tx id in path".into(),
-        ));
-    }
-    state
-        .sessions
-        .rollback_to_savepoint(id, req.clone())
-        .await?;
-    state.sessions.push_operation(
+        ))
+    } else {
+        state.sessions.rollback_to_savepoint(id, req.clone()).await
+    };
+    finish_operation(
+        &state.sessions,
         Operation::RollbackToSavepoint {
             session: id,
             request: req,
         },
-        OperationStatus::Succeeded,
-    );
+        result,
+        |_| None,
+    )?;
     Ok(Json(json!({"ok": true})))
 }
 
@@ -2906,19 +3024,22 @@ async fn release_savepoint(
     Path((id, tx_id)): Path<(sift_protocol::SessionId, sift_protocol::TxId)>,
     Json(req): Json<SavepointRequest>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    if req.tx_id != tx_id {
-        return Err(ApiError::BadRequest(
+    let result = if req.tx_id != tx_id {
+        Err(ApiError::BadRequest(
             "`tx_id` body value must match tx id in path".into(),
-        ));
-    }
-    state.sessions.release_savepoint(id, req.clone()).await?;
-    state.sessions.push_operation(
+        ))
+    } else {
+        state.sessions.release_savepoint(id, req.clone()).await
+    };
+    finish_operation(
+        &state.sessions,
         Operation::ReleaseSavepoint {
             session: id,
             request: req,
         },
-        OperationStatus::Succeeded,
-    );
+        result,
+        |_| None,
+    )?;
     Ok(Json(json!({"ok": true})))
 }
 

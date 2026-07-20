@@ -38,9 +38,17 @@ pub enum Operation {
         connection: ConnectionId,
         scope: SchemaScope,
     },
+    GenerateDdl {
+        session: SessionId,
+        connection: ConnectionId,
+    },
     ExecuteQuery {
         session: SessionId,
         request: ExecuteRequestHttp,
+    },
+    ExportQuery {
+        session: SessionId,
+        connection: ConnectionId,
     },
     Complete {
         session: SessionId,
@@ -176,7 +184,9 @@ impl Operation {
             Self::OpenConnection { .. } => OperationKind::OpenConnection,
             Self::CloseConnection { .. } => OperationKind::CloseConnection,
             Self::RefreshSchema { .. } => OperationKind::RefreshSchema,
+            Self::GenerateDdl { .. } => OperationKind::GenerateDdl,
             Self::ExecuteQuery { .. } => OperationKind::ExecuteQuery,
+            Self::ExportQuery { .. } => OperationKind::ExportQuery,
             Self::Complete { .. } => OperationKind::Complete,
             Self::CancelQuery { .. } => OperationKind::CancelQuery,
             Self::PreviewEdits { .. } => OperationKind::PreviewEdits,
@@ -228,8 +238,14 @@ impl Operation {
             Operation::RefreshSchema { connection, .. } => {
                 summary("refresh", "schema", Some(connection.0 as i64))
             }
+            Operation::GenerateDdl { connection, .. } => {
+                summary("generate", "ddl", Some(connection.0 as i64))
+            }
             Operation::ExecuteQuery { session, .. } => {
                 summary("execute", "query", Some(session.0 as i64))
+            }
+            Operation::ExportQuery { connection, .. } => {
+                summary("export", "query", Some(connection.0 as i64))
             }
             Operation::Complete { session, .. } => {
                 summary("complete", "query", Some(session.0 as i64))

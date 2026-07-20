@@ -103,9 +103,9 @@ fn unavailable_reason(
         BulkInsert if engine != Some(Engine::SqlServer) => {
             Some("bulk insert is only supported by SQL Server")
         }
-        CloseConnection | RefreshSchema | ExecuteQuery | Complete | CancelQuery | PreviewEdits
-        | ApplyEdits | SearchSchema | SearchData | Explain | ListProcesses | KillProcess
-        | ImportCsv | BulkInsert
+        CloseConnection | RefreshSchema | GenerateDdl | ExecuteQuery | ExportQuery | Complete
+        | CancelQuery | PreviewEdits | ApplyEdits | SearchSchema | SearchData | Explain
+        | ListProcesses | KillProcess | ImportCsv | BulkInsert
             if !has_connection =>
         {
             Some("connection context required")
@@ -113,9 +113,9 @@ fn unavailable_reason(
         ExecuteQuery if has_active_transaction && !selected_transaction => {
             Some("select the connection's active transaction")
         }
-        CloseConnection | RefreshSchema | ExecuteQuery | Complete | CancelQuery | PreviewEdits
-        | ApplyEdits | SearchSchema | SearchData | Explain | ListProcesses | KillProcess
-        | ImportCsv | BulkInsert => None,
+        CloseConnection | RefreshSchema | GenerateDdl | ExecuteQuery | ExportQuery | Complete
+        | CancelQuery | PreviewEdits | ApplyEdits | SearchSchema | SearchData | Explain
+        | ListProcesses | KillProcess | ImportCsv | BulkInsert => None,
     }
 }
 
