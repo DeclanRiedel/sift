@@ -88,6 +88,7 @@ async fn main() -> anyhow::Result<()> {
             bearer_token: cfg.auth.bearer_token.clone(),
             loopback_bypass: cfg.auth.loopback_bypass,
             deployment: cfg.deployment,
+            transport: cfg.transport,
             instance_audience: cfg
                 .auth
                 .public_base_url

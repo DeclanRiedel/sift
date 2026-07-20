@@ -41,7 +41,7 @@ use sift_protocol::{
     WebAuthResponse, WhoAmIResponse, WsClientMessage, WsServerMessage, PROTOCOL_VERSION,
 };
 
-use crate::config::DeploymentPolicy;
+use crate::config::{DeploymentPolicy, Transport};
 use crate::error::{ApiError, ApiResult};
 use crate::room_runtime::RoomRuntime;
 use crate::session::SessionStore;
@@ -63,6 +63,7 @@ pub struct AuthState {
     pub bearer_token: Option<String>,
     pub loopback_bypass: bool,
     pub deployment: DeploymentPolicy,
+    pub transport: Transport,
     pub runtime: crate::identity::AuthRuntime,
     pub github: Option<crate::identity::GithubOAuthConfig>,
     pub instance_audience: String,
@@ -74,6 +75,7 @@ impl Default for AuthState {
             bearer_token: None,
             loopback_bypass: true,
             deployment: DeploymentPolicy::Personal,
+            transport: Transport::Loopback,
             runtime: crate::identity::AuthRuntime::default(),
             github: None,
             instance_audience: "sift:local".into(),
@@ -2552,10 +2554,36 @@ fn capability_authorization_scope(
         .principal_by_id(auth.principal_id)?
         .ok_or(ApiError::Unauthorized)?;
     let mut tenant = context.tenant_id.map(tenant_id).transpose()?;
-    let profile = context
+    let mut profile_id = context
         .connection_profile_id
         .map(connection_profile_id)
-        .transpose()?
+        .transpose()?;
+    let mut runtime_trusted_local = false;
+    if let (Some(session), Some(connection)) = (context.session, context.connection) {
+        match state.sessions.conn_entry(session, connection)?.provenance {
+            crate::session::ConnectionProvenance::TrustedLocal => runtime_trusted_local = true,
+            crate::session::ConnectionProvenance::Managed {
+                principal_id,
+                tenant_id,
+                profile_id: managed_profile,
+                ..
+            } => {
+                if principal_id != auth.principal_id {
+                    return Err(ApiError::Forbidden(
+                        "managed connection belongs to another principal".into(),
+                    ));
+                }
+                merge_capability_tenant(&mut tenant, tenant_id)?;
+                if profile_id.is_some_and(|explicit| explicit != managed_profile) {
+                    return Err(ApiError::BadRequest(
+                        "capability profile does not match runtime connection".into(),
+                    ));
+                }
+                profile_id = Some(managed_profile);
+            }
+        }
+    }
+    let profile = profile_id
         .map(|id| metadata.get_connection_profile_for_any_tenant(id))
         .transpose()?;
     if let Some(profile) = &profile {
@@ -2594,7 +2622,9 @@ fn capability_authorization_scope(
     };
     Ok(Some(AuthorizationScope {
         authenticated: true,
-        trusted_local: false,
+        trusted_local: runtime_trusted_local
+            || (state.auth.deployment == DeploymentPolicy::Personal
+                && state.auth.transport == Transport::Loopback),
         instance_admin: principal.is_instance_admin,
         tenant_role,
         room_role,
@@ -4250,12 +4280,37 @@ async fn open_connection_from_profile(
             .map_err(Into::into)
     })
     .await?;
+    let tenant_role = auth
+        .tenants
+        .iter()
+        .find(|membership| membership.tenant.id == tenant)
+        .map(|membership| sift_protocol::TenantRole::from(&membership.role))
+        .ok_or_else(|| ApiError::Forbidden("tenant membership required".into()))?;
+    let authorization = crate::authorization::AuthorizationScope {
+        authenticated: true,
+        trusted_local: state.auth.deployment == DeploymentPolicy::Personal
+            && state.auth.transport == Transport::Loopback,
+        instance_admin: false,
+        tenant_role: Some(tenant_role),
+        room_role: None,
+        connection_policy: Some(profile.policy.clone()),
+    };
+    crate::authorization::authorize(&authorization, sift_protocol::OperationKind::OpenConnection)
+        .map_err(|denial| ApiError::Forbidden(denial.public_reason().into()))?;
     let spec = metadata
         .resolve_connection_spec(tenant, auth.principal_id, profile_id)
         .await?;
     let info = state
         .sessions
-        .open_connection(session_id, profile.engine, spec)
+        .open_managed_connection(
+            session_id,
+            profile.engine,
+            spec,
+            auth.principal_id,
+            tenant,
+            profile_id,
+            profile.policy.revision,
+        )
         .await?;
     push_metadata_operation(
         &state,
@@ -4334,6 +4389,13 @@ async fn open_connection(
 ) -> ApiResult<Json<sift_protocol::ConnectionInfo>> {
     if state.shutdown.is_draining() {
         return Err(ApiError::ServiceDraining);
+    }
+    if state.auth.deployment != DeploymentPolicy::Personal
+        || state.auth.transport != Transport::Loopback
+    {
+        return Err(ApiError::Forbidden(
+            "raw connection specifications are available only in personal-loopback mode".into(),
+        ));
     }
     let engine = req.engine;
     let operation = Operation::OpenConnection {

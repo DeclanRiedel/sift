@@ -627,6 +627,52 @@ impl SessionStore {
         engine: Engine,
         spec: ConnectionSpec,
     ) -> ApiResult<ConnectionInfo> {
+        self.open_connection_with_provenance(
+            session_id,
+            engine,
+            spec,
+            ConnectionProvenance::TrustedLocal,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn open_managed_connection(
+        &self,
+        session_id: SessionId,
+        engine: Engine,
+        spec: ConnectionSpec,
+        principal_id: PrincipalId,
+        tenant_id: sift_metadata::TenantId,
+        profile_id: sift_metadata::ConnectionProfileId,
+        policy_revision: u64,
+    ) -> ApiResult<ConnectionInfo> {
+        if self.session_owner(session_id)? != Some(principal_id) {
+            return Err(ApiError::Forbidden(
+                "managed connection principal must own the session".into(),
+            ));
+        }
+        self.open_connection_with_provenance(
+            session_id,
+            engine,
+            spec,
+            ConnectionProvenance::Managed {
+                principal_id,
+                tenant_id,
+                profile_id,
+                policy_revision,
+            },
+        )
+        .await
+    }
+
+    async fn open_connection_with_provenance(
+        &self,
+        session_id: SessionId,
+        engine: Engine,
+        spec: ConnectionSpec,
+        provenance: ConnectionProvenance,
+    ) -> ApiResult<ConnectionInfo> {
         if !self.inner.sessions.contains_key(&session_id) {
             return Err(ApiError::SessionNotFound(session_id));
         }
@@ -655,6 +701,7 @@ impl SessionStore {
                     driver: driver.clone(),
                     info: info.clone(),
                     spec,
+                    provenance,
                 },
             );
             info
@@ -1982,6 +2029,7 @@ impl SessionStore {
         Ok(ConnectionEntryClone {
             driver: entry.driver.clone(),
             handle: entry.handle.clone(),
+            provenance: entry.provenance.clone(),
         })
     }
 
@@ -2026,6 +2074,18 @@ impl SessionStore {
 pub struct ConnectionEntryClone {
     pub driver: Arc<dyn Driver>,
     pub handle: ConnHandle,
+    pub provenance: ConnectionProvenance,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConnectionProvenance {
+    TrustedLocal,
+    Managed {
+        principal_id: PrincipalId,
+        tenant_id: sift_metadata::TenantId,
+        profile_id: sift_metadata::ConnectionProfileId,
+        policy_revision: u64,
+    },
 }
 
 pub struct Session {
@@ -2059,6 +2119,7 @@ pub struct ConnectionEntry {
     /// Original spec, retained so a broken connection can be transparently
     /// re-established for idempotent operations (ping/schema).
     pub spec: ConnectionSpec,
+    pub provenance: ConnectionProvenance,
 }
 
 pub struct TransactionEntry {

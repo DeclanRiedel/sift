@@ -2334,7 +2334,9 @@ async fn room_websocket_applies_and_broadcasts_document_operations() {
 
 #[tokio::test]
 async fn metadata_connection_profile_opens_session_connection() {
-    let app = app(test_state_with_metadata(true));
+    let state = test_state_with_metadata(true);
+    let sessions = state.sessions.clone();
+    let app = app(state);
     let session: sift_protocol::SessionInfo = body_json(
         app.clone()
             .oneshot(post_json_str("/v1/sessions", r#"{"tag":"profile"}"#))
@@ -2383,6 +2385,49 @@ async fn metadata_connection_profile_opens_session_connection() {
     assert_eq!(res.status(), StatusCode::OK);
     let conn: sift_protocol::ConnectionInfo = body_json(res.into_body()).await;
     assert_eq!(conn.engine, Engine::Postgres);
+    assert_eq!(
+        sessions.conn_entry(session.id, conn.id).unwrap().provenance,
+        sift_server::ConnectionProvenance::Managed {
+            principal_id: sift_metadata::PrincipalId(1),
+            tenant_id: sift_metadata::TenantId(1),
+            profile_id: sift_metadata::ConnectionProfileId(profile_id),
+            policy_revision: 0,
+        }
+    );
+}
+
+#[tokio::test]
+async fn network_mode_rejects_raw_connection_specs() {
+    let mut state = test_state_with_token("network-token");
+    state.auth.transport = sift_server::config::Transport::Network;
+    let app = app(state);
+    let session: sift_protocol::SessionInfo = body_json(
+        app.clone()
+            .oneshot(
+                Request::post("/v1/sessions")
+                    .header("authorization", "Bearer network-token")
+                    .header("content-type", "application/json")
+                    .body(Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+            .into_body(),
+    )
+    .await;
+    let response = app
+        .oneshot(
+            Request::post(format!("/v1/sessions/{}/connections", session.id))
+                .header("authorization", "Bearer network-token")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"engine":"postgres","host":"mock","user":"alice"}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
 }
 
 #[tokio::test]

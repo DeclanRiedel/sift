@@ -163,7 +163,7 @@ and tenant-resource enforcement remain absent.
       instance-admin-managed tenant limit overrides.
 - [x] [Implement] Central authorization evaluator and conservative tenant/room
       role matrix; capability discovery consumes the same evaluator.
-- [ ] [Implement] Runtime provenance and connection-entry closure: managed
+- [x] [Implement] Runtime provenance and connection-entry closure: managed
       connections carry principal/tenant/profile/revision; raw specs are
       personal-loopback only.
 - [ ] [Implement] Connection-profile permissions: `read_only`,
@@ -215,7 +215,7 @@ session. CRDT only for query text; everything else server-authoritative.
 - [ ] [Implement] Ephemeral presence channel distinct from the durable
       doc-op channel; not persisted.
 - [ ] [Implement] Shared room connection with role gating; result-reference
-      broadcast (today the room emits a `RoomQueryResult` *summary*
+      broadcast (today the room emits a `RoomQueryResult` _summary_
       (`http.rs:1731-1738`), not a cursor reference peers can page from).
 - [ ] [Implement] Observer lag recovery + follow mode.
 
@@ -265,6 +265,7 @@ hooks without forking the server.
       for user DBs (SSH/SOCKS5/HTTP CONNECT/SSM); plugin/extension loading.
 - [ ] [Implement] Driver RPC host; `sift mcp` subcommand; governance
       middleware; connection hooks; tunnel profiles; extension loader.
+- [ ] The goal for this phase to build a layer for easily adding plugins extensions as well as ways to send db/schema data to an agent as well as have agents edit inside the IDE with good context.
 
 ## Phase J — Operations polish
 
@@ -279,7 +280,7 @@ Goal: the last mile before a real release.
 - [ ] [Design] Release + packaging (musl/static Linux, macOS, Windows;
       per-channel artifacts; signature material for the Phase H updater).
 - [ ] [Implement] Prometheus metrics endpoint; OTLP trace export; `sift
-      migrate` subcommand + startup gate with pre-release CI matrix;
+    migrate` subcommand + startup gate with pre-release CI matrix;
       backup/restore driver methods + Operations; plan capture wired into
       `execute`; scheduler runtime.
 - [ ] [Implement] **OpenAPI generation from typed schemas** to replace the
@@ -312,31 +313,32 @@ Goal: the last mile before a real release.
 
 ## ADR candidates this list implies
 
-| # | Candidate | Origin | Status |
-| --- | --- | --- | --- |
-| ADR-011 | server-side cursor registry (cap + LRA eviction + spill/resume) | Phase C | written |
-| ADR-012 | schema cache with TTL + engine-specific invalidators | Phase C | written |
-| ADR-013 | driver isolation | Phase B | written; both engines meet the containment boundary |
-| ADR-014 | collaboration scope (CRDT text only) | Phase G | not written |
-| ADR-016 | protocol versioning + semver stability | Phase B | written; pin-or-proceed negotiation, monotonic integer version |
-| ADR-017 | driver trait shape | Phase A | written; Phase A trait lock |
-| ADR-018 | graceful shutdown contract | Phase B | written |
-| ADR-019 | audit durability | Phase B | written |
-| ADR-020 | authorization model | Phase F | written |
-| ADR-021 | remote topology | Phase H | not written |
-| ADR-022 | driver extensibility | Phase I | not written |
-| ADR-023 | inline-edit conflict & row-identity model | Phase D | drafted in `docs/PLANS/inline-edit-dml.md` |
-| ADR-024 | search architecture (progressive schema index + bounded data fan-out) | Phase D | drafted in `docs/PLANS/schema-data-search.md` |
-| ADR-025 | execution-plan model (typed PlanNode + XML dep + ANALYZE-rollback) | Phase D | drafted in `docs/PLANS/execution-plans.md` |
-| ADR-026 | server-owned transaction panel state | Phase D | written |
-| ADR-027 | bounded database process control | Phase D | written |
-| ADR-028 | server-derived operation capabilities | Phase D | written |
-| ADR-029 | normalized CSV import | Phase D | written |
-| ADR-030 | instance-owned closed registration + hosted identity | Phase E | written |
+| #       | Candidate                                                             | Origin  | Status                                                         |
+| ------- | --------------------------------------------------------------------- | ------- | -------------------------------------------------------------- |
+| ADR-011 | server-side cursor registry (cap + LRA eviction + spill/resume)       | Phase C | written                                                        |
+| ADR-012 | schema cache with TTL + engine-specific invalidators                  | Phase C | written                                                        |
+| ADR-013 | driver isolation                                                      | Phase B | written; both engines meet the containment boundary            |
+| ADR-014 | collaboration scope (CRDT text only)                                  | Phase G | not written                                                    |
+| ADR-016 | protocol versioning + semver stability                                | Phase B | written; pin-or-proceed negotiation, monotonic integer version |
+| ADR-017 | driver trait shape                                                    | Phase A | written; Phase A trait lock                                    |
+| ADR-018 | graceful shutdown contract                                            | Phase B | written                                                        |
+| ADR-019 | audit durability                                                      | Phase B | written                                                        |
+| ADR-020 | authorization model                                                   | Phase F | written                                                        |
+| ADR-021 | remote topology                                                       | Phase H | not written                                                    |
+| ADR-022 | driver extensibility                                                  | Phase I | not written                                                    |
+| ADR-023 | inline-edit conflict & row-identity model                             | Phase D | drafted in `docs/PLANS/inline-edit-dml.md`                     |
+| ADR-024 | search architecture (progressive schema index + bounded data fan-out) | Phase D | drafted in `docs/PLANS/schema-data-search.md`                  |
+| ADR-025 | execution-plan model (typed PlanNode + XML dep + ANALYZE-rollback)    | Phase D | drafted in `docs/PLANS/execution-plans.md`                     |
+| ADR-026 | server-owned transaction panel state                                  | Phase D | written                                                        |
+| ADR-027 | bounded database process control                                      | Phase D | written                                                        |
+| ADR-028 | server-derived operation capabilities                                 | Phase D | written                                                        |
+| ADR-029 | normalized CSV import                                                 | Phase D | written                                                        |
+| ADR-030 | instance-owned closed registration + hosted identity                  | Phase E | written                                                        |
 
 ## Reference: what is being stolen, and what is not
 
 Stealing (with attribution):
+
 - **Zed** — process discipline (→ driver isolation ADR-013), restart model
   (→ metadata + room snapshots), action system with capability checks
   (→ Phase D capability query), background updater (Phase H), CRDT-only-
@@ -350,6 +352,7 @@ Stealing (with attribution):
   query fingerprinting + centralized error correlation id (Phase B).
 
 Not copying (per ZED_LESSONS §5):
+
 - CRDTs for results/schema/sessions — those stay server-authoritative.
 - Local-first file ownership — sift's source of truth is the user DB, not
   a client-owned file (ADR-002).
