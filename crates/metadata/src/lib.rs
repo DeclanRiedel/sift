@@ -919,22 +919,24 @@ impl MetadataStore {
             .await?;
         let now = Utc::now();
         let expires = now + chrono::Duration::minutes(10);
-        let conn = self.conn()?;
-        let result = conn.execute(
-            "INSERT INTO oauth_login_attempt
-             (id, provider, state_lookup, state_digest, pkce_verifier_handle,
-              client_kind, created_at, expires_at)
-             VALUES (?1, 'github', ?2, ?3, ?4, ?5, ?6, ?7)",
-            params![
-                Uuid::new_v4().to_string(),
-                lookup,
-                state_digest,
-                verifier_handle,
-                client_kind.as_str(),
-                now.to_rfc3339(),
-                expires.to_rfc3339()
-            ],
-        );
+        let result = {
+            let conn = self.conn()?;
+            conn.execute(
+                "INSERT INTO oauth_login_attempt
+                 (id, provider, state_lookup, state_digest, pkce_verifier_handle,
+                  client_kind, created_at, expires_at)
+                 VALUES (?1, 'github', ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![
+                    Uuid::new_v4().to_string(),
+                    lookup,
+                    state_digest,
+                    verifier_handle,
+                    client_kind.as_str(),
+                    now.to_rfc3339(),
+                    expires.to_rfc3339()
+                ],
+            )
+        };
         if let Err(error) = result {
             self.delete_oauth_secret_best_effort(&verifier_handle, "create_oauth_attempt_rollback")
                 .await;
@@ -953,37 +955,40 @@ impl MetadataStore {
         let key = self.auth_token_mac_key().await?;
         let digest = auth_token_digest(&key, state);
         let now = Utc::now();
-        let mut conn = self.conn()?;
-        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let candidate = tx
-            .query_row(
-                "SELECT id, state_digest, pkce_verifier_handle, client_kind
-                 FROM oauth_login_attempt
-                 WHERE provider = 'github' AND state_lookup = ?1
-                   AND consumed_at IS NULL AND expires_at > ?2",
-                params![lookup, now.to_rfc3339()],
-                |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, String>(2)?,
-                        row.get::<_, String>(3)?,
-                    ))
-                },
-            )
-            .optional()?;
-        let Some((id, stored_digest, verifier_handle, client_kind)) = candidate else {
-            return Err(MetadataError::InvalidOAuthAttempt);
+        let (verifier_handle, client_kind) = {
+            let mut conn = self.conn()?;
+            let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            let candidate = tx
+                .query_row(
+                    "SELECT id, state_digest, pkce_verifier_handle, client_kind
+                     FROM oauth_login_attempt
+                     WHERE provider = 'github' AND state_lookup = ?1
+                       AND consumed_at IS NULL AND expires_at > ?2",
+                    params![lookup, now.to_rfc3339()],
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, String>(2)?,
+                            row.get::<_, String>(3)?,
+                        ))
+                    },
+                )
+                .optional()?;
+            let Some((id, stored_digest, verifier_handle, client_kind)) = candidate else {
+                return Err(MetadataError::InvalidOAuthAttempt);
+            };
+            if !constant_time_eq(stored_digest.as_bytes(), digest.as_bytes()) {
+                return Err(MetadataError::InvalidOAuthAttempt);
+            }
+            tx.execute(
+                "UPDATE oauth_login_attempt SET consumed_at = ?1
+                 WHERE id = ?2 AND consumed_at IS NULL",
+                params![now.to_rfc3339(), id],
+            )?;
+            tx.commit()?;
+            (verifier_handle, client_kind)
         };
-        if !constant_time_eq(stored_digest.as_bytes(), digest.as_bytes()) {
-            return Err(MetadataError::InvalidOAuthAttempt);
-        }
-        tx.execute(
-            "UPDATE oauth_login_attempt SET consumed_at = ?1
-             WHERE id = ?2 AND consumed_at IS NULL",
-            params![now.to_rfc3339(), id],
-        )?;
-        tx.commit()?;
         let verifier = self
             .secrets
             .get(OAUTH_SECRET_NAMESPACE, &verifier_handle)

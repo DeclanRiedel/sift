@@ -88,6 +88,21 @@ async fn main() -> anyhow::Result<()> {
             bearer_token: cfg.auth.bearer_token.clone(),
             loopback_bypass: cfg.auth.loopback_bypass,
             deployment: cfg.deployment,
+            github: match (
+                cfg.auth.github_client_id.clone(),
+                cfg.auth.github_client_secret.clone(),
+                cfg.auth.public_base_url.clone(),
+            ) {
+                (Some(client_id), Some(client_secret), Some(public_base_url)) => {
+                    Some(sift_server::identity::GithubOAuthConfig {
+                        client_id,
+                        client_secret,
+                        public_base_url,
+                        http: reqwest::Client::new(),
+                    })
+                }
+                _ => None,
+            },
             ..Default::default()
         },
         metadata,

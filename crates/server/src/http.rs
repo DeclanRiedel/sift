@@ -6,7 +6,7 @@ use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Extension, Path, Query, State};
 use axum::http::{header, header::HeaderName, HeaderMap, HeaderValue, Request, StatusCode};
 use axum::middleware::{from_fn, from_fn_with_state, Next};
-use axum::response::{IntoResponse, Response};
+use axum::response::{IntoResponse, Redirect, Response};
 use axum::routing::{delete, get, post, put};
 use axum::{Json, Router};
 use futures::{SinkExt, StreamExt};
@@ -18,20 +18,21 @@ use std::time::Instant;
 use sift_doc::{CrdtKind, DocumentSnapshot, TextDocument, TextOperation};
 use sift_metadata::{
     ApiTokenId, AuthClientKind as MetadataAuthClientKind, ConnectionProfileId, CrdtType, Document,
-    DocumentId, MetadataStore, NewConnectionProfile, NewDocument, NewOperationAudit,
-    NewQueryHistory, NewRoom, NewSavedQuery, PrincipalId, QueryHistory, QueryStatus,
-    RefreshAuthResult, Room, RoomId, RoomKind, RoomMember, RoomRole, SavedQuery, SavedQueryFilter,
-    SavedQueryId, SavedQueryScope, TenantId, TenantMembership, UpdateSavedQuery,
+    DocumentId, GithubAllowlistId, GithubProfile, MetadataStore, NewConnectionProfile, NewDocument,
+    NewOperationAudit, NewQueryHistory, NewRoom, NewSavedQuery, PrincipalId, QueryHistory,
+    QueryStatus, RefreshAuthResult, Room, RoomId, RoomKind, RoomMember, RoomRole, SavedQuery,
+    SavedQueryFilter, SavedQueryId, SavedQueryScope, TenantId, TenantMembership, UpdateSavedQuery,
 };
 use sift_protocol::{
     AuditEntry, AuthClientKind, AuthPrincipal, AuthTenantMembership, AuthTokensResponse,
     BeginTransactionRequest, BulkInsertRequest, CancelRequest, ChangePasswordRequest,
-    CsvImportRequest, DocumentOperationEnvelope, EndTransactionRequest, ExecuteRequest,
-    ExecuteRequestHttp, Health, KillProcessRequest, ObjectPath, OpenConnectionRequest,
-    OpenSessionRequest, Operation, OperationStatus, PasswordLoginRequest, Readiness,
-    RefreshAuthRequest, RoomClientMessage, RoomQueryResult, RoomQueryStatus, RoomServerMessage,
-    SavepointRequest, SchemaFilter, SchemaScope, TransactionPreviewRequest, WebAuthResponse,
-    WhoAmIResponse, WsClientMessage, WsServerMessage, PROTOCOL_VERSION,
+    CreateGithubAllowlistRequest, CsvImportRequest, DocumentOperationEnvelope,
+    EndTransactionRequest, ExecuteRequest, ExecuteRequestHttp, Health, KillProcessRequest,
+    ObjectPath, OpenConnectionRequest, OpenSessionRequest, Operation, OperationStatus,
+    PasswordLoginRequest, Readiness, RefreshAuthRequest, RoomClientMessage, RoomQueryResult,
+    RoomQueryStatus, RoomServerMessage, SavepointRequest, SchemaFilter, SchemaScope,
+    TransactionPreviewRequest, WebAuthResponse, WhoAmIResponse, WsClientMessage, WsServerMessage,
+    PROTOCOL_VERSION,
 };
 
 use crate::config::DeploymentPolicy;
@@ -57,6 +58,7 @@ pub struct AuthState {
     pub loopback_bypass: bool,
     pub deployment: DeploymentPolicy,
     pub runtime: crate::identity::AuthRuntime,
+    pub github: Option<crate::identity::GithubOAuthConfig>,
 }
 
 impl Default for AuthState {
@@ -66,6 +68,7 @@ impl Default for AuthState {
             loopback_bypass: true,
             deployment: DeploymentPolicy::Personal,
             runtime: crate::identity::AuthRuntime::default(),
+            github: None,
         }
     }
 }
@@ -85,6 +88,16 @@ pub fn app(state: AppState) -> Router {
         .route("/v1/auth/logout-all", post(logout_all_auth))
         .route("/v1/auth/whoami", get(whoami))
         .route("/v1/auth/password", put(change_password))
+        .route("/v1/auth/github/start", get(github_start))
+        .route("/v1/auth/github/callback", get(github_callback))
+        .route(
+            "/v1/admin/auth/github-allowlist",
+            get(list_github_allowlist).post(create_github_allowlist),
+        )
+        .route(
+            "/v1/admin/auth/github-allowlist/:id",
+            delete(revoke_github_allowlist),
+        )
         .route("/v1/metadata/tenants", get(list_metadata_tenants))
         .route(
             "/v1/metadata/rooms",
@@ -459,7 +472,13 @@ async fn auth_middleware(
 fn is_public_path(path: &str) -> bool {
     matches!(
         path,
-        "/v1/health" | "/v1/ready" | "/v1/openapi.json" | "/v1/auth/login" | "/v1/auth/refresh"
+        "/v1/health"
+            | "/v1/ready"
+            | "/v1/openapi.json"
+            | "/v1/auth/login"
+            | "/v1/auth/refresh"
+            | "/v1/auth/github/start"
+            | "/v1/auth/github/callback"
     )
 }
 
@@ -817,6 +836,256 @@ async fn change_password(
         None,
     );
     Ok(Json(json!({"ok": true})))
+}
+
+#[derive(Deserialize)]
+struct GithubStartQuery {
+    client_kind: Option<AuthClientKind>,
+}
+
+#[derive(Deserialize)]
+struct GithubCallbackQuery {
+    code: Option<String>,
+    state: Option<String>,
+    error: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct GithubTokenResponse {
+    access_token: String,
+}
+
+#[derive(Deserialize)]
+struct GithubUserResponse {
+    id: u64,
+    login: String,
+    name: Option<String>,
+    email: Option<String>,
+    avatar_url: Option<String>,
+}
+
+async fn github_start(
+    State(state): State<AppState>,
+    Query(query): Query<GithubStartQuery>,
+) -> ApiResult<Redirect> {
+    use base64::Engine as _;
+    use sha2::Digest as _;
+
+    let config =
+        state.auth.github.as_ref().ok_or_else(|| {
+            ApiError::BadRequest("GitHub authentication is not configured".into())
+        })?;
+    let client_kind = query.client_kind.unwrap_or(AuthClientKind::Web);
+    if client_kind != AuthClientKind::Web {
+        return Err(ApiError::BadRequest(
+            "native GitHub callback handoff is not available yet".into(),
+        ));
+    }
+    let attempt = metadata_store(&state)?
+        .create_github_oauth_attempt(MetadataAuthClientKind::Web)
+        .await?;
+    let challenge = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .encode(sha2::Sha256::digest(attempt.code_verifier.as_bytes()));
+    let callback = format!(
+        "{}/v1/auth/github/callback",
+        config.public_base_url.trim_end_matches('/')
+    );
+    let mut authorize = reqwest::Url::parse("https://github.com/login/oauth/authorize")
+        .map_err(|error| ApiError::Internal(error.to_string()))?;
+    authorize.query_pairs_mut().extend_pairs([
+        ("client_id", config.client_id.as_str()),
+        ("redirect_uri", callback.as_str()),
+        ("scope", "read:user"),
+        ("state", attempt.state.as_str()),
+        ("code_challenge", challenge.as_str()),
+        ("code_challenge_method", "S256"),
+        ("allow_signup", "false"),
+    ]);
+    Ok(Redirect::temporary(authorize.as_str()))
+}
+
+async fn github_callback(
+    State(state): State<AppState>,
+    Query(query): Query<GithubCallbackQuery>,
+) -> ApiResult<Response> {
+    if query.error.is_some() {
+        return Err(ApiError::Unauthorized);
+    }
+    let code = query.code.as_deref().ok_or(ApiError::Unauthorized)?;
+    let oauth_state = query.state.as_deref().ok_or(ApiError::Unauthorized)?;
+    let config =
+        state.auth.github.as_ref().ok_or_else(|| {
+            ApiError::BadRequest("GitHub authentication is not configured".into())
+        })?;
+    let attempt = metadata_store(&state)?
+        .consume_github_oauth_attempt(oauth_state)
+        .await
+        .map_err(|_| ApiError::Unauthorized)?;
+    if attempt.client_kind != MetadataAuthClientKind::Web {
+        return Err(ApiError::Unauthorized);
+    }
+    let callback = format!(
+        "{}/v1/auth/github/callback",
+        config.public_base_url.trim_end_matches('/')
+    );
+    let token_response = config
+        .http
+        .post("https://github.com/login/oauth/access_token")
+        .header(header::ACCEPT, "application/json")
+        .form(&[
+            ("client_id", config.client_id.as_str()),
+            ("client_secret", config.client_secret.as_str()),
+            ("code", code),
+            ("redirect_uri", callback.as_str()),
+            ("code_verifier", attempt.code_verifier.as_str()),
+        ])
+        .send()
+        .await
+        .map_err(|_| ApiError::Unauthorized)?;
+    if !token_response.status().is_success() {
+        return Err(ApiError::Unauthorized);
+    }
+    let token: GithubTokenResponse = token_response
+        .json()
+        .await
+        .map_err(|_| ApiError::Unauthorized)?;
+    let user_response = config
+        .http
+        .get("https://api.github.com/user")
+        .bearer_auth(&token.access_token)
+        .header(header::ACCEPT, "application/vnd.github+json")
+        .header(header::USER_AGENT, "sift")
+        .send()
+        .await
+        .map_err(|_| ApiError::Unauthorized)?;
+    if !user_response.status().is_success() {
+        return Err(ApiError::Unauthorized);
+    }
+    let user: GithubUserResponse = user_response
+        .json()
+        .await
+        .map_err(|_| ApiError::Unauthorized)?;
+    // `token` is dropped immediately after this profile fetch and is never
+    // persisted or included in operation/audit values.
+    drop(token);
+    let metadata = metadata_store(&state)?;
+    let principal = metadata
+        .complete_github_identity(
+            GithubProfile {
+                id: user.id,
+                login: user.login,
+                display_name: user.name,
+                email: user.email,
+                avatar_url: user.avatar_url,
+            },
+            NewOperationAudit {
+                actor_principal_id: None,
+                action: "authenticate.github".into(),
+                target: "auth_identity".into(),
+                target_id: None,
+                status: "succeeded".into(),
+                result_code: None,
+                row_count: None,
+                error_message: None,
+                correlation_id: crate::correlation::current(),
+            },
+        )?
+        .ok_or(ApiError::Unauthorized)?;
+    let tokens = metadata
+        .issue_auth_session(
+            principal.id,
+            MetadataAuthClientKind::Web,
+            Some("GitHub OAuth"),
+            metadata_audit_record(
+                principal.id,
+                "authenticate.github.session",
+                "auth_session",
+                None,
+            ),
+        )
+        .await?;
+    state.sessions.push_operation_local(
+        Operation::Authenticate {
+            method: sift_protocol::AuthenticationMethod::Github,
+        },
+        OperationStatus::Succeeded,
+        Some(principal.id.0),
+        None,
+        None,
+        None,
+    );
+    auth_login_response(tokens, true)
+}
+
+async fn create_github_allowlist(
+    State(state): State<AppState>,
+    Extension(auth): Extension<AuthContext>,
+    Json(request): Json<CreateGithubAllowlistRequest>,
+) -> ApiResult<Json<sift_metadata::GithubAllowlistEntry>> {
+    ensure_instance_admin(&state, &auth)?;
+    let login = crate::identity::normalize_github_login(&request.login)
+        .map_err(|error| ApiError::BadRequest(error.to_string()))?;
+    let target = request.target_principal_id.map(PrincipalId);
+    if let Some(target) = target {
+        metadata_store(&state)?
+            .principal_by_id(target)?
+            .ok_or(ApiError::Metadata(
+                sift_metadata::MetadataError::PrincipalNotFound(target),
+            ))?;
+    }
+    let entry = metadata_store(&state)?.create_github_allowlist_entry(
+        &login,
+        target,
+        auth.principal_id,
+        metadata_audit_record(
+            auth.principal_id,
+            "github_allowlist.create",
+            "github_allowlist",
+            None,
+        ),
+    )?;
+    Ok(Json(entry))
+}
+
+async fn list_github_allowlist(
+    State(state): State<AppState>,
+    Extension(auth): Extension<AuthContext>,
+) -> ApiResult<Json<Vec<sift_metadata::GithubAllowlistEntry>>> {
+    ensure_instance_admin(&state, &auth)?;
+    Ok(Json(
+        metadata_store(&state)?.list_github_allowlist_entries()?,
+    ))
+}
+
+async fn revoke_github_allowlist(
+    State(state): State<AppState>,
+    Extension(auth): Extension<AuthContext>,
+    Path(id): Path<i64>,
+) -> ApiResult<Json<serde_json::Value>> {
+    ensure_instance_admin(&state, &auth)?;
+    metadata_store(&state)?.revoke_github_allowlist_entry(
+        GithubAllowlistId(id),
+        metadata_audit_record(
+            auth.principal_id,
+            "github_allowlist.revoke",
+            "github_allowlist",
+            Some(id),
+        ),
+    )?;
+    Ok(Json(json!({"ok": true})))
+}
+
+fn ensure_instance_admin(state: &AppState, auth: &AuthContext) -> ApiResult<()> {
+    let principal = metadata_store(state)?
+        .principal_by_id(auth.principal_id)?
+        .ok_or(ApiError::Unauthorized)?;
+    if principal.is_instance_admin && principal.disabled_at.is_none() {
+        Ok(())
+    } else {
+        Err(ApiError::Forbidden(
+            "instance administrator access required".into(),
+        ))
+    }
 }
 
 async fn whoami(
@@ -1562,6 +1831,45 @@ async fn openapi() -> Json<serde_json::Value> {
                     }
                 }
             },
+            "/v1/auth/github/start": {
+                "get": {
+                    "operationId": "githubAuthStart",
+                    "summary": "Start the instance GitHub OAuth flow with state and S256 PKCE",
+                    "security": [],
+                    "responses": { "307": { "description": "GitHub authorization redirect" } }
+                }
+            },
+            "/v1/auth/github/callback": {
+                "get": {
+                    "operationId": "githubAuthCallback",
+                    "summary": "Complete GitHub OAuth, enforce the allowlist, and set browser cookies",
+                    "security": [],
+                    "responses": {
+                        "200": { "description": "Browser authentication metadata", "content": json_content("WebAuthResponse") },
+                        "401": { "description": "OAuth or allowlist denial" }
+                    }
+                }
+            },
+            "/v1/admin/auth/github-allowlist": {
+                "get": {
+                    "operationId": "listGithubAllowlist",
+                    "summary": "List GitHub allowlist entries (instance admin)",
+                    "responses": { "200": { "description": "Allowlist entries", "content": json_array_content("GithubAllowlistEntry") } }
+                },
+                "post": {
+                    "operationId": "createGithubAllowlist",
+                    "summary": "Allow a GitHub login, optionally linked to an existing principal",
+                    "requestBody": json_body("CreateGithubAllowlistRequest"),
+                    "responses": { "200": { "description": "Allowlist entry", "content": json_content("GithubAllowlistEntry") } }
+                }
+            },
+            "/v1/admin/auth/github-allowlist/{id}": {
+                "delete": {
+                    "operationId": "revokeGithubAllowlist",
+                    "summary": "Revoke a pending GitHub allowlist entry",
+                    "responses": { "200": { "description": "Ack", "content": json_object_content() } }
+                }
+            },
             "/v1/audit": {
                 "get": {
                     "operationId": "listAudit",
@@ -2077,6 +2385,10 @@ fn protocol_schema_refs() -> serde_json::Value {
     add_schema::<sift_protocol::AuditEntry>("AuditEntry", &mut schemas);
     add_schema::<sift_protocol::PasswordLoginRequest>("PasswordLoginRequest", &mut schemas);
     add_schema::<sift_protocol::ChangePasswordRequest>("ChangePasswordRequest", &mut schemas);
+    add_schema::<sift_protocol::CreateGithubAllowlistRequest>(
+        "CreateGithubAllowlistRequest",
+        &mut schemas,
+    );
     add_schema::<sift_protocol::RefreshAuthRequest>("RefreshAuthRequest", &mut schemas);
     add_schema::<sift_protocol::AuthTokensResponse>("AuthTokensResponse", &mut schemas);
     add_schema::<sift_protocol::WebAuthResponse>("WebAuthResponse", &mut schemas);
@@ -2136,6 +2448,7 @@ fn protocol_schema_refs() -> serde_json::Value {
     add_schema::<sift_protocol::RoomClientMessage>("RoomClientMessage", &mut schemas);
     add_schema::<sift_protocol::RoomServerMessage>("RoomServerMessage", &mut schemas);
     add_schema::<sift_metadata::ApiTokenRow>("ApiTokenRow", &mut schemas);
+    add_schema::<sift_metadata::GithubAllowlistEntry>("GithubAllowlistEntry", &mut schemas);
     add_schema::<sift_metadata::ConnectionProfile>("ConnectionProfile", &mut schemas);
     add_schema::<sift_metadata::Document>("Document", &mut schemas);
     add_schema::<sift_metadata::OperationAudit>("OperationAudit", &mut schemas);

@@ -216,6 +216,7 @@ impl Config {
                 || parsed.host_str().is_none()
                 || parsed.username() != ""
                 || parsed.password().is_some()
+                || parsed.path() != "/"
                 || parsed.query().is_some()
                 || parsed.fragment().is_some()
             {

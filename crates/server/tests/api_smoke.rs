@@ -1228,6 +1228,98 @@ async fn web_password_auth_uses_http_only_cookies_and_requires_csrf() {
 }
 
 #[tokio::test]
+async fn github_start_uses_fixed_callback_pkce_and_admin_owned_allowlist() {
+    let mut state = test_state_with_metadata(false);
+    let metadata = state.metadata.as_ref().unwrap();
+    let admin = metadata
+        .create_password_principal(
+            NewPasswordPrincipal {
+                username: "instance-admin",
+                display_name: "Instance Admin",
+                email: None,
+                is_instance_admin: true,
+            },
+            b"test-verifier",
+            NewOperationAudit {
+                actor_principal_id: Some(PrincipalId(1)),
+                action: "create".into(),
+                target: "principal".into(),
+                target_id: None,
+                status: "succeeded".into(),
+                result_code: None,
+                row_count: None,
+                error_message: None,
+                correlation_id: None,
+            },
+        )
+        .await
+        .unwrap();
+    let (_, admin_token) = metadata
+        .issue_api_token(admin.id, None, "admin test", None)
+        .unwrap();
+    state.auth.github = Some(sift_server::identity::GithubOAuthConfig {
+        client_id: "github-client-id".into(),
+        client_secret: "github-client-secret".into(),
+        public_base_url: "https://sift.example.test".into(),
+        http: reqwest::Client::new(),
+    });
+    let app = app(state);
+
+    let start = app
+        .clone()
+        .oneshot(
+            Request::get("/v1/auth/github/start")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(start.status(), StatusCode::TEMPORARY_REDIRECT);
+    let location = start.headers()["location"].to_str().unwrap();
+    let location = reqwest::Url::parse(location).unwrap();
+    assert_eq!(location.host_str(), Some("github.com"));
+    let query: std::collections::HashMap<_, _> = location.query_pairs().into_owned().collect();
+    assert_eq!(
+        query.get("redirect_uri").map(String::as_str),
+        Some("https://sift.example.test/v1/auth/github/callback")
+    );
+    assert_eq!(query.get("code_challenge").unwrap().len(), 43);
+    assert_eq!(query.get("code_challenge_method").unwrap(), "S256");
+    assert_eq!(query.get("scope").unwrap(), "read:user");
+    assert!(!location.as_str().contains("github-client-secret"));
+
+    let created = app
+        .clone()
+        .oneshot(
+            Request::post("/v1/admin/auth/github-allowlist")
+                .header("authorization", format!("Bearer {admin_token}"))
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({"login":"OctoCat","target_principal_id":admin.id.0})
+                        .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(created.status(), StatusCode::OK);
+    let entry: sift_metadata::GithubAllowlistEntry = body_json(created.into_body()).await;
+    assert_eq!(entry.normalized_login, "octocat");
+    assert_eq!(entry.target_principal_id, Some(admin.id));
+
+    let listed = app
+        .oneshot(
+            Request::get("/v1/admin/auth/github-allowlist")
+                .header("authorization", format!("Bearer {admin_token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(listed.status(), StatusCode::OK);
+}
+
+#[tokio::test]
 async fn responses_are_gzipped_when_client_advertises_gzip() {
     let app = app(test_state());
     let res = app

@@ -25,6 +25,30 @@ pub struct AuthRuntime {
     failures: Arc<Mutex<HashMap<String, FailureWindow>>>,
 }
 
+#[derive(Clone)]
+pub struct GithubOAuthConfig {
+    pub client_id: String,
+    pub client_secret: String,
+    pub public_base_url: String,
+    pub http: reqwest::Client,
+}
+
+pub fn normalize_github_login(value: &str) -> anyhow::Result<String> {
+    let normalized = value.trim().to_ascii_lowercase();
+    if normalized.is_empty() || normalized.len() > 39 {
+        bail!("GitHub login must be between 1 and 39 characters");
+    }
+    if normalized.starts_with('-')
+        || normalized.ends_with('-')
+        || !normalized
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+    {
+        bail!("GitHub login must contain only letters, digits, or interior hyphens");
+    }
+    Ok(normalized)
+}
+
 impl Default for AuthRuntime {
     fn default() -> Self {
         // Initialize once at process startup so unknown-user verification uses
@@ -206,6 +230,8 @@ mod tests {
         assert_eq!(normalize_username(" Alice.Smith ").unwrap(), "alice.smith");
         assert!(normalize_username("ab").is_err());
         assert!(normalize_username("not allowed").is_err());
+        assert_eq!(normalize_github_login(" Octo-Cat ").unwrap(), "octo-cat");
+        assert!(normalize_github_login("-octocat").is_err());
     }
 
     #[tokio::test]

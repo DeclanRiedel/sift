@@ -133,6 +133,14 @@ pub struct WhoAmIResponse {
     pub auth_session_id: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct CreateGithubAllowlistRequest {
+    pub login: String,
+    /// Explicitly links the first successful OAuth callback to an existing
+    /// principal. `None` creates a new principal and personal tenant.
+    pub target_principal_id: Option<i64>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
