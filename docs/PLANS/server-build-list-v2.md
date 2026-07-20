@@ -80,9 +80,10 @@ GUI later is just rendering. Remaining items below are verified absent from the
 - [x] [Implement] Process list + kill. Normalized cross-engine process model,
       bounded catalog queries, guarded termination route, audit variants,
       OpenAPI schemas, and client SDK methods.
-- [ ] [Design] Command-palette server surface: enumerate available
-      `Operation`s for a given capability context. (`GET /v1/operations`
-      exists but returns the whole list unfiltered.)
+- [x] [Design] Command-palette server surface (ADR-028): enumerate available
+      `OperationKind`s for a server-derived capability context at
+      `GET /v1/operations/available`; preserve `/v1/operations` as the replay
+      log. `docs/PLANS/operation-capabilities.md`.
 - [ ] [Design] CSV import → table (server-side ingest, type inference,
       conflict policy). Ties to PG `COPY FROM STDIN` (`PgExt::copy` Import)
       and SQL Server `BULK INSERT` (`MssqlExt::bulk_insert`).

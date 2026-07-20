@@ -623,3 +623,22 @@ while clients receive one cross-engine model. The normalized fields are the
 intersection of useful engine metadata; engine-only detail stays optional.
 Users without catalog or termination privileges see an explicit database
 error rather than a partial success.
+
+## ADR-028 — Advisory, Server-Derived Operation Capabilities
+
+**Context.** A command palette needs the operation vocabulary before it has
+concrete request payloads, and it needs disabled reasons for the current
+session/connection/transaction context. The existing `/v1/operations` endpoint
+is a replay log, so changing its response shape would break consumers.
+
+**Decision.** Add a payload-free `OperationKind` mirror and expose all kinds at
+`GET /v1/operations/available`. The query contains only resource ids; the
+server derives engine and transaction facts from live session state and
+returns availability, a reason, destructive classification, and selected
+engine. This surface is advisory UI data. Dispatch routes continue to perform
+all state and authorization checks themselves.
+
+**Consequences.** Thin clients can render one complete, contextual command
+inventory without duplicating engine rules. The audit-log endpoint remains
+compatible. `OperationKind` adds a maintenance obligation, enforced by tests:
+new user-visible operations must join both the enum and evaluator.
