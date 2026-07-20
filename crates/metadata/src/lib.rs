@@ -93,6 +93,10 @@ pub enum MetadataError {
     InvalidOAuthAttempt,
     #[error("tenant invitation is invalid, expired, consumed, revoked, or intended for another principal")]
     InvalidTenantInvitation,
+    #[error("principal key {0:?} not found or revoked")]
+    PrincipalKeyNotFound(PrincipalKeyId),
+    #[error("key challenge is invalid, expired, or consumed")]
+    InvalidKeyChallenge,
     #[error("secret store error: {0}")]
     SecretStore(String),
     #[error("io error: {0}")]
@@ -1382,6 +1386,134 @@ impl MetadataStore {
         Ok(())
     }
 
+    pub fn register_principal_key(
+        &self,
+        principal: PrincipalId,
+        public_key: &[u8],
+        fingerprint: &str,
+        label: &str,
+        audit: NewOperationAudit,
+    ) -> Result<PrincipalKey> {
+        let now = now_text();
+        let mut conn = self.conn()?;
+        let tx = conn.transaction()?;
+        tx.execute(
+            "INSERT INTO principal_key
+             (principal_id, algorithm, public_key, fingerprint, label, created_at, updated_at)
+             VALUES (?1, 'ed25519', ?2, ?3, ?4, ?5, ?5)",
+            params![principal.0, public_key, fingerprint, label, now],
+        )?;
+        let id = PrincipalKeyId(tx.last_insert_rowid());
+        insert_operation_audit_row(&tx, &audit)?;
+        let key = principal_key_by_id_locked(&tx, id)?;
+        tx.commit()?;
+        Ok(key)
+    }
+
+    pub fn list_principal_keys(&self, principal: PrincipalId) -> Result<Vec<PrincipalKey>> {
+        let conn = self.conn()?;
+        let mut statement = conn.prepare(
+            "SELECT id, principal_id, public_key, fingerprint, label, created_at,
+                    updated_at, last_used_at, revoked_at
+             FROM principal_key WHERE principal_id = ?1 ORDER BY created_at DESC",
+        )?;
+        let keys = rows(statement.query_map(params![principal.0], principal_key_from_row)?)?;
+        Ok(keys)
+    }
+
+    pub fn revoke_principal_key(
+        &self,
+        id: PrincipalKeyId,
+        principal: PrincipalId,
+        audit: NewOperationAudit,
+    ) -> Result<()> {
+        let now = now_text();
+        let mut conn = self.conn()?;
+        let tx = conn.transaction()?;
+        let changed = tx.execute(
+            "UPDATE principal_key SET revoked_at = COALESCE(revoked_at, ?1), updated_at = ?1
+             WHERE id = ?2 AND principal_id = ?3",
+            params![now, id.0, principal.0],
+        )?;
+        if changed == 0 {
+            return Err(MetadataError::PrincipalKeyNotFound(id));
+        }
+        insert_operation_audit_row(&tx, &audit)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn issue_key_challenge(&self, fingerprint: &str) -> Result<IssuedKeyChallenge> {
+        let mut nonce = vec![0_u8; 32];
+        getrandom::getrandom(&mut nonce)
+            .map_err(|error| MetadataError::SecretStore(format!("rng failure: {error}")))?;
+        let now = Utc::now();
+        let expires_at = now + chrono::Duration::minutes(5);
+        let conn = self.conn()?;
+        let key = conn
+            .query_row(
+                "SELECT id, principal_id, public_key, fingerprint, label, created_at,
+                        updated_at, last_used_at, revoked_at
+                 FROM principal_key WHERE fingerprint = ?1 AND revoked_at IS NULL",
+                params![fingerprint],
+                principal_key_from_row,
+            )
+            .optional()?
+            .ok_or(MetadataError::InvalidKeyChallenge)?;
+        conn.execute(
+            "INSERT INTO keypair_challenge
+             (nonce, fingerprint, issued_at, expires_at, principal_key_id)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                nonce,
+                fingerprint,
+                now.to_rfc3339(),
+                expires_at.to_rfc3339(),
+                key.id.0
+            ],
+        )?;
+        Ok(IssuedKeyChallenge {
+            nonce,
+            principal_key: key,
+            expires_at,
+        })
+    }
+
+    pub fn consume_key_challenge(&self, nonce: &[u8]) -> Result<ConsumedKeyChallenge> {
+        let now = Utc::now();
+        let mut conn = self.conn()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let key_id: Option<PrincipalKeyId> = tx
+            .query_row(
+                "SELECT principal_key_id FROM keypair_challenge
+                 WHERE nonce = ?1 AND consumed_at IS NULL AND expires_at > ?2",
+                params![nonce, now.to_rfc3339()],
+                |row| row.get::<_, i64>(0).map(PrincipalKeyId),
+            )
+            .optional()?;
+        let Some(key_id) = key_id else {
+            return Err(MetadataError::InvalidKeyChallenge);
+        };
+        let key = principal_key_by_id_locked(&tx, key_id)?;
+        if key.revoked_at.is_some() {
+            return Err(MetadataError::InvalidKeyChallenge);
+        }
+        tx.execute(
+            "UPDATE keypair_challenge SET consumed_at = ?1
+             WHERE nonce = ?2 AND consumed_at IS NULL",
+            params![now.to_rfc3339(), nonce],
+        )?;
+        tx.execute(
+            "UPDATE principal_key SET last_used_at = ?1, updated_at = ?1 WHERE id = ?2",
+            params![now.to_rfc3339(), key_id.0],
+        )?;
+        tx.commit()?;
+        Ok(ConsumedKeyChallenge {
+            nonce: nonce.to_vec(),
+            principal_key: key,
+        })
+    }
+
     async fn auth_token_mac_key(&self) -> Result<Vec<u8>> {
         if let Some(key) = self
             .secrets
@@ -2616,6 +2748,32 @@ fn tenant_invitation_by_id_locked(
         tenant_invitation_from_row,
     )
     .map_err(Into::into)
+}
+
+fn principal_key_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<PrincipalKey> {
+    Ok(PrincipalKey {
+        id: PrincipalKeyId(row.get(0)?),
+        principal_id: PrincipalId(row.get(1)?),
+        public_key: row.get(2)?,
+        fingerprint: row.get(3)?,
+        label: row.get(4)?,
+        created_at: parse_time_sql(row.get(5)?)?,
+        updated_at: parse_time_sql(row.get(6)?)?,
+        last_used_at: parse_optional_time_sql(row.get(7)?)?,
+        revoked_at: parse_optional_time_sql(row.get(8)?)?,
+    })
+}
+
+fn principal_key_by_id_locked(conn: &Connection, id: PrincipalKeyId) -> Result<PrincipalKey> {
+    conn.query_row(
+        "SELECT id, principal_id, public_key, fingerprint, label, created_at,
+                updated_at, last_used_at, revoked_at
+         FROM principal_key WHERE id = ?1",
+        params![id.0],
+        principal_key_from_row,
+    )
+    .optional()?
+    .ok_or(MetadataError::PrincipalKeyNotFound(id))
 }
 
 fn tenant_membership_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TenantMembership> {

@@ -24,6 +24,7 @@ axum = { workspace = true }
 bytes = { workspace = true }
 chrono = { workspace = true }
 csv = { workspace = true }
+ed25519-dalek = { workspace = true }
 dashmap = { workspace = true }
 figment = { workspace = true }
 futures = { workspace = true }

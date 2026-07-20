@@ -19,9 +19,9 @@ use sift_doc::{CrdtKind, DocumentSnapshot, TextDocument, TextOperation};
 use sift_metadata::{
     ApiTokenId, AuthClientKind as MetadataAuthClientKind, ConnectionProfileId, CrdtType, Document,
     DocumentId, GithubAllowlistId, GithubProfile, MetadataStore, NewConnectionProfile, NewDocument,
-    NewOperationAudit, NewQueryHistory, NewRoom, NewSavedQuery, PrincipalId, QueryHistory,
-    QueryStatus, RefreshAuthResult, Room, RoomId, RoomKind, RoomMember, RoomRole, SavedQuery,
-    SavedQueryFilter, SavedQueryId, SavedQueryScope, TenantId, TenantInvitationId,
+    NewOperationAudit, NewQueryHistory, NewRoom, NewSavedQuery, PrincipalId, PrincipalKeyId,
+    QueryHistory, QueryStatus, RefreshAuthResult, Room, RoomId, RoomKind, RoomMember, RoomRole,
+    SavedQuery, SavedQueryFilter, SavedQueryId, SavedQueryScope, TenantId, TenantInvitationId,
     TenantMembership, UpdateSavedQuery,
 };
 use sift_protocol::{
@@ -29,12 +29,13 @@ use sift_protocol::{
     AuthTokensResponse, BeginTransactionRequest, BulkInsertRequest, CancelRequest,
     ChangePasswordRequest, CreateGithubAllowlistRequest, CreateTenantInvitationRequest,
     CsvImportRequest, DocumentOperationEnvelope, EndTransactionRequest, ExecuteRequest,
-    ExecuteRequestHttp, Health, InvitationRole, IssuedTenantInvitationResponse, KillProcessRequest,
+    ExecuteRequestHttp, Health, InvitationRole, IssuedTenantInvitationResponse,
+    KeyAuthenticateRequest, KeyChallengeRequest, KeyChallengeResponse, KillProcessRequest,
     ObjectPath, OpenConnectionRequest, OpenSessionRequest, Operation, OperationStatus,
-    PasswordLoginRequest, Readiness, RefreshAuthRequest, RoomClientMessage, RoomQueryResult,
-    RoomQueryStatus, RoomServerMessage, SavepointRequest, SchemaFilter, SchemaScope,
-    TransactionPreviewRequest, WebAuthResponse, WhoAmIResponse, WsClientMessage, WsServerMessage,
-    PROTOCOL_VERSION,
+    PasswordLoginRequest, Readiness, RefreshAuthRequest, RegisterPrincipalKeyRequest,
+    RoomClientMessage, RoomQueryResult, RoomQueryStatus, RoomServerMessage, SavepointRequest,
+    SchemaFilter, SchemaScope, TransactionPreviewRequest, WebAuthResponse, WhoAmIResponse,
+    WsClientMessage, WsServerMessage, PROTOCOL_VERSION,
 };
 
 use crate::config::DeploymentPolicy;
@@ -61,6 +62,7 @@ pub struct AuthState {
     pub deployment: DeploymentPolicy,
     pub runtime: crate::identity::AuthRuntime,
     pub github: Option<crate::identity::GithubOAuthConfig>,
+    pub instance_audience: String,
 }
 
 impl Default for AuthState {
@@ -71,6 +73,7 @@ impl Default for AuthState {
             deployment: DeploymentPolicy::Personal,
             runtime: crate::identity::AuthRuntime::default(),
             github: None,
+            instance_audience: "sift:local".into(),
         }
     }
 }
@@ -112,6 +115,13 @@ pub fn app(state: AppState) -> Router {
             "/v1/auth/invitations/accept",
             post(accept_tenant_invitation),
         )
+        .route(
+            "/v1/auth/keys",
+            get(list_principal_keys).post(register_principal_key),
+        )
+        .route("/v1/auth/keys/:id", delete(revoke_principal_key))
+        .route("/v1/auth/keys/challenge", post(issue_key_challenge))
+        .route("/v1/auth/keys/authenticate", post(authenticate_key))
         .route("/v1/metadata/tenants", get(list_metadata_tenants))
         .route(
             "/v1/metadata/rooms",
@@ -493,6 +503,8 @@ fn is_public_path(path: &str) -> bool {
             | "/v1/auth/refresh"
             | "/v1/auth/github/start"
             | "/v1/auth/github/callback"
+            | "/v1/auth/keys/challenge"
+            | "/v1/auth/keys/authenticate"
     )
 }
 
@@ -1204,6 +1216,150 @@ async fn accept_tenant_invitation(
         )
         .await?;
     Ok(Json(membership))
+}
+
+async fn register_principal_key(
+    State(state): State<AppState>,
+    Extension(auth): Extension<AuthContext>,
+    Json(request): Json<RegisterPrincipalKeyRequest>,
+) -> ApiResult<Json<sift_metadata::PrincipalKey>> {
+    use base64::Engine as _;
+    use sha2::Digest as _;
+
+    if request.label.trim().is_empty() || request.label.len() > 100 {
+        return Err(ApiError::BadRequest(
+            "key label must be between 1 and 100 characters".into(),
+        ));
+    }
+    let public_key = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(request.public_key)
+        .map_err(|_| ApiError::BadRequest("invalid Ed25519 public key encoding".into()))?;
+    if public_key.len() != 32 {
+        return Err(ApiError::BadRequest(
+            "Ed25519 public key must be exactly 32 bytes".into(),
+        ));
+    }
+    ed25519_dalek::VerifyingKey::from_bytes(
+        public_key
+            .as_slice()
+            .try_into()
+            .map_err(|_| ApiError::BadRequest("invalid Ed25519 public key".into()))?,
+    )
+    .map_err(|_| ApiError::BadRequest("invalid Ed25519 public key".into()))?;
+    let fingerprint = format!(
+        "SHA256:{}",
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(sha2::Sha256::digest(&public_key))
+    );
+    let key = metadata_store(&state)?.register_principal_key(
+        auth.principal_id,
+        &public_key,
+        &fingerprint,
+        request.label.trim(),
+        metadata_audit_record(
+            auth.principal_id,
+            "principal_key.register",
+            "principal_key",
+            None,
+        ),
+    )?;
+    Ok(Json(key))
+}
+
+async fn list_principal_keys(
+    State(state): State<AppState>,
+    Extension(auth): Extension<AuthContext>,
+) -> ApiResult<Json<Vec<sift_metadata::PrincipalKey>>> {
+    Ok(Json(
+        metadata_store(&state)?.list_principal_keys(auth.principal_id)?,
+    ))
+}
+
+async fn revoke_principal_key(
+    State(state): State<AppState>,
+    Extension(auth): Extension<AuthContext>,
+    Path(id): Path<i64>,
+) -> ApiResult<Json<serde_json::Value>> {
+    metadata_store(&state)?.revoke_principal_key(
+        PrincipalKeyId(id),
+        auth.principal_id,
+        metadata_audit_record(
+            auth.principal_id,
+            "principal_key.revoke",
+            "principal_key",
+            Some(id),
+        ),
+    )?;
+    Ok(Json(json!({"ok": true})))
+}
+
+async fn issue_key_challenge(
+    State(state): State<AppState>,
+    Json(request): Json<KeyChallengeRequest>,
+) -> ApiResult<Json<KeyChallengeResponse>> {
+    use base64::Engine as _;
+
+    let challenge = metadata_store(&state)?
+        .issue_key_challenge(&request.fingerprint)
+        .map_err(|_| ApiError::Unauthorized)?;
+    let nonce = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&challenge.nonce);
+    Ok(Json(KeyChallengeResponse {
+        message: key_challenge_message(&state.auth.instance_audience, &nonce),
+        nonce,
+        expires_at: challenge.expires_at,
+    }))
+}
+
+async fn authenticate_key(
+    State(state): State<AppState>,
+    Json(request): Json<KeyAuthenticateRequest>,
+) -> ApiResult<Json<AuthTokensResponse>> {
+    use base64::Engine as _;
+    use ed25519_dalek::Verifier as _;
+
+    let nonce = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(&request.nonce)
+        .map_err(|_| ApiError::Unauthorized)?;
+    let signature = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(&request.signature)
+        .map_err(|_| ApiError::Unauthorized)?;
+    let consumed = metadata_store(&state)?
+        .consume_key_challenge(&nonce)
+        .map_err(|_| ApiError::Unauthorized)?;
+    let public_key: [u8; 32] = consumed
+        .principal_key
+        .public_key
+        .as_slice()
+        .try_into()
+        .map_err(|_| ApiError::Unauthorized)?;
+    let signature =
+        ed25519_dalek::Signature::from_slice(&signature).map_err(|_| ApiError::Unauthorized)?;
+    let verifying_key =
+        ed25519_dalek::VerifyingKey::from_bytes(&public_key).map_err(|_| ApiError::Unauthorized)?;
+    let nonce_text = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&nonce);
+    verifying_key
+        .verify(
+            key_challenge_message(&state.auth.instance_audience, &nonce_text).as_bytes(),
+            &signature,
+        )
+        .map_err(|_| ApiError::Unauthorized)?;
+    let tokens = metadata_store(&state)?
+        .issue_auth_session(
+            consumed.principal_key.principal_id,
+            MetadataAuthClientKind::Keypair,
+            Some(&consumed.principal_key.label),
+            metadata_audit_record(
+                consumed.principal_key.principal_id,
+                "authenticate.keypair",
+                "auth_session",
+                None,
+            ),
+        )
+        .await?;
+    Ok(Json(auth_tokens_response(tokens)))
+}
+
+fn key_challenge_message(audience: &str, nonce: &str) -> String {
+    format!("sift-key-auth-v1\n{audience}\n{nonce}")
 }
 
 async fn whoami(
@@ -2006,6 +2162,16 @@ async fn openapi() -> Json<serde_json::Value> {
                     "responses": { "200": { "description": "Membership", "content": json_content("TenantMembership") } }
                 }
             },
+            "/v1/auth/keys": {
+                "get": { "operationId": "listPrincipalKeys", "responses": { "200": { "description": "Keys", "content": json_array_content("PrincipalKey") } } },
+                "post": { "operationId": "registerPrincipalKey", "requestBody": json_body("RegisterPrincipalKeyRequest"), "responses": { "200": { "description": "Key", "content": json_content("PrincipalKey") } } }
+            },
+            "/v1/auth/keys/challenge": {
+                "post": { "operationId": "issueKeyChallenge", "security": [], "requestBody": json_body("KeyChallengeRequest"), "responses": { "200": { "description": "Challenge", "content": json_content("KeyChallengeResponse") } } }
+            },
+            "/v1/auth/keys/authenticate": {
+                "post": { "operationId": "authenticateKey", "security": [], "requestBody": json_body("KeyAuthenticateRequest"), "responses": { "200": { "description": "Session credentials", "content": json_content("AuthTokensResponse") } } }
+            },
             "/v1/audit": {
                 "get": {
                     "operationId": "listAudit",
@@ -2537,6 +2703,13 @@ fn protocol_schema_refs() -> serde_json::Value {
         "IssuedTenantInvitationResponse",
         &mut schemas,
     );
+    add_schema::<sift_protocol::RegisterPrincipalKeyRequest>(
+        "RegisterPrincipalKeyRequest",
+        &mut schemas,
+    );
+    add_schema::<sift_protocol::KeyChallengeRequest>("KeyChallengeRequest", &mut schemas);
+    add_schema::<sift_protocol::KeyChallengeResponse>("KeyChallengeResponse", &mut schemas);
+    add_schema::<sift_protocol::KeyAuthenticateRequest>("KeyAuthenticateRequest", &mut schemas);
     add_schema::<sift_protocol::RefreshAuthRequest>("RefreshAuthRequest", &mut schemas);
     add_schema::<sift_protocol::AuthTokensResponse>("AuthTokensResponse", &mut schemas);
     add_schema::<sift_protocol::WebAuthResponse>("WebAuthResponse", &mut schemas);
@@ -2605,6 +2778,7 @@ fn protocol_schema_refs() -> serde_json::Value {
     add_schema::<sift_metadata::RoomMember>("RoomMember", &mut schemas);
     add_schema::<sift_metadata::TenantMembership>("TenantMembership", &mut schemas);
     add_schema::<sift_metadata::TenantInvitation>("TenantInvitation", &mut schemas);
+    add_schema::<sift_metadata::PrincipalKey>("PrincipalKey", &mut schemas);
     add_schema::<AddRoomMemberRequest>("AddRoomMemberRequest", &mut schemas);
     add_schema::<CreateDocumentRequest>("CreateDocumentRequest", &mut schemas);
     add_schema::<CreateRoomRequest>("CreateRoomRequest", &mut schemas);

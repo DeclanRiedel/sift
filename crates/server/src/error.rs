@@ -104,6 +104,7 @@ impl ApiError {
                 | MetadataError::SavedQueryNotFound(_)
                 | MetadataError::PrincipalNotFound(_)
                 | MetadataError::AuthIdentityNotFound(_)
+                | MetadataError::PrincipalKeyNotFound(_)
                 | MetadataError::GithubAllowlistNotFound(_) => (StatusCode::NOT_FOUND, "not_found"),
                 MetadataError::FinalInstanceAdmin => (StatusCode::CONFLICT, "conflict"),
                 MetadataError::TenantMismatch(_, _) => (StatusCode::FORBIDDEN, "forbidden"),
@@ -115,6 +116,7 @@ impl ApiError {
                 | MetadataError::InvalidTimestamp { .. }
                 | MetadataError::InvalidOAuthAttempt
                 | MetadataError::InvalidTenantInvitation
+                | MetadataError::InvalidKeyChallenge
                 | MetadataError::Json(_) => (StatusCode::BAD_REQUEST, "bad_request"),
                 MetadataError::Sqlite(_)
                 | MetadataError::Migration(_)

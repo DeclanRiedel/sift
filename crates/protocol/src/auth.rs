@@ -177,6 +177,41 @@ pub struct IssuedTenantInvitationResponse {
     pub expires_at: DateTime<Utc>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct RegisterPrincipalKeyRequest {
+    /// Base64url-no-pad encoded 32-byte Ed25519 public key.
+    pub public_key: String,
+    pub label: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct KeyChallengeRequest {
+    pub fingerprint: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct KeyChallengeResponse {
+    pub nonce: String,
+    pub message: String,
+    pub expires_at: DateTime<Utc>,
+}
+
+#[derive(Clone, Serialize, Deserialize, JsonSchema)]
+pub struct KeyAuthenticateRequest {
+    pub nonce: String,
+    pub signature: String,
+}
+
+impl fmt::Debug for KeyAuthenticateRequest {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("KeyAuthenticateRequest")
+            .field("nonce", &"[REDACTED]")
+            .field("signature", &"[REDACTED]")
+            .finish()
+    }
+}
+
 impl fmt::Debug for IssuedTenantInvitationResponse {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter

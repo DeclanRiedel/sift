@@ -19,6 +19,9 @@ pub struct GithubAllowlistId(pub i64);
 pub struct TenantInvitationId(pub i64);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+pub struct PrincipalKeyId(pub i64);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 pub struct ApiTokenId(pub i64);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
@@ -246,6 +249,30 @@ pub struct TenantInvitation {
 pub struct IssuedTenantInvitation {
     pub invitation: TenantInvitation,
     pub token: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct PrincipalKey {
+    pub id: PrincipalKeyId,
+    pub principal_id: PrincipalId,
+    pub public_key: Vec<u8>,
+    pub fingerprint: String,
+    pub label: String,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    pub last_used_at: Option<DateTime<Utc>>,
+    pub revoked_at: Option<DateTime<Utc>>,
+}
+
+pub struct IssuedKeyChallenge {
+    pub nonce: Vec<u8>,
+    pub principal_key: PrincipalKey,
+    pub expires_at: DateTime<Utc>,
+}
+
+pub struct ConsumedKeyChallenge {
+    pub nonce: Vec<u8>,
+    pub principal_key: PrincipalKey,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]

@@ -34,7 +34,8 @@ pub use auth::{
     AcceptTenantInvitationRequest, AuthClientKind, AuthPrincipal, AuthTenantMembership,
     AuthTokensResponse, ChangePasswordRequest, CreateGithubAllowlistRequest,
     CreateTenantInvitationRequest, InvitationRole, IssuedTenantInvitationResponse,
-    PasswordLoginRequest, RefreshAuthRequest, WebAuthResponse, WhoAmIResponse,
+    KeyAuthenticateRequest, KeyChallengeRequest, KeyChallengeResponse, PasswordLoginRequest,
+    RefreshAuthRequest, RegisterPrincipalKeyRequest, WebAuthResponse, WhoAmIResponse,
 };
 pub use capability::{OperationCapability, OperationCapabilityContext, OperationKind};
 pub use column::{

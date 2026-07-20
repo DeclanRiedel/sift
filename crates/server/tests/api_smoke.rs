@@ -1320,6 +1320,88 @@ async fn github_start_uses_fixed_callback_pkce_and_admin_owned_allowlist() {
 }
 
 #[tokio::test]
+async fn ed25519_challenge_is_one_use_and_issues_standard_session_tokens() {
+    use base64::Engine as _;
+    use ed25519_dalek::Signer as _;
+
+    let state = test_state_with_metadata(true);
+    let app = app(state);
+    let signing = ed25519_dalek::SigningKey::from_bytes(&[7_u8; 32]);
+    let public_key =
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(signing.verifying_key().as_bytes());
+    let registered = app
+        .clone()
+        .oneshot(
+            Request::post("/v1/auth/keys")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({"public_key":public_key,"label":"test key"}).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(registered.status(), StatusCode::OK);
+    let key: sift_metadata::PrincipalKey = body_json(registered.into_body()).await;
+
+    let challenge = app
+        .clone()
+        .oneshot(
+            Request::post("/v1/auth/keys/challenge")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({"fingerprint":key.fingerprint}).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(challenge.status(), StatusCode::OK);
+    let challenge: sift_protocol::KeyChallengeResponse = body_json(challenge.into_body()).await;
+    assert!(challenge.message.contains("sift:local"));
+    let signature = signing.sign(challenge.message.as_bytes());
+    let auth_body = serde_json::json!({
+        "nonce": challenge.nonce,
+        "signature": base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(signature.to_bytes())
+    })
+    .to_string();
+    let authenticated = app
+        .clone()
+        .oneshot(
+            Request::post("/v1/auth/keys/authenticate")
+                .header("content-type", "application/json")
+                .body(Body::from(auth_body.clone()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(authenticated.status(), StatusCode::OK);
+    let tokens: AuthTokensResponse = body_json(authenticated.into_body()).await;
+    let whoami = app
+        .clone()
+        .oneshot(
+            Request::get("/v1/auth/whoami")
+                .header("authorization", format!("Bearer {}", tokens.access_token))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(whoami.status(), StatusCode::OK);
+
+    let replay = app
+        .oneshot(
+            Request::post("/v1/auth/keys/authenticate")
+                .header("content-type", "application/json")
+                .body(Body::from(auth_body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(replay.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
 async fn responses_are_gzipped_when_client_advertises_gzip() {
     let app = app(test_state());
     let res = app

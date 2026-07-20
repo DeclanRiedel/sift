@@ -88,6 +88,11 @@ async fn main() -> anyhow::Result<()> {
             bearer_token: cfg.auth.bearer_token.clone(),
             loopback_bypass: cfg.auth.loopback_bypass,
             deployment: cfg.deployment,
+            instance_audience: cfg
+                .auth
+                .public_base_url
+                .clone()
+                .unwrap_or_else(|| "sift:local".into()),
             github: match (
                 cfg.auth.github_client_id.clone(),
                 cfg.auth.github_client_secret.clone(),
