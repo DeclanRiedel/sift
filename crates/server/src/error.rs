@@ -120,6 +120,7 @@ impl ApiError {
                 | MetadataError::InvalidOAuthAttempt
                 | MetadataError::InvalidTenantInvitation
                 | MetadataError::InvalidKeyChallenge
+                | MetadataError::InvalidPasswordReset
                 | MetadataError::Json(_) => (StatusCode::BAD_REQUEST, "bad_request"),
                 MetadataError::Sqlite(_)
                 | MetadataError::Migration(_)

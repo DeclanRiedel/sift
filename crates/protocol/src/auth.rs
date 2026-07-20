@@ -260,6 +260,38 @@ pub struct AuthSessionSummary {
     pub revocation_reason: Option<String>,
 }
 
+#[derive(Clone, Serialize, Deserialize, JsonSchema)]
+pub struct PasswordResetRequest {
+    pub token: String,
+    pub new_password: String,
+}
+
+impl fmt::Debug for PasswordResetRequest {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("PasswordResetRequest")
+            .field("token", &"[REDACTED]")
+            .field("new_password", &"[REDACTED]")
+            .finish()
+    }
+}
+
+#[derive(Clone, Serialize, Deserialize, JsonSchema)]
+pub struct IssuedPasswordResetResponse {
+    pub token: String,
+    pub expires_at: DateTime<Utc>,
+}
+
+impl fmt::Debug for IssuedPasswordResetResponse {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("IssuedPasswordResetResponse")
+            .field("token", &"[REDACTED]")
+            .field("expires_at", &self.expires_at)
+            .finish()
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct KeyChallengeRequest {
     pub fingerprint: String,

@@ -31,13 +31,14 @@ use sift_protocol::{
     AuthTokensResponse, BeginTransactionRequest, BulkInsertRequest, CancelRequest,
     ChangePasswordRequest, CreateGithubAllowlistRequest, CreateTenantInvitationRequest,
     CsvImportRequest, DocumentOperationEnvelope, EndTransactionRequest, ExecuteRequest,
-    ExecuteRequestHttp, Health, InvitationRole, IssuedTenantInvitationResponse,
-    KeyAuthenticateRequest, KeyChallengeRequest, KeyChallengeResponse, KillProcessRequest,
-    ObjectPath, OpenConnectionRequest, OpenSessionRequest, Operation, OperationStatus,
-    PasswordLoginRequest, Readiness, RefreshAuthRequest, RegisterPrincipalKeyRequest,
-    RoomClientMessage, RoomQueryResult, RoomQueryStatus, RoomServerMessage, SavepointRequest,
-    SchemaFilter, SchemaScope, TransactionPreviewRequest, WebAuthResponse, WhoAmIResponse,
-    WsClientMessage, WsServerMessage, PROTOCOL_VERSION,
+    ExecuteRequestHttp, Health, InvitationRole, IssuedPasswordResetResponse,
+    IssuedTenantInvitationResponse, KeyAuthenticateRequest, KeyChallengeRequest,
+    KeyChallengeResponse, KillProcessRequest, ObjectPath, OpenConnectionRequest,
+    OpenSessionRequest, Operation, OperationStatus, PasswordLoginRequest, PasswordResetRequest,
+    Readiness, RefreshAuthRequest, RegisterPrincipalKeyRequest, RoomClientMessage, RoomQueryResult,
+    RoomQueryStatus, RoomServerMessage, SavepointRequest, SchemaFilter, SchemaScope,
+    TransactionPreviewRequest, WebAuthResponse, WhoAmIResponse, WsClientMessage, WsServerMessage,
+    PROTOCOL_VERSION,
 };
 
 use crate::config::DeploymentPolicy;
@@ -95,6 +96,7 @@ pub fn app(state: AppState) -> Router {
         .route("/v1/auth/logout-all", post(logout_all_auth))
         .route("/v1/auth/whoami", get(whoami))
         .route("/v1/auth/password", put(change_password))
+        .route("/v1/auth/password/reset", post(reset_password))
         .route("/v1/auth/github/start", get(github_start))
         .route("/v1/auth/github/callback", get(github_callback))
         .route(
@@ -129,6 +131,10 @@ pub fn app(state: AppState) -> Router {
         .route(
             "/v1/admin/principals/:principal_id/auth-sessions/:session_id",
             delete(admin_revoke_auth_session),
+        )
+        .route(
+            "/v1/admin/principals/:principal_id/identities/:identity_id/password-reset",
+            post(admin_issue_password_reset),
         )
         .route(
             "/v1/metadata/tenants/:id/invitations",
@@ -527,6 +533,7 @@ fn is_public_path(path: &str) -> bool {
             | "/v1/ready"
             | "/v1/openapi.json"
             | "/v1/auth/login"
+            | "/v1/auth/password/reset"
             | "/v1/auth/refresh"
             | "/v1/auth/github/start"
             | "/v1/auth/github/callback"
@@ -894,6 +901,56 @@ async fn change_password(
         Operation::ChangePassword,
         OperationStatus::Succeeded,
         Some(auth.principal_id.0),
+        None,
+        None,
+        None,
+    );
+    Ok(Json(json!({"ok": true})))
+}
+
+async fn reset_password(
+    State(state): State<AppState>,
+    Json(request): Json<PasswordResetRequest>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let verifier = state
+        .auth
+        .runtime
+        .hash_password_bounded(request.new_password.into_bytes())
+        .await
+        .map_err(|error| ApiError::BadRequest(error.to_string()))?
+        .ok_or(ApiError::TooManyAuthAttempts)?;
+    let principal = match metadata_store(&state)?
+        .consume_password_reset(
+            &request.token,
+            verifier.as_bytes(),
+            NewOperationAudit {
+                actor_principal_id: None,
+                action: "manage_principal.reset_password".into(),
+                target: "auth_identity".into(),
+                target_id: None,
+                status: "succeeded".into(),
+                result_code: None,
+                row_count: None,
+                error_message: None,
+                correlation_id: crate::correlation::current(),
+            },
+        )
+        .await
+    {
+        Ok(principal) => principal,
+        Err(sift_metadata::MetadataError::InvalidPasswordReset) => {
+            return Err(ApiError::Unauthorized)
+        }
+        Err(error) => return Err(error.into()),
+    };
+    state.auth.runtime.invalidate_principal(principal);
+    state.sessions.push_operation_local(
+        Operation::ManagePrincipal {
+            action: sift_protocol::IdentityAdminAction::Reset,
+            principal_id: Some(principal.0),
+        },
+        OperationStatus::Succeeded,
+        Some(principal.0),
         None,
         None,
         None,
@@ -1331,6 +1388,42 @@ async fn admin_revoke_auth_session(
     )?;
     state.auth.runtime.invalidate_auth_session(&session_id);
     Ok(Json(json!({"ok": true})))
+}
+
+async fn admin_issue_password_reset(
+    State(state): State<AppState>,
+    Extension(auth): Extension<AuthContext>,
+    Path((principal_id, identity_id)): Path<(i64, i64)>,
+) -> ApiResult<Json<IssuedPasswordResetResponse>> {
+    ensure_instance_admin(&state, &auth)?;
+    let issued = metadata_store(&state)?
+        .issue_password_reset(
+            PrincipalId(principal_id),
+            AuthIdentityId(identity_id),
+            auth.principal_id,
+            metadata_audit_record(
+                auth.principal_id,
+                "manage_principal.issue_password_reset",
+                "auth_identity",
+                Some(identity_id),
+            ),
+        )
+        .await?;
+    state.sessions.push_operation_local(
+        Operation::ManagePrincipal {
+            action: sift_protocol::IdentityAdminAction::Reset,
+            principal_id: Some(principal_id),
+        },
+        OperationStatus::Succeeded,
+        Some(auth.principal_id.0),
+        None,
+        None,
+        None,
+    );
+    Ok(Json(IssuedPasswordResetResponse {
+        token: issued.token,
+        expires_at: issued.expires_at,
+    }))
 }
 
 fn ensure_instance_admin(state: &AppState, auth: &AuthContext) -> ApiResult<()> {
@@ -2342,6 +2435,18 @@ async fn openapi() -> Json<serde_json::Value> {
                     }
                 }
             },
+            "/v1/auth/password/reset": {
+                "post": {
+                    "operationId": "resetPassword",
+                    "summary": "Consume an administrator-issued one-use password reset token",
+                    "security": [],
+                    "requestBody": json_body("PasswordResetRequest"),
+                    "responses": {
+                        "200": { "description": "Ack", "content": json_object_content() },
+                        "401": { "description": "Invalid, expired, or consumed reset token" }
+                    }
+                }
+            },
             "/v1/auth/github/start": {
                 "get": {
                     "operationId": "githubAuthStart",
@@ -2424,6 +2529,12 @@ async fn openapi() -> Json<serde_json::Value> {
                 "delete": {
                     "operationId": "adminRevokeAuthSession",
                     "responses": { "200": { "description": "Ack", "content": json_object_content() } }
+                }
+            },
+            "/v1/admin/principals/{principal_id}/identities/{identity_id}/password-reset": {
+                "post": {
+                    "operationId": "adminIssuePasswordReset",
+                    "responses": { "200": { "description": "One-use reset token", "content": json_content("IssuedPasswordResetResponse") } }
                 }
             },
             "/v1/metadata/tenants/{id}/invitations": {
@@ -2969,6 +3080,11 @@ fn protocol_schema_refs() -> serde_json::Value {
     add_schema::<sift_protocol::AuditEntry>("AuditEntry", &mut schemas);
     add_schema::<sift_protocol::PasswordLoginRequest>("PasswordLoginRequest", &mut schemas);
     add_schema::<sift_protocol::ChangePasswordRequest>("ChangePasswordRequest", &mut schemas);
+    add_schema::<sift_protocol::PasswordResetRequest>("PasswordResetRequest", &mut schemas);
+    add_schema::<sift_protocol::IssuedPasswordResetResponse>(
+        "IssuedPasswordResetResponse",
+        &mut schemas,
+    );
     add_schema::<sift_protocol::CreateGithubAllowlistRequest>(
         "CreateGithubAllowlistRequest",
         &mut schemas,

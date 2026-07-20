@@ -84,6 +84,16 @@ pub enum PasswordAuthOutcome {
 }
 
 impl AuthRuntime {
+    pub async fn hash_password_bounded(&self, password: Vec<u8>) -> anyhow::Result<Option<String>> {
+        let permit = match Arc::clone(&self.verifier_slots).try_acquire_owned() {
+            Ok(permit) => permit,
+            Err(_) => return Ok(None),
+        };
+        let verifier = hash_password(password).await?;
+        drop(permit);
+        Ok(Some(verifier))
+    }
+
     pub async fn resolve_access_token(
         &self,
         metadata: &MetadataStore,

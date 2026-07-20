@@ -34,6 +34,7 @@ const AUTH_TOKEN_MAC_HANDLE: &str = "token-mac-v1";
 const OAUTH_SECRET_NAMESPACE: &str = "sift.auth.oauth";
 const OAUTH_STATE_PREFIX: &str = "sift_oauth_";
 const INVITATION_TOKEN_PREFIX: &str = "sift_inv_";
+const PASSWORD_RESET_TOKEN_PREFIX: &str = "sift_pr_";
 const ACCESS_TOKEN_PREFIX: &str = "sift_at_";
 const REFRESH_TOKEN_PREFIX: &str = "sift_rt_";
 const AUTH_TOKEN_LOOKUP_LEN: usize = 12;
@@ -101,6 +102,8 @@ pub enum MetadataError {
     PrincipalKeyNotFound(PrincipalKeyId),
     #[error("key challenge is invalid, expired, or consumed")]
     InvalidKeyChallenge,
+    #[error("password reset token is invalid, expired, or already consumed")]
+    InvalidPasswordReset,
     #[error("secret store error: {0}")]
     SecretStore(String),
     #[error("io error: {0}")]
@@ -950,6 +953,154 @@ impl MetadataStore {
                 .await;
         }
         Ok(())
+    }
+
+    pub async fn issue_password_reset(
+        &self,
+        principal: PrincipalId,
+        identity: AuthIdentityId,
+        created_by: PrincipalId,
+        audit: NewOperationAudit,
+    ) -> Result<IssuedPasswordReset> {
+        let key = self.auth_token_mac_key().await?;
+        let token = new_token_material(PASSWORD_RESET_TOKEN_PREFIX, &key);
+        let now = Utc::now();
+        let expires_at = now + chrono::Duration::minutes(30);
+        let mut conn = self.conn()?;
+        let tx = conn.transaction()?;
+        let eligible: i64 = tx.query_row(
+            "SELECT COUNT(*) FROM auth_identity ai
+             JOIN principal p ON p.id = ai.principal_id
+             WHERE ai.id = ?1 AND ai.principal_id = ?2
+               AND ai.method = 'password' AND ai.disabled_at IS NULL
+               AND p.disabled_at IS NULL",
+            params![identity.0, principal.0],
+            |row| row.get(0),
+        )?;
+        if eligible != 1 {
+            return Err(MetadataError::AuthIdentityNotFound(identity));
+        }
+        tx.execute(
+            "UPDATE password_reset_token SET revoked_at = COALESCE(revoked_at, ?1)
+             WHERE auth_identity_id = ?2 AND consumed_at IS NULL AND revoked_at IS NULL",
+            params![now.to_rfc3339(), identity.0],
+        )?;
+        tx.execute(
+            "INSERT INTO password_reset_token
+             (auth_identity_id, token_lookup, token_digest, created_by, created_at, expires_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                identity.0,
+                token.lookup,
+                token.digest,
+                created_by.0,
+                now.to_rfc3339(),
+                expires_at.to_rfc3339()
+            ],
+        )?;
+        insert_operation_audit_row(&tx, &audit)?;
+        tx.commit()?;
+        Ok(IssuedPasswordReset {
+            token: token.plaintext,
+            expires_at,
+        })
+    }
+
+    pub async fn consume_password_reset(
+        &self,
+        presented: &str,
+        password_verifier: &[u8],
+        audit: NewOperationAudit,
+    ) -> Result<PrincipalId> {
+        let Some(lookup) = auth_token_lookup(presented, PASSWORD_RESET_TOKEN_PREFIX) else {
+            return Err(MetadataError::InvalidPasswordReset);
+        };
+        let key = self.auth_token_mac_key().await?;
+        let digest = auth_token_digest(&key, presented);
+        let lookup = lookup.to_string();
+        let new_handle = Uuid::new_v4().to_string();
+        self.secrets
+            .put(PASSWORD_SECRET_NAMESPACE, &new_handle, password_verifier)
+            .await?;
+        let backend = self.backend.clone();
+        let db_handle = new_handle.clone();
+        let now = Utc::now();
+        let result = sqlite_blocking(move || {
+            let mut conn = backend.conn()?;
+            let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            let candidate: Option<(i64, AuthIdentityId, PrincipalId, String, Option<String>)> = tx
+                .query_row(
+                    "SELECT pr.id, ai.id, ai.principal_id, pr.token_digest,
+                            ai.credential_handle
+                     FROM password_reset_token pr
+                     JOIN auth_identity ai ON ai.id = pr.auth_identity_id
+                     JOIN principal p ON p.id = ai.principal_id
+                     WHERE pr.token_lookup = ?1 AND pr.consumed_at IS NULL
+                       AND pr.revoked_at IS NULL AND pr.expires_at > ?2
+                       AND ai.method = 'password' AND ai.disabled_at IS NULL
+                       AND p.disabled_at IS NULL",
+                    params![lookup, now.to_rfc3339()],
+                    |row| {
+                        Ok((
+                            row.get(0)?,
+                            AuthIdentityId(row.get(1)?),
+                            PrincipalId(row.get(2)?),
+                            row.get(3)?,
+                            row.get(4)?,
+                        ))
+                    },
+                )
+                .optional()?;
+            let Some((reset_id, identity, principal, stored_digest, old_handle)) = candidate else {
+                return Err(MetadataError::InvalidPasswordReset);
+            };
+            if !constant_time_eq(stored_digest.as_bytes(), digest.as_bytes()) {
+                return Err(MetadataError::InvalidPasswordReset);
+            }
+            tx.execute(
+                "UPDATE password_reset_token SET consumed_at = ?1 WHERE id = ?2",
+                params![now.to_rfc3339(), reset_id],
+            )?;
+            tx.execute(
+                "UPDATE auth_identity SET credential_handle = ?1, updated_at = ?2
+                 WHERE id = ?3",
+                params![db_handle, now.to_rfc3339(), identity.0],
+            )?;
+            tx.execute(
+                "UPDATE auth_session
+                 SET revoked_at = COALESCE(revoked_at, ?1),
+                     revocation_reason = COALESCE(revocation_reason, 'password_reset')
+                 WHERE principal_id = ?2",
+                params![now.to_rfc3339(), principal.0],
+            )?;
+            let mut audit = audit;
+            audit.actor_principal_id = Some(principal);
+            audit.target_id = Some(identity.0);
+            insert_operation_audit_row(&tx, &audit)?;
+            tx.commit()?;
+            Ok((principal, old_handle))
+        })
+        .await;
+        match result {
+            Ok((principal, old_handle)) => {
+                if let Some(old_handle) = old_handle {
+                    self.delete_password_secret_best_effort(
+                        &old_handle,
+                        "consume_password_reset_old_verifier",
+                    )
+                    .await;
+                }
+                Ok(principal)
+            }
+            Err(error) => {
+                self.delete_password_secret_best_effort(
+                    &new_handle,
+                    "consume_password_reset_rollback",
+                )
+                .await;
+                Err(error)
+            }
+        }
     }
 
     pub async fn issue_auth_session(
@@ -3764,6 +3915,96 @@ mod tests {
                 test_audit("revoke", "auth_session", None),
             ),
             Err(MetadataError::AuthSessionNotFound(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn password_reset_is_secret_backed_one_use_and_revokes_sessions() {
+        let (store, secrets) = store_with_memory();
+        let principal = store
+            .create_password_principal(
+                NewPasswordPrincipal {
+                    username: "reset-user",
+                    display_name: "Reset User",
+                    email: None,
+                    is_instance_admin: true,
+                },
+                b"old-verifier",
+                test_audit("create", "principal", None),
+            )
+            .await
+            .unwrap();
+        let identity = store.list_auth_identities(principal.id).unwrap()[0].clone();
+        let old_handle = identity.credential_handle.clone().unwrap();
+        let session = store
+            .issue_auth_session(
+                principal.id,
+                AuthClientKind::Native,
+                None,
+                test_audit("authenticate", "auth_session", None),
+            )
+            .await
+            .unwrap();
+        let reset = store
+            .issue_password_reset(
+                principal.id,
+                identity.id,
+                principal.id,
+                test_audit("issue_reset", "auth_identity", Some(identity.id.0)),
+            )
+            .await
+            .unwrap();
+        let conn = store.conn().unwrap();
+        let durable: String = conn
+            .query_row(
+                "SELECT token_lookup || token_digest FROM password_reset_token",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        drop(conn);
+        assert!(!durable.contains(&reset.token));
+
+        assert_eq!(
+            store
+                .consume_password_reset(
+                    &reset.token,
+                    b"new-verifier",
+                    test_audit("reset", "auth_identity", None),
+                )
+                .await
+                .unwrap(),
+            principal.id
+        );
+        assert!(store
+            .verify_auth_access_token(&session.access_token)
+            .await
+            .unwrap()
+            .is_none());
+        let updated = store
+            .resolve_password_identity("reset-user")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            store.password_verifier(&updated.identity).await.unwrap(),
+            Some(b"new-verifier".to_vec())
+        );
+        assert_eq!(
+            secrets
+                .get(PASSWORD_SECRET_NAMESPACE, &old_handle)
+                .await
+                .unwrap(),
+            None
+        );
+        assert!(matches!(
+            store
+                .consume_password_reset(
+                    &reset.token,
+                    b"another-verifier",
+                    test_audit("reset", "auth_identity", None),
+                )
+                .await,
+            Err(MetadataError::InvalidPasswordReset)
         ));
     }
 

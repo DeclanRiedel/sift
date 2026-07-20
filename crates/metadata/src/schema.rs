@@ -270,6 +270,11 @@ pub struct IssuedKeyChallenge {
     pub expires_at: DateTime<Utc>,
 }
 
+pub struct IssuedPasswordReset {
+    pub token: String,
+    pub expires_at: DateTime<Utc>,
+}
+
 pub struct ConsumedKeyChallenge {
     pub nonce: Vec<u8>,
     pub principal_key: PrincipalKey,

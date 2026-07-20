@@ -35,10 +35,10 @@ pub use auth::{
     AdminLinkPasswordIdentityRequest, AdminSetPrincipalDisabledRequest, AuthClientKind,
     AuthIdentitySummary, AuthPrincipal, AuthSessionSummary, AuthTenantMembership,
     AuthTokensResponse, ChangePasswordRequest, CreateGithubAllowlistRequest,
-    CreateTenantInvitationRequest, InvitationRole, IssuedTenantInvitationResponse,
-    KeyAuthenticateRequest, KeyChallengeRequest, KeyChallengeResponse, PasswordLoginRequest,
-    RedactedString, RefreshAuthRequest, RegisterPrincipalKeyRequest, WebAuthResponse,
-    WhoAmIResponse,
+    CreateTenantInvitationRequest, InvitationRole, IssuedPasswordResetResponse,
+    IssuedTenantInvitationResponse, KeyAuthenticateRequest, KeyChallengeRequest,
+    KeyChallengeResponse, PasswordLoginRequest, PasswordResetRequest, RedactedString,
+    RefreshAuthRequest, RegisterPrincipalKeyRequest, WebAuthResponse, WhoAmIResponse,
 };
 pub use capability::{OperationCapability, OperationCapabilityContext, OperationKind};
 pub use column::{
