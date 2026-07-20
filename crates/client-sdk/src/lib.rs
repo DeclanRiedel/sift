@@ -95,6 +95,83 @@ pub struct Client {
     http: reqwest::Client,
 }
 
+type TransportWebSocket =
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
+
+pub struct SessionWebSocket {
+    socket: TransportWebSocket,
+}
+
+impl SessionWebSocket {
+    pub async fn send(&mut self, message: WsClientMessage) -> Result<()> {
+        use futures::SinkExt;
+        use tokio_tungstenite::tungstenite::Message;
+
+        self.socket
+            .send(Message::Text(serde_json::to_string(&message)?.into()))
+            .await?;
+        Ok(())
+    }
+
+    pub async fn next(&mut self) -> Result<WsServerMessage> {
+        next_ws(&mut self.socket).await
+    }
+
+    pub async fn reauthenticate(
+        &mut self,
+        access_token: impl Into<String>,
+    ) -> Result<chrono::DateTime<chrono::Utc>> {
+        self.send(WsClientMessage::Reauthenticate {
+            access_token: sift_protocol::RedactedString(access_token.into()),
+        })
+        .await?;
+        match self.next().await? {
+            WsServerMessage::Authenticated { expires_at } => Ok(expires_at),
+            WsServerMessage::Error { message, .. } => Err(Error::Protocol(message)),
+            other => Err(Error::Protocol(format!(
+                "expected WebSocket authentication acknowledgement, got {other:?}"
+            ))),
+        }
+    }
+}
+
+pub struct RoomWebSocket {
+    socket: TransportWebSocket,
+}
+
+impl RoomWebSocket {
+    pub async fn send(&mut self, message: sift_protocol::RoomClientMessage) -> Result<()> {
+        use futures::SinkExt;
+        use tokio_tungstenite::tungstenite::Message;
+
+        self.socket
+            .send(Message::Text(serde_json::to_string(&message)?.into()))
+            .await?;
+        Ok(())
+    }
+
+    pub async fn next(&mut self) -> Result<sift_protocol::RoomServerMessage> {
+        next_room_ws(&mut self.socket).await
+    }
+
+    pub async fn reauthenticate(
+        &mut self,
+        access_token: impl Into<String>,
+    ) -> Result<chrono::DateTime<chrono::Utc>> {
+        self.send(sift_protocol::RoomClientMessage::Reauthenticate {
+            access_token: sift_protocol::RedactedString(access_token.into()),
+        })
+        .await?;
+        match self.next().await? {
+            sift_protocol::RoomServerMessage::Authenticated { expires_at } => Ok(expires_at),
+            sift_protocol::RoomServerMessage::Error { message } => Err(Error::Protocol(message)),
+            other => Err(Error::Protocol(format!(
+                "expected room WebSocket authentication acknowledgement, got {other:?}"
+            ))),
+        }
+    }
+}
+
 impl Client {
     pub fn new(base: impl Into<String>) -> Self {
         Self {
@@ -1246,6 +1323,38 @@ impl Client {
                 }
             }
         }
+    }
+
+    pub async fn connect_session_websocket(&self, session: SessionId) -> Result<SessionWebSocket> {
+        use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+
+        let mut request = self.ws_url(session).into_client_request()?;
+        if let Some(token) = self.current_bearer().await {
+            request.headers_mut().insert(
+                "authorization",
+                format!("Bearer {token}").parse().map_err(|error| {
+                    Error::Protocol(format!("invalid bearer token header: {error}"))
+                })?,
+            );
+        }
+        let (socket, _) = tokio_tungstenite::connect_async(request).await?;
+        Ok(SessionWebSocket { socket })
+    }
+
+    pub async fn connect_room_websocket(&self, room: RoomId) -> Result<RoomWebSocket> {
+        use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+
+        let mut request = self.room_ws_url(room).into_client_request()?;
+        if let Some(token) = self.current_bearer().await {
+            request.headers_mut().insert(
+                "authorization",
+                format!("Bearer {token}").parse().map_err(|error| {
+                    Error::Protocol(format!("invalid bearer token header: {error}"))
+                })?,
+            );
+        }
+        let (socket, _) = tokio_tungstenite::connect_async(request).await?;
+        Ok(RoomWebSocket { socket })
     }
 
     pub async fn listen_notifications(
