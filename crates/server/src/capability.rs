@@ -78,9 +78,12 @@ fn unavailable_reason(
     use OperationKind::*;
     match operation {
         Authenticate => Some("available only before authentication"),
-        ManagePrincipal | ManageGithubAllowlist | ManagePrincipalKey | ManageTenantInvitation => {
-            Some("administrator context required")
-        }
+        ManagePrincipal
+        | ManageGithubAllowlist
+        | ManagePrincipalKey
+        | ManageTenantInvitation
+        | ManageConnectionPolicy
+        | ManageTenantLimits => Some("administrator context required"),
         RefreshAuthSession
         | Logout
         | ChangePassword

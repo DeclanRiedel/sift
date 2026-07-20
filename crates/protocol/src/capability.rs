@@ -13,6 +13,8 @@ pub enum OperationKind {
     ManageGithubAllowlist,
     ManagePrincipalKey,
     ManageTenantInvitation,
+    ManageConnectionPolicy,
+    ManageTenantLimits,
     OpenSession,
     ListSessions,
     ListAvailableOperations,
@@ -49,7 +51,7 @@ pub enum OperationKind {
 }
 
 impl OperationKind {
-    pub const ALL: [Self; 41] = [
+    pub const ALL: [Self; 43] = [
         Self::Authenticate,
         Self::RefreshAuthSession,
         Self::Logout,
@@ -58,6 +60,8 @@ impl OperationKind {
         Self::ManageGithubAllowlist,
         Self::ManagePrincipalKey,
         Self::ManageTenantInvitation,
+        Self::ManageConnectionPolicy,
+        Self::ManageTenantLimits,
         Self::OpenSession,
         Self::ListSessions,
         Self::ListAvailableOperations,
@@ -102,6 +106,8 @@ impl OperationKind {
                 | Self::ManageGithubAllowlist
                 | Self::ManagePrincipalKey
                 | Self::ManageTenantInvitation
+                | Self::ManageConnectionPolicy
+                | Self::ManageTenantLimits
                 | Self::ApplyEdits
                 | Self::KillProcess
                 | Self::ImportCsv

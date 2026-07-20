@@ -57,6 +57,12 @@ pub enum Code {
     #[error("result too large")]
     ResultTooLarge,
 
+    #[error("rate limit exceeded")]
+    RateLimited,
+
+    #[error("tenant resource exhausted")]
+    TenantResourceExhausted,
+
     #[error("inline edit conflicts with a concurrent modification")]
     EditConflict,
 

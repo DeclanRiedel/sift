@@ -5281,6 +5281,8 @@ async fn handle_ws(
                 if !ws_lease_is_valid(&state, auth.as_ref().expect("guarded"), None)? {
                     send_json(&mut sender, &WsServerMessage::Error {
                         request_id: None,
+                        code: None,
+                        retry_after_ms: None,
                         message: "authentication lease expired or was revoked".into(),
                     }).await?;
                     break;
@@ -5332,6 +5334,8 @@ async fn handle_ws(
                                     &mut sender,
                                     &WsServerMessage::Error {
                                         request_id: Some(request_id),
+                                        code: None,
+                                        retry_after_ms: None,
                                         message: error.to_string(),
                                     },
                                 )
@@ -5374,6 +5378,8 @@ async fn handle_ws(
                                     &mut sender,
                                     &WsServerMessage::Error {
                                         request_id: Some(request_id),
+                                        code: None,
+                                        retry_after_ms: None,
                                         message: error.to_string(),
                                     },
                                 )
@@ -5397,6 +5403,8 @@ async fn handle_ws(
                             &mut sender,
                             &WsServerMessage::Error {
                                 request_id: None,
+                                code: None,
+                                retry_after_ms: None,
                                 message: "unexpected ack without active stream".to_string(),
                             },
                         )

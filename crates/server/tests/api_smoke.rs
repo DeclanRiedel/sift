@@ -880,7 +880,8 @@ async fn websocket_execute_requires_active_tx_ref() {
         message,
         sift_protocol::WsServerMessage::Error {
             request_id: Some(id),
-            message
+            message,
+            ..
         } if id == "no-tx" && message.contains("active transaction")
     ));
 

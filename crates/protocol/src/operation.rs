@@ -35,6 +35,15 @@ pub enum IdentityAdminAction {
     Revoke,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum PolicyAdminAction {
+    Read,
+    Update,
+    Clear,
+    Disconnect,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum Operation {
@@ -62,6 +71,15 @@ pub enum Operation {
     },
     ManageTenantInvitation {
         action: IdentityAdminAction,
+        tenant_id: i64,
+    },
+    ManageConnectionPolicy {
+        action: PolicyAdminAction,
+        tenant_id: i64,
+        profile_id: i64,
+    },
+    ManageTenantLimits {
+        action: PolicyAdminAction,
         tenant_id: i64,
     },
     OpenSession {
@@ -234,6 +252,8 @@ impl Operation {
             Self::ManageGithubAllowlist { .. } => OperationKind::ManageGithubAllowlist,
             Self::ManagePrincipalKey { .. } => OperationKind::ManagePrincipalKey,
             Self::ManageTenantInvitation { .. } => OperationKind::ManageTenantInvitation,
+            Self::ManageConnectionPolicy { .. } => OperationKind::ManageConnectionPolicy,
+            Self::ManageTenantLimits { .. } => OperationKind::ManageTenantLimits,
             Self::OpenSession { .. } => OperationKind::OpenSession,
             Self::ListSessions => OperationKind::ListSessions,
             Self::ListAvailableOperations { .. } => OperationKind::ListAvailableOperations,
@@ -318,6 +338,20 @@ impl Operation {
             Operation::ManageTenantInvitation { action, tenant_id } => summary(
                 &format!("tenant_invitation_{action:?}").to_lowercase(),
                 "tenant_invitation",
+                Some(*tenant_id),
+            ),
+            Operation::ManageConnectionPolicy {
+                action, profile_id, ..
+            } => summary(
+                &format!("connection_policy_{action:?}").to_lowercase(),
+                "connection_profile",
+                Some(*profile_id),
+            ),
+            Operation::ManageTenantLimits {
+                action, tenant_id, ..
+            } => summary(
+                &format!("tenant_limits_{action:?}").to_lowercase(),
+                "tenant",
                 Some(*tenant_id),
             ),
             Operation::OpenSession { .. } => summary("open", "session", None),

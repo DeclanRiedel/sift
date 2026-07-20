@@ -336,6 +336,10 @@ pub enum WsServerMessage {
     },
     Error {
         request_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        code: Option<crate::Code>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        retry_after_ms: Option<u64>,
         message: String,
     },
 }

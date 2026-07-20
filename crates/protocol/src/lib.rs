@@ -20,6 +20,7 @@ pub mod engine;
 pub mod error;
 pub mod operation;
 pub mod plan;
+pub mod policy;
 pub mod process;
 pub mod result;
 pub mod room;
@@ -59,8 +60,15 @@ pub use edit::{
 };
 pub use engine::Engine;
 pub use error::{Code, DriverError, DriverWarning};
-pub use operation::{AuthenticationMethod, IdentityAdminAction, Operation, OperationSummary};
+pub use operation::{
+    AuthenticationMethod, IdentityAdminAction, Operation, OperationSummary, PolicyAdminAction,
+};
 pub use plan::{ExplainRequest, ExplainResponse, PlanNode};
+pub use policy::{
+    ConnectionPolicy, RateLimitClass, SchemaSelector, TenantResource, TenantResourceLimits,
+    TenantResourceUsage, TenantRole, TenantUsageSnapshot, UpdateConnectionPolicyRequest,
+    UpdateTenantLimitsRequest,
+};
 pub use process::{DatabaseProcess, KillProcessRequest, KillProcessResponse};
 pub use result::{CursorId, ExecuteRequest, Page, Row};
 pub use room::{

@@ -157,7 +157,7 @@ and tenant-resource enforcement remain absent.
       queries, cursors, and retained result bytes. RAII admission guards;
       `Code::TenantResourceExhausted`; trusted personal-loopback unlimited by
       default. Detailed build contract: `docs/PLANS/phase-f-authorization.md`.
-- [ ] [Implement] Protocol policy/usage contracts and stable
+- [x] [Implement] Protocol policy/usage contracts and stable
       `RateLimited`/`TenantResourceExhausted` errors.
 - [ ] [Implement] Metadata migration for profile policy revisions and
       instance-admin-managed tenant limit overrides.

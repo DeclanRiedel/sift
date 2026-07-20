@@ -2,7 +2,7 @@
 //! `Code`; everything else maps to internal-server-error with a sanitized
 //! message (never leak `Debug` of internal types across the wire).
 
-use axum::http::StatusCode;
+use axum::http::{header::RETRY_AFTER, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use sift_metadata::MetadataError;
@@ -29,6 +29,16 @@ pub enum ApiError {
     Forbidden(String),
     #[error("too many authentication attempts")]
     TooManyAuthAttempts,
+
+    #[error("rate limit exceeded")]
+    RateLimited { retry_after_secs: u64 },
+
+    #[error("tenant resource exhausted: {resource:?}")]
+    TenantResourceExhausted {
+        resource: sift_protocol::TenantResource,
+        retry_after_secs: Option<u64>,
+        durable: bool,
+    },
 
     #[error("metadata unavailable")]
     MetadataUnavailable,
@@ -66,6 +76,10 @@ impl ApiError {
                     (StatusCode::UNPROCESSABLE_ENTITY, "unsupported_for_engine")
                 }
                 Code::ResultTooLarge => (StatusCode::PAYLOAD_TOO_LARGE, "result_too_large"),
+                Code::RateLimited => (StatusCode::TOO_MANY_REQUESTS, "rate_limited"),
+                Code::TenantResourceExhausted => {
+                    (StatusCode::TOO_MANY_REQUESTS, "tenant_resource_exhausted")
+                }
                 Code::EditConflict => (StatusCode::CONFLICT, "edit_conflict"),
                 Code::EditNoRowIdentity => (StatusCode::UNPROCESSABLE_ENTITY, "no_row_identity"),
                 Code::UnsupportedResultShape => {
@@ -89,6 +103,15 @@ impl ApiError {
             ApiError::TooManyAuthAttempts => {
                 (StatusCode::TOO_MANY_REQUESTS, "too_many_auth_attempts")
             }
+            ApiError::RateLimited { .. } => (StatusCode::TOO_MANY_REQUESTS, "rate_limited"),
+            ApiError::TenantResourceExhausted { durable, .. } => (
+                if *durable {
+                    StatusCode::CONFLICT
+                } else {
+                    StatusCode::TOO_MANY_REQUESTS
+                },
+                "tenant_resource_exhausted",
+            ),
             ApiError::MetadataUnavailable => {
                 (StatusCode::SERVICE_UNAVAILABLE, "metadata_unavailable")
             }
@@ -135,6 +158,16 @@ impl ApiError {
             ApiError::Internal(_) => (StatusCode::INTERNAL_SERVER_ERROR, "internal"),
         }
     }
+
+    fn retry_after_secs(&self) -> Option<u64> {
+        match self {
+            Self::RateLimited { retry_after_secs } => Some(*retry_after_secs),
+            Self::TenantResourceExhausted {
+                retry_after_secs, ..
+            } => *retry_after_secs,
+            _ => None,
+        }
+    }
 }
 
 impl IntoResponse for ApiError {
@@ -151,8 +184,42 @@ impl IntoResponse for ApiError {
             "message": message,
             "correlation_id": correlation_id,
         });
-        (status, Json(body)).into_response()
+        let retry_after = self.retry_after_secs();
+        let mut response = (status, Json(body)).into_response();
+        if let Some(seconds) = retry_after {
+            if let Ok(value) = HeaderValue::from_str(&seconds.to_string()) {
+                response.headers_mut().insert(RETRY_AFTER, value);
+            }
+        }
+        response
     }
 }
 
 pub type ApiResult<T> = Result<T, ApiError>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rate_limit_sets_retry_after() {
+        let response = ApiError::RateLimited {
+            retry_after_secs: 3,
+        }
+        .into_response();
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(response.headers()[RETRY_AFTER], "3");
+    }
+
+    #[test]
+    fn durable_tenant_exhaustion_is_a_conflict_without_retry_hint() {
+        let response = ApiError::TenantResourceExhausted {
+            resource: sift_protocol::TenantResource::ConnectionProfiles,
+            retry_after_secs: None,
+            durable: true,
+        }
+        .into_response();
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        assert!(!response.headers().contains_key(RETRY_AFTER));
+    }
+}
