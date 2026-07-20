@@ -8,6 +8,7 @@ use crate::{
     completion::CompletionRequest, BeginTransactionRequest, BulkInsertRequest, CancelRequest,
     ConnectionId, EndTransactionRequest, ExecuteRequestHttp, OpenConnectionRequest,
     OpenSessionRequest, SavepointRequest, SchemaScope, SessionId, TextDocumentOperation,
+    TransactionPreviewRequest,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
@@ -79,6 +80,13 @@ pub enum Operation {
     BeginTransaction {
         session: SessionId,
         request: BeginTransactionRequest,
+    },
+    ListTransactions {
+        session: SessionId,
+    },
+    PreviewTransaction {
+        session: SessionId,
+        request: TransactionPreviewRequest,
     },
     CommitTransaction {
         session: SessionId,
@@ -190,6 +198,12 @@ impl Operation {
             }
             Operation::BeginTransaction { session, .. } => {
                 summary("begin", "transaction", Some(session.0 as i64))
+            }
+            Operation::ListTransactions { session } => {
+                summary("list", "transaction", Some(session.0 as i64))
+            }
+            Operation::PreviewTransaction { session, .. } => {
+                summary("preview", "transaction", Some(session.0 as i64))
             }
             Operation::CommitTransaction { session, .. } => {
                 summary("commit", "transaction", Some(session.0 as i64))

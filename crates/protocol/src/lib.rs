@@ -22,6 +22,7 @@ pub mod room;
 pub mod schema;
 pub mod search;
 pub mod session;
+pub mod transaction_panel;
 pub mod tx;
 pub mod value;
 
@@ -62,6 +63,10 @@ pub use session::{
     OpenConnectionRequest, OpenSessionRequest, OperationAuditEntry, OperationStatus, Readiness,
     SavepointRequest, SessionId, SessionInfo, TransactionInfo, TxHandleRef, WsClientMessage,
     WsServerMessage,
+};
+pub use transaction_panel::{
+    SavepointInfo, SavepointState, TransactionEndAction, TransactionPreview,
+    TransactionPreviewRequest, TransactionState,
 };
 pub use tx::{AccessMode as TxAccessMode, IsolationLevel, TxId, TxMode};
 

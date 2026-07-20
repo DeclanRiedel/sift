@@ -17,8 +17,9 @@ use sift_protocol::{
     BeginTransactionRequest, BulkInsertRequest, BulkInsertResponse, CancelRequest, ConnectionId,
     ConnectionInfo, CursorId, EndTransactionRequest, ExecuteRequestHttp, ExecuteResponse, Health,
     OpenConnectionRequest, OpenSessionRequest, Page, Readiness, SavepointRequest, SchemaSnapshot,
-    ServerInfo, SessionId, SessionInfo, TextDocumentOperation, TransactionInfo, TxHandleRef, TxId,
-    TxMode, Value, WsClientMessage, WsServerMessage,
+    ServerInfo, SessionId, SessionInfo, TextDocumentOperation, TransactionEndAction,
+    TransactionInfo, TransactionPreview, TransactionPreviewRequest, TransactionState, TxHandleRef,
+    TxId, TxMode, Value, WsClientMessage, WsServerMessage,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -276,6 +277,29 @@ impl Client {
         self.post(
             &format!("/v1/sessions/{session}/transactions"),
             &BeginTransactionRequest { connection, mode },
+        )
+        .await
+    }
+
+    pub async fn list_transactions(&self, session: SessionId) -> Result<Vec<TransactionState>> {
+        self.get(&format!("/v1/sessions/{session}/transactions"))
+            .await
+    }
+
+    pub async fn preview_transaction(
+        &self,
+        session: SessionId,
+        connection: ConnectionId,
+        tx_id: TxId,
+        action: TransactionEndAction,
+    ) -> Result<TransactionPreview> {
+        self.post(
+            &format!("/v1/sessions/{session}/transactions/{tx_id}/preview"),
+            &TransactionPreviewRequest {
+                connection,
+                tx_id,
+                action,
+            },
         )
         .await
     }

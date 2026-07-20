@@ -28,7 +28,8 @@ use sift_protocol::{
     DocumentOperationEnvelope, EndTransactionRequest, ExecuteRequest, ExecuteRequestHttp, Health,
     ObjectPath, OpenConnectionRequest, OpenSessionRequest, Operation, OperationStatus, Readiness,
     RoomClientMessage, RoomQueryResult, RoomQueryStatus, RoomServerMessage, SavepointRequest,
-    SchemaFilter, SchemaScope, WsClientMessage, WsServerMessage, PROTOCOL_VERSION,
+    SchemaFilter, SchemaScope, TransactionPreviewRequest, WsClientMessage, WsServerMessage,
+    PROTOCOL_VERSION,
 };
 
 use crate::error::{ApiError, ApiResult};
@@ -173,7 +174,10 @@ pub fn app(state: AppState) -> Router {
             post(post_explain),
         )
         .route("/v1/sessions/:id/queries", post(execute_query))
-        .route("/v1/sessions/:id/transactions", post(begin_transaction))
+        .route(
+            "/v1/sessions/:id/transactions",
+            get(list_transactions).post(begin_transaction),
+        )
         .route(
             "/v1/sessions/:id/transactions/:tx_id/commit",
             post(commit_transaction),
@@ -181,6 +185,10 @@ pub fn app(state: AppState) -> Router {
         .route(
             "/v1/sessions/:id/transactions/:tx_id/rollback",
             post(rollback_transaction),
+        )
+        .route(
+            "/v1/sessions/:id/transactions/:tx_id/preview",
+            post(preview_transaction),
         )
         .route(
             "/v1/sessions/:id/transactions/:tx_id/savepoints",
@@ -1036,6 +1044,11 @@ async fn openapi() -> Json<serde_json::Value> {
                 }
             },
             "/v1/sessions/{id}/transactions": {
+                "get": {
+                    "operationId": "listTransactions",
+                    "summary": "List open transactions",
+                    "responses": { "200": { "description": "Transactions", "content": json_array_content("TransactionState") } }
+                },
                 "post": {
                     "operationId": "beginTransaction",
                     "summary": "Begin transaction",
@@ -1057,6 +1070,14 @@ async fn openapi() -> Json<serde_json::Value> {
                     "summary": "Rollback transaction",
                     "requestBody": json_body("EndTransactionRequest"),
                     "responses": { "200": { "description": "Ack", "content": json_object_content() } }
+                }
+            },
+            "/v1/sessions/{id}/transactions/{tx_id}/preview": {
+                "post": {
+                    "operationId": "previewTransaction",
+                    "summary": "Preview commit or rollback consequences",
+                    "requestBody": json_body("TransactionPreviewRequest"),
+                    "responses": { "200": { "description": "Preview", "content": json_content("TransactionPreview") } }
                 }
             },
             "/v1/sessions/{id}/transactions/{tx_id}/savepoints": {
@@ -1378,6 +1399,12 @@ fn protocol_schema_refs() -> serde_json::Value {
     add_schema::<sift_protocol::ServerInfo>("ServerInfo", &mut schemas);
     add_schema::<sift_protocol::SessionInfo>("SessionInfo", &mut schemas);
     add_schema::<sift_protocol::TransactionInfo>("TransactionInfo", &mut schemas);
+    add_schema::<sift_protocol::TransactionState>("TransactionState", &mut schemas);
+    add_schema::<sift_protocol::TransactionPreviewRequest>(
+        "TransactionPreviewRequest",
+        &mut schemas,
+    );
+    add_schema::<sift_protocol::TransactionPreview>("TransactionPreview", &mut schemas);
     add_schema::<sift_protocol::WsClientMessage>("WsClientMessage", &mut schemas);
     add_schema::<sift_protocol::WsServerMessage>("WsServerMessage", &mut schemas);
     add_schema::<sift_protocol::RoomClientMessage>("RoomClientMessage", &mut schemas);
@@ -2634,6 +2661,39 @@ async fn begin_transaction(
         .sessions
         .push_operation(operation, OperationStatus::Succeeded);
     Ok(Json(tx))
+}
+
+async fn list_transactions(
+    State(state): State<AppState>,
+    Path(id): Path<sift_protocol::SessionId>,
+) -> ApiResult<Json<Vec<sift_protocol::TransactionState>>> {
+    let result = state.sessions.list_transactions(id)?;
+    state.sessions.push_operation(
+        Operation::ListTransactions { session: id },
+        OperationStatus::Succeeded,
+    );
+    Ok(Json(result))
+}
+
+async fn preview_transaction(
+    State(state): State<AppState>,
+    Path((id, tx_id)): Path<(sift_protocol::SessionId, sift_protocol::TxId)>,
+    Json(req): Json<TransactionPreviewRequest>,
+) -> ApiResult<Json<sift_protocol::TransactionPreview>> {
+    if req.tx_id != tx_id {
+        return Err(ApiError::BadRequest(
+            "`tx_id` body value must match tx id in path".into(),
+        ));
+    }
+    let result = state.sessions.preview_transaction(id, &req)?;
+    state.sessions.push_operation(
+        Operation::PreviewTransaction {
+            session: id,
+            request: req,
+        },
+        OperationStatus::Succeeded,
+    );
+    Ok(Json(result))
 }
 
 async fn commit_transaction(

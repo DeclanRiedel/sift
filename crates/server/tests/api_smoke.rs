@@ -2441,6 +2441,126 @@ async fn savepoint_routes_dispatch_to_ext_traits() {
 }
 
 #[tokio::test]
+async fn transaction_panel_lists_previews_and_tracks_savepoints() {
+    let app = app(test_state());
+    let session: sift_protocol::SessionInfo = body_json(
+        app.clone()
+            .oneshot(post_json_str("/v1/sessions", "{}"))
+            .await
+            .unwrap()
+            .into_body(),
+    )
+    .await;
+    let conn: sift_protocol::ConnectionInfo = body_json(
+        app.clone()
+            .oneshot(post_json(
+                format!("/v1/sessions/{}/connections", session.id),
+                serde_json::json!({
+                    "engine": "postgres",
+                    "host": "mock.invalid",
+                    "user": "mock",
+                }),
+            ))
+            .await
+            .unwrap()
+            .into_body(),
+    )
+    .await;
+    let tx: sift_protocol::TransactionInfo = body_json(
+        app.clone()
+            .oneshot(post_json(
+                format!("/v1/sessions/{}/transactions", session.id),
+                sift_protocol::BeginTransactionRequest {
+                    connection: conn.id,
+                    mode: sift_protocol::TxMode::default(),
+                },
+            ))
+            .await
+            .unwrap()
+            .into_body(),
+    )
+    .await;
+    for name in ["outer", "inner"] {
+        let response = app
+            .clone()
+            .oneshot(post_json(
+                format!(
+                    "/v1/sessions/{}/transactions/{}/savepoints",
+                    session.id, tx.tx_id
+                ),
+                sift_protocol::SavepointRequest {
+                    connection: conn.id,
+                    tx_id: tx.tx_id,
+                    name: name.into(),
+                },
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+    let rollback = sift_protocol::SavepointRequest {
+        connection: conn.id,
+        tx_id: tx.tx_id,
+        name: "outer".into(),
+    };
+    let response = app
+        .clone()
+        .oneshot(post_json(
+            format!(
+                "/v1/sessions/{}/transactions/{}/savepoints/rollback",
+                session.id, tx.tx_id
+            ),
+            rollback,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let states: Vec<sift_protocol::TransactionState> = body_json(
+        app.clone()
+            .oneshot(
+                Request::get(format!("/v1/sessions/{}/transactions", session.id))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+            .into_body(),
+    )
+    .await;
+    assert_eq!(states.len(), 1);
+    assert_eq!(states[0].savepoints.len(), 2);
+    assert_eq!(
+        states[0].savepoints[0].state,
+        sift_protocol::SavepointState::Active
+    );
+    assert_eq!(
+        states[0].savepoints[1].state,
+        sift_protocol::SavepointState::Invalidated
+    );
+
+    let preview: sift_protocol::TransactionPreview = body_json(
+        app.oneshot(post_json(
+            format!(
+                "/v1/sessions/{}/transactions/{}/preview",
+                session.id, tx.tx_id
+            ),
+            sift_protocol::TransactionPreviewRequest {
+                connection: conn.id,
+                tx_id: tx.tx_id,
+                action: sift_protocol::TransactionEndAction::Rollback,
+            },
+        ))
+        .await
+        .unwrap()
+        .into_body(),
+    )
+    .await;
+    assert!(preview.destructive);
+    assert_eq!(preview.active_savepoints, 1);
+}
+
+#[tokio::test]
 async fn ws_streaming_bounded_memory_across_many_pages() {
     // Prove the cursor pump doesn't buffer everything ahead of the
     // consumer. Push 10k row pages through the driver; assert the WS

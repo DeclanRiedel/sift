@@ -24,8 +24,9 @@ use sift_protocol::{
     Code, ColumnMetadata, ConnectionId, ConnectionInfo, ConnectionSpec, CursorId, DriverError,
     DriverWarning, EndTransactionRequest, Engine, ExecuteRequest, ExecuteRequestHttp,
     ExecuteResponse, ExportRequest, OpenSessionRequest, Operation, OperationAuditEntry,
-    OperationStatus, Page, Row, SavepointRequest, SchemaScope, SchemaSnapshot, ServerInfo,
-    SessionId, SessionInfo, TransactionInfo, TxHandleRef, TxId,
+    OperationStatus, Page, Row, SavepointInfo, SavepointRequest, SavepointState, SchemaScope,
+    SchemaSnapshot, ServerInfo, SessionId, SessionInfo, TransactionEndAction, TransactionInfo,
+    TransactionPreview, TransactionPreviewRequest, TransactionState, TxHandleRef, TxId,
 };
 
 use sift_metadata::{MetadataStore, NewOperationAudit, PrincipalId};
@@ -1162,6 +1163,7 @@ impl SessionStore {
         let tx = TransactionEntry {
             info: info.clone(),
             handle,
+            savepoints: Mutex::new(Vec::new()),
         };
         let session = self
             .inner
@@ -1177,11 +1179,13 @@ impl SessionStore {
         session_id: SessionId,
         req: EndTransactionRequest,
     ) -> ApiResult<()> {
-        let tx = self.remove_tx(session_id, req.connection, req.tx_id)?;
+        let tx = self.tx_handle_for(session_id, req.connection, req.tx_id)?;
         let entry = self.get_conn_entry(session_id, req.connection)?;
         let driver = entry.driver.clone();
-        self.run_bounded("commit", async move { driver.commit(tx.handle).await })
-            .await
+        self.run_bounded("commit", async move { driver.commit(tx).await })
+            .await?;
+        self.remove_tx(session_id, req.connection, req.tx_id)?;
+        Ok(())
     }
 
     pub async fn rollback_transaction(
@@ -1189,11 +1193,71 @@ impl SessionStore {
         session_id: SessionId,
         req: EndTransactionRequest,
     ) -> ApiResult<()> {
-        let tx = self.remove_tx(session_id, req.connection, req.tx_id)?;
+        let tx = self.tx_handle_for(session_id, req.connection, req.tx_id)?;
         let entry = self.get_conn_entry(session_id, req.connection)?;
         let driver = entry.driver.clone();
-        self.run_bounded("rollback", async move { driver.rollback(tx.handle).await })
-            .await
+        self.run_bounded("rollback", async move { driver.rollback(tx).await })
+            .await?;
+        self.remove_tx(session_id, req.connection, req.tx_id)?;
+        Ok(())
+    }
+
+    pub fn list_transactions(&self, session_id: SessionId) -> ApiResult<Vec<TransactionState>> {
+        let session = self
+            .inner
+            .sessions
+            .get(&session_id)
+            .ok_or(ApiError::SessionNotFound(session_id))?;
+        let mut transactions: Vec<_> = session
+            .transactions
+            .iter()
+            .map(|entry| TransactionState {
+                transaction: entry.info.clone(),
+                savepoints: entry.savepoints.lock().unwrap().clone(),
+            })
+            .collect();
+        transactions.sort_by_key(|state| state.transaction.opened_at);
+        Ok(transactions)
+    }
+
+    pub fn preview_transaction(
+        &self,
+        session_id: SessionId,
+        req: &TransactionPreviewRequest,
+    ) -> ApiResult<TransactionPreview> {
+        let session = self
+            .inner
+            .sessions
+            .get(&session_id)
+            .ok_or(ApiError::SessionNotFound(session_id))?;
+        let entry = session.transactions.get(&req.tx_id).ok_or_else(|| {
+            ApiError::Driver(DriverError::new(
+                Code::TransactionNotFound,
+                "transaction not active",
+            ))
+        })?;
+        if entry.info.connection != req.connection {
+            return Err(ApiError::BadRequest(
+                "`connection` must match transaction connection".into(),
+            ));
+        }
+        let savepoints = entry.savepoints.lock().unwrap();
+        let active_savepoints = savepoints
+            .iter()
+            .filter(|savepoint| savepoint.state == SavepointState::Active)
+            .count();
+        let age_seconds = chrono::Utc::now()
+            .signed_duration_since(entry.info.opened_at)
+            .num_seconds()
+            .max(0) as u64;
+        Ok(TransactionPreview {
+            transaction: entry.info.clone(),
+            action: req.action,
+            age_seconds,
+            active_savepoints,
+            closes_savepoints: active_savepoints,
+            destructive: req.action == TransactionEndAction::Rollback,
+        })
     }
 
     pub async fn create_savepoint(
@@ -1201,27 +1265,42 @@ impl SessionStore {
         session_id: SessionId,
         req: SavepointRequest,
     ) -> ApiResult<()> {
+        let name = req.name.trim().to_string();
+        if name.is_empty() {
+            return Err(ApiError::BadRequest(
+                "savepoint name must not be empty".into(),
+            ));
+        }
+        self.ensure_savepoint_name_available(session_id, req.tx_id, &name)?;
         let tx_handle = self.tx_handle_for(session_id, req.connection, req.tx_id)?;
         let entry = self.get_conn_entry(session_id, req.connection)?;
         let driver = entry.driver.clone();
-        let name = req.name;
+        let driver_name = name.clone();
         self.run_bounded("savepoint", async move {
             match driver.engine() {
                 Engine::Postgres => {
                     let pg = driver
                         .as_pg()
                         .ok_or_else(|| missing_ext(Engine::Postgres, "PgExt"))?;
-                    pg.savepoint(&tx_handle, &name).await.map(|_| ())
+                    pg.savepoint(&tx_handle, &driver_name).await.map(|_| ())
                 }
                 Engine::SqlServer => {
                     let mssql = driver
                         .as_mssql()
                         .ok_or_else(|| missing_ext(Engine::SqlServer, "MssqlExt"))?;
-                    mssql.savepoint(&tx_handle, &name).await.map(|_| ())
+                    mssql.savepoint(&tx_handle, &driver_name).await.map(|_| ())
                 }
             }
         })
-        .await
+        .await?;
+        self.update_savepoints(session_id, req.tx_id, |savepoints| {
+            savepoints.push(SavepointInfo {
+                name,
+                created_at: chrono::Utc::now(),
+                state: SavepointState::Active,
+            });
+        })?;
+        Ok(())
     }
 
     pub async fn rollback_to_savepoint(
@@ -1233,6 +1312,8 @@ impl SessionStore {
         let entry = self.get_conn_entry(session_id, req.connection)?;
         let driver = entry.driver.clone();
         let name = req.name;
+        self.ensure_active_savepoint(session_id, req.tx_id, &name)?;
+        let state_name = name.clone();
         let tx_id = req.tx_id;
         self.run_bounded("rollback_to_savepoint", async move {
             match driver.engine() {
@@ -1261,7 +1342,19 @@ impl SessionStore {
                 }
             }
         })
-        .await
+        .await?;
+        self.update_savepoints(session_id, tx_id, |savepoints| {
+            if let Some(index) = savepoints.iter().position(|savepoint| {
+                savepoint.name == state_name && savepoint.state == SavepointState::Active
+            }) {
+                for savepoint in savepoints.iter_mut().skip(index + 1) {
+                    if savepoint.state == SavepointState::Active {
+                        savepoint.state = SavepointState::Invalidated;
+                    }
+                }
+            }
+        })?;
+        Ok(())
     }
 
     pub async fn release_savepoint(
@@ -1274,6 +1367,8 @@ impl SessionStore {
         let entry = self.get_conn_entry(session_id, req.connection)?;
         let driver = entry.driver.clone();
         let name = req.name;
+        self.ensure_active_savepoint(session_id, req.tx_id, &name)?;
+        let state_name = name.clone();
         let tx_id = req.tx_id;
         self.run_bounded("release_savepoint", async move {
             match driver.engine() {
@@ -1295,7 +1390,82 @@ impl SessionStore {
                 .with_engine(Engine::SqlServer)),
             }
         })
-        .await
+        .await?;
+        self.update_savepoints(session_id, tx_id, |savepoints| {
+            if let Some(savepoint) = savepoints.iter_mut().find(|savepoint| {
+                savepoint.name == state_name && savepoint.state == SavepointState::Active
+            }) {
+                savepoint.state = SavepointState::Released;
+            }
+        })?;
+        Ok(())
+    }
+
+    fn ensure_savepoint_name_available(
+        &self,
+        session_id: SessionId,
+        tx_id: TxId,
+        name: &str,
+    ) -> ApiResult<()> {
+        self.with_transaction(session_id, tx_id, |entry| {
+            if entry.savepoints.lock().unwrap().iter().any(|savepoint| {
+                savepoint.name == name && savepoint.state == SavepointState::Active
+            }) {
+                return Err(ApiError::BadRequest(
+                    "savepoint name is already active".into(),
+                ));
+            }
+            Ok(())
+        })
+    }
+
+    fn ensure_active_savepoint(
+        &self,
+        session_id: SessionId,
+        tx_id: TxId,
+        name: &str,
+    ) -> ApiResult<()> {
+        self.with_transaction(session_id, tx_id, |entry| {
+            if entry.savepoints.lock().unwrap().iter().any(|savepoint| {
+                savepoint.name == name && savepoint.state == SavepointState::Active
+            }) {
+                Ok(())
+            } else {
+                Err(ApiError::BadRequest("savepoint is not active".into()))
+            }
+        })
+    }
+
+    fn update_savepoints(
+        &self,
+        session_id: SessionId,
+        tx_id: TxId,
+        update: impl FnOnce(&mut Vec<SavepointInfo>),
+    ) -> ApiResult<()> {
+        self.with_transaction(session_id, tx_id, |entry| {
+            update(&mut entry.savepoints.lock().unwrap());
+            Ok(())
+        })
+    }
+
+    fn with_transaction<T>(
+        &self,
+        session_id: SessionId,
+        tx_id: TxId,
+        use_entry: impl FnOnce(&TransactionEntry) -> ApiResult<T>,
+    ) -> ApiResult<T> {
+        let session = self
+            .inner
+            .sessions
+            .get(&session_id)
+            .ok_or(ApiError::SessionNotFound(session_id))?;
+        let entry = session.transactions.get(&tx_id).ok_or_else(|| {
+            ApiError::Driver(DriverError::new(
+                Code::TransactionNotFound,
+                "transaction not active",
+            ))
+        })?;
+        use_entry(&entry)
     }
 
     fn tx_handle_for(
@@ -1817,6 +1987,7 @@ pub struct ConnectionEntry {
 pub struct TransactionEntry {
     pub info: TransactionInfo,
     pub handle: TxHandle,
+    pub savepoints: Mutex<Vec<SavepointInfo>>,
 }
 
 /// Strip secrets and bind values from an operation before it is recorded on

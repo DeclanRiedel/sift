@@ -49,6 +49,9 @@ GUI later is just rendering. Remaining items below are verified absent from the
 - [x] [Design] Transactions panel contract (ADR-026): server exposes open-tx state
       per connection, savepoint lifecycle (Phase A savepoint Operation variants
       exist), commit/rollback preview. `docs/PLANS/transactions-panel.md`.
+- [x] [Implement] Transactions panel server state. Session-scoped list and
+      commit/rollback preview routes, tracked savepoint lifecycle, audited
+      `Operation` variants, OpenAPI schemas, and client SDK methods.
 - [x] [Design] Schema search + data search (ADR-024). `docs/PLANS/schema-data-search.md`.
 - [x] [Implement] Schema + data search. `completion/src/fuzzy.rs`
       (subsequence matcher + scoring), `protocol/src/search.rs`,
@@ -79,8 +82,7 @@ GUI later is just rendering. Remaining items below are verified absent from the
 - [ ] [Design] CSV import → table (server-side ingest, type inference,
       conflict policy). Ties to PG `COPY FROM STDIN` (`PgExt::copy` Import)
       and SQL Server `BULK INSERT` (`MssqlExt::bulk_insert`).
-- [ ] [Implement] Transactions panel server state; process-list + kill;
-      capability query; CSV import.
+- [ ] [Implement] Process-list + kill; capability query; CSV import.
 
 ## Phase E — Hosted auth & identity
 
