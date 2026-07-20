@@ -758,6 +758,10 @@ async fn refresh_auth(
     };
     match metadata.rotate_auth_refresh_token(presented, audit).await? {
         RefreshAuthResult::Issued(tokens) => {
+            state
+                .auth
+                .runtime
+                .invalidate_auth_session(&tokens.session_id);
             state.sessions.push_operation_local(
                 Operation::RefreshAuthSession,
                 OperationStatus::Succeeded,
@@ -768,9 +772,11 @@ async fn refresh_auth(
             );
             auth_login_response(tokens, cookie_refresh.is_some())
         }
-        RefreshAuthResult::Invalid | RefreshAuthResult::ReplayDetected => {
+        RefreshAuthResult::ReplayDetected => {
+            state.auth.runtime.invalidate_all_access_tokens();
             Err(ApiError::Unauthorized)
         }
+        RefreshAuthResult::Invalid => Err(ApiError::Unauthorized),
     }
 }
 
@@ -786,6 +792,7 @@ async fn logout_auth(
         "logout",
         metadata_audit_record(auth.principal_id, "logout", "auth_session", None),
     )?;
+    state.auth.runtime.invalidate_auth_session(session_id);
     state.sessions.push_operation_local(
         Operation::Logout {
             all_sessions: false,
@@ -808,6 +815,7 @@ async fn logout_all_auth(
         "logout_all",
         metadata_audit_record(auth.principal_id, "logout_all", "auth_session", None),
     )?;
+    state.auth.runtime.invalidate_principal(auth.principal_id);
     state.sessions.push_operation_local(
         Operation::Logout { all_sessions: true },
         OperationStatus::Succeeded,
@@ -873,6 +881,7 @@ async fn change_password(
             ),
         )
         .await?;
+    state.auth.runtime.invalidate_principal(auth.principal_id);
     state.sessions.push_operation_local(
         Operation::ChangePassword,
         OperationStatus::Succeeded,
@@ -1184,6 +1193,7 @@ async fn admin_set_principal_disabled(
             Some(id),
         ),
     )?;
+    state.auth.runtime.invalidate_principal(PrincipalId(id));
     Ok(Json(json!({"ok": true})))
 }
 
@@ -1269,6 +1279,10 @@ async fn admin_unlink_identity(
             ),
         )
         .await?;
+    state
+        .auth
+        .runtime
+        .invalidate_principal(PrincipalId(principal_id));
     Ok(Json(json!({"ok": true})))
 }
 
@@ -1745,8 +1759,10 @@ async fn resolve_auth_context_blocking(
     if let Some(token) = bearer.or(cookie_token) {
         if token.starts_with("sift_at_") {
             let metadata = metadata_store(&state)?;
-            let session = metadata
-                .verify_auth_access_token(token)
+            let session = state
+                .auth
+                .runtime
+                .resolve_access_token(metadata, token)
                 .await?
                 .ok_or(ApiError::Unauthorized)?;
             let tenants = metadata.list_principal_tenants(session.principal.id)?;
@@ -4796,8 +4812,10 @@ async fn reauthenticate_ws(
     expected_principal: PrincipalId,
 ) -> ApiResult<AuthContext> {
     let metadata = metadata_store(state)?;
-    let session = metadata
-        .verify_auth_access_token(token)
+    let session = state
+        .auth
+        .runtime
+        .resolve_access_token(metadata, token)
         .await?
         .ok_or(ApiError::Unauthorized)?;
     if session.principal.id != expected_principal {

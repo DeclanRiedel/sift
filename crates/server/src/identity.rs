@@ -9,7 +9,8 @@ use anyhow::{bail, Context};
 use argon2::password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString};
 use argon2::{Algorithm, Argon2, Params, Version};
 use rand_core::OsRng;
-use sift_metadata::{MetadataStore, PasswordIdentity};
+use sha2::{Digest, Sha256};
+use sift_metadata::{AuthenticatedSession, MetadataStore, PasswordIdentity, PrincipalId};
 use tokio::sync::Semaphore;
 
 const MIN_PASSWORD_BYTES: usize = 12;
@@ -18,11 +19,14 @@ const LOGIN_WINDOW: Duration = Duration::from_secs(60);
 const MAX_SOURCE_FAILURES: u32 = 20;
 const MAX_IDENTITY_FAILURES: u32 = 5;
 const MAX_ARGON2_CONCURRENCY: usize = 4;
+const ACCESS_CACHE_TTL: Duration = Duration::from_secs(30);
+const ACCESS_CACHE_MAX_ENTRIES: usize = 1024;
 
 #[derive(Clone)]
 pub struct AuthRuntime {
     verifier_slots: Arc<Semaphore>,
     failures: Arc<Mutex<HashMap<String, FailureWindow>>>,
+    access_cache: Arc<Mutex<HashMap<[u8; 32], CachedAccessSession>>>,
 }
 
 #[derive(Clone)]
@@ -57,8 +61,15 @@ impl Default for AuthRuntime {
         Self {
             verifier_slots: Arc::new(Semaphore::new(MAX_ARGON2_CONCURRENCY)),
             failures: Arc::new(Mutex::new(HashMap::new())),
+            access_cache: Arc::new(Mutex::new(HashMap::new())),
         }
     }
+}
+
+#[derive(Clone)]
+struct CachedAccessSession {
+    session: AuthenticatedSession,
+    cached_at: Instant,
 }
 
 struct FailureWindow {
@@ -73,6 +84,66 @@ pub enum PasswordAuthOutcome {
 }
 
 impl AuthRuntime {
+    pub async fn resolve_access_token(
+        &self,
+        metadata: &MetadataStore,
+        presented: &str,
+    ) -> sift_metadata::Result<Option<AuthenticatedSession>> {
+        let key = access_cache_key(presented);
+        let now = Instant::now();
+        let utc_now = chrono::Utc::now();
+        {
+            let mut cache = self.access_cache.lock().unwrap();
+            cache.retain(|_, entry| {
+                now.duration_since(entry.cached_at) < ACCESS_CACHE_TTL
+                    && entry.session.expires_at > utc_now
+            });
+            if let Some(entry) = cache.get(&key) {
+                return Ok(Some(entry.session.clone()));
+            }
+        }
+
+        let session = metadata.verify_auth_access_token(presented).await?;
+        if let Some(session) = &session {
+            let mut cache = self.access_cache.lock().unwrap();
+            if cache.len() >= ACCESS_CACHE_MAX_ENTRIES {
+                if let Some(oldest) = cache
+                    .iter()
+                    .max_by_key(|(_, entry)| now.duration_since(entry.cached_at))
+                    .map(|(key, _)| *key)
+                {
+                    cache.remove(&oldest);
+                }
+            }
+            cache.insert(
+                key,
+                CachedAccessSession {
+                    session: session.clone(),
+                    cached_at: now,
+                },
+            );
+        }
+        Ok(session)
+    }
+
+    pub fn invalidate_auth_session(&self, session_id: &str) {
+        self.access_cache
+            .lock()
+            .unwrap()
+            .retain(|_, entry| entry.session.session_id != session_id);
+    }
+
+    pub fn invalidate_principal(&self, principal: PrincipalId) {
+        self.access_cache
+            .lock()
+            .unwrap()
+            .retain(|_, entry| entry.session.principal.id != principal);
+    }
+
+    pub fn invalidate_all_access_tokens(&self) {
+        self.access_cache.lock().unwrap().clear();
+    }
+
     pub async fn authenticate_password(
         &self,
         metadata: &MetadataStore,
@@ -144,6 +215,10 @@ impl AuthRuntime {
     fn clear_failure(&self, key: &str) {
         self.failures.lock().unwrap().remove(key);
     }
+}
+
+fn access_cache_key(presented: &str) -> [u8; 32] {
+    Sha256::digest(presented.as_bytes()).into()
 }
 
 pub fn normalize_username(value: &str) -> anyhow::Result<String> {
@@ -305,5 +380,85 @@ mod tests {
                 .unwrap(),
             PasswordAuthOutcome::Throttled
         ));
+    }
+
+    #[tokio::test]
+    async fn access_cache_is_bounded_by_local_revocation_invalidation() {
+        let metadata = MetadataStore::open_in_memory(Arc::new(MemorySecretStore::new())).unwrap();
+        let verifier = hash_password(b"correct horse battery staple".to_vec())
+            .await
+            .unwrap();
+        let principal = metadata
+            .create_password_principal(
+                NewPasswordPrincipal {
+                    username: "cache-user",
+                    display_name: "Cache User",
+                    email: None,
+                    is_instance_admin: false,
+                },
+                verifier.as_bytes(),
+                NewOperationAudit {
+                    actor_principal_id: None,
+                    action: "create".into(),
+                    target: "principal".into(),
+                    target_id: None,
+                    status: "succeeded".into(),
+                    result_code: None,
+                    row_count: None,
+                    error_message: None,
+                    correlation_id: None,
+                },
+            )
+            .await
+            .unwrap();
+        let tokens = metadata
+            .issue_auth_session(
+                principal.id,
+                sift_metadata::AuthClientKind::Native,
+                Some("cache test"),
+                NewOperationAudit {
+                    actor_principal_id: Some(principal.id),
+                    action: "authenticate".into(),
+                    target: "auth_session".into(),
+                    target_id: None,
+                    status: "succeeded".into(),
+                    result_code: None,
+                    row_count: None,
+                    error_message: None,
+                    correlation_id: None,
+                },
+            )
+            .await
+            .unwrap();
+        let runtime = AuthRuntime::default();
+        assert!(runtime
+            .resolve_access_token(&metadata, &tokens.access_token)
+            .await
+            .unwrap()
+            .is_some());
+
+        metadata
+            .revoke_auth_session(
+                &tokens.session_id,
+                "test",
+                NewOperationAudit {
+                    actor_principal_id: Some(principal.id),
+                    action: "logout".into(),
+                    target: "auth_session".into(),
+                    target_id: None,
+                    status: "succeeded".into(),
+                    result_code: None,
+                    row_count: None,
+                    error_message: None,
+                    correlation_id: None,
+                },
+            )
+            .unwrap();
+        runtime.invalidate_auth_session(&tokens.session_id);
+        assert!(runtime
+            .resolve_access_token(&metadata, &tokens.access_token)
+            .await
+            .unwrap()
+            .is_none());
     }
 }
