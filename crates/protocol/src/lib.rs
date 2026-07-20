@@ -32,7 +32,7 @@ pub mod value;
 
 pub use auth::{
     AuthClientKind, AuthPrincipal, AuthTenantMembership, AuthTokensResponse, PasswordLoginRequest,
-    RefreshAuthRequest, WhoAmIResponse,
+    RefreshAuthRequest, WebAuthResponse, WhoAmIResponse,
 };
 pub use capability::{OperationCapability, OperationCapabilityContext, OperationKind};
 pub use column::{

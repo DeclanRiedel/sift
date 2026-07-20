@@ -132,7 +132,7 @@ impl Client {
             .http
             .post(self.url("/v1/auth/refresh"))
             .json(&RefreshAuthRequest {
-                refresh_token: provider.refresh_token().await,
+                refresh_token: Some(provider.refresh_token().await),
             })
             .send()
             .await?;

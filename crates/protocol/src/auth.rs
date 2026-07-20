@@ -39,7 +39,8 @@ impl fmt::Debug for PasswordLoginRequest {
 
 #[derive(Clone, Serialize, Deserialize, JsonSchema)]
 pub struct RefreshAuthRequest {
-    pub refresh_token: String,
+    #[serde(default)]
+    pub refresh_token: Option<String>,
 }
 
 impl fmt::Debug for RefreshAuthRequest {
@@ -57,6 +58,26 @@ pub struct AuthTokensResponse {
     pub access_expires_at: DateTime<Utc>,
     pub refresh_token: String,
     pub refresh_expires_at: DateTime<Utc>,
+}
+
+#[derive(Clone, Serialize, Deserialize, JsonSchema)]
+pub struct WebAuthResponse {
+    pub access_expires_at: DateTime<Utc>,
+    pub refresh_expires_at: DateTime<Utc>,
+    /// Double-submit value. This is not an authentication credential; browser
+    /// clients echo it in `X-Sift-CSRF` for state-changing requests.
+    pub csrf_token: String,
+}
+
+impl fmt::Debug for WebAuthResponse {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("WebAuthResponse")
+            .field("access_expires_at", &self.access_expires_at)
+            .field("refresh_expires_at", &self.refresh_expires_at)
+            .field("csrf_token", &"[REDACTED]")
+            .finish()
+    }
 }
 
 impl fmt::Debug for AuthTokensResponse {
@@ -109,7 +130,7 @@ mod tests {
             client_label: None,
         };
         let refresh = RefreshAuthRequest {
-            refresh_token: "sift_rt_secret".into(),
+            refresh_token: Some("sift_rt_secret".into()),
         };
         let tokens = AuthTokensResponse {
             access_token: "sift_at_secret".into(),

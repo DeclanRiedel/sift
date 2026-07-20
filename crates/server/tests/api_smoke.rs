@@ -12,7 +12,8 @@ use sift_metadata::{
 use sift_protocol::{
     AuthTokensResponse, ColumnMetadata, ConnectionSpec, Engine, ExecuteRequestHttp, Health,
     Nullability, Page, PrimitiveType, RoomClientMessage, RoomServerMessage, Row, SchemaScope,
-    SchemaSnapshot, ServerInfo, SslMode, TextDocumentOperation, TypeRef, Value, WhoAmIResponse,
+    SchemaSnapshot, ServerInfo, SslMode, TextDocumentOperation, TypeRef, Value, WebAuthResponse,
+    WhoAmIResponse,
 };
 use sift_server::http::{app, AppState, AuthState};
 use sift_server::registry::DriverRegistry;
@@ -1092,6 +1093,138 @@ async fn password_login_refresh_whoami_and_logout_are_end_to_end() {
         .await
         .unwrap();
     assert_eq!(after_logout.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn web_password_auth_uses_http_only_cookies_and_requires_csrf() {
+    let mut state = test_state_with_metadata(false);
+    let metadata = state.metadata.as_ref().unwrap();
+    let password = "browser password manager value";
+    let verifier = sift_server::identity::hash_password(password.as_bytes().to_vec())
+        .await
+        .unwrap();
+    metadata
+        .create_password_principal(
+            NewPasswordPrincipal {
+                username: "browser-user",
+                display_name: "Browser User",
+                email: None,
+                is_instance_admin: false,
+            },
+            verifier.as_bytes(),
+            NewOperationAudit {
+                actor_principal_id: Some(PrincipalId(1)),
+                action: "create".into(),
+                target: "principal".into(),
+                target_id: None,
+                status: "succeeded".into(),
+                result_code: None,
+                row_count: None,
+                error_message: None,
+                correlation_id: None,
+            },
+        )
+        .await
+        .unwrap();
+    state.auth.loopback_bypass = false;
+    let app = app(state);
+    let login = app
+        .clone()
+        .oneshot(
+            Request::post("/v1/auth/login")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "username": "browser-user",
+                        "password": password,
+                        "client_kind": "web"
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(login.status(), StatusCode::OK);
+    let set_cookies: Vec<String> = login
+        .headers()
+        .get_all("set-cookie")
+        .iter()
+        .map(|value| value.to_str().unwrap().to_string())
+        .collect();
+    assert_eq!(set_cookies.len(), 3);
+    assert!(set_cookies
+        .iter()
+        .filter(|cookie| cookie.starts_with("sift_access=") || cookie.starts_with("sift_refresh="))
+        .all(|cookie| cookie.contains("HttpOnly") && cookie.contains("Secure")));
+    let cookie_header = set_cookies
+        .iter()
+        .map(|cookie| cookie.split(';').next().unwrap())
+        .collect::<Vec<_>>()
+        .join("; ");
+    let web: WebAuthResponse = body_json(login.into_body()).await;
+
+    let whoami = app
+        .clone()
+        .oneshot(
+            Request::get("/v1/auth/whoami")
+                .header("cookie", &cookie_header)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(whoami.status(), StatusCode::OK);
+
+    let no_csrf = app
+        .clone()
+        .oneshot(
+            Request::post("/v1/auth/logout")
+                .header("cookie", &cookie_header)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(no_csrf.status(), StatusCode::FORBIDDEN);
+
+    let refreshed = app
+        .clone()
+        .oneshot(
+            Request::post("/v1/auth/refresh")
+                .header("content-type", "application/json")
+                .header("cookie", &cookie_header)
+                .header("x-sift-csrf", &web.csrf_token)
+                .body(Body::from("{}"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(refreshed.status(), StatusCode::OK);
+    let refreshed_cookies: Vec<String> = refreshed
+        .headers()
+        .get_all("set-cookie")
+        .iter()
+        .map(|value| value.to_str().unwrap().to_string())
+        .collect();
+    let refreshed_cookie_header = refreshed_cookies
+        .iter()
+        .map(|cookie| cookie.split(';').next().unwrap())
+        .collect::<Vec<_>>()
+        .join("; ");
+    let refreshed_web: WebAuthResponse = body_json(refreshed.into_body()).await;
+    let logout = app
+        .oneshot(
+            Request::post("/v1/auth/logout")
+                .header("cookie", refreshed_cookie_header)
+                .header("x-sift-csrf", refreshed_web.csrf_token)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(logout.status(), StatusCode::OK);
+    assert_eq!(logout.headers().get_all("set-cookie").iter().count(), 3);
 }
 
 #[tokio::test]

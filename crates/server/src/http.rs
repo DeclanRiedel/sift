@@ -30,8 +30,8 @@ use sift_protocol::{
     KillProcessRequest, ObjectPath, OpenConnectionRequest, OpenSessionRequest, Operation,
     OperationStatus, PasswordLoginRequest, Readiness, RefreshAuthRequest, RoomClientMessage,
     RoomQueryResult, RoomQueryStatus, RoomServerMessage, SavepointRequest, SchemaFilter,
-    SchemaScope, TransactionPreviewRequest, WhoAmIResponse, WsClientMessage, WsServerMessage,
-    PROTOCOL_VERSION,
+    SchemaScope, TransactionPreviewRequest, WebAuthResponse, WhoAmIResponse, WsClientMessage,
+    WsServerMessage, PROTOCOL_VERSION,
 };
 
 use crate::config::DeploymentPolicy;
@@ -423,6 +423,12 @@ async fn auth_middleware(
                 if let Err(error) = authorize_route(&state, &context, path) {
                     return error.into_response();
                 }
+                if context.cookie_authenticated
+                    && is_state_changing(req.method())
+                    && !valid_csrf(req.headers())
+                {
+                    return ApiError::Forbidden("invalid CSRF token".into()).into_response();
+                }
                 req.extensions_mut().insert(context);
                 next.run(req).await
             }
@@ -535,6 +541,7 @@ struct AuthContext {
     principal_id: PrincipalId,
     tenants: Vec<TenantMembership>,
     auth_session_id: Option<String>,
+    cookie_authenticated: bool,
 }
 
 #[derive(Clone)]
@@ -584,12 +591,8 @@ async fn password_login(
     State(state): State<AppState>,
     headers: HeaderMap,
     Json(request): Json<PasswordLoginRequest>,
-) -> ApiResult<Json<AuthTokensResponse>> {
-    if request.client_kind == AuthClientKind::Web {
-        return Err(ApiError::BadRequest(
-            "web authentication requires the cookie/CSRF surface".into(),
-        ));
-    }
+) -> ApiResult<Response> {
+    let client_kind = request.client_kind;
     let source = headers
         .get(&PEER_ADDR_HEADER)
         .and_then(|value| value.to_str().ok())
@@ -630,7 +633,10 @@ async fn password_login(
     let tokens = metadata
         .issue_auth_session(
             identity.principal.id,
-            MetadataAuthClientKind::Native,
+            match client_kind {
+                AuthClientKind::Native => MetadataAuthClientKind::Native,
+                AuthClientKind::Web => MetadataAuthClientKind::Web,
+            },
             request.client_label.as_deref(),
             NewOperationAudit {
                 actor_principal_id: Some(identity.principal.id),
@@ -655,14 +661,24 @@ async fn password_login(
         None,
         None,
     );
-    Ok(Json(auth_tokens_response(tokens)))
+    auth_login_response(tokens, client_kind == AuthClientKind::Web)
 }
 
 async fn refresh_auth(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Json(request): Json<RefreshAuthRequest>,
-) -> ApiResult<Json<AuthTokensResponse>> {
+) -> ApiResult<Response> {
     let metadata = metadata_store(&state)?;
+    let cookie_refresh = cookie_value(&headers, "sift_refresh");
+    if cookie_refresh.is_some() && !valid_csrf(&headers) {
+        return Err(ApiError::Forbidden("invalid CSRF token".into()));
+    }
+    let presented = request
+        .refresh_token
+        .as_deref()
+        .or(cookie_refresh)
+        .ok_or(ApiError::Unauthorized)?;
     let audit = NewOperationAudit {
         actor_principal_id: None,
         action: "refresh_auth_session".into(),
@@ -674,10 +690,7 @@ async fn refresh_auth(
         error_message: None,
         correlation_id: crate::correlation::current(),
     };
-    match metadata
-        .rotate_auth_refresh_token(&request.refresh_token, audit)
-        .await?
-    {
+    match metadata.rotate_auth_refresh_token(presented, audit).await? {
         RefreshAuthResult::Issued(tokens) => {
             state.sessions.push_operation_local(
                 Operation::RefreshAuthSession,
@@ -687,7 +700,7 @@ async fn refresh_auth(
                 None,
                 None,
             );
-            Ok(Json(auth_tokens_response(tokens)))
+            auth_login_response(tokens, cookie_refresh.is_some())
         }
         RefreshAuthResult::Invalid | RefreshAuthResult::ReplayDetected => {
             Err(ApiError::Unauthorized)
@@ -698,7 +711,7 @@ async fn refresh_auth(
 async fn logout_auth(
     State(state): State<AppState>,
     Extension(auth): Extension<AuthContext>,
-) -> ApiResult<Json<serde_json::Value>> {
+) -> ApiResult<Response> {
     let session_id = auth.auth_session_id.as_deref().ok_or_else(|| {
         ApiError::BadRequest("the current credential is not an interactive session".into())
     })?;
@@ -717,13 +730,13 @@ async fn logout_auth(
         None,
         None,
     );
-    Ok(Json(json!({"ok": true})))
+    Ok(logout_response(auth.cookie_authenticated))
 }
 
 async fn logout_all_auth(
     State(state): State<AppState>,
     Extension(auth): Extension<AuthContext>,
-) -> ApiResult<Json<serde_json::Value>> {
+) -> ApiResult<Response> {
     metadata_store(&state)?.revoke_all_auth_sessions(
         auth.principal_id,
         "logout_all",
@@ -737,7 +750,7 @@ async fn logout_all_auth(
         None,
         None,
     );
-    Ok(Json(json!({"ok": true})))
+    Ok(logout_response(auth.cookie_authenticated))
 }
 
 async fn whoami(
@@ -784,6 +797,56 @@ fn auth_tokens_response(tokens: sift_metadata::IssuedAuthTokens) -> AuthTokensRe
     }
 }
 
+fn auth_login_response(tokens: sift_metadata::IssuedAuthTokens, web: bool) -> ApiResult<Response> {
+    if !web {
+        return Ok(Json(auth_tokens_response(tokens)).into_response());
+    }
+    let csrf = format!(
+        "{}{}",
+        uuid::Uuid::new_v4().simple(),
+        uuid::Uuid::new_v4().simple()
+    );
+    let access_cookie = format!(
+        "sift_access={}; Path=/; Max-Age=900; Secure; HttpOnly; SameSite=Lax",
+        tokens.access_token
+    );
+    let refresh_cookie = format!(
+        "sift_refresh={}; Path=/v1/auth/refresh; Max-Age=2592000; Secure; HttpOnly; SameSite=Strict",
+        tokens.refresh_token
+    );
+    let csrf_cookie = format!("sift_csrf={csrf}; Path=/; Max-Age=2592000; Secure; SameSite=Strict");
+    let mut response = Json(WebAuthResponse {
+        access_expires_at: tokens.access_expires_at,
+        refresh_expires_at: tokens.refresh_expires_at,
+        csrf_token: csrf,
+    })
+    .into_response();
+    for cookie in [access_cookie, refresh_cookie, csrf_cookie] {
+        response.headers_mut().append(
+            header::SET_COOKIE,
+            HeaderValue::from_str(&cookie)
+                .map_err(|error| ApiError::Internal(format!("invalid auth cookie: {error}")))?,
+        );
+    }
+    Ok(response)
+}
+
+fn logout_response(clear_cookies: bool) -> Response {
+    let mut response = Json(json!({"ok": true})).into_response();
+    if clear_cookies {
+        for cookie in [
+            "sift_access=; Path=/; Max-Age=0; Secure; HttpOnly; SameSite=Lax",
+            "sift_refresh=; Path=/v1/auth/refresh; Max-Age=0; Secure; HttpOnly; SameSite=Strict",
+            "sift_csrf=; Path=/; Max-Age=0; Secure; SameSite=Strict",
+        ] {
+            response
+                .headers_mut()
+                .append(header::SET_COOKIE, HeaderValue::from_static(cookie));
+        }
+    }
+    response
+}
+
 fn record_auth_failure(metadata: &MetadataStore, action: &str, code: &str) -> ApiResult<()> {
     metadata.record_operation_audit(NewOperationAudit {
         actor_principal_id: None,
@@ -816,6 +879,30 @@ fn bearer_from_headers(headers: &HeaderMap) -> Option<&str> {
         .and_then(|h| h.strip_prefix("Bearer "))
 }
 
+fn cookie_value<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
+    headers
+        .get(header::COOKIE)
+        .and_then(|value| value.to_str().ok())?
+        .split(';')
+        .filter_map(|part| part.trim().split_once('='))
+        .find_map(|(key, value)| (key == name).then_some(value))
+}
+
+fn is_state_changing(method: &axum::http::Method) -> bool {
+    !matches!(
+        *method,
+        axum::http::Method::GET | axum::http::Method::HEAD | axum::http::Method::OPTIONS
+    )
+}
+
+fn valid_csrf(headers: &HeaderMap) -> bool {
+    let header = headers
+        .get("x-sift-csrf")
+        .and_then(|value| value.to_str().ok());
+    let cookie = cookie_value(headers, "sift_csrf");
+    matches!((header, cookie), (Some(header), Some(cookie)) if constant_time_eq(header.as_bytes(), cookie.as_bytes()))
+}
+
 fn resolve_auth_context(state: &AppState, headers: &HeaderMap) -> ApiResult<AuthContext> {
     let metadata = metadata_store(state)?;
     if let Some(token) = bearer_from_headers(headers) {
@@ -828,6 +915,7 @@ fn resolve_auth_context(state: &AppState, headers: &HeaderMap) -> ApiResult<Auth
                 principal_id: row.principal_id,
                 tenants,
                 auth_session_id: None,
+                cookie_authenticated: false,
             });
         }
         if state
@@ -859,6 +947,7 @@ fn local_auth_context(metadata: &MetadataStore) -> ApiResult<AuthContext> {
         principal_id: principal.id,
         tenants,
         auth_session_id: None,
+        cookie_authenticated: false,
     })
 }
 
@@ -866,7 +955,12 @@ async fn resolve_auth_context_blocking(
     state: AppState,
     headers: HeaderMap,
 ) -> ApiResult<AuthContext> {
-    if let Some(token) = bearer_from_headers(&headers) {
+    let bearer = bearer_from_headers(&headers);
+    let cookie_token = bearer
+        .is_none()
+        .then(|| cookie_value(&headers, "sift_access"))
+        .flatten();
+    if let Some(token) = bearer.or(cookie_token) {
         if token.starts_with("sift_at_") {
             let metadata = metadata_store(&state)?;
             let session = metadata
@@ -878,7 +972,11 @@ async fn resolve_auth_context_blocking(
                 principal_id: session.principal.id,
                 tenants,
                 auth_session_id: Some(session.session_id),
+                cookie_authenticated: cookie_token.is_some(),
             });
+        }
+        if cookie_token.is_some() {
+            return Err(ApiError::Unauthorized);
         }
     }
     metadata_blocking(move || resolve_auth_context(&state, &headers)).await
@@ -1348,7 +1446,7 @@ async fn openapi() -> Json<serde_json::Value> {
                     "security": [],
                     "requestBody": json_body("PasswordLoginRequest"),
                     "responses": {
-                        "200": { "description": "Opaque access and refresh credentials", "content": json_content("AuthTokensResponse") },
+                        "200": { "description": "Native opaque credentials or browser cookie metadata", "content": json_one_of_content(&["AuthTokensResponse", "WebAuthResponse"]) },
                         "401": { "description": "Authentication denied" },
                         "429": { "description": "Authentication throttled" }
                     }
@@ -1361,7 +1459,7 @@ async fn openapi() -> Json<serde_json::Value> {
                     "security": [],
                     "requestBody": json_body("RefreshAuthRequest"),
                     "responses": {
-                        "200": { "description": "Rotated credentials", "content": json_content("AuthTokensResponse") },
+                        "200": { "description": "Rotated native credentials or browser cookie metadata", "content": json_one_of_content(&["AuthTokensResponse", "WebAuthResponse"]) },
                         "401": { "description": "Invalid, expired, or replayed refresh credential" }
                     }
                 }
@@ -1876,6 +1974,19 @@ fn json_array_content(schema: &'static str) -> serde_json::Value {
     })
 }
 
+fn json_one_of_content(schemas: &[&str]) -> serde_json::Value {
+    json!({
+        "application/json": {
+            "schema": {
+                "oneOf": schemas
+                    .iter()
+                    .map(|schema| json!({ "$ref": format!("#/components/schemas/{schema}") }))
+                    .collect::<Vec<_>>()
+            }
+        }
+    })
+}
+
 fn json_object_content() -> serde_json::Value {
     json!({
         "application/json": {
@@ -1890,6 +2001,7 @@ fn protocol_schema_refs() -> serde_json::Value {
     add_schema::<sift_protocol::PasswordLoginRequest>("PasswordLoginRequest", &mut schemas);
     add_schema::<sift_protocol::RefreshAuthRequest>("RefreshAuthRequest", &mut schemas);
     add_schema::<sift_protocol::AuthTokensResponse>("AuthTokensResponse", &mut schemas);
+    add_schema::<sift_protocol::WebAuthResponse>("WebAuthResponse", &mut schemas);
     add_schema::<sift_protocol::WhoAmIResponse>("WhoAmIResponse", &mut schemas);
     add_schema::<sift_protocol::BeginTransactionRequest>("BeginTransactionRequest", &mut schemas);
     add_schema::<sift_protocol::BulkInsertRequest>("BulkInsertRequest", &mut schemas);
