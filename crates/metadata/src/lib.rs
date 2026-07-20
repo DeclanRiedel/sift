@@ -28,6 +28,7 @@ mod migrations {
 }
 
 const SECRET_NAMESPACE: &str = "sift.local";
+const PASSWORD_SECRET_NAMESPACE: &str = "sift.auth.password";
 const API_TOKEN_PREFIX: &str = "sift_";
 const API_TOKEN_LOOKUP_LEN: usize = 12;
 const API_TOKEN_LAST_USED_DEBOUNCE_SECS: i64 = 300;
@@ -313,7 +314,7 @@ impl MetadataStore {
         let conn = self.conn()?;
         conn.query_row(
             "SELECT id, external_id, display_name, email, avatar_url, disabled_at,
-                    created_at, updated_at
+                    is_instance_admin, created_at, updated_at
              FROM principal WHERE external_id = ?1",
             params![external_id],
             principal_from_row,
@@ -345,7 +346,7 @@ impl MetadataStore {
         )?;
         let principal = tx.query_row(
             "SELECT id, external_id, display_name, email, avatar_url, disabled_at,
-                    created_at, updated_at
+                    is_instance_admin, created_at, updated_at
              FROM principal WHERE id = ?1",
             params![id.0],
             principal_from_row,
@@ -364,6 +365,110 @@ impl MetadataStore {
         let rows = statement.query_map(params![principal.0], auth_identity_from_row)?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
             .map_err(Into::into)
+    }
+
+    /// Atomically creates the stable principal, its personal tenant and owner
+    /// membership, its password identity, and the sanitized administration
+    /// audit row. `password_verifier` is already an Argon2id verifier; it is
+    /// persisted only in `SecretStore`, never in SQLite.
+    pub async fn create_password_principal(
+        &self,
+        input: NewPasswordPrincipal<'_>,
+        password_verifier: &[u8],
+        audit: NewOperationAudit,
+    ) -> Result<Principal> {
+        let handle = Uuid::new_v4().to_string();
+        self.secrets
+            .put(PASSWORD_SECRET_NAMESPACE, &handle, password_verifier)
+            .await?;
+
+        let now = now_text();
+        let external_id = format!("principal:{}", Uuid::new_v4());
+        let username = input.username.to_string();
+        let display_name = input.display_name.to_string();
+        let email = input.email.map(str::to_string);
+        let is_instance_admin = input.is_instance_admin;
+        let backend = self.backend.clone();
+        let db_handle = handle.clone();
+        let result = sqlite_blocking(move || {
+            let mut conn = backend.conn()?;
+            let tx = conn.transaction()?;
+            tx.execute(
+                "INSERT INTO principal
+                 (external_id, display_name, email, is_instance_admin, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?5)",
+                params![external_id, display_name, email, is_instance_admin, now],
+            )?;
+            let principal_id = PrincipalId(tx.last_insert_rowid());
+            tx.execute(
+                "INSERT INTO tenant (name, kind, created_at, updated_at)
+                 VALUES (?1, 'personal', ?2, ?2)",
+                params![username, now],
+            )?;
+            let tenant_id = TenantId(tx.last_insert_rowid());
+            tx.execute(
+                "INSERT INTO membership
+                 (tenant_id, principal_id, role, created_at, updated_at)
+                 VALUES (?1, ?2, 'owner', ?3, ?3)",
+                params![tenant_id.0, principal_id.0, now],
+            )?;
+            tx.execute(
+                "INSERT INTO auth_identity
+                 (principal_id, method, issuer, subject, credential_handle,
+                  created_at, updated_at)
+                 VALUES (?1, 'password', 'sift', ?2, ?3, ?4, ?4)",
+                params![principal_id.0, username, db_handle, now],
+            )?;
+            let mut audit = audit;
+            audit.target_id = Some(principal_id.0);
+            insert_operation_audit_row(&tx, &audit)?;
+            let principal = tx.query_row(
+                "SELECT id, external_id, display_name, email, avatar_url, disabled_at,
+                        is_instance_admin, created_at, updated_at
+                 FROM principal WHERE id = ?1",
+                params![principal_id.0],
+                principal_from_row,
+            )?;
+            tx.commit()?;
+            Ok(principal)
+        })
+        .await;
+
+        if result.is_err() {
+            self.delete_password_secret_best_effort(&handle, "create_password_principal_rollback")
+                .await;
+        }
+        result
+    }
+
+    pub fn resolve_password_identity(&self, username: &str) -> Result<Option<PasswordIdentity>> {
+        let conn = self.conn()?;
+        conn.query_row(
+            "SELECT ai.id, ai.principal_id, ai.method, ai.issuer, ai.subject,
+                    ai.provider_login, ai.credential_handle, ai.created_at,
+                    ai.updated_at, ai.last_used_at, ai.disabled_at,
+                    p.id, p.external_id, p.display_name, p.email, p.avatar_url,
+                    p.disabled_at, p.is_instance_admin, p.created_at, p.updated_at
+             FROM auth_identity ai
+             JOIN principal p ON p.id = ai.principal_id
+             WHERE ai.method = 'password' AND ai.issuer = 'sift' AND ai.subject = ?1",
+            params![username],
+            |row| {
+                Ok(PasswordIdentity {
+                    identity: auth_identity_from_row(row)?,
+                    principal: principal_from_row_offset(row, 11)?,
+                })
+            },
+        )
+        .optional()
+        .map_err(Into::into)
+    }
+
+    pub async fn password_verifier(&self, identity: &AuthIdentity) -> Result<Option<Vec<u8>>> {
+        let Some(handle) = identity.credential_handle.as_deref() else {
+            return Ok(None);
+        };
+        self.secrets.get(PASSWORD_SECRET_NAMESPACE, handle).await
     }
 
     pub fn create_tenant(&self, name: &str, kind: TenantKind) -> Result<Tenant> {
@@ -689,6 +794,17 @@ impl MetadataStore {
                 handle,
                 context,
                 "orphaned secret: deleting handle from secret store failed"
+            );
+        }
+    }
+
+    async fn delete_password_secret_best_effort(&self, handle: &str, context: &str) {
+        if let Err(error) = self.secrets.delete(PASSWORD_SECRET_NAMESPACE, handle).await {
+            tracing::warn!(
+                %error,
+                handle,
+                context,
+                "orphaned password verifier: deleting handle from secret store failed"
             );
         }
     }
@@ -1486,15 +1602,23 @@ fn connection_profile_by_id_locked(
 }
 
 fn principal_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Principal> {
+    principal_from_row_offset(row, 0)
+}
+
+fn principal_from_row_offset(
+    row: &rusqlite::Row<'_>,
+    offset: usize,
+) -> rusqlite::Result<Principal> {
     Ok(Principal {
-        id: PrincipalId(row.get(0)?),
-        external_id: row.get(1)?,
-        display_name: row.get(2)?,
-        email: row.get(3)?,
-        avatar_url: row.get(4)?,
-        disabled_at: parse_optional_time_sql(row.get(5)?)?,
-        created_at: parse_time_sql(row.get(6)?)?,
-        updated_at: parse_time_sql(row.get(7)?)?,
+        id: PrincipalId(row.get(offset)?),
+        external_id: row.get(offset + 1)?,
+        display_name: row.get(offset + 2)?,
+        email: row.get(offset + 3)?,
+        avatar_url: row.get(offset + 4)?,
+        disabled_at: parse_optional_time_sql(row.get(offset + 5)?)?,
+        is_instance_admin: row.get(offset + 6)?,
+        created_at: parse_time_sql(row.get(offset + 7)?)?,
+        updated_at: parse_time_sql(row.get(offset + 8)?)?,
     })
 }
 
@@ -1934,6 +2058,64 @@ mod tests {
         assert_eq!(identities.len(), 1);
         assert_eq!(identities[0].method, AuthIdentityMethod::Legacy);
         assert_eq!(identities[0].subject, "legacy:test");
+    }
+
+    #[tokio::test]
+    async fn password_principal_creation_owns_personal_tenant_and_keeps_verifier_out_of_sqlite() {
+        let store = store();
+        let verifier = b"$argon2id$v=19$m=19456,t=2,p=1$test-salt$test-verifier";
+        let principal = store
+            .create_password_principal(
+                NewPasswordPrincipal {
+                    username: "alice",
+                    display_name: "Alice",
+                    email: Some("alice@example.com"),
+                    is_instance_admin: true,
+                },
+                verifier,
+                NewOperationAudit {
+                    actor_principal_id: None,
+                    action: "manage_principal.create".into(),
+                    target: "principal".into(),
+                    target_id: None,
+                    status: "succeeded".into(),
+                    result_code: None,
+                    row_count: None,
+                    error_message: None,
+                    correlation_id: Some("offline-admin".into()),
+                },
+            )
+            .await
+            .unwrap();
+
+        assert!(principal.is_instance_admin);
+        assert!(principal.external_id.starts_with("principal:"));
+        let memberships = store.list_principal_tenants(principal.id).unwrap();
+        assert_eq!(memberships.len(), 1);
+        assert_eq!(memberships[0].tenant.kind, TenantKind::Personal);
+        assert_eq!(memberships[0].role, MembershipRole::Owner);
+
+        let password = store.resolve_password_identity("alice").unwrap().unwrap();
+        assert_eq!(password.principal.id, principal.id);
+        assert_eq!(
+            store.password_verifier(&password.identity).await.unwrap(),
+            Some(verifier.to_vec())
+        );
+        let conn = store.conn().unwrap();
+        let sqlite_dump: String = conn
+            .query_row(
+                "SELECT group_concat(COALESCE(credential_handle, '') || subject, '|')
+                 FROM auth_identity",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        drop(conn);
+        assert!(!sqlite_dump.contains("argon2"));
+
+        let audit = store.list_operation_audit(1).unwrap();
+        assert_eq!(audit[0].target_id, Some(principal.id.0));
+        assert!(!serde_json::to_string(&audit).unwrap().contains("argon2"));
     }
 
     #[test]

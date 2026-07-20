@@ -137,8 +137,23 @@ pub struct Principal {
     pub email: Option<String>,
     pub avatar_url: Option<String>,
     pub disabled_at: Option<DateTime<Utc>>,
+    pub is_instance_admin: bool,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone)]
+pub struct NewPasswordPrincipal<'a> {
+    pub username: &'a str,
+    pub display_name: &'a str,
+    pub email: Option<&'a str>,
+    pub is_instance_admin: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct PasswordIdentity {
+    pub identity: AuthIdentity,
+    pub principal: Principal,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
