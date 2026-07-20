@@ -10,21 +10,28 @@ pub use sift_metadata::http::{
     UpdateDocumentSnapshotRequest, UpdateSavedQueryRequest, UpsertConnectionProfileRequest,
 };
 use sift_metadata::{
-    ApiTokenId, ConnectionProfile, ConnectionProfileId, Document, DocumentId, QueryHistory, Room,
-    RoomId, RoomMember, SavedQuery, SavedQueryId, SavedQueryScope, TenantId, TenantMembership,
+    ApiTokenId, ConnectionProfile, ConnectionProfileId, Document, DocumentId, GithubAllowlistEntry,
+    PrincipalKey, QueryHistory, Room, RoomId, RoomMember, SavedQuery, SavedQueryId,
+    SavedQueryScope, TenantId, TenantInvitation, TenantMembership,
 };
 use sift_protocol::{
-    ApplyEditsRequest, ApplyEditsResult, AuthTokensResponse, BeginTransactionRequest,
-    BulkInsertRequest, BulkInsertResponse, CancelRequest, ConnectionId, ConnectionInfo,
-    CsvImportRequest, CsvImportResponse, CursorId, DataSearchRequest, DataSearchResponse,
-    DatabaseProcess, EditPlan, EndTransactionRequest, ExecuteRequestHttp, ExecuteResponse,
-    ExplainRequest, ExplainResponse, Health, KillProcessRequest, KillProcessResponse,
+    AcceptTenantInvitationRequest, AdminCreatePasswordPrincipalRequest,
+    AdminLinkPasswordIdentityRequest, AdminSetPrincipalDisabledRequest, ApplyEditsRequest,
+    ApplyEditsResult, AuthIdentitySummary, AuthPrincipal, AuthSessionSummary, AuthTokensResponse,
+    BeginTransactionRequest, BulkInsertRequest, BulkInsertResponse, CancelRequest,
+    ChangePasswordRequest, ConnectionId, ConnectionInfo, CreateGithubAllowlistRequest,
+    CreateTenantInvitationRequest, CsvImportRequest, CsvImportResponse, CursorId,
+    DataSearchRequest, DataSearchResponse, DatabaseProcess, EditPlan, EndTransactionRequest,
+    ExecuteRequestHttp, ExecuteResponse, ExplainRequest, ExplainResponse, Health,
+    IssuedPasswordResetResponse, IssuedTenantInvitationResponse, KeyAuthenticateRequest,
+    KeyChallengeRequest, KeyChallengeResponse, KillProcessRequest, KillProcessResponse,
     OpenConnectionRequest, OpenSessionRequest, OperationCapability, OperationCapabilityContext,
-    Page, PasswordLoginRequest, PreviewEditsRequest, Readiness, RefreshAuthRequest,
-    SavepointRequest, SchemaSearchRequest, SchemaSearchResponse, SchemaSnapshot, ServerInfo,
-    SessionId, SessionInfo, TextDocumentOperation, TransactionEndAction, TransactionInfo,
-    TransactionPreview, TransactionPreviewRequest, TransactionState, TxHandleRef, TxId, TxMode,
-    Value, WhoAmIResponse, WsClientMessage, WsServerMessage,
+    Page, PasswordLoginRequest, PasswordResetRequest, PreviewEditsRequest, Readiness,
+    RefreshAuthRequest, RegisterPrincipalKeyRequest, SavepointRequest, SchemaSearchRequest,
+    SchemaSearchResponse, SchemaSnapshot, ServerInfo, SessionId, SessionInfo,
+    TextDocumentOperation, TransactionEndAction, TransactionInfo, TransactionPreview,
+    TransactionPreviewRequest, TransactionState, TxHandleRef, TxId, TxMode, Value, WebAuthResponse,
+    WhoAmIResponse, WsClientMessage, WsServerMessage,
 };
 
 #[derive(Clone)]
@@ -148,6 +155,208 @@ impl Client {
     pub async fn logout(&self) -> Result<()> {
         let _: serde_json::Value = self.post_empty("/v1/auth/logout").await?;
         Ok(())
+    }
+
+    pub async fn logout_all(&self) -> Result<()> {
+        let _: serde_json::Value = self.post_empty("/v1/auth/logout-all").await?;
+        Ok(())
+    }
+
+    pub async fn change_password(&self, request: ChangePasswordRequest) -> Result<()> {
+        let _: serde_json::Value = self.put("/v1/auth/password", &request).await?;
+        Ok(())
+    }
+
+    pub async fn reset_password(&self, request: PasswordResetRequest) -> Result<()> {
+        let _: serde_json::Value = self.post("/v1/auth/password/reset", &request).await?;
+        Ok(())
+    }
+
+    pub async fn github_authorization_url(&self) -> Result<String> {
+        let client = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()?;
+        let response = client
+            .get(self.url("/v1/auth/github/start?client_kind=web"))
+            .send()
+            .await?;
+        if !response.status().is_redirection() {
+            return Err(server_error(response).await);
+        }
+        response
+            .headers()
+            .get(reqwest::header::LOCATION)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_string)
+            .ok_or_else(|| Error::Protocol("GitHub authorization redirect omitted Location".into()))
+    }
+
+    pub async fn github_callback(&self, code: &str, state: &str) -> Result<WebAuthResponse> {
+        self.get(&format!(
+            "/v1/auth/github/callback?code={}&state={}",
+            urlencoding_replace(code),
+            urlencoding_replace(state)
+        ))
+        .await
+    }
+
+    pub async fn github_allowlist(&self) -> Result<Vec<GithubAllowlistEntry>> {
+        self.get("/v1/admin/auth/github-allowlist").await
+    }
+
+    pub async fn create_github_allowlist_entry(
+        &self,
+        request: CreateGithubAllowlistRequest,
+    ) -> Result<GithubAllowlistEntry> {
+        self.post("/v1/admin/auth/github-allowlist", &request).await
+    }
+
+    pub async fn revoke_github_allowlist_entry(&self, id: i64) -> Result<()> {
+        self.delete(&format!("/v1/admin/auth/github-allowlist/{id}"))
+            .await
+    }
+
+    pub async fn admin_create_principal(
+        &self,
+        request: AdminCreatePasswordPrincipalRequest,
+    ) -> Result<AuthPrincipal> {
+        self.post("/v1/admin/principals", &request).await
+    }
+
+    pub async fn admin_set_principal_disabled(
+        &self,
+        principal_id: i64,
+        disabled: bool,
+    ) -> Result<()> {
+        let _: serde_json::Value = self
+            .put(
+                &format!("/v1/admin/principals/{principal_id}/disabled"),
+                &AdminSetPrincipalDisabledRequest { disabled },
+            )
+            .await?;
+        Ok(())
+    }
+
+    pub async fn admin_principal_identities(
+        &self,
+        principal_id: i64,
+    ) -> Result<Vec<AuthIdentitySummary>> {
+        self.get(&format!("/v1/admin/principals/{principal_id}/identities"))
+            .await
+    }
+
+    pub async fn admin_link_password_identity(
+        &self,
+        principal_id: i64,
+        request: AdminLinkPasswordIdentityRequest,
+    ) -> Result<AuthIdentitySummary> {
+        self.post(
+            &format!("/v1/admin/principals/{principal_id}/identities/password"),
+            &request,
+        )
+        .await
+    }
+
+    pub async fn admin_unlink_identity(&self, principal_id: i64, identity_id: i64) -> Result<()> {
+        self.delete(&format!(
+            "/v1/admin/principals/{principal_id}/identities/{identity_id}"
+        ))
+        .await
+    }
+
+    pub async fn admin_auth_sessions(&self, principal_id: i64) -> Result<Vec<AuthSessionSummary>> {
+        self.get(&format!(
+            "/v1/admin/principals/{principal_id}/auth-sessions"
+        ))
+        .await
+    }
+
+    pub async fn admin_revoke_auth_session(
+        &self,
+        principal_id: i64,
+        session_id: &str,
+    ) -> Result<()> {
+        self.delete(&format!(
+            "/v1/admin/principals/{principal_id}/auth-sessions/{session_id}"
+        ))
+        .await
+    }
+
+    pub async fn admin_issue_password_reset(
+        &self,
+        principal_id: i64,
+        identity_id: i64,
+    ) -> Result<IssuedPasswordResetResponse> {
+        self.post_empty(&format!(
+            "/v1/admin/principals/{principal_id}/identities/{identity_id}/password-reset"
+        ))
+        .await
+    }
+
+    pub async fn create_tenant_invitation(
+        &self,
+        tenant: TenantId,
+        request: CreateTenantInvitationRequest,
+    ) -> Result<IssuedTenantInvitationResponse> {
+        self.post(
+            &format!("/v1/metadata/tenants/{}/invitations", tenant.0),
+            &request,
+        )
+        .await
+    }
+
+    pub async fn tenant_invitations(&self, tenant: TenantId) -> Result<Vec<TenantInvitation>> {
+        self.get(&format!("/v1/metadata/tenants/{}/invitations", tenant.0))
+            .await
+    }
+
+    pub async fn revoke_tenant_invitation(
+        &self,
+        tenant: TenantId,
+        invitation_id: i64,
+    ) -> Result<()> {
+        self.delete(&format!(
+            "/v1/metadata/tenants/{}/invitations/{invitation_id}",
+            tenant.0
+        ))
+        .await
+    }
+
+    pub async fn accept_tenant_invitation(
+        &self,
+        request: AcceptTenantInvitationRequest,
+    ) -> Result<TenantMembership> {
+        self.post("/v1/auth/invitations/accept", &request).await
+    }
+
+    pub async fn principal_keys(&self) -> Result<Vec<PrincipalKey>> {
+        self.get("/v1/auth/keys").await
+    }
+
+    pub async fn register_principal_key(
+        &self,
+        request: RegisterPrincipalKeyRequest,
+    ) -> Result<PrincipalKey> {
+        self.post("/v1/auth/keys", &request).await
+    }
+
+    pub async fn revoke_principal_key(&self, key_id: i64) -> Result<()> {
+        self.delete(&format!("/v1/auth/keys/{key_id}")).await
+    }
+
+    pub async fn issue_key_challenge(
+        &self,
+        request: KeyChallengeRequest,
+    ) -> Result<KeyChallengeResponse> {
+        self.post("/v1/auth/keys/challenge", &request).await
+    }
+
+    pub async fn authenticate_key(
+        &self,
+        request: KeyAuthenticateRequest,
+    ) -> Result<SessionTokenProvider> {
+        let tokens: AuthTokensResponse = self.post("/v1/auth/keys/authenticate", &request).await?;
+        Ok(SessionTokenProvider::new(tokens))
     }
 
     pub async fn health(&self) -> Result<Health> {
@@ -1187,6 +1396,12 @@ async fn response_json<T: serde::de::DeserializeOwned>(response: reqwest::Respon
         return Err(Error::Server { status, body });
     }
     Ok(response.json().await?)
+}
+
+async fn server_error(response: reqwest::Response) -> Error {
+    let status = response.status();
+    let body = response.text().await.unwrap_or_default();
+    Error::Server { status, body }
 }
 
 async fn next_ws<S>(ws: &mut S) -> Result<WsServerMessage>
