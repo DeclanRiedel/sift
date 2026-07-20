@@ -19,9 +19,9 @@ use sift_doc::{CrdtKind, DocumentSnapshot, TextDocument, TextOperation};
 use sift_metadata::{
     ApiTokenId, ConnectionProfileId, CrdtType, Document, DocumentId, MetadataStore,
     NewConnectionProfile, NewDocument, NewOperationAudit, NewQueryHistory, NewRoom, NewSavedQuery,
-    PrincipalId,
-    QueryHistory, QueryStatus, Room, RoomId, RoomKind, RoomMember, RoomRole, SavedQuery,
-    SavedQueryFilter, SavedQueryId, SavedQueryScope, TenantId, TenantMembership, UpdateSavedQuery,
+    PrincipalId, QueryHistory, QueryStatus, Room, RoomId, RoomKind, RoomMember, RoomRole,
+    SavedQuery, SavedQueryFilter, SavedQueryId, SavedQueryScope, TenantId, TenantMembership,
+    UpdateSavedQuery,
 };
 use sift_protocol::{
     AuditEntry, BeginTransactionRequest, BulkInsertRequest, CancelRequest,
@@ -151,6 +151,22 @@ pub fn app(state: AppState) -> Router {
         .route(
             "/v1/sessions/:id/connections/:conn_id/export",
             post(export_query),
+        )
+        .route(
+            "/v1/sessions/:id/connections/:conn_id/edits/preview",
+            post(post_edits_preview),
+        )
+        .route(
+            "/v1/sessions/:id/connections/:conn_id/edits/apply",
+            post(post_edits_apply),
+        )
+        .route(
+            "/v1/sessions/:id/connections/:conn_id/search/schema",
+            post(post_search_schema),
+        )
+        .route(
+            "/v1/sessions/:id/connections/:conn_id/search/data",
+            post(post_search_data),
         )
         .route("/v1/sessions/:id/queries", post(execute_query))
         .route("/v1/sessions/:id/transactions", post(begin_transaction))
@@ -2374,6 +2390,84 @@ async fn post_completion(
             session: id,
             connection: conn_id,
             request: req,
+        },
+        OperationStatus::Succeeded,
+    );
+    Ok(Json(resp))
+}
+
+async fn post_edits_preview(
+    State(state): State<AppState>,
+    Path((id, conn_id)): Path<(sift_protocol::SessionId, sift_protocol::ConnectionId)>,
+    Json(req): Json<sift_protocol::PreviewEditsRequest>,
+) -> ApiResult<Json<sift_protocol::EditPlan>> {
+    if req.connection != conn_id {
+        return Err(ApiError::BadRequest(
+            "`connection` in body must match the path connection".into(),
+        ));
+    }
+    let plan = state
+        .sessions
+        .preview_edits(id, conn_id, req.edit_set)
+        .await?;
+    state.sessions.push_operation(
+        Operation::PreviewEdits {
+            session: id,
+            connection: conn_id,
+        },
+        OperationStatus::Succeeded,
+    );
+    Ok(Json(plan))
+}
+
+async fn post_edits_apply(
+    State(state): State<AppState>,
+    Path((id, conn_id)): Path<(sift_protocol::SessionId, sift_protocol::ConnectionId)>,
+    Json(mut req): Json<sift_protocol::ApplyEditsRequest>,
+) -> ApiResult<Json<sift_protocol::ApplyEditsResult>> {
+    if req.connection != conn_id {
+        return Err(ApiError::BadRequest(
+            "`connection` in body must match the path connection".into(),
+        ));
+    }
+    req.connection = conn_id;
+    let result = state.sessions.apply_edits(id, req).await?;
+    state.sessions.push_operation(
+        Operation::ApplyEdits {
+            session: id,
+            connection: conn_id,
+        },
+        OperationStatus::Succeeded,
+    );
+    Ok(Json(result))
+}
+
+async fn post_search_schema(
+    State(state): State<AppState>,
+    Path((id, conn_id)): Path<(sift_protocol::SessionId, sift_protocol::ConnectionId)>,
+    Json(req): Json<sift_protocol::SchemaSearchRequest>,
+) -> ApiResult<Json<sift_protocol::SchemaSearchResponse>> {
+    let resp = state.sessions.search_schema(id, conn_id, req).await?;
+    state.sessions.push_operation(
+        Operation::SearchSchema {
+            session: id,
+            connection: conn_id,
+        },
+        OperationStatus::Succeeded,
+    );
+    Ok(Json(resp))
+}
+
+async fn post_search_data(
+    State(state): State<AppState>,
+    Path((id, conn_id)): Path<(sift_protocol::SessionId, sift_protocol::ConnectionId)>,
+    Json(req): Json<sift_protocol::DataSearchRequest>,
+) -> ApiResult<Json<sift_protocol::DataSearchResponse>> {
+    let resp = state.sessions.search_data(id, conn_id, req).await?;
+    state.sessions.push_operation(
+        Operation::SearchData {
+            session: id,
+            connection: conn_id,
         },
         OperationStatus::Succeeded,
     );

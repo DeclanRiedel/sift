@@ -57,6 +57,12 @@ pub enum Code {
     #[error("result too large")]
     ResultTooLarge,
 
+    #[error("inline edit conflicts with a concurrent modification")]
+    EditConflict,
+
+    #[error("table has no stable row identity for inline edits")]
+    EditNoRowIdentity,
+
     #[error("result shape is not supported by this surface")]
     UnsupportedResultShape,
 

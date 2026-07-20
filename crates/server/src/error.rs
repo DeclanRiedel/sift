@@ -64,6 +64,8 @@ impl ApiError {
                     (StatusCode::UNPROCESSABLE_ENTITY, "unsupported_for_engine")
                 }
                 Code::ResultTooLarge => (StatusCode::PAYLOAD_TOO_LARGE, "result_too_large"),
+                Code::EditConflict => (StatusCode::CONFLICT, "edit_conflict"),
+                Code::EditNoRowIdentity => (StatusCode::UNPROCESSABLE_ENTITY, "no_row_identity"),
                 Code::UnsupportedResultShape => {
                     (StatusCode::UNPROCESSABLE_ENTITY, "unsupported_result_shape")
                 }

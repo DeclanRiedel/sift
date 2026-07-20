@@ -46,6 +46,26 @@ pub enum Operation {
         session: SessionId,
         request: CancelRequest,
     },
+    /// Generate (preview) inline-edit DML without executing it.
+    PreviewEdits {
+        session: SessionId,
+        connection: ConnectionId,
+    },
+    /// Apply an inline-edit set transactionally.
+    ApplyEdits {
+        session: SessionId,
+        connection: ConnectionId,
+    },
+    /// Fuzzy schema search (object + column names).
+    SearchSchema {
+        session: SessionId,
+        connection: ConnectionId,
+    },
+    /// Bounded live data search (row contents).
+    SearchData {
+        session: SessionId,
+        connection: ConnectionId,
+    },
     BulkInsert {
         session: SessionId,
         connection: ConnectionId,
@@ -144,6 +164,18 @@ impl Operation {
             }
             Operation::CancelQuery { session, .. } => {
                 summary("cancel", "query", Some(session.0 as i64))
+            }
+            Operation::PreviewEdits { connection, .. } => {
+                summary("preview", "edits", Some(connection.0 as i64))
+            }
+            Operation::ApplyEdits { connection, .. } => {
+                summary("apply", "edits", Some(connection.0 as i64))
+            }
+            Operation::SearchSchema { connection, .. } => {
+                summary("search", "schema", Some(connection.0 as i64))
+            }
+            Operation::SearchData { connection, .. } => {
+                summary("search", "data", Some(connection.0 as i64))
             }
             Operation::BulkInsert { connection, .. } => {
                 summary("bulk_insert", "connection", Some(connection.0 as i64))

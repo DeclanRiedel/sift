@@ -10,6 +10,7 @@ pub mod config;
 pub mod correlation;
 pub mod cursors;
 pub mod ddl;
+pub mod edit;
 pub mod error;
 pub mod export;
 pub mod fingerprint;
@@ -17,6 +18,7 @@ pub mod http;
 pub mod registry;
 pub mod room_runtime;
 pub mod schema_cache;
+pub mod search;
 pub mod session;
 pub mod shutdown;
 

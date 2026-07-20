@@ -12,7 +12,7 @@ use std::sync::mpsc::{SyncSender, TrySendError};
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use dashmap::DashMap;
 use sift_driver_api::{
@@ -24,9 +24,8 @@ use sift_protocol::{
     Code, ColumnMetadata, ConnectionId, ConnectionInfo, ConnectionSpec, CursorId, DriverError,
     DriverWarning, EndTransactionRequest, Engine, ExecuteRequest, ExecuteRequestHttp,
     ExecuteResponse, ExportRequest, OpenSessionRequest, Operation, OperationAuditEntry,
-    OperationStatus, Page,
-    Row, SavepointRequest, SchemaScope, SchemaSnapshot, ServerInfo, SessionId, SessionInfo,
-    TransactionInfo, TxHandleRef, TxId,
+    OperationStatus, Page, Row, SavepointRequest, SchemaScope, SchemaSnapshot, ServerInfo,
+    SessionId, SessionInfo, TransactionInfo, TxHandleRef, TxId,
 };
 
 use sift_metadata::{MetadataStore, NewOperationAudit, PrincipalId};
@@ -110,7 +109,14 @@ struct SessionStoreInner {
     cursors: CursorRegistry,
     /// Per-spec schema cache with TTL + engine-specific invalidators.
     schema_cache: SchemaCache,
+    /// Per-connection schema-search index (object + column names), built lazily
+    /// and cached with a TTL (Phase D schema search). Keyed by connection since
+    /// search scope is the active connection.
+    search_indexes: DashMap<ConnectionId, (Arc<crate::search::SearchIndex>, Instant)>,
 }
+
+/// TTL for a cached per-connection search index before it is rebuilt.
+const SEARCH_INDEX_TTL: Duration = Duration::from_secs(60);
 
 /// An append-mostly in-memory ring with cheap snapshot reads. Appends are
 /// O(1) amortized (`VecDeque` push-back + a single pop-front at the cap).
@@ -191,6 +197,7 @@ impl SessionStore {
                 driver_tasks: AtomicUsize::new(0),
                 cursors: CursorRegistry::default(),
                 schema_cache: SchemaCache::default(),
+                search_indexes: DashMap::new(),
             }),
         };
         store.install_eviction_callback();
@@ -225,6 +232,7 @@ impl SessionStore {
                 driver_tasks: AtomicUsize::new(0),
                 cursors: CursorRegistry::default(),
                 schema_cache: SchemaCache::default(),
+                search_indexes: DashMap::new(),
             }),
         };
         store.install_eviction_callback();
@@ -1417,6 +1425,278 @@ impl SessionStore {
         let handle = entry.handle.clone();
         let result = crate::ddl::generate_ddl(&*driver, handle, object).await?;
         Ok(result)
+    }
+
+    /// Generate the inline-edit DML plan without executing it. Fetches the
+    /// target table's deep schema to resolve row identity + column metadata.
+    pub async fn preview_edits(
+        &self,
+        session_id: SessionId,
+        conn_id: ConnectionId,
+        edit_set: sift_protocol::EditSet,
+    ) -> ApiResult<sift_protocol::EditPlan> {
+        let entry = self.get_conn_entry(session_id, conn_id)?;
+        let driver = entry.driver.clone();
+        let handle = entry.handle.clone();
+        crate::edit::build_plan(&*driver, handle, &edit_set)
+            .await
+            .map_err(ApiError::Driver)
+    }
+
+    /// Apply an inline-edit set transactionally. Generates the plan, then runs
+    /// every statement inside one transaction (its own, or the caller-supplied
+    /// `tx`). Any driver error or a mismatched `affected_rows` on an
+    /// update/delete rolls the whole set back and returns a conflict.
+    pub async fn apply_edits(
+        &self,
+        session_id: SessionId,
+        req: sift_protocol::ApplyEditsRequest,
+    ) -> ApiResult<sift_protocol::ApplyEditsResult> {
+        use sift_protocol::{EditStatementKind, ExecuteRequestHttp};
+
+        let conn_id = req.connection;
+        let plan = {
+            let entry = self.get_conn_entry(session_id, conn_id)?;
+            let driver = entry.driver.clone();
+            let handle = entry.handle.clone();
+            crate::edit::build_plan(&*driver, handle, &req.edit_set)
+                .await
+                .map_err(ApiError::Driver)?
+        };
+
+        // Own a transaction unless the caller passed one to run under.
+        let (tx_ref, owned) = match req.tx {
+            Some(tx) => (tx, false),
+            None => {
+                let info = self
+                    .begin_transaction(
+                        session_id,
+                        sift_protocol::BeginTransactionRequest {
+                            connection: conn_id,
+                            mode: sift_protocol::TxMode::default(),
+                        },
+                    )
+                    .await?;
+                (
+                    sift_protocol::TxHandleRef {
+                        tx_id: info.tx_id,
+                        connection: info.connection,
+                        mode: info.mode,
+                    },
+                    true,
+                )
+            }
+        };
+
+        let mut applied = Vec::with_capacity(plan.statements.len());
+        for stmt in plan.statements {
+            let is_write = matches!(
+                stmt.kind,
+                EditStatementKind::Update | EditStatementKind::Delete
+            );
+            let exec = ExecuteRequestHttp {
+                connection: conn_id,
+                sql: stmt.sql,
+                params: stmt.params,
+                tx: Some(tx_ref.clone()),
+                room_id: None,
+                connection_profile_id: None,
+            };
+            match self.execute_http(session_id, exec).await {
+                Ok(resp) => {
+                    let mut affected = resp.affected_rows.unwrap_or(0);
+                    // An update/delete must hit exactly one row; otherwise the
+                    // row changed or vanished under the user (optimistic
+                    // conflict), or the identity wasn't unique.
+                    if is_write && affected != 1 {
+                        if owned {
+                            self.rollback_edits_tx(session_id, conn_id, tx_ref.tx_id)
+                                .await;
+                        }
+                        return Err(ApiError::Driver(DriverError::new(
+                            Code::EditConflict,
+                            format!(
+                                "edit {} affected {affected} rows (expected 1); the row \
+                                 changed or no longer matches",
+                                stmt.edit_index
+                            ),
+                        )));
+                    }
+                    // Insert-with-RETURNING is row-producing, so the driver may
+                    // report no `affected_rows`; treat returned keys as the count.
+                    if !is_write && affected == 0 {
+                        affected = resp.rows.len() as u64;
+                    }
+                    applied.push(sift_protocol::EditOutcome {
+                        edit_index: stmt.edit_index,
+                        kind: stmt.kind,
+                        affected_rows: affected,
+                        returned: resp.rows,
+                    });
+                }
+                Err(e) => {
+                    if owned {
+                        self.rollback_edits_tx(session_id, conn_id, tx_ref.tx_id)
+                            .await;
+                    }
+                    return Err(e);
+                }
+            }
+        }
+
+        let committed = if owned {
+            self.commit_transaction(
+                session_id,
+                sift_protocol::EndTransactionRequest {
+                    connection: conn_id,
+                    tx_id: tx_ref.tx_id,
+                },
+            )
+            .await?;
+            true
+        } else {
+            false
+        };
+
+        Ok(sift_protocol::ApplyEditsResult { applied, committed })
+    }
+
+    /// Best-effort rollback on the inline-edit apply failure path.
+    async fn rollback_edits_tx(&self, session_id: SessionId, conn_id: ConnectionId, tx_id: TxId) {
+        if let Err(e) = self
+            .rollback_transaction(
+                session_id,
+                sift_protocol::EndTransactionRequest {
+                    connection: conn_id,
+                    tx_id,
+                },
+            )
+            .await
+        {
+            tracing::warn!(
+                session_id = %session_id,
+                conn_id = %conn_id,
+                error = %e,
+                "rollback after failed inline-edit apply failed"
+            );
+        }
+    }
+
+    /// Build or reuse the per-connection schema-search index. Built from a
+    /// shallow schema snapshot (objects) plus one bulk catalog query
+    /// (columns); cached with a TTL. Synchronous build means the index is
+    /// always `Ready` in v1 (background pre-warm is a future enhancement).
+    async fn search_index_for(
+        &self,
+        session_id: SessionId,
+        conn_id: ConnectionId,
+    ) -> ApiResult<(Arc<crate::search::SearchIndex>, sift_protocol::IndexState)> {
+        if let Some(entry) = self.inner.search_indexes.get(&conn_id) {
+            if entry.1.elapsed() < SEARCH_INDEX_TTL {
+                return Ok((entry.0.clone(), sift_protocol::IndexState::Ready));
+            }
+        }
+        let snapshot = self
+            .schema(session_id, conn_id, sift_protocol::SchemaScope::shallow())
+            .await?;
+        let engine = self.get_conn_entry(session_id, conn_id)?.driver.engine();
+        let resp = self
+            .execute_http(
+                session_id,
+                sift_protocol::ExecuteRequestHttp {
+                    connection: conn_id,
+                    sql: crate::search::bulk_columns_sql(engine).to_string(),
+                    params: Vec::new(),
+                    tx: None,
+                    room_id: None,
+                    connection_profile_id: None,
+                },
+            )
+            .await?;
+        let columns = crate::search::decode_catalog_columns(resp.rows);
+        let index = Arc::new(crate::search::SearchIndex::build(&snapshot, columns));
+        self.inner
+            .search_indexes
+            .insert(conn_id, (index.clone(), Instant::now()));
+        Ok((index, sift_protocol::IndexState::Ready))
+    }
+
+    /// Fuzzy schema search (object + column names) over the in-memory index.
+    pub async fn search_schema(
+        &self,
+        session_id: SessionId,
+        conn_id: ConnectionId,
+        req: sift_protocol::SchemaSearchRequest,
+    ) -> ApiResult<sift_protocol::SchemaSearchResponse> {
+        let (index, index_state) = self.search_index_for(session_id, conn_id).await?;
+        let limit = req.limit.unwrap_or(crate::search::DEFAULT_SCHEMA_HITS);
+        let hits = crate::search::rank(&index, &req.query, req.kinds.as_deref(), limit);
+        Ok(sift_protocol::SchemaSearchResponse { hits, index_state })
+    }
+
+    /// Bounded live data search: parameterized `LIKE` over text columns of the
+    /// scoped tables, capped per-table and by table count, running through the
+    /// normal execute path (timeout + cursor caps apply).
+    pub async fn search_data(
+        &self,
+        session_id: SessionId,
+        conn_id: ConnectionId,
+        req: sift_protocol::DataSearchRequest,
+    ) -> ApiResult<sift_protocol::DataSearchResponse> {
+        let (index, _) = self.search_index_for(session_id, conn_id).await?;
+        let engine = self.get_conn_entry(session_id, conn_id)?.driver.engine();
+        let per_table = req
+            .per_table_limit
+            .unwrap_or(crate::search::DEFAULT_PER_TABLE)
+            .clamp(1, crate::search::MAX_PER_TABLE);
+        let max_tables = req
+            .max_tables
+            .unwrap_or(crate::search::DEFAULT_MAX_TABLES)
+            .clamp(1, crate::search::MAX_TABLES);
+
+        let all_tables = crate::search::resolve_scope(&index, &req.scope);
+        let mut truncated = all_tables.len() as u32 > max_tables;
+        let pattern = sift_protocol::Value::Text(crate::search::like_pattern(&req.query));
+
+        let mut hits = Vec::new();
+        let mut tables_searched = 0u32;
+        for table in all_tables.into_iter().take(max_tables as usize) {
+            let text_cols = crate::search::text_columns_for(&index, &table, req.columns.as_deref());
+            let Some(sql) = crate::search::data_search_sql(engine, &table, &text_cols, per_table)
+            else {
+                continue;
+            };
+            tables_searched += 1;
+            let resp = self
+                .execute_http(
+                    session_id,
+                    sift_protocol::ExecuteRequestHttp {
+                        connection: conn_id,
+                        sql,
+                        params: vec![pattern.clone()],
+                        tx: None,
+                        room_id: None,
+                        connection_profile_id: None,
+                    },
+                )
+                .await?;
+            if resp.rows.len() as u32 >= per_table {
+                truncated = true;
+            }
+            for row in resp.rows {
+                hits.push(sift_protocol::DataSearchHit {
+                    table: table.clone(),
+                    columns: text_cols.clone(),
+                    row,
+                    matched_columns: text_cols.clone(),
+                });
+            }
+        }
+        Ok(sift_protocol::DataSearchResponse {
+            hits,
+            truncated,
+            tables_searched,
+        })
     }
 
     /// Compute completion candidates for `request.sql` at

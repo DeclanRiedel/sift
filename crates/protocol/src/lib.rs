@@ -12,12 +12,14 @@ pub const PROTOCOL_VERSION: &str = "1";
 pub mod column;
 pub mod completion;
 pub mod connection;
+pub mod edit;
 pub mod engine;
 pub mod error;
 pub mod operation;
 pub mod result;
 pub mod room;
 pub mod schema;
+pub mod search;
 pub mod session;
 pub mod tx;
 pub mod value;
@@ -29,6 +31,10 @@ pub use column::{
 pub use connection::{
     AccessMode as ConnAccessMode, EngineConnectionSpec, MssqlConnectionSpec, PgConnectionSpec,
     ServerInfo, SslMode,
+};
+pub use edit::{
+    ApplyEditsRequest, ApplyEditsResult, CellEdit, EditOutcome, EditPlan, EditSet, EditStatement,
+    EditStatementKind, IdentitySource, PreviewEditsRequest, RowEdit, RowKey,
 };
 pub use engine::Engine;
 pub use error::{Code, DriverError, DriverWarning};
@@ -42,6 +48,10 @@ pub use schema::{
     CatalogTree, ConstraintInfo, ConstraintKind, IndexInfo, IndexKind, ObjectDdl, ObjectInfo,
     ObjectKind, ObjectPath, SchemaDepth, SchemaFilter, SchemaScope, SchemaSnapshot, SchemaTree,
     TriggerEvent, TriggerInfo, TriggerTiming,
+};
+pub use search::{
+    DataSearchHit, DataSearchRequest, DataSearchResponse, DataSearchScope, IndexState,
+    SchemaSearchRequest, SchemaSearchResponse, SearchHit, SearchTarget,
 };
 pub use session::{
     Ack, AuditEntry, BeginTransactionRequest, BulkInsertFormat, BulkInsertRequest,

@@ -318,7 +318,7 @@ fn value_to_text(v: Value) -> String {
     }
 }
 
-fn qualified_name(path: &ObjectPath, engine: Engine) -> String {
+pub(crate) fn qualified_name(path: &ObjectPath, engine: Engine) -> String {
     let schema = path.schema.as_deref();
     match (engine, schema) {
         (Engine::Postgres, Some(s)) => {
@@ -340,7 +340,7 @@ fn qualified_name(path: &ObjectPath, engine: Engine) -> String {
     }
 }
 
-fn quote_ident(name: &str, engine: Engine) -> String {
+pub(crate) fn quote_ident(name: &str, engine: Engine) -> String {
     match engine {
         Engine::Postgres => {
             let escaped = name.replace('"', "\"\"");

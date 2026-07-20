@@ -17,11 +17,13 @@ use sift_protocol::{Engine, SchemaSnapshot};
 
 mod context;
 mod dictionary;
+pub mod fuzzy;
 mod keywords;
 mod rank;
 
 pub use context::{detect_context, ContextResult};
 pub use dictionary::Dictionary;
+pub use fuzzy::{fuzzy_match, FuzzyMatch};
 
 /// Server-facing entry point: compute ranked completion candidates for
 /// `req.sql` at byte offset `req.cursor`, using `snapshot` as the source
