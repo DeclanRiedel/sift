@@ -84,6 +84,14 @@ pub struct AuthConfig {
     /// Zero-auth local mode. The current implementation applies this for the
     /// local server process; peer-address scoping lands with hosted mode.
     pub loopback_bypass: bool,
+    /// Authoritative externally reachable origin. OAuth callbacks are derived
+    /// only from this value, never from request forwarding headers.
+    pub public_base_url: Option<String>,
+    /// Per-instance GitHub OAuth App client id.
+    pub github_client_id: Option<String>,
+    /// Per-instance GitHub OAuth App secret. Environment/config only; never
+    /// persisted to metadata or included in logs.
+    pub github_client_secret: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -194,6 +202,27 @@ impl Config {
             bail!("transport=ssh-proxy is reserved for Phase H and is not implemented yet");
         }
 
+        let github_partial =
+            self.auth.github_client_id.is_some() != self.auth.github_client_secret.is_some();
+        if github_partial {
+            bail!("GitHub OAuth requires both auth.github_client_id and auth.github_client_secret");
+        }
+        if self.auth.github_client_id.is_some() && self.auth.public_base_url.is_none() {
+            bail!("GitHub OAuth requires auth.public_base_url");
+        }
+        if let Some(base) = &self.auth.public_base_url {
+            let parsed = reqwest::Url::parse(base).context("invalid auth.public_base_url")?;
+            if parsed.scheme() != "https"
+                || parsed.host_str().is_none()
+                || parsed.username() != ""
+                || parsed.password().is_some()
+                || parsed.query().is_some()
+                || parsed.fragment().is_some()
+            {
+                bail!("auth.public_base_url must be an HTTPS origin without credentials, query, or fragment");
+            }
+        }
+
         if self.deployment == DeploymentPolicy::Team {
             if !self.metadata.enabled {
                 bail!("deployment=team requires metadata.enabled=true");
@@ -203,6 +232,9 @@ impl Config {
             }
             if self.metadata.secret_backend == "memory" {
                 bail!("deployment=team requires a durable metadata secret backend");
+            }
+            if self.auth.public_base_url.is_none() {
+                bail!("deployment=team requires auth.public_base_url");
             }
         }
 
@@ -247,6 +279,9 @@ impl Default for AuthConfig {
         Self {
             bearer_token: None,
             loopback_bypass: true,
+            public_base_url: None,
+            github_client_id: None,
+            github_client_secret: None,
         }
     }
 }
@@ -313,6 +348,7 @@ mod tests {
             deployment: DeploymentPolicy::Team,
             auth: AuthConfig {
                 loopback_bypass: false,
+                public_base_url: Some("https://sift.example.test".into()),
                 ..AuthConfig::default()
             },
             metadata: MetadataConfig {
@@ -351,5 +387,37 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("not implemented"));
+    }
+
+    #[test]
+    fn github_oauth_configuration_is_complete_and_uses_an_https_origin() {
+        let missing_secret = Config {
+            auth: AuthConfig {
+                github_client_id: Some("client".into()),
+                ..AuthConfig::default()
+            },
+            ..Config::default()
+        };
+        assert!(missing_secret.validate().is_err());
+
+        let insecure = Config {
+            auth: AuthConfig {
+                public_base_url: Some("http://sift.example.test".into()),
+                ..AuthConfig::default()
+            },
+            ..Config::default()
+        };
+        assert!(insecure.validate().is_err());
+
+        let configured = Config {
+            auth: AuthConfig {
+                public_base_url: Some("https://sift.example.test".into()),
+                github_client_id: Some("client".into()),
+                github_client_secret: Some("secret".into()),
+                ..AuthConfig::default()
+            },
+            ..Config::default()
+        };
+        configured.validate().unwrap();
     }
 }

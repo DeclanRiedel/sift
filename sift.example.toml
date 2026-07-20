@@ -23,6 +23,11 @@ shutdown_drain_secs = 30
 # Unsafe to commit with a real value.
 # bearer_token = "replace-me"
 loopback_bypass = true
+# Required for team deployments and GitHub OAuth.
+# public_base_url = "https://sift.example.com"
+# Per-instance GitHub OAuth App credentials. Never commit the secret.
+# github_client_id = "replace-me"
+# github_client_secret = "replace-me"
 
 [metadata]
 enabled = true
