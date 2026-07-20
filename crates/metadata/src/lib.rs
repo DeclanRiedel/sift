@@ -9,7 +9,7 @@ use argon2::password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, Salt
 use argon2::Argon2;
 use chrono::{DateTime, Utc};
 use rand_core::OsRng;
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use sha2::{Digest, Sha256};
 use sift_protocol::ConnectionSpec;
 use uuid::Uuid;
@@ -29,6 +29,13 @@ mod migrations {
 
 const SECRET_NAMESPACE: &str = "sift.local";
 const PASSWORD_SECRET_NAMESPACE: &str = "sift.auth.password";
+const AUTH_SYSTEM_SECRET_NAMESPACE: &str = "sift.auth.system";
+const AUTH_TOKEN_MAC_HANDLE: &str = "token-mac-v1";
+const ACCESS_TOKEN_PREFIX: &str = "sift_at_";
+const REFRESH_TOKEN_PREFIX: &str = "sift_rt_";
+const AUTH_TOKEN_LOOKUP_LEN: usize = 12;
+const ACCESS_TOKEN_TTL_MINUTES: i64 = 15;
+const REFRESH_TOKEN_TTL_DAYS: i64 = 30;
 const API_TOKEN_PREFIX: &str = "sift_";
 const API_TOKEN_LOOKUP_LEN: usize = 12;
 const API_TOKEN_LAST_USED_DEBOUNCE_SECS: i64 = 300;
@@ -75,6 +82,8 @@ pub enum MetadataError {
     AuthIdentityNotFound(AuthIdentityId),
     #[error("cannot disable the final active instance administrator")]
     FinalInstanceAdmin,
+    #[error("authentication token key has an invalid length")]
+    InvalidAuthTokenKey,
     #[error("secret store error: {0}")]
     SecretStore(String),
     #[error("io error: {0}")]
@@ -610,6 +619,326 @@ impl MetadataStore {
                 Err(error)
             }
         }
+    }
+
+    pub async fn issue_auth_session(
+        &self,
+        principal: PrincipalId,
+        client_kind: AuthClientKind,
+        client_label: Option<&str>,
+        audit: NewOperationAudit,
+    ) -> Result<IssuedAuthTokens> {
+        let key = self.auth_token_mac_key().await?;
+        let issued = new_auth_token_material(&key);
+        let session_id = Uuid::new_v4().to_string();
+        let family_id = Uuid::new_v4().to_string();
+        let now = Utc::now();
+        let access_expires_at = now + chrono::Duration::minutes(ACCESS_TOKEN_TTL_MINUTES);
+        let refresh_expires_at = now + chrono::Duration::days(REFRESH_TOKEN_TTL_DAYS);
+        let mut conn = self.conn()?;
+        let tx = conn.transaction()?;
+        let enabled: bool = tx
+            .query_row(
+                "SELECT disabled_at IS NULL FROM principal WHERE id = ?1",
+                params![principal.0],
+                |row| row.get(0),
+            )
+            .optional()?
+            .ok_or(MetadataError::PrincipalNotFound(principal))?;
+        if !enabled {
+            return Err(MetadataError::PrincipalNotFound(principal));
+        }
+        tx.execute(
+            "INSERT INTO auth_session
+             (id, principal_id, refresh_family_id, client_kind, client_label,
+              created_at, last_used_at, expires_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6, ?7)",
+            params![
+                session_id,
+                principal.0,
+                family_id,
+                client_kind.as_str(),
+                client_label,
+                now.to_rfc3339(),
+                refresh_expires_at.to_rfc3339()
+            ],
+        )?;
+        insert_access_token(&tx, &session_id, &issued.access, access_expires_at, now)?;
+        insert_refresh_token(
+            &tx,
+            &session_id,
+            &family_id,
+            None,
+            &issued.refresh,
+            refresh_expires_at,
+            now,
+        )?;
+        insert_operation_audit_row(&tx, &audit)?;
+        tx.commit()?;
+        Ok(IssuedAuthTokens {
+            session_id,
+            access_token: issued.access.plaintext,
+            access_expires_at,
+            refresh_token: issued.refresh.plaintext,
+            refresh_expires_at,
+        })
+    }
+
+    pub async fn verify_auth_access_token(
+        &self,
+        presented: &str,
+    ) -> Result<Option<AuthenticatedSession>> {
+        let Some(lookup) = auth_token_lookup(presented, ACCESS_TOKEN_PREFIX) else {
+            return Ok(None);
+        };
+        let key = self.auth_token_mac_key().await?;
+        let digest = auth_token_digest(&key, presented);
+        let now = Utc::now();
+        let conn = self.conn()?;
+        let session = conn
+            .query_row(
+                "SELECT s.id, s.client_kind, at.expires_at,
+                        p.id, p.external_id, p.display_name, p.email, p.avatar_url,
+                        p.disabled_at, p.is_instance_admin, p.created_at, p.updated_at
+                 FROM auth_access_token at
+                 JOIN auth_session s ON s.id = at.auth_session_id
+                 JOIN principal p ON p.id = s.principal_id
+                 WHERE at.token_lookup = ?1 AND at.token_digest = ?2
+                   AND at.revoked_at IS NULL AND at.expires_at > ?3
+                   AND s.revoked_at IS NULL AND s.expires_at > ?3
+                   AND p.disabled_at IS NULL",
+                params![lookup, digest, now.to_rfc3339()],
+                |row| {
+                    let kind: String = row.get(1)?;
+                    Ok(AuthenticatedSession {
+                        session_id: row.get(0)?,
+                        client_kind: parse_auth_client_kind_sql(kind)?,
+                        expires_at: parse_time_sql(row.get(2)?)?,
+                        principal: principal_from_row_offset(row, 3)?,
+                    })
+                },
+            )
+            .optional()?;
+        if let Some(session) = &session {
+            conn.execute(
+                "UPDATE auth_session SET last_used_at = ?1 WHERE id = ?2",
+                params![now.to_rfc3339(), session.session_id],
+            )?;
+        }
+        Ok(session)
+    }
+
+    pub async fn rotate_auth_refresh_token(
+        &self,
+        presented: &str,
+        audit: NewOperationAudit,
+    ) -> Result<RefreshAuthResult> {
+        let Some(lookup) = auth_token_lookup(presented, REFRESH_TOKEN_PREFIX) else {
+            return Ok(RefreshAuthResult::Invalid);
+        };
+        let key = self.auth_token_mac_key().await?;
+        let digest = auth_token_digest(&key, presented);
+        let replacement = new_auth_token_material(&key);
+        let now = Utc::now();
+        let access_expires_at = now + chrono::Duration::minutes(ACCESS_TOKEN_TTL_MINUTES);
+        let refresh_expires_at = now + chrono::Duration::days(REFRESH_TOKEN_TTL_DAYS);
+        let mut conn = self.conn()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let candidate = tx
+            .query_row(
+                "SELECT rt.id, rt.auth_session_id, rt.family_id, rt.token_digest,
+                        rt.expires_at, rt.consumed_at, rt.revoked_at,
+                        s.revoked_at, p.disabled_at
+                 FROM auth_refresh_token rt
+                 JOIN auth_session s ON s.id = rt.auth_session_id
+                 JOIN principal p ON p.id = s.principal_id
+                 WHERE rt.token_lookup = ?1",
+                params![lookup],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, String>(4)?,
+                        row.get::<_, Option<String>>(5)?,
+                        row.get::<_, Option<String>>(6)?,
+                        row.get::<_, Option<String>>(7)?,
+                        row.get::<_, Option<String>>(8)?,
+                    ))
+                },
+            )
+            .optional()?;
+        let Some((
+            id,
+            session_id,
+            family_id,
+            stored_digest,
+            expires_at,
+            consumed_at,
+            token_revoked,
+            session_revoked,
+            principal_disabled,
+        )) = candidate
+        else {
+            return Ok(RefreshAuthResult::Invalid);
+        };
+        if !constant_time_eq(stored_digest.as_bytes(), digest.as_bytes()) {
+            return Ok(RefreshAuthResult::Invalid);
+        }
+        if consumed_at.is_some() {
+            tx.execute(
+                "UPDATE auth_session
+                 SET revoked_at = COALESCE(revoked_at, ?1),
+                     revocation_reason = COALESCE(revocation_reason, 'refresh_replay')
+                 WHERE refresh_family_id = ?2",
+                params![now.to_rfc3339(), family_id],
+            )?;
+            tx.execute(
+                "UPDATE auth_refresh_token SET revoked_at = COALESCE(revoked_at, ?1)
+                 WHERE family_id = ?2",
+                params![now.to_rfc3339(), family_id],
+            )?;
+            insert_operation_audit_row(&tx, &audit)?;
+            tx.commit()?;
+            return Ok(RefreshAuthResult::ReplayDetected);
+        }
+        if token_revoked.is_some()
+            || session_revoked.is_some()
+            || principal_disabled.is_some()
+            || parse_time(expires_at)? <= now
+        {
+            return Ok(RefreshAuthResult::Invalid);
+        }
+        let replacement_id = insert_refresh_token(
+            &tx,
+            &session_id,
+            &family_id,
+            Some(id),
+            &replacement.refresh,
+            refresh_expires_at,
+            now,
+        )?;
+        tx.execute(
+            "UPDATE auth_refresh_token
+             SET consumed_at = ?1, replaced_by_id = ?2 WHERE id = ?3 AND consumed_at IS NULL",
+            params![now.to_rfc3339(), replacement_id, id],
+        )?;
+        tx.execute(
+            "UPDATE auth_access_token SET revoked_at = COALESCE(revoked_at, ?1)
+             WHERE auth_session_id = ?2",
+            params![now.to_rfc3339(), session_id],
+        )?;
+        insert_access_token(
+            &tx,
+            &session_id,
+            &replacement.access,
+            access_expires_at,
+            now,
+        )?;
+        tx.execute(
+            "UPDATE auth_session SET last_used_at = ?1, expires_at = ?2 WHERE id = ?3",
+            params![
+                now.to_rfc3339(),
+                refresh_expires_at.to_rfc3339(),
+                session_id
+            ],
+        )?;
+        insert_operation_audit_row(&tx, &audit)?;
+        tx.commit()?;
+        Ok(RefreshAuthResult::Issued(IssuedAuthTokens {
+            session_id,
+            access_token: replacement.access.plaintext,
+            access_expires_at,
+            refresh_token: replacement.refresh.plaintext,
+            refresh_expires_at,
+        }))
+    }
+
+    pub fn revoke_auth_session(
+        &self,
+        session_id: &str,
+        reason: &str,
+        audit: NewOperationAudit,
+    ) -> Result<()> {
+        let now = now_text();
+        let mut conn = self.conn()?;
+        let tx = conn.transaction()?;
+        tx.execute(
+            "UPDATE auth_session
+             SET revoked_at = COALESCE(revoked_at, ?1),
+                 revocation_reason = COALESCE(revocation_reason, ?2)
+             WHERE id = ?3",
+            params![now, reason, session_id],
+        )?;
+        tx.execute(
+            "UPDATE auth_access_token SET revoked_at = COALESCE(revoked_at, ?1)
+             WHERE auth_session_id = ?2",
+            params![now, session_id],
+        )?;
+        tx.execute(
+            "UPDATE auth_refresh_token SET revoked_at = COALESCE(revoked_at, ?1)
+             WHERE auth_session_id = ?2",
+            params![now, session_id],
+        )?;
+        insert_operation_audit_row(&tx, &audit)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn revoke_all_auth_sessions(
+        &self,
+        principal: PrincipalId,
+        reason: &str,
+        audit: NewOperationAudit,
+    ) -> Result<()> {
+        let now = now_text();
+        let mut conn = self.conn()?;
+        let tx = conn.transaction()?;
+        tx.execute(
+            "UPDATE auth_session
+             SET revoked_at = COALESCE(revoked_at, ?1),
+                 revocation_reason = COALESCE(revocation_reason, ?2)
+             WHERE principal_id = ?3",
+            params![now, reason, principal.0],
+        )?;
+        tx.execute(
+            "UPDATE auth_access_token SET revoked_at = COALESCE(revoked_at, ?1)
+             WHERE auth_session_id IN (
+                SELECT id FROM auth_session WHERE principal_id = ?2
+             )",
+            params![now, principal.0],
+        )?;
+        tx.execute(
+            "UPDATE auth_refresh_token SET revoked_at = COALESCE(revoked_at, ?1)
+             WHERE auth_session_id IN (
+                SELECT id FROM auth_session WHERE principal_id = ?2
+             )",
+            params![now, principal.0],
+        )?;
+        insert_operation_audit_row(&tx, &audit)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    async fn auth_token_mac_key(&self) -> Result<Vec<u8>> {
+        if let Some(key) = self
+            .secrets
+            .get(AUTH_SYSTEM_SECRET_NAMESPACE, AUTH_TOKEN_MAC_HANDLE)
+            .await?
+        {
+            if key.len() != 32 {
+                return Err(MetadataError::InvalidAuthTokenKey);
+            }
+            return Ok(key);
+        }
+        let mut key = vec![0_u8; 32];
+        getrandom::getrandom(&mut key)
+            .map_err(|error| MetadataError::SecretStore(format!("rng failure: {error}")))?;
+        self.secrets
+            .put(AUTH_SYSTEM_SECRET_NAMESPACE, AUTH_TOKEN_MAC_HANDLE, &key)
+            .await?;
+        Ok(key)
     }
 
     pub fn create_tenant(&self, name: &str, kind: TenantKind) -> Result<Tenant> {
@@ -2026,6 +2355,17 @@ fn parse_query_status_sql(value: String) -> rusqlite::Result<QueryStatus> {
     schema::parse_query_status(value).map_err(sql_conversion_error)
 }
 
+fn parse_auth_client_kind_sql(value: String) -> rusqlite::Result<AuthClientKind> {
+    match value.as_str() {
+        "native" => Ok(AuthClientKind::Native),
+        "web" => Ok(AuthClientKind::Web),
+        "keypair" => Ok(AuthClientKind::Keypair),
+        _ => Err(sql_message_error(format!(
+            "invalid auth_session.client_kind: {value}"
+        ))),
+    }
+}
+
 fn sql_conversion_error(error: impl std::error::Error + Send + Sync + 'static) -> rusqlite::Error {
     rusqlite::Error::ToSqlConversionFailure(Box::new(error))
 }
@@ -2056,6 +2396,99 @@ fn token_lookup_from_presented(presented: &str) -> Option<&str> {
 
 fn token_mac(token: &str) -> String {
     hex_encode(&hmac_sha256(API_TOKEN_MAC_KEY, token.as_bytes()))
+}
+
+struct TokenMaterial {
+    plaintext: String,
+    lookup: String,
+    digest: String,
+}
+
+struct AuthTokenMaterial {
+    access: TokenMaterial,
+    refresh: TokenMaterial,
+}
+
+fn new_auth_token_material(key: &[u8]) -> AuthTokenMaterial {
+    AuthTokenMaterial {
+        access: new_token_material(ACCESS_TOKEN_PREFIX, key),
+        refresh: new_token_material(REFRESH_TOKEN_PREFIX, key),
+    }
+}
+
+fn new_token_material(prefix: &str, key: &[u8]) -> TokenMaterial {
+    let lookup_seed = Uuid::new_v4().simple().to_string();
+    let lookup = lookup_seed[..AUTH_TOKEN_LOOKUP_LEN].to_string();
+    let plaintext = format!("{prefix}{lookup}_{}", Uuid::new_v4().simple());
+    let digest = auth_token_digest(key, &plaintext);
+    TokenMaterial {
+        plaintext,
+        lookup,
+        digest,
+    }
+}
+
+fn auth_token_lookup<'a>(presented: &'a str, prefix: &str) -> Option<&'a str> {
+    let body = presented.strip_prefix(prefix)?;
+    if body.len() <= AUTH_TOKEN_LOOKUP_LEN
+        || body.as_bytes().get(AUTH_TOKEN_LOOKUP_LEN) != Some(&b'_')
+    {
+        return None;
+    }
+    Some(&body[..AUTH_TOKEN_LOOKUP_LEN])
+}
+
+fn auth_token_digest(key: &[u8], presented: &str) -> String {
+    hex_encode(&hmac_sha256(key, presented.as_bytes()))
+}
+
+fn insert_access_token(
+    conn: &Connection,
+    session_id: &str,
+    token: &TokenMaterial,
+    expires_at: DateTime<Utc>,
+    now: DateTime<Utc>,
+) -> rusqlite::Result<i64> {
+    conn.execute(
+        "INSERT INTO auth_access_token
+         (auth_session_id, token_lookup, token_digest, created_at, expires_at)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![
+            session_id,
+            token.lookup,
+            token.digest,
+            now.to_rfc3339(),
+            expires_at.to_rfc3339()
+        ],
+    )?;
+    Ok(conn.last_insert_rowid())
+}
+
+fn insert_refresh_token(
+    conn: &Connection,
+    session_id: &str,
+    family_id: &str,
+    parent_id: Option<i64>,
+    token: &TokenMaterial,
+    expires_at: DateTime<Utc>,
+    now: DateTime<Utc>,
+) -> rusqlite::Result<i64> {
+    conn.execute(
+        "INSERT INTO auth_refresh_token
+         (auth_session_id, family_id, parent_id, token_lookup, token_digest,
+          created_at, expires_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        params![
+            session_id,
+            family_id,
+            parent_id,
+            token.lookup,
+            token.digest,
+            now.to_rfc3339(),
+            expires_at.to_rfc3339()
+        ],
+    )?;
+    Ok(conn.last_insert_rowid())
 }
 
 fn hmac_sha256(key: &[u8], message: &[u8]) -> [u8; 32] {
@@ -2426,6 +2859,108 @@ mod tests {
             )
             .unwrap();
         assert_eq!(reason, "password_changed");
+    }
+
+    #[tokio::test]
+    async fn opaque_auth_tokens_rotate_and_refresh_replay_revokes_the_family() {
+        let store = store();
+        let principal = store
+            .create_password_principal(
+                NewPasswordPrincipal {
+                    username: "token-user",
+                    display_name: "Token User",
+                    email: None,
+                    is_instance_admin: false,
+                },
+                b"verifier",
+                NewOperationAudit {
+                    actor_principal_id: None,
+                    ..test_audit("create", "principal", None)
+                },
+            )
+            .await
+            .unwrap();
+        let first = store
+            .issue_auth_session(
+                principal.id,
+                AuthClientKind::Native,
+                Some("test client"),
+                test_audit("authenticate", "auth_session", None),
+            )
+            .await
+            .unwrap();
+        assert!(first.access_token.starts_with(ACCESS_TOKEN_PREFIX));
+        assert!(first.refresh_token.starts_with(REFRESH_TOKEN_PREFIX));
+        assert_eq!(
+            store
+                .verify_auth_access_token(&first.access_token)
+                .await
+                .unwrap()
+                .unwrap()
+                .principal
+                .id,
+            principal.id
+        );
+
+        let rotated = match store
+            .rotate_auth_refresh_token(
+                &first.refresh_token,
+                test_audit("refresh", "auth_session", None),
+            )
+            .await
+            .unwrap()
+        {
+            RefreshAuthResult::Issued(tokens) => tokens,
+            _ => panic!("initial refresh should rotate"),
+        };
+        assert!(store
+            .verify_auth_access_token(&first.access_token)
+            .await
+            .unwrap()
+            .is_none());
+        assert!(store
+            .verify_auth_access_token(&rotated.access_token)
+            .await
+            .unwrap()
+            .is_some());
+
+        assert!(matches!(
+            store
+                .rotate_auth_refresh_token(
+                    &first.refresh_token,
+                    test_audit("refresh_replay", "auth_session", None),
+                )
+                .await
+                .unwrap(),
+            RefreshAuthResult::ReplayDetected
+        ));
+        assert!(store
+            .verify_auth_access_token(&rotated.access_token)
+            .await
+            .unwrap()
+            .is_none());
+        assert!(matches!(
+            store
+                .rotate_auth_refresh_token(
+                    &rotated.refresh_token,
+                    test_audit("refresh", "auth_session", None),
+                )
+                .await
+                .unwrap(),
+            RefreshAuthResult::Invalid
+        ));
+
+        let conn = store.conn().unwrap();
+        let durable: String = conn
+            .query_row(
+                "SELECT group_concat(token_lookup || token_digest, '|')
+                 FROM auth_access_token",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(!durable.contains(&first.access_token));
+        assert!(!durable.contains(&rotated.access_token));
     }
 
     #[test]

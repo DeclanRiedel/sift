@@ -156,6 +156,49 @@ pub struct PasswordIdentity {
     pub principal: Principal,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum AuthClientKind {
+    Native,
+    Web,
+    Keypair,
+}
+
+impl AuthClientKind {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Native => "native",
+            Self::Web => "web",
+            Self::Keypair => "keypair",
+        }
+    }
+}
+
+/// Fresh bearer values are intentionally neither `Debug` nor serializable at
+/// the metadata boundary. The HTTP layer copies them into its explicit secret
+/// response wrapper.
+pub struct IssuedAuthTokens {
+    pub session_id: String,
+    pub access_token: String,
+    pub access_expires_at: DateTime<Utc>,
+    pub refresh_token: String,
+    pub refresh_expires_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone)]
+pub struct AuthenticatedSession {
+    pub session_id: String,
+    pub principal: Principal,
+    pub client_kind: AuthClientKind,
+    pub expires_at: DateTime<Utc>,
+}
+
+pub enum RefreshAuthResult {
+    Issued(IssuedAuthTokens),
+    Invalid,
+    ReplayDetected,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct AuthIdentity {
     pub id: AuthIdentityId,

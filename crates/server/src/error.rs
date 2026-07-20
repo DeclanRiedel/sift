@@ -111,6 +111,7 @@ impl ApiError {
                 MetadataError::Sqlite(_)
                 | MetadataError::Migration(_)
                 | MetadataError::PasswordHash(_)
+                | MetadataError::InvalidAuthTokenKey
                 | MetadataError::SecretStore(_)
                 | MetadataError::Io(_)
                 | MetadataError::BlockingTask(_) => {
