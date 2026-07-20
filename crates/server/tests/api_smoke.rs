@@ -10,10 +10,10 @@ use sift_metadata::{
     PrincipalId, RoomKind, RoomRole, TenantId, TenantKind,
 };
 use sift_protocol::{
-    AuthTokensResponse, ColumnMetadata, ConnectionSpec, Engine, ExecuteRequestHttp, Health,
-    Nullability, Page, PrimitiveType, RoomClientMessage, RoomServerMessage, Row, SchemaScope,
-    SchemaSnapshot, ServerInfo, SslMode, TextDocumentOperation, TypeRef, Value, WebAuthResponse,
-    WhoAmIResponse,
+    AuthTokensResponse, ColumnMetadata, ConnectionSpec, Engine, ExecuteRequestHttp,
+    GithubNativeAuthStartResponse, Health, Nullability, Page, PrimitiveType, RoomClientMessage,
+    RoomServerMessage, Row, SchemaScope, SchemaSnapshot, ServerInfo, SslMode,
+    TextDocumentOperation, TypeRef, Value, WebAuthResponse, WhoAmIResponse,
 };
 use sift_server::http::{app, AppState, AuthState};
 use sift_server::registry::DriverRegistry;
@@ -1448,6 +1448,7 @@ async fn github_start_uses_fixed_callback_pkce_and_admin_owned_allowlist() {
         http: reqwest::Client::new(),
     });
     let operation_log = state.sessions.clone();
+    let handoff_metadata = metadata.clone();
     let app = app(state);
 
     let start = app
@@ -1472,6 +1473,44 @@ async fn github_start_uses_fixed_callback_pkce_and_admin_owned_allowlist() {
     assert_eq!(query.get("code_challenge_method").unwrap(), "S256");
     assert_eq!(query.get("scope").unwrap(), "read:user");
     assert!(!location.as_str().contains("github-client-secret"));
+
+    let native_start = app
+        .clone()
+        .oneshot(
+            Request::get("/v1/auth/github/start?client_kind=native")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(native_start.status(), StatusCode::OK);
+    let native: GithubNativeAuthStartResponse = body_json(native_start.into_body()).await;
+    assert!(native.handoff_token.starts_with("sift_gh_"));
+    let authorization = reqwest::Url::parse(&native.authorization_url).unwrap();
+    let state = authorization
+        .query_pairs()
+        .find(|(key, _)| key == "state")
+        .unwrap()
+        .1
+        .into_owned();
+    let attempt = handoff_metadata
+        .consume_github_oauth_attempt(&state)
+        .await
+        .unwrap();
+    handoff_metadata
+        .complete_native_oauth_attempt(&attempt.attempt_id, admin.id)
+        .unwrap();
+    let exchanged = app
+        .clone()
+        .oneshot(post_json(
+            "/v1/auth/github/exchange",
+            serde_json::json!({"handoff_token": native.handoff_token}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(exchanged.status(), StatusCode::OK);
+    let native_tokens: AuthTokensResponse = body_json(exchanged.into_body()).await;
+    assert!(native_tokens.access_token.starts_with("sift_at_"));
 
     let created = app
         .clone()

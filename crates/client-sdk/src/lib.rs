@@ -22,7 +22,8 @@ use sift_protocol::{
     ChangePasswordRequest, ConnectionId, ConnectionInfo, CreateGithubAllowlistRequest,
     CreateTenantInvitationRequest, CsvImportRequest, CsvImportResponse, CursorId,
     DataSearchRequest, DataSearchResponse, DatabaseProcess, EditPlan, EndTransactionRequest,
-    ExecuteRequestHttp, ExecuteResponse, ExplainRequest, ExplainResponse, Health,
+    ExecuteRequestHttp, ExecuteResponse, ExplainRequest, ExplainResponse,
+    GithubNativeAuthExchangeRequest, GithubNativeAuthStartResponse, Health,
     IssuedPasswordResetResponse, IssuedTenantInvitationResponse, KeyAuthenticateRequest,
     KeyChallengeRequest, KeyChallengeResponse, KillProcessRequest, KillProcessResponse,
     OpenConnectionRequest, OpenSessionRequest, OperationCapability, OperationCapabilityContext,
@@ -280,6 +281,23 @@ impl Client {
             .and_then(|value| value.to_str().ok())
             .map(str::to_string)
             .ok_or_else(|| Error::Protocol("GitHub authorization redirect omitted Location".into()))
+    }
+
+    pub async fn github_native_start(&self) -> Result<GithubNativeAuthStartResponse> {
+        self.get("/v1/auth/github/start?client_kind=native").await
+    }
+
+    pub async fn github_native_exchange(
+        &self,
+        handoff_token: String,
+    ) -> Result<SessionTokenProvider> {
+        let tokens: AuthTokensResponse = self
+            .post(
+                "/v1/auth/github/exchange",
+                &GithubNativeAuthExchangeRequest { handoff_token },
+            )
+            .await?;
+        Ok(SessionTokenProvider::new(tokens))
     }
 
     pub async fn github_callback(&self, code: &str, state: &str) -> Result<WebAuthResponse> {

@@ -226,9 +226,11 @@ pub enum RefreshAuthResult {
 pub struct OAuthStartMaterial {
     pub state: String,
     pub code_verifier: String,
+    pub handoff_token: Option<String>,
 }
 
 pub struct ConsumedOAuthAttempt {
+    pub attempt_id: String,
     pub client_kind: AuthClientKind,
     pub code_verifier: String,
 }

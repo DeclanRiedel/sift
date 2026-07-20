@@ -33,6 +33,7 @@ const AUTH_SYSTEM_SECRET_NAMESPACE: &str = "sift.auth.system";
 const AUTH_TOKEN_MAC_HANDLE: &str = "token-mac-v1";
 const OAUTH_SECRET_NAMESPACE: &str = "sift.auth.oauth";
 const OAUTH_STATE_PREFIX: &str = "sift_oauth_";
+const GITHUB_HANDOFF_PREFIX: &str = "sift_gh_";
 const INVITATION_TOKEN_PREFIX: &str = "sift_inv_";
 const PASSWORD_RESET_TOKEN_PREFIX: &str = "sift_pr_";
 const ACCESS_TOKEN_PREFIX: &str = "sift_at_";
@@ -1181,6 +1182,8 @@ impl MetadataStore {
         let lookup = &lookup_seed[..AUTH_TOKEN_LOOKUP_LEN];
         let state = format!("{OAUTH_STATE_PREFIX}{lookup}_{}", Uuid::new_v4().simple());
         let state_digest = auth_token_digest(&key, &state);
+        let handoff = (client_kind == AuthClientKind::Native)
+            .then(|| new_token_material(GITHUB_HANDOFF_PREFIX, &key));
         let code_verifier = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
         let verifier_handle = Uuid::new_v4().to_string();
         self.secrets
@@ -1197,8 +1200,8 @@ impl MetadataStore {
             conn.execute(
                 "INSERT INTO oauth_login_attempt
                  (id, provider, state_lookup, state_digest, pkce_verifier_handle,
-                  client_kind, created_at, expires_at)
-                 VALUES (?1, 'github', ?2, ?3, ?4, ?5, ?6, ?7)",
+                  client_kind, created_at, expires_at, handoff_lookup, handoff_digest)
+                 VALUES (?1, 'github', ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
                 params![
                     Uuid::new_v4().to_string(),
                     lookup,
@@ -1206,7 +1209,9 @@ impl MetadataStore {
                     verifier_handle,
                     client_kind.as_str(),
                     now.to_rfc3339(),
-                    expires.to_rfc3339()
+                    expires.to_rfc3339(),
+                    handoff.as_ref().map(|token| token.lookup.as_str()),
+                    handoff.as_ref().map(|token| token.digest.as_str())
                 ],
             )
         };
@@ -1218,6 +1223,7 @@ impl MetadataStore {
         Ok(OAuthStartMaterial {
             state,
             code_verifier,
+            handoff_token: handoff.map(|token| token.plaintext),
         })
     }
 
@@ -1228,7 +1234,7 @@ impl MetadataStore {
         let key = self.auth_token_mac_key().await?;
         let digest = auth_token_digest(&key, state);
         let now = Utc::now();
-        let (verifier_handle, client_kind) = {
+        let (attempt_id, verifier_handle, client_kind) = {
             let mut conn = self.conn()?;
             let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
             let candidate = tx
@@ -1260,7 +1266,7 @@ impl MetadataStore {
                 params![now.to_rfc3339(), id],
             )?;
             tx.commit()?;
-            (verifier_handle, client_kind)
+            (id, verifier_handle, client_kind)
         };
         let verifier = self
             .secrets
@@ -1272,9 +1278,67 @@ impl MetadataStore {
         let code_verifier =
             String::from_utf8(verifier).map_err(|_| MetadataError::InvalidOAuthAttempt)?;
         Ok(ConsumedOAuthAttempt {
+            attempt_id,
             client_kind: parse_auth_client_kind_sql(client_kind)?,
             code_verifier,
         })
+    }
+
+    pub fn complete_native_oauth_attempt(
+        &self,
+        attempt_id: &str,
+        principal: PrincipalId,
+    ) -> Result<()> {
+        let now = now_text();
+        let conn = self.conn()?;
+        let changed = conn.execute(
+            "UPDATE oauth_login_attempt
+             SET result_principal_id = ?1, completed_at = ?2
+             WHERE id = ?3 AND client_kind = 'native' AND consumed_at IS NOT NULL
+               AND completed_at IS NULL AND expires_at > ?2",
+            params![principal.0, now, attempt_id],
+        )?;
+        if changed != 1 {
+            return Err(MetadataError::InvalidOAuthAttempt);
+        }
+        Ok(())
+    }
+
+    pub async fn consume_native_oauth_handoff(&self, presented: &str) -> Result<PrincipalId> {
+        let Some(lookup) = auth_token_lookup(presented, GITHUB_HANDOFF_PREFIX) else {
+            return Err(MetadataError::InvalidOAuthAttempt);
+        };
+        let key = self.auth_token_mac_key().await?;
+        let digest = auth_token_digest(&key, presented);
+        let now = now_text();
+        let mut conn = self.conn()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let candidate: Option<(String, PrincipalId, String)> = tx
+            .query_row(
+                "SELECT id, result_principal_id, handoff_digest FROM oauth_login_attempt
+                 WHERE provider = 'github' AND client_kind = 'native'
+                   AND handoff_lookup = ?1 AND completed_at IS NOT NULL
+                   AND claimed_at IS NULL AND expires_at > ?2",
+                params![lookup, now],
+                |row| Ok((row.get(0)?, PrincipalId(row.get(1)?), row.get(2)?)),
+            )
+            .optional()?;
+        let Some((attempt_id, principal, stored_digest)) = candidate else {
+            return Err(MetadataError::InvalidOAuthAttempt);
+        };
+        if !constant_time_eq(stored_digest.as_bytes(), digest.as_bytes()) {
+            return Err(MetadataError::InvalidOAuthAttempt);
+        }
+        let changed = tx.execute(
+            "UPDATE oauth_login_attempt SET claimed_at = ?1
+             WHERE id = ?2 AND claimed_at IS NULL",
+            params![now, attempt_id],
+        )?;
+        if changed != 1 {
+            return Err(MetadataError::InvalidOAuthAttempt);
+        }
+        tx.commit()?;
+        Ok(principal)
     }
 
     pub async fn verify_auth_access_token(
@@ -4375,6 +4439,7 @@ mod tests {
             .await
             .unwrap();
         assert!(attempt.state.starts_with(OAUTH_STATE_PREFIX));
+        assert!(attempt.handoff_token.is_none());
         assert_eq!(attempt.code_verifier.len(), 64);
         let conn = store.conn().unwrap();
         let durable: String = conn
@@ -4397,6 +4462,44 @@ mod tests {
         assert_eq!(consumed.code_verifier, attempt.code_verifier);
         assert!(matches!(
             store.consume_github_oauth_attempt(&attempt.state).await,
+            Err(MetadataError::InvalidOAuthAttempt)
+        ));
+    }
+
+    #[tokio::test]
+    async fn native_github_handoff_is_opaque_and_one_use() {
+        let store = store();
+        store.bootstrap_local("Native User").unwrap();
+        let attempt = store
+            .create_github_oauth_attempt(AuthClientKind::Native)
+            .await
+            .unwrap();
+        let handoff = attempt.handoff_token.clone().unwrap();
+        assert!(handoff.starts_with(GITHUB_HANDOFF_PREFIX));
+        let consumed = store
+            .consume_github_oauth_attempt(&attempt.state)
+            .await
+            .unwrap();
+        assert_eq!(consumed.client_kind, AuthClientKind::Native);
+        store
+            .complete_native_oauth_attempt(&consumed.attempt_id, PrincipalId(1))
+            .unwrap();
+        let conn = store.conn().unwrap();
+        let durable: String = conn
+            .query_row(
+                "SELECT handoff_lookup || handoff_digest FROM oauth_login_attempt WHERE id = ?1",
+                params![consumed.attempt_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        drop(conn);
+        assert!(!durable.contains(&handoff));
+        assert_eq!(
+            store.consume_native_oauth_handoff(&handoff).await.unwrap(),
+            PrincipalId(1)
+        );
+        assert!(matches!(
+            store.consume_native_oauth_handoff(&handoff).await,
             Err(MetadataError::InvalidOAuthAttempt)
         ));
     }

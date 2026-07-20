@@ -31,14 +31,14 @@ use sift_protocol::{
     AuthTokensResponse, BeginTransactionRequest, BulkInsertRequest, CancelRequest,
     ChangePasswordRequest, CreateGithubAllowlistRequest, CreateTenantInvitationRequest,
     CsvImportRequest, DocumentOperationEnvelope, EndTransactionRequest, ExecuteRequest,
-    ExecuteRequestHttp, Health, InvitationRole, IssuedPasswordResetResponse,
-    IssuedTenantInvitationResponse, KeyAuthenticateRequest, KeyChallengeRequest,
-    KeyChallengeResponse, KillProcessRequest, ObjectPath, OpenConnectionRequest,
-    OpenSessionRequest, Operation, OperationStatus, PasswordLoginRequest, PasswordResetRequest,
-    Readiness, RefreshAuthRequest, RegisterPrincipalKeyRequest, RoomClientMessage, RoomQueryResult,
-    RoomQueryStatus, RoomServerMessage, SavepointRequest, SchemaFilter, SchemaScope,
-    TransactionPreviewRequest, WebAuthResponse, WhoAmIResponse, WsClientMessage, WsServerMessage,
-    PROTOCOL_VERSION,
+    ExecuteRequestHttp, GithubNativeAuthExchangeRequest, GithubNativeAuthStartResponse, Health,
+    InvitationRole, IssuedPasswordResetResponse, IssuedTenantInvitationResponse,
+    KeyAuthenticateRequest, KeyChallengeRequest, KeyChallengeResponse, KillProcessRequest,
+    ObjectPath, OpenConnectionRequest, OpenSessionRequest, Operation, OperationStatus,
+    PasswordLoginRequest, PasswordResetRequest, Readiness, RefreshAuthRequest,
+    RegisterPrincipalKeyRequest, RoomClientMessage, RoomQueryResult, RoomQueryStatus,
+    RoomServerMessage, SavepointRequest, SchemaFilter, SchemaScope, TransactionPreviewRequest,
+    WebAuthResponse, WhoAmIResponse, WsClientMessage, WsServerMessage, PROTOCOL_VERSION,
 };
 
 use crate::config::DeploymentPolicy;
@@ -99,6 +99,7 @@ pub fn app(state: AppState) -> Router {
         .route("/v1/auth/password/reset", post(reset_password))
         .route("/v1/auth/github/start", get(github_start))
         .route("/v1/auth/github/callback", get(github_callback))
+        .route("/v1/auth/github/exchange", post(github_native_exchange))
         .route(
             "/v1/admin/auth/github-allowlist",
             get(list_github_allowlist).post(create_github_allowlist),
@@ -537,6 +538,7 @@ fn is_public_path(path: &str) -> bool {
             | "/v1/auth/refresh"
             | "/v1/auth/github/start"
             | "/v1/auth/github/callback"
+            | "/v1/auth/github/exchange"
             | "/v1/auth/keys/challenge"
             | "/v1/auth/keys/authenticate"
     )
@@ -987,7 +989,7 @@ struct GithubUserResponse {
 async fn github_start(
     State(state): State<AppState>,
     Query(query): Query<GithubStartQuery>,
-) -> ApiResult<Redirect> {
+) -> ApiResult<Response> {
     use base64::Engine as _;
     use sha2::Digest as _;
 
@@ -996,13 +998,11 @@ async fn github_start(
             ApiError::BadRequest("GitHub authentication is not configured".into())
         })?;
     let client_kind = query.client_kind.unwrap_or(AuthClientKind::Web);
-    if client_kind != AuthClientKind::Web {
-        return Err(ApiError::BadRequest(
-            "native GitHub callback handoff is not available yet".into(),
-        ));
-    }
     let attempt = metadata_store(&state)?
-        .create_github_oauth_attempt(MetadataAuthClientKind::Web)
+        .create_github_oauth_attempt(match client_kind {
+            AuthClientKind::Native => MetadataAuthClientKind::Native,
+            AuthClientKind::Web => MetadataAuthClientKind::Web,
+        })
         .await?;
     let challenge = base64::engine::general_purpose::URL_SAFE_NO_PAD
         .encode(sha2::Sha256::digest(attempt.code_verifier.as_bytes()));
@@ -1021,7 +1021,17 @@ async fn github_start(
         ("code_challenge_method", "S256"),
         ("allow_signup", "false"),
     ]);
-    Ok(Redirect::temporary(authorize.as_str()))
+    if client_kind == AuthClientKind::Native {
+        Ok(Json(GithubNativeAuthStartResponse {
+            authorization_url: authorize.to_string(),
+            handoff_token: attempt
+                .handoff_token
+                .ok_or_else(|| ApiError::Internal("native OAuth handoff missing".into()))?,
+        })
+        .into_response())
+    } else {
+        Ok(Redirect::temporary(authorize.as_str()).into_response())
+    }
 }
 
 async fn github_callback(
@@ -1041,9 +1051,6 @@ async fn github_callback(
         .consume_github_oauth_attempt(oauth_state)
         .await
         .map_err(|_| ApiError::Unauthorized)?;
-    if attempt.client_kind != MetadataAuthClientKind::Web {
-        return Err(ApiError::Unauthorized);
-    }
     let callback = format!(
         "{}/v1/auth/github/callback",
         config.public_base_url.trim_end_matches('/')
@@ -1111,6 +1118,14 @@ async fn github_callback(
             },
         )?
         .ok_or(ApiError::Unauthorized)?;
+    if attempt.client_kind == MetadataAuthClientKind::Native {
+        metadata.complete_native_oauth_attempt(&attempt.attempt_id, principal.id)?;
+        return Ok(Json(json!({
+            "ok": true,
+            "message": "GitHub authentication complete; return to Sift"
+        }))
+        .into_response());
+    }
     let tokens = metadata
         .issue_auth_session(
             principal.id,
@@ -1135,6 +1150,46 @@ async fn github_callback(
         None,
     );
     auth_login_response(tokens, true)
+}
+
+async fn github_native_exchange(
+    State(state): State<AppState>,
+    Json(request): Json<GithubNativeAuthExchangeRequest>,
+) -> ApiResult<Json<AuthTokensResponse>> {
+    let metadata = metadata_store(&state)?;
+    let principal = metadata
+        .consume_native_oauth_handoff(&request.handoff_token)
+        .await
+        .map_err(|_| ApiError::Unauthorized)?;
+    let tokens = metadata
+        .issue_auth_session(
+            principal,
+            MetadataAuthClientKind::Native,
+            Some("GitHub OAuth native handoff"),
+            metadata_audit_record(
+                principal,
+                "authenticate.github.session",
+                "auth_session",
+                None,
+            ),
+        )
+        .await?;
+    state.sessions.push_operation_local(
+        Operation::Authenticate {
+            method: sift_protocol::AuthenticationMethod::Github,
+        },
+        OperationStatus::Succeeded,
+        Some(principal.0),
+        None,
+        None,
+        None,
+    );
+    Ok(Json(AuthTokensResponse {
+        access_token: tokens.access_token,
+        access_expires_at: tokens.access_expires_at,
+        refresh_token: tokens.refresh_token,
+        refresh_expires_at: tokens.refresh_expires_at,
+    }))
 }
 
 async fn create_github_allowlist(
@@ -2588,7 +2643,10 @@ async fn openapi() -> Json<serde_json::Value> {
                     "operationId": "githubAuthStart",
                     "summary": "Start the instance GitHub OAuth flow with state and S256 PKCE",
                     "security": [],
-                    "responses": { "307": { "description": "GitHub authorization redirect" } }
+                    "responses": {
+                        "200": { "description": "Native IDE authorization URL and one-use handoff", "content": json_content("GithubNativeAuthStartResponse") },
+                        "307": { "description": "Browser GitHub authorization redirect" }
+                    }
                 }
             },
             "/v1/auth/github/callback": {
@@ -2599,6 +2657,18 @@ async fn openapi() -> Json<serde_json::Value> {
                     "responses": {
                         "200": { "description": "Browser authentication metadata", "content": json_content("WebAuthResponse") },
                         "401": { "description": "OAuth or allowlist denial" }
+                    }
+                }
+            },
+            "/v1/auth/github/exchange": {
+                "post": {
+                    "operationId": "githubNativeAuthExchange",
+                    "summary": "Exchange a completed one-use native GitHub handoff for Sift tokens",
+                    "security": [],
+                    "requestBody": json_body("GithubNativeAuthExchangeRequest"),
+                    "responses": {
+                        "200": { "description": "Native session credentials", "content": json_content("AuthTokensResponse") },
+                        "401": { "description": "Pending, invalid, expired, or consumed handoff" }
                     }
                 }
             },
@@ -3224,6 +3294,14 @@ fn protocol_schema_refs() -> serde_json::Value {
     add_schema::<sift_protocol::SshProxyCapabilityClaims>("SshProxyCapabilityClaims", &mut schemas);
     add_schema::<sift_protocol::CreateGithubAllowlistRequest>(
         "CreateGithubAllowlistRequest",
+        &mut schemas,
+    );
+    add_schema::<sift_protocol::GithubNativeAuthStartResponse>(
+        "GithubNativeAuthStartResponse",
+        &mut schemas,
+    );
+    add_schema::<sift_protocol::GithubNativeAuthExchangeRequest>(
+        "GithubNativeAuthExchangeRequest",
         &mut schemas,
     );
     add_schema::<sift_protocol::AdminCreatePasswordPrincipalRequest>(

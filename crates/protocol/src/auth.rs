@@ -151,6 +151,36 @@ pub struct CreateGithubAllowlistRequest {
     pub target_principal_id: Option<i64>,
 }
 
+#[derive(Clone, Serialize, Deserialize, JsonSchema)]
+pub struct GithubNativeAuthStartResponse {
+    pub authorization_url: String,
+    pub handoff_token: String,
+}
+
+impl fmt::Debug for GithubNativeAuthStartResponse {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("GithubNativeAuthStartResponse")
+            .field("authorization_url", &self.authorization_url)
+            .field("handoff_token", &"[REDACTED]")
+            .finish()
+    }
+}
+
+#[derive(Clone, Serialize, Deserialize, JsonSchema)]
+pub struct GithubNativeAuthExchangeRequest {
+    pub handoff_token: String,
+}
+
+impl fmt::Debug for GithubNativeAuthExchangeRequest {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("GithubNativeAuthExchangeRequest")
+            .field("handoff_token", &"[REDACTED]")
+            .finish()
+    }
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum InvitationRole {
