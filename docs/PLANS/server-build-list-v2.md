@@ -147,9 +147,11 @@ and tenant-resource enforcement remain absent.
       connection-profile policy through one server evaluator. Personal +
       loopback stays login-optional and permits raw connection specs; every
       shared/network path requires authentication and managed profiles.
-- [ ] [Design] General rate limiting (per-principal + per-tenant token bucket or
-      sliding window); 429 + `Retry-After`. `Code::RateLimited` does not
-      exist today. Phase E separately owns login/refresh abuse throttling.
+- [x] [Design] Hierarchical token-bucket rate limiting: principal + tenant,
+      classified as control, interactive, query, heavy transfer, and streamed
+      bytes. HTTP denial is 429 + `Retry-After` + `Code::RateLimited`; WebSocket
+      operations use the same code. Trusted personal-loopback is exempt by
+      default. Phase E retains separate login/refresh abuse throttling.
 - [ ] [Design] Tenant isolation: connection quotas, concurrent-query caps,
       total-result-bytes-per-tenant; `Code::TenantResourceExhausted` (does
       not exist today) instead of a crash.

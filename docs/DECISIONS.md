@@ -790,6 +790,28 @@ credentials, or explicitly disconnecting invalidates active descendants.
 Ordinary policy edits take effect before the next operation while an already
 authorized in-flight operation may finish.
 
+General API rate limiting uses hierarchical token buckets. After authentication
+and tenant resolution, each admitted action must obtain its configured cost
+from both a principal bucket and a tenant bucket for its route class. Routes
+without tenant context consume only the principal bucket; public login and
+refresh routes retain Phase E's separate abuse limiter. The route classes are
+control/metadata, interactive reads, query admission, heavy transfer, and
+streamed bytes. HTTP admission failure returns 429 with `Code::RateLimited` and
+a ceiling-rounded `Retry-After`; WebSocket operations return the same stable
+code in their error envelope. Checking both scopes is one reservation: a denial
+does not partially consume the other bucket.
+
+Buckets refill from monotonic time, support a burst capacity, and are created
+lazily with bounded idle eviction. Configuration defines refill rate, burst,
+and operation cost per route class; a disabled class has no bucket rather than
+using magic zero values. Byte limits on an already-started stream apply
+backpressure for a bounded interval instead of attempting to change an HTTP
+status after headers were sent. Cancellation and shutdown interrupt that wait.
+Trusted personal-loopback traffic is exempt by default, with an explicit
+configuration switch available for testing or unusually constrained local
+hosts. Rate-limited attempts still produce sanitized failed-operation audit
+entries through the existing bounded audit path.
+
 Phase F resource enforcement is single-process. Durable policy and optional
 per-tenant overrides live in SQLite, while token buckets and live-resource
 counters live in memory. Rate admission intersects principal and tenant token
