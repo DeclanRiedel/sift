@@ -1,7 +1,7 @@
 use chrono::{DateTime, Utc};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use sift_protocol::{ConnectionSpec, Engine};
+use sift_protocol::{ConnectionPolicy, ConnectionSpec, Engine, TenantResourceLimits, TenantRole};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 pub struct TenantId(pub i64);
@@ -330,7 +330,17 @@ pub struct ConnectionProfile {
     pub credential_mode: CredentialMode,
     pub shared_secret_handle: Option<String>,
     pub tags: Vec<String>,
+    pub policy: ConnectionPolicy,
     pub created_by: PrincipalId,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct TenantLimitOverride {
+    pub tenant_id: TenantId,
+    pub limits: TenantResourceLimits,
+    pub updated_by: PrincipalId,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -482,6 +492,17 @@ impl MembershipRole {
             Self::Admin => "admin",
             Self::Member => "member",
             Self::Viewer => "viewer",
+        }
+    }
+}
+
+impl From<&MembershipRole> for TenantRole {
+    fn from(role: &MembershipRole) -> Self {
+        match role {
+            MembershipRole::Owner => Self::Owner,
+            MembershipRole::Admin => Self::Admin,
+            MembershipRole::Member => Self::Member,
+            MembershipRole::Viewer => Self::Viewer,
         }
     }
 }

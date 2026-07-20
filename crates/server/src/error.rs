@@ -133,6 +133,12 @@ impl ApiError {
                 MetadataError::FinalInstanceAdmin | MetadataError::FinalAuthIdentity => {
                     (StatusCode::CONFLICT, "conflict")
                 }
+                MetadataError::PolicyRevisionConflict { .. } => {
+                    (StatusCode::CONFLICT, "policy_revision_conflict")
+                }
+                MetadataError::TenantAdminRequired | MetadataError::InstanceAdminRequired => {
+                    (StatusCode::FORBIDDEN, "forbidden")
+                }
                 MetadataError::TenantMismatch(_, _) => (StatusCode::FORBIDDEN, "forbidden"),
                 MetadataError::MissingCredential(_, _)
                 | MetadataError::BrokerCredentialUnsupported(_) => {

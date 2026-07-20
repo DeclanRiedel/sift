@@ -159,7 +159,7 @@ and tenant-resource enforcement remain absent.
       default. Detailed build contract: `docs/PLANS/phase-f-authorization.md`.
 - [x] [Implement] Protocol policy/usage contracts and stable
       `RateLimited`/`TenantResourceExhausted` errors.
-- [ ] [Implement] Metadata migration for profile policy revisions and
+- [x] [Implement] Metadata migration for profile policy revisions and
       instance-admin-managed tenant limit overrides.
 - [ ] [Implement] Central authorization evaluator and conservative tenant/room
       role matrix; capability discovery consumes the same evaluator.

@@ -11,7 +11,10 @@ use chrono::{DateTime, Utc};
 use rand_core::OsRng;
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use sha2::{Digest, Sha256};
-use sift_protocol::{AuthSessionSummary, ConnectionSpec};
+use sift_protocol::{
+    AuthSessionSummary, ConnectionPolicy, ConnectionSpec, TenantResourceLimits,
+    UpdateConnectionPolicyRequest,
+};
 use uuid::Uuid;
 
 pub mod http;
@@ -73,6 +76,12 @@ pub enum MetadataError {
     BrokerCredentialUnsupported(ConnectionProfileId),
     #[error("connection profile {0:?} is not in tenant {1:?}")]
     TenantMismatch(ConnectionProfileId, TenantId),
+    #[error("connection profile policy revision conflict: expected {expected}, current {current}")]
+    PolicyRevisionConflict { expected: u64, current: u64 },
+    #[error("tenant administrator access required")]
+    TenantAdminRequired,
+    #[error("instance administrator access required")]
+    InstanceAdminRequired,
     #[error("room {0:?} not found")]
     RoomNotFound(RoomId),
     #[error("document {0:?} not found")]
@@ -2124,7 +2133,8 @@ impl MetadataStore {
         let conn = self.conn()?;
         let mut stmt = conn.prepare(
             "SELECT id, tenant_id, name, engine, spec_json, credential_mode,
-                    shared_secret_handle, tags_json, created_by, created_at, updated_at
+                    shared_secret_handle, tags_json, created_by, created_at, updated_at,
+                    policy_json, policy_revision
              FROM connection_profile
              WHERE tenant_id = ?1
              ORDER BY name",
@@ -2152,6 +2162,133 @@ impl MetadataStore {
     ) -> Result<ConnectionProfile> {
         let conn = self.conn()?;
         self.connection_profile_by_id_locked(&conn, id)
+    }
+
+    pub fn update_connection_policy(
+        &self,
+        tenant: TenantId,
+        actor: PrincipalId,
+        id: ConnectionProfileId,
+        input: UpdateConnectionPolicyRequest,
+        audit: NewOperationAudit,
+    ) -> Result<ConnectionProfile> {
+        validate_connection_policy_input(&input)?;
+        let mut conn = self.conn()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        ensure_tenant_admin_locked(&tx, tenant, actor)?;
+        let current = connection_profile_by_id_locked(&tx, id)?;
+        if current.tenant_id != tenant {
+            return Err(MetadataError::TenantMismatch(id, tenant));
+        }
+        if let Some(expected) = input.expected_revision {
+            if expected != current.policy.revision {
+                return Err(MetadataError::PolicyRevisionConflict {
+                    expected,
+                    current: current.policy.revision,
+                });
+            }
+        }
+        let revision = current.policy.revision.checked_add(1).ok_or(
+            MetadataError::PolicyRevisionConflict {
+                expected: current.policy.revision,
+                current: current.policy.revision,
+            },
+        )?;
+        let policy = ConnectionPolicy {
+            minimum_tenant_role: input.minimum_tenant_role,
+            read_only: input.read_only,
+            allowed_ops: input.allowed_ops,
+            blocked_ops: input.blocked_ops,
+            allowed_schemas: input.allowed_schemas,
+            revision,
+        };
+        let policy_json = serde_json::to_string(&policy)?;
+        let revision_i64 =
+            i64::try_from(revision).map_err(|_| MetadataError::PolicyRevisionConflict {
+                expected: current.policy.revision,
+                current: current.policy.revision,
+            })?;
+        tx.execute(
+            "UPDATE connection_profile
+             SET policy_json = ?1, policy_revision = ?2, updated_at = ?3
+             WHERE id = ?4 AND tenant_id = ?5",
+            params![policy_json, revision_i64, now_text(), id.0, tenant.0],
+        )?;
+        let mut audit = audit;
+        audit.actor_principal_id = Some(actor);
+        insert_operation_audit_row(&tx, &audit)?;
+        tx.commit()?;
+        connection_profile_by_id_locked(&conn, id)
+    }
+
+    pub fn get_tenant_limit_override(
+        &self,
+        tenant: TenantId,
+    ) -> Result<Option<TenantLimitOverride>> {
+        let conn = self.conn()?;
+        conn.query_row(
+            "SELECT tenant_id, limits_json, updated_by, created_at, updated_at
+             FROM tenant_limit_override WHERE tenant_id = ?1",
+            params![tenant.0],
+            tenant_limit_override_from_row,
+        )
+        .optional()
+        .map_err(Into::into)
+    }
+
+    pub fn set_tenant_limit_override(
+        &self,
+        actor: PrincipalId,
+        tenant: TenantId,
+        limits: TenantResourceLimits,
+        audit: NewOperationAudit,
+    ) -> Result<TenantLimitOverride> {
+        let limits_json = serde_json::to_string(&limits)?;
+        let now = now_text();
+        let mut conn = self.conn()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        ensure_instance_admin_locked(&tx, actor)?;
+        tx.execute(
+            "INSERT INTO tenant_limit_override
+             (tenant_id, limits_json, updated_by, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?4)
+             ON CONFLICT(tenant_id) DO UPDATE SET
+                limits_json = excluded.limits_json,
+                updated_by = excluded.updated_by,
+                updated_at = excluded.updated_at",
+            params![tenant.0, limits_json, actor.0, now],
+        )?;
+        let mut audit = audit;
+        audit.actor_principal_id = Some(actor);
+        insert_operation_audit_row(&tx, &audit)?;
+        tx.commit()?;
+        conn.query_row(
+            "SELECT tenant_id, limits_json, updated_by, created_at, updated_at
+             FROM tenant_limit_override WHERE tenant_id = ?1",
+            params![tenant.0],
+            tenant_limit_override_from_row,
+        )
+        .map_err(Into::into)
+    }
+
+    pub fn clear_tenant_limit_override(
+        &self,
+        actor: PrincipalId,
+        tenant: TenantId,
+        audit: NewOperationAudit,
+    ) -> Result<bool> {
+        let mut conn = self.conn()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        ensure_instance_admin_locked(&tx, actor)?;
+        let deleted = tx.execute(
+            "DELETE FROM tenant_limit_override WHERE tenant_id = ?1",
+            params![tenant.0],
+        )?;
+        let mut audit = audit;
+        audit.actor_principal_id = Some(actor);
+        insert_operation_audit_row(&tx, &audit)?;
+        tx.commit()?;
+        Ok(deleted != 0)
     }
 
     pub async fn upsert_connection_profile(
@@ -3066,13 +3203,91 @@ fn connection_profile_by_id_locked(
 ) -> Result<ConnectionProfile> {
     conn.query_row(
         "SELECT id, tenant_id, name, engine, spec_json, credential_mode,
-                    shared_secret_handle, tags_json, created_by, created_at, updated_at
+                    shared_secret_handle, tags_json, created_by, created_at, updated_at,
+                    policy_json, policy_revision
              FROM connection_profile WHERE id = ?1",
         params![id.0],
         connection_profile_from_row,
     )
     .optional()?
     .ok_or(MetadataError::ConnectionProfileNotFound(id))
+}
+
+fn ensure_tenant_admin_locked(
+    conn: &Connection,
+    tenant: TenantId,
+    actor: PrincipalId,
+) -> Result<()> {
+    let role: Option<String> = conn
+        .query_row(
+            "SELECT m.role
+             FROM membership m
+             JOIN principal p ON p.id = m.principal_id
+             WHERE m.tenant_id = ?1 AND m.principal_id = ?2
+               AND p.disabled_at IS NULL",
+            params![tenant.0, actor.0],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if matches!(role.as_deref(), Some("owner" | "admin")) {
+        Ok(())
+    } else {
+        Err(MetadataError::TenantAdminRequired)
+    }
+}
+
+fn ensure_instance_admin_locked(conn: &Connection, actor: PrincipalId) -> Result<()> {
+    let active: bool = conn.query_row(
+        "SELECT EXISTS(
+                SELECT 1 FROM principal
+                WHERE id = ?1 AND is_instance_admin = 1 AND disabled_at IS NULL
+             )",
+        params![actor.0],
+        |row| row.get(0),
+    )?;
+    if active {
+        Ok(())
+    } else {
+        Err(MetadataError::InstanceAdminRequired)
+    }
+}
+
+fn validate_connection_policy_input(input: &UpdateConnectionPolicyRequest) -> Result<()> {
+    if input
+        .allowed_ops
+        .as_ref()
+        .is_some_and(|operations| operations.len() > sift_protocol::OperationKind::ALL.len())
+        || input.blocked_ops.len() > sift_protocol::OperationKind::ALL.len()
+    {
+        return Err(MetadataError::InvalidEnum {
+            field: "connection_profile.policy.operations",
+            value: "too many operation entries".to_string(),
+        });
+    }
+    if let Some(selectors) = &input.allowed_schemas {
+        if selectors.len() > 256 {
+            return Err(MetadataError::InvalidEnum {
+                field: "connection_profile.policy.allowed_schemas",
+                value: "too many schema selectors".to_string(),
+            });
+        }
+        for selector in selectors {
+            let invalid_schema = selector.schema.trim().is_empty()
+                || selector.schema.len() > 128
+                || selector.schema.contains('\0');
+            let invalid_catalog = selector.catalog.as_ref().is_some_and(|catalog| {
+                catalog.trim().is_empty() || catalog.len() > 128 || catalog.contains('\0')
+            });
+            if invalid_schema || invalid_catalog {
+                return Err(MetadataError::InvalidEnum {
+                    field: "connection_profile.policy.allowed_schemas",
+                    value: "schema selectors must contain bounded, non-empty identifiers"
+                        .to_string(),
+                });
+            }
+        }
+    }
+    Ok(())
 }
 
 fn principal_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Principal> {
@@ -3218,6 +3433,12 @@ fn connection_profile_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Conn
     let spec_json: String = row.get(4)?;
     let credential_mode: String = row.get(5)?;
     let tags_json: String = row.get(7)?;
+    let policy_json: String = row.get(11)?;
+    let mut policy: ConnectionPolicy =
+        serde_json::from_str(&policy_json).map_err(sql_conversion_error)?;
+    policy.revision = row.get::<_, i64>(12)?.try_into().map_err(|_| {
+        sql_message_error("connection profile policy revision is negative".to_string())
+    })?;
     Ok(ConnectionProfile {
         id: ConnectionProfileId(row.get(0)?),
         tenant_id: TenantId(row.get(1)?),
@@ -3227,9 +3448,23 @@ fn connection_profile_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Conn
         credential_mode: parse_credential_mode_sql(credential_mode)?,
         shared_secret_handle: row.get(6)?,
         tags: serde_json::from_str(&tags_json).map_err(sql_conversion_error)?,
+        policy,
         created_by: PrincipalId(row.get(8)?),
         created_at: parse_time_sql(row.get(9)?)?,
         updated_at: parse_time_sql(row.get(10)?)?,
+    })
+}
+
+fn tenant_limit_override_from_row(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<TenantLimitOverride> {
+    let limits_json: String = row.get(1)?;
+    Ok(TenantLimitOverride {
+        tenant_id: TenantId(row.get(0)?),
+        limits: serde_json::from_str(&limits_json).map_err(sql_conversion_error)?,
+        updated_by: PrincipalId(row.get(2)?),
+        created_at: parse_time_sql(row.get(3)?)?,
+        updated_at: parse_time_sql(row.get(4)?)?,
     })
 }
 
@@ -3631,7 +3866,7 @@ fn should_touch_token(last_used_at: Option<&str>, now: DateTime<Utc>) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sift_protocol::Engine;
+    use sift_protocol::{Engine, TenantResourceLimits, TenantRole, UpdateConnectionPolicyRequest};
 
     fn store() -> MetadataStore {
         MetadataStore::open_in_memory(Arc::new(MemorySecretStore::new())).unwrap()
@@ -4835,6 +5070,115 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resolved.password.as_deref(), Some("secret"));
+    }
+
+    #[tokio::test]
+    async fn connection_policy_is_versioned_and_tenant_admin_only() {
+        let store = store();
+        store.bootstrap_local("local user").unwrap();
+        let profile = store
+            .upsert_connection_profile(
+                TenantId(1),
+                PrincipalId(1),
+                NewConnectionProfile {
+                    name: "policy pg".to_string(),
+                    engine: Engine::Postgres,
+                    spec: spec(None),
+                    credential_mode: CredentialMode::Shared,
+                    tags: Vec::new(),
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(profile.policy, ConnectionPolicy::default());
+
+        let request = UpdateConnectionPolicyRequest {
+            expected_revision: Some(0),
+            minimum_tenant_role: TenantRole::Admin,
+            read_only: true,
+            allowed_ops: Some(vec![sift_protocol::OperationKind::ExecuteQuery]),
+            blocked_ops: vec![sift_protocol::OperationKind::ExportQuery],
+            allowed_schemas: Some(vec![sift_protocol::SchemaSelector {
+                catalog: None,
+                schema: "public".to_string(),
+            }]),
+        };
+        let updated = store
+            .update_connection_policy(
+                TenantId(1),
+                PrincipalId(1),
+                profile.id,
+                request.clone(),
+                test_audit("update", "connection_policy", Some(profile.id.0)),
+            )
+            .unwrap();
+        assert_eq!(updated.policy.revision, 1);
+        assert!(updated.policy.read_only);
+        assert_eq!(updated.policy.minimum_tenant_role, TenantRole::Admin);
+
+        assert!(matches!(
+            store.update_connection_policy(
+                TenantId(1),
+                PrincipalId(1),
+                profile.id,
+                request,
+                test_audit("update", "connection_policy", Some(profile.id.0)),
+            ),
+            Err(MetadataError::PolicyRevisionConflict {
+                expected: 0,
+                current: 1
+            })
+        ));
+    }
+
+    #[test]
+    fn tenant_limit_overrides_require_an_instance_admin() {
+        let store = store();
+        store.bootstrap_local("local user").unwrap();
+        let limits = TenantResourceLimits {
+            sessions: Some(2),
+            connections: Some(4),
+            ..TenantResourceLimits::default()
+        };
+        assert!(matches!(
+            store.set_tenant_limit_override(
+                PrincipalId(1),
+                TenantId(1),
+                limits.clone(),
+                test_audit("update", "tenant_limits", Some(1)),
+            ),
+            Err(MetadataError::InstanceAdminRequired)
+        ));
+
+        store
+            .conn()
+            .unwrap()
+            .execute(
+                "UPDATE principal SET is_instance_admin = 1 WHERE id = 1",
+                [],
+            )
+            .unwrap();
+        let saved = store
+            .set_tenant_limit_override(
+                PrincipalId(1),
+                TenantId(1),
+                limits.clone(),
+                test_audit("update", "tenant_limits", Some(1)),
+            )
+            .unwrap();
+        assert_eq!(saved.limits, limits);
+        assert_eq!(saved.updated_by, PrincipalId(1));
+        assert!(store
+            .clear_tenant_limit_override(
+                PrincipalId(1),
+                TenantId(1),
+                test_audit("clear", "tenant_limits", Some(1)),
+            )
+            .unwrap());
+        assert!(store
+            .get_tenant_limit_override(TenantId(1))
+            .unwrap()
+            .is_none());
     }
 
     #[tokio::test]
