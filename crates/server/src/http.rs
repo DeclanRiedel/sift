@@ -815,6 +815,10 @@ async fn logout_auth(
         metadata_audit_record(auth.principal_id, "logout", "auth_session", None),
     )?;
     state.auth.runtime.invalidate_auth_session(session_id);
+    state
+        .sessions
+        .disconnect_managed_principal(auth.principal_id)
+        .await;
     state.sessions.push_operation_local(
         Operation::Logout {
             all_sessions: false,
@@ -838,6 +842,10 @@ async fn logout_all_auth(
         metadata_audit_record(auth.principal_id, "logout_all", "auth_session", None),
     )?;
     state.auth.runtime.invalidate_principal(auth.principal_id);
+    state
+        .sessions
+        .disconnect_managed_principal(auth.principal_id)
+        .await;
     state.sessions.push_operation_local(
         Operation::Logout { all_sessions: true },
         OperationStatus::Succeeded,
@@ -904,6 +912,10 @@ async fn change_password(
         )
         .await?;
     state.auth.runtime.invalidate_principal(auth.principal_id);
+    state
+        .sessions
+        .disconnect_managed_principal(auth.principal_id)
+        .await;
     state.sessions.push_operation_local(
         Operation::ChangePassword,
         OperationStatus::Succeeded,
@@ -1352,6 +1364,12 @@ async fn admin_set_principal_disabled(
         ),
     )?;
     state.auth.runtime.invalidate_principal(PrincipalId(id));
+    if request.disabled {
+        state
+            .sessions
+            .disconnect_managed_principal(PrincipalId(id))
+            .await;
+    }
     state.sessions.push_operation_local(
         Operation::ManagePrincipal {
             action: if request.disabled {
@@ -1467,6 +1485,10 @@ async fn admin_unlink_identity(
         .auth
         .runtime
         .invalidate_principal(PrincipalId(principal_id));
+    state
+        .sessions
+        .disconnect_managed_principal(PrincipalId(principal_id))
+        .await;
     state.sessions.push_operation_local(
         Operation::ManagePrincipal {
             action: sift_protocol::IdentityAdminAction::Unlink,
@@ -1517,6 +1539,10 @@ async fn admin_revoke_auth_session(
         ),
     )?;
     state.auth.runtime.invalidate_auth_session(&session_id);
+    state
+        .sessions
+        .disconnect_managed_principal(PrincipalId(principal_id))
+        .await;
     state.sessions.push_operation_local(
         Operation::ManagePrincipal {
             action: sift_protocol::IdentityAdminAction::Revoke,
@@ -3897,6 +3923,10 @@ async fn delete_metadata_connection(
     metadata
         .delete_connection_profile(tenant, profile, audit)
         .await?;
+    state
+        .sessions
+        .disconnect_managed_profile(tenant, profile)
+        .await;
     push_metadata_operation_local(
         &state,
         auth.principal_id,
@@ -3933,6 +3963,10 @@ async fn set_metadata_connection_credential(
     metadata
         .set_per_user_credential(profile_id, auth.principal_id, req.secret.as_bytes(), audit)
         .await?;
+    state
+        .sessions
+        .disconnect_managed_profile_principal(profile_id, auth.principal_id)
+        .await;
     push_metadata_operation_local(
         &state,
         auth.principal_id,

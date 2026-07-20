@@ -95,6 +95,17 @@ struct SessionStoreInner {
     audit_tx: Mutex<Option<SyncSender<NewOperationAudit>>>,
     /// Durable policy source used by the dispatcher for managed connections.
     authorization_store: RwLock<Option<MetadataStore>>,
+    /// Reverse index for immediate hard-revocation cleanup.
+    managed_connections: DashMap<
+        (
+            PrincipalId,
+            sift_metadata::TenantId,
+            sift_metadata::ConnectionProfileId,
+            SessionId,
+            ConnectionId,
+        ),
+        (),
+    >,
     /// Count of durable-audit rows dropped because the bounded channel above
     /// was full. Surfaced in the overflow log so the drop is never silent.
     audit_dropped: AtomicU64,
@@ -194,6 +205,7 @@ impl SessionStore {
                 request_timeout_ms: AtomicU64::new(DEFAULT_REQUEST_TIMEOUT_MS),
                 audit_tx: Mutex::new(None),
                 authorization_store: RwLock::new(None),
+                managed_connections: DashMap::new(),
                 audit_dropped: AtomicU64::new(0),
                 store_sql: AtomicBool::new(true),
                 max_result_rows: AtomicUsize::new(DEFAULT_MAX_RESULT_ROWS),
@@ -230,6 +242,7 @@ impl SessionStore {
                 request_timeout_ms: AtomicU64::new(DEFAULT_REQUEST_TIMEOUT_MS),
                 audit_tx: Mutex::new(None),
                 authorization_store: RwLock::new(None),
+                managed_connections: DashMap::new(),
                 audit_dropped: AtomicU64::new(0),
                 store_sql: AtomicBool::new(true),
                 max_result_rows: AtomicUsize::new(DEFAULT_MAX_RESULT_ROWS),
@@ -350,7 +363,7 @@ impl SessionStore {
             principal_id,
             tenant_id,
             profile_id,
-            ..
+            policy_revision,
         } = entry.provenance.clone()
         else {
             return Ok(entry);
@@ -367,7 +380,14 @@ impl SessionStore {
             .unwrap()
             .clone()
             .ok_or(ApiError::MetadataUnavailable)?;
-        let profile = metadata.get_connection_profile(tenant_id, profile_id)?;
+        let profile = metadata
+            .get_connection_profile(tenant_id, profile_id)
+            .map_err(|error| match error {
+                sift_metadata::MetadataError::ConnectionProfileNotFound(_) => {
+                    ApiError::Forbidden("connection profile is no longer available".into())
+                }
+                other => ApiError::Metadata(other),
+            })?;
         let membership = metadata
             .list_principal_tenants(principal_id)?
             .into_iter()
@@ -390,6 +410,18 @@ impl SessionStore {
             sql,
             objects,
         )?;
+        if profile.policy.revision != policy_revision {
+            self.with_session(&session_id, |session| {
+                if let Some(mut live) = session.connections.get_mut(&conn_id) {
+                    if let ConnectionProvenance::Managed {
+                        policy_revision, ..
+                    } = &mut live.provenance
+                    {
+                        *policy_revision = profile.policy.revision;
+                    }
+                }
+            })?;
+        }
         Ok(entry)
     }
 
@@ -685,7 +717,28 @@ impl SessionStore {
         for entry in session.connections.iter() {
             let driver = entry.driver.clone();
             let handle = entry.handle.clone();
+            let connection_id = entry.id;
+            if let ConnectionProvenance::Managed {
+                principal_id,
+                tenant_id,
+                profile_id,
+                ..
+            } = entry.provenance.clone()
+            {
+                self.inner.managed_connections.remove(&(
+                    principal_id,
+                    tenant_id,
+                    profile_id,
+                    id,
+                    connection_id,
+                ));
+            }
+            let cursors = self.inner.cursors.clone();
             tokio::spawn(async move {
+                for cursor in cursors.connection_cursors(id, connection_id) {
+                    let _ = driver.cancel(handle.clone(), cursor).await;
+                    cursors.remove(cursor);
+                }
                 if let Err(e) = driver.close(handle).await {
                     tracing::warn!(error = %e, "error closing conn during session close");
                 }
@@ -769,6 +822,15 @@ impl SessionStore {
             return Err(ApiError::SessionNotFound(session_id));
         }
 
+        let managed_identity = match &provenance {
+            ConnectionProvenance::Managed {
+                principal_id,
+                tenant_id,
+                profile_id,
+                ..
+            } => Some((*principal_id, *tenant_id, *profile_id)),
+            ConnectionProvenance::TrustedLocal => None,
+        };
         let driver = self.inner.registry.get(engine)?;
         let handle = driver.open(&spec).await?;
         let info = {
@@ -798,6 +860,12 @@ impl SessionStore {
             );
             info
         };
+        if let Some((principal_id, tenant_id, profile_id)) = managed_identity {
+            self.inner.managed_connections.insert(
+                (principal_id, tenant_id, profile_id, session_id, info.id),
+                (),
+            );
+        }
         tracing::info!(session_id = %session_id, conn_id = %info.id, %engine, "connection opened");
         Ok(info)
     }
@@ -814,6 +882,14 @@ impl SessionStore {
             None,
             &[],
         )?;
+        self.close_connection_unchecked(session_id, conn_id).await
+    }
+
+    async fn close_connection_unchecked(
+        &self,
+        session_id: SessionId,
+        conn_id: ConnectionId,
+    ) -> ApiResult<()> {
         let (txs, entry) = self
             .with_session(&session_id, |s| {
                 let txs = drain_connection_transactions(s, conn_id);
@@ -822,14 +898,114 @@ impl SessionStore {
                     .map(|(_, entry)| (txs, entry))
             })?
             .ok_or(ApiError::ConnectionNotFound(conn_id))?;
+        for cursor in self.inner.cursors.connection_cursors(session_id, conn_id) {
+            if let Err(error) = entry.driver.cancel(entry.handle.clone(), cursor).await {
+                tracing::debug!(%error, %cursor, "cursor cancel during connection close failed");
+            }
+            self.inner.cursors.remove(cursor);
+        }
         for tx in txs {
             if let Err(error) = entry.driver.rollback(tx.handle).await {
                 tracing::warn!(session_id = %session_id, conn_id = %conn_id, error = %error, "rollback during connection close failed");
             }
         }
-        entry.driver.close(entry.handle).await?;
+        let close_result = entry.driver.close(entry.handle).await;
+        if let ConnectionProvenance::Managed {
+            principal_id,
+            tenant_id,
+            profile_id,
+            ..
+        } = entry.provenance
+        {
+            self.inner.managed_connections.remove(&(
+                principal_id,
+                tenant_id,
+                profile_id,
+                session_id,
+                conn_id,
+            ));
+        }
+        close_result?;
         tracing::info!(session_id = %session_id, conn_id = %conn_id, "connection closed");
         Ok(())
+    }
+
+    pub async fn disconnect_managed_profile(
+        &self,
+        tenant_id: sift_metadata::TenantId,
+        profile_id: sift_metadata::ConnectionProfileId,
+    ) -> usize {
+        let targets: Vec<_> = self
+            .inner
+            .managed_connections
+            .iter()
+            .filter_map(|entry| {
+                let (_, tenant, profile, session, connection) = *entry.key();
+                (tenant == tenant_id && profile == profile_id).then_some((session, connection))
+            })
+            .collect();
+        let mut disconnected = 0;
+        for (session, connection) in targets {
+            match self.close_connection_unchecked(session, connection).await {
+                Ok(()) => disconnected += 1,
+                Err(ApiError::ConnectionNotFound(_)) | Err(ApiError::SessionNotFound(_)) => {}
+                Err(error) => {
+                    tracing::warn!(%error, %session, %connection, "hard revocation cleanup failed")
+                }
+            }
+        }
+        disconnected
+    }
+
+    pub async fn disconnect_managed_principal(&self, principal_id: PrincipalId) -> usize {
+        let targets: Vec<_> = self
+            .inner
+            .managed_connections
+            .iter()
+            .filter_map(|entry| {
+                let (principal, _, _, session, connection) = *entry.key();
+                (principal == principal_id).then_some((session, connection))
+            })
+            .collect();
+        let mut disconnected = 0;
+        for (session, connection) in targets {
+            if self
+                .close_connection_unchecked(session, connection)
+                .await
+                .is_ok()
+            {
+                disconnected += 1;
+            }
+        }
+        disconnected
+    }
+
+    pub async fn disconnect_managed_profile_principal(
+        &self,
+        profile_id: sift_metadata::ConnectionProfileId,
+        principal_id: PrincipalId,
+    ) -> usize {
+        let targets: Vec<_> = self
+            .inner
+            .managed_connections
+            .iter()
+            .filter_map(|entry| {
+                let (principal, _, profile, session, connection) = *entry.key();
+                (principal == principal_id && profile == profile_id)
+                    .then_some((session, connection))
+            })
+            .collect();
+        let mut disconnected = 0;
+        for (session, connection) in targets {
+            if self
+                .close_connection_unchecked(session, connection)
+                .await
+                .is_ok()
+            {
+                disconnected += 1;
+            }
+        }
+        disconnected
     }
 
     pub fn list_connections(&self, session_id: SessionId) -> ApiResult<Vec<ConnectionInfo>> {
@@ -1086,7 +1262,7 @@ impl SessionStore {
             *slot.lock().unwrap() = Some(cursor_id);
             // Hand the driver stream to the registry pump. Eviction of
             // a co-tenant cursor happens via the on_evict callback.
-            let wrapped = cursors.wrap(session_id, stream)?;
+            let wrapped = cursors.wrap_for_connection(session_id, conn_id, stream)?;
             let result = drain_stream(wrapped, max_rows, max_bytes).await;
             cursors.remove(cursor_id);
             result
@@ -1211,7 +1387,11 @@ impl SessionStore {
         // same session via the installed on_evict callback), spawns
         // the pump task, and returns a rebound stream whose `rows`
         // channel is fed by the pump.
-        match self.inner.cursors.wrap(session_id, stream) {
+        match self
+            .inner
+            .cursors
+            .wrap_for_connection(session_id, conn_id, stream)
+        {
             Ok(wrapped) => Ok(wrapped),
             Err(error) => {
                 // Wrap failed (cap misconfig or duplicate id). Drop the

@@ -23,7 +23,7 @@ use std::time::Instant;
 use dashmap::DashMap;
 use futures::FutureExt;
 use sift_driver_api::ResultSetStream;
-use sift_protocol::{Code, CursorId, DriverError, Page, SessionId};
+use sift_protocol::{Code, ConnectionId, CursorId, DriverError, Page, SessionId};
 use tokio::sync::{mpsc, Notify};
 
 /// Registry-wide configuration. Applied at construction; live cursors
@@ -77,6 +77,7 @@ struct Inner {
     config: std::sync::RwLock<CursorConfig>,
     entries: DashMap<CursorId, Arc<CursorState>>,
     per_session: DashMap<SessionId, Vec<CursorId>>,
+    per_connection: DashMap<(SessionId, ConnectionId), Vec<CursorId>>,
     /// Monotonic tick handed out on cursor creation and on every `touch`.
     /// A cursor's `last_ack` sequence is its rank; the lowest is the
     /// least-recently-acked (LRA) victim. A single relaxed atomic
@@ -109,6 +110,7 @@ struct CursorState {
     #[allow(dead_code)]
     cursor_id: CursorId,
     session_id: SessionId,
+    connection_id: Option<ConnectionId>,
     /// LRA rank: the `Inner::clock` tick as of the last `touch` (or
     /// creation). Lower = older. Relaxed ordering is sufficient — the
     /// value is only used to pick an eviction victim, not to synchronize.
@@ -142,6 +144,7 @@ impl CursorRegistry {
                 config: std::sync::RwLock::new(config),
                 entries: DashMap::new(),
                 per_session: DashMap::new(),
+                per_connection: DashMap::new(),
                 clock: AtomicU64::new(0),
                 on_evict: std::sync::RwLock::new(None),
                 spills: DashMap::new(),
@@ -171,6 +174,24 @@ impl CursorRegistry {
     pub fn wrap(
         &self,
         session_id: SessionId,
+        stream: ResultSetStream,
+    ) -> Result<ResultSetStream, DriverError> {
+        self.wrap_inner(session_id, None, stream)
+    }
+
+    pub fn wrap_for_connection(
+        &self,
+        session_id: SessionId,
+        connection_id: ConnectionId,
+        stream: ResultSetStream,
+    ) -> Result<ResultSetStream, DriverError> {
+        self.wrap_inner(session_id, Some(connection_id), stream)
+    }
+
+    fn wrap_inner(
+        &self,
+        session_id: SessionId,
+        connection_id: Option<ConnectionId>,
         stream: ResultSetStream,
     ) -> Result<ResultSetStream, DriverError> {
         let config = self.config();
@@ -203,6 +224,7 @@ impl CursorRegistry {
         let state = Arc::new(CursorState {
             cursor_id,
             session_id,
+            connection_id,
             last_ack: AtomicU64::new(self.inner.next_seq()),
             control: Arc::clone(&control),
         });
@@ -212,6 +234,13 @@ impl CursorRegistry {
             .entry(session_id)
             .or_default()
             .push(cursor_id);
+        if let Some(connection_id) = connection_id {
+            self.inner
+                .per_connection
+                .entry((session_id, connection_id))
+                .or_default()
+                .push(cursor_id);
+        }
 
         let prefetch = config.prefetch_pages.max(1);
         let (consumer_tx, consumer_rx) = mpsc::channel::<Page>(prefetch);
@@ -271,7 +300,22 @@ impl CursorRegistry {
             if let Some(mut list) = self.inner.per_session.get_mut(&state.session_id) {
                 list.retain(|c| *c != cursor_id);
             }
+            if let Some(connection_id) = state.connection_id {
+                remove_connection_cursor(&self.inner, state.session_id, connection_id, cursor_id);
+            }
         }
+    }
+
+    pub fn connection_cursors(
+        &self,
+        session_id: SessionId,
+        connection_id: ConnectionId,
+    ) -> Vec<CursorId> {
+        self.inner
+            .per_connection
+            .get(&(session_id, connection_id))
+            .map(|ids| ids.clone())
+            .unwrap_or_default()
     }
 
     /// Pause the cursor's pump. Idempotent.
@@ -462,7 +506,28 @@ impl CursorRegistry {
             if let Some(mut list) = self.inner.per_session.get_mut(&state.session_id) {
                 list.retain(|c| *c != cursor_id);
             }
+            if let Some(connection_id) = state.connection_id {
+                remove_connection_cursor(&self.inner, state.session_id, connection_id, cursor_id);
+            }
         }
+    }
+}
+
+fn remove_connection_cursor(
+    inner: &Inner,
+    session_id: SessionId,
+    connection_id: ConnectionId,
+    cursor_id: CursorId,
+) {
+    let key = (session_id, connection_id);
+    let empty = if let Some(mut ids) = inner.per_connection.get_mut(&key) {
+        ids.retain(|id| *id != cursor_id);
+        ids.is_empty()
+    } else {
+        false
+    };
+    if empty {
+        inner.per_connection.remove(&key);
     }
 }
 
@@ -497,9 +562,15 @@ async fn supervise_pump_task(
 }
 
 fn remove_cursor_state(inner: &Arc<Inner>, session_id: SessionId, cursor_id: CursorId) {
-    inner.entries.remove(&cursor_id);
+    let connection_id = inner
+        .entries
+        .remove(&cursor_id)
+        .and_then(|(_, state)| state.connection_id);
     if let Some(mut list) = inner.per_session.get_mut(&session_id) {
         list.retain(|c| *c != cursor_id);
+    }
+    if let Some(connection_id) = connection_id {
+        remove_connection_cursor(inner, session_id, connection_id, cursor_id);
     }
 }
 
@@ -793,6 +864,29 @@ mod tests {
             }
         }
         assert_eq!(count, 3);
+    }
+
+    #[tokio::test]
+    async fn connection_reverse_index_tracks_cursor_lifetime() {
+        let registry = CursorRegistry::new(CursorConfig::default());
+        let (tx, rx) = mpsc::channel(1);
+        let cursor = CursorId(42);
+        let _wrapped = registry
+            .wrap_for_connection(
+                SessionId(7),
+                ConnectionId(9),
+                ResultSetStream::with_cursor_mode(cursor, rx, true),
+            )
+            .unwrap();
+        assert_eq!(
+            registry.connection_cursors(SessionId(7), ConnectionId(9)),
+            vec![cursor]
+        );
+        registry.remove(cursor);
+        assert!(registry
+            .connection_cursors(SessionId(7), ConnectionId(9))
+            .is_empty());
+        drop(tx);
     }
 
     #[tokio::test]

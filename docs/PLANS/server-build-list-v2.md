@@ -169,7 +169,7 @@ and tenant-resource enforcement remain absent.
 - [x] [Implement] Connection-profile permissions: `read_only`,
       `allowed_ops`/`blocked_ops`, `allowed_schemas`; enforced in the
       dispatcher before routing to the driver.
-- [ ] [Implement] Policy-revision checks and hybrid revocation of active
+- [x] [Implement] Policy-revision checks and hybrid revocation of active
       connections, transactions, queries, and cursors.
 - [ ] [Implement] Rate-limit middleware keyed by principal + tenant;
       configurable per route class, with bounded stream-byte pacing.
