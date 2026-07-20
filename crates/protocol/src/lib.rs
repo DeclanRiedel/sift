@@ -9,6 +9,7 @@
 /// `X-Sift-Protocol-Version` on every HTTP response.
 pub const PROTOCOL_VERSION: &str = "1";
 
+pub mod auth;
 pub mod capability;
 pub mod column;
 pub mod completion;
@@ -29,6 +30,10 @@ pub mod transaction_panel;
 pub mod tx;
 pub mod value;
 
+pub use auth::{
+    AuthClientKind, AuthPrincipal, AuthTenantMembership, AuthTokensResponse, PasswordLoginRequest,
+    RefreshAuthRequest, WhoAmIResponse,
+};
 pub use capability::{OperationCapability, OperationCapabilityContext, OperationKind};
 pub use column::{
     EngineColumnFacets, MssqlColumnFacets, Nullability, PgColumnFacets, PrimitiveType,
