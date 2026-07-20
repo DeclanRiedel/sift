@@ -309,6 +309,12 @@ functionally equivalent principals.
 4. Define, but do not yet expose over SSH, the short-lived audience- and
    instance-bound capability shape Phase H's proxy bootstrap will use.
 
+The locked wire claims are `SshProxyCapabilityClaims`: version, exact
+server-configured `instance_audience`, principal id, unique capability id,
+issued-at, and expiry. Phase H owns signing/MAC encoding, one-use persistence,
+issuance over the authenticated SSH channel, and exchange. It must reject an
+audience mismatch and may not broaden loopback trust.
+
 Exit: automation and future SSH proxy paths do not need passwords or portable
 refresh tokens.
 

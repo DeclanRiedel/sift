@@ -3085,6 +3085,7 @@ fn protocol_schema_refs() -> serde_json::Value {
         "IssuedPasswordResetResponse",
         &mut schemas,
     );
+    add_schema::<sift_protocol::SshProxyCapabilityClaims>("SshProxyCapabilityClaims", &mut schemas);
     add_schema::<sift_protocol::CreateGithubAllowlistRequest>(
         "CreateGithubAllowlistRequest",
         &mut schemas,

@@ -282,6 +282,21 @@ pub struct IssuedPasswordResetResponse {
     pub expires_at: DateTime<Utc>,
 }
 
+/// Claims carried by the future Phase H SSH-proxy capability. Phase E locks
+/// the narrow, instance-bound shape but exposes no issuance endpoint yet.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct SshProxyCapabilityClaims {
+    pub version: u8,
+    /// Exact server-configured audience; capabilities are not portable across
+    /// Sift instances.
+    pub instance_audience: String,
+    pub principal_id: i64,
+    /// Unique identifier reserved for one-use/replay enforcement.
+    pub capability_id: String,
+    pub issued_at: DateTime<Utc>,
+    pub expires_at: DateTime<Utc>,
+}
+
 impl fmt::Debug for IssuedPasswordResetResponse {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
@@ -362,5 +377,23 @@ mod tests {
         assert!(!debug.contains("sift_at_secret"));
         assert!(!debug.contains("current secret"));
         assert!(!debug.contains("new secret"));
+    }
+
+    #[test]
+    fn ssh_proxy_capability_claims_are_instance_bound_and_secret_free() {
+        let issued_at = Utc::now();
+        let claims = SshProxyCapabilityClaims {
+            version: 1,
+            instance_audience: "sift:instance:example".into(),
+            principal_id: 42,
+            capability_id: "capability-id".into(),
+            issued_at,
+            expires_at: issued_at + chrono::Duration::minutes(1),
+        };
+        let encoded = serde_json::to_value(claims).unwrap();
+        assert_eq!(encoded["instance_audience"], "sift:instance:example");
+        assert_eq!(encoded["principal_id"], 42);
+        assert!(encoded.get("token").is_none());
+        assert!(encoded.get("secret").is_none());
     }
 }
