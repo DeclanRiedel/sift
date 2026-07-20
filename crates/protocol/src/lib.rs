@@ -31,9 +31,10 @@ pub mod tx;
 pub mod value;
 
 pub use auth::{
-    AuthClientKind, AuthPrincipal, AuthTenantMembership, AuthTokensResponse, ChangePasswordRequest,
-    CreateGithubAllowlistRequest, PasswordLoginRequest, RefreshAuthRequest, WebAuthResponse,
-    WhoAmIResponse,
+    AcceptTenantInvitationRequest, AuthClientKind, AuthPrincipal, AuthTenantMembership,
+    AuthTokensResponse, ChangePasswordRequest, CreateGithubAllowlistRequest,
+    CreateTenantInvitationRequest, InvitationRole, IssuedTenantInvitationResponse,
+    PasswordLoginRequest, RefreshAuthRequest, WebAuthResponse, WhoAmIResponse,
 };
 pub use capability::{OperationCapability, OperationCapabilityContext, OperationKind};
 pub use column::{

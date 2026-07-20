@@ -114,6 +114,7 @@ impl ApiError {
                 MetadataError::InvalidEnum { .. }
                 | MetadataError::InvalidTimestamp { .. }
                 | MetadataError::InvalidOAuthAttempt
+                | MetadataError::InvalidTenantInvitation
                 | MetadataError::Json(_) => (StatusCode::BAD_REQUEST, "bad_request"),
                 MetadataError::Sqlite(_)
                 | MetadataError::Migration(_)

@@ -231,6 +231,24 @@ pub struct ConsumedOAuthAttempt {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct TenantInvitation {
+    pub id: TenantInvitationId,
+    pub tenant_id: TenantId,
+    pub intended_role: MembershipRole,
+    pub created_by: PrincipalId,
+    pub target_principal_id: Option<PrincipalId>,
+    pub created_at: DateTime<Utc>,
+    pub expires_at: DateTime<Utc>,
+    pub consumed_at: Option<DateTime<Utc>>,
+    pub revoked_at: Option<DateTime<Utc>>,
+}
+
+pub struct IssuedTenantInvitation {
+    pub invitation: TenantInvitation,
+    pub token: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct AuthIdentity {
     pub id: AuthIdentityId,
     pub principal_id: PrincipalId,

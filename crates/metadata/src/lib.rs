@@ -33,6 +33,7 @@ const AUTH_SYSTEM_SECRET_NAMESPACE: &str = "sift.auth.system";
 const AUTH_TOKEN_MAC_HANDLE: &str = "token-mac-v1";
 const OAUTH_SECRET_NAMESPACE: &str = "sift.auth.oauth";
 const OAUTH_STATE_PREFIX: &str = "sift_oauth_";
+const INVITATION_TOKEN_PREFIX: &str = "sift_inv_";
 const ACCESS_TOKEN_PREFIX: &str = "sift_at_";
 const REFRESH_TOKEN_PREFIX: &str = "sift_rt_";
 const AUTH_TOKEN_LOOKUP_LEN: usize = 12;
@@ -90,6 +91,8 @@ pub enum MetadataError {
     InvalidAuthTokenKey,
     #[error("OAuth login attempt is invalid, expired, or already consumed")]
     InvalidOAuthAttempt,
+    #[error("tenant invitation is invalid, expired, consumed, revoked, or intended for another principal")]
+    InvalidTenantInvitation,
     #[error("secret store error: {0}")]
     SecretStore(String),
     #[error("io error: {0}")]
@@ -1236,6 +1239,144 @@ impl MetadataStore {
              )",
             params![now, principal.0],
         )?;
+        insert_operation_audit_row(&tx, &audit)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub async fn issue_tenant_invitation(
+        &self,
+        tenant: TenantId,
+        role: MembershipRole,
+        actor: PrincipalId,
+        target: Option<PrincipalId>,
+        expires_at: DateTime<Utc>,
+        audit: NewOperationAudit,
+    ) -> Result<IssuedTenantInvitation> {
+        let key = self.auth_token_mac_key().await?;
+        let token = new_token_material(INVITATION_TOKEN_PREFIX, &key);
+        let now = Utc::now();
+        let mut conn = self.conn()?;
+        let tx = conn.transaction()?;
+        tx.execute(
+            "INSERT INTO tenant_invitation
+             (tenant_id, intended_role, created_by, target_principal_id,
+              token_lookup, token_digest, created_at, expires_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                tenant.0,
+                role.as_str(),
+                actor.0,
+                target.map(|id| id.0),
+                token.lookup,
+                token.digest,
+                now.to_rfc3339(),
+                expires_at.to_rfc3339()
+            ],
+        )?;
+        let id = TenantInvitationId(tx.last_insert_rowid());
+        insert_operation_audit_row(&tx, &audit)?;
+        let invitation = tenant_invitation_by_id_locked(&tx, id)?;
+        tx.commit()?;
+        Ok(IssuedTenantInvitation {
+            invitation,
+            token: token.plaintext,
+        })
+    }
+
+    pub fn list_tenant_invitations(&self, tenant: TenantId) -> Result<Vec<TenantInvitation>> {
+        let conn = self.conn()?;
+        let mut statement = conn.prepare(
+            "SELECT id, tenant_id, intended_role, created_by, target_principal_id,
+                    created_at, expires_at, consumed_at, revoked_at
+             FROM tenant_invitation WHERE tenant_id = ?1 ORDER BY created_at DESC, id DESC",
+        )?;
+        let invitations =
+            rows(statement.query_map(params![tenant.0], tenant_invitation_from_row)?)?;
+        Ok(invitations)
+    }
+
+    pub async fn accept_tenant_invitation(
+        &self,
+        presented: &str,
+        principal: PrincipalId,
+        audit: NewOperationAudit,
+    ) -> Result<TenantMembership> {
+        let Some(lookup) = auth_token_lookup(presented, INVITATION_TOKEN_PREFIX) else {
+            return Err(MetadataError::InvalidTenantInvitation);
+        };
+        let key = self.auth_token_mac_key().await?;
+        let digest = auth_token_digest(&key, presented);
+        let now = Utc::now();
+        let mut conn = self.conn()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let candidate = tx
+            .query_row(
+                "SELECT id, tenant_id, intended_role, target_principal_id, token_digest
+                 FROM tenant_invitation
+                 WHERE token_lookup = ?1 AND consumed_at IS NULL AND revoked_at IS NULL
+                   AND expires_at > ?2",
+                params![lookup, now.to_rfc3339()],
+                |row| {
+                    Ok((
+                        TenantInvitationId(row.get(0)?),
+                        TenantId(row.get(1)?),
+                        row.get::<_, String>(2)?,
+                        row.get::<_, Option<i64>>(3)?.map(PrincipalId),
+                        row.get::<_, String>(4)?,
+                    ))
+                },
+            )
+            .optional()?;
+        let Some((id, tenant, role, target, stored_digest)) = candidate else {
+            return Err(MetadataError::InvalidTenantInvitation);
+        };
+        if target.is_some_and(|target| target != principal)
+            || !constant_time_eq(stored_digest.as_bytes(), digest.as_bytes())
+        {
+            return Err(MetadataError::InvalidTenantInvitation);
+        }
+        let role = schema::parse_role(role)?;
+        tx.execute(
+            "INSERT INTO membership (tenant_id, principal_id, role, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?4)
+             ON CONFLICT(tenant_id, principal_id) DO UPDATE SET
+                role = excluded.role, updated_at = excluded.updated_at",
+            params![tenant.0, principal.0, role.as_str(), now.to_rfc3339()],
+        )?;
+        tx.execute(
+            "UPDATE tenant_invitation SET consumed_at = ?1 WHERE id = ?2 AND consumed_at IS NULL",
+            params![now.to_rfc3339(), id.0],
+        )?;
+        insert_operation_audit_row(&tx, &audit)?;
+        let membership = tx.query_row(
+            "SELECT t.id, t.name, t.kind, t.created_at, t.updated_at,
+                    m.principal_id, m.role, m.created_at, m.updated_at
+             FROM membership m JOIN tenant t ON t.id = m.tenant_id
+             WHERE m.tenant_id = ?1 AND m.principal_id = ?2",
+            params![tenant.0, principal.0],
+            tenant_membership_from_row,
+        )?;
+        tx.commit()?;
+        Ok(membership)
+    }
+
+    pub fn revoke_tenant_invitation(
+        &self,
+        id: TenantInvitationId,
+        audit: NewOperationAudit,
+    ) -> Result<()> {
+        let now = now_text();
+        let mut conn = self.conn()?;
+        let tx = conn.transaction()?;
+        let changed = tx.execute(
+            "UPDATE tenant_invitation SET revoked_at = COALESCE(revoked_at, ?1)
+             WHERE id = ?2 AND consumed_at IS NULL",
+            params![now, id.0],
+        )?;
+        if changed == 0 {
+            return Err(MetadataError::InvalidTenantInvitation);
+        }
         insert_operation_audit_row(&tx, &audit)?;
         tx.commit()?;
         Ok(())
@@ -2448,6 +2589,35 @@ fn github_allowlist_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Github
     })
 }
 
+fn tenant_invitation_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TenantInvitation> {
+    let role: String = row.get(2)?;
+    Ok(TenantInvitation {
+        id: TenantInvitationId(row.get(0)?),
+        tenant_id: TenantId(row.get(1)?),
+        intended_role: schema::parse_role(role).map_err(sql_conversion_error)?,
+        created_by: PrincipalId(row.get(3)?),
+        target_principal_id: row.get::<_, Option<i64>>(4)?.map(PrincipalId),
+        created_at: parse_time_sql(row.get(5)?)?,
+        expires_at: parse_time_sql(row.get(6)?)?,
+        consumed_at: parse_optional_time_sql(row.get(7)?)?,
+        revoked_at: parse_optional_time_sql(row.get(8)?)?,
+    })
+}
+
+fn tenant_invitation_by_id_locked(
+    conn: &Connection,
+    id: TenantInvitationId,
+) -> Result<TenantInvitation> {
+    conn.query_row(
+        "SELECT id, tenant_id, intended_role, created_by, target_principal_id,
+                created_at, expires_at, consumed_at, revoked_at
+         FROM tenant_invitation WHERE id = ?1",
+        params![id.0],
+        tenant_invitation_from_row,
+    )
+    .map_err(Into::into)
+}
+
 fn tenant_membership_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TenantMembership> {
     let kind: String = row.get(2)?;
     let role: String = row.get(6)?;
@@ -3433,6 +3603,68 @@ mod tests {
         assert!(matches!(
             store.consume_github_oauth_attempt(&attempt.state).await,
             Err(MetadataError::InvalidOAuthAttempt)
+        ));
+    }
+
+    #[tokio::test]
+    async fn tenant_invitation_is_opaque_targeted_and_atomically_one_use() {
+        let store = store();
+        store.bootstrap_local("Admin").unwrap();
+        let invited = store
+            .create_principal("legacy:invited", "Invited", None)
+            .unwrap();
+        let other = store
+            .create_principal("legacy:other", "Other", None)
+            .unwrap();
+        let issued = store
+            .issue_tenant_invitation(
+                TenantId(1),
+                MembershipRole::Member,
+                PrincipalId(1),
+                Some(invited.id),
+                Utc::now() + chrono::Duration::days(1),
+                test_audit("invite", "tenant_invitation", None),
+            )
+            .await
+            .unwrap();
+        let conn = store.conn().unwrap();
+        let durable: String = conn
+            .query_row(
+                "SELECT token_lookup || token_digest FROM tenant_invitation WHERE id = ?1",
+                params![issued.invitation.id.0],
+                |row| row.get(0),
+            )
+            .unwrap();
+        drop(conn);
+        assert!(!durable.contains(&issued.token));
+        assert!(matches!(
+            store
+                .accept_tenant_invitation(
+                    &issued.token,
+                    other.id,
+                    test_audit("accept", "tenant_invitation", None),
+                )
+                .await,
+            Err(MetadataError::InvalidTenantInvitation)
+        ));
+        let membership = store
+            .accept_tenant_invitation(
+                &issued.token,
+                invited.id,
+                test_audit("accept", "tenant_invitation", None),
+            )
+            .await
+            .unwrap();
+        assert_eq!(membership.role, MembershipRole::Member);
+        assert!(matches!(
+            store
+                .accept_tenant_invitation(
+                    &issued.token,
+                    invited.id,
+                    test_audit("accept", "tenant_invitation", None),
+                )
+                .await,
+            Err(MetadataError::InvalidTenantInvitation)
         ));
     }
 

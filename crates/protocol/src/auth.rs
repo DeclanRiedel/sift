@@ -141,6 +141,53 @@ pub struct CreateGithubAllowlistRequest {
     pub target_principal_id: Option<i64>,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum InvitationRole {
+    Admin,
+    Member,
+    Viewer,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct CreateTenantInvitationRequest {
+    pub role: InvitationRole,
+    pub target_principal_id: Option<i64>,
+    pub expires_at: DateTime<Utc>,
+}
+
+#[derive(Clone, Serialize, Deserialize, JsonSchema)]
+pub struct AcceptTenantInvitationRequest {
+    pub token: String,
+}
+
+impl fmt::Debug for AcceptTenantInvitationRequest {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("AcceptTenantInvitationRequest")
+            .field("token", &"[REDACTED]")
+            .finish()
+    }
+}
+
+#[derive(Clone, Serialize, Deserialize, JsonSchema)]
+pub struct IssuedTenantInvitationResponse {
+    pub invitation_id: i64,
+    pub token: String,
+    pub expires_at: DateTime<Utc>,
+}
+
+impl fmt::Debug for IssuedTenantInvitationResponse {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("IssuedTenantInvitationResponse")
+            .field("invitation_id", &self.invitation_id)
+            .field("token", &"[REDACTED]")
+            .field("expires_at", &self.expires_at)
+            .finish()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

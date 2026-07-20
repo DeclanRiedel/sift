@@ -21,13 +21,15 @@ use sift_metadata::{
     DocumentId, GithubAllowlistId, GithubProfile, MetadataStore, NewConnectionProfile, NewDocument,
     NewOperationAudit, NewQueryHistory, NewRoom, NewSavedQuery, PrincipalId, QueryHistory,
     QueryStatus, RefreshAuthResult, Room, RoomId, RoomKind, RoomMember, RoomRole, SavedQuery,
-    SavedQueryFilter, SavedQueryId, SavedQueryScope, TenantId, TenantMembership, UpdateSavedQuery,
+    SavedQueryFilter, SavedQueryId, SavedQueryScope, TenantId, TenantInvitationId,
+    TenantMembership, UpdateSavedQuery,
 };
 use sift_protocol::{
-    AuditEntry, AuthClientKind, AuthPrincipal, AuthTenantMembership, AuthTokensResponse,
-    BeginTransactionRequest, BulkInsertRequest, CancelRequest, ChangePasswordRequest,
-    CreateGithubAllowlistRequest, CsvImportRequest, DocumentOperationEnvelope,
-    EndTransactionRequest, ExecuteRequest, ExecuteRequestHttp, Health, KillProcessRequest,
+    AcceptTenantInvitationRequest, AuditEntry, AuthClientKind, AuthPrincipal, AuthTenantMembership,
+    AuthTokensResponse, BeginTransactionRequest, BulkInsertRequest, CancelRequest,
+    ChangePasswordRequest, CreateGithubAllowlistRequest, CreateTenantInvitationRequest,
+    CsvImportRequest, DocumentOperationEnvelope, EndTransactionRequest, ExecuteRequest,
+    ExecuteRequestHttp, Health, InvitationRole, IssuedTenantInvitationResponse, KillProcessRequest,
     ObjectPath, OpenConnectionRequest, OpenSessionRequest, Operation, OperationStatus,
     PasswordLoginRequest, Readiness, RefreshAuthRequest, RoomClientMessage, RoomQueryResult,
     RoomQueryStatus, RoomServerMessage, SavepointRequest, SchemaFilter, SchemaScope,
@@ -97,6 +99,18 @@ pub fn app(state: AppState) -> Router {
         .route(
             "/v1/admin/auth/github-allowlist/:id",
             delete(revoke_github_allowlist),
+        )
+        .route(
+            "/v1/metadata/tenants/:id/invitations",
+            get(list_tenant_invitations).post(create_tenant_invitation),
+        )
+        .route(
+            "/v1/metadata/tenants/:tenant_id/invitations/:id",
+            delete(revoke_tenant_invitation),
+        )
+        .route(
+            "/v1/auth/invitations/accept",
+            post(accept_tenant_invitation),
         )
         .route("/v1/metadata/tenants", get(list_metadata_tenants))
         .route(
@@ -1088,6 +1102,110 @@ fn ensure_instance_admin(state: &AppState, auth: &AuthContext) -> ApiResult<()> 
     }
 }
 
+async fn create_tenant_invitation(
+    State(state): State<AppState>,
+    Extension(auth): Extension<AuthContext>,
+    Path(tenant): Path<i64>,
+    Json(request): Json<CreateTenantInvitationRequest>,
+) -> ApiResult<Json<IssuedTenantInvitationResponse>> {
+    let tenant = TenantId(tenant);
+    if !is_tenant_admin(&auth, tenant) {
+        return Err(ApiError::Forbidden(
+            "tenant administrator access required".into(),
+        ));
+    }
+    let now = chrono::Utc::now();
+    if request.expires_at <= now || request.expires_at > now + chrono::Duration::days(30) {
+        return Err(ApiError::BadRequest(
+            "invitation expiry must be within the next 30 days".into(),
+        ));
+    }
+    let role = match request.role {
+        InvitationRole::Admin => sift_metadata::MembershipRole::Admin,
+        InvitationRole::Member => sift_metadata::MembershipRole::Member,
+        InvitationRole::Viewer => sift_metadata::MembershipRole::Viewer,
+    };
+    let issued = metadata_store(&state)?
+        .issue_tenant_invitation(
+            tenant,
+            role,
+            auth.principal_id,
+            request.target_principal_id.map(PrincipalId),
+            request.expires_at,
+            metadata_audit_record(
+                auth.principal_id,
+                "tenant_invitation.create",
+                "tenant_invitation",
+                None,
+            ),
+        )
+        .await?;
+    Ok(Json(IssuedTenantInvitationResponse {
+        invitation_id: issued.invitation.id.0,
+        token: issued.token,
+        expires_at: issued.invitation.expires_at,
+    }))
+}
+
+async fn list_tenant_invitations(
+    State(state): State<AppState>,
+    Extension(auth): Extension<AuthContext>,
+    Path(tenant): Path<i64>,
+) -> ApiResult<Json<Vec<sift_metadata::TenantInvitation>>> {
+    let tenant = TenantId(tenant);
+    if !is_tenant_admin(&auth, tenant) {
+        return Err(ApiError::Forbidden(
+            "tenant administrator access required".into(),
+        ));
+    }
+    Ok(Json(
+        metadata_store(&state)?.list_tenant_invitations(tenant)?,
+    ))
+}
+
+async fn revoke_tenant_invitation(
+    State(state): State<AppState>,
+    Extension(auth): Extension<AuthContext>,
+    Path((tenant, id)): Path<(i64, i64)>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let tenant = TenantId(tenant);
+    if !is_tenant_admin(&auth, tenant) {
+        return Err(ApiError::Forbidden(
+            "tenant administrator access required".into(),
+        ));
+    }
+    metadata_store(&state)?.revoke_tenant_invitation(
+        TenantInvitationId(id),
+        metadata_audit_record(
+            auth.principal_id,
+            "tenant_invitation.revoke",
+            "tenant_invitation",
+            Some(id),
+        ),
+    )?;
+    Ok(Json(json!({"ok": true})))
+}
+
+async fn accept_tenant_invitation(
+    State(state): State<AppState>,
+    Extension(auth): Extension<AuthContext>,
+    Json(request): Json<AcceptTenantInvitationRequest>,
+) -> ApiResult<Json<TenantMembership>> {
+    let membership = metadata_store(&state)?
+        .accept_tenant_invitation(
+            &request.token,
+            auth.principal_id,
+            metadata_audit_record(
+                auth.principal_id,
+                "tenant_invitation.accept",
+                "tenant_invitation",
+                None,
+            ),
+        )
+        .await?;
+    Ok(Json(membership))
+}
+
 async fn whoami(
     State(state): State<AppState>,
     Extension(auth): Extension<AuthContext>,
@@ -1870,6 +1988,24 @@ async fn openapi() -> Json<serde_json::Value> {
                     "responses": { "200": { "description": "Ack", "content": json_object_content() } }
                 }
             },
+            "/v1/metadata/tenants/{id}/invitations": {
+                "get": {
+                    "operationId": "listTenantInvitations",
+                    "responses": { "200": { "description": "Invitations", "content": json_array_content("TenantInvitation") } }
+                },
+                "post": {
+                    "operationId": "createTenantInvitation",
+                    "requestBody": json_body("CreateTenantInvitationRequest"),
+                    "responses": { "200": { "description": "One-use invitation token", "content": json_content("IssuedTenantInvitationResponse") } }
+                }
+            },
+            "/v1/auth/invitations/accept": {
+                "post": {
+                    "operationId": "acceptTenantInvitation",
+                    "requestBody": json_body("AcceptTenantInvitationRequest"),
+                    "responses": { "200": { "description": "Membership", "content": json_content("TenantMembership") } }
+                }
+            },
             "/v1/audit": {
                 "get": {
                     "operationId": "listAudit",
@@ -2389,6 +2525,18 @@ fn protocol_schema_refs() -> serde_json::Value {
         "CreateGithubAllowlistRequest",
         &mut schemas,
     );
+    add_schema::<sift_protocol::CreateTenantInvitationRequest>(
+        "CreateTenantInvitationRequest",
+        &mut schemas,
+    );
+    add_schema::<sift_protocol::AcceptTenantInvitationRequest>(
+        "AcceptTenantInvitationRequest",
+        &mut schemas,
+    );
+    add_schema::<sift_protocol::IssuedTenantInvitationResponse>(
+        "IssuedTenantInvitationResponse",
+        &mut schemas,
+    );
     add_schema::<sift_protocol::RefreshAuthRequest>("RefreshAuthRequest", &mut schemas);
     add_schema::<sift_protocol::AuthTokensResponse>("AuthTokensResponse", &mut schemas);
     add_schema::<sift_protocol::WebAuthResponse>("WebAuthResponse", &mut schemas);
@@ -2456,6 +2604,7 @@ fn protocol_schema_refs() -> serde_json::Value {
     add_schema::<sift_metadata::Room>("Room", &mut schemas);
     add_schema::<sift_metadata::RoomMember>("RoomMember", &mut schemas);
     add_schema::<sift_metadata::TenantMembership>("TenantMembership", &mut schemas);
+    add_schema::<sift_metadata::TenantInvitation>("TenantInvitation", &mut schemas);
     add_schema::<AddRoomMemberRequest>("AddRoomMemberRequest", &mut schemas);
     add_schema::<CreateDocumentRequest>("CreateDocumentRequest", &mut schemas);
     add_schema::<CreateRoomRequest>("CreateRoomRequest", &mut schemas);
