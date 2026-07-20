@@ -74,8 +74,9 @@ GUI later is just rendering. Remaining items below are verified absent from the
       Tests: `plan::tests` (3), `tests/explain.rs` (4). **v1 gap:** MSSQL
       `analyze=true` returns `UnsupportedForEngine` (STATISTICS XML multi-result
       capture not wired); PG analyze is full.
-- [ ] [Design] Process list + kill (PG `pg_stat_activity` + `pg_terminate_backend`,
-      MSSQL `sys.dm_exec_requests` + `KILL`).
+- [x] [Design] Process list + kill (ADR-027): PG `pg_stat_activity` +
+      `pg_terminate_backend`, MSSQL `sys.dm_exec_requests` + `KILL`.
+      `docs/PLANS/process-control.md`.
 - [ ] [Design] Command-palette server surface: enumerate available
       `Operation`s for a given capability context. (`GET /v1/operations`
       exists but returns the whole list unfiltered.)

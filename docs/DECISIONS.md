@@ -603,3 +603,23 @@ reconnect without replaying local history. The state remains process-local,
 matching the lifetime of driver handles; a server restart rolls database
 connections back and therefore has no transaction state to restore. The
 driver trait stays locked.
+
+## ADR-027 — Process Control Through Bounded Catalog SQL
+
+**Context.** Database process inspection and termination are engine-native
+administrative operations. Adding them to the locked driver trait would make
+every driver implement concepts that are already expressible through SQL.
+
+**Decision.** The server owns a normalized process DTO and composes list/kill
+through the existing bounded execute path. Postgres uses `pg_stat_activity`
+and `pg_terminate_backend`; SQL Server uses the dynamic management views and a
+validated numeric `KILL`. Listing is capped at 500 entries and excludes the
+catalog query's own backend. Kill accepts only a positive integer and refuses
+the current backend. Database permissions and engine errors pass through the
+normal driver error mapping.
+
+**Consequences.** The driver lock and isolation boundary remain unchanged,
+while clients receive one cross-engine model. The normalized fields are the
+intersection of useful engine metadata; engine-only detail stays optional.
+Users without catalog or termination privileges see an explicit database
+error rather than a partial success.
