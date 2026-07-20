@@ -14,17 +14,52 @@ use sift_metadata::{
     RoomId, RoomMember, SavedQuery, SavedQueryId, SavedQueryScope, TenantId, TenantMembership,
 };
 use sift_protocol::{
-    ApplyEditsRequest, ApplyEditsResult, BeginTransactionRequest, BulkInsertRequest,
-    BulkInsertResponse, CancelRequest, ConnectionId, ConnectionInfo, CsvImportRequest,
-    CsvImportResponse, CursorId, DataSearchRequest, DataSearchResponse, DatabaseProcess, EditPlan,
-    EndTransactionRequest, ExecuteRequestHttp, ExecuteResponse, ExplainRequest, ExplainResponse,
-    Health, KillProcessRequest, KillProcessResponse, OpenConnectionRequest, OpenSessionRequest,
-    OperationCapability, OperationCapabilityContext, Page, PreviewEditsRequest, Readiness,
+    ApplyEditsRequest, ApplyEditsResult, AuthTokensResponse, BeginTransactionRequest,
+    BulkInsertRequest, BulkInsertResponse, CancelRequest, ConnectionId, ConnectionInfo,
+    CsvImportRequest, CsvImportResponse, CursorId, DataSearchRequest, DataSearchResponse,
+    DatabaseProcess, EditPlan, EndTransactionRequest, ExecuteRequestHttp, ExecuteResponse,
+    ExplainRequest, ExplainResponse, Health, KillProcessRequest, KillProcessResponse,
+    OpenConnectionRequest, OpenSessionRequest, OperationCapability, OperationCapabilityContext,
+    Page, PasswordLoginRequest, PreviewEditsRequest, Readiness, RefreshAuthRequest,
     SavepointRequest, SchemaSearchRequest, SchemaSearchResponse, SchemaSnapshot, ServerInfo,
     SessionId, SessionInfo, TextDocumentOperation, TransactionEndAction, TransactionInfo,
     TransactionPreview, TransactionPreviewRequest, TransactionState, TxHandleRef, TxId, TxMode,
-    Value, WsClientMessage, WsServerMessage,
+    Value, WhoAmIResponse, WsClientMessage, WsServerMessage,
 };
+
+#[derive(Clone)]
+pub struct SessionTokenProvider {
+    tokens: std::sync::Arc<tokio::sync::RwLock<AuthTokensResponse>>,
+}
+
+impl std::fmt::Debug for SessionTokenProvider {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("SessionTokenProvider")
+            .field("tokens", &"[REDACTED]")
+            .finish()
+    }
+}
+
+impl SessionTokenProvider {
+    pub fn new(tokens: AuthTokensResponse) -> Self {
+        Self {
+            tokens: std::sync::Arc::new(tokio::sync::RwLock::new(tokens)),
+        }
+    }
+
+    async fn access_token(&self) -> String {
+        self.tokens.read().await.access_token.clone()
+    }
+
+    async fn refresh_token(&self) -> String {
+        self.tokens.read().await.refresh_token.clone()
+    }
+
+    async fn replace(&self, tokens: AuthTokensResponse) {
+        *self.tokens.write().await = tokens;
+    }
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -49,6 +84,7 @@ pub type Result<T> = std::result::Result<T, Error>;
 pub struct Client {
     base: String,
     token: Option<String>,
+    session_tokens: Option<SessionTokenProvider>,
     http: reqwest::Client,
 }
 
@@ -57,13 +93,61 @@ impl Client {
         Self {
             base: base.into().trim_end_matches('/').to_string(),
             token: None,
+            session_tokens: None,
             http: reqwest::Client::new(),
         }
     }
 
     pub fn with_bearer_token(mut self, token: impl Into<String>) -> Self {
         self.token = Some(token.into());
+        self.session_tokens = None;
         self
+    }
+
+    pub fn with_session_tokens(mut self, provider: SessionTokenProvider) -> Self {
+        self.token = None;
+        self.session_tokens = Some(provider);
+        self
+    }
+
+    pub async fn password_login(
+        &self,
+        request: PasswordLoginRequest,
+    ) -> Result<SessionTokenProvider> {
+        let response = self
+            .http
+            .post(self.url("/v1/auth/login"))
+            .json(&request)
+            .send()
+            .await?;
+        let tokens = response_json(response).await?;
+        Ok(SessionTokenProvider::new(tokens))
+    }
+
+    pub async fn refresh_session(&self) -> Result<()> {
+        let provider = self.session_tokens.as_ref().ok_or_else(|| {
+            Error::Protocol("client has no interactive session token provider".into())
+        })?;
+        let response = self
+            .http
+            .post(self.url("/v1/auth/refresh"))
+            .json(&RefreshAuthRequest {
+                refresh_token: provider.refresh_token().await,
+            })
+            .send()
+            .await?;
+        let tokens = response_json(response).await?;
+        provider.replace(tokens).await;
+        Ok(())
+    }
+
+    pub async fn whoami(&self) -> Result<WhoAmIResponse> {
+        self.get("/v1/auth/whoami").await
+    }
+
+    pub async fn logout(&self) -> Result<()> {
+        let _: serde_json::Value = self.post_empty("/v1/auth/logout").await?;
+        Ok(())
     }
 
     pub async fn health(&self) -> Result<Health> {
@@ -75,7 +159,7 @@ impl Client {
     /// Other statuses (e.g. auth failure) surface as [`Error::Server`].
     pub async fn ready(&self) -> Result<Readiness> {
         let mut request = self.http.get(self.url("/v1/ready"));
-        if let Some(token) = &self.token {
+        if let Some(token) = self.current_bearer().await {
             request = request.bearer_auth(token);
         }
         let response = request.send().await?;
@@ -172,7 +256,7 @@ impl Client {
                 "/v1/sessions/{session}/connections/{connection}/export"
             )))
             .json(&request);
-        if let Some(token) = &self.token {
+        if let Some(token) = self.current_bearer().await {
             req = req.bearer_auth(token);
         }
         let resp = req.send().await?;
@@ -793,7 +877,7 @@ impl Client {
         use tokio_tungstenite::tungstenite::Message;
 
         let mut request = self.room_ws_url(room).into_client_request()?;
-        if let Some(token) = &self.token {
+        if let Some(token) = self.current_bearer().await {
             request.headers_mut().insert(
                 "authorization",
                 format!("Bearer {token}")
@@ -891,7 +975,7 @@ impl Client {
         use tokio_tungstenite::tungstenite::Message;
 
         let mut request = self.ws_url(session).into_client_request()?;
-        if let Some(token) = &self.token {
+        if let Some(token) = self.current_bearer().await {
             request.headers_mut().insert(
                 "authorization",
                 format!("Bearer {token}")
@@ -967,7 +1051,7 @@ impl Client {
         use tokio_tungstenite::tungstenite::Message;
 
         let mut request = self.ws_url(session).into_client_request()?;
-        if let Some(token) = &self.token {
+        if let Some(token) = self.current_bearer().await {
             request.headers_mut().insert(
                 "authorization",
                 format!("Bearer {token}")
@@ -1072,7 +1156,7 @@ impl Client {
         &self,
         mut request: reqwest::RequestBuilder,
     ) -> Result<T> {
-        if let Some(token) = &self.token {
+        if let Some(token) = self.current_bearer().await {
             request = request.bearer_auth(token);
         }
         let response = request.send().await?;
@@ -1087,6 +1171,22 @@ impl Client {
     fn url(&self, path: &str) -> String {
         format!("{}{}", self.base, path)
     }
+
+    async fn current_bearer(&self) -> Option<String> {
+        if let Some(provider) = &self.session_tokens {
+            return Some(provider.access_token().await);
+        }
+        self.token.clone()
+    }
+}
+
+async fn response_json<T: serde::de::DeserializeOwned>(response: reqwest::Response) -> Result<T> {
+    let status = response.status();
+    if !status.is_success() {
+        let body = response.text().await.unwrap_or_default();
+        return Err(Error::Server { status, body });
+    }
+    Ok(response.json().await?)
 }
 
 async fn next_ws<S>(ws: &mut S) -> Result<WsServerMessage>
@@ -1157,4 +1257,28 @@ fn urlencoding_replace(s: &str) -> String {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tokens(access: &str, refresh: &str) -> AuthTokensResponse {
+        AuthTokensResponse {
+            access_token: access.into(),
+            access_expires_at: chrono::Utc::now(),
+            refresh_token: refresh.into(),
+            refresh_expires_at: chrono::Utc::now(),
+        }
+    }
+
+    #[tokio::test]
+    async fn session_token_provider_rotates_and_redacts() {
+        let provider = SessionTokenProvider::new(tokens("access-one", "refresh-one"));
+        assert_eq!(provider.access_token().await, "access-one");
+        assert!(!format!("{provider:?}").contains("access-one"));
+        provider.replace(tokens("access-two", "refresh-two")).await;
+        assert_eq!(provider.access_token().await, "access-two");
+        assert_eq!(provider.refresh_token().await, "refresh-two");
+    }
 }
