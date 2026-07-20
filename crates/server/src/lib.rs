@@ -5,6 +5,7 @@
 //! (ADR-001, ADR-002). Local-first by default (ADR-010): same binary runs
 //! in-process alongside the desktop client or as a daemon for hosted use.
 
+pub mod authorization;
 pub mod autocomplete;
 pub mod capability;
 pub mod config;

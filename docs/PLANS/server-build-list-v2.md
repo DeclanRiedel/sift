@@ -161,7 +161,7 @@ and tenant-resource enforcement remain absent.
       `RateLimited`/`TenantResourceExhausted` errors.
 - [x] [Implement] Metadata migration for profile policy revisions and
       instance-admin-managed tenant limit overrides.
-- [ ] [Implement] Central authorization evaluator and conservative tenant/room
+- [x] [Implement] Central authorization evaluator and conservative tenant/room
       role matrix; capability discovery consumes the same evaluator.
 - [ ] [Implement] Runtime provenance and connection-entry closure: managed
       connections carry principal/tenant/profile/revision; raw specs are

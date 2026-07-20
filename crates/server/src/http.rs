@@ -2517,18 +2517,99 @@ async fn list_operations(
 
 async fn list_available_operations(
     State(state): State<AppState>,
+    auth: Option<Extension<AuthContext>>,
     Query(context): Query<sift_protocol::OperationCapabilityContext>,
 ) -> ApiResult<Json<Vec<sift_protocol::OperationCapability>>> {
     let operation = Operation::ListAvailableOperations {
         context: context.clone(),
     };
+    let authorization = capability_authorization_scope(
+        &state,
+        auth.as_ref().map(|Extension(auth)| auth),
+        &context,
+    )?;
     let capabilities = finish_operation(
         &state.sessions,
         operation,
-        crate::capability::evaluate(&state.sessions, &context),
+        crate::capability::evaluate(&state.sessions, &context, authorization.as_ref()),
         |_| None,
     )?;
     Ok(Json(capabilities))
+}
+
+fn capability_authorization_scope(
+    state: &AppState,
+    auth: Option<&AuthContext>,
+    context: &sift_protocol::OperationCapabilityContext,
+) -> ApiResult<Option<crate::authorization::AuthorizationScope>> {
+    use crate::authorization::{AuthorizationRoomRole, AuthorizationScope};
+
+    let Some(metadata) = state.metadata.as_ref() else {
+        return Ok(Some(AuthorizationScope::trusted_local()));
+    };
+    let auth = auth.ok_or(ApiError::Unauthorized)?;
+    let principal = metadata
+        .principal_by_id(auth.principal_id)?
+        .ok_or(ApiError::Unauthorized)?;
+    let mut tenant = context.tenant_id.map(tenant_id).transpose()?;
+    let profile = context
+        .connection_profile_id
+        .map(connection_profile_id)
+        .transpose()?
+        .map(|id| metadata.get_connection_profile_for_any_tenant(id))
+        .transpose()?;
+    if let Some(profile) = &profile {
+        merge_capability_tenant(&mut tenant, profile.tenant_id)?;
+    }
+    let room = context
+        .room_id
+        .map(room_id)
+        .transpose()?
+        .map(|id| metadata.get_room(id))
+        .transpose()?;
+    if let Some(room) = &room {
+        merge_capability_tenant(&mut tenant, room.tenant_id)?;
+    }
+    let tenant_role = tenant.and_then(|tenant| {
+        auth.tenants
+            .iter()
+            .find(|membership| membership.tenant.id == tenant)
+            .map(|membership| sift_protocol::TenantRole::from(&membership.role))
+    });
+    if tenant.is_some() && tenant_role.is_none() {
+        return Err(ApiError::Forbidden("tenant membership required".into()));
+    }
+    let room_role = match room {
+        Some(room) => {
+            let member = metadata
+                .get_room_member(room.id, auth.principal_id)?
+                .ok_or_else(|| ApiError::Forbidden("room membership required".into()))?;
+            Some(match member.role {
+                RoomRole::Owner => AuthorizationRoomRole::Owner,
+                RoomRole::Editor => AuthorizationRoomRole::Editor,
+                RoomRole::Viewer => AuthorizationRoomRole::Viewer,
+            })
+        }
+        None => None,
+    };
+    Ok(Some(AuthorizationScope {
+        authenticated: true,
+        trusted_local: false,
+        instance_admin: principal.is_instance_admin,
+        tenant_role,
+        room_role,
+        connection_policy: profile.map(|profile| profile.policy),
+    }))
+}
+
+fn merge_capability_tenant(current: &mut Option<TenantId>, candidate: TenantId) -> ApiResult<()> {
+    if current.is_some_and(|tenant| tenant != candidate) {
+        return Err(ApiError::BadRequest(
+            "capability context spans multiple tenants".into(),
+        ));
+    }
+    *current = Some(candidate);
+    Ok(())
 }
 
 async fn list_operation_audit_log(

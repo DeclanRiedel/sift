@@ -2,12 +2,14 @@ use sift_protocol::{
     Engine, OperationCapability, OperationCapabilityContext, OperationKind, TransactionState,
 };
 
+use crate::authorization::{authorize, AuthorizationScope};
 use crate::error::{ApiError, ApiResult};
 use crate::session::SessionStore;
 
 pub fn evaluate(
     store: &SessionStore,
     context: &OperationCapabilityContext,
+    authorization: Option<&AuthorizationScope>,
 ) -> ApiResult<Vec<OperationCapability>> {
     if context.connection.is_some() && context.session.is_none() {
         return Err(ApiError::BadRequest(
@@ -39,7 +41,7 @@ pub fn evaluate(
     Ok(OperationKind::ALL
         .into_iter()
         .map(|operation| {
-            let reason = unavailable_reason(
+            let mut reason = unavailable_reason(
                 operation,
                 context.session.is_some(),
                 context.connection.is_some(),
@@ -47,6 +49,13 @@ pub fn evaluate(
                 active.is_some(),
                 selected_transaction,
             );
+            if reason.is_none() {
+                if let Some(scope) = authorization {
+                    reason = authorize(scope, operation)
+                        .err()
+                        .map(|denial| denial.public_reason());
+                }
+            }
             OperationCapability {
                 operation,
                 available: reason.is_none(),

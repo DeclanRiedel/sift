@@ -123,6 +123,12 @@ impl OperationKind {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct OperationCapabilityContext {
     #[serde(default)]
+    pub tenant_id: Option<i64>,
+    #[serde(default)]
+    pub room_id: Option<i64>,
+    #[serde(default)]
+    pub connection_profile_id: Option<i64>,
+    #[serde(default)]
     pub session: Option<SessionId>,
     #[serde(default)]
     pub connection: Option<ConnectionId>,
