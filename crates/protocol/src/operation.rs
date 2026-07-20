@@ -12,9 +12,58 @@ use crate::{
     TextDocumentOperation, TransactionPreviewRequest,
 };
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum AuthenticationMethod {
+    Password,
+    Github,
+    ApiToken,
+    Keypair,
+    LocalBypass,
+    SshCapability,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum IdentityAdminAction {
+    Create,
+    Enable,
+    Disable,
+    Link,
+    Unlink,
+    Reset,
+    Revoke,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum Operation {
+    /// Authentication attempt. Deliberately carries the method only: raw
+    /// credentials, OAuth codes, and tokens never enter the operation model.
+    Authenticate {
+        method: AuthenticationMethod,
+    },
+    RefreshAuthSession,
+    Logout {
+        all_sessions: bool,
+    },
+    ChangePassword,
+    ManagePrincipal {
+        action: IdentityAdminAction,
+        principal_id: Option<i64>,
+    },
+    ManageGithubAllowlist {
+        action: IdentityAdminAction,
+        principal_id: Option<i64>,
+    },
+    ManagePrincipalKey {
+        action: IdentityAdminAction,
+        key_id: Option<i64>,
+    },
+    ManageTenantInvitation {
+        action: IdentityAdminAction,
+        tenant_id: i64,
+    },
     OpenSession {
         request: OpenSessionRequest,
     },
@@ -177,6 +226,14 @@ pub struct OperationSummary {
 impl Operation {
     pub fn kind(&self) -> OperationKind {
         match self {
+            Self::Authenticate { .. } => OperationKind::Authenticate,
+            Self::RefreshAuthSession => OperationKind::RefreshAuthSession,
+            Self::Logout { .. } => OperationKind::Logout,
+            Self::ChangePassword => OperationKind::ChangePassword,
+            Self::ManagePrincipal { .. } => OperationKind::ManagePrincipal,
+            Self::ManageGithubAllowlist { .. } => OperationKind::ManageGithubAllowlist,
+            Self::ManagePrincipalKey { .. } => OperationKind::ManagePrincipalKey,
+            Self::ManageTenantInvitation { .. } => OperationKind::ManageTenantInvitation,
             Self::OpenSession { .. } => OperationKind::OpenSession,
             Self::ListSessions => OperationKind::ListSessions,
             Self::ListAvailableOperations { .. } => OperationKind::ListAvailableOperations,
@@ -221,6 +278,48 @@ impl Operation {
             target_id,
         };
         match self {
+            Operation::Authenticate { method } => summary(
+                &format!("authenticate_{method:?}").to_lowercase(),
+                "auth",
+                None,
+            ),
+            Operation::RefreshAuthSession => summary("refresh", "auth_session", None),
+            Operation::Logout { all_sessions } => summary(
+                if *all_sessions {
+                    "logout_all"
+                } else {
+                    "logout"
+                },
+                "auth_session",
+                None,
+            ),
+            Operation::ChangePassword => summary("change_password", "auth_identity", None),
+            Operation::ManagePrincipal {
+                action,
+                principal_id,
+            } => summary(
+                &format!("principal_{action:?}").to_lowercase(),
+                "principal",
+                *principal_id,
+            ),
+            Operation::ManageGithubAllowlist {
+                action,
+                principal_id,
+            } => summary(
+                &format!("github_allowlist_{action:?}").to_lowercase(),
+                "github_allowlist",
+                *principal_id,
+            ),
+            Operation::ManagePrincipalKey { action, key_id } => summary(
+                &format!("principal_key_{action:?}").to_lowercase(),
+                "principal_key",
+                *key_id,
+            ),
+            Operation::ManageTenantInvitation { action, tenant_id } => summary(
+                &format!("tenant_invitation_{action:?}").to_lowercase(),
+                "tenant_invitation",
+                Some(*tenant_id),
+            ),
             Operation::OpenSession { .. } => summary("open", "session", None),
             Operation::ListSessions => summary("list", "session", None),
             Operation::ListAvailableOperations { .. } => {
@@ -312,6 +411,23 @@ impl Operation {
             Operation::ApplyDocumentOperation { document_id, .. } => {
                 summary("apply_operation", "document", Some(*document_id))
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn authentication_operations_have_no_secret_shaped_payload() {
+        let encoded = serde_json::to_string(&Operation::Authenticate {
+            method: AuthenticationMethod::Password,
+        })
+        .unwrap();
+        assert_eq!(encoded, r#"{"op":"authenticate","method":"password"}"#);
+        for forbidden in ["token", "secret", "code", "credential"] {
+            assert!(!encoded.contains(forbidden));
         }
     }
 }

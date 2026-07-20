@@ -5,6 +5,14 @@ use crate::{ConnectionId, Engine, SessionId, TxId};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum OperationKind {
+    Authenticate,
+    RefreshAuthSession,
+    Logout,
+    ChangePassword,
+    ManagePrincipal,
+    ManageGithubAllowlist,
+    ManagePrincipalKey,
+    ManageTenantInvitation,
     OpenSession,
     ListSessions,
     ListAvailableOperations,
@@ -41,7 +49,15 @@ pub enum OperationKind {
 }
 
 impl OperationKind {
-    pub const ALL: [Self; 33] = [
+    pub const ALL: [Self; 41] = [
+        Self::Authenticate,
+        Self::RefreshAuthSession,
+        Self::Logout,
+        Self::ChangePassword,
+        Self::ManagePrincipal,
+        Self::ManageGithubAllowlist,
+        Self::ManagePrincipalKey,
+        Self::ManageTenantInvitation,
         Self::OpenSession,
         Self::ListSessions,
         Self::ListAvailableOperations,
@@ -80,7 +96,13 @@ impl OperationKind {
     pub fn destructive(self) -> bool {
         matches!(
             self,
-            Self::ApplyEdits
+            Self::Logout
+                | Self::ChangePassword
+                | Self::ManagePrincipal
+                | Self::ManageGithubAllowlist
+                | Self::ManagePrincipalKey
+                | Self::ManageTenantInvitation
+                | Self::ApplyEdits
                 | Self::KillProcess
                 | Self::ImportCsv
                 | Self::BulkInsert

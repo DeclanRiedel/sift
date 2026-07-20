@@ -77,7 +77,17 @@ fn unavailable_reason(
 ) -> Option<&'static str> {
     use OperationKind::*;
     match operation {
-        OpenSession | ListSessions | ListAvailableOperations | Metadata => None,
+        Authenticate => Some("available only before authentication"),
+        ManagePrincipal | ManageGithubAllowlist | ManagePrincipalKey | ManageTenantInvitation => {
+            Some("administrator context required")
+        }
+        RefreshAuthSession
+        | Logout
+        | ChangePassword
+        | OpenSession
+        | ListSessions
+        | ListAvailableOperations
+        | Metadata => None,
         CloseSession | OpenConnection | ListTransactions if !has_session => {
             Some("session context required")
         }

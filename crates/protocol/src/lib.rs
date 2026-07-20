@@ -47,7 +47,7 @@ pub use edit::{
 };
 pub use engine::Engine;
 pub use error::{Code, DriverError, DriverWarning};
-pub use operation::{Operation, OperationSummary};
+pub use operation::{AuthenticationMethod, IdentityAdminAction, Operation, OperationSummary};
 pub use plan::{ExplainRequest, ExplainResponse, PlanNode};
 pub use process::{DatabaseProcess, KillProcessRequest, KillProcessResponse};
 pub use result::{CursorId, ExecuteRequest, Page, Row};
