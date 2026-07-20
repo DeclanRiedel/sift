@@ -267,7 +267,14 @@ pub enum CopyOp {
     /// Export: server streams data out via COPY TO STDOUT.
     Export { sql: String },
     /// Import: client streams data in via COPY FROM STDIN.
-    Import { table: String, data: Vec<u8> },
+    Import {
+        table: String,
+        columns: Vec<String>,
+        data: Vec<u8>,
+        delimiter: u8,
+        header: bool,
+        null_value: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -305,6 +312,9 @@ pub struct MssqlSavepoint {
 pub struct BulkOp {
     pub table: String,
     pub data: Vec<u8>,
+    pub delimiter: u8,
+    pub header: bool,
+    pub null_value: Option<String>,
 }
 
 #[derive(Debug, Clone)]

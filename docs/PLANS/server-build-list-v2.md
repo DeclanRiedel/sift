@@ -19,12 +19,13 @@
   (cursor registry + spill/resume, schema cache, pool pre-warm, compression).
   Their per-item detail lived here previously; it is now recorded in the git
   history and the ADRs, not re-listed.
-- **Phase D is in progress.** Landed: autocomplete endpoint (`sift-completion`
+- **Phase D is complete.** Landed: autocomplete endpoint (`sift-completion`
   crate + `POST .../complete`), DDL generation (`server/src/ddl.rs`; remaining
   gaps tracked in `docs/PLANS/ddl-gaps.md`), the export pipeline
   (`server/src/export.rs`, CSV/TSV/JSONL/JSON-array, streamed and routed through
-  the cursor registry), and the saved-query library (full CRUD + FTS + RBAC;
-  the table is no longer dead schema). Remaining Phase D items are below.
+  the cursor registry), saved-query library (full CRUD + FTS + RBAC), inline
+  edits, schema/data search, execution plans, transaction state, process
+  control, contextual capabilities, and CSV import.
 - **Still dead schema:** `principal_key` and `keypair_challenge` (V001) — wire
   in Phase E or drop.
 
@@ -33,8 +34,7 @@
 ## Phase D — Headless product features
 
 Goal: the server side of every daily-driver and power-user IDE feature, so a
-GUI later is just rendering. Remaining items below are verified absent from the
-`Operation` enum and the route table.
+GUI later is just rendering.
 
 - [x] [Design] Inline-edit → DML generation (ADR-023). `docs/PLANS/inline-edit-dml.md`.
 - [x] [Implement] Inline-edit → DML. `protocol/src/edit.rs`,
@@ -91,7 +91,10 @@ GUI later is just rendering. Remaining items below are verified absent from the
       inference, optional create, atomic abort or duplicate-skip policy; PG
       `COPY FROM STDIN` and SQL Server bulk fast paths.
       `docs/PLANS/csv-import.md`.
-- [ ] [Implement] CSV import.
+- [x] [Implement] CSV import. Validated 64 MiB-bounded parser, deterministic
+      type inference, optional engine-quoted table creation, atomic abort and
+      duplicate-skip modes, both engine ingest extensions, audited route,
+      OpenAPI schemas, and client SDK method.
 
 ## Phase E — Hosted auth & identity
 
@@ -246,8 +249,7 @@ Goal: the last mile before a real release.
 
 ## Sequencing & dependency notes
 
-- **Phase D's next deliverable is Inline-edit → DML generation** (design first).
-  Export and saved-query — previously listed here as open — are done.
+- **Phase D is complete.** Phase E hosted identity is the next ordered phase.
 - **Phase E's keypair work is partially unblocked** — `principal_key` and
   `keypair_challenge` tables already exist (dead schema).
 - **Phase G's first deliverable is replacing `sift-doc` with a real CRDT.**

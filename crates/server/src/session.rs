@@ -361,7 +361,7 @@ impl SessionStore {
     /// [`Code::QueryTimedOut`] rather than hanging. The spawned task is
     /// detached on timeout (not aborted) so the driver reaches a safe point
     /// on its own rather than being dropped mid-call.
-    async fn run_bounded<F, T>(&self, op: &'static str, fut: F) -> ApiResult<T>
+    pub(crate) async fn run_bounded<F, T>(&self, op: &'static str, fut: F) -> ApiResult<T>
     where
         F: std::future::Future<Output = Result<T, DriverError>> + Send + 'static,
         T: Send + 'static,
@@ -1130,7 +1130,18 @@ impl SessionStore {
                     )
                     .with_engine(driver.engine())
                 })?;
-                mssql.bulk_insert(handle, BulkOp { table, data }).await
+                mssql
+                    .bulk_insert(
+                        handle,
+                        BulkOp {
+                            table,
+                            data,
+                            delimiter: b',',
+                            header: true,
+                            null_value: None,
+                        },
+                    )
+                    .await
             })
             .await?;
         Ok(BulkInsertResponse {

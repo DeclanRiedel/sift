@@ -21,6 +21,7 @@ async-trait = { workspace = true }
 axum = { workspace = true }
 bytes = { workspace = true }
 chrono = { workspace = true }
+csv = { workspace = true }
 dashmap = { workspace = true }
 figment = { workspace = true }
 futures = { workspace = true }

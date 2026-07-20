@@ -22,6 +22,7 @@ pub enum OperationKind {
     Explain,
     ListProcesses,
     KillProcess,
+    ImportCsv,
     BulkInsert,
     BeginTransaction,
     ListTransactions,
@@ -38,7 +39,7 @@ pub enum OperationKind {
 }
 
 impl OperationKind {
-    pub const ALL: [Self; 30] = [
+    pub const ALL: [Self; 31] = [
         Self::OpenSession,
         Self::ListSessions,
         Self::ListAvailableOperations,
@@ -56,6 +57,7 @@ impl OperationKind {
         Self::Explain,
         Self::ListProcesses,
         Self::KillProcess,
+        Self::ImportCsv,
         Self::BulkInsert,
         Self::BeginTransaction,
         Self::ListTransactions,
@@ -76,6 +78,7 @@ impl OperationKind {
             self,
             Self::ApplyEdits
                 | Self::KillProcess
+                | Self::ImportCsv
                 | Self::BulkInsert
                 | Self::CommitTransaction
                 | Self::RollbackTransaction

@@ -1114,11 +1114,11 @@ fn params_to_mssql(params: Vec<Value>) -> Result<Vec<Box<dyn ToSql>>, DriverErro
 async fn bulk_insert_csv(conn: &mut MssqlConn, op: BulkOp) -> Result<BulkResult, DriverError> {
     let table = quote_qualified_ident(&op.table)?;
     let mut reader = csv::ReaderBuilder::new()
-        .has_headers(true)
+        .has_headers(op.header)
+        .delimiter(op.delimiter)
         .from_reader(op.data.as_slice());
-    let headers = reader
-        .headers()
-        .map_err(csv_err)?
+    let raw_headers = reader.headers().map_err(csv_err)?.clone();
+    let headers = raw_headers
         .iter()
         .map(quote_ident)
         .collect::<Result<Vec<_>, _>>()?;
@@ -1137,7 +1137,15 @@ async fn bulk_insert_csv(conn: &mut MssqlConn, op: BulkOp) -> Result<BulkResult,
     // batches 1-2 committed with no rollback, and the returned
     // `rows_inserted` reflected rows *attempted*, not committed.
     execute_sql_batch(conn, "BEGIN TRANSACTION").await?;
-    match bulk_insert_batches(conn, &insert_prefix, headers.len(), &mut reader).await {
+    match bulk_insert_batches(
+        conn,
+        &insert_prefix,
+        headers.len(),
+        &mut reader,
+        op.null_value.as_deref(),
+    )
+    .await
+    {
         Ok(rows_inserted) => {
             execute_sql_batch(conn, "COMMIT TRANSACTION").await?;
             Ok(BulkResult { rows_inserted })
@@ -1162,6 +1170,7 @@ async fn bulk_insert_batches(
     insert_prefix: &str,
     header_len: usize,
     reader: &mut csv::Reader<&[u8]>,
+    null_value: Option<&str>,
 ) -> Result<u64, DriverError> {
     let mut sql = String::with_capacity(insert_prefix.len() + 8192);
     let mut rows_in_batch = 0usize;
@@ -1176,7 +1185,7 @@ async fn bulk_insert_batches(
             )
             .with_engine(Engine::SqlServer));
         }
-        let row_sql = csv_record_values(&record);
+        let row_sql = csv_record_values(&record, null_value);
         // Reject a single row that exceeds the byte cap even before the
         // first flush; otherwise a >BULK_INSERT_MAX_SQL_BYTES row would
         // bypass the cap and could OOM the driver.
@@ -1225,14 +1234,18 @@ async fn execute_sql_batch(conn: &mut MssqlConn, sql: &str) -> Result<(), Driver
     Ok(())
 }
 
-fn csv_record_values(record: &csv::StringRecord) -> String {
+fn csv_record_values(record: &csv::StringRecord, null_value: Option<&str>) -> String {
     let mut out = String::with_capacity(record.len() * 8 + 2);
     out.push('(');
     for (idx, field) in record.iter().enumerate() {
         if idx > 0 {
             out.push_str(", ");
         }
-        out.push_str(&mssql_literal(field));
+        if null_value == Some(field) {
+            out.push_str("NULL");
+        } else {
+            out.push_str(&mssql_literal(field));
+        }
     }
     out.push(')');
     out
@@ -1636,14 +1649,22 @@ mod tests {
         assert!(is_pure_dml("INSERT INTO t (a) VALUES (1)"));
         assert!(is_pure_dml("update t set a = 1 where id = 2"));
         assert!(is_pure_dml("DELETE FROM t WHERE id = 3"));
-        assert!(is_pure_dml("MERGE t USING s ON t.id = s.id WHEN MATCHED THEN UPDATE SET a = 1"));
+        assert!(is_pure_dml(
+            "MERGE t USING s ON t.id = s.id WHEN MATCHED THEN UPDATE SET a = 1"
+        ));
 
         // OUTPUT clause streams rows — must stay on the query() path
         // regardless of the whitespace delimiting the keyword. The old
         // ` OUTPUT ` substring check missed tab/newline forms.
-        assert!(!is_pure_dml("INSERT INTO t (a) OUTPUT inserted.a VALUES (1)"));
-        assert!(!is_pure_dml("INSERT INTO t (a)\tOUTPUT\tinserted.a VALUES (1)"));
-        assert!(!is_pure_dml("DELETE FROM t\nOUTPUT deleted.id\nWHERE id = 3"));
+        assert!(!is_pure_dml(
+            "INSERT INTO t (a) OUTPUT inserted.a VALUES (1)"
+        ));
+        assert!(!is_pure_dml(
+            "INSERT INTO t (a)\tOUTPUT\tinserted.a VALUES (1)"
+        ));
+        assert!(!is_pure_dml(
+            "DELETE FROM t\nOUTPUT deleted.id\nWHERE id = 3"
+        ));
 
         // Row-producing statements are never "pure DML".
         assert!(!is_pure_dml("SELECT * FROM t"));

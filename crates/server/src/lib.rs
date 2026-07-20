@@ -9,6 +9,7 @@ pub mod autocomplete;
 pub mod capability;
 pub mod config;
 pub mod correlation;
+pub mod csv_import;
 pub mod cursors;
 pub mod ddl;
 pub mod edit;

@@ -24,7 +24,7 @@ use sift_metadata::{
     UpdateSavedQuery,
 };
 use sift_protocol::{
-    AuditEntry, BeginTransactionRequest, BulkInsertRequest, CancelRequest,
+    AuditEntry, BeginTransactionRequest, BulkInsertRequest, CancelRequest, CsvImportRequest,
     DocumentOperationEnvelope, EndTransactionRequest, ExecuteRequest, ExecuteRequestHttp, Health,
     KillProcessRequest, ObjectPath, OpenConnectionRequest, OpenSessionRequest, Operation,
     OperationStatus, Readiness, RoomClientMessage, RoomQueryResult, RoomQueryStatus,
@@ -137,6 +137,10 @@ pub fn app(state: AppState) -> Router {
         .route(
             "/v1/sessions/:id/connections/:conn_id/bulk-insert",
             post(bulk_insert),
+        )
+        .route(
+            "/v1/sessions/:id/connections/:conn_id/import/csv",
+            post(import_csv),
         )
         .route(
             "/v1/sessions/:id/connections/:conn_id/schema",
@@ -1050,6 +1054,14 @@ async fn openapi() -> Json<serde_json::Value> {
                     "responses": { "200": { "description": "Bulk insert result", "content": json_content("BulkInsertResponse") } }
                 }
             },
+            "/v1/sessions/{id}/connections/{conn_id}/import/csv": {
+                "post": {
+                    "operationId": "importCsv",
+                    "summary": "Import CSV into a table",
+                    "requestBody": json_body("CsvImportRequest"),
+                    "responses": { "200": { "description": "Import result", "content": json_content("CsvImportResponse") } }
+                }
+            },
             "/v1/sessions/{id}/connections/{conn_id}/schema": {
                 "get": {
                     "operationId": "getSchema",
@@ -1419,6 +1431,8 @@ fn protocol_schema_refs() -> serde_json::Value {
     add_schema::<sift_protocol::BulkInsertResponse>("BulkInsertResponse", &mut schemas);
     add_schema::<sift_protocol::CancelRequest>("CancelRequest", &mut schemas);
     add_schema::<sift_protocol::ConnectionInfo>("ConnectionInfo", &mut schemas);
+    add_schema::<sift_protocol::CsvImportRequest>("CsvImportRequest", &mut schemas);
+    add_schema::<sift_protocol::CsvImportResponse>("CsvImportResponse", &mut schemas);
     add_schema::<sift_protocol::DatabaseProcess>("DatabaseProcess", &mut schemas);
     add_schema::<sift_protocol::EndTransactionRequest>("EndTransactionRequest", &mut schemas);
     add_schema::<sift_protocol::ExecuteRequestHttp>("ExecuteRequestHttp", &mut schemas);
@@ -2361,6 +2375,30 @@ async fn bulk_insert(
         request: req.clone(),
     };
     let response = state.sessions.bulk_insert(id, conn_id, req).await?;
+    state.sessions.push_operation_full(
+        operation,
+        OperationStatus::Succeeded,
+        None,
+        None,
+        Some(response.rows_inserted as i64),
+        None,
+    );
+    Ok(Json(response))
+}
+
+async fn import_csv(
+    State(state): State<AppState>,
+    Path((session, connection)): Path<(sift_protocol::SessionId, sift_protocol::ConnectionId)>,
+    Json(req): Json<CsvImportRequest>,
+) -> ApiResult<Json<sift_protocol::CsvImportResponse>> {
+    let operation = Operation::ImportCsv {
+        session,
+        connection,
+        table: req.table.clone(),
+        create_table: req.create_table,
+        conflict_policy: req.conflict_policy,
+    };
+    let response = crate::csv_import::import(&state.sessions, session, connection, req).await?;
     state.sessions.push_operation_full(
         operation,
         OperationStatus::Succeeded,

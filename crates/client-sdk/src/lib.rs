@@ -15,12 +15,13 @@ use sift_metadata::{
 };
 use sift_protocol::{
     BeginTransactionRequest, BulkInsertRequest, BulkInsertResponse, CancelRequest, ConnectionId,
-    ConnectionInfo, CursorId, DatabaseProcess, EndTransactionRequest, ExecuteRequestHttp,
-    ExecuteResponse, Health, KillProcessRequest, KillProcessResponse, OpenConnectionRequest,
-    OpenSessionRequest, OperationCapability, OperationCapabilityContext, Page, Readiness,
-    SavepointRequest, SchemaSnapshot, ServerInfo, SessionId, SessionInfo, TextDocumentOperation,
-    TransactionEndAction, TransactionInfo, TransactionPreview, TransactionPreviewRequest,
-    TransactionState, TxHandleRef, TxId, TxMode, Value, WsClientMessage, WsServerMessage,
+    ConnectionInfo, CsvImportRequest, CsvImportResponse, CursorId, DatabaseProcess,
+    EndTransactionRequest, ExecuteRequestHttp, ExecuteResponse, Health, KillProcessRequest,
+    KillProcessResponse, OpenConnectionRequest, OpenSessionRequest, OperationCapability,
+    OperationCapabilityContext, Page, Readiness, SavepointRequest, SchemaSnapshot, ServerInfo,
+    SessionId, SessionInfo, TextDocumentOperation, TransactionEndAction, TransactionInfo,
+    TransactionPreview, TransactionPreviewRequest, TransactionState, TxHandleRef, TxId, TxMode,
+    Value, WsClientMessage, WsServerMessage,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -223,6 +224,19 @@ impl Client {
     ) -> Result<BulkInsertResponse> {
         self.post(
             &format!("/v1/sessions/{session}/connections/{connection}/bulk-insert"),
+            &request,
+        )
+        .await
+    }
+
+    pub async fn import_csv(
+        &self,
+        session: SessionId,
+        connection: ConnectionId,
+        request: CsvImportRequest,
+    ) -> Result<CsvImportResponse> {
+        self.post(
+            &format!("/v1/sessions/{session}/connections/{connection}/import/csv"),
             &request,
         )
         .await

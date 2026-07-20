@@ -128,6 +128,9 @@ async fn bulk_insert_csv_round_trip() {
             BulkOp {
                 table: format!("dbo.{table}"),
                 data: b"id,name\n1,Alice\n2,\"Bob, Jr\"\n3,\n".to_vec(),
+                delimiter: b',',
+                header: true,
+                null_value: None,
             },
         )
         .await

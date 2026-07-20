@@ -105,7 +105,7 @@ fn unavailable_reason(
         }
         CloseConnection | RefreshSchema | ExecuteQuery | Complete | CancelQuery | PreviewEdits
         | ApplyEdits | SearchSchema | SearchData | Explain | ListProcesses | KillProcess
-        | BulkInsert
+        | ImportCsv | BulkInsert
             if !has_connection =>
         {
             Some("connection context required")
@@ -115,7 +115,7 @@ fn unavailable_reason(
         }
         CloseConnection | RefreshSchema | ExecuteQuery | Complete | CancelQuery | PreviewEdits
         | ApplyEdits | SearchSchema | SearchData | Explain | ListProcesses | KillProcess
-        | BulkInsert => None,
+        | ImportCsv | BulkInsert => None,
     }
 }
 

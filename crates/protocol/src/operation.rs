@@ -85,6 +85,13 @@ pub enum Operation {
         connection: ConnectionId,
         request: KillProcessRequest,
     },
+    ImportCsv {
+        session: SessionId,
+        connection: ConnectionId,
+        table: String,
+        create_table: bool,
+        conflict_policy: crate::CsvConflictPolicy,
+    },
     BulkInsert {
         session: SessionId,
         connection: ConnectionId,
@@ -179,6 +186,7 @@ impl Operation {
             Self::Explain { .. } => OperationKind::Explain,
             Self::ListProcesses { .. } => OperationKind::ListProcesses,
             Self::KillProcess { .. } => OperationKind::KillProcess,
+            Self::ImportCsv { .. } => OperationKind::ImportCsv,
             Self::BulkInsert { .. } => OperationKind::BulkInsert,
             Self::BeginTransaction { .. } => OperationKind::BeginTransaction,
             Self::ListTransactions { .. } => OperationKind::ListTransactions,
@@ -249,6 +257,9 @@ impl Operation {
             }
             Operation::KillProcess { request, .. } => {
                 summary("kill", "process", Some(request.process_id))
+            }
+            Operation::ImportCsv { connection, .. } => {
+                summary("import", "table", Some(connection.0 as i64))
             }
             Operation::BulkInsert { connection, .. } => {
                 summary("bulk_insert", "connection", Some(connection.0 as i64))

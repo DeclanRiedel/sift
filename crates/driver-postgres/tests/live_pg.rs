@@ -491,7 +491,11 @@ async fn copy_import_export_round_trip() {
             conn.clone(),
             CopyOp::Import {
                 table: table.clone(),
+                columns: vec!["id".into(), "name".into()],
                 data: b"1\talice\n2\tbob\n".to_vec(),
+                delimiter: b'\t',
+                header: false,
+                null_value: None,
             },
         )
         .await

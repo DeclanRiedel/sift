@@ -330,9 +330,42 @@ impl PgExt for PgDriver {
                         data,
                     })
                 }
-                CopyOp::Import { table, data } => {
+                CopyOp::Import {
+                    table,
+                    columns,
+                    data,
+                    delimiter,
+                    header,
+                    null_value,
+                } => {
                     let table = quote_qualified_ident(&table)?;
-                    let sql = format!("COPY {table} FROM STDIN");
+                    if !delimiter.is_ascii() || delimiter == b'\'' || delimiter == b'\\' {
+                        return Err(DriverError::new(
+                            Code::InvalidParameterValue,
+                            "COPY delimiter must be ASCII and cannot be a quote or backslash",
+                        )
+                        .with_engine(Engine::Postgres));
+                    }
+                    let columns = columns
+                        .iter()
+                        .map(|column| quote_ident(column))
+                        .collect::<Result<Vec<_>, _>>()?;
+                    if columns.is_empty() {
+                        return Err(DriverError::new(
+                            Code::InvalidParameterValue,
+                            "COPY import requires at least one column",
+                        )
+                        .with_engine(Engine::Postgres));
+                    }
+                    let null_clause = null_value
+                        .map(|value| format!(", NULL '{}'", value.replace('\'', "''")))
+                        .unwrap_or_default();
+                    let sql = format!(
+                        "COPY {table} ({}) FROM STDIN WITH (FORMAT csv, HEADER {}, DELIMITER '{}'{null_clause})",
+                        columns.join(", "),
+                        if header { "true" } else { "false" },
+                        delimiter as char,
+                    );
                     let bytes = data.len() as u64;
                     let mut stream = futures::stream::iter(vec![Ok::<_, tokio_postgres::Error>(
                         Bytes::from(data),

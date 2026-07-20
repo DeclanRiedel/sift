@@ -13,6 +13,7 @@ pub mod capability;
 pub mod column;
 pub mod completion;
 pub mod connection;
+pub mod csv_import;
 pub mod edit;
 pub mod engine;
 pub mod error;
@@ -36,6 +37,9 @@ pub use column::{
 pub use connection::{
     AccessMode as ConnAccessMode, EngineConnectionSpec, MssqlConnectionSpec, PgConnectionSpec,
     ServerInfo, SslMode,
+};
+pub use csv_import::{
+    CsvConflictPolicy, CsvImportRequest, CsvImportResponse, InferredCsvColumn, InferredCsvType,
 };
 pub use edit::{
     ApplyEditsRequest, ApplyEditsResult, CellEdit, EditOutcome, EditPlan, EditSet, EditStatement,
