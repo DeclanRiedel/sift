@@ -1164,6 +1164,17 @@ async fn create_github_allowlist(
             None,
         ),
     )?;
+    state.sessions.push_operation_local(
+        Operation::ManageGithubAllowlist {
+            action: sift_protocol::IdentityAdminAction::Create,
+            principal_id: request.target_principal_id,
+        },
+        OperationStatus::Succeeded,
+        Some(auth.principal_id.0),
+        None,
+        None,
+        None,
+    );
     Ok(Json(entry))
 }
 
@@ -1192,6 +1203,17 @@ async fn revoke_github_allowlist(
             Some(id),
         ),
     )?;
+    state.sessions.push_operation_local(
+        Operation::ManageGithubAllowlist {
+            action: sift_protocol::IdentityAdminAction::Revoke,
+            principal_id: None,
+        },
+        OperationStatus::Succeeded,
+        Some(auth.principal_id.0),
+        None,
+        None,
+        None,
+    );
     Ok(Json(json!({"ok": true})))
 }
 
@@ -1228,6 +1250,17 @@ async fn admin_create_principal(
             ),
         )
         .await?;
+    state.sessions.push_operation_local(
+        Operation::ManagePrincipal {
+            action: sift_protocol::IdentityAdminAction::Create,
+            principal_id: Some(principal.id.0),
+        },
+        OperationStatus::Succeeded,
+        Some(auth.principal_id.0),
+        None,
+        None,
+        None,
+    );
     Ok(Json(AuthPrincipal {
         id: principal.id.0,
         display_name: principal.display_name,
@@ -1259,6 +1292,21 @@ async fn admin_set_principal_disabled(
         ),
     )?;
     state.auth.runtime.invalidate_principal(PrincipalId(id));
+    state.sessions.push_operation_local(
+        Operation::ManagePrincipal {
+            action: if request.disabled {
+                sift_protocol::IdentityAdminAction::Disable
+            } else {
+                sift_protocol::IdentityAdminAction::Enable
+            },
+            principal_id: Some(id),
+        },
+        OperationStatus::Succeeded,
+        Some(auth.principal_id.0),
+        None,
+        None,
+        None,
+    );
     Ok(Json(json!({"ok": true})))
 }
 
@@ -1316,6 +1364,17 @@ async fn admin_link_password_identity(
             ),
         )
         .await?;
+    state.sessions.push_operation_local(
+        Operation::ManagePrincipal {
+            action: sift_protocol::IdentityAdminAction::Link,
+            principal_id: Some(id),
+        },
+        OperationStatus::Succeeded,
+        Some(auth.principal_id.0),
+        None,
+        None,
+        None,
+    );
     Ok(Json(AuthIdentitySummary {
         id: identity.id.0,
         method: "password".into(),
@@ -1348,6 +1407,17 @@ async fn admin_unlink_identity(
         .auth
         .runtime
         .invalidate_principal(PrincipalId(principal_id));
+    state.sessions.push_operation_local(
+        Operation::ManagePrincipal {
+            action: sift_protocol::IdentityAdminAction::Unlink,
+            principal_id: Some(principal_id),
+        },
+        OperationStatus::Succeeded,
+        Some(auth.principal_id.0),
+        None,
+        None,
+        None,
+    );
     Ok(Json(json!({"ok": true})))
 }
 
@@ -1387,6 +1457,17 @@ async fn admin_revoke_auth_session(
         ),
     )?;
     state.auth.runtime.invalidate_auth_session(&session_id);
+    state.sessions.push_operation_local(
+        Operation::ManagePrincipal {
+            action: sift_protocol::IdentityAdminAction::Revoke,
+            principal_id: Some(principal_id),
+        },
+        OperationStatus::Succeeded,
+        Some(auth.principal_id.0),
+        None,
+        None,
+        None,
+    );
     Ok(Json(json!({"ok": true})))
 }
 
@@ -1477,6 +1558,17 @@ async fn create_tenant_invitation(
             ),
         )
         .await?;
+    state.sessions.push_operation_local(
+        Operation::ManageTenantInvitation {
+            action: sift_protocol::IdentityAdminAction::Create,
+            tenant_id: tenant.0,
+        },
+        OperationStatus::Succeeded,
+        Some(auth.principal_id.0),
+        None,
+        None,
+        None,
+    );
     Ok(Json(IssuedTenantInvitationResponse {
         invitation_id: issued.invitation.id.0,
         token: issued.token,
@@ -1520,6 +1612,17 @@ async fn revoke_tenant_invitation(
             Some(id),
         ),
     )?;
+    state.sessions.push_operation_local(
+        Operation::ManageTenantInvitation {
+            action: sift_protocol::IdentityAdminAction::Revoke,
+            tenant_id: tenant.0,
+        },
+        OperationStatus::Succeeded,
+        Some(auth.principal_id.0),
+        None,
+        None,
+        None,
+    );
     Ok(Json(json!({"ok": true})))
 }
 
@@ -1540,6 +1643,17 @@ async fn accept_tenant_invitation(
             ),
         )
         .await?;
+    state.sessions.push_operation_local(
+        Operation::ManageTenantInvitation {
+            action: sift_protocol::IdentityAdminAction::Link,
+            tenant_id: membership.tenant.id.0,
+        },
+        OperationStatus::Succeeded,
+        Some(auth.principal_id.0),
+        None,
+        None,
+        None,
+    );
     Ok(Json(membership))
 }
 
@@ -1587,6 +1701,17 @@ async fn register_principal_key(
             None,
         ),
     )?;
+    state.sessions.push_operation_local(
+        Operation::ManagePrincipalKey {
+            action: sift_protocol::IdentityAdminAction::Create,
+            key_id: Some(key.id.0),
+        },
+        OperationStatus::Succeeded,
+        Some(auth.principal_id.0),
+        None,
+        None,
+        None,
+    );
     Ok(Json(key))
 }
 
@@ -1614,6 +1739,17 @@ async fn revoke_principal_key(
             Some(id),
         ),
     )?;
+    state.sessions.push_operation_local(
+        Operation::ManagePrincipalKey {
+            action: sift_protocol::IdentityAdminAction::Revoke,
+            key_id: Some(id),
+        },
+        OperationStatus::Succeeded,
+        Some(auth.principal_id.0),
+        None,
+        None,
+        None,
+    );
     Ok(Json(json!({"ok": true})))
 }
 

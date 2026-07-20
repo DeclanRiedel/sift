@@ -1447,6 +1447,7 @@ async fn github_start_uses_fixed_callback_pkce_and_admin_owned_allowlist() {
         public_base_url: "https://sift.example.test".into(),
         http: reqwest::Client::new(),
     });
+    let operation_log = state.sessions.clone();
     let app = app(state);
 
     let start = app
@@ -1501,6 +1502,13 @@ async fn github_start_uses_fixed_callback_pkce_and_admin_owned_allowlist() {
         .await
         .unwrap();
     assert_eq!(listed.status(), StatusCode::OK);
+    assert!(operation_log.list_operations().iter().any(|entry| matches!(
+        entry.operation,
+        sift_protocol::Operation::ManageGithubAllowlist {
+            action: sift_protocol::IdentityAdminAction::Create,
+            principal_id: Some(id),
+        } if id == admin.id.0
+    )));
 }
 
 #[tokio::test]
