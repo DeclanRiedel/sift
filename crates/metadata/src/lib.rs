@@ -3642,6 +3642,88 @@ mod tests {
         assert_eq!(identities[0].subject, "legacy:test");
     }
 
+    #[test]
+    fn every_prior_schema_boundary_upgrades_to_hosted_identity() {
+        let latest = migrations::migrations::runner()
+            .get_migrations()
+            .last()
+            .unwrap()
+            .version();
+        for starting_version in 0..=latest {
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join(format!("v{starting_version}.sqlite"));
+            if starting_version > 0 {
+                let mut conn = Connection::open(&path).unwrap();
+                configure_connection(&conn).unwrap();
+                migrations::migrations::runner()
+                    .set_target(refinery::Target::Version(starting_version))
+                    .run(&mut conn)
+                    .unwrap();
+                let now = now_text();
+                conn.execute(
+                    "INSERT INTO tenant (id, name, kind, created_at, updated_at)
+                     VALUES (1, 'local', 'personal', ?1, ?1)",
+                    params![now],
+                )
+                .unwrap();
+                conn.execute(
+                    "INSERT INTO principal
+                     (id, external_id, display_name, email, created_at, updated_at)
+                     VALUES (1, 'local:1', 'local user', NULL, ?1, ?1)",
+                    params![now],
+                )
+                .unwrap();
+                conn.execute(
+                    "INSERT INTO membership
+                     (tenant_id, principal_id, role, created_at, updated_at)
+                     VALUES (1, 1, 'owner', ?1, ?1)",
+                    params![now],
+                )
+                .unwrap();
+                if starting_version >= 14 {
+                    conn.execute(
+                        "INSERT INTO auth_identity
+                         (principal_id, method, issuer, subject, created_at, updated_at)
+                         VALUES (1, 'local_bypass', 'sift', 'local:1', ?1, ?1)",
+                        params![now],
+                    )
+                    .unwrap();
+                }
+            }
+
+            let store = MetadataStore::open(&path, Arc::new(MemorySecretStore::new())).unwrap();
+            if starting_version == 0 {
+                store.bootstrap_local("local user").unwrap();
+            }
+            let principal = store
+                .resolve_principal_by_external_id("local:1")
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                principal.id,
+                PrincipalId(1),
+                "starting at V{starting_version}"
+            );
+            let identities = store.list_auth_identities(principal.id).unwrap();
+            assert_eq!(identities.len(), 1, "starting at V{starting_version}");
+            assert_eq!(
+                identities[0].method,
+                AuthIdentityMethod::LocalBypass,
+                "starting at V{starting_version}"
+            );
+            let conn = store.conn().unwrap();
+            let reset_table: String = conn
+                .query_row(
+                    "SELECT name FROM sqlite_master
+                     WHERE type = 'table' AND name = 'password_reset_token'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(reset_table, "password_reset_token");
+        }
+    }
+
     #[tokio::test]
     async fn password_principal_creation_owns_personal_tenant_and_keeps_verifier_out_of_sqlite() {
         let store = store();
