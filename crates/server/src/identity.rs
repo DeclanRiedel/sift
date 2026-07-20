@@ -19,6 +19,9 @@ const LOGIN_WINDOW: Duration = Duration::from_secs(60);
 const MAX_SOURCE_FAILURES: u32 = 20;
 const MAX_IDENTITY_FAILURES: u32 = 5;
 const MAX_ARGON2_CONCURRENCY: usize = 4;
+const ARGON2_MEMORY_KIB: u32 = 19_456;
+const ARGON2_ITERATIONS: u32 = 2;
+const ARGON2_PARALLELISM: u32 = 1;
 const ACCESS_CACHE_TTL: Duration = Duration::from_secs(30);
 const ACCESS_CACHE_MAX_ENTRIES: usize = 1024;
 
@@ -183,6 +186,8 @@ impl AuthRuntime {
                 .unwrap_or_else(|| dummy_verifier().clone()),
             None => dummy_verifier().clone(),
         };
+        let upgrade_password = password.clone();
+        let needs_upgrade = password_verifier_needs_upgrade(&verifier);
         let verified = verify_password(password, verifier).await?;
         drop(permit);
         let enabled = identity.as_ref().is_some_and(|identity| {
@@ -190,9 +195,28 @@ impl AuthRuntime {
         });
         if verified && enabled {
             self.clear_failure(&identity_key);
-            return Ok(PasswordAuthOutcome::Authenticated(Box::new(
-                identity.expect("enabled identity is present"),
-            )));
+            let identity = identity.expect("enabled identity is present");
+            if needs_upgrade {
+                let upgraded = hash_password(upgrade_password).await?;
+                metadata
+                    .replace_password_verifier(
+                        identity.identity.id,
+                        upgraded.as_bytes(),
+                        sift_metadata::NewOperationAudit {
+                            actor_principal_id: Some(identity.principal.id),
+                            action: "password_verifier.upgrade".into(),
+                            target: "auth_identity".into(),
+                            target_id: Some(identity.identity.id.0),
+                            status: "succeeded".into(),
+                            result_code: None,
+                            row_count: None,
+                            error_message: None,
+                            correlation_id: crate::correlation::current(),
+                        },
+                    )
+                    .await?;
+            }
+            return Ok(PasswordAuthOutcome::Authenticated(Box::new(identity)));
         }
         self.record_failure(source_key);
         self.record_failure(identity_key);
@@ -270,8 +294,13 @@ pub async fn hash_password(password: Vec<u8>) -> anyhow::Result<String> {
     validate_password(&password)?;
     tokio::task::spawn_blocking(move || {
         let salt = SaltString::generate(&mut OsRng);
-        let params = Params::new(19_456, 2, 1, None)
-            .map_err(|error| anyhow::anyhow!("invalid Argon2 policy: {error}"))?;
+        let params = Params::new(
+            ARGON2_MEMORY_KIB,
+            ARGON2_ITERATIONS,
+            ARGON2_PARALLELISM,
+            None,
+        )
+        .map_err(|error| anyhow::anyhow!("invalid Argon2 policy: {error}"))?;
         Argon2::new(Algorithm::Argon2id, Version::V0x13, params)
             .hash_password(&password, &salt)
             .map(|hash| hash.to_string())
@@ -279,6 +308,17 @@ pub async fn hash_password(password: Vec<u8>) -> anyhow::Result<String> {
     })
     .await
     .context("password hashing worker failed")?
+}
+
+fn password_verifier_needs_upgrade(verifier: &str) -> bool {
+    let Ok(parsed) = PasswordHash::new(verifier) else {
+        return false;
+    };
+    parsed.algorithm.as_str() != "argon2id"
+        || parsed.version != Some(19)
+        || parsed.params.get_decimal("m") < Some(ARGON2_MEMORY_KIB)
+        || parsed.params.get_decimal("t") < Some(ARGON2_ITERATIONS)
+        || parsed.params.get_decimal("p") < Some(ARGON2_PARALLELISM)
 }
 
 async fn verify_password(password: Vec<u8>, verifier: String) -> anyhow::Result<bool> {
@@ -297,7 +337,13 @@ fn dummy_verifier() -> &'static String {
     static VERIFIER: OnceLock<String> = OnceLock::new();
     VERIFIER.get_or_init(|| {
         let salt = SaltString::generate(&mut OsRng);
-        let params = Params::new(19_456, 2, 1, None).expect("static Argon2 policy is valid");
+        let params = Params::new(
+            ARGON2_MEMORY_KIB,
+            ARGON2_ITERATIONS,
+            ARGON2_PARALLELISM,
+            None,
+        )
+        .expect("static Argon2 policy is valid");
         Argon2::new(Algorithm::Argon2id, Version::V0x13, params)
             .hash_password(b"sift dummy password verification", &salt)
             .expect("static dummy password hashes")
@@ -390,6 +436,64 @@ mod tests {
                 .unwrap(),
             PasswordAuthOutcome::Throttled
         ));
+    }
+
+    #[tokio::test]
+    async fn successful_login_upgrades_weaker_argon2_policy() {
+        let metadata = MetadataStore::open_in_memory(Arc::new(MemorySecretStore::new())).unwrap();
+        let plaintext = b"correct horse battery staple".to_vec();
+        let weak = Argon2::new(
+            Algorithm::Argon2id,
+            Version::V0x13,
+            Params::new(8_192, 1, 1, None).unwrap(),
+        )
+        .hash_password(&plaintext, &SaltString::generate(&mut OsRng))
+        .unwrap()
+        .to_string();
+        metadata
+            .create_password_principal(
+                NewPasswordPrincipal {
+                    username: "upgrade-user",
+                    display_name: "Upgrade User",
+                    email: None,
+                    is_instance_admin: false,
+                },
+                weak.as_bytes(),
+                NewOperationAudit {
+                    actor_principal_id: None,
+                    action: "create".into(),
+                    target: "principal".into(),
+                    target_id: None,
+                    status: "succeeded".into(),
+                    result_code: None,
+                    row_count: None,
+                    error_message: None,
+                    correlation_id: None,
+                },
+            )
+            .await
+            .unwrap();
+        let runtime = AuthRuntime::default();
+        assert!(matches!(
+            runtime
+                .authenticate_password(&metadata, "127.0.0.1", "upgrade-user", plaintext)
+                .await
+                .unwrap(),
+            PasswordAuthOutcome::Authenticated(_)
+        ));
+        let identity = metadata
+            .resolve_password_identity("upgrade-user")
+            .unwrap()
+            .unwrap();
+        let upgraded = metadata
+            .password_verifier(&identity.identity)
+            .await
+            .unwrap()
+            .unwrap();
+        let upgraded = PasswordHash::new(std::str::from_utf8(&upgraded).unwrap()).unwrap();
+        assert_eq!(upgraded.params.get_decimal("m"), Some(ARGON2_MEMORY_KIB));
+        assert_eq!(upgraded.params.get_decimal("t"), Some(ARGON2_ITERATIONS));
+        assert_eq!(upgraded.params.get_decimal("p"), Some(ARGON2_PARALLELISM));
     }
 
     #[tokio::test]
