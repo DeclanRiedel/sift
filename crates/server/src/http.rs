@@ -25,17 +25,19 @@ use sift_metadata::{
     TenantMembership, UpdateSavedQuery,
 };
 use sift_protocol::{
-    AcceptTenantInvitationRequest, AuditEntry, AuthClientKind, AuthPrincipal, AuthTenantMembership,
-    AuthTokensResponse, BeginTransactionRequest, BulkInsertRequest, CancelRequest,
-    ChangePasswordRequest, CreateGithubAllowlistRequest, CreateTenantInvitationRequest,
-    CsvImportRequest, DocumentOperationEnvelope, EndTransactionRequest, ExecuteRequest,
-    ExecuteRequestHttp, Health, InvitationRole, IssuedTenantInvitationResponse,
-    KeyAuthenticateRequest, KeyChallengeRequest, KeyChallengeResponse, KillProcessRequest,
-    ObjectPath, OpenConnectionRequest, OpenSessionRequest, Operation, OperationStatus,
-    PasswordLoginRequest, Readiness, RefreshAuthRequest, RegisterPrincipalKeyRequest,
-    RoomClientMessage, RoomQueryResult, RoomQueryStatus, RoomServerMessage, SavepointRequest,
-    SchemaFilter, SchemaScope, TransactionPreviewRequest, WebAuthResponse, WhoAmIResponse,
-    WsClientMessage, WsServerMessage, PROTOCOL_VERSION,
+    AcceptTenantInvitationRequest, AdminCreatePasswordPrincipalRequest,
+    AdminSetPrincipalDisabledRequest, AuditEntry, AuthClientKind, AuthPrincipal,
+    AuthTenantMembership, AuthTokensResponse, BeginTransactionRequest, BulkInsertRequest,
+    CancelRequest, ChangePasswordRequest, CreateGithubAllowlistRequest,
+    CreateTenantInvitationRequest, CsvImportRequest, DocumentOperationEnvelope,
+    EndTransactionRequest, ExecuteRequest, ExecuteRequestHttp, Health, InvitationRole,
+    IssuedTenantInvitationResponse, KeyAuthenticateRequest, KeyChallengeRequest,
+    KeyChallengeResponse, KillProcessRequest, ObjectPath, OpenConnectionRequest,
+    OpenSessionRequest, Operation, OperationStatus, PasswordLoginRequest, Readiness,
+    RefreshAuthRequest, RegisterPrincipalKeyRequest, RoomClientMessage, RoomQueryResult,
+    RoomQueryStatus, RoomServerMessage, SavepointRequest, SchemaFilter, SchemaScope,
+    TransactionPreviewRequest, WebAuthResponse, WhoAmIResponse, WsClientMessage, WsServerMessage,
+    PROTOCOL_VERSION,
 };
 
 use crate::config::DeploymentPolicy;
@@ -102,6 +104,11 @@ pub fn app(state: AppState) -> Router {
         .route(
             "/v1/admin/auth/github-allowlist/:id",
             delete(revoke_github_allowlist),
+        )
+        .route("/v1/admin/principals", post(admin_create_principal))
+        .route(
+            "/v1/admin/principals/:id/disabled",
+            put(admin_set_principal_disabled),
         )
         .route(
             "/v1/metadata/tenants/:id/invitations",
@@ -588,6 +595,7 @@ struct AuthContext {
     tenants: Vec<TenantMembership>,
     auth_session_id: Option<String>,
     cookie_authenticated: bool,
+    access_expires_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 #[derive(Clone)]
@@ -1101,6 +1109,72 @@ async fn revoke_github_allowlist(
     Ok(Json(json!({"ok": true})))
 }
 
+async fn admin_create_principal(
+    State(state): State<AppState>,
+    Extension(auth): Extension<AuthContext>,
+    Json(request): Json<AdminCreatePasswordPrincipalRequest>,
+) -> ApiResult<Json<AuthPrincipal>> {
+    ensure_instance_admin(&state, &auth)?;
+    let username = crate::identity::normalize_username(&request.username)
+        .map_err(|error| ApiError::BadRequest(error.to_string()))?;
+    if request.display_name.trim().is_empty() || request.display_name.len() > 200 {
+        return Err(ApiError::BadRequest(
+            "display name must be between 1 and 200 characters".into(),
+        ));
+    }
+    let verifier = crate::identity::hash_password(request.password.into_bytes())
+        .await
+        .map_err(|error| ApiError::BadRequest(error.to_string()))?;
+    let principal = metadata_store(&state)?
+        .create_password_principal(
+            sift_metadata::NewPasswordPrincipal {
+                username: &username,
+                display_name: request.display_name.trim(),
+                email: request.email.as_deref(),
+                is_instance_admin: request.is_instance_admin,
+            },
+            verifier.as_bytes(),
+            metadata_audit_record(
+                auth.principal_id,
+                "manage_principal.create",
+                "principal",
+                None,
+            ),
+        )
+        .await?;
+    Ok(Json(AuthPrincipal {
+        id: principal.id.0,
+        display_name: principal.display_name,
+        email: principal.email,
+        avatar_url: principal.avatar_url,
+        is_instance_admin: principal.is_instance_admin,
+    }))
+}
+
+async fn admin_set_principal_disabled(
+    State(state): State<AppState>,
+    Extension(auth): Extension<AuthContext>,
+    Path(id): Path<i64>,
+    Json(request): Json<AdminSetPrincipalDisabledRequest>,
+) -> ApiResult<Json<serde_json::Value>> {
+    ensure_instance_admin(&state, &auth)?;
+    metadata_store(&state)?.set_principal_disabled(
+        PrincipalId(id),
+        request.disabled,
+        metadata_audit_record(
+            auth.principal_id,
+            if request.disabled {
+                "manage_principal.disable"
+            } else {
+                "manage_principal.enable"
+            },
+            "principal",
+            Some(id),
+        ),
+    )?;
+    Ok(Json(json!({"ok": true})))
+}
+
 fn ensure_instance_admin(state: &AppState, auth: &AuthContext) -> ApiResult<()> {
     let principal = metadata_store(state)?
         .principal_by_id(auth.principal_id)?
@@ -1525,6 +1599,7 @@ fn resolve_auth_context(state: &AppState, headers: &HeaderMap) -> ApiResult<Auth
                 tenants,
                 auth_session_id: None,
                 cookie_authenticated: false,
+                access_expires_at: None,
             });
         }
         if state
@@ -1557,6 +1632,7 @@ fn local_auth_context(metadata: &MetadataStore) -> ApiResult<AuthContext> {
         tenants,
         auth_session_id: None,
         cookie_authenticated: false,
+        access_expires_at: None,
     })
 }
 
@@ -1582,6 +1658,7 @@ async fn resolve_auth_context_blocking(
                 tenants,
                 auth_session_id: Some(session.session_id),
                 cookie_authenticated: cookie_token.is_some(),
+                access_expires_at: Some(session.expires_at),
             });
         }
         if cookie_token.is_some() {
@@ -2144,6 +2221,20 @@ async fn openapi() -> Json<serde_json::Value> {
                     "responses": { "200": { "description": "Ack", "content": json_object_content() } }
                 }
             },
+            "/v1/admin/principals": {
+                "post": {
+                    "operationId": "adminCreatePasswordPrincipal",
+                    "requestBody": json_body("AdminCreatePasswordPrincipalRequest"),
+                    "responses": { "200": { "description": "Principal", "content": json_content("AuthPrincipal") } }
+                }
+            },
+            "/v1/admin/principals/{id}/disabled": {
+                "put": {
+                    "operationId": "adminSetPrincipalDisabled",
+                    "requestBody": json_body("AdminSetPrincipalDisabledRequest"),
+                    "responses": { "200": { "description": "Ack", "content": json_object_content() } }
+                }
+            },
             "/v1/metadata/tenants/{id}/invitations": {
                 "get": {
                     "operationId": "listTenantInvitations",
@@ -2691,6 +2782,15 @@ fn protocol_schema_refs() -> serde_json::Value {
         "CreateGithubAllowlistRequest",
         &mut schemas,
     );
+    add_schema::<sift_protocol::AdminCreatePasswordPrincipalRequest>(
+        "AdminCreatePasswordPrincipalRequest",
+        &mut schemas,
+    );
+    add_schema::<sift_protocol::AdminSetPrincipalDisabledRequest>(
+        "AdminSetPrincipalDisabledRequest",
+        &mut schemas,
+    );
+    add_schema::<sift_protocol::AuthPrincipal>("AuthPrincipal", &mut schemas);
     add_schema::<sift_protocol::CreateTenantInvitationRequest>(
         "CreateTenantInvitationRequest",
         &mut schemas,
@@ -4354,6 +4454,7 @@ async fn delete_spilled_cursor(
 
 async fn ws_session(
     State(state): State<AppState>,
+    auth: Option<Extension<AuthContext>>,
     Path(session_id): Path<sift_protocol::SessionId>,
     ws: WebSocketUpgrade,
 ) -> Response {
@@ -4362,7 +4463,8 @@ async fn ws_session(
     let correlation_id = crate::correlation::current().unwrap_or_else(crate::correlation::generate);
     ws.on_upgrade(move |socket| {
         crate::correlation::scope(correlation_id, async move {
-            if let Err(error) = handle_ws(state.sessions, state.shutdown, session_id, socket).await
+            if let Err(error) =
+                handle_ws(state, auth.map(|Extension(auth)| auth), session_id, socket).await
             {
                 tracing::warn!(%session_id, error = %error, "websocket session ended with error");
             }
@@ -4398,13 +4500,14 @@ async fn ws_room(
 async fn handle_room_ws(
     state: AppState,
     metadata: MetadataStore,
-    auth: AuthContext,
+    mut auth: AuthContext,
     room: RoomId,
     socket: WebSocket,
 ) -> ApiResult<()> {
     let (mut sender, mut receiver) = socket.split();
     let mut events = state.rooms.subscribe(room.0);
     let mut attachment_id = None;
+    let mut lease_tick = tokio::time::interval(std::time::Duration::from_secs(1));
 
     loop {
         tokio::select! {
@@ -4419,6 +4522,12 @@ async fn handle_room_ws(
                 let message: RoomClientMessage =
                     serde_json::from_str(&text).map_err(|error| ApiError::BadRequest(error.to_string()))?;
                 match message {
+                    RoomClientMessage::Reauthenticate { access_token } => {
+                        let replacement = reauthenticate_ws(&state, &access_token.0, auth.principal_id).await?;
+                        let expires_at = replacement.access_expires_at.ok_or(ApiError::Unauthorized)?;
+                        auth = replacement;
+                        send_json(&mut sender, &RoomServerMessage::Authenticated { expires_at }).await?;
+                    }
                     RoomClientMessage::Attach { client_id } => {
                         if attachment_id.is_some() {
                             send_json(&mut sender, &RoomServerMessage::Error {
@@ -4511,6 +4620,14 @@ async fn handle_room_ws(
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                 }
             }
+            _ = lease_tick.tick() => {
+                if !ws_lease_is_valid(&state, &auth, Some(room))? {
+                    send_json(&mut sender, &RoomServerMessage::Error {
+                        message: "authentication lease or room membership was revoked".into(),
+                    }).await?;
+                    break;
+                }
+            }
         }
     }
 
@@ -4525,6 +4642,55 @@ async fn handle_room_ws(
         );
     }
     Ok(())
+}
+
+fn ws_lease_is_valid(
+    state: &AppState,
+    auth: &AuthContext,
+    room: Option<RoomId>,
+) -> ApiResult<bool> {
+    if auth
+        .access_expires_at
+        .is_some_and(|expires| expires <= chrono::Utc::now())
+    {
+        return Ok(false);
+    }
+    let Some(metadata) = state.metadata.as_ref() else {
+        return Ok(true);
+    };
+    if let Some(session_id) = auth.auth_session_id.as_deref() {
+        if !metadata.auth_session_is_active(session_id)? {
+            return Ok(false);
+        }
+    }
+    if let Some(room) = room {
+        return Ok(metadata.get_room_member(room, auth.principal_id)?.is_some());
+    }
+    Ok(true)
+}
+
+async fn reauthenticate_ws(
+    state: &AppState,
+    token: &str,
+    expected_principal: PrincipalId,
+) -> ApiResult<AuthContext> {
+    let metadata = metadata_store(state)?;
+    let session = metadata
+        .verify_auth_access_token(token)
+        .await?
+        .ok_or(ApiError::Unauthorized)?;
+    if session.principal.id != expected_principal {
+        return Err(ApiError::Forbidden(
+            "WebSocket reauthentication cannot change principal".into(),
+        ));
+    }
+    Ok(AuthContext {
+        principal_id: session.principal.id,
+        tenants: metadata.list_principal_tenants(session.principal.id)?,
+        auth_session_id: Some(session.session_id),
+        cookie_authenticated: false,
+        access_expires_at: Some(session.expires_at),
+    })
 }
 
 async fn apply_room_document_operation(
@@ -4568,19 +4734,48 @@ async fn apply_room_document_operation(
 }
 
 async fn handle_ws(
-    sessions: SessionStore,
-    shutdown: crate::shutdown::Shutdown,
+    state: AppState,
+    mut auth: Option<AuthContext>,
     session_id: sift_protocol::SessionId,
     socket: WebSocket,
 ) -> ApiResult<()> {
     let (mut sender, mut receiver) = socket.split();
-    while let Some(message) = receiver.next().await {
+    let mut lease_tick = tokio::time::interval(std::time::Duration::from_secs(1));
+    loop {
+        let message = tokio::select! {
+            message = receiver.next() => match message {
+                Some(message) => message,
+                None => break,
+            },
+            _ = lease_tick.tick(), if auth.is_some() => {
+                if !ws_lease_is_valid(&state, auth.as_ref().expect("guarded"), None)? {
+                    send_json(&mut sender, &WsServerMessage::Error {
+                        request_id: None,
+                        message: "authentication lease expired or was revoked".into(),
+                    }).await?;
+                    break;
+                }
+                continue;
+            }
+        };
         let message = message.map_err(|e| ApiError::BadRequest(e.to_string()))?;
         match message {
             Message::Text(text) => {
                 let msg: WsClientMessage =
                     serde_json::from_str(&text).map_err(|e| ApiError::BadRequest(e.to_string()))?;
                 match msg {
+                    WsClientMessage::Reauthenticate { access_token } => {
+                        let current = auth.as_ref().ok_or(ApiError::Unauthorized)?;
+                        let replacement =
+                            reauthenticate_ws(&state, &access_token.0, current.principal_id)
+                                .await?;
+                        let expires_at = replacement
+                            .access_expires_at
+                            .ok_or(ApiError::Unauthorized)?;
+                        auth = Some(replacement);
+                        send_json(&mut sender, &WsServerMessage::Authenticated { expires_at })
+                            .await?;
+                    }
                     WsClientMessage::Execute {
                         request_id,
                         connection,
@@ -4590,8 +4785,9 @@ async fn handle_ws(
                     } => {
                         // Track the streaming query against the drain gate for
                         // its whole lifetime (execute + paging).
-                        let _query_guard = shutdown.track_query();
-                        let stream = match sessions
+                        let _query_guard = state.shutdown.track_query();
+                        let stream = match state
+                            .sessions
                             .execute_stream(
                                 session_id,
                                 connection,
@@ -4624,7 +4820,7 @@ async fn handle_ws(
                         stream_pages_with_ack(
                             &mut sender,
                             &mut receiver,
-                            &sessions,
+                            &state.sessions,
                             session_id,
                             connection,
                             stream.cursor_id,
@@ -4637,27 +4833,35 @@ async fn handle_ws(
                         connection,
                         channels,
                     } => {
-                        let stream =
-                            match sessions.listen_pg(session_id, connection, channels).await {
-                                Ok(stream) => stream,
-                                Err(error) => {
-                                    send_json(
-                                        &mut sender,
-                                        &WsServerMessage::Error {
-                                            request_id: Some(request_id),
-                                            message: error.to_string(),
-                                        },
-                                    )
-                                    .await?;
-                                    continue;
-                                }
-                            };
+                        let stream = match state
+                            .sessions
+                            .listen_pg(session_id, connection, channels)
+                            .await
+                        {
+                            Ok(stream) => stream,
+                            Err(error) => {
+                                send_json(
+                                    &mut sender,
+                                    &WsServerMessage::Error {
+                                        request_id: Some(request_id),
+                                        message: error.to_string(),
+                                    },
+                                )
+                                .await?;
+                                continue;
+                            }
+                        };
                         stream_notifications(&mut sender, request_id, stream.notifications).await?;
                     }
                     WsClientMessage::Cancel {
                         connection,
                         cursor_id,
-                    } => sessions.cancel(session_id, connection, cursor_id).await?,
+                    } => {
+                        state
+                            .sessions
+                            .cancel(session_id, connection, cursor_id)
+                            .await?
+                    }
                     WsClientMessage::Ack { .. } => {
                         send_json(
                             &mut sender,
@@ -4799,6 +5003,11 @@ async fn wait_for_ack(
                 WsClientMessage::Listen { .. } => {
                     return Err(ApiError::BadRequest(
                         "listen during active stream is not supported".into(),
+                    ));
+                }
+                WsClientMessage::Reauthenticate { .. } => {
+                    return Err(ApiError::BadRequest(
+                        "reauthenticate before starting a result stream".into(),
                     ));
                 }
             },

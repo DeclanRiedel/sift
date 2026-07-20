@@ -7,6 +7,16 @@ use chrono::{DateTime, Utc};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+#[derive(Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(transparent)]
+pub struct RedactedString(pub String);
+
+impl fmt::Debug for RedactedString {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("[REDACTED]")
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum AuthClientKind {
@@ -182,6 +192,34 @@ pub struct RegisterPrincipalKeyRequest {
     /// Base64url-no-pad encoded 32-byte Ed25519 public key.
     pub public_key: String,
     pub label: String,
+}
+
+#[derive(Clone, Serialize, Deserialize, JsonSchema)]
+pub struct AdminCreatePasswordPrincipalRequest {
+    pub username: String,
+    pub password: String,
+    pub display_name: String,
+    pub email: Option<String>,
+    #[serde(default)]
+    pub is_instance_admin: bool,
+}
+
+impl fmt::Debug for AdminCreatePasswordPrincipalRequest {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("AdminCreatePasswordPrincipalRequest")
+            .field("username", &self.username)
+            .field("password", &"[REDACTED]")
+            .field("display_name", &self.display_name)
+            .field("email", &self.email)
+            .field("is_instance_admin", &self.is_instance_admin)
+            .finish()
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct AdminSetPrincipalDisabledRequest {
+    pub disabled: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]

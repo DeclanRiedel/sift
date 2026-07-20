@@ -281,6 +281,9 @@ pub enum OperationStatus {
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum WsClientMessage {
+    Reauthenticate {
+        access_token: crate::RedactedString,
+    },
     Execute {
         request_id: String,
         connection: ConnectionId,
@@ -314,6 +317,9 @@ pub enum WsClientMessage {
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum WsServerMessage {
+    Authenticated {
+        expires_at: chrono::DateTime<chrono::Utc>,
+    },
     Started {
         request_id: String,
         cursor_id: CursorId,

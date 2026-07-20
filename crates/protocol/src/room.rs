@@ -45,6 +45,9 @@ pub struct RoomQueryResult {
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum RoomClientMessage {
+    Reauthenticate {
+        access_token: crate::RedactedString,
+    },
     Attach {
         client_id: String,
     },
@@ -60,6 +63,9 @@ pub enum RoomClientMessage {
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum RoomServerMessage {
+    Authenticated {
+        expires_at: chrono::DateTime<chrono::Utc>,
+    },
     Attached {
         attachment_id: i64,
         presence: Vec<RoomPresence>,

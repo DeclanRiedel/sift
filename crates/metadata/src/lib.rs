@@ -1055,6 +1055,20 @@ impl MetadataStore {
         Ok(session)
     }
 
+    pub fn auth_session_is_active(&self, session_id: &str) -> Result<bool> {
+        let now = now_text();
+        let conn = self.conn()?;
+        let active: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM auth_session s
+             JOIN principal p ON p.id = s.principal_id
+             WHERE s.id = ?1 AND s.revoked_at IS NULL AND s.expires_at > ?2
+               AND p.disabled_at IS NULL",
+            params![session_id, now],
+            |row| row.get(0),
+        )?;
+        Ok(active == 1)
+    }
+
     pub async fn rotate_auth_refresh_token(
         &self,
         presented: &str,

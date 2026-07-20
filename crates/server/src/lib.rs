@@ -1,4 +1,4 @@
-#![recursion_limit = "256"]
+#![recursion_limit = "512"]
 
 //! `sift-server` — workspace server. The server is the product; clients
 //! (desktop GPUI, future web) are thin stateless consumers of its HTTP API

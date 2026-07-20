@@ -31,11 +31,13 @@ pub mod tx;
 pub mod value;
 
 pub use auth::{
-    AcceptTenantInvitationRequest, AuthClientKind, AuthPrincipal, AuthTenantMembership,
+    AcceptTenantInvitationRequest, AdminCreatePasswordPrincipalRequest,
+    AdminSetPrincipalDisabledRequest, AuthClientKind, AuthPrincipal, AuthTenantMembership,
     AuthTokensResponse, ChangePasswordRequest, CreateGithubAllowlistRequest,
     CreateTenantInvitationRequest, InvitationRole, IssuedTenantInvitationResponse,
     KeyAuthenticateRequest, KeyChallengeRequest, KeyChallengeResponse, PasswordLoginRequest,
-    RefreshAuthRequest, RegisterPrincipalKeyRequest, WebAuthResponse, WhoAmIResponse,
+    RedactedString, RefreshAuthRequest, RegisterPrincipalKeyRequest, WebAuthResponse,
+    WhoAmIResponse,
 };
 pub use capability::{OperationCapability, OperationCapabilityContext, OperationKind};
 pub use column::{
