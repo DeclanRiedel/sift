@@ -1096,6 +1096,86 @@ async fn password_login_refresh_whoami_and_logout_are_end_to_end() {
 }
 
 #[tokio::test]
+async fn websocket_lease_reauthenticates_after_rotation_and_closes_on_revocation() {
+    let mut state = test_state_with_metadata(false);
+    let password = "renewable websocket password";
+    let verifier = sift_server::identity::hash_password(password.as_bytes().to_vec())
+        .await
+        .unwrap();
+    state
+        .metadata
+        .as_ref()
+        .unwrap()
+        .create_password_principal(
+            NewPasswordPrincipal {
+                username: "websocket-user",
+                display_name: "WebSocket User",
+                email: None,
+                is_instance_admin: false,
+            },
+            verifier.as_bytes(),
+            NewOperationAudit {
+                actor_principal_id: Some(PrincipalId(1)),
+                action: "create".into(),
+                target: "principal".into(),
+                target_id: None,
+                status: "succeeded".into(),
+                result_code: None,
+                row_count: None,
+                error_message: None,
+                correlation_id: None,
+            },
+        )
+        .await
+        .unwrap();
+    state.auth.loopback_bypass = false;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app(state).into_make_service())
+            .await
+            .unwrap();
+    });
+
+    let unauthenticated = sift_client_sdk::Client::new(format!("http://{addr}"));
+    let provider = unauthenticated
+        .password_login(sift_protocol::PasswordLoginRequest {
+            username: "websocket-user".into(),
+            password: password.into(),
+            client_kind: sift_protocol::AuthClientKind::Native,
+            client_label: Some("lease test".into()),
+        })
+        .await
+        .unwrap();
+    let client = sift_client_sdk::Client::new(format!("http://{addr}"))
+        .with_session_tokens(provider.clone());
+    let session = client
+        .open_session(Some("lease test".into()))
+        .await
+        .unwrap();
+    let mut socket = client.connect_session_websocket(session.id).await.unwrap();
+
+    client.refresh_session().await.unwrap();
+    let renewed_expiry = provider
+        .reauthenticate_session_websocket(&mut socket)
+        .await
+        .unwrap();
+    assert!(renewed_expiry > chrono::Utc::now());
+
+    client.logout_all().await.unwrap();
+    let revoked = tokio::time::timeout(std::time::Duration::from_secs(3), socket.next())
+        .await
+        .expect("lease revocation is delivered")
+        .unwrap();
+    assert!(matches!(
+        revoked,
+        sift_protocol::WsServerMessage::Error { message, .. }
+            if message.contains("revoked")
+    ));
+    server.abort();
+}
+
+#[tokio::test]
 async fn web_password_auth_uses_http_only_cookies_and_requires_csrf() {
     let mut state = test_state_with_metadata(false);
     let metadata = state.metadata.as_ref().unwrap();

@@ -66,6 +66,20 @@ impl SessionTokenProvider {
     async fn replace(&self, tokens: AuthTokensResponse) {
         *self.tokens.write().await = tokens;
     }
+
+    pub async fn reauthenticate_session_websocket(
+        &self,
+        socket: &mut SessionWebSocket,
+    ) -> Result<chrono::DateTime<chrono::Utc>> {
+        socket.reauthenticate(self.access_token().await).await
+    }
+
+    pub async fn reauthenticate_room_websocket(
+        &self,
+        socket: &mut RoomWebSocket,
+    ) -> Result<chrono::DateTime<chrono::Utc>> {
+        socket.reauthenticate(self.access_token().await).await
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
