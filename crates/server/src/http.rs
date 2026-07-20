@@ -27,17 +27,17 @@ use sift_metadata::{
 use sift_protocol::{
     AcceptTenantInvitationRequest, AdminCreatePasswordPrincipalRequest,
     AdminLinkPasswordIdentityRequest, AdminSetPrincipalDisabledRequest, AuditEntry, AuthClientKind,
-    AuthIdentitySummary, AuthPrincipal, AuthTenantMembership, AuthTokensResponse,
-    BeginTransactionRequest, BulkInsertRequest, CancelRequest, ChangePasswordRequest,
-    CreateGithubAllowlistRequest, CreateTenantInvitationRequest, CsvImportRequest,
-    DocumentOperationEnvelope, EndTransactionRequest, ExecuteRequest, ExecuteRequestHttp, Health,
-    InvitationRole, IssuedTenantInvitationResponse, KeyAuthenticateRequest, KeyChallengeRequest,
-    KeyChallengeResponse, KillProcessRequest, ObjectPath, OpenConnectionRequest,
-    OpenSessionRequest, Operation, OperationStatus, PasswordLoginRequest, Readiness,
-    RefreshAuthRequest, RegisterPrincipalKeyRequest, RoomClientMessage, RoomQueryResult,
-    RoomQueryStatus, RoomServerMessage, SavepointRequest, SchemaFilter, SchemaScope,
-    TransactionPreviewRequest, WebAuthResponse, WhoAmIResponse, WsClientMessage, WsServerMessage,
-    PROTOCOL_VERSION,
+    AuthIdentitySummary, AuthPrincipal, AuthSessionSummary, AuthTenantMembership,
+    AuthTokensResponse, BeginTransactionRequest, BulkInsertRequest, CancelRequest,
+    ChangePasswordRequest, CreateGithubAllowlistRequest, CreateTenantInvitationRequest,
+    CsvImportRequest, DocumentOperationEnvelope, EndTransactionRequest, ExecuteRequest,
+    ExecuteRequestHttp, Health, InvitationRole, IssuedTenantInvitationResponse,
+    KeyAuthenticateRequest, KeyChallengeRequest, KeyChallengeResponse, KillProcessRequest,
+    ObjectPath, OpenConnectionRequest, OpenSessionRequest, Operation, OperationStatus,
+    PasswordLoginRequest, Readiness, RefreshAuthRequest, RegisterPrincipalKeyRequest,
+    RoomClientMessage, RoomQueryResult, RoomQueryStatus, RoomServerMessage, SavepointRequest,
+    SchemaFilter, SchemaScope, TransactionPreviewRequest, WebAuthResponse, WhoAmIResponse,
+    WsClientMessage, WsServerMessage, PROTOCOL_VERSION,
 };
 
 use crate::config::DeploymentPolicy;
@@ -121,6 +121,14 @@ pub fn app(state: AppState) -> Router {
         .route(
             "/v1/admin/principals/:principal_id/identities/:identity_id",
             delete(admin_unlink_identity),
+        )
+        .route(
+            "/v1/admin/principals/:id/auth-sessions",
+            get(admin_list_auth_sessions),
+        )
+        .route(
+            "/v1/admin/principals/:principal_id/auth-sessions/:session_id",
+            delete(admin_revoke_auth_session),
         )
         .route(
             "/v1/metadata/tenants/:id/invitations",
@@ -1286,6 +1294,45 @@ async fn admin_unlink_identity(
     Ok(Json(json!({"ok": true})))
 }
 
+async fn admin_list_auth_sessions(
+    State(state): State<AppState>,
+    Extension(auth): Extension<AuthContext>,
+    Path(id): Path<i64>,
+) -> ApiResult<Json<Vec<AuthSessionSummary>>> {
+    ensure_instance_admin(&state, &auth)?;
+    if metadata_store(&state)?
+        .principal_by_id(PrincipalId(id))?
+        .is_none()
+    {
+        return Err(ApiError::Metadata(
+            sift_metadata::MetadataError::PrincipalNotFound(PrincipalId(id)),
+        ));
+    }
+    Ok(Json(
+        metadata_store(&state)?.list_principal_auth_sessions(PrincipalId(id))?,
+    ))
+}
+
+async fn admin_revoke_auth_session(
+    State(state): State<AppState>,
+    Extension(auth): Extension<AuthContext>,
+    Path((principal_id, session_id)): Path<(i64, String)>,
+) -> ApiResult<Json<serde_json::Value>> {
+    ensure_instance_admin(&state, &auth)?;
+    metadata_store(&state)?.revoke_principal_auth_session(
+        PrincipalId(principal_id),
+        &session_id,
+        metadata_audit_record(
+            auth.principal_id,
+            "manage_principal.revoke_session",
+            "auth_session",
+            None,
+        ),
+    )?;
+    state.auth.runtime.invalidate_auth_session(&session_id);
+    Ok(Json(json!({"ok": true})))
+}
+
 fn ensure_instance_admin(state: &AppState, auth: &AuthContext) -> ApiResult<()> {
     let principal = metadata_store(state)?
         .principal_by_id(auth.principal_id)?
@@ -2367,6 +2414,18 @@ async fn openapi() -> Json<serde_json::Value> {
                     "responses": { "200": { "description": "Ack", "content": json_object_content() } }
                 }
             },
+            "/v1/admin/principals/{id}/auth-sessions": {
+                "get": {
+                    "operationId": "adminListAuthSessions",
+                    "responses": { "200": { "description": "Authentication sessions", "content": json_array_content("AuthSessionSummary") } }
+                }
+            },
+            "/v1/admin/principals/{principal_id}/auth-sessions/{session_id}": {
+                "delete": {
+                    "operationId": "adminRevokeAuthSession",
+                    "responses": { "200": { "description": "Ack", "content": json_object_content() } }
+                }
+            },
             "/v1/metadata/tenants/{id}/invitations": {
                 "get": {
                     "operationId": "listTenantInvitations",
@@ -2927,6 +2986,7 @@ fn protocol_schema_refs() -> serde_json::Value {
         &mut schemas,
     );
     add_schema::<sift_protocol::AuthIdentitySummary>("AuthIdentitySummary", &mut schemas);
+    add_schema::<sift_protocol::AuthSessionSummary>("AuthSessionSummary", &mut schemas);
     add_schema::<sift_protocol::AuthPrincipal>("AuthPrincipal", &mut schemas);
     add_schema::<sift_protocol::CreateTenantInvitationRequest>(
         "CreateTenantInvitationRequest",

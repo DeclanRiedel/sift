@@ -104,6 +104,7 @@ impl ApiError {
                 | MetadataError::SavedQueryNotFound(_)
                 | MetadataError::PrincipalNotFound(_)
                 | MetadataError::AuthIdentityNotFound(_)
+                | MetadataError::AuthSessionNotFound(_)
                 | MetadataError::PrincipalKeyNotFound(_)
                 | MetadataError::GithubAllowlistNotFound(_) => (StatusCode::NOT_FOUND, "not_found"),
                 MetadataError::FinalInstanceAdmin | MetadataError::FinalAuthIdentity => {

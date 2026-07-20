@@ -33,11 +33,12 @@ pub mod value;
 pub use auth::{
     AcceptTenantInvitationRequest, AdminCreatePasswordPrincipalRequest,
     AdminLinkPasswordIdentityRequest, AdminSetPrincipalDisabledRequest, AuthClientKind,
-    AuthIdentitySummary, AuthPrincipal, AuthTenantMembership, AuthTokensResponse,
-    ChangePasswordRequest, CreateGithubAllowlistRequest, CreateTenantInvitationRequest,
-    InvitationRole, IssuedTenantInvitationResponse, KeyAuthenticateRequest, KeyChallengeRequest,
-    KeyChallengeResponse, PasswordLoginRequest, RedactedString, RefreshAuthRequest,
-    RegisterPrincipalKeyRequest, WebAuthResponse, WhoAmIResponse,
+    AuthIdentitySummary, AuthPrincipal, AuthSessionSummary, AuthTenantMembership,
+    AuthTokensResponse, ChangePasswordRequest, CreateGithubAllowlistRequest,
+    CreateTenantInvitationRequest, InvitationRole, IssuedTenantInvitationResponse,
+    KeyAuthenticateRequest, KeyChallengeRequest, KeyChallengeResponse, PasswordLoginRequest,
+    RedactedString, RefreshAuthRequest, RegisterPrincipalKeyRequest, WebAuthResponse,
+    WhoAmIResponse,
 };
 pub use capability::{OperationCapability, OperationCapabilityContext, OperationKind};
 pub use column::{

@@ -249,6 +249,18 @@ pub struct AuthIdentitySummary {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct AuthSessionSummary {
+    pub id: String,
+    pub client_kind: String,
+    pub client_label: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub last_used_at: Option<DateTime<Utc>>,
+    pub expires_at: DateTime<Utc>,
+    pub revoked_at: Option<DateTime<Utc>>,
+    pub revocation_reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct KeyChallengeRequest {
     pub fingerprint: String,
 }

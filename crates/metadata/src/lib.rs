@@ -11,7 +11,7 @@ use chrono::{DateTime, Utc};
 use rand_core::OsRng;
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use sha2::{Digest, Sha256};
-use sift_protocol::ConnectionSpec;
+use sift_protocol::{AuthSessionSummary, ConnectionSpec};
 use uuid::Uuid;
 
 pub mod http;
@@ -83,6 +83,8 @@ pub enum MetadataError {
     PrincipalNotFound(PrincipalId),
     #[error("authentication identity {0:?} not found")]
     AuthIdentityNotFound(AuthIdentityId),
+    #[error("authentication session not found: {0}")]
+    AuthSessionNotFound(String),
     #[error("GitHub allowlist entry {0:?} not found")]
     GithubAllowlistNotFound(GithubAllowlistId),
     #[error("cannot disable the final active instance administrator")]
@@ -1325,6 +1327,67 @@ impl MetadataStore {
              WHERE id = ?3",
             params![now, reason, session_id],
         )?;
+        tx.execute(
+            "UPDATE auth_access_token SET revoked_at = COALESCE(revoked_at, ?1)
+             WHERE auth_session_id = ?2",
+            params![now, session_id],
+        )?;
+        tx.execute(
+            "UPDATE auth_refresh_token SET revoked_at = COALESCE(revoked_at, ?1)
+             WHERE auth_session_id = ?2",
+            params![now, session_id],
+        )?;
+        insert_operation_audit_row(&tx, &audit)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn list_principal_auth_sessions(
+        &self,
+        principal: PrincipalId,
+    ) -> Result<Vec<AuthSessionSummary>> {
+        let conn = self.conn()?;
+        let mut statement = conn.prepare(
+            "SELECT id, client_kind, client_label, created_at, last_used_at,
+                    expires_at, revoked_at, revocation_reason
+             FROM auth_session WHERE principal_id = ?1
+             ORDER BY created_at DESC, id DESC",
+        )?;
+        let rows = statement.query_map(params![principal.0], |row| {
+            Ok(AuthSessionSummary {
+                id: row.get(0)?,
+                client_kind: row.get(1)?,
+                client_label: row.get(2)?,
+                created_at: parse_time_sql(row.get(3)?)?,
+                last_used_at: parse_optional_time_sql(row.get(4)?)?,
+                expires_at: parse_time_sql(row.get(5)?)?,
+                revoked_at: parse_optional_time_sql(row.get(6)?)?,
+                revocation_reason: row.get(7)?,
+            })
+        })?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
+    }
+
+    pub fn revoke_principal_auth_session(
+        &self,
+        principal: PrincipalId,
+        session_id: &str,
+        audit: NewOperationAudit,
+    ) -> Result<()> {
+        let now = now_text();
+        let mut conn = self.conn()?;
+        let tx = conn.transaction()?;
+        let changed = tx.execute(
+            "UPDATE auth_session
+             SET revoked_at = COALESCE(revoked_at, ?1),
+                 revocation_reason = COALESCE(revocation_reason, 'admin_revoked')
+             WHERE id = ?2 AND principal_id = ?3",
+            params![now, session_id, principal.0],
+        )?;
+        if changed == 0 {
+            return Err(MetadataError::AuthSessionNotFound(session_id.to_string()));
+        }
         tx.execute(
             "UPDATE auth_access_token SET revoked_at = COALESCE(revoked_at, ?1)
              WHERE auth_session_id = ?2",
@@ -3650,6 +3713,58 @@ mod tests {
         let audit = store.list_operation_audit(10).unwrap();
         assert!(audit.iter().any(|entry| entry.action == "unlink"));
         assert!(audit.iter().any(|entry| entry.action == "link"));
+    }
+
+    #[tokio::test]
+    async fn principal_auth_sessions_can_be_listed_and_selectively_revoked() {
+        let store = store();
+        let principal = store
+            .create_password_principal(
+                NewPasswordPrincipal {
+                    username: "session-admin-target",
+                    display_name: "Session Target",
+                    email: None,
+                    is_instance_admin: false,
+                },
+                b"verifier",
+                test_audit("create", "principal", None),
+            )
+            .await
+            .unwrap();
+        let tokens = store
+            .issue_auth_session(
+                principal.id,
+                AuthClientKind::Native,
+                Some("workstation"),
+                test_audit("authenticate", "auth_session", None),
+            )
+            .await
+            .unwrap();
+        let sessions = store.list_principal_auth_sessions(principal.id).unwrap();
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].id, tokens.session_id);
+        assert_eq!(sessions[0].client_label.as_deref(), Some("workstation"));
+
+        store
+            .revoke_principal_auth_session(
+                principal.id,
+                &tokens.session_id,
+                test_audit("revoke", "auth_session", None),
+            )
+            .unwrap();
+        assert!(store
+            .verify_auth_access_token(&tokens.access_token)
+            .await
+            .unwrap()
+            .is_none());
+        assert!(matches!(
+            store.revoke_principal_auth_session(
+                PrincipalId(999),
+                &tokens.session_id,
+                test_audit("revoke", "auth_session", None),
+            ),
+            Err(MetadataError::AuthSessionNotFound(_))
+        ));
     }
 
     #[tokio::test]
