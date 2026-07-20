@@ -163,8 +163,8 @@ impl Default for Config {
 impl Config {
     /// Reject topology/policy combinations that would broaden implicit trust.
     ///
-    /// Team and SSH-proxy startup remain deliberately unavailable until their
-    /// fail-closed authentication paths land in the following Phase E slices.
+    /// SSH-proxy startup remains deliberately unavailable until its Phase H
+    /// transport lands.
     pub fn validate(&self) -> anyhow::Result<()> {
         use anyhow::{bail, Context};
 
@@ -190,18 +190,20 @@ impl Config {
             );
         }
 
-        if self.metadata.bootstrap_local && self.deployment != DeploymentPolicy::Personal {
-            bail!("metadata.bootstrap_local is allowed only with deployment=personal");
-        }
-
         if self.transport == Transport::SshProxy {
             bail!("transport=ssh-proxy is reserved for Phase H and is not implemented yet");
         }
 
         if self.deployment == DeploymentPolicy::Team {
-            bail!(
-                "deployment=team remains disabled until Phase E's fail-closed auth middleware lands"
-            );
+            if !self.metadata.enabled {
+                bail!("deployment=team requires metadata.enabled=true");
+            }
+            if self.metadata.bootstrap_local {
+                bail!("deployment=team requires metadata.bootstrap_local=false");
+            }
+            if self.metadata.secret_backend == "memory" {
+                bail!("deployment=team requires a durable metadata secret backend");
+            }
         }
 
         Ok(())
@@ -306,7 +308,7 @@ mod tests {
     }
 
     #[test]
-    fn unfinished_team_and_ssh_modes_fail_closed() {
+    fn team_requires_durable_metadata_and_ssh_is_unavailable() {
         let team = Config {
             deployment: DeploymentPolicy::Team,
             auth: AuthConfig {
@@ -315,15 +317,26 @@ mod tests {
             },
             metadata: MetadataConfig {
                 bootstrap_local: false,
+                secret_backend: "file".into(),
                 ..MetadataConfig::default()
             },
             ..Config::default()
         };
-        assert!(team
+        team.validate().unwrap();
+
+        let unsafe_team = Config {
+            deployment: DeploymentPolicy::Team,
+            auth: AuthConfig {
+                loopback_bypass: false,
+                ..AuthConfig::default()
+            },
+            ..Config::default()
+        };
+        assert!(unsafe_team
             .validate()
             .unwrap_err()
             .to_string()
-            .contains("disabled"));
+            .contains("bootstrap_local"));
 
         let ssh = Config {
             transport: Transport::SshProxy,

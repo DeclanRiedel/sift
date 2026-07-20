@@ -32,6 +32,7 @@ use sift_protocol::{
     WsClientMessage, WsServerMessage, PROTOCOL_VERSION,
 };
 
+use crate::config::DeploymentPolicy;
 use crate::error::{ApiError, ApiResult};
 use crate::room_runtime::RoomRuntime;
 use crate::session::SessionStore;
@@ -48,10 +49,21 @@ pub struct AppState {
     pub shutdown: crate::shutdown::Shutdown,
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct AuthState {
     pub bearer_token: Option<String>,
     pub loopback_bypass: bool,
+    pub deployment: DeploymentPolicy,
+}
+
+impl Default for AuthState {
+    fn default() -> Self {
+        Self {
+            bearer_token: None,
+            loopback_bypass: true,
+            deployment: DeploymentPolicy::Personal,
+        }
+    }
 }
 
 pub fn app(state: AppState) -> Router {
@@ -222,7 +234,7 @@ pub fn app(state: AppState) -> Router {
         )
         .route("/v1/cursors/:cursor_id/pages", get(read_spill_pages))
         .route("/v1/cursors/:cursor_id", delete(delete_spilled_cursor))
-        .layer(from_fn_with_state(state.auth.clone(), auth_middleware))
+        .layer(from_fn_with_state(state.clone(), auth_middleware))
         .layer(from_fn(inject_peer_addr))
         .layer(from_fn_with_state(state.sessions.clone(), audit_middleware))
         .layer(from_fn(protocol_version_middleware))
@@ -387,28 +399,46 @@ fn finish_operation<T>(
 }
 
 async fn auth_middleware(
-    State(auth): State<AuthState>,
-    req: Request<Body>,
+    State(state): State<AppState>,
+    mut req: Request<Body>,
     next: Next,
-) -> Result<Response, StatusCode> {
+) -> Response {
     let path = req.uri().path();
-    if path.starts_with("/v1/metadata/") || path.starts_with("/v1/auth/") {
-        return Ok(next.run(req).await);
+    if is_public_path(path) {
+        return next.run(req).await;
     }
-    let Some(expected) = auth.bearer_token.as_deref() else {
-        return Ok(next.run(req).await);
+
+    if state.metadata.is_some() {
+        return match resolve_auth_context_blocking(state.clone(), req.headers().clone()).await {
+            Ok(context) => {
+                req.extensions_mut().insert(context);
+                next.run(req).await
+            }
+            Err(error) => error.into_response(),
+        };
+    }
+
+    // Metadata-free personal mode is retained for the headless development
+    // harness. It never applies to team deployments and still requires either
+    // an explicit static bearer or a verified loopback peer.
+    if state.auth.deployment == DeploymentPolicy::Team {
+        return ApiError::MetadataUnavailable.into_response();
+    }
+    let presented = bearer_from_headers(req.headers());
+    let bearer_valid = match (presented, state.auth.bearer_token.as_deref()) {
+        (Some(actual), Some(expected)) => constant_time_eq(actual.as_bytes(), expected.as_bytes()),
+        (Some(_), None) | (None, _) => false,
     };
-    let valid = req
-        .headers()
-        .get(header::AUTHORIZATION)
-        .and_then(|h| h.to_str().ok())
-        .and_then(|h| h.strip_prefix("Bearer "))
-        .is_some_and(|actual| constant_time_eq(actual.as_bytes(), expected.as_bytes()));
-    if valid {
-        Ok(next.run(req).await)
-    } else {
-        Err(StatusCode::UNAUTHORIZED)
+    let bypass_allowed =
+        presented.is_none() && state.auth.loopback_bypass && peer_is_loopback(req.headers());
+    if !bearer_valid && !bypass_allowed {
+        return ApiError::Unauthorized.into_response();
     }
+    next.run(req).await
+}
+
+fn is_public_path(path: &str) -> bool {
+    matches!(path, "/v1/health" | "/v1/ready" | "/v1/openapi.json")
 }
 
 /// Constant-time equality for the static bearer token, so the auth check is
@@ -504,44 +534,35 @@ fn resolve_auth_context(state: &AppState, headers: &HeaderMap) -> ApiResult<Auth
                 tenants,
             });
         }
-    }
-
-    // Loopback bypass: only trust when the peer is actually on the loopback
-    // interface. Without this check, `loopback_bypass = true` (the default)
-    // authenticates any unauthenticated client — remote or local — as the
-    // local principal.
-    let bypass_allowed = state.auth.loopback_bypass && peer_is_loopback(headers);
-
-    if bearer_from_headers(headers).is_some_and(|token| {
-        state
+        if state
             .auth
             .bearer_token
             .as_deref()
-            .is_some_and(|expected| token == expected)
-    }) && bypass_allowed
-    {
-        let principal = metadata
-            .resolve_principal_by_external_id("local:1")?
-            .ok_or(ApiError::Unauthorized)?;
-        let tenants = metadata.list_principal_tenants(principal.id)?;
-        return Ok(AuthContext {
-            principal_id: principal.id,
-            tenants,
-        });
+            .is_some_and(|expected| constant_time_eq(token.as_bytes(), expected.as_bytes()))
+        {
+            return local_auth_context(metadata);
+        }
+        // Explicit invalid credentials never fall through to loopback bypass.
+        return Err(ApiError::Unauthorized);
     }
 
-    if bypass_allowed {
-        let principal = metadata
-            .resolve_principal_by_external_id("local:1")?
-            .ok_or(ApiError::Unauthorized)?;
-        let tenants = metadata.list_principal_tenants(principal.id)?;
-        return Ok(AuthContext {
-            principal_id: principal.id,
-            tenants,
-        });
+    // Team-mode validation forbids enabling this implicit path.
+    if state.auth.loopback_bypass && peer_is_loopback(headers) {
+        return local_auth_context(metadata);
     }
 
     Err(ApiError::Unauthorized)
+}
+
+fn local_auth_context(metadata: &MetadataStore) -> ApiResult<AuthContext> {
+    let principal = metadata
+        .resolve_principal_by_external_id("local:1")?
+        .ok_or(ApiError::Unauthorized)?;
+    let tenants = metadata.list_principal_tenants(principal.id)?;
+    Ok(AuthContext {
+        principal_id: principal.id,
+        tenants,
+    })
 }
 
 async fn resolve_auth_context_blocking(

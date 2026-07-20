@@ -64,6 +64,7 @@ fn audited_state(driver: MockDriver) -> AppState {
         auth: AuthState {
             bearer_token: None,
             loopback_bypass: true,
+            deployment: Default::default(),
         },
         metadata: Some(metadata),
         shutdown: Shutdown::default(),

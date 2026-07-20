@@ -90,6 +90,7 @@ async fn main() -> anyhow::Result<()> {
         auth: sift_server::http::AuthState {
             bearer_token: cfg.auth.bearer_token.clone(),
             loopback_bypass: cfg.auth.loopback_bypass,
+            deployment: cfg.deployment,
         },
         metadata,
         shutdown: shutdown.clone(),

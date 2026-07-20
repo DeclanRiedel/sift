@@ -110,6 +110,7 @@ fn test_state_with_token(token: &str) -> AppState {
         auth: AuthState {
             bearer_token: Some(token.to_string()),
             loopback_bypass: false,
+            deployment: Default::default(),
         },
         metadata: None,
     }
@@ -142,6 +143,7 @@ fn test_state_with_metadata(loopback_bypass: bool) -> AppState {
         auth: AuthState {
             bearer_token: None,
             loopback_bypass,
+            deployment: Default::default(),
         },
         metadata: Some(metadata),
     }
@@ -935,11 +937,18 @@ async fn bearer_token_auth_is_enforced_when_configured() {
         .oneshot(Request::get("/v1/health").body(Body::empty()).unwrap())
         .await
         .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+
+    let res = app
+        .clone()
+        .oneshot(Request::get("/v1/audit").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
     assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
 
     let res = app
         .oneshot(
-            Request::get("/v1/health")
+            Request::get("/v1/audit")
                 .header("authorization", "Bearer secret")
                 .body(Body::empty())
                 .unwrap(),
@@ -1478,13 +1487,19 @@ async fn http_execute_records_room_scoped_query_history() {
     .await;
     let conn: sift_protocol::ConnectionInfo = body_json(
         app.clone()
-            .oneshot(post_json(
-                format!("/v1/sessions/{}/connections", session.id),
-                sift_protocol::OpenConnectionRequest {
-                    engine: Engine::Postgres,
-                    spec: pg_spec(),
-                },
-            ))
+            .oneshot(
+                Request::post(format!("/v1/sessions/{}/connections", session.id))
+                    .header("authorization", format!("Bearer {token}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&sift_protocol::OpenConnectionRequest {
+                            engine: Engine::Postgres,
+                            spec: pg_spec(),
+                        })
+                        .unwrap(),
+                    ))
+                    .unwrap(),
+            )
             .await
             .unwrap()
             .into_body(),
@@ -2263,13 +2278,19 @@ async fn cancel_rejects_different_session_owner() {
     .await;
     let conn: sift_protocol::ConnectionInfo = body_json(
         app.clone()
-            .oneshot(post_json(
-                format!("/v1/sessions/{}/connections", session.id),
-                sift_protocol::OpenConnectionRequest {
-                    engine: Engine::Postgres,
-                    spec: pg_spec(),
-                },
-            ))
+            .oneshot(
+                Request::post(format!("/v1/sessions/{}/connections", session.id))
+                    .header("authorization", format!("Bearer {owner_token}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&sift_protocol::OpenConnectionRequest {
+                            engine: Engine::Postgres,
+                            spec: pg_spec(),
+                        })
+                        .unwrap(),
+                    ))
+                    .unwrap(),
+            )
             .await
             .unwrap()
             .into_body(),
