@@ -115,26 +115,25 @@ real identity," without breaking local-first (ADR-006, ADR-010).
       30-day rotating refresh families with replay revocation; native bearer +
       secure web cookie; WebSocket auth leases; personal tenant on first
       principal creation and explicit invite/accept for teams.
-- [ ] [Implement] Authentication floor: central fail-closed middleware and
+- [x] [Implement] Authentication floor: central fail-closed middleware and
       principal/room ownership across sessions, connections, transactions,
       cursors, queries, and WebSockets. This minimum authorization moves from
       Phase F because hosted identity is unsafe without it.
-- [ ] [Implement] Instance admin bootstrap and closed registration: create,
+- [x] [Implement] Instance admin bootstrap and closed registration: create,
       disable, link, and revoke password/GitHub identities; GitHub allowlist;
       personal-tenant creation and team invitation lifecycle.
-- [ ] [Implement] Username/password login using Argon2id verifiers behind
+- [x] [Implement] Username/password login using Argon2id verifiers behind
       `SecretStore`; auth-specific throttling; session-token
       issue/refresh/revoke with rotating refresh tokens and replay detection.
-- [ ] [Implement] Per-instance GitHub OAuth login route pair, allowlist
+- [x] [Implement] Per-instance GitHub OAuth login route pair, allowlist
       enforcement, immutable GitHub-id binding, and profile synchronization.
-- [ ] [Implement] Keypair auth. **Note: `principal_key` and
-      `keypair_challenge` tables already exist** (`V001__identity.sql:40`,
-      `:53`) but are **dead schema** — no Rust touches them. Wire or drop.
-- [ ] [Implement] Policy/transport guarantee: loopback bypass exists only for
+- [x] [Implement] Keypair auth. Ed25519 registration/revocation and bounded,
+      one-use challenges now issue the standard opaque Sift session shape.
+- [x] [Implement] Policy/transport guarantee: loopback bypass exists only for
       `personal + loopback`; every network transport requires explicit auth;
       team mode fails closed on unsafe configuration. Future SSH proxy auth
       uses an instance-bound capability rather than broadening loopback trust.
-- [ ] [Implement] Principal profile sync (display name, optional email, avatar
+- [x] [Implement] Principal profile sync (display name, optional email, avatar
       from GitHub on login); expose via `/v1/auth/whoami`; native SDK token
       rotation and cookie/CSRF + WebSocket reauthentication surfaces.
 
@@ -269,9 +268,9 @@ Goal: the last mile before a real release.
 
 ## Sequencing & dependency notes
 
-- **Phase D is complete.** Phase E hosted identity is the next ordered phase.
-- **Phase E's keypair work is partially unblocked** — `principal_key` and
-  `keypair_challenge` tables already exist (dead schema).
+- **Phases D and E are complete.** Hosted password/GitHub identity, closed
+  registration, keypair sessions, invitations, ownership enforcement, and
+  renewable WebSocket leases are implemented and release-gated.
 - **Phase G's first deliverable is replacing `sift-doc` with a real CRDT.**
   Everything else in G (late-join, presence split, follow mode) depends on it.
 - **Phase H depends on E's instance-bound proxy capability + a real version

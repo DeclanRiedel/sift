@@ -1,6 +1,6 @@
 # Phase E — instance-owned identity and authentication
 
-Status: accepted design (ADR-030); implementation pending.
+Status: implemented (ADR-030; Phase E complete).
 
 ## Goal
 
@@ -208,6 +208,9 @@ Interactive authentication:
 - `GET /v1/auth/github/start` — begin the instance GitHub flow;
 - `GET /v1/auth/github/callback` — validate callback and complete or hand off
   the one-time Sift login result;
+- `POST /v1/auth/github/exchange` — consume the native IDE's one-use handoff
+  after the browser callback, returning Sift tokens without putting them in a
+  URL or browser-visible response;
 - `POST /v1/auth/refresh` — rotate refresh credentials;
 - `POST /v1/auth/logout` — revoke the current auth session;
 - `POST /v1/auth/logout-all` — revoke all interactive sessions for the
