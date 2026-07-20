@@ -728,3 +728,82 @@ boundary for later replacement. Phase E grows to include ownership enforcement
 and auth-specific throttling because exposing identity without those controls
 would not create a safely hostable server. Detailed contracts and sequencing
 are in `docs/PLANS/hosted-identity.md`.
+
+---
+
+## ADR-020 — Authorization Intersects Tenant, Room, And Connection Policy
+
+**Context.** Phase E established authenticated principals and ownership for
+session-derived resources, but ownership alone is not sufficient for a hosted
+database IDE. A tenant member may be allowed into a room without being allowed
+to use every connection, and observing a collaborative query is different from
+executing it. The current raw-spec connection route would also bypass any
+profile policy if it remained reachable on a shared instance. At the same time,
+requiring a login or a saved profile for a personal server bound to loopback
+would violate Sift's zero-friction local-first goal.
+
+**Decision.** Authorization and transport remain separate concerns. The trust
+boundary is:
+
+| Deployment | Transport | Login | Connection entry |
+| --- | --- | --- | --- |
+| personal | loopback | optional | raw spec or profile |
+| personal | network | required | profile only |
+| team | loopback | required | profile only |
+| team | network | required | profile only |
+
+The personal-loopback bypass resolves to the bootstrapped local principal and
+personal tenant internally; it is not an unaffiliated or unowned runtime path.
+General abuse rate limits and tenant quotas are unlimited by default in this
+trusted-local mode, while hard safety bounds such as per-result size, cursor
+backpressure, driver timeouts, and cancellation remain active. Explicit policy
+on a saved local profile is still honored. Future SSH-proxy transport must
+establish an authenticated, instance-bound principal context and never widens
+loopback trust.
+
+For managed connections, permission is the intersection of the authenticated
+principal's tenant role, optional room role, and connection-profile policy.
+Every applicable layer must allow an operation and an explicit denial always
+wins. Tenant owner/admin roles may administer connection policy but do not
+bypass it for database operations. Tenant members may use profiles permitted to
+their role; tenant viewers cannot execute. Room owners/editors may edit and
+execute when tenant and profile policy also allow it; room viewers may observe
+documents, status, and shared result references but cannot execute.
+
+A connection profile carries a minimum tenant role plus `read_only`, optional
+`allowed_ops`, `blocked_ops`, and optional `allowed_schemas`. Operation sets use
+the public `OperationKind` vocabulary so capability discovery and enforcement
+cannot drift. A missing allowlist is unrestricted by that field, an empty
+allowlist permits nothing, and a blocklist always takes precedence. A missing
+schema allowlist is unrestricted; an empty one permits no schema. Restricted
+SQL is classified with the selected engine dialect before driver dispatch;
+unknown or ambiguous statements fail closed when read-only or schema policy
+requires classification. Database-side least-privilege credentials remain the
+final security boundary for dynamic SQL and stored procedures.
+
+One server-internal authorization evaluator is authoritative for HTTP,
+WebSocket, session dispatch, capability discovery, shared-room execution, and
+future automation surfaces. Managed runtime connections retain principal,
+tenant, profile, and policy-revision provenance; transactions, queries, and
+cursors inherit it. Removing access, deleting/disabling a profile, revoking
+credentials, or explicitly disconnecting invalidates active descendants.
+Ordinary policy edits take effect before the next operation while an already
+authorized in-flight operation may finish.
+
+Phase F resource enforcement is single-process. Durable policy and optional
+per-tenant overrides live in SQLite, while token buckets and live-resource
+counters live in memory. Rate admission intersects principal and tenant token
+buckets by route class. Tenant accounting covers managed connections,
+concurrent queries, cursors, and retained result bytes. A later distributed
+coordination backend may replace these in-memory mechanisms without changing
+the public policy model.
+
+**Consequences.** Local use remains login-free and supports direct connection
+specs without creating a remote policy bypass. Hosted and collaborative paths
+gain one explainable deny-wins model, and `ListAvailableOperations` can report
+the same decision the dispatcher will enforce. Sessions and connection entries
+need richer provenance, and restricted SQL incurs parser/classifier work;
+unrestricted profiles avoid that cost. Phase G shared connections must use this
+evaluator, Phase H proxy bootstrap must establish its principal context, Phase
+I MCP governance must consume rather than duplicate this policy, and Phase J
+metrics export must read the Phase F resource counters.

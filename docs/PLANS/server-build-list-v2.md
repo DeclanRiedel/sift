@@ -143,9 +143,10 @@ Goal: deepen Phase E's principal/room ownership floor into configurable
 tenant and connection policy. Per-connection permissions, general API limits,
 and tenant-resource enforcement remain absent.
 
-- [ ] [Design] ADR-020 (candidate): authorization model — connection-level
-      permissions, room roles (already owner/editor/viewer), tenant roles;
-      where policy is evaluated.
+- [x] [Design] ADR-020: deny-wins intersection of tenant role, room role, and
+      connection-profile policy through one server evaluator. Personal +
+      loopback stays login-optional and permits raw connection specs; every
+      shared/network path requires authentication and managed profiles.
 - [ ] [Design] General rate limiting (per-principal + per-tenant token bucket or
       sliding window); 429 + `Retry-After`. `Code::RateLimited` does not
       exist today. Phase E separately owns login/refresh abuse throttling.
@@ -186,7 +187,8 @@ session. CRDT only for query text; everything else server-authoritative.
       (`room_runtime.rs:84`).
 - [ ] [Design] Shared-connection ownership: a connection opened in a room
       is server-owned; members attach and run ops through it with role
-      gating (editor+ can run queries, viewer observes).
+      gating from ADR-020 (editor+ can run only operations also permitted by
+      tenant/profile policy; viewer observes result references).
 - [ ] [Implement] Real CRDT in `sift-doc`; snapshot + op-log persistence in
       metadata; deterministic merge across peers.
 - [ ] [Implement] Late-join snapshot + ops-since over the room WS; bounded
@@ -210,7 +212,9 @@ handshake.
       initial remote support.
 - [ ] [Design] Remote bootstrap (SSH control-master, binary fetch/upload,
       version check, daemon spawn/reconnect, capability handoff over the
-      authenticated channel); reconnect + state survival on SSH drop.
+      authenticated channel); reconnect + state survival on SSH drop. The
+      proxy establishes an instance-bound principal context and never inherits
+      personal-loopback bypass (ADR-020/030).
 - [ ] [Design] Version handshake. The client-sdk never sends or inspects
       `X-Sift-Protocol-Version` today (`client-sdk/src/lib.rs` never
       imports `PROTOCOL_VERSION`); the server emits it one-way. Both sides
@@ -236,8 +240,8 @@ hooks without forking the server.
 - [ ] [Design] MCP server surface (`sift mcp`): every `Operation` is a
       tool; results are protocol types.
 - [ ] [Design] MCP governance layer (operation classification, per-
-      connection policy, approval flow for write/destructive ops); ties to
-      Phase F authorization.
+      connection policy, approval flow for write/destructive ops); it consumes
+      the Phase F evaluator and must not create a second authorization model.
 - [ ] [Design] Connection hooks (`PreConnect`/`PostConnect`/etc); tunneling
       for user DBs (SSH/SOCKS5/HTTP CONNECT/SSM); plugin/extension loading.
 - [ ] [Implement] Driver RPC host; `sift mcp` subcommand; governance
@@ -251,7 +255,8 @@ Goal: the last mile before a real release.
       export; server-side migrations policy (`sift migrate` subcommand vs
       startup gate — today refinery runs eagerly on startup,
       `metadata/src/lib.rs:80`); backup/restore ops; query plan capture +
-      retrieval; scheduler.
+      retrieval; scheduler. Prometheus/OTLP export consumes Phase F's
+      resource counters and rate-limit events.
 - [ ] [Design] Release + packaging (musl/static Linux, macOS, Windows;
       per-channel artifacts; signature material for the Phase H updater).
 - [ ] [Implement] Prometheus metrics endpoint; OTLP trace export; `sift
@@ -273,12 +278,18 @@ Goal: the last mile before a real release.
   renewable WebSocket leases are implemented and release-gated.
 - **Phase G's first deliverable is replacing `sift-doc` with a real CRDT.**
   Everything else in G (late-join, presence split, follow mode) depends on it.
+- **Phase G shared execution depends on F's managed-connection provenance and
+  central evaluator.** Room roles narrow tenant/profile permission; they never
+  grant around it.
 - **Phase H depends on E's instance-bound proxy capability + a real version
   handshake.** The one-way header today is not a handshake. It does not
-  require a central identity or collaboration relay.
-- **Phase I is mostly orthogonal** but governance depends on F.
+  require a central identity or collaboration relay, and it cannot reuse the
+  personal-loopback bypass.
+- **Phase I is mostly orthogonal** but governance consumes F's evaluator and
+  `OperationKind` policy rather than defining parallel permissions.
 - **Phase J's OpenAPI item can land earlier** — the hand-authored map is
-  already drifting.
+  already drifting. Its metrics exporter consumes F's in-memory resource
+  counters; F does not introduce a competing Prometheus surface.
 
 ## ADR candidates this list implies
 
@@ -292,7 +303,7 @@ Goal: the last mile before a real release.
 | ADR-017 | driver trait shape | Phase A | written; Phase A trait lock |
 | ADR-018 | graceful shutdown contract | Phase B | written |
 | ADR-019 | audit durability | Phase B | written |
-| ADR-020 | authorization model | Phase F | not written |
+| ADR-020 | authorization model | Phase F | written |
 | ADR-021 | remote topology | Phase H | not written |
 | ADR-022 | driver extensibility | Phase I | not written |
 | ADR-023 | inline-edit conflict & row-identity model | Phase D | drafted in `docs/PLANS/inline-edit-dml.md` |
