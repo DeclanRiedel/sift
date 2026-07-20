@@ -17,6 +17,8 @@ pub mod error;
 pub mod export;
 pub mod fingerprint;
 pub mod http;
+pub mod identity;
+pub mod metadata_runtime;
 pub mod plan;
 pub mod process;
 pub mod registry;

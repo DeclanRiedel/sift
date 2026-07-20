@@ -16,6 +16,7 @@ sift-doc = { workspace = true }
 sift-completion = { workspace = true }
 sift-metadata = { workspace = true }
 anyhow = { workspace = true }
+argon2 = { workspace = true }
 async-stream = "0.3"
 async-trait = { workspace = true }
 axum = { workspace = true }
@@ -29,6 +30,8 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 schemars = { workspace = true }
 roxmltree = { workspace = true }
+rpassword = { workspace = true }
+rand_core = { workspace = true }
 sha2 = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
@@ -63,3 +66,7 @@ tower = { workspace = true, features = ["util"] }
 [[bin]]
 name = "sift-server"
 path = "src/main.rs"
+
+[[bin]]
+name = "sift-admin"
+path = "src/bin/sift-admin.rs"

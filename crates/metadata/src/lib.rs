@@ -367,6 +367,17 @@ impl MetadataStore {
             .map_err(Into::into)
     }
 
+    pub fn has_active_instance_admin(&self) -> Result<bool> {
+        let conn = self.conn()?;
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM principal
+             WHERE is_instance_admin = 1 AND disabled_at IS NULL",
+            [],
+            |row| row.get(0),
+        )?;
+        Ok(count > 0)
+    }
+
     /// Atomically creates the stable principal, its personal tenant and owner
     /// membership, its password identity, and the sanitized administration
     /// audit row. `password_verifier` is already an Argon2id verifier; it is
