@@ -96,7 +96,10 @@ impl ApiError {
                 | MetadataError::RoomNotFound(_)
                 | MetadataError::DocumentNotFound(_)
                 | MetadataError::RoomAttachmentNotFound(_)
-                | MetadataError::SavedQueryNotFound(_) => (StatusCode::NOT_FOUND, "not_found"),
+                | MetadataError::SavedQueryNotFound(_)
+                | MetadataError::PrincipalNotFound(_)
+                | MetadataError::AuthIdentityNotFound(_) => (StatusCode::NOT_FOUND, "not_found"),
+                MetadataError::FinalInstanceAdmin => (StatusCode::CONFLICT, "conflict"),
                 MetadataError::TenantMismatch(_, _) => (StatusCode::FORBIDDEN, "forbidden"),
                 MetadataError::MissingCredential(_, _)
                 | MetadataError::BrokerCredentialUnsupported(_) => {

@@ -69,6 +69,12 @@ pub enum MetadataError {
     RoomAttachmentNotFound(RoomAttachmentId),
     #[error("saved query {0:?} not found")]
     SavedQueryNotFound(SavedQueryId),
+    #[error("principal {0:?} not found")]
+    PrincipalNotFound(PrincipalId),
+    #[error("authentication identity {0:?} not found")]
+    AuthIdentityNotFound(AuthIdentityId),
+    #[error("cannot disable the final active instance administrator")]
+    FinalInstanceAdmin,
     #[error("secret store error: {0}")]
     SecretStore(String),
     #[error("io error: {0}")]
@@ -480,6 +486,130 @@ impl MetadataStore {
             return Ok(None);
         };
         self.secrets.get(PASSWORD_SECRET_NAMESPACE, handle).await
+    }
+
+    /// Disablement is principal-wide: all linked identities and interactive
+    /// sessions are revoked in the same transaction as the audit record.
+    pub fn set_principal_disabled(
+        &self,
+        principal: PrincipalId,
+        disabled: bool,
+        audit: NewOperationAudit,
+    ) -> Result<()> {
+        let now = now_text();
+        let mut conn = self.conn()?;
+        let tx = conn.transaction()?;
+        let is_admin: Option<bool> = tx
+            .query_row(
+                "SELECT is_instance_admin FROM principal WHERE id = ?1",
+                params![principal.0],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let Some(is_admin) = is_admin else {
+            return Err(MetadataError::PrincipalNotFound(principal));
+        };
+        if disabled && is_admin {
+            let other_admins: i64 = tx.query_row(
+                "SELECT COUNT(*) FROM principal
+                 WHERE is_instance_admin = 1 AND disabled_at IS NULL AND id != ?1",
+                params![principal.0],
+                |row| row.get(0),
+            )?;
+            if other_admins == 0 {
+                return Err(MetadataError::FinalInstanceAdmin);
+            }
+        }
+        let disabled_at = disabled.then_some(now.as_str());
+        tx.execute(
+            "UPDATE principal SET disabled_at = ?1, updated_at = ?2 WHERE id = ?3",
+            params![disabled_at, now, principal.0],
+        )?;
+        tx.execute(
+            "UPDATE auth_identity SET disabled_at = ?1, updated_at = ?2
+             WHERE principal_id = ?3",
+            params![disabled_at, now, principal.0],
+        )?;
+        if disabled {
+            tx.execute(
+                "UPDATE auth_session
+                 SET revoked_at = COALESCE(revoked_at, ?1),
+                     revocation_reason = COALESCE(revocation_reason, 'principal_disabled')
+                 WHERE principal_id = ?2",
+                params![now, principal.0],
+            )?;
+        }
+        insert_operation_audit_row(&tx, &audit)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub async fn replace_password_verifier(
+        &self,
+        identity: AuthIdentityId,
+        password_verifier: &[u8],
+        audit: NewOperationAudit,
+    ) -> Result<()> {
+        let new_handle = Uuid::new_v4().to_string();
+        self.secrets
+            .put(PASSWORD_SECRET_NAMESPACE, &new_handle, password_verifier)
+            .await?;
+        let now = now_text();
+        let backend = self.backend.clone();
+        let db_handle = new_handle.clone();
+        let result = sqlite_blocking(move || {
+            let mut conn = backend.conn()?;
+            let tx = conn.transaction()?;
+            let old_handle: Option<String> = tx
+                .query_row(
+                    "SELECT credential_handle FROM auth_identity
+                     WHERE id = ?1 AND method = 'password'",
+                    params![identity.0],
+                    |row| row.get(0),
+                )
+                .optional()?
+                .flatten();
+            let Some(old_handle) = old_handle else {
+                return Err(MetadataError::AuthIdentityNotFound(identity));
+            };
+            tx.execute(
+                "UPDATE auth_identity
+                 SET credential_handle = ?1, updated_at = ?2, disabled_at = NULL
+                 WHERE id = ?3",
+                params![db_handle, now, identity.0],
+            )?;
+            tx.execute(
+                "UPDATE auth_session
+                 SET revoked_at = COALESCE(revoked_at, ?1),
+                     revocation_reason = COALESCE(revocation_reason, 'password_changed')
+                 WHERE principal_id = (
+                    SELECT principal_id FROM auth_identity WHERE id = ?2
+                 )",
+                params![now, identity.0],
+            )?;
+            insert_operation_audit_row(&tx, &audit)?;
+            tx.commit()?;
+            Ok(old_handle)
+        })
+        .await;
+        match result {
+            Ok(old_handle) => {
+                self.delete_password_secret_best_effort(
+                    &old_handle,
+                    "replace_password_verifier_old",
+                )
+                .await;
+                Ok(())
+            }
+            Err(error) => {
+                self.delete_password_secret_best_effort(
+                    &new_handle,
+                    "replace_password_verifier_rollback",
+                )
+                .await;
+                Err(error)
+            }
+        }
     }
 
     pub fn create_tenant(&self, name: &str, kind: TenantKind) -> Result<Tenant> {
@@ -2127,6 +2257,175 @@ mod tests {
         let audit = store.list_operation_audit(1).unwrap();
         assert_eq!(audit[0].target_id, Some(principal.id.0));
         assert!(!serde_json::to_string(&audit).unwrap().contains("argon2"));
+    }
+
+    #[tokio::test]
+    async fn principal_disablement_is_atomic_and_protects_the_final_admin() {
+        let store = store();
+        let verifier = b"$argon2id$test";
+        let first = store
+            .create_password_principal(
+                NewPasswordPrincipal {
+                    username: "first-admin",
+                    display_name: "First",
+                    email: None,
+                    is_instance_admin: true,
+                },
+                verifier,
+                test_audit("create", "principal", None),
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            store.set_principal_disabled(
+                first.id,
+                true,
+                test_audit("disable", "principal", Some(first.id.0))
+            ),
+            Err(MetadataError::FinalInstanceAdmin)
+        ));
+
+        let second = store
+            .create_password_principal(
+                NewPasswordPrincipal {
+                    username: "second-admin",
+                    display_name: "Second",
+                    email: None,
+                    is_instance_admin: true,
+                },
+                verifier,
+                test_audit("create", "principal", None),
+            )
+            .await
+            .unwrap();
+        let conn = store.conn().unwrap();
+        conn.execute(
+            "INSERT INTO auth_session
+             (id, principal_id, refresh_family_id, client_kind, created_at, expires_at)
+             VALUES ('session-1', ?1, 'family-1', 'native', ?2, ?3)",
+            params![
+                first.id.0,
+                now_text(),
+                (Utc::now() + chrono::Duration::days(1)).to_rfc3339()
+            ],
+        )
+        .unwrap();
+        drop(conn);
+
+        store
+            .set_principal_disabled(
+                first.id,
+                true,
+                test_audit("disable", "principal", Some(first.id.0)),
+            )
+            .unwrap();
+        let disabled = store
+            .resolve_password_identity("first-admin")
+            .unwrap()
+            .unwrap();
+        assert!(disabled.principal.disabled_at.is_some());
+        assert!(disabled.identity.disabled_at.is_some());
+        let conn = store.conn().unwrap();
+        let reason: String = conn
+            .query_row(
+                "SELECT revocation_reason FROM auth_session WHERE id = 'session-1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(reason, "principal_disabled");
+        drop(conn);
+
+        store
+            .set_principal_disabled(
+                first.id,
+                false,
+                test_audit("enable", "principal", Some(first.id.0)),
+            )
+            .unwrap();
+        assert!(store
+            .resolve_password_identity("first-admin")
+            .unwrap()
+            .unwrap()
+            .principal
+            .disabled_at
+            .is_none());
+        assert!(second.is_instance_admin);
+    }
+
+    #[tokio::test]
+    async fn replacing_password_verifier_revokes_sessions_and_removes_old_secret() {
+        let store = store();
+        let principal = store
+            .create_password_principal(
+                NewPasswordPrincipal {
+                    username: "password-user",
+                    display_name: "Password User",
+                    email: None,
+                    is_instance_admin: false,
+                },
+                b"old-verifier",
+                NewOperationAudit {
+                    actor_principal_id: None,
+                    ..test_audit("create", "principal", None)
+                },
+            )
+            .await
+            .unwrap();
+        let original = store
+            .resolve_password_identity("password-user")
+            .unwrap()
+            .unwrap();
+        let conn = store.conn().unwrap();
+        conn.execute(
+            "INSERT INTO auth_session
+             (id, principal_id, refresh_family_id, client_kind, created_at, expires_at)
+             VALUES ('session-password', ?1, 'family-password', 'web', ?2, ?3)",
+            params![
+                principal.id.0,
+                now_text(),
+                (Utc::now() + chrono::Duration::days(1)).to_rfc3339()
+            ],
+        )
+        .unwrap();
+        drop(conn);
+
+        store
+            .replace_password_verifier(
+                original.identity.id,
+                b"new-verifier",
+                test_audit(
+                    "change_password",
+                    "auth_identity",
+                    Some(original.identity.id.0),
+                ),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            store.password_verifier(&original.identity).await.unwrap(),
+            None
+        );
+        let replacement = store
+            .resolve_password_identity("password-user")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            store
+                .password_verifier(&replacement.identity)
+                .await
+                .unwrap(),
+            Some(b"new-verifier".to_vec())
+        );
+        let conn = store.conn().unwrap();
+        let reason: String = conn
+            .query_row(
+                "SELECT revocation_reason FROM auth_session WHERE id = 'session-password'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(reason, "password_changed");
     }
 
     #[test]
