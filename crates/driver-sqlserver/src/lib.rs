@@ -720,8 +720,13 @@ SELECT
   COLUMNPROPERTY(OBJECT_ID(QUOTENAME(c.TABLE_SCHEMA) + '.' + QUOTENAME(c.TABLE_NAME)), c.COLUMN_NAME, 'IsIdentity') AS IS_IDENTITY,
   CASE WHEN pk.COLUMN_NAME IS NULL THEN CAST(0 AS bit) ELSE CAST(1 AS bit) END AS IS_PK,
   c.CHARACTER_MAXIMUM_LENGTH,
-  c.COLLATION_NAME
+  c.COLLATION_NAME,
+  dc.definition AS DEFAULT_EXPR
 FROM INFORMATION_SCHEMA.COLUMNS c
+LEFT JOIN sys.columns sc
+  ON sc.object_id = OBJECT_ID(QUOTENAME(c.TABLE_SCHEMA) + '.' + QUOTENAME(c.TABLE_NAME))
+ AND sc.name = c.COLUMN_NAME
+LEFT JOIN sys.default_constraints dc ON dc.object_id = sc.default_object_id
 LEFT JOIN (
   SELECT ku.TABLE_SCHEMA, ku.TABLE_NAME, ku.COLUMN_NAME
   FROM INFORMATION_SCHEMA.TABLE_CONSTRAINTS tc
@@ -770,6 +775,10 @@ ORDER BY c.ORDINAL_POSITION
                 .try_get::<&str, _>(6)
                 .map_err(ms_err)?
                 .map(str::to_string);
+            let default_expr = row
+                .try_get::<&str, _>(7)
+                .map_err(ms_err)?
+                .map(str::to_string);
             Ok(ColumnMetadata {
                 name,
                 type_ref: mssql_type_name_ref(type_name),
@@ -782,6 +791,7 @@ ORDER BY c.ORDINAL_POSITION
                         tds_type: Some(type_name.to_string()),
                         collation,
                         max_length,
+                        default_expr,
                     }),
                 },
             })
@@ -992,6 +1002,7 @@ fn ms_col(col: &tiberius::Column) -> ColumnMetadata {
                 tds_type: Some(format!("{:?}", col.column_type())),
                 collation: None,
                 max_length: None,
+                default_expr: None,
             }),
         },
     }

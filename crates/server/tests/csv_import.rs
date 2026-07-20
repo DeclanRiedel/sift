@@ -2,7 +2,9 @@ use axum::body::{to_bytes, Body};
 use axum::http::{Request, StatusCode};
 use sift_driver_api::mock::MockDriver;
 use sift_protocol::{
-    CsvConflictPolicy, CsvImportRequest, CsvImportResponse, Engine, Page, ServerInfo,
+    CatalogTree, ColumnMetadata, CsvConflictPolicy, CsvImportRequest, CsvImportResponse, Engine,
+    ObjectInfo, ObjectKind, Page, PrimitiveType, SchemaScope, SchemaSnapshot, SchemaTree,
+    ServerInfo, TypeRef,
 };
 use sift_server::http::{app, AppState, AuthState};
 use sift_server::{DriverRegistry, RoomRuntime, SessionStore, Shutdown};
@@ -25,6 +27,35 @@ fn state() -> AppState {
             current_database: "app".into(),
             current_user: "alice".into(),
             pool_warm_slots: None,
+        })
+        .schema_ok(SchemaSnapshot {
+            trees: vec![CatalogTree {
+                name: "app".into(),
+                schemas: vec![SchemaTree {
+                    name: "public".into(),
+                    objects: vec![ObjectInfo {
+                        name: "people".into(),
+                        kind: ObjectKind::Table,
+                        routine_args: None,
+                        columns: vec![
+                            ColumnMetadata::new("id", TypeRef::Primitive(PrimitiveType::Text)),
+                            ColumnMetadata::new("name", TypeRef::Primitive(PrimitiveType::Text)),
+                        ],
+                        indexes: vec![],
+                        constraints: vec![],
+                        triggers: vec![],
+                    }],
+                }],
+            }],
+            fetched_at: chrono::Utc::now(),
+            scope: SchemaScope::deep(sift_protocol::ObjectPath {
+                catalog: None,
+                schema: Some("public".into()),
+                name: "people".into(),
+                kind: Some(ObjectKind::Table),
+                routine_args: None,
+            }),
+            incomplete: false,
         })
         .execute_ok(inserted)
         .execute_ok(skipped)
@@ -78,7 +109,7 @@ async fn csv_import_skip_reports_inserted_and_duplicate_rows() {
 
     let request = CsvImportRequest {
         table: "public.people".into(),
-        data: b"id,name\n1,Alice\n1,Alice again\n".to_vec(),
+        data: b"id,name\n001,Alice\n001,Alice again\n".to_vec(),
         header: true,
         delimiter: ',',
         null_value: Some("NULL".into()),
@@ -107,6 +138,30 @@ async fn csv_import_skip_reports_inserted_and_duplicate_rows() {
         sift_protocol::InferredCsvType::Int64
     );
 
+    let invalid = CsvImportRequest {
+        table: "public.people".into(),
+        data: b"id,id\n1,2\n".to_vec(),
+        header: true,
+        delimiter: ',',
+        null_value: Some("NULL".into()),
+        create_table: false,
+        conflict_policy: CsvConflictPolicy::Abort,
+    };
+    let invalid_response = router
+        .clone()
+        .oneshot(
+            Request::post(format!(
+                "/v1/sessions/{}/connections/{}/import/csv",
+                session.id, connection.id
+            ))
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&invalid).unwrap()))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(invalid_response.status(), StatusCode::BAD_REQUEST);
+
     let operations: Vec<sift_protocol::OperationAuditEntry> = json(
         router
             .oneshot(Request::get("/v1/operations").body(Body::empty()).unwrap())
@@ -118,5 +173,10 @@ async fn csv_import_skip_reports_inserted_and_duplicate_rows() {
     assert!(operations.iter().any(|entry| matches!(
         &entry.operation,
         sift_protocol::Operation::ImportCsv { table, .. } if table == "public.people"
+    )));
+    assert!(operations.iter().any(|entry| matches!(
+        &entry.operation,
+        sift_protocol::Operation::ImportCsv { table, .. }
+            if table == "public.people" && entry.status == sift_protocol::OperationStatus::Failed
     )));
 }

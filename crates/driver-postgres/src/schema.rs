@@ -279,6 +279,7 @@ async fn query_columns(
                     a.atttypid AS type_oid,
                     a.attnotnull AS not_null,
                     a.attidentity AS identity,
+                    a.attndims AS array_dims,
                     pg_get_expr(ad.adbin, ad.adrelid) AS default_expr
              FROM pg_attribute a
              JOIN pg_class c ON c.oid = a.attrelid
@@ -300,7 +301,8 @@ async fn query_columns(
         let type_oid: u32 = row.get(1);
         let not_null: bool = row.get(2);
         let identity: i8 = row.get(3);
-        let default_expr: Option<String> = row.get(4);
+        let array_dims: i32 = row.get(4);
+        let default_expr: Option<String> = row.get(5);
 
         // Build TypeRef from the type OID via tokio_postgres::Type::from_oid.
         let type_ref = tokio_postgres::types::Type::from_oid(type_oid)
@@ -324,7 +326,16 @@ async fn query_columns(
             },
             auto_increment,
             primary_key: pk_columns.contains(&col_name),
-            facets: Default::default(),
+            facets: sift_protocol::EngineColumnFacets {
+                postgres: Some(sift_protocol::PgColumnFacets {
+                    oid: Some(type_oid),
+                    array_dims: u8::try_from(array_dims).unwrap_or(u8::MAX),
+                    is_identity: identity as u8 != b' ',
+                    default_expr,
+                    enum_values: None,
+                }),
+                sql_server: None,
+            },
         });
     }
     Ok(out)

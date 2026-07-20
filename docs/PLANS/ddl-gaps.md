@@ -11,30 +11,15 @@ PK/FK/UNIQUE/CHECK + standalone indexes; views; materialized views).
 Everything on this list is a real hole; the round-trip is only a proof
 of what already works.
 
-## Priority 1 — fix soon (real bugs on shipped surface)
+## Priority 1 — resolved in the Phase D polish pass
 
-1. **`ForeignTable` currently emits `CREATE TABLE`.** The routing
-   drops through the table branch; there's no SERVER / OPTIONS clause.
-   **Fix shape:** dedicated `generate_foreign_table_ddl` calling
-   `pg_get_foreign_table_ddl` (PG 15+) or hand-composing from
-   `pg_foreign_table` + `pg_foreign_server`. Rare in daily use but
-   the current output is *misleadingly wrong* — it looks like a table,
-   isn't one, and would fail to apply against a live DB.
-
-2. **Column DEFAULT expressions are dropped.** `ColumnMetadata` has no
-   field for `default_expr`, so the generator never emits
-   `DEFAULT <expr>`. Round-tripping a table with defaults silently
-   loses them. **Fix shape:** add `default_expr: Option<String>` to
-   `ColumnMetadata`; PG driver fills from
-   `pg_get_expr(pg_attribute.atthasdef → pg_attrdef.adbin, atttypid)`;
-   MSSQL from `sys.default_constraints`. Formatter appends
-   ` DEFAULT <expr>` after the type.
-
-3. **`GENERATED ALWAYS AS IDENTITY` is dropped.** The PG driver
-   reports `is_identity: true` in `PgColumnFacets` but the DDL
-   formatter ignores facets entirely. **Fix shape:** if facets report
-   identity, emit `GENERATED ALWAYS AS IDENTITY` in place of the
-   nullability suffix.
+1. `ForeignTable` no longer emits misleading `CREATE TABLE` output. It now
+   returns `UnsupportedForEngine` until server/options metadata is modeled.
+2. PG and SQL Server deep schema metadata carry column default expressions,
+   and table DDL renders them.
+3. PG identity and legacy serial columns, plus SQL Server identity columns,
+   are rendered explicitly. Serial columns use the pseudo-type instead of
+   copying a `nextval(...)` expression that references the source sequence.
 
 ## Priority 2 — natural next batch (unimplemented `ObjectKind`s users can already ask for)
 
@@ -101,9 +86,5 @@ of what already works.
 
 ## What order to tackle
 
-Do Priority 1 as one bundled pass — the remaining items all sit on
-`ColumnMetadata` or table-DDL shape changes and touch the same PG
-introspection module. Amortising the protocol churn in one commit is
-cheaper than separate passes. Priority 2 items are independent and can
-each land as isolated PRs. Priority 3/4 wait for a concrete driver
-(a user asks, or a feature above the driver layer needs it).
+Priority 2 items are independent and can each land as isolated changes.
+Priority 3/4 wait for a concrete driver need.

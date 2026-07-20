@@ -38,8 +38,15 @@ pub async fn generate_ddl(
     let kind = object.kind.unwrap_or(ObjectKind::Table);
     let engine = driver.engine();
     let ddl = match kind {
-        ObjectKind::Table | ObjectKind::PartitionedTable | ObjectKind::ForeignTable => {
+        ObjectKind::Table | ObjectKind::PartitionedTable => {
             generate_table_ddl(driver, handle, &object, engine).await?
+        }
+        ObjectKind::ForeignTable => {
+            return Err(DriverError::new(
+                Code::UnsupportedForEngine,
+                "foreign-table DDL requires server and options metadata and is not supported",
+            )
+            .with_engine(engine));
         }
         ObjectKind::View | ObjectKind::MaterializedView => {
             generate_view_ddl(driver, handle, &object, engine, kind).await?
@@ -101,11 +108,46 @@ fn format_table_ddl(path: &ObjectPath, info: &ObjectInfo, engine: Engine) -> Str
         .columns
         .iter()
         .map(|col| {
-            let mut line = format!(
-                "    {} {}",
-                quote_ident(&col.name, engine),
+            let pg_serial = matches!(engine, Engine::Postgres) && is_pg_serial_column(col);
+            let sql_type = if pg_serial {
+                match &col.type_ref {
+                    TypeRef::Primitive(sift_protocol::PrimitiveType::Int16) => "smallserial",
+                    TypeRef::Primitive(sift_protocol::PrimitiveType::Int32) => "serial",
+                    TypeRef::Primitive(sift_protocol::PrimitiveType::Int64) => "bigserial",
+                    _ => unreachable!("serial detection only accepts integer primitives"),
+                }
+                .to_owned()
+            } else {
                 type_to_sql(&col.type_ref, engine)
-            );
+            };
+            let mut line = format!("    {} {}", quote_ident(&col.name, engine), sql_type);
+            match engine {
+                Engine::Postgres => {
+                    if let Some(facets) = &col.facets.postgres {
+                        if facets.is_identity {
+                            line.push_str(" GENERATED ALWAYS AS IDENTITY");
+                        } else if !pg_serial {
+                            if let Some(default) = &facets.default_expr {
+                                line.push_str(" DEFAULT ");
+                                line.push_str(default);
+                            }
+                        }
+                    }
+                }
+                Engine::SqlServer => {
+                    if col.auto_increment {
+                        line.push_str(" IDENTITY(1,1)");
+                    } else if let Some(default) = col
+                        .facets
+                        .sql_server
+                        .as_ref()
+                        .and_then(|facets| facets.default_expr.as_deref())
+                    {
+                        line.push_str(" DEFAULT ");
+                        line.push_str(default);
+                    }
+                }
+            }
             if matches!(col.nullable, sift_protocol::Nullability::NotNullable) {
                 line.push_str(" NOT NULL");
             }
@@ -151,6 +193,24 @@ fn format_table_ddl(path: &ObjectPath, info: &ObjectInfo, engine: Engine) -> Str
         out.push_str(&format_index_ddl(path, idx, engine));
     }
     out
+}
+
+fn is_pg_serial_column(col: &sift_protocol::ColumnMetadata) -> bool {
+    col.auto_increment
+        && matches!(
+            &col.type_ref,
+            TypeRef::Primitive(
+                sift_protocol::PrimitiveType::Int16
+                    | sift_protocol::PrimitiveType::Int32
+                    | sift_protocol::PrimitiveType::Int64
+            )
+        )
+        && col
+            .facets
+            .postgres
+            .as_ref()
+            .and_then(|facets| facets.default_expr.as_deref())
+            .is_some_and(|default| default.trim_start().starts_with("nextval("))
 }
 
 fn constraint_fallback(c: &sift_protocol::ConstraintInfo, engine: Engine) -> String {
@@ -353,7 +413,7 @@ pub(crate) fn quote_ident(name: &str, engine: Engine) -> String {
     }
 }
 
-fn type_to_sql(t: &TypeRef, engine: Engine) -> String {
+pub(crate) fn type_to_sql(t: &TypeRef, engine: Engine) -> String {
     // Prefer the engine-native name when the driver preserved it via
     // Value::Engine facets — that's how deep-schema type introspection
     // reports SQL Server's `nvarchar(64)` etc. Fall back to a
@@ -420,5 +480,61 @@ mod tests {
             routine_args: Some(Vec::new()),
         };
         assert_eq!(pg_regprocedure_name(&path), "\"public\".\"answer\"()");
+    }
+
+    #[test]
+    fn table_ddl_preserves_pg_defaults_and_identity() {
+        let mut id = sift_protocol::ColumnMetadata::new(
+            "id",
+            TypeRef::Primitive(sift_protocol::PrimitiveType::Int64),
+        );
+        id.nullable = sift_protocol::Nullability::NotNullable;
+        id.facets.postgres = Some(sift_protocol::PgColumnFacets {
+            oid: Some(20),
+            array_dims: 0,
+            is_identity: true,
+            default_expr: None,
+            enum_values: None,
+        });
+        let mut status = sift_protocol::ColumnMetadata::new(
+            "status",
+            TypeRef::Primitive(sift_protocol::PrimitiveType::Text),
+        );
+        status.facets.postgres = Some(sift_protocol::PgColumnFacets {
+            oid: Some(25),
+            array_dims: 0,
+            is_identity: false,
+            default_expr: Some("'new'::text".into()),
+            enum_values: None,
+        });
+        let mut legacy_id = sift_protocol::ColumnMetadata::new(
+            "legacy_id",
+            TypeRef::Primitive(sift_protocol::PrimitiveType::Int32),
+        );
+        legacy_id.auto_increment = true;
+        legacy_id.facets.postgres = Some(sift_protocol::PgColumnFacets {
+            oid: Some(23),
+            array_dims: 0,
+            is_identity: false,
+            default_expr: Some("nextval('jobs_legacy_id_seq'::regclass)".into()),
+            enum_values: None,
+        });
+        let mut info = ObjectInfo::new("jobs", ObjectKind::Table);
+        info.columns = vec![id, status, legacy_id];
+        let ddl = format_table_ddl(
+            &ObjectPath {
+                catalog: None,
+                schema: Some("public".into()),
+                name: "jobs".into(),
+                kind: Some(ObjectKind::Table),
+                routine_args: None,
+            },
+            &info,
+            Engine::Postgres,
+        );
+        assert!(ddl.contains("\"id\" bigint GENERATED ALWAYS AS IDENTITY NOT NULL"));
+        assert!(ddl.contains("\"status\" text DEFAULT 'new'::text"));
+        assert!(ddl.contains("\"legacy_id\" serial"));
+        assert!(!ddl.contains("jobs_legacy_id_seq"));
     }
 }

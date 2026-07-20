@@ -3,7 +3,8 @@ use std::collections::HashSet;
 use sift_driver_api::{BulkOp, CopyOp};
 use sift_protocol::{
     Code, ConnectionId, CsvConflictPolicy, CsvImportRequest, CsvImportResponse, DriverError,
-    Engine, ExecuteRequestHttp, InferredCsvColumn, InferredCsvType, SessionId, Value,
+    Engine, ExecuteRequestHttp, InferredCsvColumn, InferredCsvType, ObjectKind, ObjectPath,
+    SchemaScope, SessionId, Value,
 };
 
 use crate::ddl::quote_ident;
@@ -43,7 +44,25 @@ pub async fn import(
             (rows, 0)
         }
         CsvConflictPolicy::Skip => {
-            ingest_skip(store, session, connection, engine, &table, &prepared).await?
+            let target_types = if request.create_table {
+                prepared
+                    .columns
+                    .iter()
+                    .map(|column| inferred_sql(column.inferred_type, engine).to_string())
+                    .collect()
+            } else {
+                target_column_types(store, session, connection, &request.table, &prepared).await?
+            };
+            ingest_skip(
+                store,
+                session,
+                connection,
+                engine,
+                &table,
+                &prepared,
+                &target_types,
+            )
+            .await?
         }
     };
 
@@ -292,6 +311,7 @@ async fn ingest_skip(
     engine: Engine,
     table: &str,
     prepared: &PreparedCsv,
+    target_types: &[String],
 ) -> ApiResult<(u64, u64)> {
     let column_sql = prepared
         .columns
@@ -305,12 +325,12 @@ async fn ingest_skip(
         let mut params = Vec::new();
         let values = record
             .iter()
-            .zip(&prepared.columns)
-            .map(|(value, column)| match value {
+            .zip(target_types)
+            .map(|(value, target_type)| match value {
                 None => "NULL".to_string(),
                 Some(value) => {
-                    params.push(to_value(value, column.inferred_type));
-                    placeholder(engine, params.len())
+                    params.push(Value::Text(value.clone()));
+                    cast_placeholder(engine, params.len(), target_type)
                 }
             })
             .collect::<Vec<_>>()
@@ -346,29 +366,93 @@ async fn ingest_skip(
     Ok((inserted, skipped))
 }
 
-fn to_value(value: &str, inferred: InferredCsvType) -> Value {
-    match inferred {
-        InferredCsvType::Boolean => Value::Bool(value.eq_ignore_ascii_case("true")),
-        InferredCsvType::Int64 => value
-            .parse()
-            .map(Value::Int64)
-            .unwrap_or_else(|_| Value::Text(value.into())),
-        InferredCsvType::Decimal => Value::Decimal(value.into()),
-        InferredCsvType::Date => chrono::NaiveDate::parse_from_str(value, "%Y-%m-%d")
-            .map(Value::Date)
-            .unwrap_or_else(|_| Value::Text(value.into())),
-        InferredCsvType::TimestampTz => chrono::DateTime::parse_from_rfc3339(value)
-            .map(|value| Value::TimestampTz(value.to_utc()))
-            .unwrap_or_else(|_| Value::Text(value.into())),
-        InferredCsvType::Text => Value::Text(value.into()),
+fn cast_placeholder(engine: Engine, index: usize, target_type: &str) -> String {
+    match engine {
+        Engine::Postgres => format!("CAST(${index} AS text)::{target_type}"),
+        Engine::SqlServer => format!("CAST(@P{index} AS {target_type})"),
     }
 }
 
-fn placeholder(engine: Engine, index: usize) -> String {
-    match engine {
-        Engine::Postgres => format!("${index}"),
-        Engine::SqlServer => format!("@P{index}"),
+async fn target_column_types(
+    store: &SessionStore,
+    session: SessionId,
+    connection: ConnectionId,
+    table: &str,
+    prepared: &PreparedCsv,
+) -> ApiResult<Vec<String>> {
+    let path = table_path(table)?;
+    let snapshot = store
+        .schema(session, connection, SchemaScope::deep(path.clone()))
+        .await?;
+    let object = snapshot
+        .trees
+        .iter()
+        .filter(|catalog| {
+            path.catalog
+                .as_ref()
+                .map_or(true, |name| &catalog.name == name)
+        })
+        .flat_map(|catalog| &catalog.schemas)
+        .filter(|schema| {
+            path.schema
+                .as_ref()
+                .map_or(true, |name| &schema.name == name)
+        })
+        .flat_map(|schema| &schema.objects)
+        .find(|object| object.name == path.name)
+        .ok_or_else(|| {
+            ApiError::Driver(DriverError::new(
+                Code::UndefinedObject,
+                format!("CSV target table `{table}` was not found"),
+            ))
+        })?;
+    let engine = store.conn_entry(session, connection)?.driver.engine();
+    prepared
+        .columns
+        .iter()
+        .map(|csv_column| {
+            object
+                .columns
+                .iter()
+                .find(|column| column.name == csv_column.name)
+                .map(|column| crate::ddl::type_to_sql(&column.type_ref, engine))
+                .ok_or_else(|| {
+                    ApiError::Driver(DriverError::new(
+                        Code::UndefinedObject,
+                        format!(
+                            "CSV column `{}` does not exist on target table `{table}`",
+                            csv_column.name
+                        ),
+                    ))
+                })
+        })
+        .collect()
+}
+
+fn table_path(table: &str) -> ApiResult<ObjectPath> {
+    let parts = table.split('.').collect::<Vec<_>>();
+    if parts.is_empty() || parts.len() > 3 || parts.iter().any(|part| part.trim().is_empty()) {
+        return Err(ApiError::BadRequest(
+            "table must be `table`, `schema.table`, or `database.schema.table`".into(),
+        ));
     }
+    let (catalog, schema, name) = match parts.as_slice() {
+        [name] => (None, None, *name),
+        [schema, name] => (None, Some((*schema).to_string()), *name),
+        [catalog, schema, name] => (
+            Some((*catalog).to_string()),
+            Some((*schema).to_string()),
+            *name,
+        ),
+        _ => unreachable!(),
+    };
+    Ok(ObjectPath {
+        catalog,
+        schema,
+        name: name.to_string(),
+        kind: Some(ObjectKind::Table),
+        routine_args: None,
+    })
 }
 
 fn qualified_table(table: &str, engine: Engine) -> ApiResult<String> {
@@ -464,5 +548,17 @@ mod tests {
     fn rejects_duplicate_headers_and_ragged_rows() {
         assert!(prepare(&request("id,id\n1,2\n")).is_err());
         assert!(prepare(&request("id,name\n1\n")).is_err());
+    }
+
+    #[test]
+    fn skip_placeholders_bind_text_then_cast_to_target_type() {
+        assert_eq!(
+            cast_placeholder(Engine::Postgres, 2, "numeric"),
+            "CAST($2 AS text)::numeric"
+        );
+        assert_eq!(
+            cast_placeholder(Engine::SqlServer, 2, "decimal(38,10)"),
+            "CAST(@P2 AS decimal(38,10))"
+        );
     }
 }

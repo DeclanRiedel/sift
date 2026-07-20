@@ -58,6 +58,8 @@ pub struct MockDriver {
     execute_hang: bool,
     /// `schema` never resolves — models a wedged introspection call.
     schema_pending: bool,
+    /// `commit` never resolves — models an indeterminate transaction end.
+    commit_pending: bool,
     /// `ping` panics — models a driver code path that unwinds. Used to prove
     /// the server contains driver panics rather than crashing.
     ping_panic: bool,
@@ -71,6 +73,7 @@ impl MockDriver {
             execute_pending: false,
             execute_hang: false,
             schema_pending: false,
+            commit_pending: false,
             ping_panic: false,
         }
     }
@@ -122,6 +125,7 @@ pub struct MockDriverBuilder {
     execute_pending: bool,
     execute_hang: bool,
     schema_pending: bool,
+    commit_pending: bool,
     ping_panic: bool,
 }
 
@@ -147,6 +151,12 @@ impl MockDriverBuilder {
     /// Make `schema` hang forever.
     pub fn schema_pending(mut self) -> Self {
         self.schema_pending = true;
+        self
+    }
+
+    /// Make `commit` hang forever.
+    pub fn commit_pending(mut self) -> Self {
+        self.commit_pending = true;
         self
     }
 
@@ -220,6 +230,16 @@ impl MockDriverBuilder {
         self
     }
 
+    pub fn commit_err(mut self, err: DriverError) -> Self {
+        self.state.commit.push_back(Box::new(move || Err(err)));
+        self
+    }
+
+    pub fn rollback_err(mut self, err: DriverError) -> Self {
+        self.state.rollback.push_back(Box::new(move || Err(err)));
+        self
+    }
+
     pub fn build(self) -> MockDriver {
         MockDriver {
             engine: self.engine,
@@ -230,6 +250,7 @@ impl MockDriverBuilder {
             execute_pending: self.execute_pending,
             execute_hang: self.execute_hang,
             schema_pending: self.schema_pending,
+            commit_pending: self.commit_pending,
             ping_panic: self.ping_panic,
         }
     }
@@ -284,6 +305,9 @@ impl Driver for MockDriver {
 
     async fn commit(&self, _t: TxHandle) -> Result<(), DriverError> {
         self.record("commit");
+        if self.commit_pending {
+            std::future::pending::<()>().await;
+        }
         MockDriver::pop_or_ok(&mut self.state.lock().unwrap().commit)
     }
 

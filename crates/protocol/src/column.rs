@@ -123,6 +123,9 @@ pub struct PgColumnFacets {
     pub array_dims: u8,
     /// True if this column is a SQL identity column (`GENERATED ... AS IDENTITY`).
     pub is_identity: bool,
+    /// Catalog-rendered DEFAULT expression, if one exists.
+    #[serde(default)]
+    pub default_expr: Option<String>,
     /// Enum values, if the column type is an enum.
     pub enum_values: Option<Vec<String>>,
 }
@@ -135,4 +138,7 @@ pub struct MssqlColumnFacets {
     pub collation: Option<String>,
     /// Declared max length, in bytes for binary types, chars for text types.
     pub max_length: Option<u32>,
+    /// Catalog-rendered DEFAULT constraint expression, if one exists.
+    #[serde(default)]
+    pub default_expr: Option<String>,
 }

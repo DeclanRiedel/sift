@@ -1175,6 +1175,7 @@ impl SessionStore {
             info: info.clone(),
             handle,
             savepoints: Mutex::new(Vec::new()),
+            ending: AtomicBool::new(false),
         };
         let session = self
             .inner
@@ -1190,11 +1191,18 @@ impl SessionStore {
         session_id: SessionId,
         req: EndTransactionRequest,
     ) -> ApiResult<()> {
-        let tx = self.tx_handle_for(session_id, req.connection, req.tx_id)?;
+        let tx = self.claim_tx_end(session_id, req.connection, req.tx_id)?;
         let entry = self.get_conn_entry(session_id, req.connection)?;
         let driver = entry.driver.clone();
-        self.run_bounded("commit", async move { driver.commit(tx).await })
-            .await?;
+        if let Err(error) = self
+            .run_bounded("commit", async move { driver.commit(tx).await })
+            .await
+        {
+            if transaction_end_is_retryable(&error) {
+                self.release_tx_end(session_id, req.tx_id);
+            }
+            return Err(error);
+        }
         self.remove_tx(session_id, req.connection, req.tx_id)?;
         Ok(())
     }
@@ -1204,11 +1212,18 @@ impl SessionStore {
         session_id: SessionId,
         req: EndTransactionRequest,
     ) -> ApiResult<()> {
-        let tx = self.tx_handle_for(session_id, req.connection, req.tx_id)?;
+        let tx = self.claim_tx_end(session_id, req.connection, req.tx_id)?;
         let entry = self.get_conn_entry(session_id, req.connection)?;
         let driver = entry.driver.clone();
-        self.run_bounded("rollback", async move { driver.rollback(tx).await })
-            .await?;
+        if let Err(error) = self
+            .run_bounded("rollback", async move { driver.rollback(tx).await })
+            .await
+        {
+            if transaction_end_is_retryable(&error) {
+                self.release_tx_end(session_id, req.tx_id);
+            }
+            return Err(error);
+        }
         self.remove_tx(session_id, req.connection, req.tx_id)?;
         Ok(())
     }
@@ -1501,7 +1516,47 @@ impl SessionStore {
                 "`connection` must match transaction connection".into(),
             ));
         }
+        if entry.ending.load(Ordering::Acquire) {
+            return Err(ApiError::BadRequest("transaction is ending".into()));
+        }
         Ok(entry.handle.clone())
+    }
+
+    fn claim_tx_end(
+        &self,
+        session_id: SessionId,
+        conn_id: ConnectionId,
+        tx_id: TxId,
+    ) -> ApiResult<TxHandle> {
+        let session = self
+            .inner
+            .sessions
+            .get(&session_id)
+            .ok_or(ApiError::SessionNotFound(session_id))?;
+        let entry = session.transactions.get(&tx_id).ok_or_else(|| {
+            ApiError::Driver(DriverError::new(
+                Code::TransactionNotFound,
+                "transaction not active",
+            ))
+        })?;
+        if entry.info.connection != conn_id {
+            return Err(ApiError::BadRequest(
+                "`connection` must match transaction connection".into(),
+            ));
+        }
+        entry
+            .ending
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .map_err(|_| ApiError::BadRequest("transaction is already ending".into()))?;
+        Ok(entry.handle.clone())
+    }
+
+    fn release_tx_end(&self, session_id: SessionId, tx_id: TxId) {
+        if let Some(session) = self.inner.sessions.get(&session_id) {
+            if let Some(entry) = session.transactions.get(&tx_id) {
+                entry.ending.store(false, Ordering::Release);
+            }
+        }
     }
 
     fn validate_execute_tx(
@@ -1999,6 +2054,7 @@ pub struct TransactionEntry {
     pub info: TransactionInfo,
     pub handle: TxHandle,
     pub savepoints: Mutex<Vec<SavepointInfo>>,
+    ending: AtomicBool,
 }
 
 /// Strip secrets and bind values from an operation before it is recorded on
@@ -2079,6 +2135,16 @@ fn timeout_error(op: &str) -> ApiError {
         Code::QueryTimedOut,
         format!("`{op}` exceeded the configured request timeout"),
     ))
+}
+
+fn transaction_end_is_retryable(error: &ApiError) -> bool {
+    !matches!(
+        error,
+        ApiError::Driver(DriverError {
+            code: Code::QueryTimedOut,
+            ..
+        }) | ApiError::Internal(_)
+    )
 }
 
 fn spawn_operation_log_writer(file: File) -> OperationLogWriter {

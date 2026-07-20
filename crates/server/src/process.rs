@@ -55,7 +55,9 @@ pub async fn kill(
             vec![Value::Int64(process_id)],
         ),
         Engine::SqlServer => (
-            format!("IF {process_id} <> @@SPID KILL {process_id}"),
+            format!(
+                "IF {process_id} = @@SPID SELECT CAST(0 AS bit) AS sift_terminated ELSE BEGIN KILL {process_id}; SELECT CAST(1 AS bit) AS sift_terminated END"
+            ),
             Vec::new(),
         ),
     };
@@ -72,15 +74,12 @@ pub async fn kill(
             },
         )
         .await?;
-    let terminated = match engine {
-        Engine::Postgres => response
-            .rows
-            .first()
-            .and_then(|row| row.values.first())
-            .and_then(value_bool)
-            .unwrap_or(false),
-        Engine::SqlServer => true,
-    };
+    let terminated = response
+        .rows
+        .first()
+        .and_then(|row| row.values.first())
+        .and_then(value_bool)
+        .unwrap_or(false);
     Ok(KillProcessResponse {
         process_id,
         terminated,
