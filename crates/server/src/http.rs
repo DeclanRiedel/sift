@@ -25,13 +25,13 @@ use sift_metadata::{
 };
 use sift_protocol::{
     AuditEntry, AuthClientKind, AuthPrincipal, AuthTenantMembership, AuthTokensResponse,
-    BeginTransactionRequest, BulkInsertRequest, CancelRequest, CsvImportRequest,
-    DocumentOperationEnvelope, EndTransactionRequest, ExecuteRequest, ExecuteRequestHttp, Health,
-    KillProcessRequest, ObjectPath, OpenConnectionRequest, OpenSessionRequest, Operation,
-    OperationStatus, PasswordLoginRequest, Readiness, RefreshAuthRequest, RoomClientMessage,
-    RoomQueryResult, RoomQueryStatus, RoomServerMessage, SavepointRequest, SchemaFilter,
-    SchemaScope, TransactionPreviewRequest, WebAuthResponse, WhoAmIResponse, WsClientMessage,
-    WsServerMessage, PROTOCOL_VERSION,
+    BeginTransactionRequest, BulkInsertRequest, CancelRequest, ChangePasswordRequest,
+    CsvImportRequest, DocumentOperationEnvelope, EndTransactionRequest, ExecuteRequest,
+    ExecuteRequestHttp, Health, KillProcessRequest, ObjectPath, OpenConnectionRequest,
+    OpenSessionRequest, Operation, OperationStatus, PasswordLoginRequest, Readiness,
+    RefreshAuthRequest, RoomClientMessage, RoomQueryResult, RoomQueryStatus, RoomServerMessage,
+    SavepointRequest, SchemaFilter, SchemaScope, TransactionPreviewRequest, WebAuthResponse,
+    WhoAmIResponse, WsClientMessage, WsServerMessage, PROTOCOL_VERSION,
 };
 
 use crate::config::DeploymentPolicy;
@@ -84,6 +84,7 @@ pub fn app(state: AppState) -> Router {
         .route("/v1/auth/logout", post(logout_auth))
         .route("/v1/auth/logout-all", post(logout_all_auth))
         .route("/v1/auth/whoami", get(whoami))
+        .route("/v1/auth/password", put(change_password))
         .route("/v1/metadata/tenants", get(list_metadata_tenants))
         .route(
             "/v1/metadata/rooms",
@@ -751,6 +752,71 @@ async fn logout_all_auth(
         None,
     );
     Ok(logout_response(auth.cookie_authenticated))
+}
+
+async fn change_password(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Extension(auth): Extension<AuthContext>,
+    Json(request): Json<ChangePasswordRequest>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let metadata = metadata_store(&state)?;
+    let identity = metadata
+        .list_auth_identities(auth.principal_id)?
+        .into_iter()
+        .find(|identity| {
+            identity.method == sift_metadata::AuthIdentityMethod::Password
+                && identity.disabled_at.is_none()
+        })
+        .ok_or_else(|| ApiError::BadRequest("principal has no password identity".into()))?;
+    let source = headers
+        .get(&PEER_ADDR_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("unknown");
+    let verified = state
+        .auth
+        .runtime
+        .authenticate_password(
+            metadata,
+            source,
+            &identity.subject,
+            request.current_password.into_bytes(),
+        )
+        .await
+        .map_err(|error| ApiError::Internal(error.to_string()))?;
+    match verified {
+        crate::identity::PasswordAuthOutcome::Authenticated(password)
+            if password.principal.id == auth.principal_id => {}
+        crate::identity::PasswordAuthOutcome::Throttled => {
+            return Err(ApiError::TooManyAuthAttempts)
+        }
+        crate::identity::PasswordAuthOutcome::Authenticated(_)
+        | crate::identity::PasswordAuthOutcome::Denied => return Err(ApiError::Unauthorized),
+    }
+    let verifier = crate::identity::hash_password(request.new_password.into_bytes())
+        .await
+        .map_err(|error| ApiError::BadRequest(error.to_string()))?;
+    metadata
+        .replace_password_verifier(
+            identity.id,
+            verifier.as_bytes(),
+            metadata_audit_record(
+                auth.principal_id,
+                "change_password",
+                "auth_identity",
+                Some(identity.id.0),
+            ),
+        )
+        .await?;
+    state.sessions.push_operation_local(
+        Operation::ChangePassword,
+        OperationStatus::Succeeded,
+        Some(auth.principal_id.0),
+        None,
+        None,
+        None,
+    );
+    Ok(Json(json!({"ok": true})))
 }
 
 async fn whoami(
@@ -1485,6 +1551,17 @@ async fn openapi() -> Json<serde_json::Value> {
                     "responses": { "200": { "description": "Authentication context", "content": json_content("WhoAmIResponse") } }
                 }
             },
+            "/v1/auth/password": {
+                "put": {
+                    "operationId": "changePassword",
+                    "summary": "Replace the current principal password and revoke interactive sessions",
+                    "requestBody": json_body("ChangePasswordRequest"),
+                    "responses": {
+                        "200": { "description": "Ack", "content": json_object_content() },
+                        "401": { "description": "Current password denied" }
+                    }
+                }
+            },
             "/v1/audit": {
                 "get": {
                     "operationId": "listAudit",
@@ -1999,6 +2076,7 @@ fn protocol_schema_refs() -> serde_json::Value {
     let mut schemas = serde_json::Map::new();
     add_schema::<sift_protocol::AuditEntry>("AuditEntry", &mut schemas);
     add_schema::<sift_protocol::PasswordLoginRequest>("PasswordLoginRequest", &mut schemas);
+    add_schema::<sift_protocol::ChangePasswordRequest>("ChangePasswordRequest", &mut schemas);
     add_schema::<sift_protocol::RefreshAuthRequest>("RefreshAuthRequest", &mut schemas);
     add_schema::<sift_protocol::AuthTokensResponse>("AuthTokensResponse", &mut schemas);
     add_schema::<sift_protocol::WebAuthResponse>("WebAuthResponse", &mut schemas);

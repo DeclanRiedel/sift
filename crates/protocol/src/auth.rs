@@ -25,6 +25,22 @@ pub struct PasswordLoginRequest {
     pub client_label: Option<String>,
 }
 
+#[derive(Clone, Serialize, Deserialize, JsonSchema)]
+pub struct ChangePasswordRequest {
+    pub current_password: String,
+    pub new_password: String,
+}
+
+impl fmt::Debug for ChangePasswordRequest {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ChangePasswordRequest")
+            .field("current_password", &"[REDACTED]")
+            .field("new_password", &"[REDACTED]")
+            .finish()
+    }
+}
+
 impl fmt::Debug for PasswordLoginRequest {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
@@ -138,9 +154,15 @@ mod tests {
             refresh_token: "sift_rt_secret".into(),
             refresh_expires_at: Utc::now(),
         };
-        let debug = format!("{login:?} {refresh:?} {tokens:?}");
+        let change = ChangePasswordRequest {
+            current_password: "current secret".into(),
+            new_password: "new secret".into(),
+        };
+        let debug = format!("{login:?} {refresh:?} {tokens:?} {change:?}");
         assert!(!debug.contains("correct horse"));
         assert!(!debug.contains("sift_rt_secret"));
         assert!(!debug.contains("sift_at_secret"));
+        assert!(!debug.contains("current secret"));
+        assert!(!debug.contains("new secret"));
     }
 }
