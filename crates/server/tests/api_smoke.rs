@@ -1176,6 +1176,110 @@ async fn websocket_lease_reauthenticates_after_rotation_and_closes_on_revocation
 }
 
 #[tokio::test]
+async fn room_websocket_lease_closes_when_membership_is_removed() {
+    let mut state = test_state_with_metadata(false);
+    let metadata = state.metadata.as_ref().unwrap().clone();
+    let member = metadata
+        .create_password_principal(
+            NewPasswordPrincipal {
+                username: "removed-room-member",
+                display_name: "Removed Member",
+                email: None,
+                is_instance_admin: false,
+            },
+            b"test-verifier",
+            NewOperationAudit {
+                actor_principal_id: Some(PrincipalId(1)),
+                action: "create".into(),
+                target: "principal".into(),
+                target_id: None,
+                status: "succeeded".into(),
+                result_code: None,
+                row_count: None,
+                error_message: None,
+                correlation_id: None,
+            },
+        )
+        .await
+        .unwrap();
+    let room = metadata
+        .create_room(
+            TenantId(1),
+            PrincipalId(1),
+            NewRoom {
+                name: "membership lease".into(),
+                kind: RoomKind::Shared,
+            },
+        )
+        .unwrap();
+    metadata
+        .upsert_tenant_membership(TenantId(1), member.id, MembershipRole::Member)
+        .unwrap();
+    metadata
+        .add_room_member(room.id, member.id, RoomRole::Editor)
+        .unwrap();
+    let issued = metadata
+        .issue_auth_session(
+            member.id,
+            sift_metadata::AuthClientKind::Native,
+            Some("room lease test"),
+            NewOperationAudit {
+                actor_principal_id: Some(member.id),
+                action: "authenticate".into(),
+                target: "auth_session".into(),
+                target_id: None,
+                status: "succeeded".into(),
+                result_code: None,
+                row_count: None,
+                error_message: None,
+                correlation_id: None,
+            },
+        )
+        .await
+        .unwrap();
+    state.auth.loopback_bypass = false;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app(state).into_make_service())
+            .await
+            .unwrap();
+    });
+    let provider = sift_client_sdk::SessionTokenProvider::new(AuthTokensResponse {
+        access_token: issued.access_token,
+        access_expires_at: issued.access_expires_at,
+        refresh_token: issued.refresh_token,
+        refresh_expires_at: issued.refresh_expires_at,
+    });
+    let client =
+        sift_client_sdk::Client::new(format!("http://{addr}")).with_session_tokens(provider);
+    let mut socket = client.connect_room_websocket(room.id).await.unwrap();
+    socket
+        .send(RoomClientMessage::Attach {
+            client_id: "membership-test".into(),
+        })
+        .await
+        .unwrap();
+    assert!(matches!(
+        socket.next().await.unwrap(),
+        RoomServerMessage::Attached { .. }
+    ));
+
+    metadata.remove_room_member(room.id, member.id).unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        loop {
+            if let RoomServerMessage::Error { message } = socket.next().await.unwrap() {
+                assert!(message.contains("membership"));
+                break;
+            }
+        }
+    })
+    .await
+    .expect("membership revocation is delivered");
+    server.abort();
+}
+
+#[tokio::test]
 async fn web_password_auth_uses_http_only_cookies_and_requires_csrf() {
     let mut state = test_state_with_metadata(false);
     let metadata = state.metadata.as_ref().unwrap();
