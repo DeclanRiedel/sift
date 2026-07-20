@@ -3,7 +3,7 @@
 
 use axum::body::Body;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::extract::{Path, Query, State};
+use axum::extract::{Extension, Path, Query, State};
 use axum::http::{header, header::HeaderName, HeaderMap, HeaderValue, Request, StatusCode};
 use axum::middleware::{from_fn, from_fn_with_state, Next};
 use axum::response::{IntoResponse, Response};
@@ -411,6 +411,9 @@ async fn auth_middleware(
     if state.metadata.is_some() {
         return match resolve_auth_context_blocking(state.clone(), req.headers().clone()).await {
             Ok(context) => {
+                if let Err(error) = authorize_route(&state, &context, path) {
+                    return error.into_response();
+                }
                 req.extensions_mut().insert(context);
                 next.run(req).await
             }
@@ -439,6 +442,66 @@ async fn auth_middleware(
 
 fn is_public_path(path: &str) -> bool {
     matches!(path, "/v1/health" | "/v1/ready" | "/v1/openapi.json")
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RouteAccess {
+    Public,
+    Authenticated,
+    Session(sift_protocol::SessionId),
+    Cursor(sift_protocol::CursorId),
+}
+
+/// Classify every current route family at the authentication boundary.
+/// Tenant/room/admin detail is evaluated by the typed handler after this
+/// authenticated floor; session-derived resources are enforced here because
+/// every operation below them inherits the session owner.
+fn route_access(path: &str) -> RouteAccess {
+    if is_public_path(path) {
+        return RouteAccess::Public;
+    }
+    if let Some(rest) = path.strip_prefix("/v1/sessions/") {
+        if let Some(id) = rest.split('/').next().and_then(|part| part.parse().ok()) {
+            return RouteAccess::Session(sift_protocol::SessionId(id));
+        }
+    }
+    if let Some(rest) = path.strip_prefix("/v1/cursors/") {
+        if let Some(id) = rest.split('/').next().and_then(|part| part.parse().ok()) {
+            return RouteAccess::Cursor(sift_protocol::CursorId(id));
+        }
+    }
+    RouteAccess::Authenticated
+}
+
+fn authorize_route(state: &AppState, auth: &AuthContext, path: &str) -> ApiResult<()> {
+    let owner = match route_access(path) {
+        RouteAccess::Public | RouteAccess::Authenticated => return Ok(()),
+        RouteAccess::Session(session) => state.sessions.session_owner(session)?,
+        RouteAccess::Cursor(cursor) => {
+            let spill = state
+                .sessions
+                .cursor_registry()
+                .spill_info(cursor)
+                .ok_or_else(|| {
+                    ApiError::Driver(sift_protocol::DriverError::new(
+                        sift_protocol::Code::CursorNotFound,
+                        "cursor not found",
+                    ))
+                })?;
+            state.sessions.session_owner(spill.session_id)?
+        }
+    };
+    if owner.is_some_and(|owner| owner != auth.principal_id) {
+        return Err(ApiError::Forbidden(
+            "resource belongs to another principal".into(),
+        ));
+    }
+    if owner.is_none() && state.auth.deployment == DeploymentPolicy::Team {
+        return Err(ApiError::Forbidden(
+            "team deployments reject unowned runtime resources".into(),
+        ));
+    }
+    Ok(())
 }
 
 /// Constant-time equality for the static bearer token, so the auth check is
@@ -2400,8 +2463,11 @@ async fn create_session(
 
 async fn list_sessions(
     State(state): State<AppState>,
+    auth: Option<Extension<AuthContext>>,
 ) -> ApiResult<Json<Vec<sift_protocol::SessionInfo>>> {
-    let sessions = state.sessions.list_sessions();
+    let sessions = state
+        .sessions
+        .list_sessions_for_owner(auth.map(|Extension(auth)| auth.principal_id));
     state
         .sessions
         .push_operation(Operation::ListSessions, OperationStatus::Succeeded);
@@ -3629,4 +3695,30 @@ async fn send_json<T: serde::Serialize>(
         .send(Message::Binary(bytes))
         .await
         .map_err(|e| ApiError::BadRequest(e.to_string()))
+}
+
+#[cfg(test)]
+mod route_access_tests {
+    use super::*;
+
+    #[test]
+    fn classifies_public_authenticated_and_owned_route_families() {
+        assert_eq!(route_access("/v1/health"), RouteAccess::Public);
+        assert_eq!(
+            route_access("/v1/metadata/rooms/1"),
+            RouteAccess::Authenticated
+        );
+        assert_eq!(
+            route_access("/v1/sessions/42/connections/7/schema"),
+            RouteAccess::Session(sift_protocol::SessionId(42))
+        );
+        assert_eq!(
+            route_access("/v1/cursors/9/pages"),
+            RouteAccess::Cursor(sift_protocol::CursorId(9))
+        );
+        assert_eq!(
+            route_access("/v1/sessions/not-a-number"),
+            RouteAccess::Authenticated
+        );
+    }
 }

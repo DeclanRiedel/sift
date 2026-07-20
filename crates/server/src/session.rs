@@ -428,6 +428,17 @@ impl SessionStore {
         self.inner.sessions.iter().map(|s| s.info()).collect()
     }
 
+    /// List only sessions owned by `owner`. `None` retains the metadata-free
+    /// personal development behavior and returns only legacy unowned sessions.
+    pub fn list_sessions_for_owner(&self, owner: Option<PrincipalId>) -> Vec<SessionInfo> {
+        self.inner
+            .sessions
+            .iter()
+            .filter(|session| session.owner_principal_id == owner)
+            .map(|session| session.info())
+            .collect()
+    }
+
     pub fn push_audit(&self, entry: AuditEntry) {
         self.inner.audit.push(entry);
     }

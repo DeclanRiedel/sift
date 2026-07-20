@@ -1259,7 +1259,7 @@ async fn metadata_auth_and_tenant_edges_are_rejected() {
         ))
         .await
         .unwrap();
-    assert_eq!(res.status(), StatusCode::FORBIDDEN);
+    assert_eq!(res.status(), StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]
@@ -2296,6 +2296,33 @@ async fn cancel_rejects_different_session_owner() {
             .into_body(),
     )
     .await;
+
+    let res = app
+        .clone()
+        .oneshot(
+            Request::get(format!("/v1/sessions/{}", session.id))
+                .header("authorization", format!("Bearer {other_token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::FORBIDDEN);
+
+    let other_sessions: Vec<sift_protocol::SessionInfo> = body_json(
+        app.clone()
+            .oneshot(
+                Request::get("/v1/sessions")
+                    .header("authorization", format!("Bearer {other_token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+            .into_body(),
+    )
+    .await;
+    assert!(other_sessions.is_empty());
 
     let res = app
         .clone()
