@@ -21,11 +21,13 @@ pub enum OperationKind {
     CloseSession,
     OpenConnection,
     CloseConnection,
+    PingConnection,
     RefreshSchema,
     GenerateDdl,
     ExecuteQuery,
     ExportQuery,
     Complete,
+    Listen,
     CancelQuery,
     PreviewEdits,
     ApplyEdits,
@@ -51,7 +53,7 @@ pub enum OperationKind {
 }
 
 impl OperationKind {
-    pub const ALL: [Self; 43] = [
+    pub const ALL: [Self; 45] = [
         Self::Authenticate,
         Self::RefreshAuthSession,
         Self::Logout,
@@ -68,11 +70,13 @@ impl OperationKind {
         Self::CloseSession,
         Self::OpenConnection,
         Self::CloseConnection,
+        Self::PingConnection,
         Self::RefreshSchema,
         Self::GenerateDdl,
         Self::ExecuteQuery,
         Self::ExportQuery,
         Self::Complete,
+        Self::Listen,
         Self::CancelQuery,
         Self::PreviewEdits,
         Self::ApplyEdits,

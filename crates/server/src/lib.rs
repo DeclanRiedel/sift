@@ -28,6 +28,7 @@ pub mod schema_cache;
 pub mod search;
 pub mod session;
 pub mod shutdown;
+pub mod sql_policy;
 
 pub use config::Config;
 pub use error::ApiError;

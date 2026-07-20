@@ -26,6 +26,14 @@ pub async fn import(
     connection: ConnectionId,
     request: CsvImportRequest,
 ) -> ApiResult<CsvImportResponse> {
+    let target = table_path(&request.table)?;
+    store.authorize_connection_operation(
+        session,
+        connection,
+        sift_protocol::OperationKind::ImportCsv,
+        None,
+        &[&target],
+    )?;
     let prepared = prepare(&request)?;
     let entry = store.conn_entry(session, connection)?;
     let engine = entry.driver.engine();
@@ -34,7 +42,11 @@ pub async fn import(
     if request.create_table {
         let ddl = create_table_sql(&table, &prepared.columns, engine);
         store
-            .execute_http(session, execute_request(connection, ddl, Vec::new()))
+            .execute_http_as(
+                session,
+                execute_request(connection, ddl, Vec::new()),
+                sift_protocol::OperationKind::ImportCsv,
+            )
             .await?;
     }
 
@@ -343,7 +355,11 @@ async fn ingest_skip(
             ),
         };
         let response = store
-            .execute_http(session, execute_request(connection, sql, params))
+            .execute_http_as(
+                session,
+                execute_request(connection, sql, params),
+                sift_protocol::OperationKind::ImportCsv,
+            )
             .await?;
         let did_insert = match engine {
             Engine::Postgres => response.affected_rows.unwrap_or(0) > 0,
@@ -382,8 +398,9 @@ async fn target_column_types(
 ) -> ApiResult<Vec<String>> {
     let path = table_path(table)?;
     let snapshot = store
-        .schema(session, connection, SchemaScope::deep(path.clone()))
+        .schema_cached(session, connection, SchemaScope::deep(path.clone()))
         .await?;
+    let snapshot = snapshot.snapshot.as_ref();
     let object = snapshot
         .trees
         .iter()

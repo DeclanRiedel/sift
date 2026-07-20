@@ -26,6 +26,13 @@ pub async fn explain(
     conn_id: ConnectionId,
     req: &ExplainRequest,
 ) -> ApiResult<ExplainResponse> {
+    store.authorize_connection_operation(
+        session_id,
+        conn_id,
+        sift_protocol::OperationKind::Explain,
+        Some(&req.sql),
+        &[],
+    )?;
     let engine = store.conn_entry(session_id, conn_id)?.driver.engine();
     match engine {
         Engine::Postgres => explain_pg(store, session_id, conn_id, req).await,
@@ -55,7 +62,11 @@ async fn explain_pg(
             .ok_or_else(|| ApiError::Internal("EXPLAIN produced no result".into()))?
     } else {
         store
-            .execute_http(session_id, exec(conn_id, sql, req.params.clone(), None))
+            .execute_http_as(
+                session_id,
+                exec(conn_id, sql, req.params.clone(), None),
+                sift_protocol::OperationKind::Explain,
+            )
             .await?
     };
 
@@ -96,21 +107,24 @@ async fn explain_mssql(
     // returns its plan XML instead of executing. Turn it back off afterwards so
     // the (single-session) connection returns data again.
     store
-        .execute_http(
+        .execute_http_as(
             session_id,
             exec(conn_id, "SET SHOWPLAN_XML ON".into(), vec![], None),
+            sift_protocol::OperationKind::Explain,
         )
         .await?;
     let plan_resp = store
-        .execute_http(
+        .execute_http_as(
             session_id,
             exec(conn_id, req.sql.clone(), req.params.clone(), None),
+            sift_protocol::OperationKind::Explain,
         )
         .await;
     let off = store
-        .execute_http(
+        .execute_http_as(
             session_id,
             exec(conn_id, "SET SHOWPLAN_XML OFF".into(), vec![], None),
+            sift_protocol::OperationKind::Explain,
         )
         .await;
     if let Err(e) = off {
@@ -143,12 +157,13 @@ async fn run_seq_rollback(
     stmts: Vec<(String, Vec<Value>)>,
 ) -> ApiResult<Vec<ExecuteResponse>> {
     let info = store
-        .begin_transaction(
+        .begin_transaction_as(
             session_id,
             BeginTransactionRequest {
                 connection: conn_id,
                 mode: TxMode::default(),
             },
+            sift_protocol::OperationKind::Explain,
         )
         .await?;
     let tx = TxHandleRef {
@@ -160,7 +175,11 @@ async fn run_seq_rollback(
     let mut failure = None;
     for (sql, params) in stmts {
         match store
-            .execute_http(session_id, exec(conn_id, sql, params, Some(tx.clone())))
+            .execute_http_as(
+                session_id,
+                exec(conn_id, sql, params, Some(tx.clone())),
+                sift_protocol::OperationKind::Explain,
+            )
             .await
         {
             Ok(r) => out.push(r),
@@ -172,12 +191,13 @@ async fn run_seq_rollback(
     }
     // Always roll back — the plan is captured, the mutation is discarded.
     if let Err(e) = store
-        .rollback_transaction(
+        .rollback_transaction_as(
             session_id,
             EndTransactionRequest {
                 connection: conn_id,
                 tx_id: tx.tx_id,
             },
+            sift_protocol::OperationKind::Explain,
         )
         .await
     {

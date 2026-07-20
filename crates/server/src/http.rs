@@ -84,6 +84,9 @@ impl Default for AuthState {
 }
 
 pub fn app(state: AppState) -> Router {
+    if let Some(metadata) = &state.metadata {
+        state.sessions.set_authorization_store(metadata.clone());
+    }
     Router::new()
         .route("/v1/health", get(health))
         .route("/v1/ready", get(ready))
@@ -4436,7 +4439,17 @@ async fn ping_connection(
     State(state): State<AppState>,
     Path((id, conn_id)): Path<(sift_protocol::SessionId, sift_protocol::ConnectionId)>,
 ) -> ApiResult<Json<sift_protocol::ServerInfo>> {
-    Ok(Json(state.sessions.ping(id, conn_id).await?))
+    let operation = Operation::PingConnection {
+        session: id,
+        connection: conn_id,
+    };
+    let response = finish_operation(
+        &state.sessions,
+        operation,
+        state.sessions.ping(id, conn_id).await,
+        |_| None,
+    )?;
+    Ok(Json(response))
 }
 
 async fn bulk_insert(
@@ -5510,6 +5523,10 @@ async fn handle_ws(
                         connection,
                         channels,
                     } => {
+                        let operation = Operation::Listen {
+                            session: session_id,
+                            connection,
+                        };
                         let stream = match state
                             .sessions
                             .listen_pg(session_id, connection, channels)
@@ -5517,6 +5534,14 @@ async fn handle_ws(
                         {
                             Ok(stream) => stream,
                             Err(error) => {
+                                state.sessions.push_operation_full(
+                                    operation,
+                                    OperationStatus::Failed,
+                                    None,
+                                    None,
+                                    None,
+                                    Some(error.to_string()),
+                                );
                                 send_json(
                                     &mut sender,
                                     &WsServerMessage::Error {
@@ -5530,6 +5555,9 @@ async fn handle_ws(
                                 continue;
                             }
                         };
+                        state
+                            .sessions
+                            .push_operation(operation, OperationStatus::Succeeded);
                         stream_notifications(&mut sender, request_id, stream.notifications).await?;
                     }
                     WsClientMessage::Cancel {

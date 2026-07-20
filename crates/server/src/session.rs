@@ -10,7 +10,7 @@ use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{SyncSender, TrySendError};
 use std::sync::Arc;
-use std::sync::Mutex;
+use std::sync::{Mutex, RwLock};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -93,6 +93,8 @@ struct SessionStoreInner {
     /// every recorded operation still lands synchronously in the
     /// in-memory/JSONL log below.
     audit_tx: Mutex<Option<SyncSender<NewOperationAudit>>>,
+    /// Durable policy source used by the dispatcher for managed connections.
+    authorization_store: RwLock<Option<MetadataStore>>,
     /// Count of durable-audit rows dropped because the bounded channel above
     /// was full. Surfaced in the overflow log so the drop is never silent.
     audit_dropped: AtomicU64,
@@ -191,6 +193,7 @@ impl SessionStore {
                 registry,
                 request_timeout_ms: AtomicU64::new(DEFAULT_REQUEST_TIMEOUT_MS),
                 audit_tx: Mutex::new(None),
+                authorization_store: RwLock::new(None),
                 audit_dropped: AtomicU64::new(0),
                 store_sql: AtomicBool::new(true),
                 max_result_rows: AtomicUsize::new(DEFAULT_MAX_RESULT_ROWS),
@@ -226,6 +229,7 @@ impl SessionStore {
                 registry,
                 request_timeout_ms: AtomicU64::new(DEFAULT_REQUEST_TIMEOUT_MS),
                 audit_tx: Mutex::new(None),
+                authorization_store: RwLock::new(None),
                 audit_dropped: AtomicU64::new(0),
                 store_sql: AtomicBool::new(true),
                 max_result_rows: AtomicUsize::new(DEFAULT_MAX_RESULT_ROWS),
@@ -327,6 +331,94 @@ impl SessionStore {
             })
             .expect("spawn audit writer thread");
         *self.inner.audit_tx.lock().unwrap() = Some(tx);
+    }
+
+    pub fn set_authorization_store(&self, store: MetadataStore) {
+        *self.inner.authorization_store.write().unwrap() = Some(store);
+    }
+
+    pub fn authorize_connection_operation(
+        &self,
+        session_id: SessionId,
+        conn_id: ConnectionId,
+        operation: sift_protocol::OperationKind,
+        sql: Option<&str>,
+        objects: &[&sift_protocol::ObjectPath],
+    ) -> ApiResult<ConnectionEntryClone> {
+        let entry = self.get_conn_entry(session_id, conn_id)?;
+        let ConnectionProvenance::Managed {
+            principal_id,
+            tenant_id,
+            profile_id,
+            ..
+        } = entry.provenance.clone()
+        else {
+            return Ok(entry);
+        };
+        if self.session_owner(session_id)? != Some(principal_id) {
+            return Err(ApiError::Forbidden(
+                "managed connection principal no longer owns the session".into(),
+            ));
+        }
+        let metadata = self
+            .inner
+            .authorization_store
+            .read()
+            .unwrap()
+            .clone()
+            .ok_or(ApiError::MetadataUnavailable)?;
+        let profile = metadata.get_connection_profile(tenant_id, profile_id)?;
+        let membership = metadata
+            .list_principal_tenants(principal_id)?
+            .into_iter()
+            .find(|membership| membership.tenant.id == tenant_id)
+            .ok_or_else(|| ApiError::Forbidden("tenant membership required".into()))?;
+        let scope = crate::authorization::AuthorizationScope {
+            authenticated: true,
+            trusted_local: false,
+            instance_admin: false,
+            tenant_role: Some(sift_protocol::TenantRole::from(&membership.role)),
+            room_role: None,
+            connection_policy: Some(profile.policy.clone()),
+        };
+        crate::authorization::authorize(&scope, operation)
+            .map_err(|denial| ApiError::Forbidden(denial.public_reason().into()))?;
+        crate::sql_policy::enforce(
+            &profile.policy,
+            entry.driver.engine(),
+            operation,
+            sql,
+            objects,
+        )?;
+        Ok(entry)
+    }
+
+    fn current_connection_policy(
+        &self,
+        session_id: SessionId,
+        conn_id: ConnectionId,
+    ) -> ApiResult<Option<sift_protocol::ConnectionPolicy>> {
+        let entry = self.get_conn_entry(session_id, conn_id)?;
+        let ConnectionProvenance::Managed {
+            tenant_id,
+            profile_id,
+            ..
+        } = entry.provenance
+        else {
+            return Ok(None);
+        };
+        let metadata = self
+            .inner
+            .authorization_store
+            .read()
+            .unwrap()
+            .clone()
+            .ok_or(ApiError::MetadataUnavailable)?;
+        Ok(Some(
+            metadata
+                .get_connection_profile(tenant_id, profile_id)?
+                .policy,
+        ))
     }
 
     /// Whether raw SQL is persisted in query history (`metadata.store_sql`).
@@ -715,6 +807,13 @@ impl SessionStore {
         session_id: SessionId,
         conn_id: ConnectionId,
     ) -> ApiResult<()> {
+        self.authorize_connection_operation(
+            session_id,
+            conn_id,
+            sift_protocol::OperationKind::CloseConnection,
+            None,
+            &[],
+        )?;
         let (txs, entry) = self
             .with_session(&session_id, |s| {
                 let txs = drain_connection_transactions(s, conn_id);
@@ -747,7 +846,13 @@ impl SessionStore {
         session_id: SessionId,
         conn_id: ConnectionId,
     ) -> ApiResult<ServerInfo> {
-        let entry = self.get_conn_entry(session_id, conn_id)?;
+        let entry = self.authorize_connection_operation(
+            session_id,
+            conn_id,
+            sift_protocol::OperationKind::PingConnection,
+            None,
+            &[],
+        )?;
         let driver = entry.driver.clone();
         let handle = entry.handle.clone();
         let first = {
@@ -772,11 +877,42 @@ impl SessionStore {
         conn_id: ConnectionId,
         scope: SchemaScope,
     ) -> ApiResult<SchemaSnapshot> {
+        let objects: Vec<_> = match &scope.depth {
+            sift_protocol::SchemaDepth::Shallow => Vec::new(),
+            sift_protocol::SchemaDepth::Deep { object } => vec![object],
+        };
+        self.authorize_connection_operation(
+            session_id,
+            conn_id,
+            sift_protocol::OperationKind::RefreshSchema,
+            None,
+            &objects,
+        )?;
         let cached = self.schema_cached(session_id, conn_id, scope).await?;
         Ok((*cached.snapshot).clone())
     }
 
     pub async fn schema_cached(
+        &self,
+        session_id: SessionId,
+        conn_id: ConnectionId,
+        scope: SchemaScope,
+    ) -> ApiResult<CachedSchema> {
+        let cached = self
+            .schema_cached_unfiltered(session_id, conn_id, scope)
+            .await?;
+        let Some(policy) = self.current_connection_policy(session_id, conn_id)? else {
+            return Ok(cached);
+        };
+        if policy.allowed_schemas.is_none() {
+            return Ok(cached);
+        }
+        let mut snapshot = (*cached.snapshot).clone();
+        crate::sql_policy::filter_snapshot(&policy, &mut snapshot);
+        Ok(CachedSchema::new_uncached(snapshot))
+    }
+
+    async fn schema_cached_unfiltered(
         &self,
         session_id: SessionId,
         conn_id: ConnectionId,
@@ -909,13 +1045,29 @@ impl SessionStore {
         session_id: SessionId,
         req: ExecuteRequestHttp,
     ) -> ApiResult<ExecuteResponse> {
+        self.execute_http_as(session_id, req, sift_protocol::OperationKind::ExecuteQuery)
+            .await
+    }
+
+    pub async fn execute_http_as(
+        &self,
+        session_id: SessionId,
+        req: ExecuteRequestHttp,
+        operation: sift_protocol::OperationKind,
+    ) -> ApiResult<ExecuteResponse> {
         let conn_id = req.connection;
         self.validate_execute_tx(session_id, conn_id, req.tx.as_ref())?;
+        let entry = self.authorize_connection_operation(
+            session_id,
+            conn_id,
+            operation,
+            Some(&req.sql),
+            &[],
+        )?;
         let exec = ExecuteRequest {
             sql: req.sql,
             params: req.params,
         };
-        let entry = self.get_conn_entry(session_id, conn_id)?;
         let driver = entry.driver.clone();
         let handle = entry.handle.clone();
         let dur = self.request_timeout();
@@ -986,7 +1138,9 @@ impl SessionStore {
         cursor: CursorId,
     ) {
         let dur = self.request_timeout();
-        let cancel = self.cancel(session_id, conn_id, cursor);
+        // Safety cleanup is not a user-requested operation and must remain
+        // available even when the profile blocks explicit cancellation.
+        let cancel = self.cancel_unchecked(session_id, conn_id, cursor);
         let result = if dur.is_zero() {
             cancel.await
         } else {
@@ -1025,8 +1179,32 @@ impl SessionStore {
         req: ExecuteRequest,
         tx: Option<&TxHandleRef>,
     ) -> ApiResult<ResultSetStream> {
+        self.execute_stream_as(
+            session_id,
+            conn_id,
+            req,
+            tx,
+            sift_protocol::OperationKind::ExecuteQuery,
+        )
+        .await
+    }
+
+    pub async fn execute_stream_as(
+        &self,
+        session_id: SessionId,
+        conn_id: ConnectionId,
+        req: ExecuteRequest,
+        tx: Option<&TxHandleRef>,
+        operation: sift_protocol::OperationKind,
+    ) -> ApiResult<ResultSetStream> {
         self.validate_execute_tx(session_id, conn_id, tx)?;
-        let entry = self.get_conn_entry(session_id, conn_id)?;
+        let entry = self.authorize_connection_operation(
+            session_id,
+            conn_id,
+            operation,
+            Some(&req.sql),
+            &[],
+        )?;
         let stream = entry.driver.execute(entry.handle.clone(), req).await?;
         // Hand the driver's stream to the registry-owned pump. Wrapping
         // enforces the per-session cap (evicting the LRA cursor of the
@@ -1071,7 +1249,13 @@ impl SessionStore {
             params: req.params,
         };
         let dur = self.request_timeout();
-        let fut = self.execute_stream(session_id, conn_id, exec, None);
+        let fut = self.execute_stream_as(
+            session_id,
+            conn_id,
+            exec,
+            None,
+            sift_protocol::OperationKind::ExportQuery,
+        );
         let wrapped = if dur.is_zero() {
             fut.await?
         } else {
@@ -1110,7 +1294,13 @@ impl SessionStore {
         conn_id: ConnectionId,
         channels: Vec<String>,
     ) -> ApiResult<NotificationStream> {
-        let entry = self.get_conn_entry(session_id, conn_id)?;
+        let entry = self.authorize_connection_operation(
+            session_id,
+            conn_id,
+            sift_protocol::OperationKind::Listen,
+            None,
+            &[],
+        )?;
         let pg = entry.driver.as_pg().ok_or_else(|| {
             ApiError::Driver(
                 DriverError::new(
@@ -1124,6 +1314,22 @@ impl SessionStore {
     }
 
     pub async fn cancel(
+        &self,
+        session_id: SessionId,
+        conn_id: ConnectionId,
+        cursor: CursorId,
+    ) -> ApiResult<()> {
+        self.authorize_connection_operation(
+            session_id,
+            conn_id,
+            sift_protocol::OperationKind::CancelQuery,
+            None,
+            &[],
+        )?;
+        self.cancel_unchecked(session_id, conn_id, cursor).await
+    }
+
+    async fn cancel_unchecked(
         &self,
         session_id: SessionId,
         conn_id: ConnectionId,
@@ -1164,7 +1370,14 @@ impl SessionStore {
         conn_id: ConnectionId,
         req: BulkInsertRequest,
     ) -> ApiResult<BulkInsertResponse> {
-        let entry = self.get_conn_entry(session_id, conn_id)?;
+        let table_path = object_path_from_qualified_name(&req.table)?;
+        let entry = self.authorize_connection_operation(
+            session_id,
+            conn_id,
+            sift_protocol::OperationKind::BulkInsert,
+            None,
+            &[&table_path],
+        )?;
         if req.format == BulkInsertFormat::Native {
             return Err(ApiError::Driver(
                 DriverError::new(
@@ -1212,7 +1425,22 @@ impl SessionStore {
         session_id: SessionId,
         req: BeginTransactionRequest,
     ) -> ApiResult<TransactionInfo> {
-        let entry = self.get_conn_entry(session_id, req.connection)?;
+        self.begin_transaction_as(
+            session_id,
+            req,
+            sift_protocol::OperationKind::BeginTransaction,
+        )
+        .await
+    }
+
+    pub(crate) async fn begin_transaction_as(
+        &self,
+        session_id: SessionId,
+        req: BeginTransactionRequest,
+        operation: sift_protocol::OperationKind,
+    ) -> ApiResult<TransactionInfo> {
+        let entry =
+            self.authorize_connection_operation(session_id, req.connection, operation, None, &[])?;
         self.reject_if_connection_has_tx(session_id, req.connection, None)?;
         let driver = entry.driver.clone();
         let conn_handle = entry.handle.clone();
@@ -1249,6 +1477,21 @@ impl SessionStore {
         session_id: SessionId,
         req: EndTransactionRequest,
     ) -> ApiResult<()> {
+        self.commit_transaction_as(
+            session_id,
+            req,
+            sift_protocol::OperationKind::CommitTransaction,
+        )
+        .await
+    }
+
+    pub(crate) async fn commit_transaction_as(
+        &self,
+        session_id: SessionId,
+        req: EndTransactionRequest,
+        operation: sift_protocol::OperationKind,
+    ) -> ApiResult<()> {
+        self.authorize_connection_operation(session_id, req.connection, operation, None, &[])?;
         let tx = self.claim_tx_end(session_id, req.connection, req.tx_id)?;
         let entry = self.get_conn_entry(session_id, req.connection)?;
         let driver = entry.driver.clone();
@@ -1270,6 +1513,21 @@ impl SessionStore {
         session_id: SessionId,
         req: EndTransactionRequest,
     ) -> ApiResult<()> {
+        self.rollback_transaction_as(
+            session_id,
+            req,
+            sift_protocol::OperationKind::RollbackTransaction,
+        )
+        .await
+    }
+
+    pub(crate) async fn rollback_transaction_as(
+        &self,
+        session_id: SessionId,
+        req: EndTransactionRequest,
+        operation: sift_protocol::OperationKind,
+    ) -> ApiResult<()> {
+        self.authorize_connection_operation(session_id, req.connection, operation, None, &[])?;
         let tx = self.claim_tx_end(session_id, req.connection, req.tx_id)?;
         let entry = self.get_conn_entry(session_id, req.connection)?;
         let driver = entry.driver.clone();
@@ -1300,6 +1558,15 @@ impl SessionStore {
                 savepoints: entry.savepoints.lock().unwrap().clone(),
             })
             .collect();
+        for transaction in &transactions {
+            self.authorize_connection_operation(
+                session_id,
+                transaction.transaction.connection,
+                sift_protocol::OperationKind::ListTransactions,
+                None,
+                &[],
+            )?;
+        }
         transactions.sort_by_key(|state| state.transaction.opened_at);
         Ok(transactions)
     }
@@ -1309,6 +1576,13 @@ impl SessionStore {
         session_id: SessionId,
         req: &TransactionPreviewRequest,
     ) -> ApiResult<TransactionPreview> {
+        self.authorize_connection_operation(
+            session_id,
+            req.connection,
+            sift_protocol::OperationKind::PreviewTransaction,
+            None,
+            &[],
+        )?;
         let session = self
             .inner
             .sessions
@@ -1349,6 +1623,13 @@ impl SessionStore {
         session_id: SessionId,
         req: SavepointRequest,
     ) -> ApiResult<()> {
+        self.authorize_connection_operation(
+            session_id,
+            req.connection,
+            sift_protocol::OperationKind::Savepoint,
+            None,
+            &[],
+        )?;
         let name = req.name.trim().to_string();
         if name.is_empty() {
             return Err(ApiError::BadRequest(
@@ -1392,6 +1673,13 @@ impl SessionStore {
         session_id: SessionId,
         req: SavepointRequest,
     ) -> ApiResult<()> {
+        self.authorize_connection_operation(
+            session_id,
+            req.connection,
+            sift_protocol::OperationKind::RollbackToSavepoint,
+            None,
+            &[],
+        )?;
         let tx_handle = self.tx_handle_for(session_id, req.connection, req.tx_id)?;
         let entry = self.get_conn_entry(session_id, req.connection)?;
         let driver = entry.driver.clone();
@@ -1446,6 +1734,13 @@ impl SessionStore {
         session_id: SessionId,
         req: SavepointRequest,
     ) -> ApiResult<()> {
+        self.authorize_connection_operation(
+            session_id,
+            req.connection,
+            sift_protocol::OperationKind::ReleaseSavepoint,
+            None,
+            &[],
+        )?;
         // Validate tx is active on the connection before dispatching.
         let tx_handle = self.tx_handle_for(session_id, req.connection, req.tx_id)?;
         let entry = self.get_conn_entry(session_id, req.connection)?;
@@ -1714,7 +2009,13 @@ impl SessionStore {
         conn_id: ConnectionId,
         object: sift_protocol::ObjectPath,
     ) -> ApiResult<sift_protocol::ObjectDdl> {
-        let entry = self.get_conn_entry(session_id, conn_id)?;
+        let entry = self.authorize_connection_operation(
+            session_id,
+            conn_id,
+            sift_protocol::OperationKind::GenerateDdl,
+            None,
+            &[&object],
+        )?;
         let driver = entry.driver.clone();
         let handle = entry.handle.clone();
         let result = crate::ddl::generate_ddl(&*driver, handle, object).await?;
@@ -1729,7 +2030,13 @@ impl SessionStore {
         conn_id: ConnectionId,
         edit_set: sift_protocol::EditSet,
     ) -> ApiResult<sift_protocol::EditPlan> {
-        let entry = self.get_conn_entry(session_id, conn_id)?;
+        let entry = self.authorize_connection_operation(
+            session_id,
+            conn_id,
+            sift_protocol::OperationKind::PreviewEdits,
+            None,
+            &[&edit_set.table],
+        )?;
         let driver = entry.driver.clone();
         let handle = entry.handle.clone();
         crate::edit::build_plan(&*driver, handle, &edit_set)
@@ -1749,6 +2056,13 @@ impl SessionStore {
         use sift_protocol::{EditStatementKind, ExecuteRequestHttp};
 
         let conn_id = req.connection;
+        self.authorize_connection_operation(
+            session_id,
+            conn_id,
+            sift_protocol::OperationKind::ApplyEdits,
+            None,
+            &[&req.edit_set.table],
+        )?;
         let plan = {
             let entry = self.get_conn_entry(session_id, conn_id)?;
             let driver = entry.driver.clone();
@@ -1763,12 +2077,13 @@ impl SessionStore {
             Some(tx) => (tx, false),
             None => {
                 let info = self
-                    .begin_transaction(
+                    .begin_transaction_as(
                         session_id,
                         sift_protocol::BeginTransactionRequest {
                             connection: conn_id,
                             mode: sift_protocol::TxMode::default(),
                         },
+                        sift_protocol::OperationKind::ApplyEdits,
                     )
                     .await?;
                 (
@@ -1796,7 +2111,10 @@ impl SessionStore {
                 room_id: None,
                 connection_profile_id: None,
             };
-            match self.execute_http(session_id, exec).await {
+            match self
+                .execute_http_as(session_id, exec, sift_protocol::OperationKind::ApplyEdits)
+                .await
+            {
                 Ok(resp) => {
                     let mut affected = resp.affected_rows.unwrap_or(0);
                     // An update/delete must hit exactly one row; otherwise the
@@ -1839,12 +2157,13 @@ impl SessionStore {
         }
 
         let committed = if owned {
-            self.commit_transaction(
+            self.commit_transaction_as(
                 session_id,
                 sift_protocol::EndTransactionRequest {
                     connection: conn_id,
                     tx_id: tx_ref.tx_id,
                 },
+                sift_protocol::OperationKind::ApplyEdits,
             )
             .await?;
             true
@@ -1858,12 +2177,13 @@ impl SessionStore {
     /// Best-effort rollback on the inline-edit apply failure path.
     async fn rollback_edits_tx(&self, session_id: SessionId, conn_id: ConnectionId, tx_id: TxId) {
         if let Err(e) = self
-            .rollback_transaction(
+            .rollback_transaction_as(
                 session_id,
                 sift_protocol::EndTransactionRequest {
                     connection: conn_id,
                     tx_id,
                 },
+                sift_protocol::OperationKind::ApplyEdits,
             )
             .await
         {
@@ -1890,12 +2210,14 @@ impl SessionStore {
                 return Ok((entry.0.clone(), sift_protocol::IndexState::Ready));
             }
         }
-        let snapshot = self
-            .schema(session_id, conn_id, sift_protocol::SchemaScope::shallow())
-            .await?;
+        let snapshot = (*self
+            .schema_cached(session_id, conn_id, sift_protocol::SchemaScope::shallow())
+            .await?
+            .snapshot)
+            .clone();
         let engine = self.get_conn_entry(session_id, conn_id)?.driver.engine();
         let resp = self
-            .execute_http(
+            .execute_http_as(
                 session_id,
                 sift_protocol::ExecuteRequestHttp {
                     connection: conn_id,
@@ -1905,6 +2227,7 @@ impl SessionStore {
                     room_id: None,
                     connection_profile_id: None,
                 },
+                sift_protocol::OperationKind::SearchSchema,
             )
             .await?;
         let columns = crate::search::decode_catalog_columns(resp.rows);
@@ -1922,6 +2245,13 @@ impl SessionStore {
         conn_id: ConnectionId,
         req: sift_protocol::SchemaSearchRequest,
     ) -> ApiResult<sift_protocol::SchemaSearchResponse> {
+        self.authorize_connection_operation(
+            session_id,
+            conn_id,
+            sift_protocol::OperationKind::SearchSchema,
+            None,
+            &[],
+        )?;
         let (index, index_state) = self.search_index_for(session_id, conn_id).await?;
         let limit = req.limit.unwrap_or(crate::search::DEFAULT_SCHEMA_HITS);
         let hits = crate::search::rank(&index, &req.query, req.kinds.as_deref(), limit);
@@ -1937,6 +2267,13 @@ impl SessionStore {
         conn_id: ConnectionId,
         req: sift_protocol::DataSearchRequest,
     ) -> ApiResult<sift_protocol::DataSearchResponse> {
+        self.authorize_connection_operation(
+            session_id,
+            conn_id,
+            sift_protocol::OperationKind::SearchData,
+            None,
+            &[],
+        )?;
         let (index, _) = self.search_index_for(session_id, conn_id).await?;
         let engine = self.get_conn_entry(session_id, conn_id)?.driver.engine();
         let per_table = req
@@ -1962,7 +2299,7 @@ impl SessionStore {
             };
             tables_searched += 1;
             let resp = self
-                .execute_http(
+                .execute_http_as(
                     session_id,
                     sift_protocol::ExecuteRequestHttp {
                         connection: conn_id,
@@ -1972,6 +2309,7 @@ impl SessionStore {
                         room_id: None,
                         connection_profile_id: None,
                     },
+                    sift_protocol::OperationKind::SearchData,
                 )
                 .await?;
             if resp.rows.len() as u32 >= per_table {
@@ -2004,7 +2342,13 @@ impl SessionStore {
         conn_id: ConnectionId,
         request: sift_protocol::completion::CompletionRequest,
     ) -> ApiResult<sift_protocol::completion::CompletionResponse> {
-        let entry = self.get_conn_entry(session_id, conn_id)?;
+        let entry = self.authorize_connection_operation(
+            session_id,
+            conn_id,
+            sift_protocol::OperationKind::Complete,
+            None,
+            &[],
+        )?;
         let engine = entry.driver.engine();
         crate::autocomplete::generate_completion(self, session_id, conn_id, engine, request).await
     }
@@ -2391,6 +2735,39 @@ fn value_bytes(value: &sift_protocol::Value) -> usize {
 
 /// Human-readable label for a connection spec. Used in `ConnectionInfo`
 /// `display_name`; the client may overwrite.
+fn object_path_from_qualified_name(value: &str) -> ApiResult<sift_protocol::ObjectPath> {
+    let parts: Vec<_> = value.split('.').collect();
+    let (catalog, schema, name) = match parts.as_slice() {
+        [name] if !name.trim().is_empty() => (None, None, *name),
+        [schema, name] if !schema.trim().is_empty() && !name.trim().is_empty() => {
+            (None, Some((*schema).to_string()), *name)
+        }
+        [catalog, schema, name]
+            if !catalog.trim().is_empty()
+                && !schema.trim().is_empty()
+                && !name.trim().is_empty() =>
+        {
+            (
+                Some((*catalog).to_string()),
+                Some((*schema).to_string()),
+                *name,
+            )
+        }
+        _ => {
+            return Err(ApiError::BadRequest(
+                "table must be `table`, `schema.table`, or `database.schema.table`".into(),
+            ))
+        }
+    };
+    Ok(sift_protocol::ObjectPath {
+        catalog,
+        schema,
+        name: name.to_string(),
+        kind: Some(sift_protocol::ObjectKind::Table),
+        routine_args: None,
+    })
+}
+
 fn display_name_for(spec: &ConnectionSpec) -> String {
     let db = spec.database.as_deref().unwrap_or("?");
     let host = if spec.host.starts_with('/') {

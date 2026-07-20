@@ -166,7 +166,7 @@ and tenant-resource enforcement remain absent.
 - [x] [Implement] Runtime provenance and connection-entry closure: managed
       connections carry principal/tenant/profile/revision; raw specs are
       personal-loopback only.
-- [ ] [Implement] Connection-profile permissions: `read_only`,
+- [x] [Implement] Connection-profile permissions: `read_only`,
       `allowed_ops`/`blocked_ops`, `allowed_schemas`; enforced in the
       dispatcher before routing to the driver.
 - [ ] [Implement] Policy-revision checks and hybrid revocation of active

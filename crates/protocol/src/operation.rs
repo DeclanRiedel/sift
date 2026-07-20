@@ -100,6 +100,10 @@ pub enum Operation {
         session: SessionId,
         connection: ConnectionId,
     },
+    PingConnection {
+        session: SessionId,
+        connection: ConnectionId,
+    },
     RefreshSchema {
         session: SessionId,
         connection: ConnectionId,
@@ -121,6 +125,10 @@ pub enum Operation {
         session: SessionId,
         connection: ConnectionId,
         request: CompletionRequest,
+    },
+    Listen {
+        session: SessionId,
+        connection: ConnectionId,
     },
     CancelQuery {
         session: SessionId,
@@ -260,11 +268,13 @@ impl Operation {
             Self::CloseSession { .. } => OperationKind::CloseSession,
             Self::OpenConnection { .. } => OperationKind::OpenConnection,
             Self::CloseConnection { .. } => OperationKind::CloseConnection,
+            Self::PingConnection { .. } => OperationKind::PingConnection,
             Self::RefreshSchema { .. } => OperationKind::RefreshSchema,
             Self::GenerateDdl { .. } => OperationKind::GenerateDdl,
             Self::ExecuteQuery { .. } => OperationKind::ExecuteQuery,
             Self::ExportQuery { .. } => OperationKind::ExportQuery,
             Self::Complete { .. } => OperationKind::Complete,
+            Self::Listen { .. } => OperationKind::Listen,
             Self::CancelQuery { .. } => OperationKind::CancelQuery,
             Self::PreviewEdits { .. } => OperationKind::PreviewEdits,
             Self::ApplyEdits { .. } => OperationKind::ApplyEdits,
@@ -368,6 +378,9 @@ impl Operation {
             Operation::CloseConnection { connection, .. } => {
                 summary("close", "connection", Some(connection.0 as i64))
             }
+            Operation::PingConnection { connection, .. } => {
+                summary("ping", "connection", Some(connection.0 as i64))
+            }
             Operation::RefreshSchema { connection, .. } => {
                 summary("refresh", "schema", Some(connection.0 as i64))
             }
@@ -382,6 +395,9 @@ impl Operation {
             }
             Operation::Complete { session, .. } => {
                 summary("complete", "query", Some(session.0 as i64))
+            }
+            Operation::Listen { connection, .. } => {
+                summary("listen", "connection", Some(connection.0 as i64))
             }
             Operation::CancelQuery { session, .. } => {
                 summary("cancel", "query", Some(session.0 as i64))

@@ -131,11 +131,13 @@ pub const fn is_connection_operation(operation: OperationKind) -> bool {
         operation,
         OpenConnection
             | CloseConnection
+            | PingConnection
             | RefreshSchema
             | GenerateDdl
             | ExecuteQuery
             | ExportQuery
             | Complete
+            | Listen
             | CancelQuery
             | PreviewEdits
             | ApplyEdits

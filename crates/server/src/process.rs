@@ -20,7 +20,7 @@ pub async fn list(
         Engine::SqlServer => MSSQL_LIST,
     };
     let response = store
-        .execute_http(
+        .execute_http_as(
             session,
             ExecuteRequestHttp {
                 connection,
@@ -30,6 +30,7 @@ pub async fn list(
                 room_id: None,
                 connection_profile_id: None,
             },
+            sift_protocol::OperationKind::ListProcesses,
         )
         .await?;
     response
@@ -62,7 +63,7 @@ pub async fn kill(
         ),
     };
     let response = store
-        .execute_http(
+        .execute_http_as(
             session,
             ExecuteRequestHttp {
                 connection,
@@ -72,6 +73,7 @@ pub async fn kill(
                 room_id: None,
                 connection_profile_id: None,
             },
+            sift_protocol::OperationKind::KillProcess,
         )
         .await?;
     let terminated = response
