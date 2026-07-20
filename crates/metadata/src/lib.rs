@@ -87,6 +87,8 @@ pub enum MetadataError {
     GithubAllowlistNotFound(GithubAllowlistId),
     #[error("cannot disable the final active instance administrator")]
     FinalInstanceAdmin,
+    #[error("cannot unlink the final active authentication identity")]
+    FinalAuthIdentity,
     #[error("authentication token key has an invalid length")]
     InvalidAuthTokenKey,
     #[error("OAuth login attempt is invalid, expired, or already consumed")]
@@ -835,6 +837,117 @@ impl MetadataStore {
                 Err(error)
             }
         }
+    }
+
+    pub async fn link_password_identity(
+        &self,
+        principal: PrincipalId,
+        username: &str,
+        password_verifier: &[u8],
+        audit: NewOperationAudit,
+    ) -> Result<AuthIdentity> {
+        let handle = Uuid::new_v4().to_string();
+        self.secrets
+            .put(PASSWORD_SECRET_NAMESPACE, &handle, password_verifier)
+            .await?;
+        let now = now_text();
+        let backend = self.backend.clone();
+        let username = username.to_string();
+        let db_handle = handle.clone();
+        let result = sqlite_blocking(move || {
+            let mut conn = backend.conn()?;
+            let tx = conn.transaction()?;
+            if tx
+                .query_row(
+                    "SELECT id FROM principal WHERE id = ?1 AND disabled_at IS NULL",
+                    params![principal.0],
+                    |row| row.get::<_, i64>(0),
+                )
+                .optional()?
+                .is_none()
+            {
+                return Err(MetadataError::PrincipalNotFound(principal));
+            }
+            tx.execute(
+                "INSERT INTO auth_identity
+                 (principal_id, method, issuer, subject, credential_handle,
+                  created_at, updated_at)
+                 VALUES (?1, 'password', 'sift', ?2, ?3, ?4, ?4)",
+                params![principal.0, username, db_handle, now],
+            )?;
+            let id = AuthIdentityId(tx.last_insert_rowid());
+            insert_operation_audit_row(&tx, &audit)?;
+            let identity = tx.query_row(
+                "SELECT id, principal_id, method, issuer, subject, provider_login,
+                        credential_handle, created_at, updated_at, last_used_at, disabled_at
+                 FROM auth_identity WHERE id = ?1",
+                params![id.0],
+                auth_identity_from_row,
+            )?;
+            tx.commit()?;
+            Ok(identity)
+        })
+        .await;
+        if result.is_err() {
+            self.delete_password_secret_best_effort(&handle, "link_password_identity_rollback")
+                .await;
+        }
+        result
+    }
+
+    pub async fn unlink_auth_identity(
+        &self,
+        principal: PrincipalId,
+        identity: AuthIdentityId,
+        audit: NewOperationAudit,
+    ) -> Result<()> {
+        let backend = self.backend.clone();
+        let credential_handle = sqlite_blocking(move || {
+            let mut conn = backend.conn()?;
+            let tx = conn.transaction()?;
+            let identity_row: Option<(Option<String>, bool)> = tx
+                .query_row(
+                    "SELECT credential_handle, disabled_at IS NOT NULL FROM auth_identity
+                     WHERE id = ?1 AND principal_id = ?2",
+                    params![identity.0, principal.0],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .optional()?;
+            let Some((handle, disabled)) = identity_row else {
+                return Err(MetadataError::AuthIdentityNotFound(identity));
+            };
+            if !disabled {
+                let active: i64 = tx.query_row(
+                    "SELECT COUNT(*) FROM auth_identity
+                     WHERE principal_id = ?1 AND disabled_at IS NULL",
+                    params![principal.0],
+                    |row| row.get(0),
+                )?;
+                if active <= 1 {
+                    return Err(MetadataError::FinalAuthIdentity);
+                }
+            }
+            tx.execute(
+                "DELETE FROM auth_identity WHERE id = ?1",
+                params![identity.0],
+            )?;
+            tx.execute(
+                "UPDATE auth_session
+                 SET revoked_at = COALESCE(revoked_at, ?1),
+                     revocation_reason = COALESCE(revocation_reason, 'identity_unlinked')
+                 WHERE principal_id = ?2",
+                params![now_text(), principal.0],
+            )?;
+            insert_operation_audit_row(&tx, &audit)?;
+            tx.commit()?;
+            Ok(handle)
+        })
+        .await?;
+        if let Some(handle) = credential_handle {
+            self.delete_password_secret_best_effort(&handle, "unlink_password_identity")
+                .await;
+        }
+        Ok(())
     }
 
     pub async fn issue_auth_session(
@@ -3465,6 +3578,78 @@ mod tests {
             .disabled_at
             .is_none());
         assert!(second.is_instance_admin);
+    }
+
+    #[tokio::test]
+    async fn password_identities_link_and_unlink_without_exposing_or_orphaning_secrets() {
+        let (store, secrets) = store_with_memory();
+        let verifier = b"$argon2id$linked-verifier";
+        let principal = store
+            .create_password_principal(
+                NewPasswordPrincipal {
+                    username: "primary-login",
+                    display_name: "Linked User",
+                    email: None,
+                    is_instance_admin: false,
+                },
+                b"$argon2id$primary-verifier",
+                test_audit("create", "principal", None),
+            )
+            .await
+            .unwrap();
+        let primary = store.list_auth_identities(principal.id).unwrap()[0].clone();
+        assert!(matches!(
+            store
+                .unlink_auth_identity(
+                    principal.id,
+                    primary.id,
+                    test_audit("unlink", "auth_identity", Some(primary.id.0)),
+                )
+                .await,
+            Err(MetadataError::FinalAuthIdentity)
+        ));
+
+        let linked = store
+            .link_password_identity(
+                principal.id,
+                "secondary-login",
+                verifier,
+                test_audit("link", "auth_identity", None),
+            )
+            .await
+            .unwrap();
+        let handle = linked.credential_handle.clone().unwrap();
+        assert_eq!(
+            secrets
+                .get(PASSWORD_SECRET_NAMESPACE, &handle)
+                .await
+                .unwrap(),
+            Some(verifier.to_vec())
+        );
+
+        store
+            .unlink_auth_identity(
+                principal.id,
+                linked.id,
+                test_audit("unlink", "auth_identity", Some(linked.id.0)),
+            )
+            .await
+            .unwrap();
+        assert!(store
+            .resolve_password_identity("secondary-login")
+            .unwrap()
+            .is_none());
+        assert_eq!(
+            secrets
+                .get(PASSWORD_SECRET_NAMESPACE, &handle)
+                .await
+                .unwrap(),
+            None
+        );
+        assert_eq!(store.list_auth_identities(principal.id).unwrap().len(), 1);
+        let audit = store.list_operation_audit(10).unwrap();
+        assert!(audit.iter().any(|entry| entry.action == "unlink"));
+        assert!(audit.iter().any(|entry| entry.action == "link"));
     }
 
     #[tokio::test]

@@ -17,21 +17,21 @@ use std::time::Instant;
 
 use sift_doc::{CrdtKind, DocumentSnapshot, TextDocument, TextOperation};
 use sift_metadata::{
-    ApiTokenId, AuthClientKind as MetadataAuthClientKind, ConnectionProfileId, CrdtType, Document,
-    DocumentId, GithubAllowlistId, GithubProfile, MetadataStore, NewConnectionProfile, NewDocument,
-    NewOperationAudit, NewQueryHistory, NewRoom, NewSavedQuery, PrincipalId, PrincipalKeyId,
-    QueryHistory, QueryStatus, RefreshAuthResult, Room, RoomId, RoomKind, RoomMember, RoomRole,
-    SavedQuery, SavedQueryFilter, SavedQueryId, SavedQueryScope, TenantId, TenantInvitationId,
-    TenantMembership, UpdateSavedQuery,
+    ApiTokenId, AuthClientKind as MetadataAuthClientKind, AuthIdentityId, ConnectionProfileId,
+    CrdtType, Document, DocumentId, GithubAllowlistId, GithubProfile, MetadataStore,
+    NewConnectionProfile, NewDocument, NewOperationAudit, NewQueryHistory, NewRoom, NewSavedQuery,
+    PrincipalId, PrincipalKeyId, QueryHistory, QueryStatus, RefreshAuthResult, Room, RoomId,
+    RoomKind, RoomMember, RoomRole, SavedQuery, SavedQueryFilter, SavedQueryId, SavedQueryScope,
+    TenantId, TenantInvitationId, TenantMembership, UpdateSavedQuery,
 };
 use sift_protocol::{
     AcceptTenantInvitationRequest, AdminCreatePasswordPrincipalRequest,
-    AdminSetPrincipalDisabledRequest, AuditEntry, AuthClientKind, AuthPrincipal,
-    AuthTenantMembership, AuthTokensResponse, BeginTransactionRequest, BulkInsertRequest,
-    CancelRequest, ChangePasswordRequest, CreateGithubAllowlistRequest,
-    CreateTenantInvitationRequest, CsvImportRequest, DocumentOperationEnvelope,
-    EndTransactionRequest, ExecuteRequest, ExecuteRequestHttp, Health, InvitationRole,
-    IssuedTenantInvitationResponse, KeyAuthenticateRequest, KeyChallengeRequest,
+    AdminLinkPasswordIdentityRequest, AdminSetPrincipalDisabledRequest, AuditEntry, AuthClientKind,
+    AuthIdentitySummary, AuthPrincipal, AuthTenantMembership, AuthTokensResponse,
+    BeginTransactionRequest, BulkInsertRequest, CancelRequest, ChangePasswordRequest,
+    CreateGithubAllowlistRequest, CreateTenantInvitationRequest, CsvImportRequest,
+    DocumentOperationEnvelope, EndTransactionRequest, ExecuteRequest, ExecuteRequestHttp, Health,
+    InvitationRole, IssuedTenantInvitationResponse, KeyAuthenticateRequest, KeyChallengeRequest,
     KeyChallengeResponse, KillProcessRequest, ObjectPath, OpenConnectionRequest,
     OpenSessionRequest, Operation, OperationStatus, PasswordLoginRequest, Readiness,
     RefreshAuthRequest, RegisterPrincipalKeyRequest, RoomClientMessage, RoomQueryResult,
@@ -109,6 +109,18 @@ pub fn app(state: AppState) -> Router {
         .route(
             "/v1/admin/principals/:id/disabled",
             put(admin_set_principal_disabled),
+        )
+        .route(
+            "/v1/admin/principals/:id/identities",
+            get(admin_list_principal_identities),
+        )
+        .route(
+            "/v1/admin/principals/:id/identities/password",
+            post(admin_link_password_identity),
+        )
+        .route(
+            "/v1/admin/principals/:principal_id/identities/:identity_id",
+            delete(admin_unlink_identity),
         )
         .route(
             "/v1/metadata/tenants/:id/invitations",
@@ -1175,6 +1187,91 @@ async fn admin_set_principal_disabled(
     Ok(Json(json!({"ok": true})))
 }
 
+async fn admin_list_principal_identities(
+    State(state): State<AppState>,
+    Extension(auth): Extension<AuthContext>,
+    Path(id): Path<i64>,
+) -> ApiResult<Json<Vec<AuthIdentitySummary>>> {
+    ensure_instance_admin(&state, &auth)?;
+    if metadata_store(&state)?
+        .principal_by_id(PrincipalId(id))?
+        .is_none()
+    {
+        return Err(ApiError::Metadata(
+            sift_metadata::MetadataError::PrincipalNotFound(PrincipalId(id)),
+        ));
+    }
+    let identities = metadata_store(&state)?
+        .list_auth_identities(PrincipalId(id))?
+        .into_iter()
+        .map(|identity| AuthIdentitySummary {
+            id: identity.id.0,
+            method: format!("{:?}", identity.method).to_lowercase(),
+            issuer: identity.issuer,
+            subject: identity.subject,
+            provider_login: identity.provider_login,
+            disabled: identity.disabled_at.is_some(),
+        })
+        .collect();
+    Ok(Json(identities))
+}
+
+async fn admin_link_password_identity(
+    State(state): State<AppState>,
+    Extension(auth): Extension<AuthContext>,
+    Path(id): Path<i64>,
+    Json(request): Json<AdminLinkPasswordIdentityRequest>,
+) -> ApiResult<Json<AuthIdentitySummary>> {
+    ensure_instance_admin(&state, &auth)?;
+    let username = crate::identity::normalize_username(&request.username)
+        .map_err(|error| ApiError::BadRequest(error.to_string()))?;
+    let verifier = crate::identity::hash_password(request.password.into_bytes())
+        .await
+        .map_err(|error| ApiError::BadRequest(error.to_string()))?;
+    let identity = metadata_store(&state)?
+        .link_password_identity(
+            PrincipalId(id),
+            &username,
+            verifier.as_bytes(),
+            metadata_audit_record(
+                auth.principal_id,
+                "manage_principal.link",
+                "auth_identity",
+                None,
+            ),
+        )
+        .await?;
+    Ok(Json(AuthIdentitySummary {
+        id: identity.id.0,
+        method: "password".into(),
+        issuer: identity.issuer,
+        subject: identity.subject,
+        provider_login: identity.provider_login,
+        disabled: false,
+    }))
+}
+
+async fn admin_unlink_identity(
+    State(state): State<AppState>,
+    Extension(auth): Extension<AuthContext>,
+    Path((principal_id, identity_id)): Path<(i64, i64)>,
+) -> ApiResult<Json<serde_json::Value>> {
+    ensure_instance_admin(&state, &auth)?;
+    metadata_store(&state)?
+        .unlink_auth_identity(
+            PrincipalId(principal_id),
+            AuthIdentityId(identity_id),
+            metadata_audit_record(
+                auth.principal_id,
+                "manage_principal.unlink",
+                "auth_identity",
+                Some(identity_id),
+            ),
+        )
+        .await?;
+    Ok(Json(json!({"ok": true})))
+}
+
 fn ensure_instance_admin(state: &AppState, auth: &AuthContext) -> ApiResult<()> {
     let principal = metadata_store(state)?
         .principal_by_id(auth.principal_id)?
@@ -2235,6 +2332,25 @@ async fn openapi() -> Json<serde_json::Value> {
                     "responses": { "200": { "description": "Ack", "content": json_object_content() } }
                 }
             },
+            "/v1/admin/principals/{id}/identities": {
+                "get": {
+                    "operationId": "adminListPrincipalIdentities",
+                    "responses": { "200": { "description": "Authentication identities", "content": json_array_content("AuthIdentitySummary") } }
+                }
+            },
+            "/v1/admin/principals/{id}/identities/password": {
+                "post": {
+                    "operationId": "adminLinkPasswordIdentity",
+                    "requestBody": json_body("AdminLinkPasswordIdentityRequest"),
+                    "responses": { "200": { "description": "Linked identity", "content": json_content("AuthIdentitySummary") } }
+                }
+            },
+            "/v1/admin/principals/{principal_id}/identities/{identity_id}": {
+                "delete": {
+                    "operationId": "adminUnlinkIdentity",
+                    "responses": { "200": { "description": "Ack", "content": json_object_content() } }
+                }
+            },
             "/v1/metadata/tenants/{id}/invitations": {
                 "get": {
                     "operationId": "listTenantInvitations",
@@ -2790,6 +2906,11 @@ fn protocol_schema_refs() -> serde_json::Value {
         "AdminSetPrincipalDisabledRequest",
         &mut schemas,
     );
+    add_schema::<sift_protocol::AdminLinkPasswordIdentityRequest>(
+        "AdminLinkPasswordIdentityRequest",
+        &mut schemas,
+    );
+    add_schema::<sift_protocol::AuthIdentitySummary>("AuthIdentitySummary", &mut schemas);
     add_schema::<sift_protocol::AuthPrincipal>("AuthPrincipal", &mut schemas);
     add_schema::<sift_protocol::CreateTenantInvitationRequest>(
         "CreateTenantInvitationRequest",

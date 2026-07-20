@@ -106,7 +106,9 @@ impl ApiError {
                 | MetadataError::AuthIdentityNotFound(_)
                 | MetadataError::PrincipalKeyNotFound(_)
                 | MetadataError::GithubAllowlistNotFound(_) => (StatusCode::NOT_FOUND, "not_found"),
-                MetadataError::FinalInstanceAdmin => (StatusCode::CONFLICT, "conflict"),
+                MetadataError::FinalInstanceAdmin | MetadataError::FinalAuthIdentity => {
+                    (StatusCode::CONFLICT, "conflict")
+                }
                 MetadataError::TenantMismatch(_, _) => (StatusCode::FORBIDDEN, "forbidden"),
                 MetadataError::MissingCredential(_, _)
                 | MetadataError::BrokerCredentialUnsupported(_) => {

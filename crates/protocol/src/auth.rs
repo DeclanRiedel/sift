@@ -222,6 +222,32 @@ pub struct AdminSetPrincipalDisabledRequest {
     pub disabled: bool,
 }
 
+#[derive(Clone, Serialize, Deserialize, JsonSchema)]
+pub struct AdminLinkPasswordIdentityRequest {
+    pub username: String,
+    pub password: String,
+}
+
+impl fmt::Debug for AdminLinkPasswordIdentityRequest {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("AdminLinkPasswordIdentityRequest")
+            .field("username", &self.username)
+            .field("password", &"[REDACTED]")
+            .finish()
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct AuthIdentitySummary {
+    pub id: i64,
+    pub method: String,
+    pub issuer: String,
+    pub subject: String,
+    pub provider_login: Option<String>,
+    pub disabled: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct KeyChallengeRequest {
     pub fingerprint: String,
