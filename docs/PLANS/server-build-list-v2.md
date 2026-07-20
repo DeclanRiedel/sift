@@ -84,10 +84,13 @@ GUI later is just rendering. Remaining items below are verified absent from the
       `OperationKind`s for a server-derived capability context at
       `GET /v1/operations/available`; preserve `/v1/operations` as the replay
       log. `docs/PLANS/operation-capabilities.md`.
+- [x] [Implement] Contextual capability query. Exhaustive `OperationKind`,
+      server-derived session/connection/transaction evaluation with disabled
+      reasons and destructive flags, OpenAPI schema, audit entry, and SDK.
 - [ ] [Design] CSV import → table (server-side ingest, type inference,
       conflict policy). Ties to PG `COPY FROM STDIN` (`PgExt::copy` Import)
       and SQL Server `BULK INSERT` (`MssqlExt::bulk_insert`).
-- [ ] [Implement] Capability query; CSV import.
+- [ ] [Implement] CSV import.
 
 ## Phase E — Hosted auth & identity
 

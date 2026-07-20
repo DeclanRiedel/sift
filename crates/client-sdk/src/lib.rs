@@ -17,10 +17,10 @@ use sift_protocol::{
     BeginTransactionRequest, BulkInsertRequest, BulkInsertResponse, CancelRequest, ConnectionId,
     ConnectionInfo, CursorId, DatabaseProcess, EndTransactionRequest, ExecuteRequestHttp,
     ExecuteResponse, Health, KillProcessRequest, KillProcessResponse, OpenConnectionRequest,
-    OpenSessionRequest, Page, Readiness, SavepointRequest, SchemaSnapshot, ServerInfo, SessionId,
-    SessionInfo, TextDocumentOperation, TransactionEndAction, TransactionInfo, TransactionPreview,
-    TransactionPreviewRequest, TransactionState, TxHandleRef, TxId, TxMode, Value, WsClientMessage,
-    WsServerMessage,
+    OpenSessionRequest, OperationCapability, OperationCapabilityContext, Page, Readiness,
+    SavepointRequest, SchemaSnapshot, ServerInfo, SessionId, SessionInfo, TextDocumentOperation,
+    TransactionEndAction, TransactionInfo, TransactionPreview, TransactionPreviewRequest,
+    TransactionState, TxHandleRef, TxId, TxMode, Value, WsClientMessage, WsServerMessage,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -756,6 +756,28 @@ impl Client {
 
     pub async fn operations(&self) -> Result<Vec<sift_protocol::OperationAuditEntry>> {
         self.get("/v1/operations").await
+    }
+
+    pub async fn available_operations(
+        &self,
+        context: &OperationCapabilityContext,
+    ) -> Result<Vec<OperationCapability>> {
+        let mut query = Vec::new();
+        if let Some(session) = context.session {
+            query.push(format!("session={session}"));
+        }
+        if let Some(connection) = context.connection {
+            query.push(format!("connection={connection}"));
+        }
+        if let Some(transaction) = context.transaction {
+            query.push(format!("transaction={transaction}"));
+        }
+        let suffix = if query.is_empty() {
+            String::new()
+        } else {
+            format!("?{}", query.join("&"))
+        };
+        self.get(&format!("/v1/operations/available{suffix}")).await
     }
 
     /// Durable operation-audit rows (actor, target, result code, row count,

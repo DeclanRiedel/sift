@@ -60,6 +60,7 @@ pub fn app(state: AppState) -> Router {
         .route("/v1/ready", get(ready))
         .route("/v1/audit", get(list_audit))
         .route("/v1/operations", get(list_operations))
+        .route("/v1/operations/available", get(list_available_operations))
         .route("/v1/operations/audit", get(list_operation_audit_log))
         .route("/v1/openapi.json", get(openapi))
         .route("/v1/metadata/tenants", get(list_metadata_tenants))
@@ -911,6 +912,18 @@ async fn list_operations(
     Json(state.sessions.list_operations())
 }
 
+async fn list_available_operations(
+    State(state): State<AppState>,
+    Query(context): Query<sift_protocol::OperationCapabilityContext>,
+) -> ApiResult<Json<Vec<sift_protocol::OperationCapability>>> {
+    let capabilities = crate::capability::evaluate(&state.sessions, &context)?;
+    state.sessions.push_operation(
+        Operation::ListAvailableOperations { context },
+        OperationStatus::Succeeded,
+    );
+    Ok(Json(capabilities))
+}
+
 async fn list_operation_audit_log(
     State(state): State<AppState>,
     Query(q): Query<HistoryQuery>,
@@ -961,6 +974,13 @@ async fn openapi() -> Json<serde_json::Value> {
                     "operationId": "listOperations",
                     "summary": "List replayable operation audit rows",
                     "responses": { "200": { "description": "Operation rows", "content": json_array_content("OperationAuditEntry") } }
+                }
+            },
+            "/v1/operations/available": {
+                "get": {
+                    "operationId": "listAvailableOperations",
+                    "summary": "List contextual operation capabilities",
+                    "responses": { "200": { "description": "Capabilities", "content": json_array_content("OperationCapability") } }
                 }
             },
             "/v1/operations/audit": {
@@ -1409,6 +1429,7 @@ fn protocol_schema_refs() -> serde_json::Value {
     add_schema::<sift_protocol::OpenConnectionRequest>("OpenConnectionRequest", &mut schemas);
     add_schema::<sift_protocol::OpenSessionRequest>("OpenSessionRequest", &mut schemas);
     add_schema::<sift_protocol::OperationAuditEntry>("OperationAuditEntry", &mut schemas);
+    add_schema::<sift_protocol::OperationCapability>("OperationCapability", &mut schemas);
     add_schema::<sift_protocol::Readiness>("Readiness", &mut schemas);
     add_schema::<sift_protocol::SavepointRequest>("SavepointRequest", &mut schemas);
     add_schema::<sift_protocol::SchemaSnapshot>("SchemaSnapshot", &mut schemas);

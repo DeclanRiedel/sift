@@ -6,6 +6,7 @@
 //! in-process alongside the desktop client or as a daemon for hosted use.
 
 pub mod autocomplete;
+pub mod capability;
 pub mod config;
 pub mod correlation;
 pub mod cursors;

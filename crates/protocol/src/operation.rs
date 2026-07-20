@@ -4,6 +4,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::OperationKind;
 use crate::{
     completion::CompletionRequest, BeginTransactionRequest, BulkInsertRequest, CancelRequest,
     ConnectionId, EndTransactionRequest, ExecuteRequestHttp, KillProcessRequest,
@@ -18,6 +19,9 @@ pub enum Operation {
         request: OpenSessionRequest,
     },
     ListSessions,
+    ListAvailableOperations {
+        context: crate::OperationCapabilityContext,
+    },
     CloseSession {
         session: SessionId,
     },
@@ -156,6 +160,41 @@ pub struct OperationSummary {
 }
 
 impl Operation {
+    pub fn kind(&self) -> OperationKind {
+        match self {
+            Self::OpenSession { .. } => OperationKind::OpenSession,
+            Self::ListSessions => OperationKind::ListSessions,
+            Self::ListAvailableOperations { .. } => OperationKind::ListAvailableOperations,
+            Self::CloseSession { .. } => OperationKind::CloseSession,
+            Self::OpenConnection { .. } => OperationKind::OpenConnection,
+            Self::CloseConnection { .. } => OperationKind::CloseConnection,
+            Self::RefreshSchema { .. } => OperationKind::RefreshSchema,
+            Self::ExecuteQuery { .. } => OperationKind::ExecuteQuery,
+            Self::Complete { .. } => OperationKind::Complete,
+            Self::CancelQuery { .. } => OperationKind::CancelQuery,
+            Self::PreviewEdits { .. } => OperationKind::PreviewEdits,
+            Self::ApplyEdits { .. } => OperationKind::ApplyEdits,
+            Self::SearchSchema { .. } => OperationKind::SearchSchema,
+            Self::SearchData { .. } => OperationKind::SearchData,
+            Self::Explain { .. } => OperationKind::Explain,
+            Self::ListProcesses { .. } => OperationKind::ListProcesses,
+            Self::KillProcess { .. } => OperationKind::KillProcess,
+            Self::BulkInsert { .. } => OperationKind::BulkInsert,
+            Self::BeginTransaction { .. } => OperationKind::BeginTransaction,
+            Self::ListTransactions { .. } => OperationKind::ListTransactions,
+            Self::PreviewTransaction { .. } => OperationKind::PreviewTransaction,
+            Self::CommitTransaction { .. } => OperationKind::CommitTransaction,
+            Self::RollbackTransaction { .. } => OperationKind::RollbackTransaction,
+            Self::Savepoint { .. } => OperationKind::Savepoint,
+            Self::RollbackToSavepoint { .. } => OperationKind::RollbackToSavepoint,
+            Self::ReleaseSavepoint { .. } => OperationKind::ReleaseSavepoint,
+            Self::Metadata { .. } => OperationKind::Metadata,
+            Self::AttachRoom { .. } => OperationKind::AttachRoom,
+            Self::DetachRoom { .. } => OperationKind::DetachRoom,
+            Self::ApplyDocumentOperation { .. } => OperationKind::ApplyDocumentOperation,
+        }
+    }
+
     /// Sanitized `(action, target, target_id)` view for audit records.
     pub fn audit_summary(&self) -> OperationSummary {
         let summary = |action: &str, target: &str, target_id: Option<i64>| OperationSummary {
@@ -166,6 +205,9 @@ impl Operation {
         match self {
             Operation::OpenSession { .. } => summary("open", "session", None),
             Operation::ListSessions => summary("list", "session", None),
+            Operation::ListAvailableOperations { .. } => {
+                summary("list_available", "operation", None)
+            }
             Operation::CloseSession { session } => {
                 summary("close", "session", Some(session.0 as i64))
             }
