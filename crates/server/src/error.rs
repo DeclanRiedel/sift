@@ -103,7 +103,8 @@ impl ApiError {
                 | MetadataError::RoomAttachmentNotFound(_)
                 | MetadataError::SavedQueryNotFound(_)
                 | MetadataError::PrincipalNotFound(_)
-                | MetadataError::AuthIdentityNotFound(_) => (StatusCode::NOT_FOUND, "not_found"),
+                | MetadataError::AuthIdentityNotFound(_)
+                | MetadataError::GithubAllowlistNotFound(_) => (StatusCode::NOT_FOUND, "not_found"),
                 MetadataError::FinalInstanceAdmin => (StatusCode::CONFLICT, "conflict"),
                 MetadataError::TenantMismatch(_, _) => (StatusCode::FORBIDDEN, "forbidden"),
                 MetadataError::MissingCredential(_, _)

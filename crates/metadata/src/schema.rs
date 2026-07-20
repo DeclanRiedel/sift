@@ -156,6 +156,27 @@ pub struct PasswordIdentity {
     pub principal: Principal,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct GithubAllowlistEntry {
+    pub id: GithubAllowlistId,
+    pub normalized_login: String,
+    pub target_principal_id: Option<PrincipalId>,
+    pub created_by: PrincipalId,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    pub consumed_at: Option<DateTime<Utc>>,
+    pub revoked_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone)]
+pub struct GithubProfile {
+    pub id: u64,
+    pub login: String,
+    pub display_name: Option<String>,
+    pub email: Option<String>,
+    pub avatar_url: Option<String>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum AuthClientKind {

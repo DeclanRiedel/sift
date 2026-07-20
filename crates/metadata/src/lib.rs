@@ -80,6 +80,8 @@ pub enum MetadataError {
     PrincipalNotFound(PrincipalId),
     #[error("authentication identity {0:?} not found")]
     AuthIdentityNotFound(AuthIdentityId),
+    #[error("GitHub allowlist entry {0:?} not found")]
+    GithubAllowlistNotFound(GithubAllowlistId),
     #[error("cannot disable the final active instance administrator")]
     FinalInstanceAdmin,
     #[error("authentication token key has an invalid length")]
@@ -508,6 +510,196 @@ impl MetadataStore {
             return Ok(None);
         };
         self.secrets.get(PASSWORD_SECRET_NAMESPACE, handle).await
+    }
+
+    pub fn create_github_allowlist_entry(
+        &self,
+        normalized_login: &str,
+        target_principal: Option<PrincipalId>,
+        actor: PrincipalId,
+        audit: NewOperationAudit,
+    ) -> Result<GithubAllowlistEntry> {
+        let now = now_text();
+        let mut conn = self.conn()?;
+        let tx = conn.transaction()?;
+        tx.execute(
+            "INSERT INTO github_allowlist
+             (normalized_login, target_principal_id, created_by, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?4)",
+            params![
+                normalized_login,
+                target_principal.map(|id| id.0),
+                actor.0,
+                now
+            ],
+        )?;
+        let id = GithubAllowlistId(tx.last_insert_rowid());
+        insert_operation_audit_row(&tx, &audit)?;
+        let entry = tx.query_row(
+            "SELECT id, normalized_login, target_principal_id, created_by,
+                    created_at, updated_at, consumed_at, revoked_at
+             FROM github_allowlist WHERE id = ?1",
+            params![id.0],
+            github_allowlist_from_row,
+        )?;
+        tx.commit()?;
+        Ok(entry)
+    }
+
+    pub fn list_github_allowlist_entries(&self) -> Result<Vec<GithubAllowlistEntry>> {
+        let conn = self.conn()?;
+        let mut statement = conn.prepare(
+            "SELECT id, normalized_login, target_principal_id, created_by,
+                    created_at, updated_at, consumed_at, revoked_at
+             FROM github_allowlist ORDER BY created_at DESC, id DESC",
+        )?;
+        let entries = rows(statement.query_map([], github_allowlist_from_row)?)?;
+        Ok(entries)
+    }
+
+    pub fn revoke_github_allowlist_entry(
+        &self,
+        id: GithubAllowlistId,
+        audit: NewOperationAudit,
+    ) -> Result<()> {
+        let now = now_text();
+        let mut conn = self.conn()?;
+        let tx = conn.transaction()?;
+        let changed = tx.execute(
+            "UPDATE github_allowlist SET revoked_at = COALESCE(revoked_at, ?1), updated_at = ?1
+             WHERE id = ?2 AND consumed_at IS NULL",
+            params![now, id.0],
+        )?;
+        if changed == 0 {
+            return Err(MetadataError::GithubAllowlistNotFound(id));
+        }
+        insert_operation_audit_row(&tx, &audit)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Resolve an immutable GitHub id or atomically consume the matching
+    /// normalized-login allowlist entry. New identities receive the same
+    /// principal + personal-tenant shape as password-created users.
+    pub fn complete_github_identity(
+        &self,
+        profile: GithubProfile,
+        audit: NewOperationAudit,
+    ) -> Result<Option<Principal>> {
+        let now = now_text();
+        let subject = profile.id.to_string();
+        let normalized_login = profile.login.to_ascii_lowercase();
+        let display_name = profile
+            .display_name
+            .as_deref()
+            .filter(|name| !name.trim().is_empty())
+            .unwrap_or(&profile.login)
+            .to_string();
+        let mut conn = self.conn()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let existing: Option<PrincipalId> = tx
+            .query_row(
+                "SELECT principal_id FROM auth_identity
+                 WHERE method = 'github' AND issuer = 'https://github.com' AND subject = ?1",
+                params![subject],
+                |row| row.get::<_, i64>(0).map(PrincipalId),
+            )
+            .optional()?;
+        let principal_id = if let Some(principal_id) = existing {
+            tx.execute(
+                "UPDATE auth_identity
+                 SET provider_login = ?1, last_used_at = ?2, updated_at = ?2
+                 WHERE method = 'github' AND issuer = 'https://github.com' AND subject = ?3",
+                params![profile.login, now, subject],
+            )?;
+            principal_id
+        } else {
+            let pending: Option<(GithubAllowlistId, Option<PrincipalId>)> = tx
+                .query_row(
+                    "SELECT id, target_principal_id FROM github_allowlist
+                     WHERE normalized_login = ?1 AND consumed_at IS NULL AND revoked_at IS NULL",
+                    params![normalized_login],
+                    |row| {
+                        Ok((
+                            GithubAllowlistId(row.get(0)?),
+                            row.get::<_, Option<i64>>(1)?.map(PrincipalId),
+                        ))
+                    },
+                )
+                .optional()?;
+            let Some((allowlist_id, target)) = pending else {
+                return Ok(None);
+            };
+            let principal_id = if let Some(target) = target {
+                target
+            } else {
+                tx.execute(
+                    "INSERT INTO principal
+                     (external_id, display_name, email, avatar_url, created_at, updated_at)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?5)",
+                    params![
+                        format!("principal:{}", Uuid::new_v4()),
+                        display_name,
+                        profile.email,
+                        profile.avatar_url,
+                        now
+                    ],
+                )?;
+                let created = PrincipalId(tx.last_insert_rowid());
+                tx.execute(
+                    "INSERT INTO tenant (name, kind, created_at, updated_at)
+                     VALUES (?1, 'personal', ?2, ?2)",
+                    params![profile.login, now],
+                )?;
+                let tenant = TenantId(tx.last_insert_rowid());
+                tx.execute(
+                    "INSERT INTO membership
+                     (tenant_id, principal_id, role, created_at, updated_at)
+                     VALUES (?1, ?2, 'owner', ?3, ?3)",
+                    params![tenant.0, created.0, now],
+                )?;
+                created
+            };
+            tx.execute(
+                "INSERT INTO auth_identity
+                 (principal_id, method, issuer, subject, provider_login,
+                  created_at, updated_at, last_used_at)
+                 VALUES (?1, 'github', 'https://github.com', ?2, ?3, ?4, ?4, ?4)",
+                params![principal_id.0, subject, profile.login, now],
+            )?;
+            tx.execute(
+                "UPDATE github_allowlist SET consumed_at = ?1, updated_at = ?1 WHERE id = ?2",
+                params![now, allowlist_id.0],
+            )?;
+            principal_id
+        };
+        tx.execute(
+            "UPDATE principal SET display_name = ?1,
+                    email = COALESCE(?2, email), avatar_url = COALESCE(?3, avatar_url),
+                    updated_at = ?4
+             WHERE id = ?5 AND disabled_at IS NULL",
+            params![
+                display_name,
+                profile.email,
+                profile.avatar_url,
+                now,
+                principal_id.0
+            ],
+        )?;
+        let mut audit = audit;
+        audit.actor_principal_id = Some(principal_id);
+        insert_operation_audit_row(&tx, &audit)?;
+        let principal = tx
+            .query_row(
+                "SELECT id, external_id, display_name, email, avatar_url, disabled_at,
+                    is_instance_admin, created_at, updated_at
+             FROM principal WHERE id = ?1 AND disabled_at IS NULL",
+                params![principal_id.0],
+                principal_from_row,
+            )
+            .optional()?;
+        tx.commit()?;
+        Ok(principal)
     }
 
     /// Disablement is principal-wide: all linked identities and interactive
@@ -2122,6 +2314,19 @@ fn auth_identity_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AuthIdent
     })
 }
 
+fn github_allowlist_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<GithubAllowlistEntry> {
+    Ok(GithubAllowlistEntry {
+        id: GithubAllowlistId(row.get(0)?),
+        normalized_login: row.get(1)?,
+        target_principal_id: row.get::<_, Option<i64>>(2)?.map(PrincipalId),
+        created_by: PrincipalId(row.get(3)?),
+        created_at: parse_time_sql(row.get(4)?)?,
+        updated_at: parse_time_sql(row.get(5)?)?,
+        consumed_at: parse_optional_time_sql(row.get(6)?)?,
+        revoked_at: parse_optional_time_sql(row.get(7)?)?,
+    })
+}
+
 fn tenant_membership_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TenantMembership> {
     let kind: String = row.get(2)?;
     let role: String = row.get(6)?;
@@ -2974,6 +3179,106 @@ mod tests {
             .unwrap();
         assert!(!durable.contains(&first.access_token));
         assert!(!durable.contains(&rotated.access_token));
+    }
+
+    #[test]
+    fn github_allowlist_binds_immutable_id_and_supports_explicit_linking() {
+        let store = store();
+        store.bootstrap_local("Admin").unwrap();
+        store
+            .create_github_allowlist_entry(
+                "octocat",
+                None,
+                PrincipalId(1),
+                test_audit("allowlist", "github", None),
+            )
+            .unwrap();
+        let created = store
+            .complete_github_identity(
+                GithubProfile {
+                    id: 5_830_231,
+                    login: "OctoCat".into(),
+                    display_name: Some("The Octocat".into()),
+                    email: None,
+                    avatar_url: Some("https://avatars.example/octocat".into()),
+                },
+                NewOperationAudit {
+                    actor_principal_id: None,
+                    ..test_audit("authenticate.github", "auth_session", None)
+                },
+            )
+            .unwrap()
+            .unwrap();
+        assert_ne!(created.id, PrincipalId(1));
+        assert_eq!(store.list_principal_tenants(created.id).unwrap().len(), 1);
+        assert!(store.list_github_allowlist_entries().unwrap()[0]
+            .consumed_at
+            .is_some());
+
+        let renamed = store
+            .complete_github_identity(
+                GithubProfile {
+                    id: 5_830_231,
+                    login: "renamed-octocat".into(),
+                    display_name: None,
+                    email: None,
+                    avatar_url: None,
+                },
+                NewOperationAudit {
+                    actor_principal_id: None,
+                    ..test_audit("authenticate.github", "auth_session", None)
+                },
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(renamed.id, created.id);
+        assert_eq!(
+            store.list_auth_identities(created.id).unwrap()[0].subject,
+            "5830231"
+        );
+        assert!(store
+            .complete_github_identity(
+                GithubProfile {
+                    id: 42,
+                    login: "not-allowed".into(),
+                    display_name: None,
+                    email: None,
+                    avatar_url: None,
+                },
+                NewOperationAudit {
+                    actor_principal_id: None,
+                    ..test_audit("authenticate.github", "auth_session", None)
+                },
+            )
+            .unwrap()
+            .is_none());
+
+        store
+            .create_github_allowlist_entry(
+                "linked-admin",
+                Some(PrincipalId(1)),
+                PrincipalId(1),
+                test_audit("allowlist", "github", None),
+            )
+            .unwrap();
+        let linked = store
+            .complete_github_identity(
+                GithubProfile {
+                    id: 99,
+                    login: "linked-admin".into(),
+                    display_name: Some("Admin via GitHub".into()),
+                    email: None,
+                    avatar_url: None,
+                },
+                NewOperationAudit {
+                    actor_principal_id: None,
+                    ..test_audit("authenticate.github", "auth_session", None)
+                },
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(linked.id, PrincipalId(1));
+        assert_eq!(store.list_auth_identities(PrincipalId(1)).unwrap().len(), 2);
     }
 
     #[test]
