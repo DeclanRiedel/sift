@@ -664,3 +664,67 @@ Users choose between atomic failure and duplicate-tolerant progress rather
 than receiving engine-dependent implicit behavior. High-volume skip-mode
 imports trade throughput for portable conflict semantics; abort remains the
 fast path.
+
+---
+
+## ADR-030 — Instance-Owned Closed Registration And Provider-Neutral Principals
+
+**Context.** Sift must support a zero-friction personal loopback server, a
+future server reached through SSH, and a network-hosted collaborative instance.
+Treating these as a single `local | hosted` switch conflates transport with
+trust. Hosted login must also identify more than a caller: the current runtime
+has principal ownership on sessions but does not consistently enforce it on
+every session-derived route. Adding OAuth alone would therefore leave a
+network-hosted instance unsafe. Finally, self-hosted instances cannot depend on
+a Sift-operated identity broker or a shared GitHub callback registration.
+
+**Decision.** Deployment policy (`personal | team`) is independent of transport
+(`loopback | network | ssh-proxy`). Loopback bypass exists only for the
+personal-loopback combination; network transports require explicit
+authentication. Team mode is closed-registration and fails closed if its
+metadata, durable secret backend, external URL, or authentication configuration
+is unavailable.
+
+A `principal` is provider-neutral and may own multiple authentication
+identities. Phase E implements instance-owned username/password and a
+per-instance GitHub OAuth App. Admins create password identities and allowlist
+GitHub logins, optionally linking either credential to an existing principal.
+GitHub's immutable numeric user id becomes the durable provider subject after
+first login. Email never links accounts implicitly. New principals receive a
+personal tenant and join team tenants only through explicit invitations. OIDC
+is deferred, but identities retain issuer + subject keys so it is additive.
+
+Passwords are salted and hashed with Argon2id on bounded blocking workers; the
+verifier is stored behind `SecretStore` and SQLite contains only its opaque
+handle. GitHub client credentials are instance secret-bearing configuration,
+never metadata. OAuth uses authorization code, state, and S256 PKCE, and the
+temporary GitHub token is discarded after profile synchronization.
+
+Interactive login issues short-lived opaque access tokens and rotating opaque
+refresh tokens. Durable state retains only token lookup/digest material,
+lineage, expiry, and revocation. Refresh replay revokes the family. Native
+clients use bearer tokens; same-origin web clients use secure HttpOnly cookies
+with CSRF protection. WebSockets authenticate into renewable leases that can
+be invalidated when the principal, auth session, or room membership is
+revoked. API tokens remain separate automation credentials; existing Ed25519
+key/challenge schema is adopted for challenge login and future SSH bootstrap.
+
+Phase E also establishes the minimum authorization floor: one middleware
+produces the authoritative auth context, protected routes are fail-closed,
+sessions are principal- or room-owned, and every session-derived resource
+inherits that ownership. Phase F retains richer tenant and connection policy,
+general rate limits, quotas, and accounting. Initial collaboration is direct:
+all collaborators connect to the same network-hosted Sift instance. A central
+relay or identity broker is not part of Phase E.
+
+**Consequences.** Password and GitHub users are functionally identical after
+authentication, and an admin can attach both methods to one stable account.
+Self-hosted operators own their GitHub registration and secrets, avoiding a
+Sift cloud dependency at the cost of per-instance OAuth setup. Opaque sessions
+make revocation and membership changes immediate; a bounded cache prevents a
+SQLite lookup from becoming request-path latency. The first hosted release is
+single-process per metadata store, with persistence behind an auth-session
+boundary for later replacement. Phase E grows to include ownership enforcement
+and auth-specific throttling because exposing identity without those controls
+would not create a safely hostable server. Detailed contracts and sequencing
+are in `docs/PLANS/hosted-identity.md`.

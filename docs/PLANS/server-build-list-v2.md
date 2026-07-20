@@ -106,37 +106,50 @@ GUI later is just rendering.
 Goal: take auth from "bearer token + loopback bypass" to "hosted mode with
 real identity," without breaking local-first (ADR-006, ADR-010).
 
-- [ ] [Design] ADR-030 (candidate): hosted identity model — local mode
-      stays loopback-bypass + API tokens; hosted mode requires GitHub OAuth
-      as primary, OIDC as enterprise, keypair as programmatic.
-- [ ] [Design] OAuth flow shape (auth-code + PKCE); session token model
-      (short-lived access + rotating refresh with replay detection);
-      principal → tenant binding (invite/accept, default-tenant on first
-      OAuth login).
-- [ ] [Implement] GitHub OAuth login route pair; OIDC route pair for
-      enterprise; session-token issue/refresh/revoke with rotating refresh
-      tokens.
+- [x] [Design] ADR-030: instance-owned closed registration with provider-neutral
+      principals. Deployment policy (`personal | team`) is separate from
+      transport (`loopback | network | ssh-proxy`). Password and per-instance
+      GitHub OAuth credentials are equivalent auth methods; OIDC is deferred.
+      `docs/PLANS/hosted-identity.md`.
+- [x] [Design] Auth-code + state + S256 PKCE; 15-minute opaque access tokens +
+      30-day rotating refresh families with replay revocation; native bearer +
+      secure web cookie; WebSocket auth leases; personal tenant on first
+      principal creation and explicit invite/accept for teams.
+- [ ] [Implement] Authentication floor: central fail-closed middleware and
+      principal/room ownership across sessions, connections, transactions,
+      cursors, queries, and WebSockets. This minimum authorization moves from
+      Phase F because hosted identity is unsafe without it.
+- [ ] [Implement] Instance admin bootstrap and closed registration: create,
+      disable, link, and revoke password/GitHub identities; GitHub allowlist;
+      personal-tenant creation and team invitation lifecycle.
+- [ ] [Implement] Username/password login using Argon2id verifiers behind
+      `SecretStore`; auth-specific throttling; session-token
+      issue/refresh/revoke with rotating refresh tokens and replay detection.
+- [ ] [Implement] Per-instance GitHub OAuth login route pair, allowlist
+      enforcement, immutable GitHub-id binding, and profile synchronization.
 - [ ] [Implement] Keypair auth. **Note: `principal_key` and
       `keypair_challenge` tables already exist** (`V001__identity.sql:40`,
       `:53`) but are **dead schema** — no Rust touches them. Wire or drop.
-- [ ] [Implement] Local-mode guarantee: when `mode = local`, OAuth/OIDC/
-      keypair are disabled and loopback-bypass + bootstrapped local
-      principal remain the only path.
-- [ ] [Implement] Principal profile sync (display name, email, avatar from
-      GitHub on login); expose via `/v1/auth/whoami`.
+- [ ] [Implement] Policy/transport guarantee: loopback bypass exists only for
+      `personal + loopback`; every network transport requires explicit auth;
+      team mode fails closed on unsafe configuration. Future SSH proxy auth
+      uses an instance-bound capability rather than broadening loopback trust.
+- [ ] [Implement] Principal profile sync (display name, optional email, avatar
+      from GitHub on login); expose via `/v1/auth/whoami`; native SDK token
+      rotation and cookie/CSRF + WebSocket reauthentication surfaces.
 
 ## Phase F — Authorization, tenancy & limits
 
-Goal: once multiple principals exist, scope what each can do. Today the
-only authorization is room RBAC; per-connection and tenant-resource
-enforcement are entirely absent.
+Goal: deepen Phase E's principal/room ownership floor into configurable
+tenant and connection policy. Per-connection permissions, general API limits,
+and tenant-resource enforcement remain absent.
 
 - [ ] [Design] ADR-020 (candidate): authorization model — connection-level
       permissions, room roles (already owner/editor/viewer), tenant roles;
       where policy is evaluated.
-- [ ] [Design] Rate limiting (per-principal + per-tenant token bucket or
+- [ ] [Design] General rate limiting (per-principal + per-tenant token bucket or
       sliding window); 429 + `Retry-After`. `Code::RateLimited` does not
-      exist today.
+      exist today. Phase E separately owns login/refresh abuse throttling.
 - [ ] [Design] Tenant isolation: connection quotas, concurrent-query caps,
       total-result-bytes-per-tenant; `Code::TenantResourceExhausted` (does
       not exist today) instead of a crash.
@@ -192,11 +205,13 @@ Goal: a sift server can run remote while a thin client renders locally.
 Because sift is already server-first, this is mostly bootstrap + version
 handshake.
 
-- [ ] [Design] ADR-021 (candidate): remote topology — SSH-tunneled (Zed
-      model) vs hosted-collab-relay vs both.
+- [ ] [Design] ADR-021 (candidate): direct SSH-tunneled remote topology (Zed
+      model) using Phase E's instance-bound proxy capability. A hosted
+      collaboration relay is a separate future topology, not required for
+      initial remote support.
 - [ ] [Design] Remote bootstrap (SSH control-master, binary fetch/upload,
-      version check, daemon spawn/reconnect); reconnect + state survival on
-      SSH drop.
+      version check, daemon spawn/reconnect, capability handoff over the
+      authenticated channel); reconnect + state survival on SSH drop.
 - [ ] [Design] Version handshake. The client-sdk never sends or inspects
       `X-Sift-Protocol-Version` today (`client-sdk/src/lib.rs` never
       imports `PROTOCOL_VERSION`); the server emits it one-way. Both sides
@@ -259,8 +274,9 @@ Goal: the last mile before a real release.
   `keypair_challenge` tables already exist (dead schema).
 - **Phase G's first deliverable is replacing `sift-doc` with a real CRDT.**
   Everything else in G (late-join, presence split, follow mode) depends on it.
-- **Phase H depends on E (auth) + a real version handshake.** The one-way
-  header today is not a handshake.
+- **Phase H depends on E's instance-bound proxy capability + a real version
+  handshake.** The one-way header today is not a handshake. It does not
+  require a central identity or collaboration relay.
 - **Phase I is mostly orthogonal** but governance depends on F.
 - **Phase J's OpenAPI item can land earlier** — the hand-authored map is
   already drifting.
@@ -287,7 +303,7 @@ Goal: the last mile before a real release.
 | ADR-027 | bounded database process control | Phase D | written |
 | ADR-028 | server-derived operation capabilities | Phase D | written |
 | ADR-029 | normalized CSV import | Phase D | written |
-| ADR-030 | hosted identity model | Phase E | not written |
+| ADR-030 | instance-owned closed registration + hosted identity | Phase E | written |
 
 ## Reference: what is being stolen, and what is not
 
