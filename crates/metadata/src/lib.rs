@@ -1983,7 +1983,9 @@ mod tests {
                             })
                             .expect("concurrent write succeeds");
                         // Interleave a read on a different pooled connection.
-                        store.list_operation_audit(5).expect("concurrent read succeeds");
+                        store
+                            .list_operation_audit(5)
+                            .expect("concurrent read succeeds");
                     }
                 })
             })
@@ -1992,7 +1994,9 @@ mod tests {
             handle.join().unwrap();
         }
 
-        let rows = store.list_operation_audit((THREADS * WRITES_PER_THREAD * 2) as u32).unwrap();
+        let rows = store
+            .list_operation_audit((THREADS * WRITES_PER_THREAD * 2) as u32)
+            .unwrap();
         assert_eq!(rows.len(), THREADS * WRITES_PER_THREAD);
     }
 
