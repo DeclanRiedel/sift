@@ -31,6 +31,8 @@ const SECRET_NAMESPACE: &str = "sift.local";
 const PASSWORD_SECRET_NAMESPACE: &str = "sift.auth.password";
 const AUTH_SYSTEM_SECRET_NAMESPACE: &str = "sift.auth.system";
 const AUTH_TOKEN_MAC_HANDLE: &str = "token-mac-v1";
+const OAUTH_SECRET_NAMESPACE: &str = "sift.auth.oauth";
+const OAUTH_STATE_PREFIX: &str = "sift_oauth_";
 const ACCESS_TOKEN_PREFIX: &str = "sift_at_";
 const REFRESH_TOKEN_PREFIX: &str = "sift_rt_";
 const AUTH_TOKEN_LOOKUP_LEN: usize = 12;
@@ -86,6 +88,8 @@ pub enum MetadataError {
     FinalInstanceAdmin,
     #[error("authentication token key has an invalid length")]
     InvalidAuthTokenKey,
+    #[error("OAuth login attempt is invalid, expired, or already consumed")]
+    InvalidOAuthAttempt,
     #[error("secret store error: {0}")]
     SecretStore(String),
     #[error("io error: {0}")]
@@ -889,6 +893,112 @@ impl MetadataStore {
         })
     }
 
+    pub async fn create_github_oauth_attempt(
+        &self,
+        client_kind: AuthClientKind,
+    ) -> Result<OAuthStartMaterial> {
+        if client_kind == AuthClientKind::Keypair {
+            return Err(MetadataError::InvalidEnum {
+                field: "oauth_login_attempt.client_kind",
+                value: "keypair".into(),
+            });
+        }
+        let key = self.auth_token_mac_key().await?;
+        let lookup_seed = Uuid::new_v4().simple().to_string();
+        let lookup = &lookup_seed[..AUTH_TOKEN_LOOKUP_LEN];
+        let state = format!("{OAUTH_STATE_PREFIX}{lookup}_{}", Uuid::new_v4().simple());
+        let state_digest = auth_token_digest(&key, &state);
+        let code_verifier = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
+        let verifier_handle = Uuid::new_v4().to_string();
+        self.secrets
+            .put(
+                OAUTH_SECRET_NAMESPACE,
+                &verifier_handle,
+                code_verifier.as_bytes(),
+            )
+            .await?;
+        let now = Utc::now();
+        let expires = now + chrono::Duration::minutes(10);
+        let conn = self.conn()?;
+        let result = conn.execute(
+            "INSERT INTO oauth_login_attempt
+             (id, provider, state_lookup, state_digest, pkce_verifier_handle,
+              client_kind, created_at, expires_at)
+             VALUES (?1, 'github', ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                Uuid::new_v4().to_string(),
+                lookup,
+                state_digest,
+                verifier_handle,
+                client_kind.as_str(),
+                now.to_rfc3339(),
+                expires.to_rfc3339()
+            ],
+        );
+        if let Err(error) = result {
+            self.delete_oauth_secret_best_effort(&verifier_handle, "create_oauth_attempt_rollback")
+                .await;
+            return Err(error.into());
+        }
+        Ok(OAuthStartMaterial {
+            state,
+            code_verifier,
+        })
+    }
+
+    pub async fn consume_github_oauth_attempt(&self, state: &str) -> Result<ConsumedOAuthAttempt> {
+        let Some(lookup) = auth_token_lookup(state, OAUTH_STATE_PREFIX) else {
+            return Err(MetadataError::InvalidOAuthAttempt);
+        };
+        let key = self.auth_token_mac_key().await?;
+        let digest = auth_token_digest(&key, state);
+        let now = Utc::now();
+        let mut conn = self.conn()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let candidate = tx
+            .query_row(
+                "SELECT id, state_digest, pkce_verifier_handle, client_kind
+                 FROM oauth_login_attempt
+                 WHERE provider = 'github' AND state_lookup = ?1
+                   AND consumed_at IS NULL AND expires_at > ?2",
+                params![lookup, now.to_rfc3339()],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                    ))
+                },
+            )
+            .optional()?;
+        let Some((id, stored_digest, verifier_handle, client_kind)) = candidate else {
+            return Err(MetadataError::InvalidOAuthAttempt);
+        };
+        if !constant_time_eq(stored_digest.as_bytes(), digest.as_bytes()) {
+            return Err(MetadataError::InvalidOAuthAttempt);
+        }
+        tx.execute(
+            "UPDATE oauth_login_attempt SET consumed_at = ?1
+             WHERE id = ?2 AND consumed_at IS NULL",
+            params![now.to_rfc3339(), id],
+        )?;
+        tx.commit()?;
+        let verifier = self
+            .secrets
+            .get(OAUTH_SECRET_NAMESPACE, &verifier_handle)
+            .await?
+            .ok_or(MetadataError::InvalidOAuthAttempt)?;
+        self.delete_oauth_secret_best_effort(&verifier_handle, "consume_oauth_attempt")
+            .await;
+        let code_verifier =
+            String::from_utf8(verifier).map_err(|_| MetadataError::InvalidOAuthAttempt)?;
+        Ok(ConsumedOAuthAttempt {
+            client_kind: parse_auth_client_kind_sql(client_kind)?,
+            code_verifier,
+        })
+    }
+
     pub async fn verify_auth_access_token(
         &self,
         presented: &str,
@@ -1481,6 +1591,12 @@ impl MetadataStore {
                 context,
                 "orphaned password verifier: deleting handle from secret store failed"
             );
+        }
+    }
+
+    async fn delete_oauth_secret_best_effort(&self, handle: &str, context: &str) {
+        if let Err(error) = self.secrets.delete(OAUTH_SECRET_NAMESPACE, handle).await {
+            tracing::warn!(%error, handle, context, "orphaned OAuth secret handle");
         }
     }
 
@@ -3279,6 +3395,40 @@ mod tests {
             .unwrap();
         assert_eq!(linked.id, PrincipalId(1));
         assert_eq!(store.list_auth_identities(PrincipalId(1)).unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn oauth_state_and_pkce_verifier_are_one_use_and_secret_backed() {
+        let store = store();
+        let attempt = store
+            .create_github_oauth_attempt(AuthClientKind::Web)
+            .await
+            .unwrap();
+        assert!(attempt.state.starts_with(OAUTH_STATE_PREFIX));
+        assert_eq!(attempt.code_verifier.len(), 64);
+        let conn = store.conn().unwrap();
+        let durable: String = conn
+            .query_row(
+                "SELECT state_lookup || state_digest || pkce_verifier_handle
+                 FROM oauth_login_attempt",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        drop(conn);
+        assert!(!durable.contains(&attempt.state));
+        assert!(!durable.contains(&attempt.code_verifier));
+
+        let consumed = store
+            .consume_github_oauth_attempt(&attempt.state)
+            .await
+            .unwrap();
+        assert_eq!(consumed.client_kind, AuthClientKind::Web);
+        assert_eq!(consumed.code_verifier, attempt.code_verifier);
+        assert!(matches!(
+            store.consume_github_oauth_attempt(&attempt.state).await,
+            Err(MetadataError::InvalidOAuthAttempt)
+        ));
     }
 
     #[test]

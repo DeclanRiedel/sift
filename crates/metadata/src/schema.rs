@@ -220,6 +220,16 @@ pub enum RefreshAuthResult {
     ReplayDetected,
 }
 
+pub struct OAuthStartMaterial {
+    pub state: String,
+    pub code_verifier: String,
+}
+
+pub struct ConsumedOAuthAttempt {
+    pub client_kind: AuthClientKind,
+    pub code_verifier: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct AuthIdentity {
     pub id: AuthIdentityId,
