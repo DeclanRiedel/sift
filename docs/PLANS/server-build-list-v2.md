@@ -62,12 +62,15 @@ GUI later is just rendering. Remaining items below are verified absent from the
       deferred — always reports `Ready`); data fan-out is sequential (bounded
       concurrency deferred); engine-native FTS not wired (LIKE only);
       numeric/date columns not searched.
-- [x] [Design] Execution plans (typed `PlanNode` tree). **Design drafted in
-      `docs/PLANS/execution-plans.md`** (ADR-025): both engines typed (PG
-      `EXPLAIN FORMAT JSON`, MSSQL showplan XML via a new `roxmltree` dep),
-      estimate + safe-wrapped ANALYZE (DML runs in a rolled-back tx), common-core
-      `PlanNode` + `extra` map + raw blob, route `POST .../explain`. Implement
-      is a next build step.
+- [x] [Design] Execution plans (typed `PlanNode` tree, ADR-025). `docs/PLANS/execution-plans.md`.
+- [x] [Implement] Execution plans. `protocol/src/plan.rs` (`PlanNode`,
+      `ExplainRequest/Response`) + `Operation::Explain`; `server/src/plan.rs`
+      parses PG `EXPLAIN (FORMAT JSON)` (serde_json) and MSSQL showplan XML
+      (`roxmltree`) into a common-core node + `extra` map + raw blob; ANALYZE of
+      a non-read statement runs in a rolled-back tx. Route `POST .../explain`.
+      Tests: `plan::tests` (3), `tests/explain.rs` (4). **v1 gap:** MSSQL
+      `analyze=true` returns `UnsupportedForEngine` (STATISTICS XML multi-result
+      capture not wired); PG analyze is full.
 - [ ] [Design] Process list + kill (PG `pg_stat_activity` + `pg_terminate_backend`,
       MSSQL `sys.dm_exec_requests` + `KILL`).
 - [ ] [Design] Command-palette server surface: enumerate available
@@ -76,8 +79,8 @@ GUI later is just rendering. Remaining items below are verified absent from the
 - [ ] [Design] CSV import → table (server-side ingest, type inference,
       conflict policy). Ties to PG `COPY FROM STDIN` (`PgExt::copy` Import)
       and SQL Server `BULK INSERT` (`MssqlExt::bulk_insert`).
-- [ ] [Implement] Transactions panel server state; plan capture + structured
-      `PlanNode`; process-list + kill; capability query; CSV import.
+- [ ] [Implement] Transactions panel server state; process-list + kill;
+      capability query; CSV import.
 
 ## Phase E — Hosted auth & identity
 

@@ -168,6 +168,10 @@ pub fn app(state: AppState) -> Router {
             "/v1/sessions/:id/connections/:conn_id/search/data",
             post(post_search_data),
         )
+        .route(
+            "/v1/sessions/:id/connections/:conn_id/explain",
+            post(post_explain),
+        )
         .route("/v1/sessions/:id/queries", post(execute_query))
         .route("/v1/sessions/:id/transactions", post(begin_transaction))
         .route(
@@ -2466,6 +2470,27 @@ async fn post_search_data(
     let resp = state.sessions.search_data(id, conn_id, req).await?;
     state.sessions.push_operation(
         Operation::SearchData {
+            session: id,
+            connection: conn_id,
+        },
+        OperationStatus::Succeeded,
+    );
+    Ok(Json(resp))
+}
+
+async fn post_explain(
+    State(state): State<AppState>,
+    Path((id, conn_id)): Path<(sift_protocol::SessionId, sift_protocol::ConnectionId)>,
+    Json(req): Json<sift_protocol::ExplainRequest>,
+) -> ApiResult<Json<sift_protocol::ExplainResponse>> {
+    if req.connection != conn_id {
+        return Err(ApiError::BadRequest(
+            "`connection` in body must match the path connection".into(),
+        ));
+    }
+    let resp = crate::plan::explain(&state.sessions, id, conn_id, &req).await?;
+    state.sessions.push_operation(
+        Operation::Explain {
             session: id,
             connection: conn_id,
         },

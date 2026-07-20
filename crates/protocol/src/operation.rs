@@ -66,6 +66,11 @@ pub enum Operation {
         session: SessionId,
         connection: ConnectionId,
     },
+    /// Capture a query's execution plan (EXPLAIN).
+    Explain {
+        session: SessionId,
+        connection: ConnectionId,
+    },
     BulkInsert {
         session: SessionId,
         connection: ConnectionId,
@@ -176,6 +181,9 @@ impl Operation {
             }
             Operation::SearchData { connection, .. } => {
                 summary("search", "data", Some(connection.0 as i64))
+            }
+            Operation::Explain { connection, .. } => {
+                summary("explain", "query", Some(connection.0 as i64))
             }
             Operation::BulkInsert { connection, .. } => {
                 summary("bulk_insert", "connection", Some(connection.0 as i64))

@@ -15,6 +15,7 @@ pub mod error;
 pub mod export;
 pub mod fingerprint;
 pub mod http;
+pub mod plan;
 pub mod registry;
 pub mod room_runtime;
 pub mod schema_cache;
