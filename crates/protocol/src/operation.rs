@@ -6,9 +6,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     completion::CompletionRequest, BeginTransactionRequest, BulkInsertRequest, CancelRequest,
-    ConnectionId, EndTransactionRequest, ExecuteRequestHttp, OpenConnectionRequest,
-    OpenSessionRequest, SavepointRequest, SchemaScope, SessionId, TextDocumentOperation,
-    TransactionPreviewRequest,
+    ConnectionId, EndTransactionRequest, ExecuteRequestHttp, KillProcessRequest,
+    OpenConnectionRequest, OpenSessionRequest, SavepointRequest, SchemaScope, SessionId,
+    TextDocumentOperation, TransactionPreviewRequest,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
@@ -71,6 +71,15 @@ pub enum Operation {
     Explain {
         session: SessionId,
         connection: ConnectionId,
+    },
+    ListProcesses {
+        session: SessionId,
+        connection: ConnectionId,
+    },
+    KillProcess {
+        session: SessionId,
+        connection: ConnectionId,
+        request: KillProcessRequest,
     },
     BulkInsert {
         session: SessionId,
@@ -192,6 +201,12 @@ impl Operation {
             }
             Operation::Explain { connection, .. } => {
                 summary("explain", "query", Some(connection.0 as i64))
+            }
+            Operation::ListProcesses { connection, .. } => {
+                summary("list", "process", Some(connection.0 as i64))
+            }
+            Operation::KillProcess { request, .. } => {
+                summary("kill", "process", Some(request.process_id))
             }
             Operation::BulkInsert { connection, .. } => {
                 summary("bulk_insert", "connection", Some(connection.0 as i64))

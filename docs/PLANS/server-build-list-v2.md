@@ -77,13 +77,16 @@ GUI later is just rendering. Remaining items below are verified absent from the
 - [x] [Design] Process list + kill (ADR-027): PG `pg_stat_activity` +
       `pg_terminate_backend`, MSSQL `sys.dm_exec_requests` + `KILL`.
       `docs/PLANS/process-control.md`.
+- [x] [Implement] Process list + kill. Normalized cross-engine process model,
+      bounded catalog queries, guarded termination route, audit variants,
+      OpenAPI schemas, and client SDK methods.
 - [ ] [Design] Command-palette server surface: enumerate available
       `Operation`s for a given capability context. (`GET /v1/operations`
       exists but returns the whole list unfiltered.)
 - [ ] [Design] CSV import → table (server-side ingest, type inference,
       conflict policy). Ties to PG `COPY FROM STDIN` (`PgExt::copy` Import)
       and SQL Server `BULK INSERT` (`MssqlExt::bulk_insert`).
-- [ ] [Implement] Process-list + kill; capability query; CSV import.
+- [ ] [Implement] Capability query; CSV import.
 
 ## Phase E — Hosted auth & identity
 

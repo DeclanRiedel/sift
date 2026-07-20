@@ -15,11 +15,12 @@ use sift_metadata::{
 };
 use sift_protocol::{
     BeginTransactionRequest, BulkInsertRequest, BulkInsertResponse, CancelRequest, ConnectionId,
-    ConnectionInfo, CursorId, EndTransactionRequest, ExecuteRequestHttp, ExecuteResponse, Health,
-    OpenConnectionRequest, OpenSessionRequest, Page, Readiness, SavepointRequest, SchemaSnapshot,
-    ServerInfo, SessionId, SessionInfo, TextDocumentOperation, TransactionEndAction,
-    TransactionInfo, TransactionPreview, TransactionPreviewRequest, TransactionState, TxHandleRef,
-    TxId, TxMode, Value, WsClientMessage, WsServerMessage,
+    ConnectionInfo, CursorId, DatabaseProcess, EndTransactionRequest, ExecuteRequestHttp,
+    ExecuteResponse, Health, KillProcessRequest, KillProcessResponse, OpenConnectionRequest,
+    OpenSessionRequest, Page, Readiness, SavepointRequest, SchemaSnapshot, ServerInfo, SessionId,
+    SessionInfo, TextDocumentOperation, TransactionEndAction, TransactionInfo, TransactionPreview,
+    TransactionPreviewRequest, TransactionState, TxHandleRef, TxId, TxMode, Value, WsClientMessage,
+    WsServerMessage,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -113,6 +114,30 @@ impl Client {
         self.post_empty(&format!(
             "/v1/sessions/{session}/connections/{connection}/ping"
         ))
+        .await
+    }
+
+    pub async fn list_processes(
+        &self,
+        session: SessionId,
+        connection: ConnectionId,
+    ) -> Result<Vec<DatabaseProcess>> {
+        self.get(&format!(
+            "/v1/sessions/{session}/connections/{connection}/processes"
+        ))
+        .await
+    }
+
+    pub async fn kill_process(
+        &self,
+        session: SessionId,
+        connection: ConnectionId,
+        process_id: i64,
+    ) -> Result<KillProcessResponse> {
+        self.post(
+            &format!("/v1/sessions/{session}/connections/{connection}/processes/kill"),
+            &KillProcessRequest { process_id },
+        )
         .await
     }
 

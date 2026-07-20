@@ -17,6 +17,7 @@ pub mod engine;
 pub mod error;
 pub mod operation;
 pub mod plan;
+pub mod process;
 pub mod result;
 pub mod room;
 pub mod schema;
@@ -42,6 +43,7 @@ pub use engine::Engine;
 pub use error::{Code, DriverError, DriverWarning};
 pub use operation::{Operation, OperationSummary};
 pub use plan::{ExplainRequest, ExplainResponse, PlanNode};
+pub use process::{DatabaseProcess, KillProcessRequest, KillProcessResponse};
 pub use result::{CursorId, ExecuteRequest, Page, Row};
 pub use room::{
     DocumentOperationEnvelope, RoomClientMessage, RoomPresence, RoomQueryResult, RoomQueryStatus,

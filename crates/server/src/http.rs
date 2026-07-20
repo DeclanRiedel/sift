@@ -26,10 +26,10 @@ use sift_metadata::{
 use sift_protocol::{
     AuditEntry, BeginTransactionRequest, BulkInsertRequest, CancelRequest,
     DocumentOperationEnvelope, EndTransactionRequest, ExecuteRequest, ExecuteRequestHttp, Health,
-    ObjectPath, OpenConnectionRequest, OpenSessionRequest, Operation, OperationStatus, Readiness,
-    RoomClientMessage, RoomQueryResult, RoomQueryStatus, RoomServerMessage, SavepointRequest,
-    SchemaFilter, SchemaScope, TransactionPreviewRequest, WsClientMessage, WsServerMessage,
-    PROTOCOL_VERSION,
+    KillProcessRequest, ObjectPath, OpenConnectionRequest, OpenSessionRequest, Operation,
+    OperationStatus, Readiness, RoomClientMessage, RoomQueryResult, RoomQueryStatus,
+    RoomServerMessage, SavepointRequest, SchemaFilter, SchemaScope, TransactionPreviewRequest,
+    WsClientMessage, WsServerMessage, PROTOCOL_VERSION,
 };
 
 use crate::error::{ApiError, ApiResult};
@@ -172,6 +172,14 @@ pub fn app(state: AppState) -> Router {
         .route(
             "/v1/sessions/:id/connections/:conn_id/explain",
             post(post_explain),
+        )
+        .route(
+            "/v1/sessions/:id/connections/:conn_id/processes",
+            get(list_processes),
+        )
+        .route(
+            "/v1/sessions/:id/connections/:conn_id/processes/kill",
+            post(kill_process),
         )
         .route("/v1/sessions/:id/queries", post(execute_query))
         .route(
@@ -1035,6 +1043,21 @@ async fn openapi() -> Json<serde_json::Value> {
                     "responses": { "200": { "description": "Schema snapshot", "content": json_content("SchemaSnapshot") } }
                 }
             },
+            "/v1/sessions/{id}/connections/{conn_id}/processes": {
+                "get": {
+                    "operationId": "listProcesses",
+                    "summary": "List database processes",
+                    "responses": { "200": { "description": "Processes", "content": json_array_content("DatabaseProcess") } }
+                }
+            },
+            "/v1/sessions/{id}/connections/{conn_id}/processes/kill": {
+                "post": {
+                    "operationId": "killProcess",
+                    "summary": "Terminate a database process",
+                    "requestBody": json_body("KillProcessRequest"),
+                    "responses": { "200": { "description": "Termination result", "content": json_content("KillProcessResponse") } }
+                }
+            },
             "/v1/sessions/{id}/queries": {
                 "post": {
                     "operationId": "executeQuery",
@@ -1376,10 +1399,13 @@ fn protocol_schema_refs() -> serde_json::Value {
     add_schema::<sift_protocol::BulkInsertResponse>("BulkInsertResponse", &mut schemas);
     add_schema::<sift_protocol::CancelRequest>("CancelRequest", &mut schemas);
     add_schema::<sift_protocol::ConnectionInfo>("ConnectionInfo", &mut schemas);
+    add_schema::<sift_protocol::DatabaseProcess>("DatabaseProcess", &mut schemas);
     add_schema::<sift_protocol::EndTransactionRequest>("EndTransactionRequest", &mut schemas);
     add_schema::<sift_protocol::ExecuteRequestHttp>("ExecuteRequestHttp", &mut schemas);
     add_schema::<sift_protocol::ExecuteResponse>("ExecuteResponse", &mut schemas);
     add_schema::<sift_protocol::Health>("Health", &mut schemas);
+    add_schema::<sift_protocol::KillProcessRequest>("KillProcessRequest", &mut schemas);
+    add_schema::<sift_protocol::KillProcessResponse>("KillProcessResponse", &mut schemas);
     add_schema::<sift_protocol::OpenConnectionRequest>("OpenConnectionRequest", &mut schemas);
     add_schema::<sift_protocol::OpenSessionRequest>("OpenSessionRequest", &mut schemas);
     add_schema::<sift_protocol::OperationAuditEntry>("OperationAuditEntry", &mut schemas);
@@ -2661,6 +2687,39 @@ async fn begin_transaction(
         .sessions
         .push_operation(operation, OperationStatus::Succeeded);
     Ok(Json(tx))
+}
+
+async fn list_processes(
+    State(state): State<AppState>,
+    Path((session, connection)): Path<(sift_protocol::SessionId, sift_protocol::ConnectionId)>,
+) -> ApiResult<Json<Vec<sift_protocol::DatabaseProcess>>> {
+    let processes = crate::process::list(&state.sessions, session, connection).await?;
+    state.sessions.push_operation(
+        Operation::ListProcesses {
+            session,
+            connection,
+        },
+        OperationStatus::Succeeded,
+    );
+    Ok(Json(processes))
+}
+
+async fn kill_process(
+    State(state): State<AppState>,
+    Path((session, connection)): Path<(sift_protocol::SessionId, sift_protocol::ConnectionId)>,
+    Json(req): Json<KillProcessRequest>,
+) -> ApiResult<Json<sift_protocol::KillProcessResponse>> {
+    let response =
+        crate::process::kill(&state.sessions, session, connection, req.process_id).await?;
+    state.sessions.push_operation(
+        Operation::KillProcess {
+            session,
+            connection,
+            request: req,
+        },
+        OperationStatus::Succeeded,
+    );
+    Ok(Json(response))
 }
 
 async fn list_transactions(
