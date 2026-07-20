@@ -46,9 +46,9 @@ GUI later is just rendering. Remaining items below are verified absent from the
       `tests/edits.rs` (4). **v1 gaps:** generated/computed columns not yet
       excluded from INSERT (blocked on `ddl-gaps.md` default_expr work);
       optional dry-run conflict count not implemented.
-- [ ] [Design] Transactions panel contract: server exposes open-tx state
+- [x] [Design] Transactions panel contract (ADR-026): server exposes open-tx state
       per connection, savepoint lifecycle (Phase A savepoint Operation variants
-      exist), commit/rollback preview.
+      exist), commit/rollback preview. `docs/PLANS/transactions-panel.md`.
 - [x] [Design] Schema search + data search (ADR-024). `docs/PLANS/schema-data-search.md`.
 - [x] [Implement] Schema + data search. `completion/src/fuzzy.rs`
       (subsequence matcher + scoring), `protocol/src/search.rs`,

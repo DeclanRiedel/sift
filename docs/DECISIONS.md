@@ -580,3 +580,26 @@ tx, and switch the handler to `push_operation_local`. Revisit the default
 (e.g. an outbox pattern that makes *every* mutation transactional) if a
 multi-tenant or formal-compliance requirement makes the best-effort
 window unacceptable for ordinary operations.
+
+## ADR-026 — Server-Owned Transaction Panel State
+
+**Context.** Sift already owns transaction handles and exposes begin, commit,
+rollback, and savepoint mutations, but clients cannot enumerate open
+transactions or inspect savepoint state. A panel cannot reconstruct that state
+reliably from requests because clients reconnect and multiple clients may act
+on one session.
+
+**Decision.** The session store is authoritative for transaction-panel state.
+It exposes session-scoped listing and side-effect-free commit/rollback preview,
+and records ordered savepoint lifecycle metadata next to each opaque driver
+handle. State changes only after the corresponding bounded driver call
+succeeds. Rollback-to invalidates later savepoints; Postgres release marks its
+target released; SQL Server release remains unsupported. Preview describes
+known server consequences and never guesses row counts, locks, or database
+business effects.
+
+**Consequences.** Any client can render current transaction state after a
+reconnect without replaying local history. The state remains process-local,
+matching the lifetime of driver handles; a server restart rolls database
+connections back and therefore has no transaction state to restore. The
+driver trait stays locked.
