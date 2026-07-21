@@ -15,6 +15,7 @@
 //! Drivers are unchanged; the registry lives in `crates/server` so the
 //! ADR-013 driver-isolation boundary is undisturbed.
 
+use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -25,6 +26,9 @@ use futures::FutureExt;
 use sift_driver_api::ResultSetStream;
 use sift_protocol::{Code, ConnectionId, CursorId, DriverError, Page, SessionId};
 use tokio::sync::{mpsc, Notify};
+
+use crate::resources::{ResourceGuard, ResourceManager};
+use sift_metadata::TenantId;
 
 /// Registry-wide configuration. Applied at construction; live cursors
 /// keep the values they were opened with.
@@ -90,6 +94,7 @@ struct Inner {
     /// pump when it lands a spill file; drained by `read_spill_page`
     /// on final page or by `reap_expired_spills` on TTL.
     spills: DashMap<CursorId, SpillEntry>,
+    retentions: DashMap<CursorId, Arc<CursorRetention>>,
 }
 
 #[derive(Clone)]
@@ -104,6 +109,14 @@ struct SpillEntry {
     /// to report progress.
     total_pages: usize,
     pages_read: usize,
+    _retained_guard: Option<Arc<ResourceGuard>>,
+}
+
+struct CursorRetention {
+    manager: ResourceManager,
+    tenant: TenantId,
+    queued: std::sync::Mutex<VecDeque<ResourceGuard>>,
+    current: std::sync::Mutex<Option<ResourceGuard>>,
 }
 
 struct CursorState {
@@ -148,6 +161,7 @@ impl CursorRegistry {
                 clock: AtomicU64::new(0),
                 on_evict: std::sync::RwLock::new(None),
                 spills: DashMap::new(),
+                retentions: DashMap::new(),
             }),
         }
     }
@@ -186,6 +200,34 @@ impl CursorRegistry {
         stream: ResultSetStream,
     ) -> Result<ResultSetStream, DriverError> {
         self.wrap_inner(session_id, Some(connection_id), stream)
+    }
+
+    pub fn wrap_for_connection_accounted(
+        &self,
+        session_id: SessionId,
+        connection_id: ConnectionId,
+        stream: ResultSetStream,
+        retention: Option<(ResourceManager, TenantId)>,
+    ) -> Result<ResultSetStream, DriverError> {
+        let cursor_id = stream.cursor_id;
+        if let Some((manager, tenant)) = retention {
+            self.inner.retentions.insert(
+                cursor_id,
+                Arc::new(CursorRetention {
+                    manager,
+                    tenant,
+                    queued: std::sync::Mutex::new(VecDeque::new()),
+                    current: std::sync::Mutex::new(None),
+                }),
+            );
+        }
+        match self.wrap_inner(session_id, Some(connection_id), stream) {
+            Ok(stream) => Ok(stream),
+            Err(error) => {
+                self.inner.retentions.remove(&cursor_id);
+                Err(error)
+            }
+        }
     }
 
     fn wrap_inner(
@@ -284,6 +326,7 @@ impl CursorRegistry {
     /// `QueryCanceled` terminal if it hasn't already sent a real
     /// terminal to the consumer.
     pub fn remove(&self, cursor_id: CursorId) {
+        self.inner.retentions.remove(&cursor_id);
         if let Some((_, state)) = self.inner.entries.remove(&cursor_id) {
             {
                 let mut reason = state.control.cancel_reason.lock().unwrap();
@@ -304,6 +347,28 @@ impl CursorRegistry {
                 remove_connection_cursor(&self.inner, state.session_id, connection_id, cursor_id);
             }
         }
+    }
+
+    /// Advance retained-memory ownership after a consumer receives its next
+    /// page. The previous page is now processed and released; the new page's
+    /// reservation remains live until the next receive or cursor removal.
+    pub fn page_received(&self, cursor_id: CursorId) {
+        if let Some(retention) = self.inner.retentions.get(&cursor_id) {
+            let next = retention.queued.lock().unwrap().pop_front();
+            *retention.current.lock().unwrap() = next;
+        }
+    }
+
+    pub fn page_processed(&self, cursor_id: CursorId) {
+        if let Some(retention) = self.inner.retentions.get(&cursor_id) {
+            retention.current.lock().unwrap().take();
+        }
+    }
+
+    pub fn take_page_retention(&self, cursor_id: CursorId) -> Option<ResourceGuard> {
+        let retention = self.inner.retentions.get(&cursor_id)?;
+        let guard = retention.current.lock().unwrap().take();
+        guard
     }
 
     pub fn connection_cursors(
@@ -674,6 +739,13 @@ async fn pump_task(
             res = &mut reserve_fut => {
                 match res {
                     Ok(permit) => {
+                        if let Err(error) = retain_page(&inner, cursor_id, &page) {
+                            permit.send(Page::Error { error });
+                            if let Some(callback) = inner.on_evict.read().unwrap().clone() {
+                                callback(session_id, cursor_id);
+                            }
+                            return;
+                        }
                         permit.send(page);
                         true
                     }
@@ -719,21 +791,27 @@ async fn emit_terminal(
                         .map_err(std::io::Error::other)
                         .and_then(|result| result);
                 match write_result {
-                    Ok(path) => {
-                        inner.spills.insert(
-                            cursor_id,
-                            SpillEntry {
-                                session_id,
-                                path,
-                                created_at: Instant::now(),
-                                read_offset: 0,
-                                total_pages: spillover.len(),
-                                pages_read: 0,
-                            },
-                        );
-                        reason =
-                            reason.with_resume_url(format!("/v1/cursors/{}/pages", cursor_id.0));
-                    }
+                    Ok(path) => match spill_retention_guard(inner, cursor_id, &path) {
+                        Ok(retained_guard) => {
+                            inner.spills.insert(
+                                cursor_id,
+                                SpillEntry {
+                                    session_id,
+                                    path,
+                                    created_at: Instant::now(),
+                                    read_offset: 0,
+                                    total_pages: spillover.len(),
+                                    pages_read: 0,
+                                    _retained_guard: retained_guard,
+                                },
+                            );
+                            reason = reason
+                                .with_resume_url(format!("/v1/cursors/{}/pages", cursor_id.0));
+                        }
+                        Err(()) => {
+                            tracing::debug!(?cursor_id, "cursor spill exceeds retained-byte quota");
+                        }
+                    },
                     Err(error) => {
                         tracing::debug!(?cursor_id, %error, "cursor spill write failed");
                     }
@@ -751,6 +829,50 @@ async fn emit_terminal(
     .await;
 }
 
+fn retain_page(inner: &Arc<Inner>, cursor_id: CursorId, page: &Page) -> Result<(), DriverError> {
+    let Some(retention) = inner.retentions.get(&cursor_id) else {
+        return Ok(());
+    };
+    let bytes = approx_page_bytes(page) as u64;
+    let guard = retention
+        .manager
+        .reserve(
+            retention.tenant,
+            sift_protocol::TenantResource::RetainedResultBytes,
+            bytes,
+        )
+        .map_err(|_| {
+            DriverError::new(
+                Code::TenantResourceExhausted,
+                "tenant retained-result byte limit reached",
+            )
+        })?;
+    retention.queued.lock().unwrap().push_back(guard);
+    Ok(())
+}
+
+fn spill_retention_guard(
+    inner: &Arc<Inner>,
+    cursor_id: CursorId,
+    path: &std::path::Path,
+) -> Result<Option<Arc<ResourceGuard>>, ()> {
+    let Some(retention) = inner.retentions.get(&cursor_id) else {
+        return Ok(None);
+    };
+    let bytes = std::fs::metadata(path).map_err(|_| ())?.len();
+    match retention.manager.reserve(
+        retention.tenant,
+        sift_protocol::TenantResource::RetainedResultBytes,
+        bytes,
+    ) {
+        Ok(guard) => Ok(Some(Arc::new(guard))),
+        Err(_) => {
+            let _ = std::fs::remove_file(path);
+            Err(())
+        }
+    }
+}
+
 fn approx_pages_bytes(pages: &[Page]) -> usize {
     let mut total = 0usize;
     for page in pages {
@@ -759,7 +881,7 @@ fn approx_pages_bytes(pages: &[Page]) -> usize {
     total
 }
 
-fn approx_page_bytes(page: &Page) -> usize {
+pub(crate) fn approx_page_bytes(page: &Page) -> usize {
     match page {
         Page::Rows { rows } => rows.iter().map(approx_row_bytes).sum(),
         Page::NextResult { columns } => columns
@@ -820,6 +942,7 @@ fn write_spill(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::TenantLimitsConfig;
     use sift_protocol::{Row, Value};
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
@@ -834,6 +957,20 @@ mod tests {
             }
         });
         ResultSetStream::with_cursor_mode(cursor_id, rx, true)
+    }
+
+    fn retained_limits(bytes: u64) -> TenantLimitsConfig {
+        TenantLimitsConfig {
+            trusted_local_unlimited: false,
+            defaults: sift_protocol::TenantResourceLimits {
+                retained_result_bytes: Some(bytes),
+                ..Default::default()
+            },
+            ceilings: sift_protocol::TenantResourceLimits {
+                retained_result_bytes: Some(bytes),
+                ..Default::default()
+            },
+        }
     }
 
     #[tokio::test]
@@ -864,6 +1001,85 @@ mod tests {
             }
         }
         assert_eq!(count, 3);
+    }
+
+    #[tokio::test]
+    async fn buffered_page_bytes_are_reserved_until_processing_finishes() {
+        let limits = retained_limits(128);
+        let manager = ResourceManager::new(&limits, None);
+        let tenant = TenantId(3);
+        let registry = CursorRegistry::new(CursorConfig::default());
+        let cursor = CursorId(90);
+        let mut wrapped = registry
+            .wrap_for_connection_accounted(
+                SessionId(2),
+                ConnectionId(4),
+                stream_with_pages(
+                    cursor,
+                    vec![Page::Rows {
+                        rows: vec![Row::new(vec![Value::Text("retained".into())])],
+                    }],
+                ),
+                Some((manager.clone(), tenant)),
+            )
+            .unwrap();
+
+        let _page = wrapped.rows.recv().await.unwrap();
+        registry.page_received(cursor);
+        assert!(
+            manager
+                .snapshot(tenant)
+                .unwrap()
+                .usage
+                .retained_result_bytes
+                > 0
+        );
+        registry.page_processed(cursor);
+        assert_eq!(
+            manager
+                .snapshot(tenant)
+                .unwrap()
+                .usage
+                .retained_result_bytes,
+            0
+        );
+        registry.remove(cursor);
+    }
+
+    #[tokio::test]
+    async fn buffered_page_over_tenant_byte_limit_fails_the_cursor() {
+        let limits = retained_limits(8);
+        let manager = ResourceManager::new(&limits, None);
+        let tenant = TenantId(3);
+        let registry = CursorRegistry::new(CursorConfig::default());
+        let cursor = CursorId(91);
+        let mut wrapped = registry
+            .wrap_for_connection_accounted(
+                SessionId(2),
+                ConnectionId(4),
+                stream_with_pages(
+                    cursor,
+                    vec![Page::Rows {
+                        rows: vec![Row::new(vec![Value::Text("too large".into())])],
+                    }],
+                ),
+                Some((manager.clone(), tenant)),
+            )
+            .unwrap();
+
+        assert!(matches!(
+            wrapped.rows.recv().await,
+            Some(Page::Error { error }) if error.code == Code::TenantResourceExhausted
+        ));
+        assert_eq!(
+            manager
+                .snapshot(tenant)
+                .unwrap()
+                .usage
+                .retained_result_bytes,
+            0
+        );
+        registry.remove(cursor);
     }
 
     #[tokio::test]
@@ -1339,6 +1555,7 @@ mod tests {
                 read_offset: 0,
                 total_pages: pages.len(),
                 pages_read: 0,
+                _retained_guard: None,
             },
         );
 
@@ -1354,6 +1571,56 @@ mod tests {
         assert_eq!(out.len(), 1);
         assert!(done);
         assert!(registry.spill_info(CursorId(700)).is_none());
+    }
+
+    #[test]
+    fn spill_file_guard_releases_retained_bytes_on_drop() {
+        let dir = tempfile::tempdir().unwrap();
+        let registry = CursorRegistry::new(CursorConfig::default());
+        let tenant = TenantId(8);
+        let manager = ResourceManager::new(&retained_limits(1024), None);
+        let pages = vec![Page::Rows {
+            rows: vec![Row::new(vec![Value::Text("spill".into())])],
+        }];
+        let cursor = CursorId(701);
+        let path = write_spill(&dir.path().to_path_buf(), cursor, &pages).unwrap();
+        let bytes = std::fs::metadata(&path).unwrap().len();
+        let guard = manager
+            .reserve(
+                tenant,
+                sift_protocol::TenantResource::RetainedResultBytes,
+                bytes,
+            )
+            .unwrap();
+        registry.inner.spills.insert(
+            cursor,
+            SpillEntry {
+                session_id: SessionId(1),
+                path,
+                created_at: Instant::now(),
+                read_offset: 0,
+                total_pages: 1,
+                pages_read: 0,
+                _retained_guard: Some(Arc::new(guard)),
+            },
+        );
+        assert_eq!(
+            manager
+                .snapshot(tenant)
+                .unwrap()
+                .usage
+                .retained_result_bytes,
+            bytes
+        );
+        registry.drop_spill(cursor);
+        assert_eq!(
+            manager
+                .snapshot(tenant)
+                .unwrap()
+                .usage
+                .retained_result_bytes,
+            0
+        );
     }
 
     #[test]
@@ -1389,6 +1656,7 @@ mod tests {
                 read_offset: 0,
                 total_pages: 1,
                 pages_read: 0,
+                _retained_guard: None,
             },
         );
         assert_eq!(registry.spill_count(), 1);

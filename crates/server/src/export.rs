@@ -23,6 +23,11 @@ use serde::Serialize;
 use sift_protocol::{ColumnMetadata, ExportFormat, Page, Row, Value};
 use std::fmt::Write as _;
 
+pub trait PageRetention: Send + 'static {
+    fn page_received(&self);
+    fn page_processed(&self);
+}
+
 /// Content-Type header value for `format`.
 pub fn content_type(format: ExportFormat) -> &'static str {
     match format {
@@ -43,7 +48,7 @@ pub fn content_type(format: ExportFormat) -> &'static str {
 /// when the export completes or the client disconnects. The caller uses
 /// it to release the underlying cursor from the registry (and thereby
 /// cancel the pump); `encode_stream` itself only needs to keep it alive.
-pub fn encode_stream<G: Send + 'static>(
+pub fn encode_stream<G: PageRetention>(
     mut rx: tokio::sync::mpsc::Receiver<Page>,
     format: ExportFormat,
     emit_header: bool,
@@ -62,6 +67,7 @@ pub fn encode_stream<G: Send + 'static>(
             yield Bytes::from_static(b"[");
         }
         while let Some(page) = rx.recv().await {
+            _guard.page_received();
             match page {
                 Page::NextResult { columns: cols } => {
                     columns = cols;
@@ -104,6 +110,7 @@ pub fn encode_stream<G: Send + 'static>(
                     )))?;
                 }
             }
+            _guard.page_processed();
         }
         if matches!(format, ExportFormat::JsonArray) {
             yield Bytes::from_static(b"]");

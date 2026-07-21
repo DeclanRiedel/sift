@@ -5217,6 +5217,7 @@ async fn export_query(
         (
             state.auth.rate_limiter.clone(),
             state.sessions.clone(),
+            id,
             auth.principal_id.0,
             tenant_id,
             auth.trusted_local,
@@ -5241,6 +5242,7 @@ fn pace_http_export<S>(
     pacing: Option<(
         crate::rate_limit::RateLimiter,
         SessionStore,
+        sift_protocol::SessionId,
         i64,
         Option<i64>,
         bool,
@@ -5257,7 +5259,21 @@ where
         while let Some(chunk) = stream.next().await {
             match chunk {
                 Ok(bytes) => {
-                    if let Some((limiter, sessions, principal, tenant, trusted_local)) = &pacing {
+                    let mut bytes = bytes;
+                    if let Some((limiter, sessions, session, principal, tenant, trusted_local)) = &pacing {
+                        let retained = match sessions
+                            .reserve_session_retained_bytes(*session, bytes.len())
+                        {
+                            Ok(guard) => guard,
+                            Err(error) => {
+                                yield Err(std::io::Error::other(error.to_string()));
+                                break;
+                            }
+                        };
+                        bytes = bytes::Bytes::from_owner(RetainedStreamBytes {
+                            bytes,
+                            _guard: retained,
+                        });
                         let paced = tokio::select! {
                             _ = shutdown.wait_for_drain_start() => None,
                             result = limiter.pace_bytes(
@@ -5298,6 +5314,17 @@ where
                 }
             }
         }
+    }
+}
+
+struct RetainedStreamBytes {
+    bytes: bytes::Bytes,
+    _guard: Option<crate::resources::ResourceGuard>,
+}
+
+impl AsRef<[u8]> for RetainedStreamBytes {
+    fn as_ref(&self) -> &[u8] {
+        &self.bytes
     }
 }
 
@@ -5517,7 +5544,7 @@ async fn execute_query(
     headers: HeaderMap,
     Path(id): Path<sift_protocol::SessionId>,
     Json(req): Json<ExecuteRequestHttp>,
-) -> ApiResult<Json<sift_protocol::ExecuteResponse>> {
+) -> ApiResult<Response> {
     let metadata_context = execute_metadata_context(&state, headers, &req).await?;
     let sql_text = req.sql.clone();
     let operation = Operation::ExecuteQuery {
@@ -5558,7 +5585,9 @@ async fn execute_query(
                 row_count,
                 None,
             );
-            Ok(Json(resp))
+            let bytes =
+                serde_json::to_vec(&resp).map_err(|error| ApiError::Internal(error.to_string()))?;
+            retained_json_response(&state.sessions, id, bytes)
         }
         Err(error) => {
             let (result_code, message) = match &error {
@@ -5578,6 +5607,35 @@ async fn execute_query(
             Err(error)
         }
     }
+}
+
+struct RetainedResponseBytes {
+    bytes: Vec<u8>,
+    _guard: Option<crate::resources::ResourceGuard>,
+}
+
+impl AsRef<[u8]> for RetainedResponseBytes {
+    fn as_ref(&self) -> &[u8] {
+        &self.bytes
+    }
+}
+
+fn retained_json_response(
+    sessions: &SessionStore,
+    session: sift_protocol::SessionId,
+    bytes: Vec<u8>,
+) -> ApiResult<Response> {
+    let guard = sessions.reserve_session_retained_bytes(session, bytes.len())?;
+    let bytes = bytes::Bytes::from_owner(RetainedResponseBytes {
+        bytes,
+        _guard: guard,
+    });
+    let mut response = Body::from(bytes).into_response();
+    response.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/json"),
+    );
+    Ok(response)
 }
 
 async fn begin_transaction(
@@ -5844,18 +5902,18 @@ async fn read_spill_pages(
     State(state): State<AppState>,
     Path(cursor_id): Path<sift_protocol::CursorId>,
     axum::extract::Query(q): axum::extract::Query<ReadSpillPagesQuery>,
-) -> ApiResult<Json<serde_json::Value>> {
+) -> ApiResult<Response> {
     let registry = state.sessions.cursor_registry().clone();
+    let info = registry.spill_info(cursor_id).ok_or_else(|| {
+        ApiError::Driver(sift_protocol::DriverError::new(
+            sift_protocol::Code::CursorNotFound,
+            "no spill for cursor",
+        ))
+    })?;
     // If from_seq is set and it doesn't match the entry's current
     // read cursor, reject — we don't allow re-reading already-read
     // pages (spill files are append-only + read-forward).
     if let Some(seq) = q.from_seq {
-        let info = registry.spill_info(cursor_id).ok_or_else(|| {
-            ApiError::Driver(sift_protocol::DriverError::new(
-                sift_protocol::Code::CursorNotFound,
-                "no spill for cursor",
-            ))
-        })?;
         if seq != info.pages_read {
             return Err(ApiError::BadRequest(format!(
                 "from_seq={seq} does not match pages_read={} for cursor",
@@ -5869,11 +5927,13 @@ async fn read_spill_pages(
             .await
             .map_err(|e| ApiError::Internal(format!("spill read task failed: {e}")))?
             .map_err(ApiError::Driver)?;
-    Ok(Json(json!({
+    let bytes = serde_json::to_vec(&json!({
         "cursor_id": cursor_id.0,
         "pages": pages,
         "done": done,
-    })))
+    }))
+    .map_err(|error| ApiError::Internal(error.to_string()))?;
+    retained_json_response(&state.sessions, info.session_id, bytes)
 }
 
 /// Explicit cleanup of a spill file. Idempotent; returns ok whether or
@@ -6502,19 +6562,20 @@ async fn stream_pages_with_ack(
     } = context;
     let mut seq = 0_u64;
     while let Some(page) = rows.recv().await {
+        sessions.cursor_page_received(cursor_id);
+        let page_bytes = serde_json::to_vec(&page)
+            .map_err(|error| ApiError::Internal(error.to_string()))?
+            .len();
         if let Some(auth) = auth {
             let tenant = sessions
                 .managed_tenant_for_session(session_id)
                 .or_else(|| (auth.tenants.len() == 1).then(|| auth.tenants[0].tenant.id));
-            let bytes = serde_json::to_vec(&page)
-                .map_err(|error| ApiError::Internal(error.to_string()))?
-                .len();
             let paced = tokio::select! {
                 _ = shutdown.wait_for_drain_start() => None,
                 result = rate_limiter.pace_bytes(
                     auth.principal_id.0,
                     tenant.map(|tenant| tenant.0),
-                    bytes,
+                    page_bytes,
                     auth.trusted_local,
                     std::time::Duration::from_secs(5),
                 ) => Some(result),
@@ -6547,6 +6608,15 @@ async fn stream_pages_with_ack(
             &page,
             sift_protocol::Page::Done { .. } | sift_protocol::Page::Error { .. }
         );
+        let _response_guard = match sessions.reserve_session_retained_bytes(session_id, page_bytes)
+        {
+            Ok(guard) => guard,
+            Err(error) => {
+                let _ = sessions.cancel(session_id, connection, cursor_id).await;
+                sessions.cursor_remove(cursor_id);
+                return Err(error);
+            }
+        };
         send_json(
             sender,
             &WsServerMessage::Page {
@@ -6564,6 +6634,7 @@ async fn stream_pages_with_ack(
         }
         match wait_for_ack(receiver, sessions, session_id, connection, cursor_id, seq).await? {
             AckOutcome::Acked => {
+                sessions.cursor_page_processed(cursor_id);
                 // Fresh ack — bump the cursor's last-ack so it is not
                 // ranked as idle by the eviction policy.
                 sessions.cursor_touch(cursor_id);
@@ -6703,15 +6774,14 @@ mod route_access_tests {
             });
         let shutdown = crate::shutdown::Shutdown::default();
         let stream = futures::stream::iter([Ok(bytes::Bytes::from_static(b"four"))]);
+        let sessions = SessionStore::new(crate::registry::DriverRegistry::new());
+        let session = sessions.open_session(OpenSessionRequest {
+            tag: None,
+            tenant_id: None,
+        });
         let paced = pace_http_export(
             stream,
-            Some((
-                limiter,
-                SessionStore::new(crate::registry::DriverRegistry::new()),
-                1,
-                Some(1),
-                false,
-            )),
+            Some((limiter, sessions, session.id, 1, Some(1), false)),
             shutdown.clone(),
             shutdown.track_query(),
         );
@@ -6720,5 +6790,69 @@ mod route_access_tests {
         assert!(paced.next().await.unwrap().is_err());
         assert!(paced.next().await.is_none());
         assert_eq!(shutdown.in_flight(), 0);
+    }
+
+    #[test]
+    fn serialized_response_bytes_hold_quota_until_last_bytes_clone_drops() {
+        let sessions = SessionStore::new(crate::registry::DriverRegistry::new());
+        let tenant = TenantId(5);
+        let limits = crate::config::TenantLimitsConfig {
+            trusted_local_unlimited: false,
+            defaults: sift_protocol::TenantResourceLimits {
+                retained_result_bytes: Some(16),
+                ..Default::default()
+            },
+            ceilings: sift_protocol::TenantResourceLimits {
+                retained_result_bytes: Some(16),
+                ..Default::default()
+            },
+        };
+        let manager = crate::resources::ResourceManager::new(&limits, None);
+        sessions.set_resource_manager(manager.clone());
+        let session = sessions
+            .open_session_with_owner(
+                OpenSessionRequest {
+                    tag: None,
+                    tenant_id: Some(tenant.0),
+                },
+                Some(PrincipalId(1)),
+                Some(tenant),
+                true,
+            )
+            .unwrap();
+        let guard = sessions
+            .reserve_session_retained_bytes(session.id, 5)
+            .unwrap();
+        let bytes = bytes::Bytes::from_owner(RetainedResponseBytes {
+            bytes: b"12345".to_vec(),
+            _guard: guard,
+        });
+        let clone = bytes.clone();
+        assert_eq!(
+            manager
+                .snapshot(tenant)
+                .unwrap()
+                .usage
+                .retained_result_bytes,
+            5
+        );
+        drop(bytes);
+        assert_eq!(
+            manager
+                .snapshot(tenant)
+                .unwrap()
+                .usage
+                .retained_result_bytes,
+            5
+        );
+        drop(clone);
+        assert_eq!(
+            manager
+                .snapshot(tenant)
+                .unwrap()
+                .usage
+                .retained_result_bytes,
+            0
+        );
     }
 }

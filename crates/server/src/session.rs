@@ -505,29 +505,22 @@ impl SessionStore {
         Ok(Some((query, cursor)))
     }
 
-    fn reserve_retained_bytes(
+    fn retained_byte_context(
         &self,
         entry: &ConnectionEntryClone,
-        bytes: u64,
-    ) -> ApiResult<Option<crate::resources::ResourceGuard>> {
+    ) -> Option<(crate::resources::ResourceManager, sift_metadata::TenantId)> {
         let ConnectionProvenance::Managed {
             tenant_id,
             quota_exempt,
             ..
         } = &entry.provenance
         else {
-            return Ok(None);
+            return None;
         };
         if *quota_exempt {
-            return Ok(None);
+            return None;
         }
-        self.resource_manager()
-            .reserve(
-                *tenant_id,
-                sift_protocol::TenantResource::RetainedResultBytes,
-                bytes,
-            )
-            .map(Some)
+        Some((self.resource_manager(), *tenant_id))
     }
 
     /// Whether raw SQL is persisted in query history (`metadata.store_sql`).
@@ -630,6 +623,7 @@ impl SessionStore {
             transactions: DashMap::new(),
             next_conn_id: AtomicU64::new(1),
             tenant_id: Mutex::new(tenant_id),
+            quota_exempt: AtomicBool::new(!enforce_limits),
             resource_guard: Mutex::new(resource_guard),
         };
         let info = session.info();
@@ -863,6 +857,31 @@ impl SessionStore {
         tenant
     }
 
+    pub fn reserve_session_retained_bytes(
+        &self,
+        id: SessionId,
+        bytes: usize,
+    ) -> ApiResult<Option<crate::resources::ResourceGuard>> {
+        let session = self
+            .inner
+            .sessions
+            .get(&id)
+            .ok_or(ApiError::SessionNotFound(id))?;
+        if session.quota_exempt.load(Ordering::Acquire) {
+            return Ok(None);
+        }
+        let tenant = *session.tenant_id.lock().unwrap();
+        tenant
+            .map(|tenant| {
+                self.resource_manager().reserve(
+                    tenant,
+                    sift_protocol::TenantResource::RetainedResultBytes,
+                    bytes as u64,
+                )
+            })
+            .transpose()
+    }
+
     pub async fn open_connection(
         &self,
         session_id: SessionId,
@@ -1008,6 +1027,7 @@ impl SessionStore {
                 1,
             )?;
             *session.resource_guard.lock().unwrap() = Some(guard);
+            session.quota_exempt.store(false, Ordering::Release);
         }
         *bound = Some(tenant_id);
         Ok(())
@@ -1385,7 +1405,7 @@ impl SessionStore {
             &[],
         )?;
         let resource_guards = self.reserve_query_resources(&entry)?;
-        let retained_bytes = self.reserve_retained_bytes(&entry, self.result_limits().1 as u64)?;
+        let retained_context = self.retained_byte_context(&entry);
         let exec = ExecuteRequest {
             sql: req.sql,
             params: req.params,
@@ -1404,14 +1424,18 @@ impl SessionStore {
         let cursors = self.inner.cursors.clone();
         let mut task = tokio::spawn(async move {
             let _resource_guards = resource_guards;
-            let _retained_bytes = retained_bytes;
             let stream = driver.execute(handle, exec).await?;
             let cursor_id = stream.cursor_id;
             *slot.lock().unwrap() = Some(cursor_id);
             // Hand the driver stream to the registry pump. Eviction of
             // a co-tenant cursor happens via the on_evict callback.
-            let wrapped = cursors.wrap_for_connection(session_id, conn_id, stream)?;
-            let result = drain_stream(wrapped, max_rows, max_bytes).await;
+            let wrapped = cursors.wrap_for_connection_accounted(
+                session_id,
+                conn_id,
+                stream,
+                retained_context.clone(),
+            )?;
+            let result = drain_stream_accounted(wrapped, max_rows, max_bytes, &cursors).await;
             cursors.remove(cursor_id);
             result
         });
@@ -1530,6 +1554,7 @@ impl SessionStore {
             &[],
         )?;
         let resource_guards = self.reserve_query_resources(&entry)?;
+        let retained_context = self.retained_byte_context(&entry);
         let stream = entry.driver.execute(entry.handle.clone(), req).await?;
         let cursor_id = stream.cursor_id;
         // Hand the driver's stream to the registry-owned pump. Wrapping
@@ -1537,11 +1562,12 @@ impl SessionStore {
         // same session via the installed on_evict callback), spawns
         // the pump task, and returns a rebound stream whose `rows`
         // channel is fed by the pump.
-        match self
-            .inner
-            .cursors
-            .wrap_for_connection(session_id, conn_id, stream)
-        {
+        match self.inner.cursors.wrap_for_connection_accounted(
+            session_id,
+            conn_id,
+            stream,
+            retained_context,
+        ) {
             Ok(wrapped) => {
                 if let Some(resource_guards) = resource_guards {
                     self.inner
@@ -1617,6 +1643,14 @@ impl SessionStore {
     /// looking idle to the eviction policy.
     pub fn cursor_touch(&self, cursor_id: CursorId) {
         self.inner.cursors.touch(cursor_id);
+    }
+
+    pub fn cursor_page_received(&self, cursor_id: CursorId) {
+        self.inner.cursors.page_received(cursor_id);
+    }
+
+    pub fn cursor_page_processed(&self, cursor_id: CursorId) {
+        self.inner.cursors.page_processed(cursor_id);
     }
 
     /// Called after a cursor terminates or is cancelled to drop its
@@ -2781,6 +2815,7 @@ pub struct Session {
     pub transactions: DashMap<TxId, TransactionEntry>,
     pub next_conn_id: AtomicU64,
     tenant_id: Mutex<Option<sift_metadata::TenantId>>,
+    quota_exempt: AtomicBool,
     resource_guard: Mutex<Option<crate::resources::ResourceGuard>>,
 }
 
@@ -2880,6 +2915,16 @@ fn missing_ext(engine: Engine, trait_name: &str) -> DriverError {
 struct CursorGuard {
     sessions: SessionStore,
     cursor_id: CursorId,
+}
+
+impl crate::export::PageRetention for CursorGuard {
+    fn page_received(&self) {
+        self.sessions.cursor_page_received(self.cursor_id);
+    }
+
+    fn page_processed(&self) {
+        self.sessions.cursor_page_processed(self.cursor_id);
+    }
 }
 
 impl Drop for CursorGuard {
@@ -2992,6 +3037,24 @@ pub async fn drain_stream(
     max_rows: usize,
     max_bytes: usize,
 ) -> Result<ExecuteResponse, DriverError> {
+    drain_stream_inner(stream, max_rows, max_bytes, None).await
+}
+
+async fn drain_stream_accounted(
+    stream: ResultSetStream,
+    max_rows: usize,
+    max_bytes: usize,
+    cursors: &CursorRegistry,
+) -> Result<ExecuteResponse, DriverError> {
+    drain_stream_inner(stream, max_rows, max_bytes, Some(cursors)).await
+}
+
+async fn drain_stream_inner(
+    stream: ResultSetStream,
+    max_rows: usize,
+    max_bytes: usize,
+    cursors: Option<&CursorRegistry>,
+) -> Result<ExecuteResponse, DriverError> {
     let cursor_id = stream.cursor_id;
     let rx = stream.rows;
     tokio::pin!(rx);
@@ -3002,8 +3065,18 @@ pub async fn drain_stream(
     let mut warnings: Vec<DriverWarning> = Vec::new();
     let mut saw_result_set = false;
     let mut total_bytes: usize = 0;
+    let mut _retained_guards = Vec::new();
 
     while let Some(page) = rx.recv().await {
+        if let Some(cursors) = cursors {
+            cursors.page_received(cursor_id);
+        }
+        if matches!(&page, Page::NextResult { .. } | Page::Rows { .. }) {
+            if let Some(guard) = cursors.and_then(|cursors| cursors.take_page_retention(cursor_id))
+            {
+                _retained_guards.push(guard);
+            }
+        }
         match page {
             Page::NextResult { columns: cols } => {
                 if saw_result_set {
@@ -3046,6 +3119,9 @@ pub async fn drain_stream(
                 affected_rows = a;
                 warnings = w;
             }
+        }
+        if let Some(cursors) = cursors {
+            cursors.page_processed(cursor_id);
         }
     }
 
