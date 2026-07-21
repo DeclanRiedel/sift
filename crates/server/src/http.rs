@@ -67,6 +67,7 @@ pub struct AuthState {
     pub runtime: crate::identity::AuthRuntime,
     pub github: Option<crate::identity::GithubOAuthConfig>,
     pub instance_audience: String,
+    pub rate_limiter: crate::rate_limit::RateLimiter,
 }
 
 impl Default for AuthState {
@@ -79,6 +80,7 @@ impl Default for AuthState {
             runtime: crate::identity::AuthRuntime::default(),
             github: None,
             instance_audience: "sift:local".into(),
+            rate_limiter: crate::rate_limit::RateLimiter::default(),
         }
     }
 }
@@ -320,6 +322,7 @@ pub fn app(state: AppState) -> Router {
         )
         .route("/v1/cursors/:cursor_id/pages", get(read_spill_pages))
         .route("/v1/cursors/:cursor_id", delete(delete_spilled_cursor))
+        .layer(from_fn_with_state(state.clone(), rate_limit_middleware))
         .layer(from_fn_with_state(state.clone(), auth_middleware))
         .layer(from_fn(inject_peer_addr))
         .layer(from_fn_with_state(state.sessions.clone(), audit_middleware))
@@ -532,6 +535,78 @@ async fn auth_middleware(
     next.run(req).await
 }
 
+async fn rate_limit_middleware(
+    State(state): State<AppState>,
+    req: Request<Body>,
+    next: Next,
+) -> Response {
+    let Some(auth) = req.extensions().get::<AuthContext>().cloned() else {
+        return next.run(req).await;
+    };
+    let class = rate_limit_class(req.method(), req.uri().path());
+    let tenant = request_tenant(&state, &auth, req.uri());
+    match state.auth.rate_limiter.admit(
+        auth.principal_id.0,
+        tenant.map(|tenant| tenant.0),
+        class,
+        auth.trusted_local,
+    ) {
+        Ok(()) => next.run(req).await,
+        Err(retry_after_secs) => ApiError::RateLimited { retry_after_secs }.into_response(),
+    }
+}
+
+fn rate_limit_class(method: &axum::http::Method, path: &str) -> sift_protocol::RateLimitClass {
+    use sift_protocol::RateLimitClass;
+    if path.contains("/export") || path.contains("/import/") || path.ends_with("/bulk-insert") {
+        return RateLimitClass::HeavyTransfer;
+    }
+    if path.ends_with("/queries")
+        || path.ends_with("/explain")
+        || path.ends_with("/search/data")
+        || path.ends_with("/edits/apply")
+        || path.ends_with("/processes/kill")
+    {
+        return RateLimitClass::Query;
+    }
+    if method == axum::http::Method::GET
+        || path.ends_with("/ping")
+        || path.ends_with("/complete")
+        || path.ends_with("/search/schema")
+        || path.ends_with("/edits/preview")
+    {
+        return RateLimitClass::Interactive;
+    }
+    RateLimitClass::Control
+}
+
+fn request_tenant(state: &AppState, auth: &AuthContext, uri: &axum::http::Uri) -> Option<TenantId> {
+    if let Some(tenant) = uri.query().and_then(|query| {
+        query.split('&').find_map(|pair| {
+            let (key, value) = pair.split_once('=')?;
+            (key == "tenant")
+                .then(|| value.parse::<i64>().ok().map(TenantId))
+                .flatten()
+        })
+    }) {
+        return Some(tenant);
+    }
+    if let Some(session) = uri
+        .path()
+        .strip_prefix("/v1/sessions/")
+        .and_then(|rest| rest.split('/').next())
+        .and_then(|value| value.parse::<u64>().ok())
+        .and_then(|id| {
+            state
+                .sessions
+                .managed_tenant_for_session(sift_protocol::SessionId(id))
+        })
+    {
+        return Some(session);
+    }
+    (auth.tenants.len() == 1).then(|| auth.tenants[0].tenant.id)
+}
+
 fn is_public_path(path: &str) -> bool {
     matches!(
         path,
@@ -630,6 +705,7 @@ struct AuthContext {
     auth_session_id: Option<String>,
     cookie_authenticated: bool,
     access_expires_at: Option<chrono::DateTime<chrono::Utc>>,
+    trusted_local: bool,
 }
 
 #[derive(Clone)]
@@ -2073,6 +2149,7 @@ fn resolve_auth_context(state: &AppState, headers: &HeaderMap) -> ApiResult<Auth
                 auth_session_id: None,
                 cookie_authenticated: false,
                 access_expires_at: None,
+                trusted_local: false,
             });
         }
         if state
@@ -2081,7 +2158,7 @@ fn resolve_auth_context(state: &AppState, headers: &HeaderMap) -> ApiResult<Auth
             .as_deref()
             .is_some_and(|expected| constant_time_eq(token.as_bytes(), expected.as_bytes()))
         {
-            return local_auth_context(metadata);
+            return local_auth_context(metadata, false);
         }
         // Explicit invalid credentials never fall through to loopback bypass.
         return Err(ApiError::Unauthorized);
@@ -2089,13 +2166,13 @@ fn resolve_auth_context(state: &AppState, headers: &HeaderMap) -> ApiResult<Auth
 
     // Team-mode validation forbids enabling this implicit path.
     if state.auth.loopback_bypass && peer_is_loopback(headers) {
-        return local_auth_context(metadata);
+        return local_auth_context(metadata, true);
     }
 
     Err(ApiError::Unauthorized)
 }
 
-fn local_auth_context(metadata: &MetadataStore) -> ApiResult<AuthContext> {
+fn local_auth_context(metadata: &MetadataStore, trusted_local: bool) -> ApiResult<AuthContext> {
     let principal = metadata
         .resolve_principal_by_external_id("local:1")?
         .ok_or(ApiError::Unauthorized)?;
@@ -2106,6 +2183,7 @@ fn local_auth_context(metadata: &MetadataStore) -> ApiResult<AuthContext> {
         auth_session_id: None,
         cookie_authenticated: false,
         access_expires_at: None,
+        trusted_local,
     })
 }
 
@@ -2134,6 +2212,7 @@ async fn resolve_auth_context_blocking(
                 auth_session_id: Some(session.session_id),
                 cookie_authenticated: cookie_token.is_some(),
                 access_expires_at: Some(session.expires_at),
+                trusted_local: false,
             });
         }
         if cookie_token.is_some() {
@@ -5410,6 +5489,7 @@ async fn reauthenticate_ws(
         auth_session_id: Some(session.session_id),
         cookie_authenticated: false,
         access_expires_at: Some(session.expires_at),
+        trusted_local: false,
     })
 }
 
@@ -5505,6 +5585,16 @@ async fn handle_ws(
                         params,
                         tx,
                     } => {
+                        if let Err(retry_after_secs) = ws_rate_admit(
+                            &state,
+                            auth.as_ref(),
+                            session_id,
+                            sift_protocol::RateLimitClass::Query,
+                        ) {
+                            send_rate_limited(&mut sender, Some(request_id), retry_after_secs)
+                                .await?;
+                            continue;
+                        }
                         // Track the streaming query against the drain gate for
                         // its whole lifetime (execute + paging).
                         let _query_guard = state.shutdown.track_query();
@@ -5544,11 +5634,15 @@ async fn handle_ws(
                         stream_pages_with_ack(
                             &mut sender,
                             &mut receiver,
-                            &state.sessions,
-                            session_id,
-                            connection,
-                            stream.cursor_id,
                             stream.rows,
+                            WsPageContext {
+                                sessions: &state.sessions,
+                                session_id,
+                                connection,
+                                cursor_id: stream.cursor_id,
+                                rate_limiter: &state.auth.rate_limiter,
+                                auth: auth.as_ref(),
+                            },
                         )
                         .await?;
                     }
@@ -5557,6 +5651,16 @@ async fn handle_ws(
                         connection,
                         channels,
                     } => {
+                        if let Err(retry_after_secs) = ws_rate_admit(
+                            &state,
+                            auth.as_ref(),
+                            session_id,
+                            sift_protocol::RateLimitClass::Interactive,
+                        ) {
+                            send_rate_limited(&mut sender, Some(request_id), retry_after_secs)
+                                .await?;
+                            continue;
+                        }
                         let operation = Operation::Listen {
                             session: session_id,
                             connection,
@@ -5598,6 +5702,15 @@ async fn handle_ws(
                         connection,
                         cursor_id,
                     } => {
+                        if let Err(retry_after_secs) = ws_rate_admit(
+                            &state,
+                            auth.as_ref(),
+                            session_id,
+                            sift_protocol::RateLimitClass::Control,
+                        ) {
+                            send_rate_limited(&mut sender, None, retry_after_secs).await?;
+                            continue;
+                        }
                         state
                             .sessions
                             .cancel(session_id, connection, cursor_id)
@@ -5628,6 +5741,44 @@ async fn handle_ws(
     Ok(())
 }
 
+fn ws_rate_admit(
+    state: &AppState,
+    auth: Option<&AuthContext>,
+    session_id: sift_protocol::SessionId,
+    class: sift_protocol::RateLimitClass,
+) -> Result<(), u64> {
+    let Some(auth) = auth else {
+        return Ok(());
+    };
+    let tenant = state
+        .sessions
+        .managed_tenant_for_session(session_id)
+        .or_else(|| (auth.tenants.len() == 1).then(|| auth.tenants[0].tenant.id));
+    state.auth.rate_limiter.admit(
+        auth.principal_id.0,
+        tenant.map(|tenant| tenant.0),
+        class,
+        auth.trusted_local,
+    )
+}
+
+async fn send_rate_limited(
+    sender: &mut futures::stream::SplitSink<WebSocket, Message>,
+    request_id: Option<String>,
+    retry_after_secs: u64,
+) -> ApiResult<()> {
+    send_json(
+        sender,
+        &WsServerMessage::Error {
+            request_id,
+            code: Some(sift_protocol::Code::RateLimited),
+            retry_after_ms: Some(retry_after_secs.saturating_mul(1_000)),
+            message: "rate limit exceeded".into(),
+        },
+    )
+    .await
+}
+
 async fn stream_notifications(
     sender: &mut futures::stream::SplitSink<WebSocket, Message>,
     request_id: String,
@@ -5655,14 +5806,42 @@ enum AckOutcome {
 async fn stream_pages_with_ack(
     sender: &mut futures::stream::SplitSink<WebSocket, Message>,
     receiver: &mut futures::stream::SplitStream<WebSocket>,
-    sessions: &SessionStore,
-    session_id: sift_protocol::SessionId,
-    connection: sift_protocol::ConnectionId,
-    cursor_id: sift_protocol::CursorId,
     mut rows: tokio::sync::mpsc::Receiver<sift_protocol::Page>,
+    context: WsPageContext<'_>,
 ) -> ApiResult<()> {
+    let WsPageContext {
+        sessions,
+        session_id,
+        connection,
+        cursor_id,
+        rate_limiter,
+        auth,
+    } = context;
     let mut seq = 0_u64;
     while let Some(page) = rows.recv().await {
+        if let Some(auth) = auth {
+            let tenant = sessions
+                .managed_tenant_for_session(session_id)
+                .or_else(|| (auth.tenants.len() == 1).then(|| auth.tenants[0].tenant.id));
+            let bytes = serde_json::to_vec(&page)
+                .map_err(|error| ApiError::Internal(error.to_string()))?
+                .len();
+            if let Err(retry_after_secs) = rate_limiter
+                .pace_bytes(
+                    auth.principal_id.0,
+                    tenant.map(|tenant| tenant.0),
+                    bytes,
+                    auth.trusted_local,
+                    std::time::Duration::from_secs(5),
+                )
+                .await
+            {
+                send_rate_limited(sender, None, retry_after_secs).await?;
+                let _ = sessions.cancel(session_id, connection, cursor_id).await;
+                sessions.cursor_remove(cursor_id);
+                break;
+            }
+        }
         let terminal = matches!(
             &page,
             sift_protocol::Page::Done { .. } | sift_protocol::Page::Error { .. }
@@ -5696,6 +5875,15 @@ async fn stream_pages_with_ack(
         seq += 1;
     }
     Ok(())
+}
+
+struct WsPageContext<'a> {
+    sessions: &'a SessionStore,
+    session_id: sift_protocol::SessionId,
+    connection: sift_protocol::ConnectionId,
+    cursor_id: sift_protocol::CursorId,
+    rate_limiter: &'a crate::rate_limit::RateLimiter,
+    auth: Option<&'a AuthContext>,
 }
 
 async fn wait_for_ack(

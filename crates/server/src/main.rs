@@ -94,6 +94,7 @@ async fn main() -> anyhow::Result<()> {
                 .public_base_url
                 .clone()
                 .unwrap_or_else(|| "sift:local".into()),
+            rate_limiter: sift_server::rate_limit::RateLimiter::from_config(&cfg.rate_limits),
             github: match (
                 cfg.auth.github_client_id.clone(),
                 cfg.auth.github_client_secret.clone(),

@@ -766,6 +766,20 @@ impl SessionStore {
         Ok(session.owner_principal_id)
     }
 
+    pub fn managed_tenant_for_session(&self, id: SessionId) -> Option<sift_metadata::TenantId> {
+        let session = self.inner.sessions.get(&id)?;
+        let mut tenant = None;
+        for connection in session.connections.iter() {
+            if let ConnectionProvenance::Managed { tenant_id, .. } = connection.provenance {
+                if tenant.is_some_and(|current| current != tenant_id) {
+                    return None;
+                }
+                tenant = Some(tenant_id);
+            }
+        }
+        tenant
+    }
+
     pub async fn open_connection(
         &self,
         session_id: SessionId,

@@ -171,7 +171,7 @@ and tenant-resource enforcement remain absent.
       dispatcher before routing to the driver.
 - [x] [Implement] Policy-revision checks and hybrid revocation of active
       connections, transactions, queries, and cursors.
-- [ ] [Implement] Rate-limit middleware keyed by principal + tenant;
+- [x] [Implement] Rate-limit middleware keyed by principal + tenant;
       configurable per route class, with bounded stream-byte pacing.
 - [ ] [Implement] Tenant resource accounting for profiles, sessions,
       connections, concurrent queries, open cursors, and retained result

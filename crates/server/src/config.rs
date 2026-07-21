@@ -45,6 +45,8 @@ pub struct Config {
     pub audit: AuditConfig,
     /// Result-size limits for synchronous responses.
     pub limits: LimitsConfig,
+    /// General authenticated API rate limits (Phase F).
+    pub rate_limits: RateLimitsConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -144,6 +146,26 @@ pub struct LimitsConfig {
     pub schema_mssql_poll_secs: u64,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RateLimitsConfig {
+    pub trusted_local_exempt: bool,
+    pub idle_ttl_secs: u64,
+    pub control: Option<RateBucketConfig>,
+    pub interactive: Option<RateBucketConfig>,
+    pub query: Option<RateBucketConfig>,
+    pub heavy_transfer: Option<RateBucketConfig>,
+    pub stream_bytes: Option<RateBucketConfig>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RateBucketConfig {
+    pub refill_per_second: f64,
+    pub burst: f64,
+    pub cost: f64,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AuditConfig {
@@ -164,6 +186,7 @@ impl Default for Config {
             metadata: MetadataConfig::default(),
             audit: AuditConfig::default(),
             limits: LimitsConfig::default(),
+            rate_limits: RateLimitsConfig::default(),
         }
     }
 }
@@ -239,6 +262,27 @@ impl Config {
             }
         }
 
+        for (name, bucket) in [
+            ("control", self.rate_limits.control.as_ref()),
+            ("interactive", self.rate_limits.interactive.as_ref()),
+            ("query", self.rate_limits.query.as_ref()),
+            ("heavy_transfer", self.rate_limits.heavy_transfer.as_ref()),
+            ("stream_bytes", self.rate_limits.stream_bytes.as_ref()),
+        ] {
+            if let Some(bucket) = bucket {
+                if !bucket.refill_per_second.is_finite()
+                    || bucket.refill_per_second <= 0.0
+                    || !bucket.burst.is_finite()
+                    || bucket.burst <= 0.0
+                    || !bucket.cost.is_finite()
+                    || bucket.cost <= 0.0
+                    || bucket.cost > bucket.burst
+                {
+                    bail!("invalid rate_limits.{name}: refill, burst, and cost must be finite and positive, with cost <= burst");
+                }
+            }
+        }
+
         Ok(())
     }
 }
@@ -254,6 +298,40 @@ impl Default for LimitsConfig {
             cursor_spill_ttl_secs: 600,
             schema_cache_ttl_secs: 60,
             schema_mssql_poll_secs: 30,
+        }
+    }
+}
+
+impl Default for RateLimitsConfig {
+    fn default() -> Self {
+        Self {
+            trusted_local_exempt: true,
+            idle_ttl_secs: 600,
+            control: Some(RateBucketConfig::new(20.0, 40.0, 1.0)),
+            interactive: Some(RateBucketConfig::new(30.0, 60.0, 1.0)),
+            query: Some(RateBucketConfig::new(10.0, 20.0, 1.0)),
+            heavy_transfer: Some(RateBucketConfig::new(2.0, 4.0, 1.0)),
+            stream_bytes: Some(RateBucketConfig::new(
+                4.0 * 1024.0 * 1024.0,
+                8.0 * 1024.0 * 1024.0,
+                1.0,
+            )),
+        }
+    }
+}
+
+impl Default for RateBucketConfig {
+    fn default() -> Self {
+        Self::new(1.0, 1.0, 1.0)
+    }
+}
+
+impl RateBucketConfig {
+    const fn new(refill_per_second: f64, burst: f64, cost: f64) -> Self {
+        Self {
+            refill_per_second,
+            burst,
+            cost,
         }
     }
 }
@@ -420,5 +498,16 @@ mod tests {
             ..Config::default()
         };
         configured.validate().unwrap();
+    }
+
+    #[test]
+    fn rate_limit_configuration_rejects_invalid_buckets() {
+        let mut config = Config::default();
+        config.rate_limits.query = Some(RateBucketConfig {
+            refill_per_second: 1.0,
+            burst: 1.0,
+            cost: 2.0,
+        });
+        assert!(config.validate().unwrap_err().to_string().contains("query"));
     }
 }
