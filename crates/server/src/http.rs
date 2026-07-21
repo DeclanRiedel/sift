@@ -15,13 +15,12 @@ use serde::Deserialize;
 use serde_json::json;
 use std::time::Instant;
 
-use sift_doc::{CrdtKind, DocumentSnapshot, TextDocument, TextOperation};
 use sift_metadata::{
     ApiTokenId, AuthClientKind as MetadataAuthClientKind, AuthIdentityId, ConnectionProfileId,
-    CrdtType, Document, DocumentId, GithubAllowlistId, GithubProfile, MetadataStore,
-    NewConnectionProfile, NewDocument, NewOperationAudit, NewQueryHistory, NewRoom, NewSavedQuery,
-    PrincipalId, PrincipalKeyId, QueryHistory, QueryStatus, RefreshAuthResult, Room, RoomId,
-    RoomMember, RoomRole, SavedQuery, SavedQueryFilter, SavedQueryId, SavedQueryScope, TenantId,
+    Document, DocumentId, GithubAllowlistId, GithubProfile, MetadataStore, NewConnectionProfile,
+    NewDocument, NewOperationAudit, NewQueryHistory, NewRoom, NewSavedQuery, PrincipalId,
+    PrincipalKeyId, QueryHistory, QueryStatus, RefreshAuthResult, Room, RoomId, RoomMember,
+    RoomRole, SavedQuery, SavedQueryFilter, SavedQueryId, SavedQueryScope, TenantId,
     TenantInvitationId, TenantMembership, UpdateSavedQuery,
 };
 use sift_protocol::{
@@ -6133,10 +6132,14 @@ async fn handle_room_ws(
                             }).await?;
                             continue;
                         }
-                        let (id, presence, next_events) =
+                        let (attachment, presence) =
                             state.rooms.attach(room.0, auth.principal_id.0, client_id.clone());
-                        events = next_events;
-                        attachment_id = Some(id);
+                        let id = attachment.id();
+                        attachment_id = Some(AuditedRoomAttachment {
+                            attachment: Some(attachment),
+                            sessions: state.sessions.clone(),
+                            room_id: room.0,
+                        });
                         state.sessions.push_operation(
                             Operation::AttachRoom {
                                 room_id: room.0,
@@ -6168,9 +6171,9 @@ async fn handle_room_ws(
                             continue;
                         }
                         let document = document_id(raw_document_id)?;
-                        let applied = apply_room_document_operation(
+                        let applied = crate::room_service::apply_document_operation(
                             metadata.clone(),
-                            auth.clone(),
+                            auth.principal_id,
                             room,
                             document,
                             operation.clone(),
@@ -6229,17 +6232,30 @@ async fn handle_room_ws(
         }
     }
 
-    if let Some(id) = attachment_id {
-        state.rooms.detach(room.0, id);
-        state.sessions.push_operation(
+    Ok(())
+}
+
+struct AuditedRoomAttachment {
+    attachment: Option<crate::room_runtime::RoomAttachment>,
+    sessions: SessionStore,
+    room_id: i64,
+}
+
+impl Drop for AuditedRoomAttachment {
+    fn drop(&mut self) {
+        let Some(attachment) = self.attachment.take() else {
+            return;
+        };
+        let attachment_id = attachment.id();
+        attachment.detach();
+        self.sessions.push_operation(
             Operation::DetachRoom {
-                room_id: room.0,
-                attachment_id: id,
+                room_id: self.room_id,
+                attachment_id,
             },
             OperationStatus::Succeeded,
         );
     }
-    Ok(())
 }
 
 fn ws_lease_is_valid(
@@ -6292,50 +6308,6 @@ async fn reauthenticate_ws(
         access_expires_at: Some(session.expires_at),
         trusted_local: false,
     })
-}
-
-async fn apply_room_document_operation(
-    metadata: MetadataStore,
-    auth: AuthContext,
-    room: RoomId,
-    document: DocumentId,
-    operation: sift_protocol::TextDocumentOperation,
-) -> ApiResult<()> {
-    metadata_blocking(move || {
-        let row = metadata.get_document_for_principal(document, auth.principal_id, true)?;
-        if row.room_id != room {
-            return Err(ApiError::Forbidden(format!(
-                "document {:?} is not in room {:?}",
-                document, room
-            )));
-        }
-        let crdt = match row.crdt_type {
-            CrdtType::Loro => CrdtKind::Loro,
-            CrdtType::Automerge => CrdtKind::Automerge,
-        };
-        let mut doc = TextDocument::from_snapshot(DocumentSnapshot::new(crdt, row.crdt_state));
-        let operation = match operation {
-            sift_protocol::TextDocumentOperation::Replace { text } => {
-                TextOperation::Replace { text }
-            }
-            sift_protocol::TextDocumentOperation::Insert { offset, text } => {
-                TextOperation::Insert { offset, text }
-            }
-            sift_protocol::TextDocumentOperation::Delete { start, end } => {
-                TextOperation::Delete { start, end }
-            }
-        };
-        let snapshot = doc
-            .apply(operation)
-            .map_err(|error| ApiError::BadRequest(error.to_string()))?;
-        metadata.update_document_snapshot_for_principal(
-            document,
-            auth.principal_id,
-            snapshot.bytes,
-        )?;
-        Ok(())
-    })
-    .await
 }
 
 async fn handle_ws(

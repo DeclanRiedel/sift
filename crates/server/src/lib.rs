@@ -26,6 +26,7 @@ pub mod rate_limit;
 pub mod registry;
 pub mod resources;
 pub mod room_runtime;
+pub mod room_service;
 pub mod schema_cache;
 pub mod search;
 pub mod session;
