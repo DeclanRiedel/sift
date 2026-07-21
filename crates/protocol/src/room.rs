@@ -82,4 +82,7 @@ pub enum RoomServerMessage {
     Error {
         message: String,
     },
+    RateLimited {
+        retry_after_ms: u64,
+    },
 }

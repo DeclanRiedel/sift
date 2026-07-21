@@ -34,6 +34,14 @@ impl Shutdown {
         !self.inner.draining.swap(true, Ordering::AcqRel)
     }
 
+    /// Resolve when draining starts. Stream pacing selects against this so a
+    /// token-bucket wait never delays shutdown.
+    pub async fn wait_for_drain_start(&self) {
+        while !self.is_draining() {
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    }
+
     /// Register an in-flight query. The returned guard decrements the count
     /// when dropped, so `await_drain` observes the query finishing.
     pub fn track_query(&self) -> QueryGuard {

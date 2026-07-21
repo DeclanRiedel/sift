@@ -2680,6 +2680,93 @@ async fn hosted_multi_tenant_session_requires_an_explicit_tenant() {
 }
 
 #[tokio::test]
+async fn body_tenant_rate_admission_is_atomic_across_principal_and_tenant() {
+    use sift_server::config::{RateBucketConfig, RateLimitsConfig};
+
+    let mut state = test_state_with_metadata(false);
+    let metadata = state.metadata.as_ref().unwrap();
+    let peer = metadata
+        .create_principal("rate-peer", "rate peer", None)
+        .unwrap();
+    let other = metadata
+        .create_tenant("rate-other", TenantKind::Team)
+        .unwrap();
+    for tenant in [TenantId(1), other.id] {
+        metadata
+            .upsert_tenant_membership(tenant, peer.id, MembershipRole::Member)
+            .unwrap();
+    }
+    let (_, owner_token) = metadata
+        .issue_api_token(PrincipalId(1), Some(TenantId(1)), "rate-owner", None)
+        .unwrap();
+    let (_, peer_primary_token) = metadata
+        .issue_api_token(peer.id, Some(TenantId(1)), "rate-peer-primary", None)
+        .unwrap();
+    let (_, peer_other_token) = metadata
+        .issue_api_token(peer.id, Some(other.id), "rate-peer-other", None)
+        .unwrap();
+    state.auth.loopback_bypass = false;
+    state.auth.rate_limiter =
+        sift_server::rate_limit::RateLimiter::from_config(&RateLimitsConfig {
+            trusted_local_exempt: false,
+            control: Some(RateBucketConfig {
+                refill_per_second: 0.001,
+                burst: 1.0,
+                cost: 1.0,
+            }),
+            interactive: None,
+            query: None,
+            heavy_transfer: None,
+            stream_bytes: None,
+            ..RateLimitsConfig::default()
+        });
+    let sessions = state.sessions.clone();
+    let app = app(state);
+    let create = |token: &str, tenant: TenantId, name: &str| {
+        Request::post("/v1/metadata/rooms")
+            .header("authorization", format!("Bearer {token}"))
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "tenant_id": tenant.0,
+                    "name": name,
+                    "kind": "shared"
+                })
+                .to_string(),
+            ))
+            .unwrap()
+    };
+
+    let first = app
+        .clone()
+        .oneshot(create(&owner_token, TenantId(1), "first"))
+        .await
+        .unwrap();
+    assert_eq!(first.status(), StatusCode::OK);
+    let denied = app
+        .clone()
+        .oneshot(create(&peer_primary_token, TenantId(1), "denied"))
+        .await
+        .unwrap();
+    assert_eq!(denied.status(), StatusCode::TOO_MANY_REQUESTS);
+    assert!(sessions.list_operations().iter().any(|entry| {
+        entry.status == sift_protocol::OperationStatus::Failed
+            && matches!(
+                &entry.operation,
+                sift_protocol::Operation::RateLimitRejected {
+                    tenant_id: Some(1),
+                    ..
+                }
+            )
+    }));
+    let uncharged = app
+        .oneshot(create(&peer_other_token, other.id, "other tenant"))
+        .await
+        .unwrap();
+    assert_eq!(uncharged.status(), StatusCode::OK);
+}
+
+#[tokio::test]
 async fn session_lifecycle_create_list_close() {
     let app = app(test_state());
 

@@ -557,8 +557,11 @@ async fn rate_limit_middleware(
     let Some(auth) = req.extensions().get::<AuthContext>().cloned() else {
         return next.run(req).await;
     };
+    if body_tenant_rate_owned(req.method(), req.uri().path()) {
+        return next.run(req).await;
+    }
     let class = rate_limit_class(req.method(), req.uri().path());
-    let tenant = request_tenant(&state, &auth, req.uri());
+    let tenant = request_tenant(&state, &auth, req.uri()).await;
     match state.auth.rate_limiter.admit(
         auth.principal_id.0,
         tenant.map(|tenant| tenant.0),
@@ -566,8 +569,74 @@ async fn rate_limit_middleware(
         auth.trusted_local,
     ) {
         Ok(()) => next.run(req).await,
-        Err(retry_after_secs) => ApiError::RateLimited { retry_after_secs }.into_response(),
+        Err(retry_after_secs) => {
+            record_rate_rejection(
+                &state,
+                &auth,
+                class,
+                req.uri().path(),
+                tenant,
+                retry_after_secs,
+            );
+            ApiError::RateLimited { retry_after_secs }.into_response()
+        }
     }
+}
+
+fn body_tenant_rate_owned(method: &axum::http::Method, path: &str) -> bool {
+    *method == axum::http::Method::POST
+        && matches!(
+            path,
+            "/v1/sessions"
+                | "/v1/metadata/rooms"
+                | "/v1/metadata/connections"
+                | "/v1/metadata/saved-queries"
+                | "/v1/auth/tokens"
+        )
+}
+
+fn admit_resolved_tenant(
+    state: &AppState,
+    auth: &AuthContext,
+    tenant: Option<TenantId>,
+    class: sift_protocol::RateLimitClass,
+    route: &'static str,
+) -> ApiResult<()> {
+    state
+        .auth
+        .rate_limiter
+        .admit(
+            auth.principal_id.0,
+            tenant.map(|tenant| tenant.0),
+            class,
+            auth.trusted_local,
+        )
+        .map_err(|retry_after_secs| {
+            record_rate_rejection(state, auth, class, route, tenant, retry_after_secs);
+            ApiError::RateLimited { retry_after_secs }
+        })
+}
+
+fn record_rate_rejection(
+    state: &AppState,
+    auth: &AuthContext,
+    class: sift_protocol::RateLimitClass,
+    route: &str,
+    tenant: Option<TenantId>,
+    retry_after_secs: u64,
+) {
+    state.sessions.push_operation_full(
+        Operation::RateLimitRejected {
+            class,
+            route: route.to_string(),
+            tenant_id: tenant.map(|tenant| tenant.0),
+        },
+        OperationStatus::Failed,
+        Some(auth.principal_id.0),
+        Some("rate_limited".into()),
+        None,
+        Some(format!("retry after {retry_after_secs}s")),
+    );
 }
 
 fn rate_limit_class(method: &axum::http::Method, path: &str) -> sift_protocol::RateLimitClass {
@@ -594,11 +663,15 @@ fn rate_limit_class(method: &axum::http::Method, path: &str) -> sift_protocol::R
     RateLimitClass::Control
 }
 
-fn request_tenant(state: &AppState, auth: &AuthContext, uri: &axum::http::Uri) -> Option<TenantId> {
+async fn request_tenant(
+    state: &AppState,
+    auth: &AuthContext,
+    uri: &axum::http::Uri,
+) -> Option<TenantId> {
     if let Some(tenant) = uri.query().and_then(|query| {
         query.split('&').find_map(|pair| {
             let (key, value) = pair.split_once('=')?;
-            (key == "tenant")
+            matches!(key, "tenant" | "tenant_id")
                 .then(|| value.parse::<i64>().ok().map(TenantId))
                 .flatten()
         })
@@ -618,7 +691,117 @@ fn request_tenant(state: &AppState, auth: &AuthContext, uri: &axum::http::Uri) -
     {
         return Some(session);
     }
+    if let Some(tenant) = tenant_from_path(uri.path()) {
+        return Some(tenant);
+    }
+    if let (Some(metadata), Some(resource)) =
+        (state.metadata.clone(), metadata_tenant_resource(uri.path()))
+    {
+        let principal = auth.principal_id;
+        let tenants: Vec<_> = auth
+            .tenants
+            .iter()
+            .map(|membership| membership.tenant.id)
+            .collect();
+        if let Ok(tenant) = metadata_blocking(move || {
+            let tenant = match resource {
+                MetadataTenantResource::Room(id) => metadata
+                    .get_room_member(RoomId(id), principal)?
+                    .map(|_| metadata.get_room(RoomId(id)))
+                    .transpose()?
+                    .map(|room| room.tenant_id),
+                MetadataTenantResource::Document(id) => metadata
+                    .get_document_for_principal(DocumentId(id), principal, false)
+                    .and_then(|document| metadata.get_room(document.room_id))
+                    .map(|room| Some(room.tenant_id))
+                    .or_else(|error| match error {
+                        sift_metadata::MetadataError::DocumentNotFound(_) => Ok(None),
+                        error => Err(error),
+                    })?,
+                MetadataTenantResource::Connection(id) => metadata
+                    .get_connection_profile_for_principal(ConnectionProfileId(id), principal)
+                    .map(|profile| Some(profile.tenant_id))
+                    .or_else(|error| match error {
+                        sift_metadata::MetadataError::ConnectionProfileNotFound(_) => Ok(None),
+                        error => Err(error),
+                    })?,
+                MetadataTenantResource::SavedQuery(id) => {
+                    let mut resolved = None;
+                    for tenant in tenants {
+                        match metadata.get_saved_query_visible(SavedQueryId(id), tenant, principal)
+                        {
+                            Ok(_) => {
+                                resolved = Some(tenant);
+                                break;
+                            }
+                            Err(sift_metadata::MetadataError::SavedQueryNotFound(_)) => {}
+                            Err(error) => return Err(error.into()),
+                        }
+                    }
+                    resolved
+                }
+            };
+            Ok(tenant)
+        })
+        .await
+        {
+            if tenant.is_some() {
+                return tenant;
+            }
+        }
+    }
     (auth.tenants.len() == 1).then(|| auth.tenants[0].tenant.id)
+}
+
+fn tenant_from_path(path: &str) -> Option<TenantId> {
+    ["/v1/metadata/tenants/", "/v1/admin/tenants/"]
+        .iter()
+        .find_map(|prefix| {
+            path.strip_prefix(prefix)?
+                .split('/')
+                .next()?
+                .parse::<i64>()
+                .ok()
+                .map(TenantId)
+        })
+}
+
+#[derive(Clone, Copy)]
+enum MetadataTenantResource {
+    Room(i64),
+    Document(i64),
+    Connection(i64),
+    SavedQuery(i64),
+}
+
+fn metadata_tenant_resource(path: &str) -> Option<MetadataTenantResource> {
+    for (prefix, constructor) in [
+        (
+            "/v1/metadata/rooms/",
+            MetadataTenantResource::Room as fn(i64) -> MetadataTenantResource,
+        ),
+        (
+            "/v1/metadata/documents/",
+            MetadataTenantResource::Document as fn(i64) -> MetadataTenantResource,
+        ),
+        (
+            "/v1/metadata/connections/",
+            MetadataTenantResource::Connection as fn(i64) -> MetadataTenantResource,
+        ),
+        (
+            "/v1/metadata/saved-queries/",
+            MetadataTenantResource::SavedQuery as fn(i64) -> MetadataTenantResource,
+        ),
+    ] {
+        if let Some(id) = path
+            .strip_prefix(prefix)
+            .and_then(|rest| rest.split('/').next())
+            .and_then(|value| value.parse::<i64>().ok())
+        {
+            return Some(constructor(id));
+        }
+    }
+    None
 }
 
 fn is_public_path(path: &str) -> bool {
@@ -3781,6 +3964,13 @@ async fn create_metadata_room(
     let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
     let tenant = tenant_id(req.tenant_id)?;
     ensure_tenant(&auth, tenant)?;
+    admit_resolved_tenant(
+        &state,
+        &auth,
+        Some(tenant),
+        sift_protocol::RateLimitClass::Control,
+        "/v1/metadata/rooms",
+    )?;
     let room = metadata_blocking(move || {
         metadata
             .create_room(
@@ -4046,6 +4236,13 @@ async fn upsert_metadata_connection(
     let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
     let tenant = tenant_id(req.tenant_id)?;
     ensure_tenant(&auth, tenant)?;
+    admit_resolved_tenant(
+        &state,
+        &auth,
+        Some(tenant),
+        sift_protocol::RateLimitClass::Control,
+        "/v1/metadata/connections",
+    )?;
     let manager = state.sessions.resource_manager();
     let profile_limit = if manager.enforces_for(auth.trusted_local) {
         manager.effective_limits(tenant)?.connection_profiles
@@ -4460,6 +4657,13 @@ async fn create_metadata_saved_query(
     let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
     let tenant = tenant_id(req.tenant_id)?;
     ensure_tenant(&auth, tenant)?;
+    admit_resolved_tenant(
+        &state,
+        &auth,
+        Some(tenant),
+        sift_protocol::RateLimitClass::Control,
+        "/v1/metadata/saved-queries",
+    )?;
     // Sharing rules on create:
     // - If owner_principal_id is None, the query is tenant-shared —
     //   creator must be a tenant admin (Owner/Admin role).
@@ -4624,6 +4828,13 @@ async fn issue_auth_token(
     if let Some(tenant) = tenant {
         ensure_tenant(&auth, tenant)?;
     }
+    admit_resolved_tenant(
+        &state,
+        &auth,
+        tenant,
+        sift_protocol::RateLimitClass::Control,
+        "/v1/auth/tokens",
+    )?;
     let (token, plaintext) = metadata_blocking(move || {
         metadata
             .issue_api_token(auth.principal_id, tenant, &req.name, req.expires_at)
@@ -4783,6 +4994,15 @@ async fn create_session(
         }
         None => (None, None, false),
     };
+    if let Some(auth) = auth.as_ref() {
+        admit_resolved_tenant(
+            &state,
+            auth,
+            tenant,
+            sift_protocol::RateLimitClass::Control,
+            "/v1/sessions",
+        )?;
+    }
     let info =
         state
             .sessions
@@ -4968,6 +5188,7 @@ struct DdlQuery {
 
 async fn export_query(
     State(state): State<AppState>,
+    auth: Option<Extension<AuthContext>>,
     Path((id, conn_id)): Path<(sift_protocol::SessionId, sift_protocol::ConnectionId)>,
     Json(req): Json<sift_protocol::ExportRequest>,
 ) -> ApiResult<Response> {
@@ -4978,6 +5199,7 @@ async fn export_query(
         session: id,
         connection: conn_id,
     };
+    let query_guard = state.shutdown.track_query();
     // Routes through the cursor registry (per-session cap + pump), unlike
     // the previous direct driver.execute call. See `export_stream`.
     let stream = finish_operation(
@@ -4987,13 +5209,96 @@ async fn export_query(
         |_| None,
     )?;
     let content_type = crate::export::content_type(format);
-    let body = Body::from_stream(stream);
+    let tenant_id = state
+        .sessions
+        .managed_tenant_for_session(id)
+        .map(|tenant| tenant.0);
+    let pacing = auth.map(|Extension(auth)| {
+        (
+            state.auth.rate_limiter.clone(),
+            state.sessions.clone(),
+            auth.principal_id.0,
+            tenant_id,
+            auth.trusted_local,
+        )
+    });
+    let body = Body::from_stream(pace_http_export(
+        stream,
+        pacing,
+        state.shutdown.clone(),
+        query_guard,
+    ));
     let mut resp = body.into_response();
     resp.headers_mut().insert(
         axum::http::header::CONTENT_TYPE,
         content_type.parse().unwrap(),
     );
     Ok(resp)
+}
+
+fn pace_http_export<S>(
+    stream: S,
+    pacing: Option<(
+        crate::rate_limit::RateLimiter,
+        SessionStore,
+        i64,
+        Option<i64>,
+        bool,
+    )>,
+    shutdown: crate::shutdown::Shutdown,
+    query_guard: crate::shutdown::QueryGuard,
+) -> impl futures::Stream<Item = Result<bytes::Bytes, std::io::Error>> + Send + 'static
+where
+    S: futures::Stream<Item = Result<bytes::Bytes, std::io::Error>> + Send + 'static,
+{
+    async_stream::stream! {
+        let _query_guard = query_guard;
+        futures::pin_mut!(stream);
+        while let Some(chunk) = stream.next().await {
+            match chunk {
+                Ok(bytes) => {
+                    if let Some((limiter, sessions, principal, tenant, trusted_local)) = &pacing {
+                        let paced = tokio::select! {
+                            _ = shutdown.wait_for_drain_start() => None,
+                            result = limiter.pace_bytes(
+                                *principal,
+                                *tenant,
+                                bytes.len(),
+                                *trusted_local,
+                                std::time::Duration::from_secs(5),
+                            ) => Some(result),
+                        };
+                        let Some(paced) = paced else {
+                            break;
+                        };
+                        if let Err(retry_after_secs) = paced {
+                            sessions.push_operation_full(
+                                Operation::RateLimitRejected {
+                                    class: sift_protocol::RateLimitClass::StreamBytes,
+                                    route: "/v1/sessions/:id/connections/:id/export".into(),
+                                    tenant_id: *tenant,
+                                },
+                                OperationStatus::Failed,
+                                Some(*principal),
+                                Some("rate_limited".into()),
+                                None,
+                                Some(format!("retry after {retry_after_secs}s")),
+                            );
+                            yield Err(std::io::Error::other(format!(
+                                "stream byte rate limit exceeded; retry after {retry_after_secs}s"
+                            )));
+                            break;
+                        }
+                    }
+                    yield Ok(bytes);
+                }
+                Err(error) => {
+                    yield Err(error);
+                    break;
+                }
+            }
+        }
+    }
 }
 
 async fn get_object_ddl(
@@ -5619,7 +5924,16 @@ async fn ws_room(
     let correlation_id = crate::correlation::current().unwrap_or_else(crate::correlation::generate);
     Ok(ws.on_upgrade(move |socket| {
         crate::correlation::scope(correlation_id, async move {
-            if let Err(error) = handle_room_ws(state, metadata, auth, room_row.id, socket).await {
+            if let Err(error) = handle_room_ws(
+                state,
+                metadata,
+                auth,
+                room_row.id,
+                room_row.tenant_id,
+                socket,
+            )
+            .await
+            {
                 tracing::warn!(room_id = %room_row.id.0, error = %error, "room websocket ended with error");
             }
         })
@@ -5631,6 +5945,7 @@ async fn handle_room_ws(
     metadata: MetadataStore,
     mut auth: AuthContext,
     room: RoomId,
+    tenant: TenantId,
     socket: WebSocket,
 ) -> ApiResult<()> {
     let (mut sender, mut receiver) = socket.split();
@@ -5650,6 +5965,25 @@ async fn handle_room_ws(
                 };
                 let message: RoomClientMessage =
                     serde_json::from_str(&text).map_err(|error| ApiError::BadRequest(error.to_string()))?;
+                if let Err(error) = admit_resolved_tenant(
+                    &state,
+                    &auth,
+                    Some(tenant),
+                    sift_protocol::RateLimitClass::Control,
+                    "/v1/metadata/rooms/:id/ws",
+                ) {
+                    let ApiError::RateLimited { retry_after_secs } = error else {
+                        return Err(error);
+                    };
+                    send_json(
+                        &mut sender,
+                        &RoomServerMessage::RateLimited {
+                            retry_after_ms: retry_after_secs.saturating_mul(1_000),
+                        },
+                    )
+                    .await?;
+                    continue;
+                }
                 match message {
                     RoomClientMessage::Reauthenticate { access_token } => {
                         let replacement = reauthenticate_ws(&state, &access_token.0, auth.principal_id).await?;
@@ -5978,6 +6312,7 @@ async fn handle_ws(
                                 cursor_id: stream.cursor_id,
                                 rate_limiter: &state.auth.rate_limiter,
                                 auth: auth.as_ref(),
+                                shutdown: &state.shutdown,
                             },
                         )
                         .await?;
@@ -6090,12 +6425,23 @@ fn ws_rate_admit(
         .sessions
         .managed_tenant_for_session(session_id)
         .or_else(|| (auth.tenants.len() == 1).then(|| auth.tenants[0].tenant.id));
-    state.auth.rate_limiter.admit(
+    let result = state.auth.rate_limiter.admit(
         auth.principal_id.0,
         tenant.map(|tenant| tenant.0),
         class,
         auth.trusted_local,
-    )
+    );
+    if let Err(retry_after_secs) = result {
+        record_rate_rejection(
+            state,
+            auth,
+            class,
+            "/v1/sessions/:id/ws",
+            tenant,
+            retry_after_secs,
+        );
+    }
+    result
 }
 
 async fn send_rate_limited(
@@ -6152,6 +6498,7 @@ async fn stream_pages_with_ack(
         cursor_id,
         rate_limiter,
         auth,
+        shutdown,
     } = context;
     let mut seq = 0_u64;
     while let Some(page) = rows.recv().await {
@@ -6162,16 +6509,34 @@ async fn stream_pages_with_ack(
             let bytes = serde_json::to_vec(&page)
                 .map_err(|error| ApiError::Internal(error.to_string()))?
                 .len();
-            if let Err(retry_after_secs) = rate_limiter
-                .pace_bytes(
+            let paced = tokio::select! {
+                _ = shutdown.wait_for_drain_start() => None,
+                result = rate_limiter.pace_bytes(
                     auth.principal_id.0,
                     tenant.map(|tenant| tenant.0),
                     bytes,
                     auth.trusted_local,
                     std::time::Duration::from_secs(5),
-                )
-                .await
-            {
+                ) => Some(result),
+            };
+            let Some(paced) = paced else {
+                let _ = sessions.cancel(session_id, connection, cursor_id).await;
+                sessions.cursor_remove(cursor_id);
+                break;
+            };
+            if let Err(retry_after_secs) = paced {
+                sessions.push_operation_full(
+                    Operation::RateLimitRejected {
+                        class: sift_protocol::RateLimitClass::StreamBytes,
+                        route: "/v1/sessions/:id/ws".into(),
+                        tenant_id: tenant.map(|tenant| tenant.0),
+                    },
+                    OperationStatus::Failed,
+                    Some(auth.principal_id.0),
+                    Some("rate_limited".into()),
+                    None,
+                    Some(format!("retry after {retry_after_secs}s")),
+                );
                 send_rate_limited(sender, None, retry_after_secs).await?;
                 let _ = sessions.cancel(session_id, connection, cursor_id).await;
                 sessions.cursor_remove(cursor_id);
@@ -6220,6 +6585,7 @@ struct WsPageContext<'a> {
     cursor_id: sift_protocol::CursorId,
     rate_limiter: &'a crate::rate_limit::RateLimiter,
     auth: Option<&'a AuthContext>,
+    shutdown: &'a crate::shutdown::Shutdown,
 }
 
 async fn wait_for_ack(
@@ -6321,5 +6687,38 @@ mod route_access_tests {
             route_access("/v1/sessions/not-a-number"),
             RouteAccess::Authenticated
         );
+    }
+
+    #[tokio::test]
+    async fn http_export_stream_applies_byte_pacing() {
+        let limiter =
+            crate::rate_limit::RateLimiter::from_config(&crate::config::RateLimitsConfig {
+                trusted_local_exempt: false,
+                stream_bytes: Some(crate::config::RateBucketConfig {
+                    refill_per_second: 1.0,
+                    burst: 3.0,
+                    cost: 1.0,
+                }),
+                ..Default::default()
+            });
+        let shutdown = crate::shutdown::Shutdown::default();
+        let stream = futures::stream::iter([Ok(bytes::Bytes::from_static(b"four"))]);
+        let paced = pace_http_export(
+            stream,
+            Some((
+                limiter,
+                SessionStore::new(crate::registry::DriverRegistry::new()),
+                1,
+                Some(1),
+                false,
+            )),
+            shutdown.clone(),
+            shutdown.track_query(),
+        );
+        futures::pin_mut!(paced);
+
+        assert!(paced.next().await.unwrap().is_err());
+        assert!(paced.next().await.is_none());
+        assert_eq!(shutdown.in_flight(), 0);
     }
 }

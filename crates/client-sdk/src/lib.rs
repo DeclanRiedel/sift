@@ -182,6 +182,11 @@ impl RoomWebSocket {
         match self.next().await? {
             sift_protocol::RoomServerMessage::Authenticated { expires_at } => Ok(expires_at),
             sift_protocol::RoomServerMessage::Error { message } => Err(Error::Protocol(message)),
+            sift_protocol::RoomServerMessage::RateLimited { retry_after_ms } => {
+                Err(Error::Protocol(format!(
+                    "room WebSocket rate limited for {retry_after_ms}ms"
+                )))
+            }
             other => Err(Error::Protocol(format!(
                 "expected room WebSocket authentication acknowledgement, got {other:?}"
             ))),
@@ -1279,6 +1284,11 @@ impl Client {
                 sift_protocol::RoomServerMessage::Error { message } => {
                     return Err(Error::Protocol(message));
                 }
+                sift_protocol::RoomServerMessage::RateLimited { retry_after_ms } => {
+                    return Err(Error::Protocol(format!(
+                        "room WebSocket rate limited for {retry_after_ms}ms"
+                    )));
+                }
                 _ => {}
             }
         }
@@ -1302,6 +1312,11 @@ impl Client {
                 }
                 sift_protocol::RoomServerMessage::Error { message } => {
                     return Err(Error::Protocol(message));
+                }
+                sift_protocol::RoomServerMessage::RateLimited { retry_after_ms } => {
+                    return Err(Error::Protocol(format!(
+                        "room WebSocket rate limited for {retry_after_ms}ms"
+                    )));
                 }
                 _ => {}
             }

@@ -82,6 +82,11 @@ pub enum Operation {
         action: PolicyAdminAction,
         tenant_id: i64,
     },
+    RateLimitRejected {
+        class: crate::RateLimitClass,
+        route: String,
+        tenant_id: Option<i64>,
+    },
     OpenSession {
         request: OpenSessionRequest,
     },
@@ -262,6 +267,7 @@ impl Operation {
             Self::ManageTenantInvitation { .. } => OperationKind::ManageTenantInvitation,
             Self::ManageConnectionPolicy { .. } => OperationKind::ManageConnectionPolicy,
             Self::ManageTenantLimits { .. } => OperationKind::ManageTenantLimits,
+            Self::RateLimitRejected { .. } => OperationKind::Metadata,
             Self::OpenSession { .. } => OperationKind::OpenSession,
             Self::ListSessions => OperationKind::ListSessions,
             Self::ListAvailableOperations { .. } => OperationKind::ListAvailableOperations,
@@ -364,6 +370,9 @@ impl Operation {
                 "tenant",
                 Some(*tenant_id),
             ),
+            Operation::RateLimitRejected {
+                route, tenant_id, ..
+            } => summary("rate_limit_rejected", route, *tenant_id),
             Operation::OpenSession { .. } => summary("open", "session", None),
             Operation::ListSessions => summary("list", "session", None),
             Operation::ListAvailableOperations { .. } => {
