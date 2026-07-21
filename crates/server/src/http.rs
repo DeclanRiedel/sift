@@ -445,23 +445,48 @@ async fn correlation_middleware(req: Request<Body>, next: Next) -> Response {
 
 async fn audit_middleware(
     State(sessions): State<SessionStore>,
-    req: Request<Body>,
+    mut req: Request<Body>,
     next: Next,
 ) -> Response {
     let method = req.method().to_string();
     let path = req.uri().path().to_string();
+    let actor = std::sync::Arc::new(std::sync::atomic::AtomicI64::new(0));
+    req.extensions_mut()
+        .insert(RequestAuditActor(actor.clone()));
     let start = Instant::now();
     let response = next.run(req).await;
     let status = response.status().as_u16();
     sessions.push_audit(AuditEntry {
         at: chrono::Utc::now(),
-        method,
-        path,
+        method: method.clone(),
+        path: path.clone(),
         status,
         duration_ms: start.elapsed().as_millis(),
     });
+    sessions.push_operation_full(
+        Operation::HttpRequest {
+            method,
+            path,
+            status_code: status,
+        },
+        if status < 400 {
+            OperationStatus::Succeeded
+        } else {
+            OperationStatus::Failed
+        },
+        match actor.load(std::sync::atomic::Ordering::Acquire) {
+            0 => None,
+            id => Some(id),
+        },
+        (status >= 400).then(|| status.to_string()),
+        None,
+        None,
+    );
     response
 }
+
+#[derive(Clone)]
+struct RequestAuditActor(std::sync::Arc<std::sync::atomic::AtomicI64>);
 
 fn finish_operation<T>(
     sessions: &SessionStore,
@@ -514,6 +539,11 @@ async fn auth_middleware(
     if state.metadata.is_some() {
         return match resolve_auth_context_blocking(state.clone(), req.headers().clone()).await {
             Ok(context) => {
+                if let Some(actor) = req.extensions().get::<RequestAuditActor>() {
+                    actor
+                        .0
+                        .store(context.principal_id.0, std::sync::atomic::Ordering::Release);
+                }
                 if let Err(error) = authorize_route(&state, &context, path) {
                     return error.into_response();
                 }
@@ -3159,6 +3189,13 @@ async fn openapi() -> Json<serde_json::Value> {
                     "responses": { "200": { "description": "One-use invitation token", "content": json_content("IssuedTenantInvitationResponse") } }
                 }
             },
+            "/v1/metadata/tenants/{tenant_id}/invitations/{id}": {
+                "delete": {
+                    "operationId": "revokeTenantInvitation",
+                    "summary": "Revoke an unconsumed tenant invitation",
+                    "responses": { "200": { "description": "Ack", "content": json_object_content() } }
+                }
+            },
             "/v1/auth/invitations/accept": {
                 "post": {
                     "operationId": "acceptTenantInvitation",
@@ -3169,6 +3206,13 @@ async fn openapi() -> Json<serde_json::Value> {
             "/v1/auth/keys": {
                 "get": { "operationId": "listPrincipalKeys", "responses": { "200": { "description": "Keys", "content": json_array_content("PrincipalKey") } } },
                 "post": { "operationId": "registerPrincipalKey", "requestBody": json_body("RegisterPrincipalKeyRequest"), "responses": { "200": { "description": "Key", "content": json_content("PrincipalKey") } } }
+            },
+            "/v1/auth/keys/{id}": {
+                "delete": {
+                    "operationId": "revokePrincipalKey",
+                    "summary": "Revoke a registered principal key",
+                    "responses": { "200": { "description": "Ack", "content": json_object_content() } }
+                }
             },
             "/v1/auth/keys/challenge": {
                 "post": { "operationId": "issueKeyChallenge", "security": [], "requestBody": json_body("KeyChallengeRequest"), "responses": { "200": { "description": "Challenge", "content": json_content("KeyChallengeResponse") } } }
@@ -3640,6 +3684,34 @@ async fn openapi() -> Json<serde_json::Value> {
                     "responses": { "200": { "description": "Query history", "content": json_array_content("QueryHistory") } }
                 }
             },
+            "/v1/metadata/saved-queries": {
+                "get": {
+                    "operationId": "listMetadataSavedQueries",
+                    "summary": "List visible personal and tenant-shared saved queries",
+                    "responses": { "200": { "description": "Saved queries", "content": json_array_content("SavedQuery") } }
+                },
+                "post": {
+                    "operationId": "createMetadataSavedQuery",
+                    "summary": "Create a personal or tenant-shared saved query",
+                    "requestBody": json_body("CreateSavedQueryRequest"),
+                    "responses": { "200": { "description": "Saved query", "content": json_content("SavedQuery") } }
+                }
+            },
+            "/v1/metadata/saved-queries/{id}": {
+                "get": {
+                    "operationId": "getMetadataSavedQuery",
+                    "responses": { "200": { "description": "Saved query", "content": json_content("SavedQuery") } }
+                },
+                "put": {
+                    "operationId": "updateMetadataSavedQuery",
+                    "requestBody": json_body("UpdateSavedQueryRequest"),
+                    "responses": { "200": { "description": "Saved query", "content": json_content("SavedQuery") } }
+                },
+                "delete": {
+                    "operationId": "deleteMetadataSavedQuery",
+                    "responses": { "200": { "description": "Ack", "content": json_object_content() } }
+                }
+            },
             "/v1/auth/tokens": {
                 "get": {
                     "operationId": "listAuthTokens",
@@ -3893,6 +3965,7 @@ fn protocol_schema_refs() -> serde_json::Value {
     add_schema::<sift_metadata::QueryHistory>("QueryHistory", &mut schemas);
     add_schema::<sift_metadata::Room>("Room", &mut schemas);
     add_schema::<sift_metadata::RoomMember>("RoomMember", &mut schemas);
+    add_schema::<sift_metadata::SavedQuery>("SavedQuery", &mut schemas);
     add_schema::<sift_metadata::TenantMembership>("TenantMembership", &mut schemas);
     add_schema::<sift_metadata::TenantLimitOverride>("TenantLimitOverride", &mut schemas);
     add_schema::<sift_metadata::TenantInvitation>("TenantInvitation", &mut schemas);
@@ -3900,6 +3973,7 @@ fn protocol_schema_refs() -> serde_json::Value {
     add_schema::<AddRoomMemberRequest>("AddRoomMemberRequest", &mut schemas);
     add_schema::<CreateDocumentRequest>("CreateDocumentRequest", &mut schemas);
     add_schema::<CreateRoomRequest>("CreateRoomRequest", &mut schemas);
+    add_schema::<CreateSavedQueryRequest>("CreateSavedQueryRequest", &mut schemas);
     add_schema::<IssueTokenRequest>("IssueTokenRequest", &mut schemas);
     add_schema::<IssueTokenResponse>("IssueTokenResponse", &mut schemas);
     add_schema::<OpenConnectionFromProfileRequest>(
@@ -3909,6 +3983,7 @@ fn protocol_schema_refs() -> serde_json::Value {
     add_schema::<SetCredentialRequest>("SetCredentialRequest", &mut schemas);
     add_schema::<UpdateDocumentSnapshotRequest>("UpdateDocumentSnapshotRequest", &mut schemas);
     add_schema::<UpsertConnectionProfileRequest>("UpsertConnectionProfileRequest", &mut schemas);
+    add_schema::<UpdateSavedQueryRequest>("UpdateSavedQueryRequest", &mut schemas);
     serde_json::Value::Object(schemas)
 }
 
@@ -6739,6 +6814,37 @@ async fn send_json<T: serde::Serialize>(
 mod route_access_tests {
     use super::*;
 
+    fn declared_router_paths() -> std::collections::BTreeSet<String> {
+        let mut source = include_str!("http.rs");
+        let mut paths = std::collections::BTreeSet::new();
+        while let Some(index) = source.find(".route(") {
+            source = &source[index + ".route(".len()..];
+            let Some(quote) = source.find('"') else {
+                break;
+            };
+            let after_quote = &source[quote + 1..];
+            let Some(end) = after_quote.find('"') else {
+                break;
+            };
+            let path = &after_quote[..end];
+            if path.starts_with("/v1/") {
+                let normalized = path
+                    .split('/')
+                    .map(|segment| {
+                        segment
+                            .strip_prefix(':')
+                            .map(|name| format!("{{{name}}}"))
+                            .unwrap_or_else(|| segment.to_string())
+                    })
+                    .collect::<Vec<_>>()
+                    .join("/");
+                paths.insert(normalized);
+            }
+            source = &after_quote[end + 1..];
+        }
+        paths
+    }
+
     #[test]
     fn classifies_public_authenticated_and_owned_route_families() {
         assert_eq!(route_access("/v1/health"), RouteAccess::Public);
@@ -6758,6 +6864,18 @@ mod route_access_tests {
             route_access("/v1/sessions/not-a-number"),
             RouteAccess::Authenticated
         );
+    }
+
+    #[tokio::test]
+    async fn openapi_paths_match_the_live_router() {
+        let document = openapi().await.0;
+        let documented = document["paths"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(documented, declared_router_paths());
     }
 
     #[tokio::test]

@@ -47,6 +47,13 @@ pub enum PolicyAdminAction {
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum Operation {
+    /// Transport envelope recorded for every HTTP action. Semantic handlers
+    /// may additionally emit a richer operation variant.
+    HttpRequest {
+        method: String,
+        path: String,
+        status_code: u16,
+    },
     /// Authentication attempt. Deliberately carries the method only: raw
     /// credentials, OAuth codes, and tokens never enter the operation model.
     Authenticate {
@@ -257,6 +264,7 @@ pub struct OperationSummary {
 impl Operation {
     pub fn kind(&self) -> OperationKind {
         match self {
+            Self::HttpRequest { .. } => OperationKind::Metadata,
             Self::Authenticate { .. } => OperationKind::Authenticate,
             Self::RefreshAuthSession => OperationKind::RefreshAuthSession,
             Self::Logout { .. } => OperationKind::Logout,
@@ -314,6 +322,9 @@ impl Operation {
             target_id,
         };
         match self {
+            Operation::HttpRequest { method, path, .. } => {
+                summary(&method.to_lowercase(), path, None)
+            }
             Operation::Authenticate { method } => summary(
                 &format!("authenticate_{method:?}").to_lowercase(),
                 "auth",

@@ -21,6 +21,25 @@ use sift_server::shutdown::Shutdown;
 use std::sync::Arc;
 use tower::ServiceExt;
 
+#[tokio::test]
+async fn every_http_action_has_an_operation_envelope() {
+    let state = audited_state(MockDriver::builder().engine(Engine::Postgres).build());
+    let sessions = state.sessions.clone();
+    let response = app(state)
+        .oneshot(Request::get("/v1/health").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(sessions.list_operations().iter().any(|entry| matches!(
+        &entry.operation,
+        sift_protocol::Operation::HttpRequest {
+            method,
+            path,
+            status_code: 200,
+        } if method == "GET" && path == "/v1/health"
+    )));
+}
+
 fn success_pages() -> Vec<Page> {
     vec![
         Page::NextResult {
