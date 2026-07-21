@@ -249,15 +249,34 @@ handshake.
 
 ## Phase I — Extensibility
 
-Goal: third-party drivers, AI/automation consumers, and connection-time
-hooks without forking the server.
+Goal: a strong, versioned plugin system for database providers, SQL tooling,
+automation, and connection-time hooks without forking or destabilizing the
+server. Detailed design input:
+`docs/PLANS/ide-parity-and-provider-extensibility.md`.
 
 - [ ] [Design] ADR-022 (candidate): driver extensibility — in-tree drivers
-      first-class; third-party drivers register over a local RPC protocol
-      implementing the `Driver` trait shape.
-- [ ] [Design] Driver RPC Protocol contract (wire encoding, capability
-      advertisement, streaming `Page` frames, cancel cross-call); the RPC
-      proxy must satisfy driver-isolation (ADR-013).
+      remain first-class native Rust implementations; third-party drivers run
+      out of process behind a language-neutral local RPC protocol. Optional
+      ODBC and JDBC bridges are plugins, never core runtime dependencies.
+- [ ] [Design] Extensible provider identity and capability discovery. Replace
+      external reliance on the closed `Engine` enum and accumulating
+      `as_pg`/`as_mssql` downcasts with a namespaced provider id, dialect id,
+      manifest, configuration schema, and negotiated capability families.
+- [ ] [Design] Driver RPC Protocol contract: version handshake, framing,
+      connection/transaction/cursor handles, streaming `Page` backpressure,
+      cancellation, structured errors, deadlines, health/restart, and
+      conformance fixtures. The proxy must preserve ADR-013 isolation.
+- [ ] [Design] General plugin manifest and lifecycle: contribution types,
+      protocol ranges, install provenance, checksums/signatures, permissions,
+      enable/disable/update policy, health, crash reporting, and
+      operator-visible trust. Third-party server code is out-of-process by
+      default; do not load arbitrary dynamic libraries into `sift-server`.
+- [ ] [Design] Extension contribution points for drivers, tunnels, credential
+      brokers, hooks, import/export formats, dialect/analyzer packs, commands,
+      agent context providers, governed tools, and declarative client panels.
+- [ ] [Design] Namespaced extension operations. Every extension-triggered
+      user-visible action remains typed/audited and consumes central auth,
+      policy, rate, quota, timeout, cancellation, and secret boundaries.
 - [ ] [Design] MCP server surface (`sift mcp`): every `Operation` is a
       tool; results are protocol types.
 - [ ] [Design] MCP governance layer (operation classification, per-
@@ -265,13 +284,18 @@ hooks without forking the server.
       the Phase F evaluator and must not create a second authorization model.
 - [ ] [Design] Connection hooks (`PreConnect`/`PostConnect`/etc); tunneling
       for user DBs (SSH/SOCKS5/HTTP CONNECT/SSM); plugin/extension loading.
-- [ ] [Implement] Driver RPC host; `sift mcp` subcommand; governance
-      middleware; connection hooks; tunnel profiles; extension loader.
-- [ ] The goal for this phase to build a layer for easily adding plugins extensions as well as ways to send db/schema data to an agent as well as have agents edit inside the IDE with good context.
+- [ ] [Implement] Plugin supervisor + manifest registry; Driver RPC host and
+      SDK; first external-driver conformance fixture; optional bridge packaging
+      boundary; `sift mcp`; governance middleware; connection hooks; tunnel
+      profiles; contribution registry; extension management API.
+- [ ] [Graduate] A plugin crash, timeout, protocol violation, secret-handling
+      failure, or incompatible version cannot freeze or compromise the server;
+      provider capability and compatibility matrices are public API artifacts.
 
 ## Phase J — Operations polish
 
-Goal: the last mile before a real release.
+Goal: establish the operational and public-contract foundation for a real
+release. Packaging is finalized after the selected Phase K/L v1 scope lands.
 
 - [ ] [Design] Metrics surface (`/v1/metrics` Prometheus); OpenTelemetry
       export; server-side migrations policy (`sift migrate` subcommand vs
@@ -290,6 +314,66 @@ Goal: the last mile before a real release.
       drifts from routes. Single source of truth = `utoipa` annotations or
       route-level schema extraction; add a drift test. (Can land earlier —
       the drifting hand-authored map is a documentation-contract hazard.)
+- [ ] [Implement] Public contract closure: SDK methods for every supported
+      route, streaming export consumption, cursor-based pagination for large
+      collections, persistent room clients, reconnect discovery, mutation
+      revisions/preconditions, and automated router/OpenAPI/SDK parity checks.
+
+## Phase K — SQL intelligence & database modeling
+
+Goal: add the semantic database-IDE layer that is absent from the runtime API,
+without moving product behavior into one privileged client. Detailed gap
+inventory: `docs/PLANS/ide-parity-and-provider-extensibility.md`.
+
+- [ ] [Design] ADR candidate: shared dialect-aware SQL syntax and semantic
+      service powering formatting, diagnostics, completion, statement
+      selection, usages, refactoring, quick fixes, and governed AI context.
+- [ ] [Design] Catalog identity and dependency graph across tables, views,
+      routines, triggers, types, constraints, and referenced columns; define
+      invalidation and partial-introspection behavior.
+- [ ] [Design] Schema diff/migration contract: durable snapshots, normalized
+      changes, dependency ordering, engine-aware generated SQL, preview,
+      destructive warnings, transactional limits, and audited apply.
+- [ ] [Design] Table/result comparison: key selection, duplicate handling,
+      type-aware tolerances, bounded paging, cancellation, and optional patch
+      generation.
+- [ ] [Design] Diagram projection from the catalog graph. Layout and visual
+      editing remain client concerns; graph truth and mutations remain server
+      operations.
+- [ ] [Implement] SQL parse/semantic services; formatter; diagnostics and
+      quick fixes; richer completion; find usages/refactoring; catalog graph;
+      diagrams API; schema diff/migration preview+apply; data/result compare.
+- [ ] [Graduate] PostgreSQL and SQL Server semantic/diff corpora, destructive
+      migration safety matrix, large-schema latency budgets, and public
+      Operation/OpenAPI/SDK coverage.
+
+## Phase L — Workspaces, VCS & execution automation
+
+Goal: support DataGrip-class files, offline DDL sources, history, VCS, and run
+configurations without abandoning thin clients or breaking remote topology.
+
+- [ ] [Design] ADR candidate: server-owned versus hybrid workspace topology.
+      Local conveniences may use client files, but hosted/remote product state
+      must have a server-authoritative representation.
+- [ ] [Design] Durable SQL files/documents, folders, revisions, local-history
+      semantics, offline DDL sources, and mapping between DDL models and live
+      connections.
+- [ ] [Design] VCS adapter boundary: repository binding, status/diff/commit
+      operations, remote-server filesystem rules, scoped credentials through
+      `SecretStore`, and collaboration conflict behavior.
+- [ ] [Design] Run configurations: ordered scripts, target connections/schemas,
+      variables and secret references, transaction/error policies, pre-tasks,
+      scheduling handoff, logs, cancellation, and audited reruns.
+- [ ] [Design] Extensible import/export recipes including HTML, Markdown,
+      spreadsheet, and operator-installed formatter plugins. Untrusted
+      formatters use the Phase I extension boundary rather than in-process
+      execution.
+- [ ] [Implement] Workspace/history API; DDL-source model; VCS adapter and Git
+      implementation; run-configuration executor; recipe-based import/export;
+      SDK/OpenAPI and remote integration.
+- [ ] [Graduate] Local, SSH-remote, and network-hosted workspace matrices;
+      repository credential redaction; concurrent edit/VCS conflict tests;
+      deterministic multi-script execution and recovery tests.
 
 ---
 
@@ -308,10 +392,21 @@ Goal: the last mile before a real release.
   require a central identity or collaboration relay, and it cannot reuse the
   personal-loopback bypass.
 - **Phase I is mostly orthogonal** but governance consumes F's evaluator and
-  `OperationKind` policy rather than defining parallel permissions.
+  `OperationKind` policy rather than defining parallel permissions. Its driver
+  protocol and plugin manifest are prerequisites for third-party providers,
+  dialect packs, exporters, and agent context extensions in K/L.
 - **Phase J's OpenAPI item can land earlier** — the hand-authored map is
   already drifting. Its metrics exporter consumes F's in-memory resource
   counters; F does not introduce a competing Prometheus surface.
+- **Phase K consumes C's schema cache, D's editing/search/DDL surfaces, and I's
+  dialect-pack boundary.** It must expose semantic operations through the
+  server rather than creating desktop-only product behavior.
+- **Phase L depends on H's remote topology and G's durable document model.** A
+  hosted workspace cannot assume the client's filesystem is locally mounted;
+  VCS and automation also consume I's plugin/permission model.
+- **The release-packaging portion of Phase J is finalized after K/L.** Contract
+  generation and observability may land earlier, but a feature-complete release
+  artifact includes the later IDE/workspace surfaces selected for v1.
 
 ## ADR candidates this list implies
 
@@ -336,6 +431,10 @@ Goal: the last mile before a real release.
 | ADR-028 | server-derived operation capabilities                                 | Phase D | written                                                        |
 | ADR-029 | normalized CSV import                                                 | Phase D | written                                                        |
 | ADR-030 | instance-owned closed registration + hosted identity                  | Phase E | written                                                        |
+| ADR-031 | plugin manifest, isolation, permissions, and lifecycle                | Phase I | not written                                                    |
+| ADR-032 | SQL semantic service and dialect-pack boundary                        | Phase K | not written                                                    |
+| ADR-033 | catalog graph, schema diff, and migration safety                      | Phase K | not written                                                    |
+| ADR-034 | server-owned or hybrid workspace and VCS topology                     | Phase L | not written                                                    |
 
 ## Reference: what is being stolen, and what is not
 
