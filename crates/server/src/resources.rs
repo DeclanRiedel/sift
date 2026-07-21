@@ -240,4 +240,49 @@ mod tests {
         assert_eq!(clamp(Some(8), Some(5)), Some(5));
         assert_eq!(clamp(None, None), None);
     }
+
+    #[test]
+    fn concurrent_quota_admission_has_one_winner_and_releases_cleanly() {
+        let mut config = TenantLimitsConfig::default();
+        config.defaults.concurrent_queries = Some(1);
+        config.ceilings.concurrent_queries = Some(1);
+        let manager = ResourceManager::new(&config, None);
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(3));
+        let mut workers = Vec::new();
+        for _ in 0..2 {
+            let manager = manager.clone();
+            let barrier = barrier.clone();
+            workers.push(std::thread::spawn(move || {
+                barrier.wait();
+                let reservation =
+                    manager.reserve(TenantId(1), TenantResource::ConcurrentQueries, 1);
+                barrier.wait();
+                reservation
+            }));
+        }
+        barrier.wait();
+        barrier.wait();
+        let reservations: Vec<_> = workers
+            .into_iter()
+            .map(|worker| worker.join().unwrap())
+            .collect();
+        assert_eq!(
+            reservations.iter().filter(|result| result.is_ok()).count(),
+            1
+        );
+        drop(reservations);
+        assert!(manager
+            .reserve(TenantId(1), TenantResource::ConcurrentQueries, 1)
+            .is_ok());
+    }
+
+    #[test]
+    fn trusted_local_exemption_is_explicit_and_configurable() {
+        let defaults = TenantLimitsConfig::default();
+        assert!(!ResourceManager::new(&defaults, None).enforces_for(true));
+
+        let mut constrained = defaults;
+        constrained.trusted_local_unlimited = false;
+        assert!(ResourceManager::new(&constrained, None).enforces_for(true));
+    }
 }

@@ -1,6 +1,6 @@
 # Phase F — Authorization, Tenancy, And Limits
 
-Status: design locked; implementation pending. ADR-020 is authoritative when
+Status: implemented and graduated on 2026-07-21. ADR-020 is authoritative when
 this plan and the decision record differ.
 
 ## Outcome

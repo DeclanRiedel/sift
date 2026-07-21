@@ -2033,7 +2033,9 @@ async fn metadata_room_roles_are_enforced() {
         )
         .await
         .unwrap();
-    assert_eq!(res.status(), StatusCode::FORBIDDEN);
+    // Write-scoped namespace lookups deliberately hide document existence
+    // from principals without an editing role.
+    assert_eq!(res.status(), StatusCode::NOT_FOUND);
 
     let res = app
         .clone()
@@ -2085,7 +2087,8 @@ async fn metadata_room_roles_are_enforced() {
         )
         .await
         .unwrap();
-    assert_eq!(res.status(), StatusCode::FORBIDDEN);
+    // Non-members cannot distinguish an existing room document namespace.
+    assert_eq!(res.status(), StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]
@@ -2514,37 +2517,64 @@ async fn connection_policy_and_admin_disconnect_are_public_and_revision_safe() {
 }
 
 #[tokio::test]
-async fn network_mode_rejects_raw_connection_specs() {
-    let mut state = test_state_with_token("network-token");
-    state.auth.transport = sift_server::config::Transport::Network;
-    let app = app(state);
-    let session: sift_protocol::SessionInfo = body_json(
-        app.clone()
+async fn deployment_transport_matrix_only_allows_personal_loopback_raw_specs() {
+    use sift_server::config::{DeploymentPolicy, Transport};
+
+    for (deployment, transport, expected) in [
+        (
+            DeploymentPolicy::Personal,
+            Transport::Loopback,
+            StatusCode::OK,
+        ),
+        (
+            DeploymentPolicy::Personal,
+            Transport::Network,
+            StatusCode::FORBIDDEN,
+        ),
+        (
+            DeploymentPolicy::Team,
+            Transport::Loopback,
+            StatusCode::FORBIDDEN,
+        ),
+        (
+            DeploymentPolicy::Team,
+            Transport::Network,
+            StatusCode::FORBIDDEN,
+        ),
+    ] {
+        let mut state = test_state_with_metadata(false);
+        state.auth.bearer_token = Some("matrix-token".to_string());
+        state.auth.deployment = deployment;
+        state.auth.transport = transport;
+        let app = app(state);
+        let session: sift_protocol::SessionInfo = body_json(
+            app.clone()
+                .oneshot(
+                    Request::post("/v1/sessions")
+                        .header("authorization", "Bearer matrix-token")
+                        .header("content-type", "application/json")
+                        .body(Body::from("{}"))
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+                .into_body(),
+        )
+        .await;
+        let response = app
             .oneshot(
-                Request::post("/v1/sessions")
-                    .header("authorization", "Bearer network-token")
+                Request::post(format!("/v1/sessions/{}/connections", session.id))
+                    .header("authorization", "Bearer matrix-token")
                     .header("content-type", "application/json")
-                    .body(Body::from("{}"))
+                    .body(Body::from(
+                        r#"{"engine":"postgres","host":"mock","user":"alice"}"#,
+                    ))
                     .unwrap(),
             )
             .await
-            .unwrap()
-            .into_body(),
-    )
-    .await;
-    let response = app
-        .oneshot(
-            Request::post(format!("/v1/sessions/{}/connections", session.id))
-                .header("authorization", "Bearer network-token")
-                .header("content-type", "application/json")
-                .body(Body::from(
-                    r#"{"engine":"postgres","host":"mock","user":"alice"}"#,
-                ))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+            .unwrap();
+        assert_eq!(response.status(), expected, "{deployment:?}/{transport:?}");
+    }
 }
 
 #[tokio::test]

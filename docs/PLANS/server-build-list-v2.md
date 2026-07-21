@@ -140,8 +140,8 @@ real identity," without breaking local-first (ADR-006, ADR-010).
 ## Phase F — Authorization, tenancy & limits
 
 Goal: deepen Phase E's principal/room ownership floor into configurable
-tenant and connection policy. Per-connection permissions, general API limits,
-and tenant-resource enforcement remain absent.
+tenant and connection policy, general API limits, and tenant-resource
+enforcement.
 
 - [x] [Design] ADR-020: deny-wins intersection of tenant role, room role, and
       connection-profile policy through one server evaluator. Personal +
@@ -180,7 +180,7 @@ and tenant-resource enforcement remain absent.
       tenant/principal.
 - [x] [Implement] SDK/OpenAPI surfaces for policy, effective capabilities,
       limits, usage, structured errors, and retry metadata.
-- [ ] [Graduate] Role, policy, SQL-classification, revocation, rate,
+- [x] [Graduate] Role, policy, SQL-classification, revocation, rate,
       quota-race, cleanup, and trusted-local integration matrices; graduate
       Phase F only with all workspace gates green.
 

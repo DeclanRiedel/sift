@@ -5848,6 +5848,21 @@ mod tests {
                 .id,
             shared.id
         );
+        let peer_search = store
+            .list_saved_queries(
+                peer.id,
+                SavedQueryFilter {
+                    tenant_id: TenantId(1),
+                    q: Some("select".to_string()),
+                    tags: Vec::new(),
+                    scope: None,
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            peer_search.iter().map(|query| query.id).collect::<Vec<_>>(),
+            vec![shared.id]
+        );
         assert!(matches!(
             store.update_saved_query_authorized(
                 personal.id,

@@ -336,6 +336,42 @@ mod tests {
     }
 
     #[test]
+    fn both_dialect_corpora_fail_closed_under_restrictions() {
+        let policy = restricted();
+        let corpora = [
+            (
+                Engine::Postgres,
+                vec![
+                    ("SELECT id FROM public.users", true),
+                    ("SELECT id FROM secret.users", false),
+                    ("SELECT id FROM users", false),
+                    ("INSERT INTO public.users(id) VALUES (1)", false),
+                    ("DO $$ BEGIN DELETE FROM public.users; END $$", false),
+                ],
+            ),
+            (
+                Engine::SqlServer,
+                vec![
+                    ("SELECT id FROM public.users", true),
+                    ("SELECT id FROM secret.users", false),
+                    ("SELECT id FROM users", false),
+                    ("UPDATE public.users SET id = 2", false),
+                    ("EXEC public.rebuild_users", false),
+                ],
+            ),
+        ];
+        for (engine, cases) in corpora {
+            for (sql, allowed) in cases {
+                assert_eq!(
+                    enforce_sql(&policy, engine, OperationKind::ExecuteQuery, sql).is_ok(),
+                    allowed,
+                    "{engine:?}: {sql}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn schema_policy_requires_qualification_and_allows_ctes() {
         let policy = restricted();
         assert!(enforce_sql(

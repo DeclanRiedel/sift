@@ -205,6 +205,35 @@ mod tests {
     }
 
     #[test]
+    fn tenant_role_and_profile_minimum_matrix_is_deny_wins() {
+        for (role, default_allowed, admin_policy_allowed) in [
+            (TenantRole::Viewer, false, false),
+            (TenantRole::Member, true, false),
+            (TenantRole::Admin, true, true),
+            (TenantRole::Owner, true, true),
+        ] {
+            let mut default_scope = member_scope(ConnectionPolicy::default());
+            default_scope.tenant_role = Some(role);
+            assert_eq!(
+                authorize(&default_scope, OperationKind::ExecuteQuery).is_ok(),
+                default_allowed,
+                "default policy for {role:?}"
+            );
+
+            let mut admin_scope = member_scope(ConnectionPolicy {
+                minimum_tenant_role: TenantRole::Admin,
+                ..ConnectionPolicy::default()
+            });
+            admin_scope.tenant_role = Some(role);
+            assert_eq!(
+                authorize(&admin_scope, OperationKind::ExecuteQuery).is_ok(),
+                admin_policy_allowed,
+                "admin-minimum policy for {role:?}"
+            );
+        }
+    }
+
+    #[test]
     fn administration_uses_the_correct_authority() {
         let scope = AuthorizationScope {
             authenticated: true,

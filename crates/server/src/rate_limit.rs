@@ -250,4 +250,38 @@ mod tests {
             .admit_at(1, Some(11), RateLimitClass::Query, 1.0, now)
             .is_ok());
     }
+
+    #[test]
+    fn trusted_local_exemption_does_not_consume_buckets() {
+        let mut config = RateLimitsConfig {
+            trusted_local_exempt: true,
+            query: Some(RateBucketConfig {
+                refill_per_second: 1.0,
+                burst: 2.0,
+                cost: 1.0,
+            }),
+            ..RateLimitsConfig::default()
+        };
+        let limiter = RateLimiter::from_config(&config);
+        for _ in 0..4 {
+            assert!(limiter
+                .admit(1, Some(10), RateLimitClass::Query, true)
+                .is_ok());
+        }
+        assert!(limiter
+            .admit(1, Some(10), RateLimitClass::Query, false)
+            .is_ok());
+        assert!(limiter
+            .admit(1, Some(10), RateLimitClass::Query, false)
+            .is_ok());
+        assert!(limiter
+            .admit(1, Some(10), RateLimitClass::Query, false)
+            .is_err());
+
+        config.trusted_local_exempt = false;
+        let constrained = RateLimiter::from_config(&config);
+        assert!(constrained
+            .admit(1, Some(10), RateLimitClass::Query, true)
+            .is_ok());
+    }
 }
