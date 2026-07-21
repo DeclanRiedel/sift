@@ -492,7 +492,16 @@ impl Client {
     }
 
     pub async fn open_session(&self, tag: Option<String>) -> Result<SessionInfo> {
-        self.post("/v1/sessions", &OpenSessionRequest { tag }).await
+        self.open_session_for_tenant(tag, None).await
+    }
+
+    pub async fn open_session_for_tenant(
+        &self,
+        tag: Option<String>,
+        tenant_id: Option<i64>,
+    ) -> Result<SessionInfo> {
+        self.post("/v1/sessions", &OpenSessionRequest { tag, tenant_id })
+            .await
     }
 
     pub async fn list_sessions(&self) -> Result<Vec<SessionInfo>> {

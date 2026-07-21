@@ -34,7 +34,10 @@ fn mock_spec() -> ConnectionSpec {
 }
 
 async fn open(store: &SessionStore) -> (sift_protocol::SessionId, sift_protocol::ConnectionId) {
-    let session = store.open_session(OpenSessionRequest { tag: None });
+    let session = store.open_session(OpenSessionRequest {
+        tag: None,
+        tenant_id: None,
+    });
     let conn = store
         .open_connection(session.id, Engine::Postgres, mock_spec())
         .await

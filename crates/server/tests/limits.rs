@@ -57,7 +57,10 @@ async fn store_and_conn(
         .execute_ok(pages)
         .build();
     let store = SessionStore::new(DriverRegistry::builder().register(driver).build());
-    let session = store.open_session(OpenSessionRequest { tag: None });
+    let session = store.open_session(OpenSessionRequest {
+        tag: None,
+        tenant_id: None,
+    });
     let conn = store
         .open_connection(session.id, Engine::Postgres, mock_spec())
         .await

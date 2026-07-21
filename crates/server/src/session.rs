@@ -600,14 +600,25 @@ impl SessionStore {
     }
 
     pub fn open_session(&self, req: OpenSessionRequest) -> SessionInfo {
-        self.open_session_with_owner(req, None)
+        self.open_session_with_owner(req, None, None, false)
+            .expect("unowned local sessions do not reserve tenant resources")
     }
 
     pub fn open_session_with_owner(
         &self,
         req: OpenSessionRequest,
         owner_principal_id: Option<PrincipalId>,
-    ) -> SessionInfo {
+        tenant_id: Option<sift_metadata::TenantId>,
+        enforce_limits: bool,
+    ) -> ApiResult<SessionInfo> {
+        let resource_guard = match tenant_id {
+            Some(tenant) if enforce_limits => Some(self.resource_manager().reserve(
+                tenant,
+                sift_protocol::TenantResource::Sessions,
+                1,
+            )?),
+            _ => None,
+        };
         let id = SessionId(self.inner.next_id.fetch_add(1, Ordering::Relaxed));
         let now = chrono::Utc::now();
         let session = Session {
@@ -618,13 +629,13 @@ impl SessionStore {
             connections: DashMap::new(),
             transactions: DashMap::new(),
             next_conn_id: AtomicU64::new(1),
-            tenant_id: Mutex::new(None),
-            resource_guard: Mutex::new(None),
+            tenant_id: Mutex::new(tenant_id),
+            resource_guard: Mutex::new(resource_guard),
         };
         let info = session.info();
         self.inner.sessions.insert(id, session);
         tracing::info!(session_id = %id, tag = ?req.tag, "session opened");
-        info
+        Ok(info)
     }
 
     pub fn list_sessions(&self) -> Vec<SessionInfo> {
@@ -2779,6 +2790,7 @@ impl Session {
             id: self.id,
             created_at: self.created_at,
             tag: self.tag.clone(),
+            tenant_id: self.tenant_id.lock().unwrap().map(|tenant| tenant.0),
             connections: self.connections.iter().map(|e| e.info.clone()).collect(),
         }
     }
@@ -3182,6 +3194,7 @@ mod tests {
                         Operation::OpenSession {
                             request: OpenSessionRequest {
                                 tag: Some(format!("writer-{writer_id}-{i}")),
+                                tenant_id: None,
                             },
                         },
                         OperationStatus::Succeeded,
@@ -3197,5 +3210,44 @@ mod tests {
 
         assert_eq!(store.list_operations().len(), WRITERS * PER_WRITER);
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn hosted_session_quota_is_acquired_at_creation_and_released_on_close() {
+        let store = SessionStore::new(DriverRegistry::new());
+        let config = crate::config::TenantLimitsConfig {
+            trusted_local_unlimited: false,
+            defaults: sift_protocol::TenantResourceLimits {
+                sessions: Some(1),
+                ..Default::default()
+            },
+            ceilings: sift_protocol::TenantResourceLimits {
+                sessions: Some(1),
+                ..Default::default()
+            },
+        };
+        store.set_resource_manager(crate::resources::ResourceManager::new(&config, None));
+        let tenant = sift_metadata::TenantId(7);
+        let request = || OpenSessionRequest {
+            tag: None,
+            tenant_id: Some(tenant.0),
+        };
+
+        let first = store
+            .open_session_with_owner(request(), Some(PrincipalId(9)), Some(tenant), true)
+            .unwrap();
+        assert_eq!(first.tenant_id, Some(tenant.0));
+        assert!(matches!(
+            store.open_session_with_owner(request(), Some(PrincipalId(9)), Some(tenant), true),
+            Err(ApiError::TenantResourceExhausted {
+                resource: sift_protocol::TenantResource::Sessions,
+                ..
+            })
+        ));
+
+        store.close_session(first.id).unwrap();
+        assert!(store
+            .open_session_with_owner(request(), Some(PrincipalId(9)), Some(tenant), true)
+            .is_ok());
     }
 }

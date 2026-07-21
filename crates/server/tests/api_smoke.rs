@@ -397,6 +397,7 @@ async fn bulk_insert_is_public_http_api() {
                 "/v1/sessions",
                 sift_protocol::OpenSessionRequest {
                     tag: Some("bulk".into()),
+                    tenant_id: None,
                 },
             ))
             .await
@@ -461,7 +462,10 @@ async fn native_bulk_insert_is_explicitly_rejected() {
         app.clone()
             .oneshot(post_json(
                 "/v1/sessions",
-                sift_protocol::OpenSessionRequest { tag: None },
+                sift_protocol::OpenSessionRequest {
+                    tag: None,
+                    tenant_id: None,
+                },
             ))
             .await
             .unwrap()
@@ -2631,6 +2635,48 @@ async fn deployment_transport_matrix_only_allows_personal_loopback_raw_specs() {
             .unwrap();
         assert_eq!(response.status(), expected, "{deployment:?}/{transport:?}");
     }
+}
+
+#[tokio::test]
+async fn hosted_multi_tenant_session_requires_an_explicit_tenant() {
+    let mut state = test_state_with_metadata(false);
+    let metadata = state.metadata.as_ref().unwrap();
+    let other = metadata.create_tenant("other", TenantKind::Team).unwrap();
+    metadata
+        .upsert_tenant_membership(other.id, PrincipalId(1), MembershipRole::Owner)
+        .unwrap();
+    let (_, token) = metadata
+        .issue_api_token(PrincipalId(1), None, "multi-tenant", None)
+        .unwrap();
+    state.auth.loopback_bypass = false;
+    let app = app(state);
+
+    let missing = app
+        .clone()
+        .oneshot(
+            Request::post("/v1/sessions")
+                .header("authorization", format!("Bearer {token}"))
+                .header("content-type", "application/json")
+                .body(Body::from("{}"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(missing.status(), StatusCode::BAD_REQUEST);
+
+    let created = app
+        .oneshot(
+            Request::post("/v1/sessions")
+                .header("authorization", format!("Bearer {token}"))
+                .header("content-type", "application/json")
+                .body(Body::from(format!(r#"{{"tenant_id":{}}}"#, other.id.0)))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(created.status(), StatusCode::OK);
+    let session: sift_protocol::SessionInfo = body_json(created.into_body()).await;
+    assert_eq!(session.tenant_id, Some(other.id.0));
 }
 
 #[tokio::test]

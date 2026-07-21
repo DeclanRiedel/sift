@@ -4747,13 +4747,46 @@ async fn create_session(
     }
     let req = match body {
         Some(Json(b)) => b,
-        None => OpenSessionRequest { tag: None },
+        None => OpenSessionRequest {
+            tag: None,
+            tenant_id: None,
+        },
     };
     let auth = session_auth_context_blocking(state.clone(), headers).await?;
     let actor = auth.as_ref().map(|auth| auth.principal_id.0);
-    let info = state
-        .sessions
-        .open_session_with_owner(req.clone(), auth.map(|auth| auth.principal_id));
+    let (owner, tenant, enforce_limits) = match auth.as_ref() {
+        Some(auth) => {
+            let requested = req.tenant_id.map(tenant_id).transpose()?;
+            let tenant = if let Some(tenant) = requested {
+                ensure_tenant(auth, tenant)?;
+                tenant
+            } else if auth.tenants.len() == 1 {
+                auth.tenants[0].tenant.id
+            } else if auth.trusted_local {
+                auth.tenants
+                    .first()
+                    .map(|membership| membership.tenant.id)
+                    .ok_or_else(|| ApiError::Forbidden("local principal has no tenant".into()))?
+            } else {
+                return Err(ApiError::BadRequest(
+                    "tenant_id is required when opening a multi-tenant hosted session".into(),
+                ));
+            };
+            (
+                Some(auth.principal_id),
+                Some(tenant),
+                state
+                    .sessions
+                    .resource_manager()
+                    .enforces_for(auth.trusted_local),
+            )
+        }
+        None => (None, None, false),
+    };
+    let info =
+        state
+            .sessions
+            .open_session_with_owner(req.clone(), owner, tenant, enforce_limits)?;
     state.sessions.push_operation_full(
         Operation::OpenSession { request: req },
         OperationStatus::Succeeded,

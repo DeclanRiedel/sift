@@ -26,7 +26,10 @@ async fn timed_out_commit_keeps_end_claimed_while_driver_is_indeterminate() {
         .build();
     let store = SessionStore::new(DriverRegistry::builder().register(driver).build());
     store.set_request_timeout(Duration::from_millis(10));
-    let session = store.open_session(OpenSessionRequest { tag: None });
+    let session = store.open_session(OpenSessionRequest {
+        tag: None,
+        tenant_id: None,
+    });
     let connection = store
         .open_connection(session.id, Engine::Postgres, spec())
         .await
@@ -68,7 +71,10 @@ async fn failed_commit_releases_end_claim_and_keeps_transaction_open() {
         .commit_err(DriverError::new(Code::ConnectionFailed, "commit failed"))
         .build();
     let store = SessionStore::new(DriverRegistry::builder().register(driver).build());
-    let session = store.open_session(OpenSessionRequest { tag: None });
+    let session = store.open_session(OpenSessionRequest {
+        tag: None,
+        tenant_id: None,
+    });
     let connection = store
         .open_connection(session.id, Engine::Postgres, spec())
         .await

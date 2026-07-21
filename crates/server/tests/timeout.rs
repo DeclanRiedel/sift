@@ -67,7 +67,10 @@ async fn wedged_execute_times_out_within_deadline() {
         .execute_pending()
         .build();
     let store = store_with(driver);
-    let session = store.open_session(OpenSessionRequest { tag: None });
+    let session = store.open_session(OpenSessionRequest {
+        tag: None,
+        tenant_id: None,
+    });
     let conn = store
         .open_connection(session.id, Engine::Postgres, mock_spec())
         .await
@@ -93,7 +96,10 @@ async fn wedged_schema_times_out() {
         .schema_pending()
         .build();
     let store = store_with(driver);
-    let session = store.open_session(OpenSessionRequest { tag: None });
+    let session = store.open_session(OpenSessionRequest {
+        tag: None,
+        tenant_id: None,
+    });
     let conn = store
         .open_connection(session.id, Engine::Postgres, mock_spec())
         .await
@@ -115,7 +121,10 @@ async fn sqlserver_execute_timeout_discards_connection_after_cancel() {
         .execute_hang()
         .build();
     let store = store_with(driver);
-    let session = store.open_session(OpenSessionRequest { tag: None });
+    let session = store.open_session(OpenSessionRequest {
+        tag: None,
+        tenant_id: None,
+    });
     let conn = store
         .open_connection(session.id, Engine::SqlServer, mock_spec())
         .await
@@ -150,7 +159,10 @@ async fn wedged_execute_does_not_block_other_work() {
         .cancel_ok()
         .build();
     let store = store_with(driver);
-    let session = store.open_session(OpenSessionRequest { tag: None });
+    let session = store.open_session(OpenSessionRequest {
+        tag: None,
+        tenant_id: None,
+    });
     let conn = store
         .open_connection(session.id, Engine::Postgres, mock_spec())
         .await

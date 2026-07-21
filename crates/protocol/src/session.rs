@@ -36,6 +36,10 @@ impl std::fmt::Display for ConnectionId {
 pub struct OpenSessionRequest {
     #[serde(default)]
     pub tag: Option<String>,
+    /// Tenant that owns this session. Network-hosted instances require this;
+    /// trusted local instances may infer it from the local principal.
+    #[serde(default)]
+    pub tenant_id: Option<i64>,
 }
 
 /// Body of `POST /v1/sessions/:id/connections`.
@@ -54,6 +58,8 @@ pub struct SessionInfo {
     pub created_at: chrono::DateTime<chrono::Utc>,
     #[serde(default)]
     pub tag: Option<String>,
+    #[serde(default)]
+    pub tenant_id: Option<i64>,
     pub connections: Vec<ConnectionInfo>,
 }
 
