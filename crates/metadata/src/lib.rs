@@ -76,6 +76,12 @@ pub enum MetadataError {
     MissingCredential(ConnectionProfileId, PrincipalId),
     #[error("connection profile {0:?} uses broker credentials, which are not implemented")]
     BrokerCredentialUnsupported(ConnectionProfileId),
+    #[error("connection profile {profile:?} uses {actual:?} credentials, not {expected:?}")]
+    CredentialModeMismatch {
+        profile: ConnectionProfileId,
+        expected: CredentialMode,
+        actual: CredentialMode,
+    },
     #[error("connection profile {0:?} is not in tenant {1:?}")]
     TenantMismatch(ConnectionProfileId, TenantId),
     #[error("connection profile policy revision conflict: expected {expected}, current {current}")]
@@ -2337,8 +2343,24 @@ impl MetadataStore {
         actor: PrincipalId,
         input: NewConnectionProfile,
     ) -> Result<ConnectionProfile> {
-        self.upsert_connection_profile_with_limit(tenant, actor, input, None)
-            .await
+        self.upsert_connection_profile_with_limit(
+            tenant,
+            actor,
+            input,
+            None,
+            NewOperationAudit {
+                actor_principal_id: Some(actor),
+                action: "upsert".to_string(),
+                target: "connection_profile".to_string(),
+                target_id: None,
+                status: "succeeded".to_string(),
+                result_code: None,
+                row_count: None,
+                error_message: None,
+                correlation_id: None,
+            },
+        )
+        .await
     }
 
     pub async fn upsert_connection_profile_with_limit(
@@ -2347,6 +2369,7 @@ impl MetadataStore {
         actor: PrincipalId,
         mut input: NewConnectionProfile,
         max_profiles: Option<u64>,
+        audit: NewOperationAudit,
     ) -> Result<ConnectionProfile> {
         let password = input.spec.password.take();
         let mut new_shared_secret_handle = None;
@@ -2368,6 +2391,7 @@ impl MetadataStore {
         let db_result: Result<(ConnectionProfile, Option<String>)> = sqlite_blocking(move || {
             let mut conn = backend.conn()?;
             let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            ensure_tenant_admin_locked(&tx, tenant, actor)?;
             let exists = tx
                 .query_row(
                     "SELECT 1 FROM connection_profile WHERE tenant_id = ?1 AND name = ?2",
@@ -2405,7 +2429,11 @@ impl MetadataStore {
                     engine = excluded.engine,
                     spec_json = excluded.spec_json,
                     credential_mode = excluded.credential_mode,
-                    shared_secret_handle = COALESCE(excluded.shared_secret_handle, connection_profile.shared_secret_handle),
+                    shared_secret_handle = CASE
+                        WHEN excluded.credential_mode = 'shared'
+                        THEN COALESCE(excluded.shared_secret_handle, connection_profile.shared_secret_handle)
+                        ELSE NULL
+                    END,
                     tags_json = excluded.tags_json,
                     updated_at = excluded.updated_at",
                 params![
@@ -2428,6 +2456,10 @@ impl MetadataStore {
                     params![tenant.0, input.name],
                     |row| row.get(0),
                 )?);
+                let mut audit = audit;
+                audit.actor_principal_id = Some(actor);
+                audit.target_id = Some(id.0);
+                insert_operation_audit_row(&tx, &audit)?;
                 tx.commit()?;
                 let profile = connection_profile_by_id_locked(&conn, id)?;
                 Ok((profile, old_shared_secret_handle))
@@ -2444,11 +2476,8 @@ impl MetadataStore {
                 return Err(error);
             }
         };
-        if let (Some(old), Some(new)) = (
-            old_shared_secret_handle.as_deref(),
-            new_shared_secret_handle.as_deref(),
-        ) {
-            if old != new {
+        if let Some(old) = old_shared_secret_handle.as_deref() {
+            if profile.shared_secret_handle.as_deref() != Some(old) {
                 self.delete_secret_best_effort(old, "upsert_profile_replace_shared_secret")
                     .await;
             }
@@ -2500,13 +2529,15 @@ impl MetadataStore {
     pub async fn delete_connection_profile(
         &self,
         tenant: TenantId,
+        actor: PrincipalId,
         id: ConnectionProfileId,
-        audit: NewOperationAudit,
+        mut audit: NewOperationAudit,
     ) -> Result<()> {
         let backend = self.backend.clone();
         let handles = sqlite_blocking(move || {
             let mut conn = backend.conn()?;
             let tx = conn.transaction()?;
+            ensure_tenant_admin_locked(&tx, tenant, actor)?;
             let mut handles = Vec::new();
             if let Some(handle) = tx
                 .query_row(
@@ -2533,6 +2564,7 @@ impl MetadataStore {
             if deleted == 0 {
                 return Err(MetadataError::ConnectionProfileNotFound(id));
             }
+            audit.actor_principal_id = Some(actor);
             insert_operation_audit_row(&tx, &audit)?;
             tx.commit()?;
             Ok(handles)
@@ -2566,6 +2598,23 @@ impl MetadataStore {
         let db_result: Result<Option<String>> = sqlite_blocking(move || {
             let mut conn = backend.conn()?;
             let tx = conn.transaction()?;
+            let (tenant, credential_mode): (i64, String) = tx
+                .query_row(
+                    "SELECT tenant_id, credential_mode FROM connection_profile WHERE id = ?1",
+                    params![profile_id.0],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .optional()?
+                .ok_or(MetadataError::ConnectionProfileNotFound(profile_id))?;
+            let actual = schema::parse_credential_mode(credential_mode)?;
+            if actual != CredentialMode::PerUser {
+                return Err(MetadataError::CredentialModeMismatch {
+                    profile: profile_id,
+                    expected: CredentialMode::PerUser,
+                    actual,
+                });
+            }
+            ensure_tenant_membership_locked(&tx, TenantId(tenant), principal_id)?;
             let old_handle: Option<String> = tx
                 .query_row(
                     "SELECT secret_handle FROM connection_credential
@@ -3677,6 +3726,30 @@ fn ensure_tenant_admin_locked(
         Ok(())
     } else {
         Err(MetadataError::TenantAdminRequired)
+    }
+}
+
+fn ensure_tenant_membership_locked(
+    conn: &Connection,
+    tenant: TenantId,
+    principal: PrincipalId,
+) -> Result<()> {
+    let exists = conn
+        .query_row(
+            "SELECT 1
+             FROM membership m
+             JOIN principal p ON p.id = m.principal_id
+             WHERE m.tenant_id = ?1 AND m.principal_id = ?2
+               AND p.disabled_at IS NULL",
+            params![tenant.0, principal.0],
+            |_| Ok(()),
+        )
+        .optional()?
+        .is_some();
+    if exists {
+        Ok(())
+    } else {
+        Err(MetadataError::TenantMembershipRequired { tenant, principal })
     }
 }
 
@@ -5556,6 +5629,7 @@ mod tests {
                 PrincipalId(1),
                 input("one"),
                 Some(1),
+                test_audit("upsert", "connection_profile", None),
             )
             .await
             .unwrap();
@@ -5566,6 +5640,7 @@ mod tests {
                     PrincipalId(1),
                     input("two"),
                     Some(1),
+                    test_audit("upsert", "connection_profile", None),
                 )
                 .await,
             Err(MetadataError::ConnectionProfileLimitReached(TenantId(1)))
@@ -5576,9 +5651,55 @@ mod tests {
                 PrincipalId(1),
                 input("one"),
                 Some(1),
+                test_audit("upsert", "connection_profile", None),
             )
             .await
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn connection_profile_administration_requires_tenant_admin() {
+        let store = store();
+        store.bootstrap_local("local user").unwrap();
+        let member = store
+            .create_principal("profile-member", "profile member", None)
+            .unwrap();
+        store
+            .upsert_tenant_membership(TenantId(1), member.id, MembershipRole::Member)
+            .unwrap();
+        let input = || NewConnectionProfile {
+            name: "admin only".to_string(),
+            engine: Engine::Postgres,
+            spec: spec(None),
+            credential_mode: CredentialMode::PerUser,
+            tags: Vec::new(),
+        };
+
+        assert!(matches!(
+            store
+                .upsert_connection_profile(TenantId(1), member.id, input())
+                .await,
+            Err(MetadataError::TenantAdminRequired)
+        ));
+
+        let profile = store
+            .upsert_connection_profile(TenantId(1), PrincipalId(1), input())
+            .await
+            .unwrap();
+        assert!(matches!(
+            store
+                .delete_connection_profile(
+                    TenantId(1),
+                    member.id,
+                    profile.id,
+                    test_audit("delete", "connection_profile", Some(profile.id.0)),
+                )
+                .await,
+            Err(MetadataError::TenantAdminRequired)
+        ));
+        assert!(store
+            .get_connection_profile_for_principal(profile.id, PrincipalId(1))
+            .is_ok());
     }
 
     #[tokio::test]
@@ -5742,19 +5863,69 @@ mod tests {
             Some(&b"second-secret"[..])
         );
 
-        store
-            .delete_connection_profile(
+        let per_user = store
+            .upsert_connection_profile(
                 TenantId(1),
-                second.id,
-                test_audit("delete", "connection_profile", Some(second.id.0)),
+                PrincipalId(1),
+                NewConnectionProfile {
+                    name: "local pg".to_string(),
+                    engine: Engine::Postgres,
+                    spec: spec(None),
+                    credential_mode: CredentialMode::PerUser,
+                    tags: Vec::new(),
+                },
             )
             .await
             .unwrap();
+        assert!(per_user.shared_secret_handle.is_none());
         assert!(secrets
             .get(SECRET_NAMESPACE, &second_handle)
             .await
             .unwrap()
             .is_none());
+
+        store
+            .delete_connection_profile(
+                TenantId(1),
+                PrincipalId(1),
+                per_user.id,
+                test_audit("delete", "connection_profile", Some(per_user.id.0)),
+            )
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn per_user_credential_rejects_shared_profiles_without_leaking_secret() {
+        let (store, secrets) = store_with_memory();
+        store.bootstrap_local("local user").unwrap();
+        let profile = store
+            .upsert_connection_profile(
+                TenantId(1),
+                PrincipalId(1),
+                NewConnectionProfile {
+                    name: "shared pg".to_string(),
+                    engine: Engine::Postgres,
+                    spec: spec(None),
+                    credential_mode: CredentialMode::Shared,
+                    tags: Vec::new(),
+                },
+            )
+            .await
+            .unwrap();
+
+        assert!(matches!(
+            store
+                .set_per_user_credential(
+                    profile.id,
+                    PrincipalId(1),
+                    b"must-not-persist",
+                    test_audit("set_credential", "connection_profile", Some(profile.id.0)),
+                )
+                .await,
+            Err(MetadataError::CredentialModeMismatch { .. })
+        ));
+        assert!(secrets.is_empty());
     }
 
     #[tokio::test]

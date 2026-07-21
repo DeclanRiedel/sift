@@ -4064,9 +4064,10 @@ async fn upsert_metadata_connection(
                 tags: req.tags,
             },
             profile_limit,
+            metadata_audit_record(auth.principal_id, "upsert", "connection_profile", None),
         )
         .await?;
-    push_metadata_operation(
+    push_metadata_operation_local(
         &state,
         auth.principal_id,
         "upsert",
@@ -4094,7 +4095,7 @@ async fn delete_metadata_connection(
         Some(profile.0),
     );
     metadata
-        .delete_connection_profile(tenant, profile, audit)
+        .delete_connection_profile(tenant, auth.principal_id, profile, audit)
         .await?;
     state
         .sessions

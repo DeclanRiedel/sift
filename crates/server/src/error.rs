@@ -150,6 +150,9 @@ impl ApiError {
                 | MetadataError::BrokerCredentialUnsupported(_) => {
                     (StatusCode::UNPROCESSABLE_ENTITY, "metadata_unavailable")
                 }
+                MetadataError::CredentialModeMismatch { .. } => {
+                    (StatusCode::UNPROCESSABLE_ENTITY, "credential_mode_mismatch")
+                }
                 MetadataError::InvalidEnum { .. }
                 | MetadataError::InvalidTimestamp { .. }
                 | MetadataError::InvalidOAuthAttempt
