@@ -70,6 +70,8 @@ pub enum MetadataError {
     },
     #[error("connection profile {0:?} not found")]
     ConnectionProfileNotFound(ConnectionProfileId),
+    #[error("connection profile limit reached for tenant {0:?}")]
+    ConnectionProfileLimitReached(TenantId),
     #[error("connection profile {0:?} has no credential for principal {1:?}")]
     MissingCredential(ConnectionProfileId, PrincipalId),
     #[error("connection profile {0:?} uses broker credentials, which are not implemented")]
@@ -2295,7 +2297,18 @@ impl MetadataStore {
         &self,
         tenant: TenantId,
         actor: PrincipalId,
+        input: NewConnectionProfile,
+    ) -> Result<ConnectionProfile> {
+        self.upsert_connection_profile_with_limit(tenant, actor, input, None)
+            .await
+    }
+
+    pub async fn upsert_connection_profile_with_limit(
+        &self,
+        tenant: TenantId,
+        actor: PrincipalId,
         mut input: NewConnectionProfile,
+        max_profiles: Option<u64>,
     ) -> Result<ConnectionProfile> {
         let password = input.spec.password.take();
         let mut new_shared_secret_handle = None;
@@ -2316,7 +2329,27 @@ impl MetadataStore {
         let db_shared_secret_handle = new_shared_secret_handle.clone();
         let db_result: Result<(ConnectionProfile, Option<String>)> = sqlite_blocking(move || {
             let mut conn = backend.conn()?;
-            let tx = conn.transaction()?;
+            let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            let exists = tx
+                .query_row(
+                    "SELECT 1 FROM connection_profile WHERE tenant_id = ?1 AND name = ?2",
+                    params![tenant.0, input.name],
+                    |_| Ok(()),
+                )
+                .optional()?
+                .is_some();
+            if !exists {
+                if let Some(max_profiles) = max_profiles {
+                    let count: u64 = tx.query_row(
+                        "SELECT COUNT(*) FROM connection_profile WHERE tenant_id = ?1",
+                        params![tenant.0],
+                        |row| row.get(0),
+                    )?;
+                    if count >= max_profiles {
+                        return Err(MetadataError::ConnectionProfileLimitReached(tenant));
+                    }
+                }
+            }
             let old_shared_secret_handle: Option<String> = tx
                 .query_row(
                     "SELECT shared_secret_handle FROM connection_profile WHERE tenant_id = ?1 AND name = ?2",
@@ -5070,6 +5103,48 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resolved.password.as_deref(), Some("secret"));
+    }
+
+    #[tokio::test]
+    async fn connection_profile_limit_is_checked_in_the_write_transaction() {
+        let store = store();
+        store.bootstrap_local("local user").unwrap();
+        let input = |name: &str| NewConnectionProfile {
+            name: name.into(),
+            engine: Engine::Postgres,
+            spec: spec(None),
+            credential_mode: CredentialMode::PerUser,
+            tags: Vec::new(),
+        };
+        store
+            .upsert_connection_profile_with_limit(
+                TenantId(1),
+                PrincipalId(1),
+                input("one"),
+                Some(1),
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            store
+                .upsert_connection_profile_with_limit(
+                    TenantId(1),
+                    PrincipalId(1),
+                    input("two"),
+                    Some(1),
+                )
+                .await,
+            Err(MetadataError::ConnectionProfileLimitReached(TenantId(1)))
+        ));
+        store
+            .upsert_connection_profile_with_limit(
+                TenantId(1),
+                PrincipalId(1),
+                input("one"),
+                Some(1),
+            )
+            .await
+            .unwrap();
     }
 
     #[tokio::test]

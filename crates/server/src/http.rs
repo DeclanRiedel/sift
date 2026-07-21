@@ -38,7 +38,8 @@ use sift_protocol::{
     PasswordLoginRequest, PasswordResetRequest, Readiness, RefreshAuthRequest,
     RegisterPrincipalKeyRequest, RoomClientMessage, RoomQueryResult, RoomQueryStatus,
     RoomServerMessage, SavepointRequest, SchemaFilter, SchemaScope, TransactionPreviewRequest,
-    WebAuthResponse, WhoAmIResponse, WsClientMessage, WsServerMessage, PROTOCOL_VERSION,
+    UpdateTenantLimitsRequest, WebAuthResponse, WhoAmIResponse, WsClientMessage, WsServerMessage,
+    PROTOCOL_VERSION,
 };
 
 use crate::config::{DeploymentPolicy, Transport};
@@ -199,6 +200,11 @@ pub fn app(state: AppState) -> Router {
         .route(
             "/v1/metadata/connections/:id/credential",
             post(set_metadata_connection_credential),
+        )
+        .route("/v1/metadata/tenants/:id/usage", get(get_tenant_usage))
+        .route(
+            "/v1/admin/tenants/:id/limits",
+            put(set_tenant_limits).delete(clear_tenant_limits),
         )
         .route("/v1/metadata/history", get(list_metadata_history))
         .route(
@@ -3959,8 +3965,14 @@ async fn upsert_metadata_connection(
     let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
     let tenant = tenant_id(req.tenant_id)?;
     ensure_tenant(&auth, tenant)?;
+    let manager = state.sessions.resource_manager();
+    let profile_limit = if manager.enforces_for(auth.trusted_local) {
+        manager.effective_limits(tenant)?.connection_profiles
+    } else {
+        None
+    };
     let profile = metadata
-        .upsert_connection_profile(
+        .upsert_connection_profile_with_limit(
             tenant,
             auth.principal_id,
             NewConnectionProfile {
@@ -3970,6 +3982,7 @@ async fn upsert_metadata_connection(
                 credential_mode: req.credential_mode,
                 tags: req.tags,
             },
+            profile_limit,
         )
         .await?;
     push_metadata_operation(
@@ -4054,6 +4067,87 @@ async fn set_metadata_connection_credential(
         Some(profile_id.0),
     );
     Ok(Json(json!({"ok": true})))
+}
+
+async fn get_tenant_usage(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+) -> ApiResult<Json<sift_protocol::TenantUsageSnapshot>> {
+    let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
+    let tenant = tenant_id(id)?;
+    let membership = auth
+        .tenants
+        .iter()
+        .find(|membership| membership.tenant.id == tenant)
+        .ok_or_else(|| ApiError::Forbidden("tenant membership required".into()))?;
+    if !matches!(
+        membership.role,
+        sift_metadata::MembershipRole::Owner | sift_metadata::MembershipRole::Admin
+    ) {
+        return Err(ApiError::Forbidden(
+            "tenant administrator access required".into(),
+        ));
+    }
+    Ok(Json(state.sessions.resource_manager().snapshot(tenant)?))
+}
+
+async fn set_tenant_limits(
+    State(state): State<AppState>,
+    Extension(auth): Extension<AuthContext>,
+    Path(id): Path<i64>,
+    Json(request): Json<UpdateTenantLimitsRequest>,
+) -> ApiResult<Json<sift_metadata::TenantLimitOverride>> {
+    ensure_instance_admin(&state, &auth)?;
+    let tenant = tenant_id(id)?;
+    state
+        .sessions
+        .resource_manager()
+        .validate_override(&request.limits)?;
+    let row = metadata_store(&state)?.set_tenant_limit_override(
+        auth.principal_id,
+        tenant,
+        request.limits,
+        metadata_audit_record(auth.principal_id, "update", "tenant_limits", Some(tenant.0)),
+    )?;
+    state.sessions.push_operation_local(
+        Operation::ManageTenantLimits {
+            action: sift_protocol::PolicyAdminAction::Update,
+            tenant_id: tenant.0,
+        },
+        OperationStatus::Succeeded,
+        Some(auth.principal_id.0),
+        None,
+        None,
+        None,
+    );
+    Ok(Json(row))
+}
+
+async fn clear_tenant_limits(
+    State(state): State<AppState>,
+    Extension(auth): Extension<AuthContext>,
+    Path(id): Path<i64>,
+) -> ApiResult<Json<serde_json::Value>> {
+    ensure_instance_admin(&state, &auth)?;
+    let tenant = tenant_id(id)?;
+    let cleared = metadata_store(&state)?.clear_tenant_limit_override(
+        auth.principal_id,
+        tenant,
+        metadata_audit_record(auth.principal_id, "clear", "tenant_limits", Some(tenant.0)),
+    )?;
+    state.sessions.push_operation_local(
+        Operation::ManageTenantLimits {
+            action: sift_protocol::PolicyAdminAction::Clear,
+            tenant_id: tenant.0,
+        },
+        OperationStatus::Succeeded,
+        Some(auth.principal_id.0),
+        None,
+        None,
+        None,
+    );
+    Ok(Json(json!({"cleared": cleared})))
 }
 
 async fn list_metadata_history(
@@ -4426,6 +4520,7 @@ async fn open_connection_from_profile(
             tenant,
             profile_id,
             profile.policy.revision,
+            auth.trusted_local,
         )
         .await?;
     push_metadata_operation(

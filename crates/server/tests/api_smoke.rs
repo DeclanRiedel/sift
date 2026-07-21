@@ -2392,6 +2392,7 @@ async fn metadata_connection_profile_opens_session_connection() {
             tenant_id: sift_metadata::TenantId(1),
             profile_id: sift_metadata::ConnectionProfileId(profile_id),
             policy_revision: 0,
+            quota_exempt: true,
         }
     );
 }

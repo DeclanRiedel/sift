@@ -77,6 +77,10 @@ async fn main() -> anyhow::Result<()> {
         });
     }
     let metadata = build_metadata_store(&cfg)?;
+    sessions.set_resource_manager(sift_server::resources::ResourceManager::new(
+        &cfg.tenant_limits,
+        metadata.clone(),
+    ));
     if let Some(store) = &metadata {
         sessions.set_audit_store(store.clone());
     }

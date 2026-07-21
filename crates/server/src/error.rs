@@ -130,6 +130,9 @@ impl ApiError {
                 | MetadataError::AuthSessionNotFound(_)
                 | MetadataError::PrincipalKeyNotFound(_)
                 | MetadataError::GithubAllowlistNotFound(_) => (StatusCode::NOT_FOUND, "not_found"),
+                MetadataError::ConnectionProfileLimitReached(_) => {
+                    (StatusCode::CONFLICT, "tenant_resource_exhausted")
+                }
                 MetadataError::FinalInstanceAdmin | MetadataError::FinalAuthIdentity => {
                     (StatusCode::CONFLICT, "conflict")
                 }

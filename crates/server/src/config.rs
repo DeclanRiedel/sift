@@ -47,6 +47,8 @@ pub struct Config {
     pub limits: LimitsConfig,
     /// General authenticated API rate limits (Phase F).
     pub rate_limits: RateLimitsConfig,
+    /// Default and operator-maximum per-tenant resource limits.
+    pub tenant_limits: TenantLimitsConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -166,6 +168,14 @@ pub struct RateBucketConfig {
     pub cost: f64,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TenantLimitsConfig {
+    pub trusted_local_unlimited: bool,
+    pub defaults: sift_protocol::TenantResourceLimits,
+    pub ceilings: sift_protocol::TenantResourceLimits,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AuditConfig {
@@ -187,6 +197,7 @@ impl Default for Config {
             audit: AuditConfig::default(),
             limits: LimitsConfig::default(),
             rate_limits: RateLimitsConfig::default(),
+            tenant_limits: TenantLimitsConfig::default(),
         }
     }
 }
@@ -323,6 +334,24 @@ impl Default for RateLimitsConfig {
 impl Default for RateBucketConfig {
     fn default() -> Self {
         Self::new(1.0, 1.0, 1.0)
+    }
+}
+
+impl Default for TenantLimitsConfig {
+    fn default() -> Self {
+        let defaults = sift_protocol::TenantResourceLimits {
+            connection_profiles: Some(100),
+            sessions: Some(32),
+            connections: Some(64),
+            concurrent_queries: Some(16),
+            cursors: Some(64),
+            retained_result_bytes: Some(256 * 1024 * 1024),
+        };
+        Self {
+            trusted_local_unlimited: true,
+            ceilings: defaults.clone(),
+            defaults,
+        }
     }
 }
 

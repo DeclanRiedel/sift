@@ -24,6 +24,7 @@ pub mod plan;
 pub mod process;
 pub mod rate_limit;
 pub mod registry;
+pub mod resources;
 pub mod room_runtime;
 pub mod schema_cache;
 pub mod search;

@@ -173,7 +173,7 @@ and tenant-resource enforcement remain absent.
       connections, transactions, queries, and cursors.
 - [x] [Implement] Rate-limit middleware keyed by principal + tenant;
       configurable per route class, with bounded stream-byte pacing.
-- [ ] [Implement] Tenant resource accounting for profiles, sessions,
+- [x] [Implement] Tenant resource accounting for profiles, sessions,
       connections, concurrent queries, open cursors, and retained result
       bytes; admin usage API and internal metric hooks.
 - [ ] [Implement] Saved-query + document namespace isolation per

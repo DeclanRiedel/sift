@@ -106,6 +106,14 @@ struct SessionStoreInner {
         ),
         (),
     >,
+    resource_manager: RwLock<crate::resources::ResourceManager>,
+    cursor_resource_guards: DashMap<
+        CursorId,
+        (
+            crate::resources::ResourceGuard,
+            crate::resources::ResourceGuard,
+        ),
+    >,
     /// Count of durable-audit rows dropped because the bounded channel above
     /// was full. Surfaced in the overflow log so the drop is never silent.
     audit_dropped: AtomicU64,
@@ -206,6 +214,8 @@ impl SessionStore {
                 audit_tx: Mutex::new(None),
                 authorization_store: RwLock::new(None),
                 managed_connections: DashMap::new(),
+                resource_manager: RwLock::new(crate::resources::ResourceManager::default()),
+                cursor_resource_guards: DashMap::new(),
                 audit_dropped: AtomicU64::new(0),
                 store_sql: AtomicBool::new(true),
                 max_result_rows: AtomicUsize::new(DEFAULT_MAX_RESULT_ROWS),
@@ -243,6 +253,8 @@ impl SessionStore {
                 audit_tx: Mutex::new(None),
                 authorization_store: RwLock::new(None),
                 managed_connections: DashMap::new(),
+                resource_manager: RwLock::new(crate::resources::ResourceManager::default()),
+                cursor_resource_guards: DashMap::new(),
                 audit_dropped: AtomicU64::new(0),
                 store_sql: AtomicBool::new(true),
                 max_result_rows: AtomicUsize::new(DEFAULT_MAX_RESULT_ROWS),
@@ -350,6 +362,14 @@ impl SessionStore {
         *self.inner.authorization_store.write().unwrap() = Some(store);
     }
 
+    pub fn set_resource_manager(&self, manager: crate::resources::ResourceManager) {
+        *self.inner.resource_manager.write().unwrap() = manager;
+    }
+
+    pub fn resource_manager(&self) -> crate::resources::ResourceManager {
+        self.inner.resource_manager.read().unwrap().clone()
+    }
+
     pub fn authorize_connection_operation(
         &self,
         session_id: SessionId,
@@ -364,6 +384,7 @@ impl SessionStore {
             tenant_id,
             profile_id,
             policy_revision,
+            ..
         } = entry.provenance.clone()
         else {
             return Ok(entry);
@@ -451,6 +472,62 @@ impl SessionStore {
                 .get_connection_profile(tenant_id, profile_id)?
                 .policy,
         ))
+    }
+
+    fn reserve_query_resources(
+        &self,
+        entry: &ConnectionEntryClone,
+    ) -> ApiResult<
+        Option<(
+            crate::resources::ResourceGuard,
+            crate::resources::ResourceGuard,
+        )>,
+    > {
+        let ConnectionProvenance::Managed {
+            tenant_id,
+            quota_exempt,
+            ..
+        } = &entry.provenance
+        else {
+            return Ok(None);
+        };
+        if *quota_exempt {
+            return Ok(None);
+        }
+        let tenant_id = *tenant_id;
+        let manager = self.resource_manager();
+        let query = manager.reserve(
+            tenant_id,
+            sift_protocol::TenantResource::ConcurrentQueries,
+            1,
+        )?;
+        let cursor = manager.reserve(tenant_id, sift_protocol::TenantResource::Cursors, 1)?;
+        Ok(Some((query, cursor)))
+    }
+
+    fn reserve_retained_bytes(
+        &self,
+        entry: &ConnectionEntryClone,
+        bytes: u64,
+    ) -> ApiResult<Option<crate::resources::ResourceGuard>> {
+        let ConnectionProvenance::Managed {
+            tenant_id,
+            quota_exempt,
+            ..
+        } = &entry.provenance
+        else {
+            return Ok(None);
+        };
+        if *quota_exempt {
+            return Ok(None);
+        }
+        self.resource_manager()
+            .reserve(
+                *tenant_id,
+                sift_protocol::TenantResource::RetainedResultBytes,
+                bytes,
+            )
+            .map(Some)
     }
 
     /// Whether raw SQL is persisted in query history (`metadata.store_sql`).
@@ -541,6 +618,8 @@ impl SessionStore {
             connections: DashMap::new(),
             transactions: DashMap::new(),
             next_conn_id: AtomicU64::new(1),
+            tenant_id: Mutex::new(None),
+            resource_guard: Mutex::new(None),
         };
         let info = session.info();
         self.inner.sessions.insert(id, session);
@@ -734,10 +813,11 @@ impl SessionStore {
                 ));
             }
             let cursors = self.inner.cursors.clone();
+            let sessions = self.clone();
             tokio::spawn(async move {
                 for cursor in cursors.connection_cursors(id, connection_id) {
                     let _ = driver.cancel(handle.clone(), cursor).await;
-                    cursors.remove(cursor);
+                    sessions.cursor_remove(cursor);
                 }
                 if let Err(e) = driver.close(handle).await {
                     tracing::warn!(error = %e, "error closing conn during session close");
@@ -768,15 +848,7 @@ impl SessionStore {
 
     pub fn managed_tenant_for_session(&self, id: SessionId) -> Option<sift_metadata::TenantId> {
         let session = self.inner.sessions.get(&id)?;
-        let mut tenant = None;
-        for connection in session.connections.iter() {
-            if let ConnectionProvenance::Managed { tenant_id, .. } = connection.provenance {
-                if tenant.is_some_and(|current| current != tenant_id) {
-                    return None;
-                }
-                tenant = Some(tenant_id);
-            }
-        }
+        let tenant = *session.tenant_id.lock().unwrap();
         tenant
     }
 
@@ -791,6 +863,7 @@ impl SessionStore {
             engine,
             spec,
             ConnectionProvenance::TrustedLocal,
+            None,
         )
         .await
     }
@@ -805,12 +878,21 @@ impl SessionStore {
         tenant_id: sift_metadata::TenantId,
         profile_id: sift_metadata::ConnectionProfileId,
         policy_revision: u64,
+        trusted_local: bool,
     ) -> ApiResult<ConnectionInfo> {
         if self.session_owner(session_id)? != Some(principal_id) {
             return Err(ApiError::Forbidden(
                 "managed connection principal must own the session".into(),
             ));
         }
+        let manager = self.resource_manager();
+        let enforce_limits = manager.enforces_for(trusted_local);
+        self.bind_session_tenant(session_id, tenant_id, enforce_limits)?;
+        let connection_guard = if enforce_limits {
+            Some(manager.reserve(tenant_id, sift_protocol::TenantResource::Connections, 1)?)
+        } else {
+            None
+        };
         self.open_connection_with_provenance(
             session_id,
             engine,
@@ -820,7 +902,9 @@ impl SessionStore {
                 tenant_id,
                 profile_id,
                 policy_revision,
+                quota_exempt: !enforce_limits,
             },
+            connection_guard,
         )
         .await
     }
@@ -831,6 +915,7 @@ impl SessionStore {
         engine: Engine,
         spec: ConnectionSpec,
         provenance: ConnectionProvenance,
+        resource_guard: Option<crate::resources::ResourceGuard>,
     ) -> ApiResult<ConnectionInfo> {
         if !self.inner.sessions.contains_key(&session_id) {
             return Err(ApiError::SessionNotFound(session_id));
@@ -870,6 +955,7 @@ impl SessionStore {
                     info: info.clone(),
                     spec,
                     provenance,
+                    _resource_guard: resource_guard,
                 },
             );
             info
@@ -882,6 +968,38 @@ impl SessionStore {
         }
         tracing::info!(session_id = %session_id, conn_id = %info.id, %engine, "connection opened");
         Ok(info)
+    }
+
+    fn bind_session_tenant(
+        &self,
+        session_id: SessionId,
+        tenant_id: sift_metadata::TenantId,
+        enforce_limits: bool,
+    ) -> ApiResult<()> {
+        let session = self
+            .inner
+            .sessions
+            .get(&session_id)
+            .ok_or(ApiError::SessionNotFound(session_id))?;
+        let mut bound = session.tenant_id.lock().unwrap();
+        if let Some(current) = *bound {
+            if current != tenant_id {
+                return Err(ApiError::Forbidden(
+                    "a managed session cannot span tenants".into(),
+                ));
+            }
+            return Ok(());
+        }
+        if enforce_limits {
+            let guard = self.resource_manager().reserve(
+                tenant_id,
+                sift_protocol::TenantResource::Sessions,
+                1,
+            )?;
+            *session.resource_guard.lock().unwrap() = Some(guard);
+        }
+        *bound = Some(tenant_id);
+        Ok(())
     }
 
     pub async fn close_connection(
@@ -917,6 +1035,7 @@ impl SessionStore {
                 tracing::debug!(%error, %cursor, "cursor cancel during connection close failed");
             }
             self.inner.cursors.remove(cursor);
+            self.inner.cursor_resource_guards.remove(&cursor);
         }
         for tx in txs {
             if let Err(error) = entry.driver.rollback(tx.handle).await {
@@ -1254,6 +1373,8 @@ impl SessionStore {
             Some(&req.sql),
             &[],
         )?;
+        let resource_guards = self.reserve_query_resources(&entry)?;
+        let retained_bytes = self.reserve_retained_bytes(&entry, self.result_limits().1 as u64)?;
         let exec = ExecuteRequest {
             sql: req.sql,
             params: req.params,
@@ -1271,6 +1392,8 @@ impl SessionStore {
         let slot = cursor_slot.clone();
         let cursors = self.inner.cursors.clone();
         let mut task = tokio::spawn(async move {
+            let _resource_guards = resource_guards;
+            let _retained_bytes = retained_bytes;
             let stream = driver.execute(handle, exec).await?;
             let cursor_id = stream.cursor_id;
             *slot.lock().unwrap() = Some(cursor_id);
@@ -1395,7 +1518,9 @@ impl SessionStore {
             Some(&req.sql),
             &[],
         )?;
+        let resource_guards = self.reserve_query_resources(&entry)?;
         let stream = entry.driver.execute(entry.handle.clone(), req).await?;
+        let cursor_id = stream.cursor_id;
         // Hand the driver's stream to the registry-owned pump. Wrapping
         // enforces the per-session cap (evicting the LRA cursor of the
         // same session via the installed on_evict callback), spawns
@@ -1406,7 +1531,14 @@ impl SessionStore {
             .cursors
             .wrap_for_connection(session_id, conn_id, stream)
         {
-            Ok(wrapped) => Ok(wrapped),
+            Ok(wrapped) => {
+                if let Some(resource_guards) = resource_guards {
+                    self.inner
+                        .cursor_resource_guards
+                        .insert(cursor_id, resource_guards);
+                }
+                Ok(wrapped)
+            }
             Err(error) => {
                 // Wrap failed (cap misconfig or duplicate id). Drop the
                 // raw driver cursor we can't rely on the registry to
@@ -1458,7 +1590,7 @@ impl SessionStore {
                 .map_err(|_| timeout_error("export"))??
         };
         let guard = CursorGuard {
-            cursors: self.inner.cursors.clone(),
+            sessions: self.clone(),
             cursor_id: wrapped.cursor_id,
         };
         Ok(crate::export::encode_stream(
@@ -1480,6 +1612,7 @@ impl SessionStore {
     /// registry bookkeeping. Idempotent.
     pub fn cursor_remove(&self, cursor_id: CursorId) {
         self.inner.cursors.remove(cursor_id);
+        self.inner.cursor_resource_guards.remove(&cursor_id);
     }
 
     pub async fn listen_pg(
@@ -1535,6 +1668,7 @@ impl SessionStore {
         // up. Terminal-page cleanup calls `cursor_remove` on the same
         // path; this is idempotent.
         self.inner.cursors.remove(cursor);
+        self.inner.cursor_resource_guards.remove(&cursor);
         if entry.driver.engine() == Engine::SqlServer {
             self.with_session(&session_id, |s| s.connections.remove(&conn_id))?;
             // Also invoke driver.close so the driver-level socket/FD is
@@ -2623,6 +2757,7 @@ pub enum ConnectionProvenance {
         tenant_id: sift_metadata::TenantId,
         profile_id: sift_metadata::ConnectionProfileId,
         policy_revision: u64,
+        quota_exempt: bool,
     },
 }
 
@@ -2634,6 +2769,8 @@ pub struct Session {
     pub connections: DashMap<ConnectionId, ConnectionEntry>,
     pub transactions: DashMap<TxId, TransactionEntry>,
     pub next_conn_id: AtomicU64,
+    tenant_id: Mutex<Option<sift_metadata::TenantId>>,
+    resource_guard: Mutex<Option<crate::resources::ResourceGuard>>,
 }
 
 impl Session {
@@ -2658,6 +2795,7 @@ pub struct ConnectionEntry {
     /// re-established for idempotent operations (ping/schema).
     pub spec: ConnectionSpec,
     pub provenance: ConnectionProvenance,
+    _resource_guard: Option<crate::resources::ResourceGuard>,
 }
 
 pub struct TransactionEntry {
@@ -2728,13 +2866,13 @@ fn missing_ext(engine: Engine, trait_name: &str) -> DriverError {
 /// — which also signals the registry pump to cancel — without an explicit
 /// cleanup call in the handler.
 struct CursorGuard {
-    cursors: CursorRegistry,
+    sessions: SessionStore,
     cursor_id: CursorId,
 }
 
 impl Drop for CursorGuard {
     fn drop(&mut self) {
-        self.cursors.remove(self.cursor_id);
+        self.sessions.cursor_remove(self.cursor_id);
     }
 }
 
