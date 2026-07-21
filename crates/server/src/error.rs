@@ -122,6 +122,7 @@ impl ApiError {
             ApiError::Metadata(error) => match error {
                 MetadataError::ConnectionProfileNotFound(_)
                 | MetadataError::RoomNotFound(_)
+                | MetadataError::RoomMemberNotFound { .. }
                 | MetadataError::DocumentNotFound(_)
                 | MetadataError::RoomAttachmentNotFound(_)
                 | MetadataError::SavedQueryNotFound(_)
@@ -133,15 +134,17 @@ impl ApiError {
                 MetadataError::ConnectionProfileLimitReached(_) => {
                     (StatusCode::CONFLICT, "tenant_resource_exhausted")
                 }
-                MetadataError::FinalInstanceAdmin | MetadataError::FinalAuthIdentity => {
-                    (StatusCode::CONFLICT, "conflict")
-                }
+                MetadataError::FinalInstanceAdmin
+                | MetadataError::FinalAuthIdentity
+                | MetadataError::FinalRoomOwner(_) => (StatusCode::CONFLICT, "conflict"),
                 MetadataError::PolicyRevisionConflict { .. } => {
                     (StatusCode::CONFLICT, "policy_revision_conflict")
                 }
-                MetadataError::TenantAdminRequired | MetadataError::InstanceAdminRequired => {
-                    (StatusCode::FORBIDDEN, "forbidden")
-                }
+                MetadataError::TenantAdminRequired
+                | MetadataError::TenantMemberRequired
+                | MetadataError::InstanceAdminRequired
+                | MetadataError::TenantMembershipRequired { .. }
+                | MetadataError::RoomOwnerRequired { .. } => (StatusCode::FORBIDDEN, "forbidden"),
                 MetadataError::TenantMismatch(_, _) => (StatusCode::FORBIDDEN, "forbidden"),
                 MetadataError::MissingCredential(_, _)
                 | MetadataError::BrokerCredentialUnsupported(_) => {

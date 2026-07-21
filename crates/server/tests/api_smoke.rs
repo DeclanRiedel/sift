@@ -164,6 +164,25 @@ fn pg_spec() -> ConnectionSpec {
     }
 }
 
+fn metadata_audit(
+    actor: PrincipalId,
+    action: &str,
+    target: &str,
+    id: Option<i64>,
+) -> NewOperationAudit {
+    NewOperationAudit {
+        actor_principal_id: Some(actor),
+        action: action.into(),
+        target: target.into(),
+        target_id: id,
+        status: "succeeded".into(),
+        result_code: None,
+        row_count: None,
+        error_message: None,
+        correlation_id: None,
+    }
+}
+
 fn mssql_spec() -> ConnectionSpec {
     ConnectionSpec {
         host: "mock.invalid".into(),
@@ -1230,7 +1249,13 @@ async fn room_websocket_lease_closes_when_membership_is_removed() {
         .upsert_tenant_membership(TenantId(1), member.id, MembershipRole::Member)
         .unwrap();
     metadata
-        .add_room_member(room.id, member.id, RoomRole::Editor)
+        .add_room_member_authorized(
+            room.id,
+            PrincipalId(1),
+            member.id,
+            RoomRole::Editor,
+            metadata_audit(PrincipalId(1), "add_member", "room", Some(room.id.0)),
+        )
         .unwrap();
     let issued = metadata
         .issue_auth_session(
@@ -1279,7 +1304,14 @@ async fn room_websocket_lease_closes_when_membership_is_removed() {
         RoomServerMessage::Attached { .. }
     ));
 
-    metadata.remove_room_member(room.id, member.id).unwrap();
+    metadata
+        .remove_room_member_authorized(
+            room.id,
+            PrincipalId(1),
+            member.id,
+            metadata_audit(PrincipalId(1), "remove_member", "room", Some(room.id.0)),
+        )
+        .unwrap();
     tokio::time::timeout(std::time::Duration::from_secs(3), async {
         loop {
             if let RoomServerMessage::Error { message } = socket.next().await.unwrap() {
@@ -1979,10 +2011,22 @@ async fn metadata_room_roles_are_enforced() {
         )
         .unwrap();
     metadata
-        .add_room_member(room.id, viewer.id, RoomRole::Viewer)
+        .add_room_member_authorized(
+            room.id,
+            PrincipalId(1),
+            viewer.id,
+            RoomRole::Viewer,
+            metadata_audit(PrincipalId(1), "add_member", "room", Some(room.id.0)),
+        )
         .unwrap();
     metadata
-        .add_room_member(room.id, editor.id, RoomRole::Editor)
+        .add_room_member_authorized(
+            room.id,
+            PrincipalId(1),
+            editor.id,
+            RoomRole::Editor,
+            metadata_audit(PrincipalId(1), "add_member", "room", Some(room.id.0)),
+        )
         .unwrap();
     let document = metadata
         .create_document(
@@ -2072,6 +2116,18 @@ async fn metadata_room_roles_are_enforced() {
                     r#"{{"principal_id":{},"role":"viewer"}}"#,
                     outsider.id.0
                 )))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::FORBIDDEN);
+
+    let res = app
+        .clone()
+        .oneshot(
+            Request::post(format!("/v1/metadata/rooms/{}/join", room.id.0))
+                .header("authorization", format!("Bearer {outsider_token}"))
+                .body(Body::empty())
                 .unwrap(),
         )
         .await

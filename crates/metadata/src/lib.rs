@@ -82,10 +82,29 @@ pub enum MetadataError {
     PolicyRevisionConflict { expected: u64, current: u64 },
     #[error("tenant administrator access required")]
     TenantAdminRequired,
+    #[error("tenant member access required")]
+    TenantMemberRequired,
     #[error("instance administrator access required")]
     InstanceAdminRequired,
     #[error("room {0:?} not found")]
     RoomNotFound(RoomId),
+    #[error("principal {principal:?} is not a member of tenant {tenant:?}")]
+    TenantMembershipRequired {
+        tenant: TenantId,
+        principal: PrincipalId,
+    },
+    #[error("principal {principal:?} must own room {room:?}")]
+    RoomOwnerRequired {
+        room: RoomId,
+        principal: PrincipalId,
+    },
+    #[error("room {0:?} must retain at least one owner")]
+    FinalRoomOwner(RoomId),
+    #[error("principal {principal:?} is not a member of room {room:?}")]
+    RoomMemberNotFound {
+        room: RoomId,
+        principal: PrincipalId,
+    },
     #[error("document {0:?} not found")]
     DocumentNotFound(DocumentId),
     #[error("room attachment {0:?} not found")]
@@ -2643,6 +2662,7 @@ impl MetadataStore {
         let now = now_text();
         let mut conn = self.conn()?;
         let tx = conn.transaction()?;
+        ensure_tenant_member_role_locked(&tx, tenant, actor)?;
         tx.execute(
             "INSERT INTO room (tenant_id, name, kind, created_by, created_at, updated_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?5)",
@@ -2697,20 +2717,30 @@ impl MetadataStore {
         rooms
     }
 
-    pub fn add_room_member(
+    pub fn add_room_member_authorized(
         &self,
         room: RoomId,
+        actor: PrincipalId,
         principal: PrincipalId,
         role: RoomRole,
+        audit: NewOperationAudit,
     ) -> Result<RoomMember> {
         let now = now_text();
-        let conn = self.conn()?;
-        conn.execute(
+        let mut conn = self.conn()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let tenant = ensure_room_owner_locked(&tx, room, actor)?;
+        ensure_principal_tenant_member_locked(&tx, tenant, principal)?;
+        ensure_room_keeps_owner_locked(&tx, room, principal, Some(&role))?;
+        tx.execute(
             "INSERT INTO room_member (room_id, principal_id, role, joined_at)
              VALUES (?1, ?2, ?3, ?4)
              ON CONFLICT(room_id, principal_id) DO UPDATE SET role = excluded.role",
             params![room.0, principal.0, role.as_str(), now],
         )?;
+        let mut audit = audit;
+        audit.actor_principal_id = Some(actor);
+        insert_operation_audit_row(&tx, &audit)?;
+        tx.commit()?;
         self.room_member_locked(&conn, room, principal)
     }
 
@@ -2735,12 +2765,51 @@ impl MetadataStore {
         self.room_member_optional_locked(&conn, room, principal)
     }
 
-    pub fn remove_room_member(&self, room: RoomId, principal: PrincipalId) -> Result<()> {
-        let conn = self.conn()?;
-        conn.execute(
+    pub fn remove_room_member_authorized(
+        &self,
+        room: RoomId,
+        actor: PrincipalId,
+        principal: PrincipalId,
+        audit: NewOperationAudit,
+    ) -> Result<()> {
+        let mut conn = self.conn()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        ensure_room_owner_locked(&tx, room, actor)?;
+        ensure_room_keeps_owner_locked(&tx, room, principal, None)?;
+        let deleted = tx.execute(
             "DELETE FROM room_member WHERE room_id = ?1 AND principal_id = ?2",
             params![room.0, principal.0],
         )?;
+        if deleted == 0 {
+            return Err(MetadataError::RoomMemberNotFound { room, principal });
+        }
+        let mut audit = audit;
+        audit.actor_principal_id = Some(actor);
+        insert_operation_audit_row(&tx, &audit)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn leave_room_authorized(
+        &self,
+        room: RoomId,
+        principal: PrincipalId,
+        audit: NewOperationAudit,
+    ) -> Result<()> {
+        let mut conn = self.conn()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        ensure_room_keeps_owner_locked(&tx, room, principal, None)?;
+        let deleted = tx.execute(
+            "DELETE FROM room_member WHERE room_id = ?1 AND principal_id = ?2",
+            params![room.0, principal.0],
+        )?;
+        if deleted == 0 {
+            return Err(MetadataError::RoomMemberNotFound { room, principal });
+        }
+        let mut audit = audit;
+        audit.actor_principal_id = Some(principal);
+        insert_operation_audit_row(&tx, &audit)?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -3517,6 +3586,77 @@ fn connection_profile_by_id_locked(
     .ok_or(MetadataError::ConnectionProfileNotFound(id))
 }
 
+fn ensure_room_owner_locked(
+    conn: &Connection,
+    room: RoomId,
+    actor: PrincipalId,
+) -> Result<TenantId> {
+    conn.query_row(
+        "SELECT r.tenant_id
+         FROM room r
+         JOIN room_member rm ON rm.room_id = r.id
+         JOIN principal p ON p.id = rm.principal_id
+         WHERE r.id = ?1 AND rm.principal_id = ?2 AND rm.role = 'owner'
+           AND p.disabled_at IS NULL",
+        params![room.0, actor.0],
+        |row| row.get::<_, i64>(0).map(TenantId),
+    )
+    .optional()?
+    .ok_or(MetadataError::RoomOwnerRequired {
+        room,
+        principal: actor,
+    })
+}
+
+fn ensure_principal_tenant_member_locked(
+    conn: &Connection,
+    tenant: TenantId,
+    principal: PrincipalId,
+) -> Result<()> {
+    let member: bool = conn.query_row(
+        "SELECT EXISTS(
+            SELECT 1 FROM membership m
+            JOIN principal p ON p.id = m.principal_id
+            WHERE m.tenant_id = ?1 AND m.principal_id = ?2
+              AND p.disabled_at IS NULL
+         )",
+        params![tenant.0, principal.0],
+        |row| row.get(0),
+    )?;
+    if member {
+        Ok(())
+    } else {
+        Err(MetadataError::TenantMembershipRequired { tenant, principal })
+    }
+}
+
+fn ensure_room_keeps_owner_locked(
+    conn: &Connection,
+    room: RoomId,
+    principal: PrincipalId,
+    replacement: Option<&RoomRole>,
+) -> Result<()> {
+    let current_role: Option<String> = conn
+        .query_row(
+            "SELECT role FROM room_member WHERE room_id = ?1 AND principal_id = ?2",
+            params![room.0, principal.0],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let remains_owner = matches!(replacement, Some(RoomRole::Owner));
+    if current_role.as_deref() == Some("owner") && !remains_owner {
+        let owners: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM room_member WHERE room_id = ?1 AND role = 'owner'",
+            params![room.0],
+            |row| row.get(0),
+        )?;
+        if owners <= 1 {
+            return Err(MetadataError::FinalRoomOwner(room));
+        }
+    }
+    Ok(())
+}
+
 fn ensure_tenant_admin_locked(
     conn: &Connection,
     tenant: TenantId,
@@ -3537,6 +3677,29 @@ fn ensure_tenant_admin_locked(
         Ok(())
     } else {
         Err(MetadataError::TenantAdminRequired)
+    }
+}
+
+fn ensure_tenant_member_role_locked(
+    conn: &Connection,
+    tenant: TenantId,
+    actor: PrincipalId,
+) -> Result<()> {
+    let role: Option<String> = conn
+        .query_row(
+            "SELECT m.role
+             FROM membership m
+             JOIN principal p ON p.id = m.principal_id
+             WHERE m.tenant_id = ?1 AND m.principal_id = ?2
+               AND p.disabled_at IS NULL",
+            params![tenant.0, actor.0],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if matches!(role.as_deref(), Some("owner" | "admin" | "member")) {
+        Ok(())
+    } else {
+        Err(MetadataError::TenantMemberRequired)
     }
 }
 
@@ -5673,6 +5836,80 @@ mod tests {
     }
 
     #[test]
+    fn authorized_room_membership_stays_inside_tenant_and_keeps_an_owner() {
+        let store = store();
+        store.bootstrap_local("local user").unwrap();
+        let peer = store.create_principal("peer-room", "peer", None).unwrap();
+        store
+            .upsert_tenant_membership(TenantId(1), peer.id, MembershipRole::Member)
+            .unwrap();
+        let foreign = store
+            .create_principal("foreign-room", "foreign", None)
+            .unwrap();
+        let foreign_tenant = store.create_tenant("foreign", TenantKind::Team).unwrap();
+        store
+            .upsert_tenant_membership(foreign_tenant.id, foreign.id, MembershipRole::Owner)
+            .unwrap();
+        let room = store
+            .create_room(
+                TenantId(1),
+                PrincipalId(1),
+                NewRoom {
+                    name: "membership invariants".to_string(),
+                    kind: RoomKind::Shared,
+                },
+            )
+            .unwrap();
+
+        assert!(matches!(
+            store.add_room_member_authorized(
+                room.id,
+                PrincipalId(1),
+                foreign.id,
+                RoomRole::Editor,
+                test_audit("add_member", "room", Some(room.id.0)),
+            ),
+            Err(MetadataError::TenantMembershipRequired { .. })
+        ));
+        assert!(matches!(
+            store.add_room_member_authorized(
+                room.id,
+                PrincipalId(1),
+                PrincipalId(1),
+                RoomRole::Editor,
+                test_audit("add_member", "room", Some(room.id.0)),
+            ),
+            Err(MetadataError::FinalRoomOwner(_))
+        ));
+
+        store
+            .add_room_member_authorized(
+                room.id,
+                PrincipalId(1),
+                peer.id,
+                RoomRole::Owner,
+                test_audit("add_member", "room", Some(room.id.0)),
+            )
+            .unwrap();
+        store
+            .remove_room_member_authorized(
+                room.id,
+                PrincipalId(1),
+                PrincipalId(1),
+                test_audit("remove_member", "room", Some(room.id.0)),
+            )
+            .unwrap();
+        assert!(matches!(
+            store.leave_room_authorized(
+                room.id,
+                peer.id,
+                test_audit("leave", "room", Some(room.id.0)),
+            ),
+            Err(MetadataError::FinalRoomOwner(_))
+        ));
+    }
+
+    #[test]
     fn document_snapshots_are_opaque_room_state() {
         let store = store();
         store.bootstrap_local("local user").unwrap();
@@ -5724,6 +5961,9 @@ mod tests {
         let outsider = store
             .create_principal("outsider", "outsider", None)
             .unwrap();
+        store
+            .upsert_tenant_membership(TenantId(1), viewer.id, MembershipRole::Member)
+            .unwrap();
         let room = store
             .create_room(
                 TenantId(1),
@@ -5735,7 +5975,13 @@ mod tests {
             )
             .unwrap();
         store
-            .add_room_member(room.id, viewer.id, RoomRole::Viewer)
+            .add_room_member_authorized(
+                room.id,
+                PrincipalId(1),
+                viewer.id,
+                RoomRole::Viewer,
+                test_audit("add_member", "room", Some(room.id.0)),
+            )
             .unwrap();
         let document = store
             .create_document_for_principal(
@@ -5777,7 +6023,13 @@ mod tests {
         ));
 
         store
-            .add_room_member(room.id, viewer.id, RoomRole::Editor)
+            .add_room_member_authorized(
+                room.id,
+                PrincipalId(1),
+                viewer.id,
+                RoomRole::Editor,
+                test_audit("add_member", "room", Some(room.id.0)),
+            )
             .unwrap();
         let updated = store
             .update_document_snapshot_for_principal(document.id, viewer.id, b"allowed".to_vec())

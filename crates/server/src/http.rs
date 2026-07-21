@@ -21,8 +21,8 @@ use sift_metadata::{
     CrdtType, Document, DocumentId, GithubAllowlistId, GithubProfile, MetadataStore,
     NewConnectionProfile, NewDocument, NewOperationAudit, NewQueryHistory, NewRoom, NewSavedQuery,
     PrincipalId, PrincipalKeyId, QueryHistory, QueryStatus, RefreshAuthResult, Room, RoomId,
-    RoomKind, RoomMember, RoomRole, SavedQuery, SavedQueryFilter, SavedQueryId, SavedQueryScope,
-    TenantId, TenantInvitationId, TenantMembership, UpdateSavedQuery,
+    RoomMember, RoomRole, SavedQuery, SavedQueryFilter, SavedQueryId, SavedQueryScope, TenantId,
+    TenantInvitationId, TenantMembership, UpdateSavedQuery,
 };
 use sift_protocol::{
     AcceptTenantInvitationRequest, AdminCreatePasswordPrincipalRequest,
@@ -3846,13 +3846,18 @@ async fn add_metadata_room_member(
     let principal = principal_id(req.principal_id)?;
     let actor = auth.principal_id;
     let member = metadata_blocking(move || {
-        ensure_room_permission(&metadata, &auth, room, RoomPermission::Admin)?;
         metadata
-            .add_room_member(room, principal, req.role)
+            .add_room_member_authorized(
+                room,
+                actor,
+                principal,
+                req.role,
+                metadata_audit_record(actor, "add_member", "room", Some(room.0)),
+            )
             .map_err(Into::into)
     })
     .await?;
-    push_metadata_operation(&state, actor, "add_member", "room", Some(room.0));
+    push_metadata_operation_local(&state, actor, "add_member", "room", Some(room.0));
     Ok(Json(member))
 }
 
@@ -3867,12 +3872,16 @@ async fn remove_metadata_room_member(
     let principal = principal_id(principal)?;
     let actor = auth.principal_id;
     metadata_blocking(move || {
-        ensure_room_permission(&metadata, &auth, room, RoomPermission::Admin)?;
-        metadata.remove_room_member(room, principal)?;
+        metadata.remove_room_member_authorized(
+            room,
+            actor,
+            principal,
+            metadata_audit_record(actor, "remove_member", "room", Some(room.0)),
+        )?;
         Ok(())
     })
     .await?;
-    push_metadata_operation(&state, actor, "remove_member", "room", Some(room.0));
+    push_metadata_operation_local(&state, actor, "remove_member", "room", Some(room.0));
     Ok(Json(json!({"ok": true})))
 }
 
@@ -3886,16 +3895,11 @@ async fn join_metadata_room(
     let room = room_id(id)?;
     let principal = auth.principal_id;
     let member = metadata_blocking(move || {
-        let room_row = metadata.get_room(room)?;
-        ensure_tenant(&auth, room_row.tenant_id)?;
-        if room_row.kind == RoomKind::Personal && room_row.created_by != principal {
-            return Err(ApiError::Forbidden(
-                "personal rooms cannot be joined by other principals".into(),
-            ));
-        }
         metadata
-            .add_room_member(room, principal, RoomRole::Editor)
-            .map_err(Into::into)
+            .get_room_member(room, principal)?
+            .ok_or(ApiError::Forbidden(
+                "room membership must be granted by a room owner".into(),
+            ))
     })
     .await?;
     push_metadata_operation(&state, principal, "join", "room", Some(room.0));
@@ -3913,11 +3917,15 @@ async fn leave_metadata_room(
     let principal = auth.principal_id;
     metadata_blocking(move || {
         ensure_room_permission(&metadata, &auth, room, RoomPermission::Read)?;
-        metadata.remove_room_member(room, principal)?;
+        metadata.leave_room_authorized(
+            room,
+            principal,
+            metadata_audit_record(principal, "leave", "room", Some(room.0)),
+        )?;
         Ok(())
     })
     .await?;
-    push_metadata_operation(&state, principal, "leave", "room", Some(room.0));
+    push_metadata_operation_local(&state, principal, "leave", "room", Some(room.0));
     Ok(Json(json!({"ok": true})))
 }
 
