@@ -4,6 +4,9 @@ Status: **forward-looking design input.** This note records product gaps and
 constraints for incomplete phases only. It does not reopen completed phases or
 claim that the designs below are locked ADRs.
 
+The component ownership boundary is developed separately in
+`docs/PLANS/core-plugin-boundary.md`.
+
 The comparison baseline is JetBrains' current DataGrip feature overview:
 <https://www.jetbrains.com/datagrip/features/>. The target is not imitation for
 its own sake. Sift should combine serious database-IDE depth with Zed-like
@@ -202,4 +205,3 @@ the server.
 - Server-owned or hybrid workspace and VCS topology.
 - Shared SQL semantic service and dialect-pack boundary.
 - Certification tiers for providers and extensions.
-

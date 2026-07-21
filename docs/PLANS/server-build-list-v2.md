@@ -252,7 +252,8 @@ handshake.
 Goal: a strong, versioned plugin system for database providers, SQL tooling,
 automation, and connection-time hooks without forking or destabilizing the
 server. Detailed design input:
-`docs/PLANS/ide-parity-and-provider-extensibility.md`.
+`docs/PLANS/ide-parity-and-provider-extensibility.md` and
+`docs/PLANS/core-plugin-boundary.md`.
 
 - [ ] [Design] ADR-022 (candidate): driver extensibility — in-tree drivers
       remain first-class native Rust implementations; third-party drivers run
@@ -271,6 +272,9 @@ server. Detailed design input:
       enable/disable/update policy, health, crash reporting, and
       operator-visible trust. Third-party server code is out-of-process by
       default; do not load arbitrary dynamic libraries into `sift-server`.
+- [ ] [Design] ADR-031: lock the mandatory-core, first-party-bundle, and
+      optional-plugin boundary, including forbidden plugin access, scoped host
+      capabilities, plugin storage, and provider certification levels.
 - [ ] [Design] Extension contribution points for drivers, tunnels, credential
       brokers, hooks, import/export formats, dialect/analyzer packs, commands,
       agent context providers, governed tools, and declarative client panels.
