@@ -205,6 +205,13 @@ fn post_json_str(uri: impl Into<String>, body: &str) -> Request<Body> {
         .unwrap()
 }
 
+fn put_json(uri: impl Into<String>, body: impl serde::Serialize) -> Request<Body> {
+    Request::put(uri.into())
+        .header("content-type", "application/json")
+        .body(Body::from(serde_json::to_vec(&body).unwrap()))
+        .unwrap()
+}
+
 #[tokio::test]
 async fn health_lists_registered_engines() {
     let app = app(test_state());
@@ -264,6 +271,12 @@ async fn openapi_is_published() {
     assert!(body["paths"]["/v1/metadata/history"].is_object());
     assert!(body["paths"]["/v1/auth/tokens"].is_object());
     assert!(body["paths"]["/v1/sessions/{id}/connections/from-profile"].is_object());
+    assert!(body["paths"]["/v1/metadata/connections/{id}/policy"].is_object());
+    assert!(body["paths"]["/v1/metadata/connections/{id}/disconnect"].is_object());
+    assert!(body["paths"]["/v1/metadata/tenants/{id}/usage"].is_object());
+    assert!(body["paths"]["/v1/admin/tenants/{id}/limits"].is_object());
+    assert!(body["components"]["schemas"]["ApiErrorResponse"].is_object());
+    assert!(body["components"]["responses"]["RateLimited"]["headers"]["Retry-After"].is_object());
     assert_eq!(
         body["paths"]["/v1/metadata/rooms"]["post"]["requestBody"]["content"]["application/json"]
             ["schema"]["$ref"],
@@ -2395,6 +2408,109 @@ async fn metadata_connection_profile_opens_session_connection() {
             quota_exempt: true,
         }
     );
+}
+
+#[tokio::test]
+async fn connection_policy_and_admin_disconnect_are_public_and_revision_safe() {
+    let state = test_state_with_metadata(true);
+    let sessions = state.sessions.clone();
+    let app = app(state);
+    let session: sift_protocol::SessionInfo = body_json(
+        app.clone()
+            .oneshot(post_json_str("/v1/sessions", r#"{"tag":"policy"}"#))
+            .await
+            .unwrap()
+            .into_body(),
+    )
+    .await;
+    let profile: sift_metadata::ConnectionProfile = body_json(
+        app.clone()
+            .oneshot(post_json(
+                "/v1/metadata/connections",
+                serde_json::json!({
+                    "tenant_id": 1,
+                    "name": "policy pg",
+                    "engine": "postgres",
+                    "spec": {
+                        "host": "mock.invalid",
+                        "port": 5432,
+                        "database": "mock",
+                        "user": "mock",
+                        "ssl_mode": "disable"
+                    },
+                    "credential_mode": "shared",
+                    "tags": []
+                }),
+            ))
+            .await
+            .unwrap()
+            .into_body(),
+    )
+    .await;
+    let policy_url = format!("/v1/metadata/connections/{}/policy", profile.id.0);
+
+    let policy: sift_protocol::ConnectionPolicy = body_json(
+        app.clone()
+            .oneshot(Request::get(&policy_url).body(Body::empty()).unwrap())
+            .await
+            .unwrap()
+            .into_body(),
+    )
+    .await;
+    assert_eq!(policy.revision, 0);
+
+    let update = serde_json::json!({
+        "expected_revision": 0,
+        "minimum_tenant_role": "member",
+        "read_only": true,
+        "blocked_ops": [],
+    });
+    let response = app
+        .clone()
+        .oneshot(put_json(&policy_url, &update))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let updated: sift_protocol::ConnectionPolicy = body_json(response.into_body()).await;
+    assert_eq!(updated.revision, 1);
+    assert!(updated.read_only);
+
+    let conflict = app
+        .clone()
+        .oneshot(put_json(&policy_url, &update))
+        .await
+        .unwrap();
+    assert_eq!(conflict.status(), StatusCode::CONFLICT);
+    let error: sift_protocol::ApiErrorResponse = body_json(conflict.into_body()).await;
+    assert_eq!(error.kind, "policy_revision_conflict");
+
+    let connection: sift_protocol::ConnectionInfo = body_json(
+        app.clone()
+            .oneshot(post_json(
+                format!("/v1/sessions/{}/connections/from-profile", session.id),
+                serde_json::json!({
+                    "tenant_id": 1,
+                    "profile_id": profile.id.0
+                }),
+            ))
+            .await
+            .unwrap()
+            .into_body(),
+    )
+    .await;
+    let disconnected: sift_protocol::DisconnectManagedConnectionsResponse = body_json(
+        app.clone()
+            .oneshot(post_json(
+                format!("/v1/metadata/connections/{}/disconnect", profile.id.0),
+                serde_json::json!({}),
+            ))
+            .await
+            .unwrap()
+            .into_body(),
+    )
+    .await;
+    assert_eq!(disconnected.disconnected, 1);
+    assert!(sessions.conn_entry(session.id, connection.id).is_err());
 }
 
 #[tokio::test]

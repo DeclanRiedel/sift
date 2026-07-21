@@ -7,6 +7,17 @@ use serde::{Deserialize, Serialize};
 
 use crate::OperationKind;
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct ApiErrorResponse {
+    pub kind: String,
+    pub message: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub correlation_id: Option<String>,
+    /// Mirrors the HTTP `Retry-After` header when retry timing is known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_after_secs: Option<u64>,
+}
+
 #[derive(
     Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize, schemars::JsonSchema,
 )]
@@ -145,6 +156,11 @@ pub struct TenantUsageSnapshot {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct UpdateTenantLimitsRequest {
     pub limits: TenantResourceLimits,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct DisconnectManagedConnectionsResponse {
+    pub disconnected: u64,
 }
 
 #[cfg(test)]

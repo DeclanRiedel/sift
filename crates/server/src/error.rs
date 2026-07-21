@@ -188,12 +188,13 @@ impl IntoResponse for ApiError {
         // response header and the server logs/audit carry.
         let correlation_id = crate::correlation::current();
         tracing::warn!(%status, %kind, %message, correlation_id = ?correlation_id, "api error");
-        let body = serde_json::json!({
-            "kind": kind,
-            "message": message,
-            "correlation_id": correlation_id,
-        });
         let retry_after = self.retry_after_secs();
+        let body = sift_protocol::ApiErrorResponse {
+            kind: kind.to_string(),
+            message,
+            correlation_id,
+            retry_after_secs: retry_after,
+        };
         let mut response = (status, Json(body)).into_response();
         if let Some(seconds) = retry_after {
             if let Ok(value) = HeaderValue::from_str(&seconds.to_string()) {

@@ -38,8 +38,8 @@ use sift_protocol::{
     PasswordLoginRequest, PasswordResetRequest, Readiness, RefreshAuthRequest,
     RegisterPrincipalKeyRequest, RoomClientMessage, RoomQueryResult, RoomQueryStatus,
     RoomServerMessage, SavepointRequest, SchemaFilter, SchemaScope, TransactionPreviewRequest,
-    UpdateTenantLimitsRequest, WebAuthResponse, WhoAmIResponse, WsClientMessage, WsServerMessage,
-    PROTOCOL_VERSION,
+    UpdateConnectionPolicyRequest, UpdateTenantLimitsRequest, WebAuthResponse, WhoAmIResponse,
+    WsClientMessage, WsServerMessage, PROTOCOL_VERSION,
 };
 
 use crate::config::{DeploymentPolicy, Transport};
@@ -200,6 +200,14 @@ pub fn app(state: AppState) -> Router {
         .route(
             "/v1/metadata/connections/:id/credential",
             post(set_metadata_connection_credential),
+        )
+        .route(
+            "/v1/metadata/connections/:id/policy",
+            get(get_metadata_connection_policy).put(update_metadata_connection_policy),
+        )
+        .route(
+            "/v1/metadata/connections/:id/disconnect",
+            post(disconnect_metadata_connection),
         )
         .route("/v1/metadata/tenants/:id/usage", get(get_tenant_usage))
         .route(
@@ -3399,6 +3407,49 @@ async fn openapi() -> Json<serde_json::Value> {
                     "responses": { "200": { "description": "Ack", "content": json_object_content() } }
                 }
             },
+            "/v1/metadata/connections/{id}/policy": {
+                "get": {
+                    "operationId": "getMetadataConnectionPolicy",
+                    "summary": "Read the effective connection profile policy",
+                    "responses": { "200": { "description": "Connection policy", "content": json_content("ConnectionPolicy") } }
+                },
+                "put": {
+                    "operationId": "updateMetadataConnectionPolicy",
+                    "summary": "Replace a connection profile policy with optimistic revision checking",
+                    "requestBody": json_body("UpdateConnectionPolicyRequest"),
+                    "responses": {
+                        "200": { "description": "Updated connection policy", "content": json_content("ConnectionPolicy") },
+                        "409": { "description": "Policy revision conflict", "content": json_content("ApiErrorResponse") }
+                    }
+                }
+            },
+            "/v1/metadata/connections/{id}/disconnect": {
+                "post": {
+                    "operationId": "disconnectMetadataConnectionProfile",
+                    "summary": "Immediately close all active connections using a managed profile",
+                    "responses": { "200": { "description": "Disconnect count", "content": json_content("DisconnectManagedConnectionsResponse") } }
+                }
+            },
+            "/v1/metadata/tenants/{id}/usage": {
+                "get": {
+                    "operationId": "getTenantUsage",
+                    "summary": "Read effective tenant limits and current resource usage",
+                    "responses": { "200": { "description": "Tenant resource snapshot", "content": json_content("TenantUsageSnapshot") } }
+                }
+            },
+            "/v1/admin/tenants/{id}/limits": {
+                "put": {
+                    "operationId": "setTenantLimits",
+                    "summary": "Set an operator-bounded tenant resource limit override",
+                    "requestBody": json_body("UpdateTenantLimitsRequest"),
+                    "responses": { "200": { "description": "Tenant limit override", "content": json_content("TenantLimitOverride") } }
+                },
+                "delete": {
+                    "operationId": "clearTenantLimits",
+                    "summary": "Clear a tenant resource limit override",
+                    "responses": { "200": { "description": "Ack", "content": json_object_content() } }
+                }
+            },
             "/v1/metadata/history": {
                 "get": {
                     "operationId": "listMetadataHistory",
@@ -3438,6 +3489,28 @@ async fn openapi() -> Json<serde_json::Value> {
         "components": {
             "securitySchemes": {
                 "bearerAuth": { "type": "http", "scheme": "bearer" }
+            },
+            "responses": {
+                "RateLimited": {
+                    "description": "Hierarchical principal or tenant rate limit exceeded",
+                    "headers": {
+                        "Retry-After": {
+                            "description": "Seconds until the request may be retried",
+                            "schema": { "type": "integer", "minimum": 0 }
+                        }
+                    },
+                    "content": json_content("ApiErrorResponse")
+                },
+                "TenantResourceExhausted": {
+                    "description": "Tenant resource admission denied; Retry-After is present when a retry window is known",
+                    "headers": {
+                        "Retry-After": {
+                            "description": "Optional seconds until admission may succeed",
+                            "schema": { "type": "integer", "minimum": 0 }
+                        }
+                    },
+                    "content": json_content("ApiErrorResponse")
+                }
             },
             "schemas": protocol_schema_refs()
         }
@@ -3584,6 +3657,25 @@ fn protocol_schema_refs() -> serde_json::Value {
     add_schema::<sift_protocol::OpenSessionRequest>("OpenSessionRequest", &mut schemas);
     add_schema::<sift_protocol::OperationAuditEntry>("OperationAuditEntry", &mut schemas);
     add_schema::<sift_protocol::OperationCapability>("OperationCapability", &mut schemas);
+    add_schema::<sift_protocol::OperationCapabilityContext>(
+        "OperationCapabilityContext",
+        &mut schemas,
+    );
+    add_schema::<sift_protocol::ApiErrorResponse>("ApiErrorResponse", &mut schemas);
+    add_schema::<sift_protocol::ConnectionPolicy>("ConnectionPolicy", &mut schemas);
+    add_schema::<sift_protocol::UpdateConnectionPolicyRequest>(
+        "UpdateConnectionPolicyRequest",
+        &mut schemas,
+    );
+    add_schema::<sift_protocol::DisconnectManagedConnectionsResponse>(
+        "DisconnectManagedConnectionsResponse",
+        &mut schemas,
+    );
+    add_schema::<sift_protocol::TenantUsageSnapshot>("TenantUsageSnapshot", &mut schemas);
+    add_schema::<sift_protocol::UpdateTenantLimitsRequest>(
+        "UpdateTenantLimitsRequest",
+        &mut schemas,
+    );
     add_schema::<sift_protocol::Readiness>("Readiness", &mut schemas);
     add_schema::<sift_protocol::SavepointRequest>("SavepointRequest", &mut schemas);
     add_schema::<sift_protocol::SchemaSnapshot>("SchemaSnapshot", &mut schemas);
@@ -3619,6 +3711,7 @@ fn protocol_schema_refs() -> serde_json::Value {
     add_schema::<sift_metadata::Room>("Room", &mut schemas);
     add_schema::<sift_metadata::RoomMember>("RoomMember", &mut schemas);
     add_schema::<sift_metadata::TenantMembership>("TenantMembership", &mut schemas);
+    add_schema::<sift_metadata::TenantLimitOverride>("TenantLimitOverride", &mut schemas);
     add_schema::<sift_metadata::TenantInvitation>("TenantInvitation", &mut schemas);
     add_schema::<sift_metadata::PrincipalKey>("PrincipalKey", &mut schemas);
     add_schema::<AddRoomMemberRequest>("AddRoomMemberRequest", &mut schemas);
@@ -4047,6 +4140,124 @@ async fn set_metadata_connection_credential(
         Some(profile_id.0),
     );
     Ok(Json(json!({"ok": true})))
+}
+
+async fn get_metadata_connection_policy(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+) -> ApiResult<Json<sift_protocol::ConnectionPolicy>> {
+    let metadata = metadata_store_cloned(&state)?;
+    let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
+    let profile_id = connection_profile_id(id)?;
+    let principal = auth.principal_id;
+    let profile = metadata_blocking(move || {
+        metadata
+            .get_connection_profile_for_principal(profile_id, principal)
+            .map_err(Into::into)
+    })
+    .await?;
+    state.sessions.push_operation_full(
+        Operation::ManageConnectionPolicy {
+            action: sift_protocol::PolicyAdminAction::Read,
+            tenant_id: profile.tenant_id.0,
+            profile_id: profile.id.0,
+        },
+        OperationStatus::Succeeded,
+        Some(principal.0),
+        None,
+        None,
+        None,
+    );
+    Ok(Json(profile.policy))
+}
+
+async fn update_metadata_connection_policy(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+    Json(request): Json<UpdateConnectionPolicyRequest>,
+) -> ApiResult<Json<sift_protocol::ConnectionPolicy>> {
+    let metadata = metadata_store_cloned(&state)?;
+    let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
+    let profile_id = connection_profile_id(id)?;
+    let principal = auth.principal_id;
+    let profile = {
+        let lookup = metadata.clone();
+        metadata_blocking(move || {
+            lookup
+                .get_connection_profile_for_principal(profile_id, principal)
+                .map_err(Into::into)
+        })
+        .await?
+    };
+    let tenant = profile.tenant_id;
+    let updated = metadata_blocking(move || {
+        metadata
+            .update_connection_policy(
+                tenant,
+                principal,
+                profile_id,
+                request,
+                metadata_audit_record(principal, "update", "connection_policy", Some(profile_id.0)),
+            )
+            .map_err(Into::into)
+    })
+    .await?;
+    state.sessions.push_operation_local(
+        Operation::ManageConnectionPolicy {
+            action: sift_protocol::PolicyAdminAction::Update,
+            tenant_id: tenant.0,
+            profile_id: profile_id.0,
+        },
+        OperationStatus::Succeeded,
+        Some(principal.0),
+        None,
+        None,
+        None,
+    );
+    Ok(Json(updated.policy))
+}
+
+async fn disconnect_metadata_connection(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+) -> ApiResult<Json<sift_protocol::DisconnectManagedConnectionsResponse>> {
+    let metadata = metadata_store_cloned(&state)?;
+    let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
+    let profile_id = connection_profile_id(id)?;
+    let principal = auth.principal_id;
+    let profile = metadata_blocking(move || {
+        metadata
+            .get_connection_profile_for_principal(profile_id, principal)
+            .map_err(Into::into)
+    })
+    .await?;
+    if !is_tenant_admin(&auth, profile.tenant_id) {
+        return Err(ApiError::Forbidden(
+            "tenant administrator access required".into(),
+        ));
+    }
+    let disconnected = state
+        .sessions
+        .disconnect_managed_profile(profile.tenant_id, profile_id)
+        .await;
+    state.sessions.push_operation_full(
+        Operation::ManageConnectionPolicy {
+            action: sift_protocol::PolicyAdminAction::Disconnect,
+            tenant_id: profile.tenant_id.0,
+            profile_id: profile_id.0,
+        },
+        OperationStatus::Succeeded,
+        Some(principal.0),
+        None,
+        Some(i64::try_from(disconnected).unwrap_or(i64::MAX)),
+        None,
+    );
+    Ok(Json(sift_protocol::DisconnectManagedConnectionsResponse {
+        disconnected: disconnected as u64,
+    }))
 }
 
 async fn get_tenant_usage(

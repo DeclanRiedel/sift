@@ -178,9 +178,11 @@ and tenant-resource enforcement remain absent.
       bytes; admin usage API and internal metric hooks.
 - [x] [Implement] Saved-query + document namespace isolation per
       tenant/principal.
-- [ ] [Implement] SDK/OpenAPI surfaces plus role, policy, SQL-classification,
-      revocation, rate, quota-race, cleanup, and trusted-local integration
-      matrices; graduate Phase F only with all workspace gates green.
+- [x] [Implement] SDK/OpenAPI surfaces for policy, effective capabilities,
+      limits, usage, structured errors, and retry metadata.
+- [ ] [Graduate] Role, policy, SQL-classification, revocation, rate,
+      quota-race, cleanup, and trusted-local integration matrices; graduate
+      Phase F only with all workspace gates green.
 
 ## Phase G — Collaboration depth
 

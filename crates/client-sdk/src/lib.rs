@@ -12,26 +12,28 @@ pub use sift_metadata::http::{
 use sift_metadata::{
     ApiTokenId, ConnectionProfile, ConnectionProfileId, Document, DocumentId, GithubAllowlistEntry,
     PrincipalKey, QueryHistory, Room, RoomId, RoomMember, SavedQuery, SavedQueryId,
-    SavedQueryScope, TenantId, TenantInvitation, TenantMembership,
+    SavedQueryScope, TenantId, TenantInvitation, TenantLimitOverride, TenantMembership,
 };
 use sift_protocol::{
     AcceptTenantInvitationRequest, AdminCreatePasswordPrincipalRequest,
-    AdminLinkPasswordIdentityRequest, AdminSetPrincipalDisabledRequest, ApplyEditsRequest,
-    ApplyEditsResult, AuthIdentitySummary, AuthPrincipal, AuthSessionSummary, AuthTokensResponse,
-    BeginTransactionRequest, BulkInsertRequest, BulkInsertResponse, CancelRequest,
-    ChangePasswordRequest, ConnectionId, ConnectionInfo, CreateGithubAllowlistRequest,
-    CreateTenantInvitationRequest, CsvImportRequest, CsvImportResponse, CursorId,
-    DataSearchRequest, DataSearchResponse, DatabaseProcess, EditPlan, EndTransactionRequest,
-    ExecuteRequestHttp, ExecuteResponse, ExplainRequest, ExplainResponse,
-    GithubNativeAuthExchangeRequest, GithubNativeAuthStartResponse, Health,
-    IssuedPasswordResetResponse, IssuedTenantInvitationResponse, KeyAuthenticateRequest,
-    KeyChallengeRequest, KeyChallengeResponse, KillProcessRequest, KillProcessResponse,
-    OpenConnectionRequest, OpenSessionRequest, OperationCapability, OperationCapabilityContext,
-    Page, PasswordLoginRequest, PasswordResetRequest, PreviewEditsRequest, Readiness,
-    RefreshAuthRequest, RegisterPrincipalKeyRequest, SavepointRequest, SchemaSearchRequest,
-    SchemaSearchResponse, SchemaSnapshot, ServerInfo, SessionId, SessionInfo,
+    AdminLinkPasswordIdentityRequest, AdminSetPrincipalDisabledRequest, ApiErrorResponse,
+    ApplyEditsRequest, ApplyEditsResult, AuthIdentitySummary, AuthPrincipal, AuthSessionSummary,
+    AuthTokensResponse, BeginTransactionRequest, BulkInsertRequest, BulkInsertResponse,
+    CancelRequest, ChangePasswordRequest, ConnectionId, ConnectionInfo, ConnectionPolicy,
+    CreateGithubAllowlistRequest, CreateTenantInvitationRequest, CsvImportRequest,
+    CsvImportResponse, CursorId, DataSearchRequest, DataSearchResponse, DatabaseProcess,
+    DisconnectManagedConnectionsResponse, EditPlan, EndTransactionRequest, ExecuteRequestHttp,
+    ExecuteResponse, ExplainRequest, ExplainResponse, GithubNativeAuthExchangeRequest,
+    GithubNativeAuthStartResponse, Health, IssuedPasswordResetResponse,
+    IssuedTenantInvitationResponse, KeyAuthenticateRequest, KeyChallengeRequest,
+    KeyChallengeResponse, KillProcessRequest, KillProcessResponse, OpenConnectionRequest,
+    OpenSessionRequest, OperationCapability, OperationCapabilityContext, Page,
+    PasswordLoginRequest, PasswordResetRequest, PreviewEditsRequest, Readiness, RefreshAuthRequest,
+    RegisterPrincipalKeyRequest, SavepointRequest, SchemaSearchRequest, SchemaSearchResponse,
+    SchemaSnapshot, ServerInfo, SessionId, SessionInfo, TenantResourceLimits, TenantUsageSnapshot,
     TextDocumentOperation, TransactionEndAction, TransactionInfo, TransactionPreview,
-    TransactionPreviewRequest, TransactionState, TxHandleRef, TxId, TxMode, Value, WebAuthResponse,
+    TransactionPreviewRequest, TransactionState, TxHandleRef, TxId, TxMode,
+    UpdateConnectionPolicyRequest, UpdateTenantLimitsRequest, Value, WebAuthResponse,
     WhoAmIResponse, WsClientMessage, WsServerMessage,
 };
 
@@ -87,10 +89,10 @@ impl SessionTokenProvider {
 pub enum Error {
     #[error("http transport error: {0}")]
     Transport(#[from] reqwest::Error),
-    #[error("server error {status}: {body}")]
+    #[error("server error {status}: {}", error.message)]
     Server {
         status: reqwest::StatusCode,
-        body: String,
+        error: ApiErrorResponse,
     },
     #[error("websocket error: {0}")]
     WebSocket(#[from] tokio_tungstenite::tungstenite::Error),
@@ -485,8 +487,7 @@ impl Client {
         if status == reqwest::StatusCode::OK || status == reqwest::StatusCode::SERVICE_UNAVAILABLE {
             Ok(response.json().await?)
         } else {
-            let body = response.text().await.unwrap_or_default();
-            Err(Error::Server { status, body })
+            Err(server_error(response).await)
         }
     }
 
@@ -580,8 +581,7 @@ impl Client {
         let resp = req.send().await?;
         let status = resp.status();
         if !status.is_success() {
-            let body = resp.text().await.unwrap_or_default();
-            return Err(Error::Server { status, body });
+            return Err(server_error(resp).await);
         }
         Ok(resp.bytes().await?.to_vec())
     }
@@ -1084,6 +1084,59 @@ impl Client {
         .await
     }
 
+    pub async fn connection_policy(
+        &self,
+        profile: ConnectionProfileId,
+    ) -> Result<ConnectionPolicy> {
+        self.get(&format!("/v1/metadata/connections/{}/policy", profile.0))
+            .await
+    }
+
+    pub async fn update_connection_policy(
+        &self,
+        profile: ConnectionProfileId,
+        request: UpdateConnectionPolicyRequest,
+    ) -> Result<ConnectionPolicy> {
+        self.put(
+            &format!("/v1/metadata/connections/{}/policy", profile.0),
+            &request,
+        )
+        .await
+    }
+
+    pub async fn disconnect_connection_profile(
+        &self,
+        profile: ConnectionProfileId,
+    ) -> Result<DisconnectManagedConnectionsResponse> {
+        self.post_empty(&format!(
+            "/v1/metadata/connections/{}/disconnect",
+            profile.0
+        ))
+        .await
+    }
+
+    pub async fn tenant_usage(&self, tenant: TenantId) -> Result<TenantUsageSnapshot> {
+        self.get(&format!("/v1/metadata/tenants/{}/usage", tenant.0))
+            .await
+    }
+
+    pub async fn set_tenant_limits(
+        &self,
+        tenant: TenantId,
+        limits: TenantResourceLimits,
+    ) -> Result<TenantLimitOverride> {
+        self.put(
+            &format!("/v1/admin/tenants/{}/limits", tenant.0),
+            &UpdateTenantLimitsRequest { limits },
+        )
+        .await
+    }
+
+    pub async fn clear_tenant_limits(&self, tenant: TenantId) -> Result<()> {
+        self.delete(&format!("/v1/admin/tenants/{}/limits", tenant.0))
+            .await
+    }
+
     pub async fn open_connection_from_profile(
         &self,
         session: SessionId,
@@ -1259,6 +1312,15 @@ impl Client {
         context: &OperationCapabilityContext,
     ) -> Result<Vec<OperationCapability>> {
         let mut query = Vec::new();
+        if let Some(tenant) = context.tenant_id {
+            query.push(format!("tenant_id={tenant}"));
+        }
+        if let Some(room) = context.room_id {
+            query.push(format!("room_id={room}"));
+        }
+        if let Some(profile) = context.connection_profile_id {
+            query.push(format!("connection_profile_id={profile}"));
+        }
         if let Some(session) = context.session {
             query.push(format!("session={session}"));
         }
@@ -1512,8 +1574,7 @@ impl Client {
         let response = request.send().await?;
         let status = response.status();
         if !status.is_success() {
-            let body = response.text().await.unwrap_or_default();
-            return Err(Error::Server { status, body });
+            return Err(server_error(response).await);
         }
         Ok(response.json().await?)
     }
@@ -1533,16 +1594,27 @@ impl Client {
 async fn response_json<T: serde::de::DeserializeOwned>(response: reqwest::Response) -> Result<T> {
     let status = response.status();
     if !status.is_success() {
-        let body = response.text().await.unwrap_or_default();
-        return Err(Error::Server { status, body });
+        return Err(server_error(response).await);
     }
     Ok(response.json().await?)
 }
 
 async fn server_error(response: reqwest::Response) -> Error {
     let status = response.status();
+    let retry_after_secs = response
+        .headers()
+        .get(reqwest::header::RETRY_AFTER)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse().ok());
     let body = response.text().await.unwrap_or_default();
-    Error::Server { status, body }
+    let mut error = serde_json::from_str::<ApiErrorResponse>(&body).unwrap_or(ApiErrorResponse {
+        kind: "http_error".to_string(),
+        message: body,
+        correlation_id: None,
+        retry_after_secs: None,
+    });
+    error.retry_after_secs = error.retry_after_secs.or(retry_after_secs);
+    Error::Server { status, error }
 }
 
 async fn next_ws<S>(ws: &mut S) -> Result<WsServerMessage>

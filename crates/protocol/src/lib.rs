@@ -65,9 +65,9 @@ pub use operation::{
 };
 pub use plan::{ExplainRequest, ExplainResponse, PlanNode};
 pub use policy::{
-    ConnectionPolicy, RateLimitClass, SchemaSelector, TenantResource, TenantResourceLimits,
-    TenantResourceUsage, TenantRole, TenantUsageSnapshot, UpdateConnectionPolicyRequest,
-    UpdateTenantLimitsRequest,
+    ApiErrorResponse, ConnectionPolicy, DisconnectManagedConnectionsResponse, RateLimitClass,
+    SchemaSelector, TenantResource, TenantResourceLimits, TenantResourceUsage, TenantRole,
+    TenantUsageSnapshot, UpdateConnectionPolicyRequest, UpdateTenantLimitsRequest,
 };
 pub use process::{DatabaseProcess, KillProcessRequest, KillProcessResponse};
 pub use result::{CursorId, ExecuteRequest, Page, Row};
