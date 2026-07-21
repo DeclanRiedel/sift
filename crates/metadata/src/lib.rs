@@ -2166,6 +2166,25 @@ impl MetadataStore {
         self.connection_profile_by_id_locked(&conn, id)
     }
 
+    pub fn get_connection_profile_for_principal(
+        &self,
+        id: ConnectionProfileId,
+        principal: PrincipalId,
+    ) -> Result<ConnectionProfile> {
+        let conn = self.conn()?;
+        let tenant: Option<i64> = conn
+            .query_row(
+                "SELECT cp.tenant_id FROM connection_profile cp
+                 JOIN membership m ON m.tenant_id = cp.tenant_id
+                 WHERE cp.id = ?1 AND m.principal_id = ?2",
+                params![id.0, principal.0],
+                |row| row.get(0),
+            )
+            .optional()?;
+        tenant.ok_or(MetadataError::ConnectionProfileNotFound(id))?;
+        self.connection_profile_by_id_locked(&conn, id)
+    }
+
     pub fn update_connection_policy(
         &self,
         tenant: TenantId,
@@ -2756,6 +2775,56 @@ impl MetadataStore {
         self.document_by_id_locked(&conn, document_id)
     }
 
+    pub fn create_document_for_principal(
+        &self,
+        room: RoomId,
+        principal: PrincipalId,
+        input: NewDocument,
+    ) -> Result<Document> {
+        let now = now_text();
+        let mut conn = self.conn()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let tenant_id: Option<i64> = tx
+            .query_row(
+                "SELECT r.tenant_id FROM room r
+                 JOIN room_member m ON m.room_id = r.id
+                 WHERE r.id = ?1 AND m.principal_id = ?2 AND m.role IN ('owner', 'editor')",
+                params![room.0, principal.0],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let tenant_id = tenant_id.ok_or(MetadataError::RoomNotFound(room))?;
+        if let Some(profile) = input.connection_profile_id {
+            let valid: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM connection_profile WHERE id = ?1 AND tenant_id = ?2)",
+                params![profile.0, tenant_id],
+                |row| row.get(0),
+            )?;
+            if !valid {
+                return Err(MetadataError::TenantMismatch(profile, TenantId(tenant_id)));
+            }
+        }
+        tx.execute(
+            "INSERT INTO document
+             (room_id, kind, title, crdt_type, crdt_state, position, connection_profile_id, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8)",
+            params![
+                room.0,
+                input.kind,
+                input.title,
+                input.crdt_type.as_str(),
+                input.crdt_state,
+                input.position,
+                input.connection_profile_id.map(|id| id.0),
+                now
+            ],
+        )?;
+        let document_id = DocumentId(tx.last_insert_rowid());
+        let document = self.document_by_id_locked(&tx, document_id)?;
+        tx.commit()?;
+        Ok(document)
+    }
+
     pub fn list_documents(&self, room: RoomId) -> Result<Vec<Document>> {
         let conn = self.conn()?;
         let mut stmt = conn.prepare(
@@ -2769,9 +2838,55 @@ impl MetadataStore {
         documents
     }
 
+    pub fn list_documents_for_principal(
+        &self,
+        room: RoomId,
+        principal: PrincipalId,
+    ) -> Result<Vec<Document>> {
+        let conn = self.conn()?;
+        let member: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM room_member WHERE room_id = ?1 AND principal_id = ?2)",
+            params![room.0, principal.0],
+            |row| row.get(0),
+        )?;
+        if !member {
+            return Err(MetadataError::RoomNotFound(room));
+        }
+        let mut stmt = conn.prepare(
+            "SELECT d.id, d.room_id, d.kind, d.title, d.crdt_type, d.crdt_state, d.position,
+                    d.connection_profile_id, d.created_at, d.updated_at
+             FROM document d
+             JOIN room_member m ON m.room_id = d.room_id
+             WHERE d.room_id = ?1 AND m.principal_id = ?2
+             ORDER BY d.position, d.id",
+        )?;
+        let documents = rows(stmt.query_map(params![room.0, principal.0], document_from_row)?);
+        documents
+    }
+
     pub fn get_document(&self, id: DocumentId) -> Result<Document> {
         let conn = self.conn()?;
         self.document_by_id_locked(&conn, id)
+    }
+
+    pub fn get_document_for_principal(
+        &self,
+        id: DocumentId,
+        principal: PrincipalId,
+        writable: bool,
+    ) -> Result<Document> {
+        let conn = self.conn()?;
+        conn.query_row(
+            "SELECT d.id, d.room_id, d.kind, d.title, d.crdt_type, d.crdt_state, d.position,
+                    d.connection_profile_id, d.created_at, d.updated_at
+             FROM document d JOIN room_member m ON m.room_id = d.room_id
+             WHERE d.id = ?1 AND m.principal_id = ?2
+               AND (?3 = 0 OR m.role IN ('owner', 'editor'))",
+            params![id.0, principal.0, writable],
+            document_from_row,
+        )
+        .optional()?
+        .ok_or(MetadataError::DocumentNotFound(id))
     }
 
     pub fn update_document_snapshot(
@@ -2791,9 +2906,52 @@ impl MetadataStore {
         self.document_by_id_locked(&conn, document)
     }
 
+    pub fn update_document_snapshot_for_principal(
+        &self,
+        document: DocumentId,
+        principal: PrincipalId,
+        crdt_state: Vec<u8>,
+    ) -> Result<Document> {
+        let now = now_text();
+        let conn = self.conn()?;
+        let updated = conn.execute(
+            "UPDATE document SET crdt_state = ?1, updated_at = ?2
+             WHERE id = ?3 AND EXISTS (
+                 SELECT 1 FROM room_member m
+                 WHERE m.room_id = document.room_id AND m.principal_id = ?4
+                   AND m.role IN ('owner', 'editor')
+             )",
+            params![crdt_state, now, document.0, principal.0],
+        )?;
+        if updated == 0 {
+            return Err(MetadataError::DocumentNotFound(document));
+        }
+        self.document_by_id_locked(&conn, document)
+    }
+
     pub fn delete_document(&self, document: DocumentId) -> Result<()> {
         let conn = self.conn()?;
         let deleted = conn.execute("DELETE FROM document WHERE id = ?1", params![document.0])?;
+        if deleted == 0 {
+            return Err(MetadataError::DocumentNotFound(document));
+        }
+        Ok(())
+    }
+
+    pub fn delete_document_for_principal(
+        &self,
+        document: DocumentId,
+        principal: PrincipalId,
+    ) -> Result<()> {
+        let conn = self.conn()?;
+        let deleted = conn.execute(
+            "DELETE FROM document WHERE id = ?1 AND EXISTS (
+                 SELECT 1 FROM room_member m
+                 WHERE m.room_id = document.room_id AND m.principal_id = ?2
+                   AND m.role IN ('owner', 'editor')
+             )",
+            params![document.0, principal.0],
+        )?;
         if deleted == 0 {
             return Err(MetadataError::DocumentNotFound(document));
         }
@@ -2943,6 +3101,16 @@ impl MetadataStore {
         let now = now_text();
         let tags_json = serde_json::to_string(&input.tags).map_err(MetadataError::Json)?;
         let conn = self.conn()?;
+        if let Some(profile) = input.connection_profile_id {
+            let valid: bool = conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM connection_profile WHERE id = ?1 AND tenant_id = ?2)",
+                params![profile.0, input.tenant_id.0],
+                |row| row.get(0),
+            )?;
+            if !valid {
+                return Err(MetadataError::TenantMismatch(profile, input.tenant_id));
+            }
+        }
         conn.execute(
             "INSERT INTO saved_query
              (tenant_id, principal_id, name, sql_text, connection_profile_id,
@@ -2962,12 +3130,30 @@ impl MetadataStore {
         self.saved_query_by_id_locked(&conn, id)
     }
 
-    /// Fetch a saved query by id. Caller is responsible for the
-    /// visibility check (owner or tenant member) before returning to
-    /// an untrusted principal.
+    /// Fetch a saved query by id for trusted internal maintenance paths.
     pub fn get_saved_query(&self, id: SavedQueryId) -> Result<SavedQuery> {
         let conn = self.conn()?;
         self.saved_query_by_id_locked(&conn, id)
+    }
+
+    pub fn get_saved_query_visible(
+        &self,
+        id: SavedQueryId,
+        tenant: TenantId,
+        principal: PrincipalId,
+    ) -> Result<SavedQuery> {
+        let conn = self.conn()?;
+        conn.query_row(
+            "SELECT id, tenant_id, principal_id, name, sql_text,
+                    connection_profile_id, tags_json, created_at, updated_at
+             FROM saved_query
+             WHERE id = ?1 AND tenant_id = ?2
+               AND (principal_id = ?3 OR principal_id IS NULL)",
+            params![id.0, tenant.0, principal.0],
+            saved_query_from_row,
+        )
+        .optional()?
+        .ok_or(MetadataError::SavedQueryNotFound(id))
     }
 
     /// List saved queries visible to `principal` in the filter's
@@ -3048,6 +3234,16 @@ impl MetadataStore {
         let connection_profile_id = update
             .connection_profile_id
             .unwrap_or(existing.connection_profile_id);
+        if let Some(profile) = connection_profile_id {
+            let valid: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM connection_profile WHERE id = ?1 AND tenant_id = ?2)",
+                params![profile.0, existing.tenant_id.0],
+                |row| row.get(0),
+            )?;
+            if !valid {
+                return Err(MetadataError::TenantMismatch(profile, existing.tenant_id));
+            }
+        }
         let tags = update.tags.unwrap_or(existing.tags);
         let tags_json = serde_json::to_string(&tags).map_err(MetadataError::Json)?;
         tx.execute(
@@ -3076,6 +3272,81 @@ impl MetadataStore {
         let conn = self.conn()?;
         let deleted = conn.execute("DELETE FROM saved_query WHERE id = ?1", params![id.0])?;
         Ok(deleted > 0)
+    }
+
+    pub fn update_saved_query_authorized(
+        &self,
+        id: SavedQueryId,
+        tenant: TenantId,
+        principal: PrincipalId,
+        tenant_admin: bool,
+        update: UpdateSavedQuery,
+    ) -> Result<SavedQuery> {
+        let mut conn = self.conn()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let existing = tx
+            .query_row(
+                "SELECT id, tenant_id, principal_id, name, sql_text,
+                        connection_profile_id, tags_json, created_at, updated_at
+                 FROM saved_query
+                 WHERE id = ?1 AND tenant_id = ?2
+                   AND (principal_id = ?3 OR (principal_id IS NULL AND ?4))",
+                params![id.0, tenant.0, principal.0, tenant_admin],
+                saved_query_from_row,
+            )
+            .optional()?
+            .ok_or(MetadataError::SavedQueryNotFound(id))?;
+        let name = update.name.unwrap_or(existing.name);
+        let sql_text = update.sql_text.unwrap_or(existing.sql_text);
+        let profile = update
+            .connection_profile_id
+            .unwrap_or(existing.connection_profile_id);
+        if let Some(profile) = profile {
+            let valid: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM connection_profile WHERE id = ?1 AND tenant_id = ?2)",
+                params![profile.0, tenant.0],
+                |row| row.get(0),
+            )?;
+            if !valid {
+                return Err(MetadataError::TenantMismatch(profile, tenant));
+            }
+        }
+        let tags = update.tags.unwrap_or(existing.tags);
+        tx.execute(
+            "UPDATE saved_query SET name = ?1, sql_text = ?2, connection_profile_id = ?3,
+                 tags_json = ?4, updated_at = ?5 WHERE id = ?6",
+            params![
+                name,
+                sql_text,
+                profile.map(|profile| profile.0),
+                serde_json::to_string(&tags)?,
+                now_text(),
+                id.0
+            ],
+        )?;
+        let updated = self.saved_query_by_id_locked(&tx, id)?;
+        tx.commit()?;
+        Ok(updated)
+    }
+
+    pub fn delete_saved_query_authorized(
+        &self,
+        id: SavedQueryId,
+        tenant: TenantId,
+        principal: PrincipalId,
+        tenant_admin: bool,
+    ) -> Result<()> {
+        let conn = self.conn()?;
+        let deleted = conn.execute(
+            "DELETE FROM saved_query
+             WHERE id = ?1 AND tenant_id = ?2
+               AND (principal_id = ?3 OR (principal_id IS NULL AND ?4))",
+            params![id.0, tenant.0, principal.0, tenant_admin],
+        )?;
+        if deleted == 0 {
+            return Err(MetadataError::SavedQueryNotFound(id));
+        }
+        Ok(())
     }
 
     fn saved_query_by_id_locked(&self, conn: &Connection, id: SavedQueryId) -> Result<SavedQuery> {
@@ -5443,6 +5714,177 @@ mod tests {
 
         store.delete_document(document.id).unwrap();
         assert!(store.list_documents(room.id).unwrap().is_empty());
+    }
+
+    #[test]
+    fn document_namespace_enforces_room_membership_and_write_roles() {
+        let store = store();
+        store.bootstrap_local("local user").unwrap();
+        let viewer = store.create_principal("viewer", "viewer", None).unwrap();
+        let outsider = store
+            .create_principal("outsider", "outsider", None)
+            .unwrap();
+        let room = store
+            .create_room(
+                TenantId(1),
+                PrincipalId(1),
+                NewRoom {
+                    name: "isolated room".to_string(),
+                    kind: RoomKind::Shared,
+                },
+            )
+            .unwrap();
+        store
+            .add_room_member(room.id, viewer.id, RoomRole::Viewer)
+            .unwrap();
+        let document = store
+            .create_document_for_principal(
+                room.id,
+                PrincipalId(1),
+                NewDocument {
+                    kind: "sql".to_string(),
+                    title: "private.sql".to_string(),
+                    crdt_type: CrdtType::Loro,
+                    crdt_state: b"select 1".to_vec(),
+                    position: 0,
+                    connection_profile_id: None,
+                },
+            )
+            .unwrap();
+
+        assert_eq!(
+            store
+                .list_documents_for_principal(room.id, viewer.id)
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(matches!(
+            store.get_document_for_principal(document.id, outsider.id, false),
+            Err(MetadataError::DocumentNotFound(_))
+        ));
+        assert!(matches!(
+            store.get_document_for_principal(document.id, viewer.id, true),
+            Err(MetadataError::DocumentNotFound(_))
+        ));
+        assert!(matches!(
+            store.update_document_snapshot_for_principal(
+                document.id,
+                viewer.id,
+                b"denied".to_vec()
+            ),
+            Err(MetadataError::DocumentNotFound(_))
+        ));
+
+        store
+            .add_room_member(room.id, viewer.id, RoomRole::Editor)
+            .unwrap();
+        let updated = store
+            .update_document_snapshot_for_principal(document.id, viewer.id, b"allowed".to_vec())
+            .unwrap();
+        assert_eq!(updated.crdt_state, b"allowed");
+    }
+
+    #[tokio::test]
+    async fn saved_query_namespace_hides_other_principals_and_tenants() {
+        let store = store();
+        store.bootstrap_local("local user").unwrap();
+        let peer = store.create_principal("peer", "peer", None).unwrap();
+        store
+            .upsert_tenant_membership(TenantId(1), peer.id, MembershipRole::Member)
+            .unwrap();
+        let foreign_principal = store.create_principal("foreign", "foreign", None).unwrap();
+        let foreign_tenant = store.create_tenant("foreign", TenantKind::Team).unwrap();
+        store
+            .upsert_tenant_membership(
+                foreign_tenant.id,
+                foreign_principal.id,
+                MembershipRole::Owner,
+            )
+            .unwrap();
+        let foreign_profile = store
+            .upsert_connection_profile(
+                foreign_tenant.id,
+                foreign_principal.id,
+                NewConnectionProfile {
+                    name: "foreign pg".to_string(),
+                    engine: Engine::Postgres,
+                    spec: spec(None),
+                    credential_mode: CredentialMode::PerUser,
+                    tags: Vec::new(),
+                },
+            )
+            .await
+            .unwrap();
+        let personal = store
+            .insert_saved_query(NewSavedQuery {
+                tenant_id: TenantId(1),
+                owner_principal_id: Some(PrincipalId(1)),
+                name: "personal".to_string(),
+                sql_text: "select 1".to_string(),
+                connection_profile_id: None,
+                tags: Vec::new(),
+            })
+            .unwrap();
+        let shared = store
+            .insert_saved_query(NewSavedQuery {
+                tenant_id: TenantId(1),
+                owner_principal_id: None,
+                name: "shared".to_string(),
+                sql_text: "select 2".to_string(),
+                connection_profile_id: None,
+                tags: Vec::new(),
+            })
+            .unwrap();
+
+        assert!(matches!(
+            store.get_saved_query_visible(personal.id, TenantId(1), peer.id),
+            Err(MetadataError::SavedQueryNotFound(_))
+        ));
+        assert_eq!(
+            store
+                .get_saved_query_visible(shared.id, TenantId(1), peer.id)
+                .unwrap()
+                .id,
+            shared.id
+        );
+        assert!(matches!(
+            store.update_saved_query_authorized(
+                personal.id,
+                TenantId(1),
+                peer.id,
+                false,
+                UpdateSavedQuery {
+                    name: Some("stolen".to_string()),
+                    ..UpdateSavedQuery::default()
+                }
+            ),
+            Err(MetadataError::SavedQueryNotFound(_))
+        ));
+        assert!(matches!(
+            store.update_saved_query_authorized(
+                shared.id,
+                TenantId(1),
+                peer.id,
+                false,
+                UpdateSavedQuery {
+                    name: Some("denied".to_string()),
+                    ..UpdateSavedQuery::default()
+                }
+            ),
+            Err(MetadataError::SavedQueryNotFound(_))
+        ));
+        assert!(matches!(
+            store.insert_saved_query(NewSavedQuery {
+                tenant_id: TenantId(1),
+                owner_principal_id: Some(PrincipalId(1)),
+                name: "bad profile".to_string(),
+                sql_text: "select 3".to_string(),
+                connection_profile_id: Some(foreign_profile.id),
+                tags: Vec::new(),
+            }),
+            Err(MetadataError::TenantMismatch(_, TenantId(1)))
+        ));
     }
 
     #[test]

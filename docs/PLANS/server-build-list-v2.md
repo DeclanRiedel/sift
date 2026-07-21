@@ -176,7 +176,7 @@ and tenant-resource enforcement remain absent.
 - [x] [Implement] Tenant resource accounting for profiles, sessions,
       connections, concurrent queries, open cursors, and retained result
       bytes; admin usage API and internal metric hooks.
-- [ ] [Implement] Saved-query + document namespace isolation per
+- [x] [Implement] Saved-query + document namespace isolation per
       tenant/principal.
 - [ ] [Implement] SDK/OpenAPI surfaces plus role, policy, SQL-classification,
       revocation, rate, quota-race, cleanup, and trusted-local integration

@@ -2389,17 +2389,6 @@ fn room_role_allows(role: &RoomRole, permission: RoomPermission) -> bool {
     }
 }
 
-fn ensure_document_access(
-    metadata: &MetadataStore,
-    auth: &AuthContext,
-    document: DocumentId,
-    permission: RoomPermission,
-) -> ApiResult<Document> {
-    let document = metadata.get_document(document)?;
-    ensure_room_permission(metadata, auth, document.room_id, permission)?;
-    Ok(document)
-}
-
 fn push_metadata_operation(
     state: &AppState,
     actor: PrincipalId,
@@ -2499,8 +2488,8 @@ async fn execute_metadata_context(
             )?;
         }
         if let Some(profile) = profile {
-            let profile = metadata_for_check.get_connection_profile_for_any_tenant(profile)?;
-            ensure_tenant(&auth_for_check, profile.tenant_id)?;
+            metadata_for_check
+                .get_connection_profile_for_principal(profile, auth_for_check.principal_id)?;
         }
         Ok(())
     })
@@ -2698,7 +2687,7 @@ fn capability_authorization_scope(
         }
     }
     let profile = profile_id
-        .map(|id| metadata.get_connection_profile_for_any_tenant(id))
+        .map(|id| metadata.get_connection_profile_for_principal(id, auth.principal_id))
         .transpose()?;
     if let Some(profile) = &profile {
         merge_capability_tenant(&mut tenant, profile.tenant_id)?;
@@ -3847,10 +3836,12 @@ async fn list_metadata_documents(
     let metadata = metadata_store_cloned(&state)?;
     let auth = resolve_auth_context_blocking(state, headers).await?;
     let room = room_id(id)?;
+    let principal = auth.principal_id;
     Ok(Json(
         metadata_blocking(move || {
-            ensure_room_permission(&metadata, &auth, room, RoomPermission::Read)?;
-            metadata.list_documents(room).map_err(Into::into)
+            metadata
+                .list_documents_for_principal(room, principal)
+                .map_err(Into::into)
         })
         .await?,
     ))
@@ -3867,20 +3858,11 @@ async fn create_metadata_document(
     let room = room_id(id)?;
     let actor = auth.principal_id;
     let document = metadata_blocking(move || {
-        let room_row = ensure_room_permission(&metadata, &auth, room, RoomPermission::Write)?;
         let connection_profile_id = req.connection_profile_id.map(ConnectionProfileId);
-        if let Some(profile_id) = connection_profile_id {
-            let profile = metadata.get_connection_profile_for_any_tenant(profile_id)?;
-            if profile.tenant_id != room_row.tenant_id {
-                return Err(ApiError::Forbidden(format!(
-                    "connection profile {:?} is not in room tenant {:?}",
-                    profile_id, room_row.tenant_id
-                )));
-            }
-        }
         metadata
-            .create_document(
+            .create_document_for_principal(
                 room,
+                actor,
                 NewDocument {
                     kind: req.kind,
                     title: req.title,
@@ -3908,9 +3890,8 @@ async fn update_metadata_document(
     let document = document_id(id)?;
     let actor = auth.principal_id;
     let updated = metadata_blocking(move || {
-        ensure_document_access(&metadata, &auth, document, RoomPermission::Write)?;
         metadata
-            .update_document_snapshot(document, req.crdt_state)
+            .update_document_snapshot_for_principal(document, actor, req.crdt_state)
             .map_err(Into::into)
     })
     .await?;
@@ -3928,8 +3909,7 @@ async fn delete_metadata_document(
     let document = document_id(id)?;
     let actor = auth.principal_id;
     metadata_blocking(move || {
-        ensure_document_access(&metadata, &auth, document, RoomPermission::Write)?;
-        metadata.delete_document(document)?;
+        metadata.delete_document_for_principal(document, actor)?;
         Ok(())
     })
     .await?;
@@ -4041,7 +4021,7 @@ async fn set_metadata_connection_credential(
     let profile_id = connection_profile_id(id)?;
     let profile = metadata_blocking(move || {
         metadata_sync
-            .get_connection_profile_for_any_tenant(profile_id)
+            .get_connection_profile_for_principal(profile_id, auth.principal_id)
             .map_err(Into::into)
     })
     .await?;
@@ -4233,8 +4213,21 @@ async fn get_metadata_saved_query(
     let metadata = metadata_store_cloned(&state)?;
     let auth = resolve_auth_context_blocking(state, headers).await?;
     let sq_id = saved_query_id(id)?;
-    let sq = metadata_blocking(move || metadata.get_saved_query(sq_id).map_err(Into::into)).await?;
-    ensure_saved_query_visible(&auth, &sq)?;
+    let principal = auth.principal_id;
+    let tenants: Vec<_> = auth.tenants.iter().map(|row| row.tenant.id).collect();
+    let sq = metadata_blocking(move || {
+        for tenant in tenants {
+            match metadata.get_saved_query_visible(sq_id, tenant, principal) {
+                Ok(query) => return Ok(query),
+                Err(sift_metadata::MetadataError::SavedQueryNotFound(_)) => continue,
+                Err(error) => return Err(error.into()),
+            }
+        }
+        Err(ApiError::Metadata(
+            sift_metadata::MetadataError::SavedQueryNotFound(sq_id),
+        ))
+    })
+    .await?;
     Ok(Json(sq))
 }
 
@@ -4302,11 +4295,6 @@ async fn update_metadata_saved_query(
     let metadata = metadata_store_cloned(&state)?;
     let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
     let sq_id = saved_query_id(id)?;
-    let existing = {
-        let metadata = metadata.clone();
-        metadata_blocking(move || metadata.get_saved_query(sq_id).map_err(Into::into)).await?
-    };
-    ensure_saved_query_editable(&auth, &existing)?;
     let update = UpdateSavedQuery {
         name: req.name,
         sql_text: req.sql_text,
@@ -4315,10 +4303,29 @@ async fn update_metadata_saved_query(
             .map(|opt| opt.map(ConnectionProfileId)),
         tags: req.tags,
     };
+    let principal = auth.principal_id;
+    let tenants: Vec<_> = auth
+        .tenants
+        .iter()
+        .map(|row| (row.tenant.id, is_tenant_admin(&auth, row.tenant.id)))
+        .collect();
     let updated = metadata_blocking(move || {
-        metadata
-            .update_saved_query(sq_id, update)
-            .map_err(Into::into)
+        for (tenant, admin) in tenants {
+            match metadata.update_saved_query_authorized(
+                sq_id,
+                tenant,
+                principal,
+                admin,
+                update.clone(),
+            ) {
+                Ok(query) => return Ok(query),
+                Err(sift_metadata::MetadataError::SavedQueryNotFound(_)) => continue,
+                Err(error) => return Err(error.into()),
+            }
+        }
+        Err(ApiError::Metadata(
+            sift_metadata::MetadataError::SavedQueryNotFound(sq_id),
+        ))
     })
     .await?;
     state.sessions.push_operation(
@@ -4340,13 +4347,25 @@ async fn delete_metadata_saved_query(
     let metadata = metadata_store_cloned(&state)?;
     let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
     let sq_id = saved_query_id(id)?;
-    let existing = {
-        let metadata = metadata.clone();
-        metadata_blocking(move || metadata.get_saved_query(sq_id).map_err(Into::into)).await?
-    };
-    ensure_saved_query_editable(&auth, &existing)?;
-    let deleted =
-        metadata_blocking(move || metadata.delete_saved_query(sq_id).map_err(Into::into)).await?;
+    let principal = auth.principal_id;
+    let tenants: Vec<_> = auth
+        .tenants
+        .iter()
+        .map(|row| (row.tenant.id, is_tenant_admin(&auth, row.tenant.id)))
+        .collect();
+    metadata_blocking(move || {
+        for (tenant, admin) in tenants {
+            match metadata.delete_saved_query_authorized(sq_id, tenant, principal, admin) {
+                Ok(()) => return Ok(()),
+                Err(sift_metadata::MetadataError::SavedQueryNotFound(_)) => continue,
+                Err(error) => return Err(error.into()),
+            }
+        }
+        Err(ApiError::Metadata(
+            sift_metadata::MetadataError::SavedQueryNotFound(sq_id),
+        ))
+    })
+    .await?;
     state.sessions.push_operation(
         Operation::Metadata {
             action: "saved_query.delete".into(),
@@ -4355,42 +4374,7 @@ async fn delete_metadata_saved_query(
         },
         OperationStatus::Succeeded,
     );
-    Ok(Json(json!({ "ok": true, "deleted": deleted })))
-}
-
-fn ensure_saved_query_visible(auth: &AuthContext, sq: &SavedQuery) -> ApiResult<()> {
-    ensure_tenant(auth, sq.tenant_id)?;
-    match sq.owner_principal_id {
-        Some(owner) if owner != auth.principal_id => Err(ApiError::Forbidden(
-            "saved query is personal to another principal".into(),
-        )),
-        _ => Ok(()),
-    }
-}
-
-fn ensure_saved_query_editable(auth: &AuthContext, sq: &SavedQuery) -> ApiResult<()> {
-    ensure_tenant(auth, sq.tenant_id)?;
-    match sq.owner_principal_id {
-        Some(owner) => {
-            if owner == auth.principal_id {
-                Ok(())
-            } else {
-                Err(ApiError::Forbidden(
-                    "personal saved queries can only be edited by their owner".into(),
-                ))
-            }
-        }
-        None => {
-            if is_tenant_admin(auth, sq.tenant_id) {
-                Ok(())
-            } else {
-                Err(ApiError::Forbidden(
-                    "tenant-shared saved queries can only be edited by tenant Owner or Admin"
-                        .into(),
-                ))
-            }
-        }
-    }
+    Ok(Json(json!({ "ok": true, "deleted": true })))
 }
 
 async fn list_auth_tokens(
@@ -5596,7 +5580,7 @@ async fn apply_room_document_operation(
     operation: sift_protocol::TextDocumentOperation,
 ) -> ApiResult<()> {
     metadata_blocking(move || {
-        let row = ensure_document_access(&metadata, &auth, document, RoomPermission::Write)?;
+        let row = metadata.get_document_for_principal(document, auth.principal_id, true)?;
         if row.room_id != room {
             return Err(ApiError::Forbidden(format!(
                 "document {:?} is not in room {:?}",
@@ -5622,7 +5606,11 @@ async fn apply_room_document_operation(
         let snapshot = doc
             .apply(operation)
             .map_err(|error| ApiError::BadRequest(error.to_string()))?;
-        metadata.update_document_snapshot(document, snapshot.bytes)?;
+        metadata.update_document_snapshot_for_principal(
+            document,
+            auth.principal_id,
+            snapshot.bytes,
+        )?;
         Ok(())
     })
     .await
