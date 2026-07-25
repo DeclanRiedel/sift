@@ -7,13 +7,18 @@ use axum::extract::{Extension, Path, Query, State};
 use axum::http::{header, header::HeaderName, HeaderMap, HeaderValue, Request, StatusCode};
 use axum::middleware::{from_fn, from_fn_with_state, Next};
 use axum::response::{IntoResponse, Redirect, Response};
-use axum::routing::{delete, get, post, put};
 use axum::{Json, Router};
 use futures::{SinkExt, StreamExt};
 use schemars::{schema_for, JsonSchema};
 use serde::Deserialize;
 use serde_json::json;
+use std::sync::Arc;
 use std::time::Instant;
+
+use aide::axum::routing::{delete_with, get_with, post_with, put_with};
+use aide::axum::ApiRouter;
+use aide::openapi::OpenApi;
+use aide::transform::TransformOperation;
 
 use sift_metadata::{
     ApiTokenId, AuthClientKind as MetadataAuthClientKind, AuthIdentityId, ConnectionProfileId,
@@ -89,261 +94,374 @@ pub fn app(state: AppState) -> Router {
     if let Some(metadata) = &state.metadata {
         state.sessions.set_authorization_store(metadata.clone());
     }
-    Router::new()
-        .route("/v1/health", get(health))
-        .route("/v1/ready", get(ready))
-        .route("/v1/audit", get(list_audit))
-        .route("/v1/operations", get(list_operations))
-        .route("/v1/operations/available", get(list_available_operations))
-        .route("/v1/operations/audit", get(list_operation_audit_log))
-        .route("/v1/openapi.json", get(openapi))
-        .route("/v1/auth/login", post(password_login))
-        .route("/v1/auth/refresh", post(refresh_auth))
-        .route("/v1/auth/logout", post(logout_auth))
-        .route("/v1/auth/logout-all", post(logout_all_auth))
-        .route("/v1/auth/whoami", get(whoami))
-        .route("/v1/auth/password", put(change_password))
-        .route("/v1/auth/password/reset", post(reset_password))
-        .route("/v1/auth/github/start", get(github_start))
-        .route("/v1/auth/github/callback", get(github_callback))
-        .route("/v1/auth/github/exchange", post(github_native_exchange))
-        .route(
+    let router = ApiRouter::new()
+        .api_route(
+            "/v1/health",
+            get_with(health, doc("health", "Liveness and registered engines")),
+        )
+        .api_route(
+            "/v1/ready",
+            get_with(ready, |op| {
+                doc(
+                    "ready",
+                    "Readiness: 200 when ready, 503 while draining/unhealthy",
+                )(op)
+                .response::<200, Json<sift_protocol::Readiness>>()
+                .response::<503, Json<sift_protocol::Readiness>>()
+            }),
+        )
+        .api_route(
+            "/v1/audit",
+            get_with(list_audit, doc("listAudit", "List in-memory operation audit rows")),
+        )
+        .api_route(
+            "/v1/operations",
+            get_with(list_operations, doc("listOperations", "List replayable operation audit rows")),
+        )
+        .api_route(
+            "/v1/operations/available",
+            get_with(list_available_operations, doc("listAvailableOperations", "List contextual operation capabilities")),
+        )
+        .api_route(
+            "/v1/operations/audit",
+            get_with(list_operation_audit_log, doc("listOperationAudit", "List durable operation audit rows (actor, target, result, rows)")),
+        )
+        .api_route(
+            "/v1/openapi.json",
+            get_with(openapi, doc("openapi", "OpenAPI document")),
+        )
+        .api_route(
+            "/v1/auth/login",
+            post_with(password_login, doc("passwordLogin", "Authenticate an instance-owned password identity")),
+        )
+        .api_route(
+            "/v1/auth/refresh",
+            post_with(refresh_auth, doc("refreshAuth", "Atomically rotate an interactive refresh credential")),
+        )
+        .api_route(
+            "/v1/auth/logout",
+            post_with(logout_auth, doc("logoutAuth", "Revoke the current interactive auth session")),
+        )
+        .api_route(
+            "/v1/auth/logout-all",
+            post_with(logout_all_auth, doc("logoutAllAuth", "Revoke every interactive auth session for the principal")),
+        )
+        .api_route(
+            "/v1/auth/whoami",
+            get_with(whoami, doc("whoAmI", "Return the authenticated principal and memberships")),
+        )
+        .api_route(
+            "/v1/auth/password",
+            put_with(change_password, doc("changePassword", "Replace the current principal password and revoke interactive sessions")),
+        )
+        .api_route(
+            "/v1/auth/password/reset",
+            post_with(reset_password, doc("resetPassword", "Consume an administrator-issued one-use password reset token")),
+        )
+        .api_route(
+            "/v1/auth/github/start",
+            get_with(github_start, doc("githubAuthStart", "Start the instance GitHub OAuth flow with state and S256 PKCE")),
+        )
+        .api_route(
+            "/v1/auth/github/callback",
+            get_with(github_callback, doc("githubAuthCallback", "Complete GitHub OAuth, enforce the allowlist, and set browser cookies")),
+        )
+        .api_route(
+            "/v1/auth/github/exchange",
+            post_with(github_native_exchange, doc("githubNativeAuthExchange", "Exchange a completed one-use native GitHub handoff for Sift tokens")),
+        )
+        .api_route(
             "/v1/admin/auth/github-allowlist",
-            get(list_github_allowlist).post(create_github_allowlist),
+            get_with(list_github_allowlist, doc("listGithubAllowlist", "List GitHub allowlist entries (instance admin)")).post_with(create_github_allowlist, doc("createGithubAllowlist", "Allow a GitHub login, optionally linked to an existing principal")),
         )
-        .route(
+        .api_route(
             "/v1/admin/auth/github-allowlist/:id",
-            delete(revoke_github_allowlist),
+            delete_with(revoke_github_allowlist, doc("revokeGithubAllowlist", "Revoke a pending GitHub allowlist entry")),
         )
-        .route("/v1/admin/principals", post(admin_create_principal))
-        .route(
+        .api_route(
+            "/v1/admin/principals",
+            post_with(admin_create_principal, doc("adminCreatePasswordPrincipal", "")),
+        )
+        .api_route(
             "/v1/admin/principals/:id/disabled",
-            put(admin_set_principal_disabled),
+            put_with(admin_set_principal_disabled, doc("adminSetPrincipalDisabled", "")),
         )
-        .route(
+        .api_route(
             "/v1/admin/principals/:id/identities",
-            get(admin_list_principal_identities),
+            get_with(admin_list_principal_identities, doc("adminListPrincipalIdentities", "")),
         )
-        .route(
+        .api_route(
             "/v1/admin/principals/:id/identities/password",
-            post(admin_link_password_identity),
+            post_with(admin_link_password_identity, doc("adminLinkPasswordIdentity", "")),
         )
-        .route(
+        .api_route(
             "/v1/admin/principals/:principal_id/identities/:identity_id",
-            delete(admin_unlink_identity),
+            delete_with(admin_unlink_identity, doc("adminUnlinkIdentity", "")),
         )
-        .route(
+        .api_route(
             "/v1/admin/principals/:id/auth-sessions",
-            get(admin_list_auth_sessions),
+            get_with(admin_list_auth_sessions, doc("adminListAuthSessions", "")),
         )
-        .route(
+        .api_route(
             "/v1/admin/principals/:principal_id/auth-sessions/:session_id",
-            delete(admin_revoke_auth_session),
+            delete_with(admin_revoke_auth_session, doc("adminRevokeAuthSession", "")),
         )
-        .route(
+        .api_route(
             "/v1/admin/principals/:principal_id/identities/:identity_id/password-reset",
-            post(admin_issue_password_reset),
+            post_with(admin_issue_password_reset, doc("adminIssuePasswordReset", "")),
         )
-        .route(
+        .api_route(
             "/v1/metadata/tenants/:id/invitations",
-            get(list_tenant_invitations).post(create_tenant_invitation),
+            get_with(list_tenant_invitations, doc("listTenantInvitations", "")).post_with(create_tenant_invitation, doc("createTenantInvitation", "")),
         )
-        .route(
+        .api_route(
             "/v1/metadata/tenants/:tenant_id/invitations/:id",
-            delete(revoke_tenant_invitation),
+            delete_with(revoke_tenant_invitation, doc("revokeTenantInvitation", "Revoke an unconsumed tenant invitation")),
         )
-        .route(
+        .api_route(
             "/v1/auth/invitations/accept",
-            post(accept_tenant_invitation),
+            post_with(accept_tenant_invitation, doc("acceptTenantInvitation", "")),
         )
-        .route(
+        .api_route(
             "/v1/auth/keys",
-            get(list_principal_keys).post(register_principal_key),
+            get_with(list_principal_keys, doc("listPrincipalKeys", "")).post_with(register_principal_key, doc("registerPrincipalKey", "")),
         )
-        .route("/v1/auth/keys/:id", delete(revoke_principal_key))
-        .route("/v1/auth/keys/challenge", post(issue_key_challenge))
-        .route("/v1/auth/keys/authenticate", post(authenticate_key))
-        .route("/v1/metadata/tenants", get(list_metadata_tenants))
-        .route(
+        .api_route(
+            "/v1/auth/keys/:id",
+            delete_with(revoke_principal_key, doc("revokePrincipalKey", "Revoke a registered principal key")),
+        )
+        .api_route(
+            "/v1/auth/keys/challenge",
+            post_with(issue_key_challenge, doc("issueKeyChallenge", "")),
+        )
+        .api_route(
+            "/v1/auth/keys/authenticate",
+            post_with(authenticate_key, doc("authenticateKey", "")),
+        )
+        .api_route(
+            "/v1/metadata/tenants",
+            get_with(list_metadata_tenants, doc("listMetadataTenants", "List current principal tenant memberships")),
+        )
+        .api_route(
             "/v1/metadata/rooms",
-            get(list_metadata_rooms).post(create_metadata_room),
+            get_with(list_metadata_rooms, doc("listMetadataRooms", "List rooms for current principal in a tenant")).post_with(create_metadata_room, doc("createMetadataRoom", "Create room")),
         )
-        .route("/v1/metadata/rooms/:id", delete(delete_metadata_room))
-        .route(
+        .api_route(
+            "/v1/metadata/rooms/:id",
+            delete_with(delete_metadata_room, doc("deleteMetadataRoom", "Delete room")),
+        )
+        .api_route(
             "/v1/metadata/rooms/:id/members",
-            get(list_metadata_room_members).post(add_metadata_room_member),
+            get_with(list_metadata_room_members, doc("listMetadataRoomMembers", "List room members")).post_with(add_metadata_room_member, doc("addMetadataRoomMember", "Add or update room member")),
         )
-        .route(
+        .api_route(
             "/v1/metadata/rooms/:id/members/:principal_id",
-            delete(remove_metadata_room_member),
+            delete_with(remove_metadata_room_member, doc("removeMetadataRoomMember", "Remove room member")),
         )
-        .route("/v1/metadata/rooms/:id/join", post(join_metadata_room))
-        .route("/v1/metadata/rooms/:id/leave", post(leave_metadata_room))
-        .route("/v1/metadata/rooms/:id/ws", get(ws_room))
-        .route(
+        .api_route(
+            "/v1/metadata/rooms/:id/join",
+            post_with(join_metadata_room, doc("joinMetadataRoom", "Join room as current principal")),
+        )
+        .api_route(
+            "/v1/metadata/rooms/:id/leave",
+            post_with(leave_metadata_room, doc("leaveMetadataRoom", "Leave room as current principal")),
+        )
+        .api_route(
+            "/v1/metadata/rooms/:id/ws",
+            get_with(ws_room, doc("roomWebSocket", "WebSocket room presence and document operations; protocol uses RoomClientMessage/RoomServerMessage")),
+        )
+        .api_route(
             "/v1/metadata/rooms/:id/documents",
-            get(list_metadata_documents).post(create_metadata_document),
+            get_with(list_metadata_documents, doc("listMetadataDocuments", "List room documents")).post_with(create_metadata_document, doc("createMetadataDocument", "Create room document")),
         )
-        .route(
+        .api_route(
             "/v1/metadata/documents/:id",
-            put(update_metadata_document).delete(delete_metadata_document),
+            put_with(update_metadata_document, doc("updateMetadataDocument", "Update document CRDT snapshot")).delete_with(delete_metadata_document, doc("deleteMetadataDocument", "Delete document")),
         )
-        .route(
+        .api_route(
             "/v1/metadata/connections",
-            get(list_metadata_connections).post(upsert_metadata_connection),
+            get_with(list_metadata_connections, doc("listMetadataConnectionProfiles", "List connection profiles")).post_with(upsert_metadata_connection, doc("upsertMetadataConnectionProfile", "Create or replace connection profile")),
         )
-        .route(
+        .api_route(
             "/v1/metadata/connections/:id",
-            delete(delete_metadata_connection),
+            delete_with(delete_metadata_connection, doc("deleteMetadataConnectionProfile", "Delete connection profile")),
         )
-        .route(
+        .api_route(
             "/v1/metadata/connections/:id/credential",
-            post(set_metadata_connection_credential),
+            post_with(set_metadata_connection_credential, doc("setMetadataConnectionCredential", "Set per-user credential for connection profile")),
         )
-        .route(
+        .api_route(
             "/v1/metadata/connections/:id/policy",
-            get(get_metadata_connection_policy).put(update_metadata_connection_policy),
+            get_with(get_metadata_connection_policy, doc("getMetadataConnectionPolicy", "Read the effective connection profile policy")).put_with(update_metadata_connection_policy, doc("updateMetadataConnectionPolicy", "Replace a connection profile policy with optimistic revision checking")),
         )
-        .route(
+        .api_route(
             "/v1/metadata/connections/:id/disconnect",
-            post(disconnect_metadata_connection),
+            post_with(disconnect_metadata_connection, doc("disconnectMetadataConnectionProfile", "Immediately close all active connections using a managed profile")),
         )
-        .route("/v1/metadata/tenants/:id/usage", get(get_tenant_usage))
-        .route(
+        .api_route(
+            "/v1/metadata/tenants/:id/usage",
+            get_with(get_tenant_usage, doc("getTenantUsage", "Read effective tenant limits and current resource usage")),
+        )
+        .api_route(
             "/v1/admin/tenants/:id/limits",
-            put(set_tenant_limits).delete(clear_tenant_limits),
+            put_with(set_tenant_limits, doc("setTenantLimits", "Set an operator-bounded tenant resource limit override")).delete_with(clear_tenant_limits, doc("clearTenantLimits", "Clear a tenant resource limit override")),
         )
-        .route("/v1/metadata/history", get(list_metadata_history))
-        .route(
+        .api_route(
+            "/v1/metadata/history",
+            get_with(list_metadata_history, doc("listMetadataHistory", "List query history by room or current principal")),
+        )
+        .api_route(
             "/v1/metadata/saved-queries",
-            get(list_metadata_saved_queries).post(create_metadata_saved_query),
+            get_with(list_metadata_saved_queries, doc("listMetadataSavedQueries", "List visible personal and tenant-shared saved queries")).post_with(create_metadata_saved_query, doc("createMetadataSavedQuery", "Create a personal or tenant-shared saved query")),
         )
-        .route(
+        .api_route(
             "/v1/metadata/saved-queries/:id",
-            get(get_metadata_saved_query)
-                .put(update_metadata_saved_query)
-                .delete(delete_metadata_saved_query),
+            get_with(get_metadata_saved_query, doc("getMetadataSavedQuery", "")).put_with(update_metadata_saved_query, doc("updateMetadataSavedQuery", "")).delete_with(delete_metadata_saved_query, doc("deleteMetadataSavedQuery", "")),
         )
-        .route(
+        .api_route(
             "/v1/auth/tokens",
-            get(list_auth_tokens).post(issue_auth_token),
+            get_with(list_auth_tokens, doc("listAuthTokens", "List current principal API tokens")).post_with(issue_auth_token, doc("issueAuthToken", "Issue API token; plaintext returned once")),
         )
-        .route("/v1/auth/tokens/:id", delete(revoke_auth_token))
-        .route("/v1/sessions", post(create_session).get(list_sessions))
-        .route("/v1/sessions/:id", get(get_session).delete(close_session))
-        .route(
+        .api_route(
+            "/v1/auth/tokens/:id",
+            delete_with(revoke_auth_token, doc("revokeAuthToken", "Revoke API token")),
+        )
+        .api_route(
+            "/v1/sessions",
+            post_with(create_session, doc("createSession", "Create session")).get_with(list_sessions, doc("listSessions", "List sessions")),
+        )
+        .api_route(
+            "/v1/sessions/:id",
+            get_with(get_session, doc("getSession", "Get session")).delete_with(close_session, doc("closeSession", "Close session")),
+        )
+        .api_route(
             "/v1/sessions/:id/connections",
-            post(open_connection).get(list_connections),
+            post_with(open_connection, doc("openConnection", "Open connection")).get_with(list_connections, doc("listConnections", "List connections")),
         )
-        .route(
+        .api_route(
             "/v1/sessions/:id/connections/from-profile",
-            post(open_connection_from_profile),
+            post_with(open_connection_from_profile, doc("openConnectionFromProfile", "Open session connection from metadata profile")),
         )
-        .route(
+        .api_route(
             "/v1/sessions/:id/connections/:conn_id",
-            delete(close_connection),
+            delete_with(close_connection, doc("closeConnection", "Close connection")),
         )
-        .route(
+        .api_route(
             "/v1/sessions/:id/connections/:conn_id/ping",
-            post(ping_connection),
+            post_with(ping_connection, doc("pingConnection", "Ping connection")),
         )
-        .route(
+        .api_route(
             "/v1/sessions/:id/connections/:conn_id/bulk-insert",
-            post(bulk_insert),
+            post_with(bulk_insert, doc("bulkInsert", "Bulk insert rows into a SQL Server table")),
         )
-        .route(
+        .api_route(
             "/v1/sessions/:id/connections/:conn_id/import/csv",
-            post(import_csv),
+            post_with(import_csv, doc("importCsv", "Import CSV into a table")),
         )
-        .route(
+        .api_route(
             "/v1/sessions/:id/connections/:conn_id/schema",
-            get(get_schema),
+            get_with(get_schema, doc("getSchema", "Fetch schema")),
         )
-        .route(
+        .api_route(
             "/v1/sessions/:id/connections/:conn_id/ddl",
-            get(get_object_ddl),
+            get_with(get_object_ddl, doc("getObjectDdl", "Generate DDL (CREATE statement) for a database object. Query params: `name` (required), `schema`, `kind` (defaults to `table`).")),
         )
-        .route(
+        .api_route(
             "/v1/sessions/:id/connections/:conn_id/complete",
-            post(post_completion),
+            post_with(post_completion, doc("postCompletion", "Compute ranked autocomplete candidates for a SQL text + cursor position on the connection's engine.")),
         )
-        .route(
+        .api_route(
             "/v1/sessions/:id/connections/:conn_id/export",
-            post(export_query),
+            post_with(export_query, doc("exportQuery", "Stream a query result as CSV / TSV / JSON Lines / JSON Array. Response is chunked; Content-Type depends on the requested format.")),
         )
-        .route(
+        .api_route(
             "/v1/sessions/:id/connections/:conn_id/edits/preview",
-            post(post_edits_preview),
+            post_with(post_edits_preview, doc("previewEdits", "Preview parameterized inline-edit DML")),
         )
-        .route(
+        .api_route(
             "/v1/sessions/:id/connections/:conn_id/edits/apply",
-            post(post_edits_apply),
+            post_with(post_edits_apply, doc("applyEdits", "Apply inline edits transactionally")),
         )
-        .route(
+        .api_route(
             "/v1/sessions/:id/connections/:conn_id/search/schema",
-            post(post_search_schema),
+            post_with(post_search_schema, doc("searchSchema", "Search schema objects and columns")),
         )
-        .route(
+        .api_route(
             "/v1/sessions/:id/connections/:conn_id/search/data",
-            post(post_search_data),
+            post_with(post_search_data, doc("searchData", "Search table data with bounded fan-out")),
         )
-        .route(
+        .api_route(
             "/v1/sessions/:id/connections/:conn_id/explain",
-            post(post_explain),
+            post_with(post_explain, doc("explainQuery", "Capture a typed execution plan")),
         )
-        .route(
+        .api_route(
             "/v1/sessions/:id/connections/:conn_id/processes",
-            get(list_processes),
+            get_with(list_processes, doc("listProcesses", "List database processes")),
         )
-        .route(
+        .api_route(
             "/v1/sessions/:id/connections/:conn_id/processes/kill",
-            post(kill_process),
+            post_with(kill_process, doc("killProcess", "Terminate a database process")),
         )
-        .route("/v1/sessions/:id/queries", post(execute_query))
-        .route(
+        .api_route(
+            "/v1/sessions/:id/queries",
+            post_with(execute_query, doc("executeQuery", "Execute query over synchronous HTTP")),
+        )
+        .api_route(
             "/v1/sessions/:id/transactions",
-            get(list_transactions).post(begin_transaction),
+            get_with(list_transactions, doc("listTransactions", "List open transactions")).post_with(begin_transaction, doc("beginTransaction", "Begin transaction")),
         )
-        .route(
+        .api_route(
             "/v1/sessions/:id/transactions/:tx_id/commit",
-            post(commit_transaction),
+            post_with(commit_transaction, doc("commitTransaction", "Commit transaction")),
         )
-        .route(
+        .api_route(
             "/v1/sessions/:id/transactions/:tx_id/rollback",
-            post(rollback_transaction),
+            post_with(rollback_transaction, doc("rollbackTransaction", "Rollback transaction")),
         )
-        .route(
+        .api_route(
             "/v1/sessions/:id/transactions/:tx_id/preview",
-            post(preview_transaction),
+            post_with(preview_transaction, doc("previewTransaction", "Preview commit or rollback consequences")),
         )
-        .route(
+        .api_route(
             "/v1/sessions/:id/transactions/:tx_id/savepoints",
-            post(create_savepoint),
+            post_with(create_savepoint, doc("createSavepoint", "Create transaction savepoint")),
         )
-        .route(
+        .api_route(
             "/v1/sessions/:id/transactions/:tx_id/savepoints/rollback",
-            post(rollback_to_savepoint),
+            post_with(rollback_to_savepoint, doc("rollbackToSavepoint", "Rollback to transaction savepoint")),
         )
-        .route(
+        .api_route(
             "/v1/sessions/:id/transactions/:tx_id/savepoints/release",
-            post(release_savepoint),
+            post_with(release_savepoint, doc("releaseSavepoint", "Release transaction savepoint")),
         )
-        .route("/v1/sessions/:id/ws", get(ws_session))
-        .route(
+        .api_route(
+            "/v1/sessions/:id/ws",
+            get_with(ws_session, doc("sessionWebSocket", "WebSocket query stream; protocol uses WsClientMessage/WsServerMessage")),
+        )
+        .api_route(
             "/v1/sessions/:id/queries/:cursor_id/cancel",
-            post(cancel_query),
+            post_with(cancel_query, doc("cancelQuery", "Cancel query")),
         )
-        .route("/v1/cursors/:cursor_id/pages", get(read_spill_pages))
-        .route("/v1/cursors/:cursor_id", delete(delete_spilled_cursor))
+        .api_route(
+            "/v1/cursors/:cursor_id/pages",
+            get_with(read_spill_pages, doc("readSpilledCursorPages", "Read pages from a spilled (evicted) cursor. Query params: `from_seq` (optional, must equal current pages_read), `limit` (default 32, max 256).")),
+        )
+        .api_route(
+            "/v1/cursors/:cursor_id",
+            delete_with(delete_spilled_cursor, doc("deleteSpilledCursor", "Delete a spilled cursor's file explicitly (idempotent). Reaper handles this on TTL too.")),
+        )
+        ;
+    let mut api = OpenApi::default();
+    let router = router.finish_api_with(&mut api, |t| t.title("sift API").version(VERSION));
+    let openapi_doc = Arc::new(finalize_openapi(api));
+    router
+        .layer(Extension(openapi_doc))
         .layer(from_fn_with_state(state.clone(), rate_limit_middleware))
         .layer(from_fn_with_state(state.clone(), auth_middleware))
         .layer(from_fn(inject_peer_addr))
         .layer(from_fn_with_state(state.sessions.clone(), audit_middleware))
         .layer(from_fn(protocol_version_middleware))
         .layer(from_fn(correlation_middleware))
-        // gzip/br compression on HTTP responses when the client advertises
-        // support via Accept-Encoding. WS frames are untouched (upgraded
-        // connections bypass response compression layers).
         .layer(
             tower_http::compression::CompressionLayer::new()
                 .gzip(true)
@@ -1279,12 +1397,12 @@ async fn reset_password(
     Ok(Json(json!({"ok": true})))
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, JsonSchema)]
 struct GithubStartQuery {
     client_kind: Option<AuthClientKind>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, JsonSchema)]
 struct GithubCallbackQuery {
     code: Option<String>,
     state: Option<String>,
@@ -2976,1030 +3094,151 @@ async fn list_operation_audit_log(
     ))
 }
 
-async fn openapi() -> Json<serde_json::Value> {
-    Json(json!({
-        "openapi": "3.1.0",
-        "info": {
-            "title": "sift API",
-            "version": VERSION
-        },
-        "x-sift-protocol-version": PROTOCOL_VERSION,
-        "security": [{ "bearerAuth": [] }],
-        "paths": {
-            "/v1/health": {
-                "get": {
-                    "operationId": "health",
-                    "summary": "Liveness and registered engines",
-                    "responses": { "200": { "description": "Health", "content": json_content("Health") } }
-                }
-            },
-            "/v1/ready": {
-                "get": {
-                    "operationId": "ready",
-                    "summary": "Readiness: 200 when ready, 503 while draining/unhealthy",
-                    "responses": {
-                        "200": { "description": "Ready", "content": json_content("Readiness") },
-                        "503": { "description": "Not ready", "content": json_content("Readiness") }
-                    }
-                }
-            },
-            "/v1/auth/login": {
-                "post": {
-                    "operationId": "passwordLogin",
-                    "summary": "Authenticate an instance-owned password identity",
-                    "security": [],
-                    "requestBody": json_body("PasswordLoginRequest"),
-                    "responses": {
-                        "200": { "description": "Native opaque credentials or browser cookie metadata", "content": json_one_of_content(&["AuthTokensResponse", "WebAuthResponse"]) },
-                        "401": { "description": "Authentication denied" },
-                        "429": { "description": "Authentication throttled" }
-                    }
-                }
-            },
-            "/v1/auth/refresh": {
-                "post": {
-                    "operationId": "refreshAuth",
-                    "summary": "Atomically rotate an interactive refresh credential",
-                    "security": [],
-                    "requestBody": json_body("RefreshAuthRequest"),
-                    "responses": {
-                        "200": { "description": "Rotated native credentials or browser cookie metadata", "content": json_one_of_content(&["AuthTokensResponse", "WebAuthResponse"]) },
-                        "401": { "description": "Invalid, expired, or replayed refresh credential" }
-                    }
-                }
-            },
-            "/v1/auth/logout": {
-                "post": {
-                    "operationId": "logoutAuth",
-                    "summary": "Revoke the current interactive auth session",
-                    "responses": { "200": { "description": "Ack", "content": json_object_content() } }
-                }
-            },
-            "/v1/auth/logout-all": {
-                "post": {
-                    "operationId": "logoutAllAuth",
-                    "summary": "Revoke every interactive auth session for the principal",
-                    "responses": { "200": { "description": "Ack", "content": json_object_content() } }
-                }
-            },
-            "/v1/auth/whoami": {
-                "get": {
-                    "operationId": "whoAmI",
-                    "summary": "Return the authenticated principal and memberships",
-                    "responses": { "200": { "description": "Authentication context", "content": json_content("WhoAmIResponse") } }
-                }
-            },
-            "/v1/auth/password": {
-                "put": {
-                    "operationId": "changePassword",
-                    "summary": "Replace the current principal password and revoke interactive sessions",
-                    "requestBody": json_body("ChangePasswordRequest"),
-                    "responses": {
-                        "200": { "description": "Ack", "content": json_object_content() },
-                        "401": { "description": "Current password denied" }
-                    }
-                }
-            },
-            "/v1/auth/password/reset": {
-                "post": {
-                    "operationId": "resetPassword",
-                    "summary": "Consume an administrator-issued one-use password reset token",
-                    "security": [],
-                    "requestBody": json_body("PasswordResetRequest"),
-                    "responses": {
-                        "200": { "description": "Ack", "content": json_object_content() },
-                        "401": { "description": "Invalid, expired, or consumed reset token" }
-                    }
-                }
-            },
-            "/v1/auth/github/start": {
-                "get": {
-                    "operationId": "githubAuthStart",
-                    "summary": "Start the instance GitHub OAuth flow with state and S256 PKCE",
-                    "security": [],
-                    "responses": {
-                        "200": { "description": "Native IDE authorization URL and one-use handoff", "content": json_content("GithubNativeAuthStartResponse") },
-                        "307": { "description": "Browser GitHub authorization redirect" }
-                    }
-                }
-            },
-            "/v1/auth/github/callback": {
-                "get": {
-                    "operationId": "githubAuthCallback",
-                    "summary": "Complete GitHub OAuth, enforce the allowlist, and set browser cookies",
-                    "security": [],
-                    "responses": {
-                        "200": { "description": "Browser authentication metadata", "content": json_content("WebAuthResponse") },
-                        "401": { "description": "OAuth or allowlist denial" }
-                    }
-                }
-            },
-            "/v1/auth/github/exchange": {
-                "post": {
-                    "operationId": "githubNativeAuthExchange",
-                    "summary": "Exchange a completed one-use native GitHub handoff for Sift tokens",
-                    "security": [],
-                    "requestBody": json_body("GithubNativeAuthExchangeRequest"),
-                    "responses": {
-                        "200": { "description": "Native session credentials", "content": json_content("AuthTokensResponse") },
-                        "401": { "description": "Pending, invalid, expired, or consumed handoff" }
-                    }
-                }
-            },
-            "/v1/admin/auth/github-allowlist": {
-                "get": {
-                    "operationId": "listGithubAllowlist",
-                    "summary": "List GitHub allowlist entries (instance admin)",
-                    "responses": { "200": { "description": "Allowlist entries", "content": json_array_content("GithubAllowlistEntry") } }
-                },
-                "post": {
-                    "operationId": "createGithubAllowlist",
-                    "summary": "Allow a GitHub login, optionally linked to an existing principal",
-                    "requestBody": json_body("CreateGithubAllowlistRequest"),
-                    "responses": { "200": { "description": "Allowlist entry", "content": json_content("GithubAllowlistEntry") } }
-                }
-            },
-            "/v1/admin/auth/github-allowlist/{id}": {
-                "delete": {
-                    "operationId": "revokeGithubAllowlist",
-                    "summary": "Revoke a pending GitHub allowlist entry",
-                    "responses": { "200": { "description": "Ack", "content": json_object_content() } }
-                }
-            },
-            "/v1/admin/principals": {
-                "post": {
-                    "operationId": "adminCreatePasswordPrincipal",
-                    "requestBody": json_body("AdminCreatePasswordPrincipalRequest"),
-                    "responses": { "200": { "description": "Principal", "content": json_content("AuthPrincipal") } }
-                }
-            },
-            "/v1/admin/principals/{id}/disabled": {
-                "put": {
-                    "operationId": "adminSetPrincipalDisabled",
-                    "requestBody": json_body("AdminSetPrincipalDisabledRequest"),
-                    "responses": { "200": { "description": "Ack", "content": json_object_content() } }
-                }
-            },
-            "/v1/admin/principals/{id}/identities": {
-                "get": {
-                    "operationId": "adminListPrincipalIdentities",
-                    "responses": { "200": { "description": "Authentication identities", "content": json_array_content("AuthIdentitySummary") } }
-                }
-            },
-            "/v1/admin/principals/{id}/identities/password": {
-                "post": {
-                    "operationId": "adminLinkPasswordIdentity",
-                    "requestBody": json_body("AdminLinkPasswordIdentityRequest"),
-                    "responses": { "200": { "description": "Linked identity", "content": json_content("AuthIdentitySummary") } }
-                }
-            },
-            "/v1/admin/principals/{principal_id}/identities/{identity_id}": {
-                "delete": {
-                    "operationId": "adminUnlinkIdentity",
-                    "responses": { "200": { "description": "Ack", "content": json_object_content() } }
-                }
-            },
-            "/v1/admin/principals/{id}/auth-sessions": {
-                "get": {
-                    "operationId": "adminListAuthSessions",
-                    "responses": { "200": { "description": "Authentication sessions", "content": json_array_content("AuthSessionSummary") } }
-                }
-            },
-            "/v1/admin/principals/{principal_id}/auth-sessions/{session_id}": {
-                "delete": {
-                    "operationId": "adminRevokeAuthSession",
-                    "responses": { "200": { "description": "Ack", "content": json_object_content() } }
-                }
-            },
-            "/v1/admin/principals/{principal_id}/identities/{identity_id}/password-reset": {
-                "post": {
-                    "operationId": "adminIssuePasswordReset",
-                    "responses": { "200": { "description": "One-use reset token", "content": json_content("IssuedPasswordResetResponse") } }
-                }
-            },
-            "/v1/metadata/tenants/{id}/invitations": {
-                "get": {
-                    "operationId": "listTenantInvitations",
-                    "responses": { "200": { "description": "Invitations", "content": json_array_content("TenantInvitation") } }
-                },
-                "post": {
-                    "operationId": "createTenantInvitation",
-                    "requestBody": json_body("CreateTenantInvitationRequest"),
-                    "responses": { "200": { "description": "One-use invitation token", "content": json_content("IssuedTenantInvitationResponse") } }
-                }
-            },
-            "/v1/metadata/tenants/{tenant_id}/invitations/{id}": {
-                "delete": {
-                    "operationId": "revokeTenantInvitation",
-                    "summary": "Revoke an unconsumed tenant invitation",
-                    "responses": { "200": { "description": "Ack", "content": json_object_content() } }
-                }
-            },
-            "/v1/auth/invitations/accept": {
-                "post": {
-                    "operationId": "acceptTenantInvitation",
-                    "requestBody": json_body("AcceptTenantInvitationRequest"),
-                    "responses": { "200": { "description": "Membership", "content": json_content("TenantMembership") } }
-                }
-            },
-            "/v1/auth/keys": {
-                "get": { "operationId": "listPrincipalKeys", "responses": { "200": { "description": "Keys", "content": json_array_content("PrincipalKey") } } },
-                "post": { "operationId": "registerPrincipalKey", "requestBody": json_body("RegisterPrincipalKeyRequest"), "responses": { "200": { "description": "Key", "content": json_content("PrincipalKey") } } }
-            },
-            "/v1/auth/keys/{id}": {
-                "delete": {
-                    "operationId": "revokePrincipalKey",
-                    "summary": "Revoke a registered principal key",
-                    "responses": { "200": { "description": "Ack", "content": json_object_content() } }
-                }
-            },
-            "/v1/auth/keys/challenge": {
-                "post": { "operationId": "issueKeyChallenge", "security": [], "requestBody": json_body("KeyChallengeRequest"), "responses": { "200": { "description": "Challenge", "content": json_content("KeyChallengeResponse") } } }
-            },
-            "/v1/auth/keys/authenticate": {
-                "post": { "operationId": "authenticateKey", "security": [], "requestBody": json_body("KeyAuthenticateRequest"), "responses": { "200": { "description": "Session credentials", "content": json_content("AuthTokensResponse") } } }
-            },
-            "/v1/audit": {
-                "get": {
-                    "operationId": "listAudit",
-                    "summary": "List in-memory operation audit rows",
-                    "responses": { "200": { "description": "Audit rows", "content": json_array_content("AuditEntry") } }
-                }
-            },
-            "/v1/operations": {
-                "get": {
-                    "operationId": "listOperations",
-                    "summary": "List replayable operation audit rows",
-                    "responses": { "200": { "description": "Operation rows", "content": json_array_content("OperationAuditEntry") } }
-                }
-            },
-            "/v1/operations/available": {
-                "get": {
-                    "operationId": "listAvailableOperations",
-                    "summary": "List contextual operation capabilities",
-                    "responses": { "200": { "description": "Capabilities", "content": json_array_content("OperationCapability") } }
-                }
-            },
-            "/v1/operations/audit": {
-                "get": {
-                    "operationId": "listOperationAudit",
-                    "summary": "List durable operation audit rows (actor, target, result, rows)",
-                    "responses": { "200": { "description": "Durable audit rows", "content": json_array_content("OperationAudit") } }
-                }
-            },
-            "/v1/sessions": {
-                "get": {
-                    "operationId": "listSessions",
-                    "summary": "List sessions",
-                    "responses": { "200": { "description": "Sessions", "content": json_array_content("SessionInfo") } }
-                },
-                "post": {
-                    "operationId": "createSession",
-                    "summary": "Create session",
-                    "requestBody": json_body("OpenSessionRequest"),
-                    "responses": { "200": { "description": "Session", "content": json_content("SessionInfo") } }
-                }
-            },
-            "/v1/sessions/{id}": {
-                "get": {
-                    "operationId": "getSession",
-                    "summary": "Get session",
-                    "responses": { "200": { "description": "Session", "content": json_content("SessionInfo") } }
-                },
-                "delete": {
-                    "operationId": "closeSession",
-                    "summary": "Close session",
-                    "responses": { "200": { "description": "Ack", "content": json_object_content() } }
-                }
-            },
-            "/v1/sessions/{id}/connections": {
-                "get": {
-                    "operationId": "listConnections",
-                    "summary": "List connections",
-                    "responses": { "200": { "description": "Connections", "content": json_array_content("ConnectionInfo") } }
-                },
-                "post": {
-                    "operationId": "openConnection",
-                    "summary": "Open connection",
-                    "requestBody": json_body("OpenConnectionRequest"),
-                    "responses": { "200": { "description": "Connection", "content": json_content("ConnectionInfo") } }
-                }
-            },
-            "/v1/sessions/{id}/connections/{conn_id}": {
-                "delete": {
-                    "operationId": "closeConnection",
-                    "summary": "Close connection",
-                    "responses": { "200": { "description": "Ack", "content": json_object_content() } }
-                }
-            },
-            "/v1/sessions/{id}/connections/{conn_id}/ping": {
-                "post": {
-                    "operationId": "pingConnection",
-                    "summary": "Ping connection",
-                    "responses": { "200": { "description": "Server info", "content": json_content("ServerInfo") } }
-                }
-            },
-            "/v1/sessions/{id}/connections/{conn_id}/bulk-insert": {
-                "post": {
-                    "operationId": "bulkInsert",
-                    "summary": "Bulk insert rows into a SQL Server table",
-                    "requestBody": json_body("BulkInsertRequest"),
-                    "responses": { "200": { "description": "Bulk insert result", "content": json_content("BulkInsertResponse") } }
-                }
-            },
-            "/v1/sessions/{id}/connections/{conn_id}/import/csv": {
-                "post": {
-                    "operationId": "importCsv",
-                    "summary": "Import CSV into a table",
-                    "requestBody": json_body("CsvImportRequest"),
-                    "responses": { "200": { "description": "Import result", "content": json_content("CsvImportResponse") } }
-                }
-            },
-            "/v1/sessions/{id}/connections/{conn_id}/schema": {
-                "get": {
-                    "operationId": "getSchema",
-                    "summary": "Fetch schema",
-                    "parameters": [
-                        { "name": "depth", "in": "query", "schema": { "type": "string", "enum": ["shallow", "deep"] } },
-                        { "name": "schema", "in": "query", "schema": { "type": "string" } },
-                        { "name": "object", "in": "query", "schema": { "type": "string" } },
-                        { "name": "name_pattern", "in": "query", "schema": { "type": "string" } }
-                    ],
-                    "responses": { "200": { "description": "Schema snapshot", "content": json_content("SchemaSnapshot") } }
-                }
-            },
-            "/v1/sessions/{id}/connections/{conn_id}/processes": {
-                "get": {
-                    "operationId": "listProcesses",
-                    "summary": "List database processes",
-                    "responses": { "200": { "description": "Processes", "content": json_array_content("DatabaseProcess") } }
-                }
-            },
-            "/v1/sessions/{id}/connections/{conn_id}/processes/kill": {
-                "post": {
-                    "operationId": "killProcess",
-                    "summary": "Terminate a database process",
-                    "requestBody": json_body("KillProcessRequest"),
-                    "responses": { "200": { "description": "Termination result", "content": json_content("KillProcessResponse") } }
-                }
-            },
-            "/v1/sessions/{id}/queries": {
-                "post": {
-                    "operationId": "executeQuery",
-                    "summary": "Execute query over synchronous HTTP",
-                    "requestBody": json_body("ExecuteRequestHttp"),
-                    "responses": { "200": { "description": "Query result", "content": json_content("ExecuteResponse") } }
-                }
-            },
-            "/v1/sessions/{id}/transactions": {
-                "get": {
-                    "operationId": "listTransactions",
-                    "summary": "List open transactions",
-                    "responses": { "200": { "description": "Transactions", "content": json_array_content("TransactionState") } }
-                },
-                "post": {
-                    "operationId": "beginTransaction",
-                    "summary": "Begin transaction",
-                    "requestBody": json_body("BeginTransactionRequest"),
-                    "responses": { "200": { "description": "Transaction", "content": json_content("TransactionInfo") } }
-                }
-            },
-            "/v1/sessions/{id}/transactions/{tx_id}/commit": {
-                "post": {
-                    "operationId": "commitTransaction",
-                    "summary": "Commit transaction",
-                    "requestBody": json_body("EndTransactionRequest"),
-                    "responses": { "200": { "description": "Ack", "content": json_object_content() } }
-                }
-            },
-            "/v1/sessions/{id}/transactions/{tx_id}/rollback": {
-                "post": {
-                    "operationId": "rollbackTransaction",
-                    "summary": "Rollback transaction",
-                    "requestBody": json_body("EndTransactionRequest"),
-                    "responses": { "200": { "description": "Ack", "content": json_object_content() } }
-                }
-            },
-            "/v1/sessions/{id}/transactions/{tx_id}/preview": {
-                "post": {
-                    "operationId": "previewTransaction",
-                    "summary": "Preview commit or rollback consequences",
-                    "requestBody": json_body("TransactionPreviewRequest"),
-                    "responses": { "200": { "description": "Preview", "content": json_content("TransactionPreview") } }
-                }
-            },
-            "/v1/sessions/{id}/transactions/{tx_id}/savepoints": {
-                "post": {
-                    "operationId": "createSavepoint",
-                    "summary": "Create transaction savepoint",
-                    "requestBody": json_body("SavepointRequest"),
-                    "responses": { "200": { "description": "Ack", "content": json_object_content() } }
-                }
-            },
-            "/v1/sessions/{id}/transactions/{tx_id}/savepoints/rollback": {
-                "post": {
-                    "operationId": "rollbackToSavepoint",
-                    "summary": "Rollback to transaction savepoint",
-                    "requestBody": json_body("SavepointRequest"),
-                    "responses": { "200": { "description": "Ack", "content": json_object_content() } }
-                }
-            },
-            "/v1/sessions/{id}/transactions/{tx_id}/savepoints/release": {
-                "post": {
-                    "operationId": "releaseSavepoint",
-                    "summary": "Release transaction savepoint",
-                    "requestBody": json_body("SavepointRequest"),
-                    "responses": { "200": { "description": "Ack", "content": json_object_content() } }
-                }
-            },
-            "/v1/sessions/{id}/queries/{cursor_id}/cancel": {
-                "post": {
-                    "operationId": "cancelQuery",
-                    "summary": "Cancel query",
-                    "requestBody": json_body("CancelRequest"),
-                    "responses": { "200": { "description": "Ack", "content": json_object_content() } }
-                }
-            },
-            "/v1/sessions/{id}/ws": {
-                "get": {
-                    "operationId": "sessionWebSocket",
-                    "summary": "WebSocket query stream; protocol uses WsClientMessage/WsServerMessage",
-                    "responses": { "101": { "description": "WebSocket upgrade" } }
-                }
-            },
-            "/v1/openapi.json": {
-                "get": {
-                    "operationId": "openapi",
-                    "summary": "OpenAPI document",
-                    "responses": { "200": { "description": "OpenAPI document" } }
-                }
-            },
-            "/v1/sessions/{id}/connections/{conn_id}/ddl": {
-                "get": {
-                    "operationId": "getObjectDdl",
-                    "summary": "Generate DDL (CREATE statement) for a database object. Query params: `name` (required), `schema`, `kind` (defaults to `table`).",
-                    "responses": { "200": { "description": "ObjectDdl", "content": json_content("ObjectDdl") } }
-                }
-            },
-            "/v1/sessions/{id}/connections/{conn_id}/complete": {
-                "post": {
-                    "operationId": "postCompletion",
-                    "summary": "Compute ranked autocomplete candidates for a SQL text + cursor position on the connection's engine.",
-                    "requestBody": json_body("CompletionRequest"),
-                    "responses": { "200": { "description": "CompletionResponse", "content": json_content("CompletionResponse") } }
-                }
-            },
-            "/v1/sessions/{id}/connections/{conn_id}/edits/preview": {
-                "post": {
-                    "operationId": "previewEdits",
-                    "summary": "Preview parameterized inline-edit DML",
-                    "requestBody": json_body("PreviewEditsRequest"),
-                    "responses": { "200": { "description": "Edit plan", "content": json_content("EditPlan") } }
-                }
-            },
-            "/v1/sessions/{id}/connections/{conn_id}/edits/apply": {
-                "post": {
-                    "operationId": "applyEdits",
-                    "summary": "Apply inline edits transactionally",
-                    "requestBody": json_body("ApplyEditsRequest"),
-                    "responses": { "200": { "description": "Apply result", "content": json_content("ApplyEditsResult") } }
-                }
-            },
-            "/v1/sessions/{id}/connections/{conn_id}/search/schema": {
-                "post": {
-                    "operationId": "searchSchema",
-                    "summary": "Search schema objects and columns",
-                    "requestBody": json_body("SchemaSearchRequest"),
-                    "responses": { "200": { "description": "Schema matches", "content": json_content("SchemaSearchResponse") } }
-                }
-            },
-            "/v1/sessions/{id}/connections/{conn_id}/search/data": {
-                "post": {
-                    "operationId": "searchData",
-                    "summary": "Search table data with bounded fan-out",
-                    "requestBody": json_body("DataSearchRequest"),
-                    "responses": { "200": { "description": "Data matches", "content": json_content("DataSearchResponse") } }
-                }
-            },
-            "/v1/sessions/{id}/connections/{conn_id}/explain": {
-                "post": {
-                    "operationId": "explainQuery",
-                    "summary": "Capture a typed execution plan",
-                    "requestBody": json_body("ExplainRequest"),
-                    "responses": { "200": { "description": "Execution plan", "content": json_content("ExplainResponse") } }
-                }
-            },
-            "/v1/sessions/{id}/connections/{conn_id}/export": {
-                "post": {
-                    "operationId": "exportQuery",
-                    "summary": "Stream a query result as CSV / TSV / JSON Lines / JSON Array. Response is chunked; Content-Type depends on the requested format.",
-                    "requestBody": json_body("ExportRequest"),
-                    "responses": { "200": { "description": "Streamed export body" } }
-                }
-            },
-            "/v1/cursors/{cursor_id}/pages": {
-                "get": {
-                    "operationId": "readSpilledCursorPages",
-                    "summary": "Read pages from a spilled (evicted) cursor. Query params: `from_seq` (optional, must equal current pages_read), `limit` (default 32, max 256).",
-                    "responses": { "200": { "description": "Batch of pages + done flag" } }
-                }
-            },
-            "/v1/cursors/{cursor_id}": {
-                "delete": {
-                    "operationId": "deleteSpilledCursor",
-                    "summary": "Delete a spilled cursor's file explicitly (idempotent). Reaper handles this on TTL too.",
-                    "responses": { "200": { "description": "Ok" } }
-                }
-            },
-            "/v1/metadata/tenants": {
-                "get": {
-                    "operationId": "listMetadataTenants",
-                    "summary": "List current principal tenant memberships",
-                    "responses": { "200": { "description": "Tenant memberships", "content": json_array_content("TenantMembership") } }
-                }
-            },
-            "/v1/metadata/rooms": {
-                "get": {
-                    "operationId": "listMetadataRooms",
-                    "summary": "List rooms for current principal in a tenant",
-                    "responses": { "200": { "description": "Rooms", "content": json_array_content("Room") } }
-                },
-                "post": {
-                    "operationId": "createMetadataRoom",
-                    "summary": "Create room",
-                    "requestBody": json_body("CreateRoomRequest"),
-                    "responses": { "200": { "description": "Room", "content": json_content("Room") } }
-                }
-            },
-            "/v1/metadata/rooms/{id}": {
-                "delete": {
-                    "operationId": "deleteMetadataRoom",
-                    "summary": "Delete room",
-                    "responses": { "200": { "description": "Ack", "content": json_object_content() } }
-                }
-            },
-            "/v1/metadata/rooms/{id}/members": {
-                "get": {
-                    "operationId": "listMetadataRoomMembers",
-                    "summary": "List room members",
-                    "responses": { "200": { "description": "Room members", "content": json_array_content("RoomMember") } }
-                },
-                "post": {
-                    "operationId": "addMetadataRoomMember",
-                    "summary": "Add or update room member",
-                    "requestBody": json_body("AddRoomMemberRequest"),
-                    "responses": { "200": { "description": "Room member", "content": json_content("RoomMember") } }
-                }
-            },
-            "/v1/metadata/rooms/{id}/members/{principal_id}": {
-                "delete": {
-                    "operationId": "removeMetadataRoomMember",
-                    "summary": "Remove room member",
-                    "responses": { "200": { "description": "Ack", "content": json_object_content() } }
-                }
-            },
-            "/v1/metadata/rooms/{id}/join": {
-                "post": {
-                    "operationId": "joinMetadataRoom",
-                    "summary": "Join room as current principal",
-                    "responses": { "200": { "description": "Room member", "content": json_object_content() } }
-                }
-            },
-            "/v1/metadata/rooms/{id}/leave": {
-                "post": {
-                    "operationId": "leaveMetadataRoom",
-                    "summary": "Leave room as current principal",
-                    "responses": { "200": { "description": "Ack", "content": json_object_content() } }
-                }
-            },
-            "/v1/metadata/rooms/{id}/ws": {
-                "get": {
-                    "operationId": "roomWebSocket",
-                    "summary": "WebSocket room presence and document operations; protocol uses RoomClientMessage/RoomServerMessage",
-                    "responses": { "101": { "description": "WebSocket upgrade" } }
-                }
-            },
-            "/v1/metadata/rooms/{id}/documents": {
-                "get": {
-                    "operationId": "listMetadataDocuments",
-                    "summary": "List room documents",
-                    "responses": { "200": { "description": "Documents", "content": json_array_content("Document") } }
-                },
-                "post": {
-                    "operationId": "createMetadataDocument",
-                    "summary": "Create room document",
-                    "requestBody": json_body("CreateDocumentRequest"),
-                    "responses": { "200": { "description": "Document", "content": json_content("Document") } }
-                }
-            },
-            "/v1/metadata/documents/{id}": {
-                "put": {
-                    "operationId": "updateMetadataDocument",
-                    "summary": "Update document CRDT snapshot",
-                    "requestBody": json_body("UpdateDocumentSnapshotRequest"),
-                    "responses": { "200": { "description": "Document", "content": json_content("Document") } }
-                },
-                "delete": {
-                    "operationId": "deleteMetadataDocument",
-                    "summary": "Delete document",
-                    "responses": { "200": { "description": "Ack", "content": json_object_content() } }
-                }
-            },
-            "/v1/metadata/connections": {
-                "get": {
-                    "operationId": "listMetadataConnectionProfiles",
-                    "summary": "List connection profiles",
-                    "responses": { "200": { "description": "Connection profiles", "content": json_array_content("ConnectionProfile") } }
-                },
-                "post": {
-                    "operationId": "upsertMetadataConnectionProfile",
-                    "summary": "Create or replace connection profile",
-                    "requestBody": json_body("UpsertConnectionProfileRequest"),
-                    "responses": { "200": { "description": "Connection profile", "content": json_content("ConnectionProfile") } }
-                }
-            },
-            "/v1/metadata/connections/{id}": {
-                "delete": {
-                    "operationId": "deleteMetadataConnectionProfile",
-                    "summary": "Delete connection profile",
-                    "responses": { "200": { "description": "Ack", "content": json_object_content() } }
-                }
-            },
-            "/v1/metadata/connections/{id}/credential": {
-                "post": {
-                    "operationId": "setMetadataConnectionCredential",
-                    "summary": "Set per-user credential for connection profile",
-                    "requestBody": json_body("SetCredentialRequest"),
-                    "responses": { "200": { "description": "Ack", "content": json_object_content() } }
-                }
-            },
-            "/v1/metadata/connections/{id}/policy": {
-                "get": {
-                    "operationId": "getMetadataConnectionPolicy",
-                    "summary": "Read the effective connection profile policy",
-                    "responses": { "200": { "description": "Connection policy", "content": json_content("ConnectionPolicy") } }
-                },
-                "put": {
-                    "operationId": "updateMetadataConnectionPolicy",
-                    "summary": "Replace a connection profile policy with optimistic revision checking",
-                    "requestBody": json_body("UpdateConnectionPolicyRequest"),
-                    "responses": {
-                        "200": { "description": "Updated connection policy", "content": json_content("ConnectionPolicy") },
-                        "409": { "description": "Policy revision conflict", "content": json_content("ApiErrorResponse") }
-                    }
-                }
-            },
-            "/v1/metadata/connections/{id}/disconnect": {
-                "post": {
-                    "operationId": "disconnectMetadataConnectionProfile",
-                    "summary": "Immediately close all active connections using a managed profile",
-                    "responses": { "200": { "description": "Disconnect count", "content": json_content("DisconnectManagedConnectionsResponse") } }
-                }
-            },
-            "/v1/metadata/tenants/{id}/usage": {
-                "get": {
-                    "operationId": "getTenantUsage",
-                    "summary": "Read effective tenant limits and current resource usage",
-                    "responses": { "200": { "description": "Tenant resource snapshot", "content": json_content("TenantUsageSnapshot") } }
-                }
-            },
-            "/v1/admin/tenants/{id}/limits": {
-                "put": {
-                    "operationId": "setTenantLimits",
-                    "summary": "Set an operator-bounded tenant resource limit override",
-                    "requestBody": json_body("UpdateTenantLimitsRequest"),
-                    "responses": { "200": { "description": "Tenant limit override", "content": json_content("TenantLimitOverride") } }
-                },
-                "delete": {
-                    "operationId": "clearTenantLimits",
-                    "summary": "Clear a tenant resource limit override",
-                    "responses": { "200": { "description": "Ack", "content": json_object_content() } }
-                }
-            },
-            "/v1/metadata/history": {
-                "get": {
-                    "operationId": "listMetadataHistory",
-                    "summary": "List query history by room or current principal",
-                    "responses": { "200": { "description": "Query history", "content": json_array_content("QueryHistory") } }
-                }
-            },
-            "/v1/metadata/saved-queries": {
-                "get": {
-                    "operationId": "listMetadataSavedQueries",
-                    "summary": "List visible personal and tenant-shared saved queries",
-                    "responses": { "200": { "description": "Saved queries", "content": json_array_content("SavedQuery") } }
-                },
-                "post": {
-                    "operationId": "createMetadataSavedQuery",
-                    "summary": "Create a personal or tenant-shared saved query",
-                    "requestBody": json_body("CreateSavedQueryRequest"),
-                    "responses": { "200": { "description": "Saved query", "content": json_content("SavedQuery") } }
-                }
-            },
-            "/v1/metadata/saved-queries/{id}": {
-                "get": {
-                    "operationId": "getMetadataSavedQuery",
-                    "responses": { "200": { "description": "Saved query", "content": json_content("SavedQuery") } }
-                },
-                "put": {
-                    "operationId": "updateMetadataSavedQuery",
-                    "requestBody": json_body("UpdateSavedQueryRequest"),
-                    "responses": { "200": { "description": "Saved query", "content": json_content("SavedQuery") } }
-                },
-                "delete": {
-                    "operationId": "deleteMetadataSavedQuery",
-                    "responses": { "200": { "description": "Ack", "content": json_object_content() } }
-                }
-            },
-            "/v1/auth/tokens": {
-                "get": {
-                    "operationId": "listAuthTokens",
-                    "summary": "List current principal API tokens",
-                    "responses": { "200": { "description": "API tokens", "content": json_array_content("ApiTokenRow") } }
-                },
-                "post": {
-                    "operationId": "issueAuthToken",
-                    "summary": "Issue API token; plaintext returned once",
-                    "requestBody": json_body("IssueTokenRequest"),
-                    "responses": { "200": { "description": "Issued token", "content": json_content("IssueTokenResponse") } }
-                }
-            },
-            "/v1/auth/tokens/{id}": {
-                "delete": {
-                    "operationId": "revokeAuthToken",
-                    "summary": "Revoke API token",
-                    "responses": { "200": { "description": "Ack", "content": json_object_content() } }
-                }
-            },
-            "/v1/sessions/{id}/connections/from-profile": {
-                "post": {
-                    "operationId": "openConnectionFromProfile",
-                    "summary": "Open session connection from metadata profile",
-                    "requestBody": json_body("OpenConnectionFromProfileRequest"),
-                    "responses": { "200": { "description": "Connection", "content": json_content("ConnectionInfo") } }
-                }
-            }
-        },
-        "components": {
-            "securitySchemes": {
-                "bearerAuth": { "type": "http", "scheme": "bearer" }
-            },
-            "responses": {
-                "RateLimited": {
-                    "description": "Hierarchical principal or tenant rate limit exceeded",
-                    "headers": {
-                        "Retry-After": {
-                            "description": "Seconds until the request may be retried",
-                            "schema": { "type": "integer", "minimum": 0 }
-                        }
-                    },
-                    "content": json_content("ApiErrorResponse")
-                },
-                "TenantResourceExhausted": {
-                    "description": "Tenant resource admission denied; Retry-After is present when a retry window is known",
-                    "headers": {
-                        "Retry-After": {
-                            "description": "Optional seconds until admission may succeed",
-                            "schema": { "type": "integer", "minimum": 0 }
-                        }
-                    },
-                    "content": json_content("ApiErrorResponse")
-                }
-            },
-            "schemas": protocol_schema_refs()
+/// Serve the immutable OpenAPI document generated once at startup and stored as
+/// an `Extension`. See `finalize_openapi`.
+async fn openapi(
+    Extension(document): Extension<Arc<serde_json::Value>>,
+) -> Json<serde_json::Value> {
+    Json((*document).clone())
+}
+
+/// Per-operation OpenAPI metadata: a stable operation ID plus an optional human
+/// summary. aide infers request/response/parameter schemas from each handler's
+/// signature, so routes only declare identity here.
+fn doc(
+    id: &'static str,
+    summary: &'static str,
+) -> impl FnOnce(TransformOperation) -> TransformOperation {
+    move |op| {
+        let op = op.id(id);
+        if summary.is_empty() {
+            op
+        } else {
+            op.summary(summary)
         }
-    }))
-}
-
-fn json_body(schema: &'static str) -> serde_json::Value {
-    json!({
-        "required": true,
-        "content": {
-            "application/json": {
-                "schema": { "$ref": format!("#/components/schemas/{schema}") }
-            }
-        }
-    })
-}
-
-fn json_content(schema: &'static str) -> serde_json::Value {
-    json!({
-        "application/json": {
-            "schema": { "$ref": format!("#/components/schemas/{schema}") }
-        }
-    })
-}
-
-fn json_array_content(schema: &'static str) -> serde_json::Value {
-    json!({
-        "application/json": {
-            "schema": {
-                "type": "array",
-                "items": { "$ref": format!("#/components/schemas/{schema}") }
-            }
-        }
-    })
-}
-
-fn json_one_of_content(schemas: &[&str]) -> serde_json::Value {
-    json!({
-        "application/json": {
-            "schema": {
-                "oneOf": schemas
-                    .iter()
-                    .map(|schema| json!({ "$ref": format!("#/components/schemas/{schema}") }))
-                    .collect::<Vec<_>>()
-            }
-        }
-    })
-}
-
-fn json_object_content() -> serde_json::Value {
-    json!({
-        "application/json": {
-            "schema": { "type": "object" }
-        }
-    })
-}
-
-fn protocol_schema_refs() -> serde_json::Value {
-    let mut schemas = serde_json::Map::new();
-    add_schema::<sift_protocol::AuditEntry>("AuditEntry", &mut schemas);
-    add_schema::<sift_protocol::PasswordLoginRequest>("PasswordLoginRequest", &mut schemas);
-    add_schema::<sift_protocol::ChangePasswordRequest>("ChangePasswordRequest", &mut schemas);
-    add_schema::<sift_protocol::PasswordResetRequest>("PasswordResetRequest", &mut schemas);
-    add_schema::<sift_protocol::IssuedPasswordResetResponse>(
-        "IssuedPasswordResetResponse",
-        &mut schemas,
-    );
-    add_schema::<sift_protocol::SshProxyCapabilityClaims>("SshProxyCapabilityClaims", &mut schemas);
-    add_schema::<sift_protocol::CreateGithubAllowlistRequest>(
-        "CreateGithubAllowlistRequest",
-        &mut schemas,
-    );
-    add_schema::<sift_protocol::GithubNativeAuthStartResponse>(
-        "GithubNativeAuthStartResponse",
-        &mut schemas,
-    );
-    add_schema::<sift_protocol::GithubNativeAuthExchangeRequest>(
-        "GithubNativeAuthExchangeRequest",
-        &mut schemas,
-    );
-    add_schema::<sift_protocol::AdminCreatePasswordPrincipalRequest>(
-        "AdminCreatePasswordPrincipalRequest",
-        &mut schemas,
-    );
-    add_schema::<sift_protocol::AdminSetPrincipalDisabledRequest>(
-        "AdminSetPrincipalDisabledRequest",
-        &mut schemas,
-    );
-    add_schema::<sift_protocol::AdminLinkPasswordIdentityRequest>(
-        "AdminLinkPasswordIdentityRequest",
-        &mut schemas,
-    );
-    add_schema::<sift_protocol::AuthIdentitySummary>("AuthIdentitySummary", &mut schemas);
-    add_schema::<sift_protocol::AuthSessionSummary>("AuthSessionSummary", &mut schemas);
-    add_schema::<sift_protocol::AuthPrincipal>("AuthPrincipal", &mut schemas);
-    add_schema::<sift_protocol::CreateTenantInvitationRequest>(
-        "CreateTenantInvitationRequest",
-        &mut schemas,
-    );
-    add_schema::<sift_protocol::AcceptTenantInvitationRequest>(
-        "AcceptTenantInvitationRequest",
-        &mut schemas,
-    );
-    add_schema::<sift_protocol::IssuedTenantInvitationResponse>(
-        "IssuedTenantInvitationResponse",
-        &mut schemas,
-    );
-    add_schema::<sift_protocol::RegisterPrincipalKeyRequest>(
-        "RegisterPrincipalKeyRequest",
-        &mut schemas,
-    );
-    add_schema::<sift_protocol::KeyChallengeRequest>("KeyChallengeRequest", &mut schemas);
-    add_schema::<sift_protocol::KeyChallengeResponse>("KeyChallengeResponse", &mut schemas);
-    add_schema::<sift_protocol::KeyAuthenticateRequest>("KeyAuthenticateRequest", &mut schemas);
-    add_schema::<sift_protocol::RefreshAuthRequest>("RefreshAuthRequest", &mut schemas);
-    add_schema::<sift_protocol::AuthTokensResponse>("AuthTokensResponse", &mut schemas);
-    add_schema::<sift_protocol::WebAuthResponse>("WebAuthResponse", &mut schemas);
-    add_schema::<sift_protocol::WhoAmIResponse>("WhoAmIResponse", &mut schemas);
-    add_schema::<sift_protocol::BeginTransactionRequest>("BeginTransactionRequest", &mut schemas);
-    add_schema::<sift_protocol::BulkInsertRequest>("BulkInsertRequest", &mut schemas);
-    add_schema::<sift_protocol::BulkInsertResponse>("BulkInsertResponse", &mut schemas);
-    add_schema::<sift_protocol::CancelRequest>("CancelRequest", &mut schemas);
-    add_schema::<sift_protocol::ConnectionInfo>("ConnectionInfo", &mut schemas);
-    add_schema::<sift_protocol::CsvImportRequest>("CsvImportRequest", &mut schemas);
-    add_schema::<sift_protocol::CsvImportResponse>("CsvImportResponse", &mut schemas);
-    add_schema::<sift_protocol::PreviewEditsRequest>("PreviewEditsRequest", &mut schemas);
-    add_schema::<sift_protocol::EditPlan>("EditPlan", &mut schemas);
-    add_schema::<sift_protocol::ApplyEditsRequest>("ApplyEditsRequest", &mut schemas);
-    add_schema::<sift_protocol::ApplyEditsResult>("ApplyEditsResult", &mut schemas);
-    add_schema::<sift_protocol::SchemaSearchRequest>("SchemaSearchRequest", &mut schemas);
-    add_schema::<sift_protocol::SchemaSearchResponse>("SchemaSearchResponse", &mut schemas);
-    add_schema::<sift_protocol::DataSearchRequest>("DataSearchRequest", &mut schemas);
-    add_schema::<sift_protocol::DataSearchResponse>("DataSearchResponse", &mut schemas);
-    add_schema::<sift_protocol::ExplainRequest>("ExplainRequest", &mut schemas);
-    add_schema::<sift_protocol::ExplainResponse>("ExplainResponse", &mut schemas);
-    add_schema::<sift_protocol::DatabaseProcess>("DatabaseProcess", &mut schemas);
-    add_schema::<sift_protocol::EndTransactionRequest>("EndTransactionRequest", &mut schemas);
-    add_schema::<sift_protocol::ExecuteRequestHttp>("ExecuteRequestHttp", &mut schemas);
-    add_schema::<sift_protocol::ExecuteResponse>("ExecuteResponse", &mut schemas);
-    add_schema::<sift_protocol::Health>("Health", &mut schemas);
-    add_schema::<sift_protocol::KillProcessRequest>("KillProcessRequest", &mut schemas);
-    add_schema::<sift_protocol::KillProcessResponse>("KillProcessResponse", &mut schemas);
-    add_schema::<sift_protocol::OpenConnectionRequest>("OpenConnectionRequest", &mut schemas);
-    add_schema::<sift_protocol::OpenSessionRequest>("OpenSessionRequest", &mut schemas);
-    add_schema::<sift_protocol::OperationAuditEntry>("OperationAuditEntry", &mut schemas);
-    add_schema::<sift_protocol::OperationCapability>("OperationCapability", &mut schemas);
-    add_schema::<sift_protocol::OperationCapabilityContext>(
-        "OperationCapabilityContext",
-        &mut schemas,
-    );
-    add_schema::<sift_protocol::ApiErrorResponse>("ApiErrorResponse", &mut schemas);
-    add_schema::<sift_protocol::ConnectionPolicy>("ConnectionPolicy", &mut schemas);
-    add_schema::<sift_protocol::UpdateConnectionPolicyRequest>(
-        "UpdateConnectionPolicyRequest",
-        &mut schemas,
-    );
-    add_schema::<sift_protocol::DisconnectManagedConnectionsResponse>(
-        "DisconnectManagedConnectionsResponse",
-        &mut schemas,
-    );
-    add_schema::<sift_protocol::TenantUsageSnapshot>("TenantUsageSnapshot", &mut schemas);
-    add_schema::<sift_protocol::UpdateTenantLimitsRequest>(
-        "UpdateTenantLimitsRequest",
-        &mut schemas,
-    );
-    add_schema::<sift_protocol::Readiness>("Readiness", &mut schemas);
-    add_schema::<sift_protocol::SavepointRequest>("SavepointRequest", &mut schemas);
-    add_schema::<sift_protocol::SchemaSnapshot>("SchemaSnapshot", &mut schemas);
-    add_schema::<sift_protocol::ObjectDdl>("ObjectDdl", &mut schemas);
-    add_schema::<sift_protocol::completion::CompletionRequest>("CompletionRequest", &mut schemas);
-    add_schema::<sift_protocol::completion::CompletionResponse>("CompletionResponse", &mut schemas);
-    add_schema::<sift_protocol::completion::CompletionCandidate>(
-        "CompletionCandidate",
-        &mut schemas,
-    );
-    add_schema::<sift_protocol::completion::CompletionKind>("CompletionKind", &mut schemas);
-    add_schema::<sift_protocol::completion::CompletionContext>("CompletionContext", &mut schemas);
-    add_schema::<sift_protocol::ExportRequest>("ExportRequest", &mut schemas);
-    add_schema::<sift_protocol::ServerInfo>("ServerInfo", &mut schemas);
-    add_schema::<sift_protocol::SessionInfo>("SessionInfo", &mut schemas);
-    add_schema::<sift_protocol::TransactionInfo>("TransactionInfo", &mut schemas);
-    add_schema::<sift_protocol::TransactionState>("TransactionState", &mut schemas);
-    add_schema::<sift_protocol::TransactionPreviewRequest>(
-        "TransactionPreviewRequest",
-        &mut schemas,
-    );
-    add_schema::<sift_protocol::TransactionPreview>("TransactionPreview", &mut schemas);
-    add_schema::<sift_protocol::WsClientMessage>("WsClientMessage", &mut schemas);
-    add_schema::<sift_protocol::WsServerMessage>("WsServerMessage", &mut schemas);
-    add_schema::<sift_protocol::RoomClientMessage>("RoomClientMessage", &mut schemas);
-    add_schema::<sift_protocol::RoomServerMessage>("RoomServerMessage", &mut schemas);
-    add_schema::<sift_metadata::ApiTokenRow>("ApiTokenRow", &mut schemas);
-    add_schema::<sift_metadata::GithubAllowlistEntry>("GithubAllowlistEntry", &mut schemas);
-    add_schema::<sift_metadata::ConnectionProfile>("ConnectionProfile", &mut schemas);
-    add_schema::<sift_metadata::Document>("Document", &mut schemas);
-    add_schema::<sift_metadata::OperationAudit>("OperationAudit", &mut schemas);
-    add_schema::<sift_metadata::QueryHistory>("QueryHistory", &mut schemas);
-    add_schema::<sift_metadata::Room>("Room", &mut schemas);
-    add_schema::<sift_metadata::RoomMember>("RoomMember", &mut schemas);
-    add_schema::<sift_metadata::SavedQuery>("SavedQuery", &mut schemas);
-    add_schema::<sift_metadata::TenantMembership>("TenantMembership", &mut schemas);
-    add_schema::<sift_metadata::TenantLimitOverride>("TenantLimitOverride", &mut schemas);
-    add_schema::<sift_metadata::TenantInvitation>("TenantInvitation", &mut schemas);
-    add_schema::<sift_metadata::PrincipalKey>("PrincipalKey", &mut schemas);
-    add_schema::<AddRoomMemberRequest>("AddRoomMemberRequest", &mut schemas);
-    add_schema::<CreateDocumentRequest>("CreateDocumentRequest", &mut schemas);
-    add_schema::<CreateRoomRequest>("CreateRoomRequest", &mut schemas);
-    add_schema::<CreateSavedQueryRequest>("CreateSavedQueryRequest", &mut schemas);
-    add_schema::<IssueTokenRequest>("IssueTokenRequest", &mut schemas);
-    add_schema::<IssueTokenResponse>("IssueTokenResponse", &mut schemas);
-    add_schema::<OpenConnectionFromProfileRequest>(
-        "OpenConnectionFromProfileRequest",
-        &mut schemas,
-    );
-    add_schema::<SetCredentialRequest>("SetCredentialRequest", &mut schemas);
-    add_schema::<UpdateDocumentSnapshotRequest>("UpdateDocumentSnapshotRequest", &mut schemas);
-    add_schema::<UpsertConnectionProfileRequest>("UpsertConnectionProfileRequest", &mut schemas);
-    add_schema::<UpdateSavedQueryRequest>("UpdateSavedQueryRequest", &mut schemas);
-    serde_json::Value::Object(schemas)
-}
-
-fn add_schema<T: JsonSchema>(
-    name: &'static str,
-    schemas: &mut serde_json::Map<String, serde_json::Value>,
-) {
-    let root = schema_for!(T);
-    for (def_name, schema) in root.definitions {
-        schemas
-            .entry(def_name)
-            .or_insert_with(|| serde_json::to_value(schema).expect("schema serializes"));
     }
-    schemas.insert(
-        name.to_string(),
+}
+
+/// Operations reachable without authentication; they opt out of the global
+/// bearer security requirement.
+const PUBLIC_OPERATIONS: &[&str] = &[
+    "passwordLogin",
+    "refreshAuth",
+    "resetPassword",
+    "githubAuthStart",
+    "githubAuthCallback",
+    "githubNativeAuthExchange",
+    "issueKeyChallenge",
+    "authenticateKey",
+];
+
+/// Finish the aide-generated document: pin the OpenAPI version, attach the
+/// protocol-version extension and bearer security scheme, register the room and
+/// session WebSocket message contracts as components (they are unreachable from
+/// any HTTP body), and mark public operations security-optional.
+fn finalize_openapi(api: OpenApi) -> serde_json::Value {
+    let mut document = serde_json::to_value(api).expect("openapi serializes");
+    let obj = document
+        .as_object_mut()
+        .expect("openapi document is an object");
+    obj.insert("openapi".into(), json!("3.1.0"));
+    obj.insert("x-sift-protocol-version".into(), json!(PROTOCOL_VERSION));
+    obj.insert("security".into(), json!([{ "bearerAuth": [] }]));
+
+    let components = obj
+        .entry("components")
+        .or_insert_with(|| json!({}))
+        .as_object_mut()
+        .expect("components is an object");
+    components
+        .entry("securitySchemes")
+        .or_insert_with(|| json!({}))
+        .as_object_mut()
+        .expect("securitySchemes is an object")
+        .insert(
+            "bearerAuth".into(),
+            json!({ "type": "http", "scheme": "bearer" }),
+        );
+
+    let schemas = components
+        .entry("schemas")
+        .or_insert_with(|| json!({}))
+        .as_object_mut()
+        .expect("schemas is an object");
+    add_component_schema::<WsClientMessage>(schemas);
+    add_component_schema::<WsServerMessage>(schemas);
+    add_component_schema::<RoomClientMessage>(schemas);
+    add_component_schema::<RoomServerMessage>(schemas);
+    // The synchronous execute endpoint streams a raw body, so aide cannot infer
+    // its response type from the handler signature; register it explicitly as
+    // part of the public contract clients decode.
+    add_component_schema::<sift_protocol::ExecuteResponse>(schemas);
+
+    if let Some(paths) = obj.get_mut("paths").and_then(|p| p.as_object_mut()) {
+        for path_item in paths.values_mut() {
+            let Some(methods) = path_item.as_object_mut() else {
+                continue;
+            };
+            for operation in methods.values_mut() {
+                let Some(operation) = operation.as_object_mut() else {
+                    continue;
+                };
+                let is_public = operation
+                    .get("operationId")
+                    .and_then(|id| id.as_str())
+                    .map(|id| PUBLIC_OPERATIONS.contains(&id))
+                    .unwrap_or(false);
+                if is_public {
+                    operation.insert("security".into(), json!([]));
+                }
+            }
+        }
+    }
+    document
+}
+
+/// Merge a schemars-generated schema (and its nested definitions) into the
+/// OpenAPI `components/schemas` map, rewriting `#/definitions/*` references to
+/// the `#/components/schemas/*` form aide uses. Existing aide-generated entries
+/// win, so shared nested types are not duplicated.
+fn add_component_schema<T: JsonSchema>(schemas: &mut serde_json::Map<String, serde_json::Value>) {
+    let root = schema_for!(T);
+    let mut entries: Vec<(String, serde_json::Value)> = root
+        .definitions
+        .into_iter()
+        .map(|(name, schema)| (name, serde_json::to_value(schema).expect("schema serializes")))
+        .collect();
+    entries.push((
+        <T as JsonSchema>::schema_name(),
         serde_json::to_value(root.schema).expect("schema serializes"),
-    );
+    ));
+    for (name, mut value) in entries {
+        rewrite_definition_refs(&mut value);
+        schemas.entry(name).or_insert(value);
+    }
+}
+
+/// Recursively rewrite schemars `#/definitions/*` `$ref`s to the OpenAPI
+/// `#/components/schemas/*` location.
+fn rewrite_definition_refs(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Object(map) => {
+            if let Some(serde_json::Value::String(reference)) = map.get_mut("$ref") {
+                if let Some(rest) = reference.strip_prefix("#/definitions/") {
+                    *reference = format!("#/components/schemas/{rest}");
+                }
+            }
+            for child in map.values_mut() {
+                rewrite_definition_refs(child);
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for item in items {
+                rewrite_definition_refs(item);
+            }
+        }
+        _ => {}
+    }
 }
 
 async fn list_metadata_tenants(
@@ -5231,7 +4470,7 @@ async fn import_csv(
     Ok(Json(response))
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, JsonSchema)]
 struct SchemaQuery {
     /// `shallow` (default) or `deep`. Deep requires `schema` and `object`.
     #[serde(default)]
@@ -6786,37 +6025,6 @@ async fn send_json<T: serde::Serialize>(
 mod route_access_tests {
     use super::*;
 
-    fn declared_router_paths() -> std::collections::BTreeSet<String> {
-        let mut source = include_str!("http.rs");
-        let mut paths = std::collections::BTreeSet::new();
-        while let Some(index) = source.find(".route(") {
-            source = &source[index + ".route(".len()..];
-            let Some(quote) = source.find('"') else {
-                break;
-            };
-            let after_quote = &source[quote + 1..];
-            let Some(end) = after_quote.find('"') else {
-                break;
-            };
-            let path = &after_quote[..end];
-            if path.starts_with("/v1/") {
-                let normalized = path
-                    .split('/')
-                    .map(|segment| {
-                        segment
-                            .strip_prefix(':')
-                            .map(|name| format!("{{{name}}}"))
-                            .unwrap_or_else(|| segment.to_string())
-                    })
-                    .collect::<Vec<_>>()
-                    .join("/");
-                paths.insert(normalized);
-            }
-            source = &after_quote[end + 1..];
-        }
-        paths
-    }
-
     #[test]
     fn classifies_public_authenticated_and_owned_route_families() {
         assert_eq!(route_access("/v1/health"), RouteAccess::Public);
@@ -6836,18 +6044,6 @@ mod route_access_tests {
             route_access("/v1/sessions/not-a-number"),
             RouteAccess::Authenticated
         );
-    }
-
-    #[tokio::test]
-    async fn openapi_paths_match_the_live_router() {
-        let document = openapi().await.0;
-        let documented = document["paths"]
-            .as_object()
-            .unwrap()
-            .keys()
-            .cloned()
-            .collect::<std::collections::BTreeSet<_>>();
-        assert_eq!(documented, declared_router_paths());
     }
 
     #[tokio::test]

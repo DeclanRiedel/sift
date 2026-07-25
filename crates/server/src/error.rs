@@ -213,6 +213,32 @@ impl IntoResponse for ApiError {
 
 pub type ApiResult<T> = Result<T, ApiError>;
 
+/// Document a default error response (the sanitized `ApiErrorResponse` body)
+/// for every handler that returns `ApiResult<_>`. aide walks the handler
+/// return type, so this attaches the error schema to each generated operation
+/// without a per-route declaration.
+impl aide::OperationOutput for ApiError {
+    type Inner = sift_protocol::ApiErrorResponse;
+
+    fn operation_response(
+        ctx: &mut aide::gen::GenContext,
+        operation: &mut aide::openapi::Operation,
+    ) -> Option<aide::openapi::Response> {
+        <axum::Json<sift_protocol::ApiErrorResponse> as aide::OperationOutput>::operation_response(
+            ctx, operation,
+        )
+    }
+
+    fn inferred_responses(
+        ctx: &mut aide::gen::GenContext,
+        operation: &mut aide::openapi::Operation,
+    ) -> Vec<(Option<u16>, aide::openapi::Response)> {
+        Self::operation_response(ctx, operation)
+            .map(|response| vec![(None, response)])
+            .unwrap_or_default()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

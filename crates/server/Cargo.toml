@@ -44,6 +44,7 @@ tower = { workspace = true }
 tower-http = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+aide = { version = "=0.13.5", features = ["axum", "axum-ws", "macros"] }
 
 [features]
 # Forwards to sift-metadata: enables the OS keychain secret backend (pure-Rust,

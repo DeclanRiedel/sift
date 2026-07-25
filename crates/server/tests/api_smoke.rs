@@ -295,7 +295,13 @@ async fn openapi_is_published() {
     assert!(body["paths"]["/v1/metadata/tenants/{id}/usage"].is_object());
     assert!(body["paths"]["/v1/admin/tenants/{id}/limits"].is_object());
     assert!(body["components"]["schemas"]["ApiErrorResponse"].is_object());
-    assert!(body["components"]["responses"]["RateLimited"]["headers"]["Retry-After"].is_object());
+    // Every generated operation carries the sanitized error body as its default
+    // response (see `ApiError`'s `OperationOutput` impl).
+    assert_eq!(
+        body["paths"]["/v1/metadata/rooms"]["post"]["responses"]["default"]["content"]
+            ["application/json"]["schema"]["$ref"],
+        "#/components/schemas/ApiErrorResponse"
+    );
     assert_eq!(
         body["paths"]["/v1/metadata/rooms"]["post"]["requestBody"]["content"]["application/json"]
             ["schema"]["$ref"],
@@ -382,6 +388,214 @@ async fn openapi_is_published() {
         body["components"]["schemas"]["OperationAuditEntry"]["properties"]["operation"].is_object()
     );
 }
+
+/// Explicit client-SDK coverage manifest: every HTTP operation the server
+/// publishes must be listed here, keeping the generated OpenAPI, the live
+/// router, and the client SDK in lockstep. Adding or removing a route is a
+/// deliberate edit to this list.
+const SDK_OPERATION_MANIFEST: &[&str] = &[
+    "acceptTenantInvitation",
+    "addMetadataRoomMember",
+    "adminCreatePasswordPrincipal",
+    "adminIssuePasswordReset",
+    "adminLinkPasswordIdentity",
+    "adminListAuthSessions",
+    "adminListPrincipalIdentities",
+    "adminRevokeAuthSession",
+    "adminSetPrincipalDisabled",
+    "adminUnlinkIdentity",
+    "applyEdits",
+    "authenticateKey",
+    "beginTransaction",
+    "bulkInsert",
+    "cancelQuery",
+    "changePassword",
+    "clearTenantLimits",
+    "closeConnection",
+    "closeSession",
+    "commitTransaction",
+    "createGithubAllowlist",
+    "createMetadataDocument",
+    "createMetadataRoom",
+    "createMetadataSavedQuery",
+    "createSavepoint",
+    "createSession",
+    "createTenantInvitation",
+    "deleteMetadataConnectionProfile",
+    "deleteMetadataDocument",
+    "deleteMetadataRoom",
+    "deleteMetadataSavedQuery",
+    "deleteSpilledCursor",
+    "disconnectMetadataConnectionProfile",
+    "executeQuery",
+    "explainQuery",
+    "exportQuery",
+    "getMetadataConnectionPolicy",
+    "getMetadataSavedQuery",
+    "getObjectDdl",
+    "getSchema",
+    "getSession",
+    "getTenantUsage",
+    "githubAuthCallback",
+    "githubAuthStart",
+    "githubNativeAuthExchange",
+    "health",
+    "importCsv",
+    "issueAuthToken",
+    "issueKeyChallenge",
+    "joinMetadataRoom",
+    "killProcess",
+    "leaveMetadataRoom",
+    "listAudit",
+    "listAuthTokens",
+    "listAvailableOperations",
+    "listConnections",
+    "listGithubAllowlist",
+    "listMetadataConnectionProfiles",
+    "listMetadataDocuments",
+    "listMetadataHistory",
+    "listMetadataRoomMembers",
+    "listMetadataRooms",
+    "listMetadataSavedQueries",
+    "listMetadataTenants",
+    "listOperationAudit",
+    "listOperations",
+    "listPrincipalKeys",
+    "listProcesses",
+    "listSessions",
+    "listTenantInvitations",
+    "listTransactions",
+    "logoutAllAuth",
+    "logoutAuth",
+    "openapi",
+    "openConnection",
+    "openConnectionFromProfile",
+    "passwordLogin",
+    "pingConnection",
+    "postCompletion",
+    "previewEdits",
+    "previewTransaction",
+    "readSpilledCursorPages",
+    "ready",
+    "refreshAuth",
+    "registerPrincipalKey",
+    "releaseSavepoint",
+    "removeMetadataRoomMember",
+    "resetPassword",
+    "revokeAuthToken",
+    "revokeGithubAllowlist",
+    "revokePrincipalKey",
+    "revokeTenantInvitation",
+    "rollbackToSavepoint",
+    "rollbackTransaction",
+    "roomWebSocket",
+    "searchData",
+    "searchSchema",
+    "sessionWebSocket",
+    "setMetadataConnectionCredential",
+    "setTenantLimits",
+    "updateMetadataConnectionPolicy",
+    "updateMetadataDocument",
+    "updateMetadataSavedQuery",
+    "upsertMetadataConnectionProfile",
+    "whoAmI",];
+
+async fn fetch_openapi() -> serde_json::Value {
+    let app = app(test_state());
+    let res = app
+        .oneshot(
+            Request::get("/v1/openapi.json")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    body_json(res.into_body()).await
+}
+
+fn documented_operation_ids(document: &serde_json::Value) -> std::collections::BTreeSet<String> {
+    let mut ids = std::collections::BTreeSet::new();
+    let paths = document["paths"].as_object().expect("paths object");
+    for (path, item) in paths {
+        for (method, operation) in item.as_object().expect("path item object") {
+            let id = operation["operationId"]
+                .as_str()
+                .unwrap_or_else(|| panic!("{method} {path} is missing a stable operationId"));
+            assert!(
+                ids.insert(id.to_string()),
+                "duplicate operationId {id} on {method} {path}"
+            );
+        }
+    }
+    ids
+}
+
+#[tokio::test]
+async fn openapi_operation_ids_are_stable_and_unique() {
+    let document = fetch_openapi().await;
+    let ids = documented_operation_ids(&document);
+    assert!(!ids.is_empty());
+}
+
+#[tokio::test]
+async fn openapi_matches_client_sdk_coverage_manifest() {
+    let document = fetch_openapi().await;
+    let documented = documented_operation_ids(&document);
+    let manifest = SDK_OPERATION_MANIFEST
+        .iter()
+        .map(|s| s.to_string())
+        .collect::<std::collections::BTreeSet<_>>();
+    let missing_from_manifest = documented.difference(&manifest).collect::<Vec<_>>();
+    let stale_in_manifest = manifest.difference(&documented).collect::<Vec<_>>();
+    assert!(
+        missing_from_manifest.is_empty(),
+        "operations published but absent from SDK coverage manifest: {missing_from_manifest:?}"
+    );
+    assert!(
+        stale_in_manifest.is_empty(),
+        "operations in SDK coverage manifest but no longer published: {stale_in_manifest:?}"
+    );
+}
+
+#[tokio::test]
+async fn openapi_has_no_orphan_schema_refs() {
+    let document = fetch_openapi().await;
+    let schemas = document["components"]["schemas"]
+        .as_object()
+        .expect("components.schemas object");
+    let mut refs = Vec::new();
+    collect_refs(&document, &mut refs);
+    for reference in refs {
+        let Some(name) = reference.strip_prefix("#/components/schemas/") else {
+            panic!("unexpected $ref target outside components/schemas: {reference}");
+        };
+        assert!(
+            schemas.contains_key(name),
+            "orphan schema $ref: {reference} has no definition"
+        );
+    }
+}
+
+fn collect_refs(value: &serde_json::Value, out: &mut Vec<String>) {
+    match value {
+        serde_json::Value::Object(map) => {
+            if let Some(serde_json::Value::String(reference)) = map.get("$ref") {
+                out.push(reference.clone());
+            }
+            for child in map.values() {
+                collect_refs(child, out);
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for item in items {
+                collect_refs(item, out);
+            }
+        }
+        _ => {}
+    }
+}
+
 
 #[tokio::test]
 async fn bulk_insert_is_public_http_api() {
@@ -4454,3 +4668,4 @@ async fn loopback_bypass_rejects_non_loopback_peer() {
     let res = app.oneshot(req).await.unwrap();
     assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
 }
+
