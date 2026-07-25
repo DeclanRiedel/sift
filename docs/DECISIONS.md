@@ -863,3 +863,35 @@ unrestricted profiles avoid that cost. Phase G shared connections must use this
 evaluator, Phase H proxy bootstrap must establish its principal context, Phase
 I MCP governance must consume rather than duplicate this policy, and Phase J
 metrics export must read the Phase F resource counters.
+
+---
+
+## ADR-014 — Loro Is The Single CRDT Backend For Room Documents
+
+**Context.** Room documents held an opaque byte buffer edited through positional
+`insert`/`delete`/`replace` operations applied server-side. That model cannot
+converge concurrent edits, survive offline divergence, or preserve intent, and
+it carried a speculative `CrdtKind::{Loro, Automerge}` selector with no real CRDT
+behind either label. Collaboration depth (Phase G) needs genuine convergence,
+reconnect/offline merge, exact-version execution, and stable presence anchors.
+
+**Decision.** Every client and the server hold a [Loro](https://loro.dev) replica
+of each document. The only root container is a single `LoroText` named `"text"`;
+rich-text marks and extra containers are rejected. Clients author native Loro
+updates and the server never generates positional edits on their behalf — it
+validates, durably sequences, and rebroadcasts. Loro is the *only* CRDT backend:
+the `CrdtKind`/`Automerge` selector and the positional
+`TextDocumentOperation`/`DocumentOperationEnvelope` contract are removed rather
+than kept as a legacy mode. CRDT bytes (snapshots, updates, version vectors,
+frontiers, cursors) cross the wire as standard padded RFC 4648 base64 inside
+JSON, each behind its own typed newtype in `sift-protocol`. All Loro CPU work
+runs off the Tokio request workers through a per-document blocking actor.
+
+**Consequences.** `sift-doc` depends on `loro`, which lifts the crate's effective
+Rust floor above the nominal MSRV 1.80; this is accepted because Loro is the
+product's collaboration substrate. Audit attribution is always the authenticated
+submitter, never client-controlled CRDT metadata. Full Loro history is retained
+inside each snapshot (bounded by a hard per-document history cap) so arbitrarily
+old replicas still synchronize. The public protocol stays version `"1"` because
+there are no external users yet. Automerge, shared rich-text marks, and CRDT
+state outside the SQL text are explicitly out of scope.

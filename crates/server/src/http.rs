@@ -34,16 +34,16 @@ use sift_protocol::{
     AuthIdentitySummary, AuthPrincipal, AuthSessionSummary, AuthTenantMembership,
     AuthTokensResponse, BeginTransactionRequest, BulkInsertRequest, CancelRequest,
     ChangePasswordRequest, CreateGithubAllowlistRequest, CreateTenantInvitationRequest,
-    CsvImportRequest, DocumentOperationEnvelope, EndTransactionRequest, ExecuteRequest,
-    ExecuteRequestHttp, GithubNativeAuthExchangeRequest, GithubNativeAuthStartResponse, Health,
-    InvitationRole, IssuedPasswordResetResponse, IssuedTenantInvitationResponse,
-    KeyAuthenticateRequest, KeyChallengeRequest, KeyChallengeResponse, KillProcessRequest,
-    ObjectPath, OpenConnectionRequest, OpenSessionRequest, Operation, OperationStatus,
-    PasswordLoginRequest, PasswordResetRequest, Readiness, RefreshAuthRequest,
-    RegisterPrincipalKeyRequest, RoomClientMessage, RoomQueryResult, RoomQueryStatus,
-    RoomServerMessage, SavepointRequest, SchemaFilter, SchemaScope, TransactionPreviewRequest,
-    UpdateConnectionPolicyRequest, UpdateTenantLimitsRequest, WebAuthResponse, WhoAmIResponse,
-    WsClientMessage, WsServerMessage, PROTOCOL_VERSION,
+    CsvImportRequest, EndTransactionRequest, ExecuteRequest, ExecuteRequestHttp,
+    GithubNativeAuthExchangeRequest, GithubNativeAuthStartResponse, Health, InvitationRole,
+    IssuedPasswordResetResponse, IssuedTenantInvitationResponse, KeyAuthenticateRequest,
+    KeyChallengeRequest, KeyChallengeResponse, KillProcessRequest, ObjectPath,
+    OpenConnectionRequest, OpenSessionRequest, Operation, OperationStatus, PasswordLoginRequest,
+    PasswordResetRequest, Readiness, RefreshAuthRequest, RegisterPrincipalKeyRequest,
+    RoomClientMessage, RoomQueryResult, RoomQueryStatus, RoomServerMessage, SavepointRequest,
+    SchemaFilter, SchemaScope, TransactionPreviewRequest, UpdateConnectionPolicyRequest,
+    UpdateTenantLimitsRequest, WebAuthResponse, WhoAmIResponse, WsClientMessage, WsServerMessage,
+    PROTOCOL_VERSION,
 };
 
 use crate::config::{DeploymentPolicy, Transport};
@@ -3206,7 +3206,12 @@ fn add_component_schema<T: JsonSchema>(schemas: &mut serde_json::Map<String, ser
     let mut entries: Vec<(String, serde_json::Value)> = root
         .definitions
         .into_iter()
-        .map(|(name, schema)| (name, serde_json::to_value(schema).expect("schema serializes")))
+        .map(|(name, schema)| {
+            (
+                name,
+                serde_json::to_value(schema).expect("schema serializes"),
+            )
+        })
         .collect();
     entries.push((
         <T as JsonSchema>::schema_name(),
@@ -5315,7 +5320,9 @@ async fn ws_room(
 
 async fn handle_room_ws(
     state: AppState,
-    metadata: MetadataStore,
+    // Reintroduced as the document-actor handle in G3; the room WS body currently
+    // reaches metadata through `state.metadata`.
+    _metadata: MetadataStore,
     mut auth: AuthContext,
     room: RoomId,
     tenant: TenantId,
@@ -5397,55 +5404,6 @@ async fn handle_room_ws(
                         send_json(&mut sender, &RoomServerMessage::Presence {
                             presence: state.rooms.presence(room.0),
                         }).await?;
-                    }
-                    RoomClientMessage::DocumentOperation {
-                        operation_id,
-                        document_id: raw_document_id,
-                        operation,
-                    } => {
-                        if attachment_id.is_none() {
-                            send_json(&mut sender, &RoomServerMessage::Error {
-                                message: "attach before sending document operations".into(),
-                            }).await?;
-                            continue;
-                        }
-                        let document = document_id(raw_document_id)?;
-                        let applied = crate::room_service::apply_document_operation(
-                            metadata.clone(),
-                            auth.principal_id,
-                            room,
-                            document,
-                            operation.clone(),
-                        )
-                        .await;
-                        if let Err(error) = applied {
-                            send_json(&mut sender, &RoomServerMessage::Error {
-                                message: error.to_string(),
-                            }).await?;
-                            continue;
-                        }
-                        let envelope = DocumentOperationEnvelope {
-                            operation_id: operation_id.clone(),
-                            room_id: room.0,
-                            document_id: document.0,
-                            actor_principal_id: auth.principal_id.0,
-                            operation: operation.clone(),
-                        };
-                        state.rooms.publish(
-                            room.0,
-                            RoomServerMessage::DocumentOperation {
-                                operation: envelope,
-                            },
-                        );
-                        state.sessions.push_operation(
-                            Operation::ApplyDocumentOperation {
-                                room_id: room.0,
-                                document_id: document.0,
-                                operation_id,
-                                operation,
-                            },
-                            OperationStatus::Succeeded,
-                        );
                     }
                 }
             }

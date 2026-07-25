@@ -81,12 +81,6 @@ pub fn authorize(
         return Err(AuthorizationDenial::TenantAdminRequired);
     }
 
-    if operation == ApplyDocumentOperation
-        && matches!(scope.room_role, Some(AuthorizationRoomRole::Viewer))
-    {
-        return Err(AuthorizationDenial::RoomEditorRequired);
-    }
-
     if !is_connection_operation(operation) {
         return Ok(());
     }

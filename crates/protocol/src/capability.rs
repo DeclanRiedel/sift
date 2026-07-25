@@ -49,11 +49,10 @@ pub enum OperationKind {
     Metadata,
     AttachRoom,
     DetachRoom,
-    ApplyDocumentOperation,
 }
 
 impl OperationKind {
-    pub const ALL: [Self; 45] = [
+    pub const ALL: [Self; 44] = [
         Self::Authenticate,
         Self::RefreshAuthSession,
         Self::Logout,
@@ -98,7 +97,6 @@ impl OperationKind {
         Self::Metadata,
         Self::AttachRoom,
         Self::DetachRoom,
-        Self::ApplyDocumentOperation,
     ];
 
     pub fn destructive(self) -> bool {
@@ -119,7 +117,6 @@ impl OperationKind {
                 | Self::CommitTransaction
                 | Self::RollbackTransaction
                 | Self::Metadata
-                | Self::ApplyDocumentOperation
         )
     }
 }

@@ -9,7 +9,7 @@ use crate::{
     completion::CompletionRequest, BeginTransactionRequest, BulkInsertRequest, CancelRequest,
     ConnectionId, EndTransactionRequest, ExecuteRequestHttp, KillProcessRequest,
     OpenConnectionRequest, OpenSessionRequest, SavepointRequest, SchemaScope, SessionId,
-    TextDocumentOperation, TransactionPreviewRequest,
+    TransactionPreviewRequest,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
@@ -243,12 +243,6 @@ pub enum Operation {
         room_id: i64,
         attachment_id: i64,
     },
-    ApplyDocumentOperation {
-        room_id: i64,
-        document_id: i64,
-        operation_id: String,
-        operation: TextDocumentOperation,
-    },
 }
 
 /// Sanitized projection of an [`Operation`] for the durable audit log. Carries
@@ -310,7 +304,6 @@ impl Operation {
             Self::Metadata { .. } => OperationKind::Metadata,
             Self::AttachRoom { .. } => OperationKind::AttachRoom,
             Self::DetachRoom { .. } => OperationKind::DetachRoom,
-            Self::ApplyDocumentOperation { .. } => OperationKind::ApplyDocumentOperation,
         }
     }
 
@@ -478,9 +471,6 @@ impl Operation {
             Operation::Metadata { action, target, id } => summary(action, target, *id),
             Operation::AttachRoom { room_id, .. } => summary("attach", "room", Some(*room_id)),
             Operation::DetachRoom { room_id, .. } => summary("detach", "room", Some(*room_id)),
-            Operation::ApplyDocumentOperation { document_id, .. } => {
-                summary("apply_operation", "document", Some(*document_id))
-            }
         }
     }
 }

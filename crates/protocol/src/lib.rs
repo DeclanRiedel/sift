@@ -14,6 +14,7 @@ pub mod capability;
 pub mod column;
 pub mod completion;
 pub mod connection;
+pub mod crdt;
 pub mod csv_import;
 pub mod edit;
 pub mod engine;
@@ -51,6 +52,10 @@ pub use connection::{
     AccessMode as ConnAccessMode, EngineConnectionSpec, MssqlConnectionSpec, PgConnectionSpec,
     ServerInfo, SslMode,
 };
+pub use crdt::{
+    CrdtCursor, CrdtSnapshot, CrdtUpdate, DocumentFrontier, DocumentVersion, ReplicaId,
+    RoomConnectionId, RoomResultId,
+};
 pub use csv_import::{
     CsvConflictPolicy, CsvImportRequest, CsvImportResponse, InferredCsvColumn, InferredCsvType,
 };
@@ -72,8 +77,7 @@ pub use policy::{
 pub use process::{DatabaseProcess, KillProcessRequest, KillProcessResponse};
 pub use result::{CursorId, ExecuteRequest, Page, Row};
 pub use room::{
-    DocumentOperationEnvelope, RoomClientMessage, RoomPresence, RoomQueryResult, RoomQueryStatus,
-    RoomServerMessage, TextDocumentOperation,
+    RoomClientMessage, RoomPresence, RoomQueryResult, RoomQueryStatus, RoomServerMessage,
 };
 pub use schema::{
     CatalogTree, ConstraintInfo, ConstraintKind, IndexInfo, IndexKind, ObjectDdl, ObjectInfo,

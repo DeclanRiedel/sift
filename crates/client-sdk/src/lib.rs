@@ -31,10 +31,10 @@ use sift_protocol::{
     PasswordLoginRequest, PasswordResetRequest, PreviewEditsRequest, Readiness, RefreshAuthRequest,
     RegisterPrincipalKeyRequest, SavepointRequest, SchemaSearchRequest, SchemaSearchResponse,
     SchemaSnapshot, ServerInfo, SessionId, SessionInfo, TenantResourceLimits, TenantUsageSnapshot,
-    TextDocumentOperation, TransactionEndAction, TransactionInfo, TransactionPreview,
-    TransactionPreviewRequest, TransactionState, TxHandleRef, TxId, TxMode,
-    UpdateConnectionPolicyRequest, UpdateTenantLimitsRequest, Value, WebAuthResponse,
-    WhoAmIResponse, WsClientMessage, WsServerMessage,
+    TransactionEndAction, TransactionInfo, TransactionPreview, TransactionPreviewRequest,
+    TransactionState, TxHandleRef, TxId, TxMode, UpdateConnectionPolicyRequest,
+    UpdateTenantLimitsRequest, Value, WebAuthResponse, WhoAmIResponse, WsClientMessage,
+    WsServerMessage,
 };
 
 #[derive(Clone)]
@@ -1247,80 +1247,6 @@ impl Client {
 
     pub async fn revoke_token(&self, token: ApiTokenId) -> Result<()> {
         self.delete(&format!("/v1/auth/tokens/{}", token.0)).await
-    }
-
-    pub async fn apply_room_text_operation(
-        &self,
-        room: RoomId,
-        document: DocumentId,
-        client_id: impl Into<String>,
-        operation_id: impl Into<String>,
-        operation: TextDocumentOperation,
-    ) -> Result<sift_protocol::DocumentOperationEnvelope> {
-        use futures::SinkExt;
-        use tokio_tungstenite::tungstenite::client::IntoClientRequest;
-        use tokio_tungstenite::tungstenite::Message;
-
-        let mut request = self.room_ws_url(room).into_client_request()?;
-        if let Some(token) = self.current_bearer().await {
-            request.headers_mut().insert(
-                "authorization",
-                format!("Bearer {token}")
-                    .parse()
-                    .map_err(|e| Error::Protocol(format!("invalid bearer token header: {e}")))?,
-            );
-        }
-        let (mut ws, _) = tokio_tungstenite::connect_async(request).await?;
-        ws.send(Message::Text(
-            serde_json::to_string(&sift_protocol::RoomClientMessage::Attach {
-                client_id: client_id.into(),
-            })?
-            .into(),
-        ))
-        .await?;
-        loop {
-            match next_room_ws(&mut ws).await? {
-                sift_protocol::RoomServerMessage::Attached { .. } => break,
-                sift_protocol::RoomServerMessage::Error { message } => {
-                    return Err(Error::Protocol(message));
-                }
-                sift_protocol::RoomServerMessage::RateLimited { retry_after_ms } => {
-                    return Err(Error::Protocol(format!(
-                        "room WebSocket rate limited for {retry_after_ms}ms"
-                    )));
-                }
-                _ => {}
-            }
-        }
-
-        let operation_id = operation_id.into();
-        ws.send(Message::Text(
-            serde_json::to_string(&sift_protocol::RoomClientMessage::DocumentOperation {
-                operation_id: operation_id.clone(),
-                document_id: document.0,
-                operation,
-            })?
-            .into(),
-        ))
-        .await?;
-        loop {
-            match next_room_ws(&mut ws).await? {
-                sift_protocol::RoomServerMessage::DocumentOperation { operation }
-                    if operation.operation_id == operation_id =>
-                {
-                    return Ok(operation);
-                }
-                sift_protocol::RoomServerMessage::Error { message } => {
-                    return Err(Error::Protocol(message));
-                }
-                sift_protocol::RoomServerMessage::RateLimited { retry_after_ms } => {
-                    return Err(Error::Protocol(format!(
-                        "room WebSocket rate limited for {retry_after_ms}ms"
-                    )));
-                }
-                _ => {}
-            }
-        }
     }
 
     pub async fn audit(&self) -> Result<Vec<sift_protocol::AuditEntry>> {

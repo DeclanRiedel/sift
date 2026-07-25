@@ -12,8 +12,8 @@ use sift_metadata::{
 use sift_protocol::{
     AuthTokensResponse, ColumnMetadata, ConnectionSpec, Engine, ExecuteRequestHttp,
     GithubNativeAuthStartResponse, Health, Nullability, Page, PrimitiveType, RoomClientMessage,
-    RoomServerMessage, Row, SchemaScope, SchemaSnapshot, ServerInfo, SslMode,
-    TextDocumentOperation, TypeRef, Value, WebAuthResponse, WhoAmIResponse,
+    RoomServerMessage, Row, SchemaScope, SchemaSnapshot, ServerInfo, SslMode, TypeRef, Value,
+    WebAuthResponse, WhoAmIResponse,
 };
 use sift_server::http::{app, AppState, AuthState};
 use sift_server::registry::DriverRegistry;
@@ -498,7 +498,8 @@ const SDK_OPERATION_MANIFEST: &[&str] = &[
     "updateMetadataDocument",
     "updateMetadataSavedQuery",
     "upsertMetadataConnectionProfile",
-    "whoAmI",];
+    "whoAmI",
+];
 
 async fn fetch_openapi() -> serde_json::Value {
     let app = app(test_state());
@@ -595,7 +596,6 @@ fn collect_refs(value: &serde_json::Value, out: &mut Vec<String>) {
         _ => {}
     }
 }
-
 
 #[tokio::test]
 async fn bulk_insert_is_public_http_api() {
@@ -2513,114 +2513,9 @@ async fn http_execute_records_room_scoped_query_history() {
     assert_eq!(history[0]["row_count"], 2);
 }
 
-#[tokio::test]
-async fn room_websocket_applies_and_broadcasts_document_operations() {
-    use futures::{SinkExt, StreamExt};
-    use tokio_tungstenite::tungstenite::Message;
-
-    let state = test_state_with_metadata(true);
-    let metadata = state.metadata.as_ref().unwrap().clone();
-    let room = metadata
-        .create_room(
-            TenantId(1),
-            PrincipalId(1),
-            NewRoom {
-                name: "room ws".into(),
-                kind: RoomKind::Shared,
-            },
-        )
-        .unwrap();
-    let document = metadata
-        .create_document(
-            room.id,
-            NewDocument {
-                kind: "sql".into(),
-                title: "ws.sql".into(),
-                crdt_type: CrdtType::Loro,
-                crdt_state: b"select 1".to_vec(),
-                position: 0,
-                connection_profile_id: None,
-            },
-        )
-        .unwrap();
-
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    let server = tokio::spawn(async move {
-        axum::serve(listener, app(state).into_make_service())
-            .await
-            .unwrap();
-    });
-
-    let (mut ws, _) =
-        tokio_tungstenite::connect_async(format!("ws://{addr}/v1/metadata/rooms/{}/ws", room.id.0))
-            .await
-            .unwrap();
-    ws.send(Message::Text(
-        serde_json::to_string(&RoomClientMessage::Attach {
-            client_id: "test-client".into(),
-        })
-        .unwrap()
-        .into(),
-    ))
-    .await
-    .unwrap();
-    let attached: RoomServerMessage = ws_json(ws.next().await.unwrap().unwrap());
-    assert!(matches!(attached, RoomServerMessage::Attached { .. }));
-
-    ws.send(Message::Text(
-        serde_json::to_string(&RoomClientMessage::DocumentOperation {
-            operation_id: "op-1".into(),
-            document_id: document.id.0,
-            operation: TextDocumentOperation::Replace {
-                text: "select 2".into(),
-            },
-        })
-        .unwrap()
-        .into(),
-    ))
-    .await
-    .unwrap();
-
-    let mut saw_operation = false;
-    for _ in 0..4 {
-        let message: RoomServerMessage = ws_json(ws.next().await.unwrap().unwrap());
-        if matches!(
-            message,
-            RoomServerMessage::DocumentOperation { operation }
-                if operation.operation_id == "op-1"
-        ) {
-            saw_operation = true;
-            break;
-        }
-    }
-    assert!(saw_operation);
-    assert_eq!(
-        metadata.get_document(document.id).unwrap().crdt_state,
-        b"select 2"
-    );
-
-    let client = sift_client_sdk::Client::new(format!("http://{addr}"));
-    let envelope = client
-        .apply_room_text_operation(
-            room.id,
-            document.id,
-            "sdk-room-client",
-            "op-2",
-            TextDocumentOperation::Replace {
-                text: "select 3".into(),
-            },
-        )
-        .await
-        .unwrap();
-    assert_eq!(envelope.operation_id, "op-2");
-    assert_eq!(
-        metadata.get_document(document.id).unwrap().crdt_state,
-        b"select 3"
-    );
-
-    server.abort();
-}
+// Live document editing over the room WebSocket was removed with the positional
+// document-operation contract in Phase G's protocol reset. The Loro-backed
+// DocumentSync/DocumentUpdate path and its convergence tests land in G3.
 
 #[tokio::test]
 async fn metadata_connection_profile_opens_session_connection() {
@@ -4668,4 +4563,3 @@ async fn loopback_bypass_rejects_non_loopback_peer() {
     let res = app.oneshot(req).await.unwrap();
     assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
 }
-

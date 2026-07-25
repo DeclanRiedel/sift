@@ -14,3 +14,4 @@ serde_bytes = { workspace = true }
 thiserror = { workspace = true }
 chrono = { workspace = true }
 uuid = { workspace = true }
+base64 = { workspace = true }
