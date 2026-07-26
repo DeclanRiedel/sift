@@ -462,6 +462,7 @@ configurations without abandoning thin clients or breaking remote topology.
 | ADR-034 | server-owned or hybrid workspace and VCS topology                     | Phase L | not written                                                    |
 | ADR-035 | room lane separation + CRDT-safe lag recovery                         | Phase G | drafted in `docs/PLANS/presence-durable-separation.md`         |
 | ADR-036 | room-owned connection binding + submitter-scoped authorization        | Phase G | drafted in `docs/PLANS/shared-connection-ownership.md`         |
+| ADR-037 | room-owned system session + submitter-scoped pre-authorization        | Phase G | drafted in `docs/PLANS/shared-room-connection-routing.md`      |
 
 ## Reference: what is being stolen, and what is not
 
