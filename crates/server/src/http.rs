@@ -36,18 +36,18 @@ use sift_protocol::{
     ChangePasswordRequest, CreateGithubAllowlistRequest, CreateTenantInvitationRequest,
     CsvImportRequest, EndTransactionRequest, ExecuteRequest, ExecuteRequestHttp,
     GithubNativeAuthExchangeRequest, GithubNativeAuthStartResponse, HandshakeDeployment,
-    HandshakeRequest, HandshakeResponse, HandshakeTransport, Health, InvitationRole,
-    IssuedPasswordResetResponse, IssuedTenantInvitationResponse, KeyAuthenticateRequest,
-    KeyChallengeRequest, KeyChallengeResponse, KillProcessRequest, ObjectPath,
-    OpenConnectionRequest, OpenSessionRequest, Operation, OperationStatus, PasswordLoginRequest,
-    PasswordResetRequest, ProtocolRange, Readiness, RefreshAuthRequest,
+    HandshakeRequest, HandshakeResponse, HandshakeRuntimeMode, HandshakeTransport, Health,
+    InvitationRole, IssuedPasswordResetResponse, IssuedTenantInvitationResponse,
+    KeyAuthenticateRequest, KeyChallengeRequest, KeyChallengeResponse, KillProcessRequest,
+    ObjectPath, OpenConnectionRequest, OpenSessionRequest, Operation, OperationStatus,
+    PasswordLoginRequest, PasswordResetRequest, ProtocolRange, Readiness, RefreshAuthRequest,
     RegisterPrincipalKeyRequest, RoomClientMessage, RoomQueryResult, RoomServerMessage,
     SavepointRequest, SchemaFilter, SchemaScope, TransactionPreviewRequest,
     UpdateConnectionPolicyRequest, UpdateTenantLimitsRequest, WebAuthResponse, WhoAmIResponse,
     WsClientMessage, WsServerMessage, PROTOCOL_VERSION, PROTOCOL_VERSION_NUMBER,
 };
 
-use crate::config::{DeploymentPolicy, Transport};
+use crate::config::{DeploymentPolicy, RuntimeMode, Transport};
 use crate::error::{ApiError, ApiResult};
 use crate::room_runtime::RoomRuntime;
 use crate::session::SessionStore;
@@ -70,6 +70,7 @@ pub struct AuthState {
     pub loopback_bypass: bool,
     pub deployment: DeploymentPolicy,
     pub transport: Transport,
+    pub runtime_mode: RuntimeMode,
     pub runtime: crate::identity::AuthRuntime,
     pub github: Option<crate::identity::GithubOAuthConfig>,
     pub instance_audience: String,
@@ -88,6 +89,7 @@ impl Default for AuthState {
             loopback_bypass: true,
             deployment: DeploymentPolicy::Personal,
             transport: Transport::Loopback,
+            runtime_mode: RuntimeMode::InProcess,
             runtime: crate::identity::AuthRuntime::default(),
             github: None,
             instance_audience: "sift:local".into(),
@@ -3085,6 +3087,11 @@ async fn handshake(
             Transport::Loopback => HandshakeTransport::Loopback,
             Transport::Network => HandshakeTransport::Network,
             Transport::SshProxy => HandshakeTransport::SshProxy,
+        },
+        runtime_mode: match state.auth.runtime_mode {
+            RuntimeMode::InProcess => HandshakeRuntimeMode::InProcess,
+            RuntimeMode::Daemon => HandshakeRuntimeMode::Daemon,
+            RuntimeMode::Container => HandshakeRuntimeMode::Container,
         },
         capabilities: vec!["protocol_handshake".into()],
     }))

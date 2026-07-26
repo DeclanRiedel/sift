@@ -79,6 +79,7 @@ axum = { version = "0.7", default-features = false, features = ["form", "http1",
 tower = { version = "0.5", default-features = false }
 tower-http = { version = "0.6", default-features = false, features = ["trace", "cors", "normalize-path", "compression-gzip", "compression-br"] }
 figment = { version = "0.10", default-features = false, features = ["toml", "env"] }
+fs2 = "0.4"
 hyper = { version = "1", features = ["http1", "server"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
 http-body-util = "0.1"

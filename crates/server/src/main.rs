@@ -5,7 +5,7 @@
 
 use anyhow::Context;
 use sift_server::{
-    config::{load as load_config, Config},
+    config::{load as load_config, Config, RuntimeMode},
     http::{app, AppState},
     metadata_runtime::build_metadata_store,
     registry::DriverRegistry,
@@ -16,11 +16,23 @@ use sift_server::{
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let cfg = load_config().context("loading config")?;
+    let mut cfg = load_config().context("loading config")?;
+    if let Some(mode) = mode_override()? {
+        cfg.mode = mode;
+    }
     cfg.validate().context("validating config")?;
+    let mut runtime =
+        sift_server::runtime::RuntimeState::acquire(&cfg).context("acquiring runtime state")?;
     init_tracing(&cfg);
 
-    tracing::info!(version = sift_server::VERSION, bind = %cfg.bind, "sift-server starting");
+    tracing::info!(
+        version = sift_server::VERSION,
+        bind = %cfg.bind,
+        mode = ?cfg.mode,
+        instance_id = %runtime.instance_id,
+        daemon_generation = %runtime.daemon_generation,
+        "sift-server starting"
+    );
 
     let registry = build_registry(&cfg);
     let sessions = if let Some(path) = &cfg.audit.operation_log_path {
@@ -93,11 +105,14 @@ async fn main() -> anyhow::Result<()> {
             loopback_bypass: cfg.auth.loopback_bypass,
             deployment: cfg.deployment,
             transport: cfg.transport,
+            runtime_mode: cfg.mode,
             instance_audience: cfg
                 .auth
                 .public_base_url
                 .clone()
                 .unwrap_or_else(|| "sift:local".into()),
+            instance_id: runtime.instance_id.clone(),
+            daemon_generation: runtime.daemon_generation.clone(),
             allow_legacy_unversioned: false,
             rate_limiter: sift_server::rate_limit::RateLimiter::from_config(&cfg.rate_limits),
             github: match (
@@ -131,7 +146,11 @@ async fn main() -> anyhow::Result<()> {
     let listener = tokio::net::TcpListener::bind(bind)
         .await
         .with_context(|| format!("binding {bind}"))?;
-    tracing::info!("listening on http://{bind}");
+    let local_addr = listener.local_addr().context("reading bound address")?;
+    runtime
+        .publish_daemon(local_addr)
+        .context("publishing daemon readiness")?;
+    tracing::info!("listening on http://{local_addr}");
 
     let drain_deadline = std::time::Duration::from_secs(cfg.timeouts.shutdown_drain_secs);
     axum::serve(
@@ -144,6 +163,30 @@ async fn main() -> anyhow::Result<()> {
 
     tracing::info!("sift-server stopped");
     Ok(())
+}
+
+fn mode_override() -> anyhow::Result<Option<RuntimeMode>> {
+    let mut mode = None;
+    let mut args = std::env::args().skip(1);
+    while let Some(argument) = args.next() {
+        let value = if argument == "--mode" {
+            Some(
+                args.next()
+                    .context("--mode requires in-process, daemon, or container")?,
+            )
+        } else {
+            argument.strip_prefix("--mode=").map(str::to_owned)
+        };
+        if let Some(value) = value {
+            if mode.is_some() {
+                anyhow::bail!("--mode may be specified only once");
+            }
+            mode = Some(value.parse().map_err(anyhow::Error::msg)?);
+        } else {
+            anyhow::bail!("unknown sift-server argument `{argument}`");
+        }
+    }
+    Ok(mode)
 }
 
 fn init_tracing(cfg: &Config) {

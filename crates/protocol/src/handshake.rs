@@ -71,6 +71,14 @@ pub enum HandshakeTransport {
     SshProxy,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum HandshakeRuntimeMode {
+    InProcess,
+    Daemon,
+    Container,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct HandshakeResponse {
     pub server_version: String,
@@ -82,6 +90,7 @@ pub struct HandshakeResponse {
     pub daemon_generation: String,
     pub deployment: HandshakeDeployment,
     pub transport: HandshakeTransport,
+    pub runtime_mode: HandshakeRuntimeMode,
     #[serde(default)]
     pub capabilities: Vec<String>,
 }

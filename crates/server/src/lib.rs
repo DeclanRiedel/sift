@@ -30,6 +30,7 @@ pub mod resources;
 pub mod room_results;
 pub mod room_runtime;
 pub mod room_service;
+pub mod runtime;
 pub mod schema_cache;
 pub mod search;
 pub mod session;

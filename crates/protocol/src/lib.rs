@@ -69,7 +69,7 @@ pub use engine::Engine;
 pub use error::{Code, DriverError, DriverWarning};
 pub use handshake::{
     HandshakeClientKind, HandshakeDeployment, HandshakeRequest, HandshakeResponse,
-    HandshakeTransport, ProtocolRange,
+    HandshakeRuntimeMode, HandshakeTransport, ProtocolRange,
 };
 pub use operation::{
     AuthenticationMethod, IdentityAdminAction, Operation, OperationSummary, PolicyAdminAction,

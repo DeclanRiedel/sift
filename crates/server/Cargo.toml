@@ -28,6 +28,7 @@ csv = { workspace = true }
 ed25519-dalek = { workspace = true }
 dashmap = { workspace = true }
 figment = { workspace = true }
+fs2 = { workspace = true }
 futures = { workspace = true }
 getrandom = { workspace = true }
 serde = { workspace = true }

@@ -20,15 +20,47 @@ pub enum Transport {
     SshProxy,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum RuntimeMode {
+    /// Parent-owned foreground lifecycle. A future desktop may link the
+    /// runtime directly; the standalone binary remains foreground-owned.
+    #[default]
+    InProcess,
+    /// Long-lived user/service process with singleton descriptor state.
+    Daemon,
+    /// Immutable image managed and updated by a container orchestrator.
+    Container,
+}
+
+impl std::str::FromStr for RuntimeMode {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "in-process" => Ok(Self::InProcess),
+            "daemon" => Ok(Self::Daemon),
+            "container" => Ok(Self::Container),
+            _ => Err(format!(
+                "invalid runtime mode `{value}`; expected in-process, daemon, or container"
+            )),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
     /// Identity and authorization policy. Independent from how clients reach
     /// the server (ADR-030).
     pub deployment: DeploymentPolicy,
-    /// Client-to-server transport topology. `ssh-proxy` is reserved for the
-    /// Phase H stdio/proxy transport and is rejected until it is implemented.
+    /// Client-to-server transport topology. `ssh-proxy` is a daemon-only,
+    /// explicitly authenticated remote-loopback transport.
     pub transport: Transport,
+    /// Process ownership and activation policy, independent from transport.
+    pub mode: RuntimeMode,
+    /// Runtime identity/descriptor storage.
+    pub runtime: RuntimeConfig,
     /// Socket address to bind the HTTP server on.
     pub bind: String,
     /// RUST_LOG-style filter (`sift=debug,info`).
@@ -56,6 +88,14 @@ pub struct Config {
 pub struct LogConfig {
     /// `tracing-subscriber` env-filter directive string.
     pub filter: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RuntimeConfig {
+    /// Directory for the stable instance id, daemon lock, and ready
+    /// descriptor. Defaults beside the metadata database.
+    pub state_dir: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -188,6 +228,8 @@ impl Default for Config {
         Self {
             deployment: DeploymentPolicy::default(),
             transport: Transport::default(),
+            mode: RuntimeMode::default(),
+            runtime: RuntimeConfig::default(),
             bind: "127.0.0.1:7474".to_string(),
             log: LogConfig::default(),
             drivers: DriversConfig::default(),
@@ -205,8 +247,6 @@ impl Default for Config {
 impl Config {
     /// Reject topology/policy combinations that would broaden implicit trust.
     ///
-    /// SSH-proxy startup remains deliberately unavailable until its Phase H
-    /// transport lands.
     pub fn validate(&self) -> anyhow::Result<()> {
         use anyhow::{bail, Context};
 
@@ -222,6 +262,13 @@ impl Config {
             );
         }
 
+        if self.transport == Transport::SshProxy && !bind.ip().is_loopback() {
+            bail!(
+                "transport=ssh-proxy requires a remote loopback bind address; got {}",
+                self.bind
+            );
+        }
+
         if self.auth.loopback_bypass
             && (self.deployment != DeploymentPolicy::Personal
                 || self.transport != Transport::Loopback)
@@ -232,8 +279,11 @@ impl Config {
             );
         }
 
-        if self.transport == Transport::SshProxy {
-            bail!("transport=ssh-proxy is reserved for Phase H and is not implemented yet");
+        if self.transport == Transport::SshProxy && self.mode != RuntimeMode::Daemon {
+            bail!("transport=ssh-proxy requires mode=daemon");
+        }
+        if self.mode == RuntimeMode::Container && self.transport == Transport::SshProxy {
+            bail!("mode=container cannot use transport=ssh-proxy");
         }
 
         let github_partial =
@@ -295,6 +345,27 @@ impl Config {
         }
 
         Ok(())
+    }
+
+    pub fn runtime_state_dir(&self) -> std::path::PathBuf {
+        if let Some(path) = self
+            .runtime
+            .state_dir
+            .as_deref()
+            .filter(|path| !path.is_empty())
+        {
+            return path.into();
+        }
+        let metadata = self
+            .metadata
+            .path
+            .as_deref()
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(sift_metadata::MetadataStore::default_local_path);
+        metadata
+            .parent()
+            .map(std::path::Path::to_path_buf)
+            .unwrap_or_else(|| ".".into())
     }
 }
 
@@ -427,7 +498,16 @@ mod tests {
         let config = Config::default();
         assert_eq!(config.deployment, DeploymentPolicy::Personal);
         assert_eq!(config.transport, Transport::Loopback);
+        assert_eq!(config.mode, RuntimeMode::InProcess);
         config.validate().unwrap();
+    }
+
+    #[test]
+    fn runtime_modes_parse_without_changing_transport_policy() {
+        assert_eq!("in-process".parse(), Ok(RuntimeMode::InProcess));
+        assert_eq!("daemon".parse(), Ok(RuntimeMode::Daemon));
+        assert_eq!("container".parse(), Ok(RuntimeMode::Container));
+        assert!("background".parse::<RuntimeMode>().is_err());
     }
 
     #[test]
@@ -451,7 +531,7 @@ mod tests {
     }
 
     #[test]
-    fn team_requires_durable_metadata_and_ssh_is_unavailable() {
+    fn team_requires_durable_metadata_and_ssh_requires_daemon_mode() {
         let team = Config {
             deployment: DeploymentPolicy::Team,
             auth: AuthConfig {
@@ -484,17 +564,39 @@ mod tests {
 
         let ssh = Config {
             transport: Transport::SshProxy,
+            mode: RuntimeMode::Daemon,
             auth: AuthConfig {
                 loopback_bypass: false,
                 ..AuthConfig::default()
             },
             ..Config::default()
         };
-        assert!(ssh
+        ssh.validate().unwrap();
+
+        let foreground_ssh = Config {
+            transport: Transport::SshProxy,
+            auth: AuthConfig {
+                loopback_bypass: false,
+                ..AuthConfig::default()
+            },
+            ..Config::default()
+        };
+        assert!(foreground_ssh
             .validate()
             .unwrap_err()
             .to_string()
-            .contains("not implemented"));
+            .contains("mode=daemon"));
+
+        let container_ssh = Config {
+            transport: Transport::SshProxy,
+            mode: RuntimeMode::Container,
+            auth: AuthConfig {
+                loopback_bypass: false,
+                ..AuthConfig::default()
+            },
+            ..Config::default()
+        };
+        assert!(container_ssh.validate().is_err());
     }
 
     #[test]
