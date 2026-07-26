@@ -2426,6 +2426,20 @@ async fn http_execute_records_room_scoped_query_history() {
             },
         )
         .unwrap();
+    let profile = metadata
+        .upsert_connection_profile(
+            TenantId(1),
+            PrincipalId(1),
+            NewConnectionProfile {
+                name: "room pg".into(),
+                engine: Engine::Postgres,
+                spec: pg_spec(),
+                credential_mode: CredentialMode::Shared,
+                tags: Vec::new(),
+            },
+        )
+        .await
+        .unwrap();
     let (_, token) = metadata
         .issue_api_token(PrincipalId(1), Some(TenantId(1)), "history", None)
         .unwrap();
@@ -2467,6 +2481,26 @@ async fn http_execute_records_room_scoped_query_history() {
     )
     .await;
 
+    // Bind the profile so room-scoped execution routes through the room's
+    // server-owned connection (ADR-037).
+    let bind = app
+        .clone()
+        .oneshot(
+            Request::put(format!("/v1/metadata/rooms/{}/connection", room.id.0))
+                .header("authorization", format!("Bearer {token}"))
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::to_vec(&serde_json::json!({
+                        "connection_profile_id": profile.id.0
+                    }))
+                    .unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(bind.status(), StatusCode::OK);
+
     let res = app
         .clone()
         .oneshot(
@@ -2507,6 +2541,65 @@ async fn http_execute_records_room_scoped_query_history() {
     assert_eq!(history[0]["sql_text"], "SELECT id, name FROM users");
     assert_eq!(history[0]["status"], "ok");
     assert_eq!(history[0]["row_count"], 2);
+}
+
+#[tokio::test]
+async fn room_scoped_execute_requires_a_bound_connection() {
+    let mut state = test_state_with_metadata(true);
+    let metadata = state.metadata.as_ref().unwrap();
+    let room = metadata
+        .create_room(
+            TenantId(1),
+            PrincipalId(1),
+            NewRoom {
+                name: "unbound".into(),
+                kind: RoomKind::Shared,
+            },
+        )
+        .unwrap();
+    let (_, token) = metadata
+        .issue_api_token(PrincipalId(1), Some(TenantId(1)), "unbound", None)
+        .unwrap();
+    state.auth.loopback_bypass = false;
+    let app = app(state);
+
+    let session: sift_protocol::SessionInfo = body_json(
+        app.clone()
+            .oneshot(
+                Request::post("/v1/sessions")
+                    .header("authorization", format!("Bearer {token}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"tag":"unbound"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+            .into_body(),
+    )
+    .await;
+
+    // Room has no bound connection: execution is rejected, not routed.
+    let res = app
+        .oneshot(
+            Request::post(format!("/v1/sessions/{}/queries", session.id))
+                .header("authorization", format!("Bearer {token}"))
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::to_vec(&ExecuteRequestHttp {
+                        connection: sift_protocol::ConnectionId(1),
+                        sql: "SELECT 1".into(),
+                        params: Vec::new(),
+                        tx: None,
+                        room_id: Some(room.id.0),
+                        connection_profile_id: None,
+                    })
+                    .unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
 }
 
 // --- Phase G collaborative document tests (Loro over the room WebSocket) ---

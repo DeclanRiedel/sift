@@ -106,6 +106,11 @@ struct SessionStoreInner {
         ),
         (),
     >,
+    /// Server-owned room connections (ADR-037). Each room lazily opens one
+    /// managed connection under its binder's provenance; the async mutex both
+    /// guards lazy open and serializes member queries onto the single
+    /// connection.
+    room_connections: DashMap<i64, Arc<tokio::sync::Mutex<Option<RoomConn>>>>,
     resource_manager: RwLock<crate::resources::ResourceManager>,
     cursor_resource_guards: DashMap<
         CursorId,
@@ -135,6 +140,26 @@ struct SessionStoreInner {
     /// and cached with a TTL (Phase D schema search). Keyed by connection since
     /// search scope is the active connection.
     search_indexes: DashMap<ConnectionId, (Arc<crate::search::SearchIndex>, Instant)>,
+}
+
+/// A live server-owned room connection: a hidden session owned by the binder
+/// holding one managed connection opened from the room's bound profile.
+#[derive(Clone)]
+struct RoomConn {
+    session_id: SessionId,
+    conn_id: ConnectionId,
+}
+
+/// Identity a room connection is opened under (ADR-037): the binder's
+/// provenance plus the bound profile's engine and policy revision.
+#[derive(Clone)]
+pub struct RoomConnProvenance {
+    pub room_id: i64,
+    pub binder: PrincipalId,
+    pub tenant: sift_metadata::TenantId,
+    pub profile_id: sift_metadata::ConnectionProfileId,
+    pub engine: Engine,
+    pub policy_revision: u64,
 }
 
 /// TTL for a cached per-connection search index before it is rebuilt.
@@ -214,6 +239,7 @@ impl SessionStore {
                 audit_tx: Mutex::new(None),
                 authorization_store: RwLock::new(None),
                 managed_connections: DashMap::new(),
+                room_connections: DashMap::new(),
                 resource_manager: RwLock::new(crate::resources::ResourceManager::default()),
                 cursor_resource_guards: DashMap::new(),
                 audit_dropped: AtomicU64::new(0),
@@ -253,6 +279,7 @@ impl SessionStore {
                 audit_tx: Mutex::new(None),
                 authorization_store: RwLock::new(None),
                 managed_connections: DashMap::new(),
+                room_connections: DashMap::new(),
                 resource_manager: RwLock::new(crate::resources::ResourceManager::default()),
                 cursor_resource_guards: DashMap::new(),
                 audit_dropped: AtomicU64::new(0),
@@ -998,6 +1025,90 @@ impl SessionStore {
         }
         tracing::info!(session_id = %session_id, conn_id = %info.id, %engine, "connection opened");
         Ok(info)
+    }
+
+    /// Run a room-scoped query through the room's server-owned connection
+    /// (ADR-037). Holding the per-room async mutex across the whole execute
+    /// both guards the lazy open and serializes concurrent member queries onto
+    /// the single connection. The submitter must already be authorized (the
+    /// HTTP layer runs the submitter-scoped intersection before routing here).
+    pub async fn execute_room_query(
+        &self,
+        provenance: RoomConnProvenance,
+        req: ExecuteRequestHttp,
+    ) -> ApiResult<ExecuteResponse> {
+        let slot = self
+            .inner
+            .room_connections
+            .entry(provenance.room_id)
+            .or_default()
+            .clone();
+        let mut guard = slot.lock().await;
+        let room_conn = match guard.as_ref() {
+            Some(existing) => existing.clone(),
+            None => {
+                let opened = self.open_room_connection(&provenance).await?;
+                *guard = Some(opened.clone());
+                opened
+            }
+        };
+        let mut req = req;
+        req.connection = room_conn.conn_id;
+        self.execute_http(room_conn.session_id, req).await
+    }
+
+    /// Open the room's hidden session (owned by the binder) and its managed
+    /// connection from the bound profile.
+    async fn open_room_connection(&self, p: &RoomConnProvenance) -> ApiResult<RoomConn> {
+        let metadata = self
+            .inner
+            .authorization_store
+            .read()
+            .unwrap()
+            .clone()
+            .ok_or(ApiError::MetadataUnavailable)?;
+        let spec = metadata
+            .resolve_connection_spec(p.tenant, p.binder, p.profile_id)
+            .await?;
+        let session = self.open_session_with_owner(
+            OpenSessionRequest {
+                tag: Some(format!("room:{}", p.room_id)),
+                tenant_id: Some(p.tenant.0),
+            },
+            Some(p.binder),
+            Some(p.tenant),
+            false,
+        )?;
+        let info = self
+            .open_managed_connection(
+                session.id,
+                p.engine,
+                spec,
+                p.binder,
+                p.tenant,
+                p.profile_id,
+                p.policy_revision,
+                false,
+            )
+            .await?;
+        Ok(RoomConn {
+            session_id: session.id,
+            conn_id: info.id,
+        })
+    }
+
+    /// Tear down a room's server-owned connection, if any (on unbind, room
+    /// emptiness, or revocation). Closing the session closes its connection.
+    pub async fn close_room_connection(&self, room_id: i64) {
+        let Some((_, slot)) = self.inner.room_connections.remove(&room_id) else {
+            return;
+        };
+        let mut guard = slot.lock().await;
+        if let Some(room_conn) = guard.take() {
+            if let Err(error) = self.close_session(room_conn.session_id) {
+                tracing::warn!(room_id, %error, "closing room connection session failed");
+            }
+        }
     }
 
     fn bind_session_tenant(

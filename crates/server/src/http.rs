@@ -1063,6 +1063,21 @@ struct ExecuteMetadataContext {
     principal_id: PrincipalId,
     room_id: Option<RoomId>,
     connection_profile_id: Option<ConnectionProfileId>,
+    /// Present when the query targets a bound room: route it through the
+    /// room's server-owned connection instead of the caller's (ADR-037).
+    room_routing: Option<RoomRouting>,
+}
+
+/// Everything needed to route a room-scoped query onto the room's
+/// server-owned connection, opened under the binder's provenance.
+#[derive(Clone)]
+struct RoomRouting {
+    room_id: i64,
+    binder: PrincipalId,
+    tenant: TenantId,
+    profile_id: ConnectionProfileId,
+    engine: sift_protocol::Engine,
+    policy_revision: u64,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -2822,8 +2837,10 @@ async fn execute_metadata_context(
         .transpose()?;
     let metadata_for_check = metadata.clone();
     let auth_for_check = auth.clone();
-    let effective_profile = metadata_blocking(move || {
+    let sql = req.sql.clone();
+    let (effective_profile, room_routing) = metadata_blocking(move || {
         let mut effective = profile;
+        let mut routing: Option<RoomRouting> = None;
         if let Some(room) = room {
             ensure_room_permission(
                 &metadata_for_check,
@@ -2831,23 +2848,52 @@ async fn execute_metadata_context(
                 room,
                 RoomPermission::Write,
             )?;
-            // Attribution follows the room's server-owned connection when one
-            // is bound (ADR-036), overriding any client-supplied profile. The
-            // hard "unbound room cannot execute" rejection and the actual
-            // routing of the query through the bound connection land together
-            // with the shared room connection (Phase G, G9).
-            if let Some(bound) = metadata_for_check
-                .get_room(room)?
-                .bound_connection_profile_id
-            {
-                effective = Some(bound);
-            }
-        }
-        if let Some(profile) = effective {
+            let room_row = metadata_for_check.get_room(room)?;
+            // A bound room runs every query through its server-owned
+            // connection (ADR-037); an unbound room cannot execute.
+            let profile_id = room_row.bound_connection_profile_id.ok_or_else(|| {
+                ApiError::BadRequest(
+                    "room has no bound connection; bind one before running queries".into(),
+                )
+            })?;
+            let binder = room_row.bound_connection_by.ok_or_else(|| {
+                ApiError::Internal("bound room connection is missing its binder".into())
+            })?;
+            let bound_profile =
+                metadata_for_check.get_connection_profile(room_row.tenant_id, profile_id)?;
+            // Submitter-scoped intersection: the submitting member's room role
+            // x the bound profile's policy, enforced BEFORE routing to the
+            // shared connection (which itself authorizes only as the binder).
+            let scope = room_submitter_scope(
+                &metadata_for_check,
+                auth_for_check.principal_id,
+                room,
+                room_row.tenant_id,
+                &bound_profile,
+            )?;
+            crate::authorization::authorize(&scope, sift_protocol::OperationKind::ExecuteQuery)
+                .map_err(|denial| ApiError::Forbidden(denial.public_reason().into()))?;
+            crate::sql_policy::enforce(
+                &bound_profile.policy,
+                bound_profile.engine,
+                sift_protocol::OperationKind::ExecuteQuery,
+                Some(&sql),
+                &[],
+            )?;
+            effective = Some(profile_id);
+            routing = Some(RoomRouting {
+                room_id: room.0,
+                binder,
+                tenant: room_row.tenant_id,
+                profile_id,
+                engine: bound_profile.engine,
+                policy_revision: bound_profile.policy.revision,
+            });
+        } else if let Some(profile) = effective {
             metadata_for_check
                 .get_connection_profile_for_principal(profile, auth_for_check.principal_id)?;
         }
-        Ok(effective)
+        Ok((effective, routing))
     })
     .await?;
 
@@ -2856,7 +2902,45 @@ async fn execute_metadata_context(
         principal_id: auth.principal_id,
         room_id: room,
         connection_profile_id: effective_profile,
+        room_routing,
     }))
+}
+
+/// Build the submitting member's authorization scope for a room-scoped
+/// execute: their room role and tenant role intersected with the bound
+/// profile's policy (ADR-036/037).
+fn room_submitter_scope(
+    metadata: &MetadataStore,
+    principal: PrincipalId,
+    room: RoomId,
+    tenant: TenantId,
+    profile: &sift_metadata::ConnectionProfile,
+) -> ApiResult<crate::authorization::AuthorizationScope> {
+    use crate::authorization::{AuthorizationRoomRole, AuthorizationScope};
+    let member = metadata
+        .get_room_member(room, principal)?
+        .ok_or_else(|| ApiError::Forbidden("room membership required".into()))?;
+    let room_role = Some(match member.role {
+        RoomRole::Owner => AuthorizationRoomRole::Owner,
+        RoomRole::Editor => AuthorizationRoomRole::Editor,
+        RoomRole::Viewer => AuthorizationRoomRole::Viewer,
+    });
+    let tenant_role = metadata
+        .list_principal_tenants(principal)?
+        .into_iter()
+        .find(|membership| membership.tenant.id == tenant)
+        .map(|membership| sift_protocol::TenantRole::from(&membership.role));
+    if tenant_role.is_none() {
+        return Err(ApiError::Forbidden("tenant membership required".into()));
+    }
+    Ok(AuthorizationScope {
+        authenticated: true,
+        trusted_local: false,
+        instance_admin: false,
+        tenant_role,
+        room_role,
+        connection_policy: Some(profile.policy.clone()),
+    })
 }
 
 async fn record_execute_history(
@@ -3433,6 +3517,9 @@ async fn bind_metadata_room_connection(
             .map_err(Into::into)
     })
     .await?;
+    // Drop any existing server-owned connection so the next room query
+    // reopens under the newly bound profile (ADR-037).
+    state.sessions.close_room_connection(room.0).await;
     push_metadata_operation_local(&state, actor, "bind_connection", "room", Some(room.0));
     Ok(Json(room_row))
 }
@@ -3456,6 +3543,8 @@ async fn unbind_metadata_room_connection(
             .map_err(Into::into)
     })
     .await?;
+    // Close the room's server-owned connection now that it is unbound.
+    state.sessions.close_room_connection(room.0).await;
     push_metadata_operation_local(&state, actor, "unbind_connection", "room", Some(room.0));
     Ok(Json(room_row))
 }
@@ -4955,7 +5044,25 @@ async fn execute_query(
     let _query_guard = state.shutdown.track_query();
     let actor = metadata_context.as_ref().map(|c| c.principal_id.0);
     let started = Instant::now();
-    let result = state.sessions.execute_http(id, req).await;
+    // A bound room routes execution through its server-owned connection
+    // (ADR-037); everything else runs on the caller's session connection.
+    let result = match metadata_context
+        .as_ref()
+        .and_then(|c| c.room_routing.clone())
+    {
+        Some(routing) => {
+            let provenance = crate::session::RoomConnProvenance {
+                room_id: routing.room_id,
+                binder: routing.binder,
+                tenant: routing.tenant,
+                profile_id: routing.profile_id,
+                engine: routing.engine,
+                policy_revision: routing.policy_revision,
+            };
+            state.sessions.execute_room_query(provenance, req).await
+        }
+        None => state.sessions.execute_http(id, req).await,
+    };
     let duration_ms = started.elapsed().as_millis().min(i64::MAX as u128) as i64;
     if let Some(context) = metadata_context {
         if let Some(summary) = room_query_result(&context, sql_text.clone(), &result) {
