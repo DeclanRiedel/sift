@@ -8,6 +8,8 @@ use crate::runtime::{read_daemon_descriptor, DaemonDescriptor};
 use anyhow::{bail, Context};
 use base64::Engine as _;
 use ed25519_dalek::Verifier as _;
+use fs2::FileExt as _;
+use sha2::{Digest as _, Sha256};
 use sift_metadata::NewOperationAudit;
 use sift_protocol::{
     ProtocolRange, RemoteCapabilityResponse, RemoteDaemonDescriptor, RemoteKeyChallenge,
@@ -44,6 +46,9 @@ pub fn prepare_remote_config(state_dir: &Path) -> anyhow::Result<Config> {
     config.runtime = RuntimeConfig {
         state_dir: Some(runtime_dir.display().to_string()),
     };
+    if config.updater.state_dir.is_none() {
+        config.updater.state_dir = Some(state_dir.join("updates").display().to_string());
+    }
     config.metadata = MetadataConfig {
         enabled: true,
         path: Some(state_dir.join(REMOTE_METADATA_FILE).display().to_string()),
@@ -73,6 +78,51 @@ pub fn probe(state_dir: &Path) -> anyhow::Result<RemoteProbeResponse> {
         install_layout_version: 1,
         daemon,
     })
+}
+
+/// Verify an upload from inside that executable, serialize concurrent
+/// installers, and atomically place the verified artifact.
+pub fn install_uploaded(
+    state_dir: &Path,
+    destination: &Path,
+    expected_sha256: &str,
+) -> anyhow::Result<RemoteProbeResponse> {
+    if expected_sha256.len() != 64
+        || !expected_sha256
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+    {
+        bail!("expected artifact digest is not lowercase SHA-256");
+    }
+    ensure_private_dir(state_dir)?;
+    let mut lock_options = std::fs::OpenOptions::new();
+    lock_options.read(true).write(true).create(true);
+    private_file_mode(&mut lock_options);
+    let lock = lock_options.open(state_dir.join("install.lock"))?;
+    lock.lock_exclusive()?;
+
+    let uploaded = std::env::current_exe().context("resolving uploaded executable")?;
+    verify_artifact_digest(&uploaded, expected_sha256)?;
+    let parent = destination
+        .parent()
+        .context("remote install destination has no parent")?;
+    ensure_private_dir(parent)?;
+    if destination.exists() {
+        verify_artifact_digest(destination, expected_sha256)?;
+        if uploaded != destination {
+            std::fs::remove_file(uploaded)?;
+        }
+    } else {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&uploaded, std::fs::Permissions::from_mode(0o700))?;
+        }
+        std::fs::rename(&uploaded, destination)?;
+        std::fs::File::open(parent)?.sync_all()?;
+    }
+    fs2::FileExt::unlock(&lock)?;
+    probe(state_dir)
 }
 
 pub fn challenge(state_dir: &Path, fingerprint: &str) -> anyhow::Result<RemoteKeyChallenge> {
@@ -247,6 +297,32 @@ fn ensure_secret_key(path: &Path) -> anyhow::Result<()> {
     file.write_all(b"\n")?;
     file.sync_all()?;
     verify_private_file(path)
+}
+
+fn verify_artifact_digest(path: &Path, expected: &str) -> anyhow::Result<()> {
+    let metadata = std::fs::symlink_metadata(path)?;
+    if !metadata.is_file() || metadata.file_type().is_symlink() {
+        bail!("remote artifact is not a regular file");
+    }
+    let mut file = std::fs::File::open(path)?;
+    let mut digest = Sha256::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let read = std::io::Read::read(&mut file, &mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        digest.update(&buffer[..read]);
+    }
+    let mut actual = String::with_capacity(64);
+    for byte in digest.finalize() {
+        use std::fmt::Write as _;
+        let _ = write!(actual, "{byte:02x}");
+    }
+    if actual != expected {
+        bail!("remote artifact digest mismatch");
+    }
+    Ok(())
 }
 
 fn ensure_private_dir(path: &Path) -> anyhow::Result<()> {

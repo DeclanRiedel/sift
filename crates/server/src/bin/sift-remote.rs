@@ -291,13 +291,7 @@ async fn start_daemon(options: &Options, session: &SshSession) -> anyhow::Result
 }
 
 async fn install_server(options: &Options, session: &SshSession) -> anyhow::Result<()> {
-    let local = match &options.local_server_binary {
-        Some(path) => path.clone(),
-        None => std::env::current_exe()?
-            .parent()
-            .context("sift-remote executable has no parent directory")?
-            .join("sift-server"),
-    };
+    let local = select_local_server(options).await?;
     if !local.is_file() {
         bail!("local sift-server binary is missing: {}", local.display());
     }
@@ -314,6 +308,7 @@ async fn install_server(options: &Options, session: &SshSession) -> anyhow::Resu
         options.remote_binary,
         uuid::Uuid::new_v4().simple()
     );
+    let digest = sha256_file(&local)?;
     session
         .ssh_status(&[&format!("mkdir -p {parent} && chmod 700 {parent}")])
         .await?;
@@ -329,12 +324,39 @@ async fn install_server(options: &Options, session: &SshSession) -> anyhow::Resu
     if !status.success() {
         bail!("uploading remote sift-server failed with {status}");
     }
-    session
-        .ssh_status(&[&format!(
-            "chmod 700 {staging} && mv -f {staging} {}",
-            options.remote_binary
-        )])
-        .await
+    let _: RemoteProbeResponse = session
+        .agent_json(&[
+            &staging,
+            "remote",
+            "install",
+            "--state-dir",
+            &options.state_dir,
+            "--destination",
+            &options.remote_binary,
+            "--sha256",
+            &digest,
+        ])
+        .await?;
+    Ok(())
+}
+
+async fn select_local_server(options: &Options) -> anyhow::Result<PathBuf> {
+    if let Some(path) = &options.local_server_binary {
+        return Ok(path.clone());
+    }
+    let config = sift_server::config::load().context("loading local update configuration")?;
+    if config.updater.enabled {
+        let updater = sift_server::updater::Updater::from_config(&config)?;
+        let _ = updater.check_and_stage().await?;
+        return updater
+            .selected_release()?
+            .map(|release| release.executable)
+            .context("signed updater did not select a server artifact");
+    }
+    Ok(std::env::current_exe()?
+        .parent()
+        .context("sift-remote executable has no parent directory")?
+        .join("sift-server"))
 }
 
 async fn forward_connection(
@@ -577,6 +599,26 @@ fn decode_hex_32(value: &str) -> anyhow::Result<[u8; 32]> {
         out[index] = u8::from_str_radix(pair, 16).context("invalid signing-key hex")?;
     }
     Ok(out)
+}
+
+fn sha256_file(path: &Path) -> anyhow::Result<String> {
+    let mut file = std::fs::File::open(path)
+        .with_context(|| format!("opening artifact: {}", path.display()))?;
+    let mut digest = Sha256::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let read = std::io::Read::read(&mut file, &mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        digest.update(&buffer[..read]);
+    }
+    let mut output = String::with_capacity(64);
+    for byte in digest.finalize() {
+        use std::fmt::Write as _;
+        let _ = write!(output, "{byte:02x}");
+    }
+    Ok(output)
 }
 
 fn write_secret_json(value: &RemoteReady) -> anyhow::Result<()> {

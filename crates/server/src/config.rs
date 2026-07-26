@@ -61,6 +61,8 @@ pub struct Config {
     pub mode: RuntimeMode,
     /// Runtime identity/descriptor storage.
     pub runtime: RuntimeConfig,
+    /// Signed release checks and immutable staging (ADR-015).
+    pub updater: UpdaterConfig,
     /// Socket address to bind the HTTP server on.
     pub bind: String,
     /// RUST_LOG-style filter (`sift=debug,info`).
@@ -96,6 +98,39 @@ pub struct RuntimeConfig {
     /// Directory for the stable instance id, daemon lock, and ready
     /// descriptor. Defaults beside the metadata database.
     pub state_dir: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct UpdaterConfig {
+    /// Check and stage signed releases in the background.
+    pub enabled: bool,
+    /// Explicit signed release channel.
+    pub channel: String,
+    /// Distribution-owned manifest URL. Never inferred from another host.
+    pub manifest_url: Option<String>,
+    /// Detached signature URL for the exact manifest bytes.
+    pub signature_url: Option<String>,
+    /// Private updater state/cache root. Defaults under runtime state.
+    pub state_dir: Option<String>,
+    /// Hard download ceiling, in addition to the signed artifact length.
+    pub max_artifact_bytes: u64,
+    /// Delay before the first background check.
+    pub initial_delay_secs: u64,
+}
+
+impl Default for UpdaterConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            channel: "stable".into(),
+            manifest_url: None,
+            signature_url: None,
+            state_dir: None,
+            max_artifact_bytes: 512 * 1024 * 1024,
+            initial_delay_secs: 30,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -230,6 +265,7 @@ impl Default for Config {
             transport: Transport::default(),
             mode: RuntimeMode::default(),
             runtime: RuntimeConfig::default(),
+            updater: UpdaterConfig::default(),
             bind: "127.0.0.1:7474".to_string(),
             log: LogConfig::default(),
             drivers: DriversConfig::default(),
@@ -284,6 +320,36 @@ impl Config {
         }
         if self.mode == RuntimeMode::Container && self.transport == Transport::SshProxy {
             bail!("mode=container cannot use transport=ssh-proxy");
+        }
+        if self.mode == RuntimeMode::Container && self.updater.enabled {
+            bail!("mode=container disables self-update; replace the container image instead");
+        }
+        if self.updater.enabled {
+            if self.updater.channel.is_empty()
+                || !self
+                    .updater
+                    .channel
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+            {
+                bail!("updater.channel must be a non-empty safe channel name");
+            }
+            if self.updater.max_artifact_bytes == 0 {
+                bail!("updater.max_artifact_bytes must be greater than zero");
+            }
+            for (name, value) in [
+                ("updater.manifest_url", &self.updater.manifest_url),
+                ("updater.signature_url", &self.updater.signature_url),
+            ] {
+                let value = value
+                    .as_deref()
+                    .with_context(|| format!("{name} is required when updater.enabled=true"))?;
+                let url = reqwest::Url::parse(value)
+                    .with_context(|| format!("{name} is not a valid URL"))?;
+                if url.scheme() != "https" {
+                    bail!("{name} must use HTTPS");
+                }
+            }
         }
         if self.transport == Transport::SshProxy
             && (!self.metadata.enabled || self.metadata.secret_backend == "memory")

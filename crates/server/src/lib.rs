@@ -37,6 +37,7 @@ pub mod search;
 pub mod session;
 pub mod shutdown;
 pub mod sql_policy;
+pub mod updater;
 
 pub use config::Config;
 pub use error::ApiError;

@@ -52,11 +52,22 @@ async fn main() -> anyhow::Result<()> {
             sift_server::remote_agent::write_json(&response)?;
             return Ok(());
         }
+        ServerCommand::RemoteInstall {
+            state_dir,
+            destination,
+            sha256,
+        } => {
+            let response =
+                sift_server::remote_agent::install_uploaded(&state_dir, &destination, &sha256)?;
+            sift_server::remote_agent::write_json(&response)?;
+            return Ok(());
+        }
     };
     cfg.validate().context("validating config")?;
     let mut runtime =
         sift_server::runtime::RuntimeState::acquire(&cfg).context("acquiring runtime state")?;
     init_tracing(&cfg);
+    sift_server::updater::spawn_background(&cfg).context("starting signed background updater")?;
 
     tracing::info!(
         version = sift_server::VERSION,
@@ -217,6 +228,11 @@ enum ServerCommand {
         state_dir: std::path::PathBuf,
         proof: Option<RemoteProof>,
     },
+    RemoteInstall {
+        state_dir: std::path::PathBuf,
+        destination: std::path::PathBuf,
+        sha256: String,
+    },
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -256,11 +272,13 @@ fn parse_command(args: impl IntoIterator<Item = String>) -> anyhow::Result<Serve
 
     let action = args
         .next()
-        .context("remote requires one of: daemon, probe, challenge, issue")?;
+        .context("remote requires one of: daemon, probe, challenge, issue, install")?;
     let mut state_dir = sift_server::remote_agent::default_remote_state_dir();
     let mut fingerprint = None;
     let mut nonce = None;
     let mut signature = None;
+    let mut destination = None;
+    let mut sha256 = None;
     while let Some(argument) = args.next() {
         let value = args
             .next()
@@ -270,6 +288,8 @@ fn parse_command(args: impl IntoIterator<Item = String>) -> anyhow::Result<Serve
             "--fingerprint" => fingerprint = Some(value),
             "--nonce" => nonce = Some(value),
             "--signature" => signature = Some(value),
+            "--destination" => destination = Some(value.into()),
+            "--sha256" => sha256 = Some(value),
             _ => anyhow::bail!("unknown remote argument `{argument}`"),
         }
     }
@@ -288,6 +308,11 @@ fn parse_command(args: impl IntoIterator<Item = String>) -> anyhow::Result<Serve
             };
             Ok(ServerCommand::RemoteIssue { state_dir, proof })
         }
+        "install" => Ok(ServerCommand::RemoteInstall {
+            state_dir,
+            destination: destination.context("remote install requires --destination")?,
+            sha256: sha256.context("remote install requires --sha256")?,
+        }),
         _ => anyhow::bail!("unknown remote action `{action}`"),
     }
 }
