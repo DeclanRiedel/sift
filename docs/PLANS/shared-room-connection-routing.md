@@ -86,20 +86,29 @@ Audit/history attribution stays the **submitter** (already the case:
 
 ## Build slices
 
-1. **Binder recorded** (foundational, landed): `bound_connection_by` column +
-   bind wiring + `Room` field.
-2. **Room connection manager**: `room_id → RoomConnection` map + per-room lock;
-   lazy open (system session + managed connection); teardown on
-   unbind/empty/revocation.
-3. **Submitter pre-authorization**: build submitter scope + `authorize` +
-   `sql_policy::enforce` in the room-execute pre-check.
-4. **Routing + `RoomConnectionUnbound`**: rewrite room execute to the room
-   session/conn under the per-room lock; hard-reject unbound.
-5. **Tests** (`MockDriver`): editor routes through the room connection; viewer
-   denied; policy-blocked op denied for an editor; unbound rejected; two
-   members' concurrent executes serialize; teardown closes the connection.
+1. **Binder recorded** — landed. `bound_connection_by` column (V021) + bind
+   wiring + `Room` field.
+2. **Room connection manager** — landed. `room_connections: DashMap<i64,
+   Arc<tokio::sync::Mutex<Option<RoomConn>>>>` on `SessionStore`; lazy open
+   (`open_session_with_owner` + `open_managed_connection` from
+   `resolve_connection_spec`); `close_room_connection` on bind (rebind) and
+   unbind. The async mutex also serializes member queries (decision 2).
+3. **Submitter pre-authorization** — landed. `room_submitter_scope` builds the
+   submitter's scope; `authorize(ExecuteQuery)` + `sql_policy::enforce` run in
+   the room-execute pre-check before routing.
+4. **Routing + `RoomConnectionUnbound`** — landed. `execute_query` routes a
+   bound room to `execute_room_query`; an unbound room is hard-rejected.
+5. **Tests** — `MockDriver` integration: bound room routes end-to-end (200 +
+   room-attributed history); unbound rejected (400).
 
-## Tests
+## Remaining
 
-Covered by slice 5 above; all exercisable against `MockDriver` without a real
-database.
+- **Teardown on room-empty / revocation.** Today the room connection is closed
+  on unbind/rebind only; closing it when the last subscriber leaves, and on
+  credential/membership revocation (via the `managed_connections` reverse
+  index), is a resource-hygiene follow-up, not a correctness gap.
+- **Viewer / policy-blocked E2E coverage.** The submitter-scope denial is
+  wired; end-to-end tests for a viewer (denied) and a policy-blocked editor
+  are follow-ups (the `authorize` + `sql_policy` logic is already unit-proven).
+- **Pageable result reference.** The viewer-observes-results broadcast
+  (`shared-connection-ownership.md`) is the last independent G9 slice.

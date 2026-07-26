@@ -233,13 +233,17 @@ session. CRDT only for query text; everything else server-authoritative.
 - [ ] [Implement] Shared room connection with role gating; result-reference
       broadcast (today the room emits a `RoomQueryResult` _summary_
       (`http.rs:1731-1738`), not a cursor reference peers can page from).
-      _Partial (ADR-036):_ room→connection **binding** landed — nullable
-      `room.bound_connection_profile_id` (migration V020), owner-gated
-      bind/unbind ops + `PUT/DELETE /v1/metadata/rooms/:id/connection`, and
-      room-execute attribution override. Remaining: route the live query
-      through a server-held room connection (execute selects by
-      `ConnectionId`, not profile), the `RoomConnectionUnbound` reject, and
-      the pageable result reference.
+      _Mostly landed (ADR-036/037):_ room→connection **binding** (nullable
+      `room.bound_connection_profile_id` + `bound_connection_by`, migrations
+      V020/V021, owner-gated bind/unbind + `PUT/DELETE
+      /v1/metadata/rooms/:id/connection`) **and routing** — a bound room opens
+      one server-owned connection under the binder's provenance
+      (`SessionStore::execute_room_query`, a hidden binder-owned session +
+      managed connection, serialized by a per-room async mutex), room execute
+      is authorized by the submitter's room-role × the bound profile policy
+      before routing, and an unbound room is hard-rejected. Remaining: teardown
+      on room-empty/revocation, viewer/policy E2E tests, and the pageable
+      result-reference broadcast.
 - [ ] [Implement] Observer lag recovery + follow mode.
 
 ## Phase H — Remote development & distribution
