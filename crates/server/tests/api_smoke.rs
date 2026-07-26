@@ -5,9 +5,9 @@ use axum::body::{to_bytes, Body};
 use axum::http::{Request, StatusCode};
 use sift_driver_api::{mock::MockDriver, BulkResult, PgNotification};
 use sift_metadata::{
-    CrdtType, CredentialMode, MembershipRole, MemorySecretStore, MetadataStore,
-    NewConnectionProfile, NewDocument, NewOperationAudit, NewPasswordPrincipal, NewRoom,
-    PrincipalId, RoomKind, RoomRole, TenantId, TenantKind,
+    CredentialMode, MembershipRole, MemorySecretStore, MetadataStore, NewConnectionProfile,
+    NewDocument, NewOperationAudit, NewPasswordPrincipal, NewRoom, PrincipalId, RoomKind, RoomRole,
+    TenantId, TenantKind,
 };
 use sift_protocol::{
     AuthTokensResponse, ColumnMetadata, ConnectionSpec, Engine, ExecuteRequestHttp,
@@ -875,8 +875,7 @@ async fn client_sdk_consumes_metadata_api() {
             sift_client_sdk::CreateDocumentRequest {
                 kind: "sql".into(),
                 title: "sdk.sql".into(),
-                crdt_type: CrdtType::Loro,
-                crdt_state: b"select 1".to_vec(),
+                initial_text: Some("select 1".into()),
                 position: 0,
                 connection_profile_id: None,
             },
@@ -2020,8 +2019,7 @@ async fn metadata_room_document_lifecycle_uses_local_principal() {
                 serde_json::json!({
                     "kind": "sql",
                     "title": "scratch",
-                    "crdt_type": "loro",
-                    "crdt_state": [1, 2, 3],
+                    "initial_text": "select 1",
                     "position": 0
                 }),
             ))
@@ -2252,8 +2250,8 @@ async fn metadata_room_roles_are_enforced() {
             NewDocument {
                 kind: "sql".into(),
                 title: "role-check.sql".into(),
-                crdt_type: CrdtType::Loro,
                 crdt_state: vec![1],
+                snapshot_version: Vec::new(),
                 position: 0,
                 connection_profile_id: None,
             },
@@ -2405,8 +2403,6 @@ async fn document_creation_rejects_cross_tenant_connection_profile() {
             serde_json::json!({
                 "kind": "sql",
                 "title": "bad.sql",
-                "crdt_type": "loro",
-                "crdt_state": [],
                 "position": 0,
                 "connection_profile_id": profile.id.0
             }),

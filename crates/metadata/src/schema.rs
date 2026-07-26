@@ -386,7 +386,17 @@ pub struct Document {
     pub kind: String,
     pub title: String,
     pub crdt_type: CrdtType,
+    /// Full Loro snapshot bytes (for a format-version-1 document) or raw UTF-8
+    /// text (for a not-yet-upgraded legacy row, `crdt_format_version == 0`).
     pub crdt_state: Vec<u8>,
+    /// Durable CRDT format. 0 = legacy raw UTF-8, 1 = Loro snapshot.
+    pub crdt_format_version: i64,
+    /// Update sequence covered by the stored snapshot (advanced by compaction).
+    pub snapshot_seq: i64,
+    /// Next per-document update sequence to allocate.
+    pub next_update_seq: i64,
+    /// Encoded Loro version vector of the stored snapshot.
+    pub snapshot_version: Vec<u8>,
     pub position: i64,
     pub connection_profile_id: Option<ConnectionProfileId>,
     pub created_at: DateTime<Utc>,
@@ -397,10 +407,35 @@ pub struct Document {
 pub struct NewDocument {
     pub kind: String,
     pub title: String,
-    pub crdt_type: CrdtType,
+    /// Canonical Loro snapshot bytes. The server builds this from optional
+    /// initial text; the backend is always Loro.
     pub crdt_state: Vec<u8>,
+    /// Encoded Loro version vector of `crdt_state`.
+    pub snapshot_version: Vec<u8>,
     pub position: i64,
     pub connection_profile_id: Option<ConnectionProfileId>,
+}
+
+/// One durable Loro update row from the append-only `document_update` log.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct DocumentUpdate {
+    pub server_seq: i64,
+    pub update_id: String,
+    pub replica_id: String,
+    pub submitted_by: PrincipalId,
+    pub update_bytes: Vec<u8>,
+    pub decoded_len: i64,
+    pub created_at: DateTime<Utc>,
+}
+
+/// Request to durably append one validated Loro update.
+#[derive(Debug, Clone)]
+pub struct NewDocumentUpdate {
+    pub update_id: String,
+    pub replica_id: String,
+    pub submitted_by: PrincipalId,
+    pub update_bytes: Vec<u8>,
+    pub decoded_len: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -531,15 +566,6 @@ impl RoomRole {
             Self::Owner => "owner",
             Self::Editor => "editor",
             Self::Viewer => "viewer",
-        }
-    }
-}
-
-impl CrdtType {
-    pub(crate) fn as_str(&self) -> &'static str {
-        match self {
-            Self::Loro => "loro",
-            Self::Automerge => "automerge",
         }
     }
 }

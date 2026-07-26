@@ -3468,6 +3468,20 @@ async fn create_metadata_document(
     let actor = auth.principal_id;
     let document = metadata_blocking(move || {
         let connection_profile_id = req.connection_profile_id.map(ConnectionProfileId);
+        // The server owns the canonical Loro snapshot: build a fresh replica,
+        // seed it with any initial text, and persist the snapshot plus its
+        // encoded version. Clients no longer choose a backend or ship bytes.
+        let replica = sift_doc::TextReplica::new(sift_doc::random_peer_id())
+            .map_err(|e| ApiError::Internal(format!("failed to seed document replica: {e}")))?;
+        if let Some(text) = req.initial_text.as_deref().filter(|t| !t.is_empty()) {
+            replica
+                .insert(0, text)
+                .map_err(|e| ApiError::BadRequest(format!("invalid initial text: {e}")))?;
+        }
+        let crdt_state = replica
+            .export_snapshot()
+            .map_err(|e| ApiError::Internal(format!("failed to export document snapshot: {e}")))?;
+        let snapshot_version = replica.version_vector();
         metadata
             .create_document_for_principal(
                 room,
@@ -3475,8 +3489,8 @@ async fn create_metadata_document(
                 NewDocument {
                     kind: req.kind,
                     title: req.title,
-                    crdt_type: req.crdt_type,
-                    crdt_state: req.crdt_state,
+                    crdt_state,
+                    snapshot_version,
                     position: req.position,
                     connection_profile_id,
                 },

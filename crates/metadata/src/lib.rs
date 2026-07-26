@@ -2876,14 +2876,15 @@ impl MetadataStore {
         let conn = self.conn()?;
         conn.execute(
             "INSERT INTO document
-             (room_id, kind, title, crdt_type, crdt_state, position, connection_profile_id, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8)",
+             (room_id, kind, title, crdt_type, crdt_state, crdt_format_version, snapshot_version,
+              position, connection_profile_id, created_at, updated_at)
+             VALUES (?1, ?2, ?3, 'loro', ?4, 1, ?5, ?6, ?7, ?8, ?8)",
             params![
                 room.0,
                 input.kind,
                 input.title,
-                input.crdt_type.as_str(),
                 input.crdt_state,
+                input.snapshot_version,
                 input.position,
                 input.connection_profile_id.map(|id| id.0),
                 now
@@ -2891,6 +2892,29 @@ impl MetadataStore {
         )?;
         let document_id = DocumentId(conn.last_insert_rowid());
         self.document_by_id_locked(&conn, document_id)
+    }
+
+    /// Insert a pre-Phase-G legacy document row (`crdt_format_version = 0`,
+    /// `crdt_state` holding raw text bytes). Such rows are only ever produced by
+    /// databases created before the Loro migration; this seam lets the
+    /// server-side upgrader be exercised end-to-end.
+    #[doc(hidden)]
+    pub fn insert_legacy_document(
+        &self,
+        room: RoomId,
+        title: &str,
+        raw_text: &[u8],
+    ) -> Result<DocumentId> {
+        let now = now_text();
+        let conn = self.conn()?;
+        conn.execute(
+            "INSERT INTO document
+             (room_id, kind, title, crdt_type, crdt_state, crdt_format_version, snapshot_version,
+              position, connection_profile_id, created_at, updated_at)
+             VALUES (?1, 'sql', ?2, 'loro', ?3, 0, x'', 0, NULL, ?4, ?4)",
+            params![room.0, title, raw_text, now],
+        )?;
+        Ok(DocumentId(conn.last_insert_rowid()))
     }
 
     pub fn create_document_for_principal(
@@ -2924,14 +2948,15 @@ impl MetadataStore {
         }
         tx.execute(
             "INSERT INTO document
-             (room_id, kind, title, crdt_type, crdt_state, position, connection_profile_id, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8)",
+             (room_id, kind, title, crdt_type, crdt_state, crdt_format_version, snapshot_version,
+              position, connection_profile_id, created_at, updated_at)
+             VALUES (?1, ?2, ?3, 'loro', ?4, 1, ?5, ?6, ?7, ?8, ?8)",
             params![
                 room.0,
                 input.kind,
                 input.title,
-                input.crdt_type.as_str(),
                 input.crdt_state,
+                input.snapshot_version,
                 input.position,
                 input.connection_profile_id.map(|id| id.0),
                 now
@@ -2947,7 +2972,8 @@ impl MetadataStore {
         let conn = self.conn()?;
         let mut stmt = conn.prepare(
             "SELECT id, room_id, kind, title, crdt_type, crdt_state, position,
-                    connection_profile_id, created_at, updated_at
+                    connection_profile_id, created_at, updated_at,
+                    crdt_format_version, snapshot_seq, next_update_seq, snapshot_version
              FROM document
              WHERE room_id = ?1
              ORDER BY position, id",
@@ -2972,7 +2998,8 @@ impl MetadataStore {
         }
         let mut stmt = conn.prepare(
             "SELECT d.id, d.room_id, d.kind, d.title, d.crdt_type, d.crdt_state, d.position,
-                    d.connection_profile_id, d.created_at, d.updated_at
+                    d.connection_profile_id, d.created_at, d.updated_at,
+                    d.crdt_format_version, d.snapshot_seq, d.next_update_seq, d.snapshot_version
              FROM document d
              JOIN room_member m ON m.room_id = d.room_id
              WHERE d.room_id = ?1 AND m.principal_id = ?2
@@ -2996,7 +3023,8 @@ impl MetadataStore {
         let conn = self.conn()?;
         conn.query_row(
             "SELECT d.id, d.room_id, d.kind, d.title, d.crdt_type, d.crdt_state, d.position,
-                    d.connection_profile_id, d.created_at, d.updated_at
+                    d.connection_profile_id, d.created_at, d.updated_at,
+                    d.crdt_format_version, d.snapshot_seq, d.next_update_seq, d.snapshot_version
              FROM document d JOIN room_member m ON m.room_id = d.room_id
              WHERE d.id = ?1 AND m.principal_id = ?2
                AND (?3 = 0 OR m.role IN ('owner', 'editor'))",
@@ -3045,6 +3073,153 @@ impl MetadataStore {
             return Err(MetadataError::DocumentNotFound(document));
         }
         self.document_by_id_locked(&conn, document)
+    }
+
+    /// Durably append one validated Loro update and allocate its per-document
+    /// server sequence in a single transaction. Returns the assigned sequence.
+    ///
+    /// Idempotent on `(document_id, update_id, replica_id)`: a retried delivery
+    /// of an already-stored update returns the existing sequence and inserts
+    /// nothing, so no duplicate row or gap is created.
+    pub fn append_document_update(
+        &self,
+        document: DocumentId,
+        update: NewDocumentUpdate,
+    ) -> Result<i64> {
+        let now = now_text();
+        let mut conn = self.conn()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let next_seq: Option<i64> = tx
+            .query_row(
+                "SELECT next_update_seq FROM document WHERE id = ?1",
+                params![document.0],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let Some(next_seq) = next_seq else {
+            return Err(MetadataError::DocumentNotFound(document));
+        };
+        if let Some(existing) = tx
+            .query_row(
+                "SELECT server_seq FROM document_update
+                 WHERE document_id = ?1 AND update_id = ?2 AND replica_id = ?3",
+                params![document.0, update.update_id, update.replica_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()?
+        {
+            return Ok(existing);
+        }
+        tx.execute(
+            "INSERT INTO document_update
+             (document_id, server_seq, update_id, replica_id, submitted_by, update_bytes,
+              decoded_len, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                document.0,
+                next_seq,
+                update.update_id,
+                update.replica_id,
+                update.submitted_by.0,
+                update.update_bytes,
+                update.decoded_len,
+                now,
+            ],
+        )?;
+        tx.execute(
+            "UPDATE document SET next_update_seq = ?1, updated_at = ?2 WHERE id = ?3",
+            params![next_seq + 1, now, document.0],
+        )?;
+        tx.commit()?;
+        Ok(next_seq)
+    }
+
+    /// All durable updates with `server_seq > after_seq`, in sequence order.
+    pub fn list_document_updates_since(
+        &self,
+        document: DocumentId,
+        after_seq: i64,
+    ) -> Result<Vec<DocumentUpdate>> {
+        let conn = self.conn()?;
+        let mut stmt = conn.prepare(
+            "SELECT server_seq, update_id, replica_id, submitted_by, update_bytes, decoded_len,
+                    created_at
+             FROM document_update
+             WHERE document_id = ?1 AND server_seq > ?2
+             ORDER BY server_seq",
+        )?;
+        let updates =
+            rows(stmt.query_map(params![document.0, after_seq], document_update_from_row)?);
+        updates
+    }
+
+    /// Transactionally replace the stored snapshot and delete every update row
+    /// through `through_seq` (compaction). Later rows are left untouched.
+    pub fn replace_document_snapshot(
+        &self,
+        document: DocumentId,
+        snapshot_bytes: Vec<u8>,
+        snapshot_version: Vec<u8>,
+        through_seq: i64,
+    ) -> Result<()> {
+        let now = now_text();
+        let mut conn = self.conn()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let updated = tx.execute(
+            "UPDATE document
+             SET crdt_state = ?1, snapshot_version = ?2, snapshot_seq = ?3, updated_at = ?4
+             WHERE id = ?5",
+            params![
+                snapshot_bytes,
+                snapshot_version,
+                through_seq,
+                now,
+                document.0
+            ],
+        )?;
+        if updated == 0 {
+            return Err(MetadataError::DocumentNotFound(document));
+        }
+        tx.execute(
+            "DELETE FROM document_update WHERE document_id = ?1 AND server_seq <= ?2",
+            params![document.0, through_seq],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Documents whose `crdt_state` is still raw UTF-8 (legacy format 0),
+    /// awaiting the server-side Loro upgrade.
+    pub fn list_legacy_documents(&self) -> Result<Vec<Document>> {
+        let conn = self.conn()?;
+        let mut stmt = conn.prepare(
+            "SELECT id, room_id, kind, title, crdt_type, crdt_state, position,
+                    connection_profile_id, created_at, updated_at,
+                    crdt_format_version, snapshot_seq, next_update_seq, snapshot_version
+             FROM document WHERE crdt_format_version = 0 ORDER BY id",
+        )?;
+        let documents = rows(stmt.query_map([], document_from_row)?);
+        documents
+    }
+
+    /// Promote one legacy row to a Loro snapshot (format 1). No-op if the row is
+    /// already upgraded or gone. The caller supplies the canonical snapshot it
+    /// built from the row's raw text.
+    pub fn upgrade_document_to_loro(
+        &self,
+        document: DocumentId,
+        snapshot_bytes: Vec<u8>,
+        snapshot_version: Vec<u8>,
+    ) -> Result<()> {
+        let now = now_text();
+        let conn = self.conn()?;
+        conn.execute(
+            "UPDATE document
+             SET crdt_state = ?1, snapshot_version = ?2, crdt_format_version = 1, updated_at = ?3
+             WHERE id = ?4 AND crdt_format_version = 0",
+            params![snapshot_bytes, snapshot_version, now, document.0],
+        )?;
+        Ok(())
     }
 
     pub fn delete_document(&self, document: DocumentId) -> Result<()> {
@@ -3538,7 +3713,8 @@ impl MetadataStore {
     fn document_by_id_locked(&self, conn: &Connection, id: DocumentId) -> Result<Document> {
         conn.query_row(
             "SELECT id, room_id, kind, title, crdt_type, crdt_state, position,
-                    connection_profile_id, created_at, updated_at
+                    connection_profile_id, created_at, updated_at,
+                    crdt_format_version, snapshot_seq, next_update_seq, snapshot_version
              FROM document WHERE id = ?1",
             params![id.0],
             document_from_row,
@@ -4044,6 +4220,22 @@ fn document_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Document> {
         connection_profile_id: row.get::<_, Option<i64>>(7)?.map(ConnectionProfileId),
         created_at: parse_time_sql(row.get(8)?)?,
         updated_at: parse_time_sql(row.get(9)?)?,
+        crdt_format_version: row.get(10)?,
+        snapshot_seq: row.get(11)?,
+        next_update_seq: row.get(12)?,
+        snapshot_version: row.get(13)?,
+    })
+}
+
+fn document_update_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<DocumentUpdate> {
+    Ok(DocumentUpdate {
+        server_seq: row.get(0)?,
+        update_id: row.get(1)?,
+        replica_id: row.get(2)?,
+        submitted_by: PrincipalId(row.get(3)?),
+        update_bytes: row.get(4)?,
+        decoded_len: row.get(5)?,
+        created_at: parse_time_sql(row.get(6)?)?,
     })
 }
 
@@ -6101,8 +6293,8 @@ mod tests {
                 NewDocument {
                     kind: "sql".to_string(),
                     title: "scratch.sql".to_string(),
-                    crdt_type: CrdtType::Loro,
                     crdt_state: b"initial".to_vec(),
+                    snapshot_version: Vec::new(),
                     position: 0,
                     connection_profile_id: None,
                 },
@@ -6161,8 +6353,8 @@ mod tests {
                 NewDocument {
                     kind: "sql".to_string(),
                     title: "private.sql".to_string(),
-                    crdt_type: CrdtType::Loro,
                     crdt_state: b"select 1".to_vec(),
+                    snapshot_version: Vec::new(),
                     position: 0,
                     connection_profile_id: None,
                 },
@@ -6345,8 +6537,8 @@ mod tests {
                 NewDocument {
                     kind: "sql".to_string(),
                     title: "scratch.sql".to_string(),
-                    crdt_type: CrdtType::Loro,
                     crdt_state: Vec::new(),
+                    snapshot_version: Vec::new(),
                     position: 0,
                     connection_profile_id: None,
                 },

@@ -31,6 +31,16 @@ pub fn build_metadata_store(cfg: &Config) -> anyhow::Result<Option<MetadataStore
             .bootstrap_local(&display_name)
             .context("bootstrapping local metadata principal")?;
     }
+    // Promote any pre-Phase-G documents (raw UTF-8 in `crdt_state`) to canonical
+    // Loro snapshots before serving. Aborts loudly on invalid UTF-8.
+    let upgraded = crate::document_actor::upgrade_legacy_documents(&store)
+        .context("upgrading legacy documents to Loro snapshots")?;
+    if upgraded > 0 {
+        tracing::info!(
+            count = upgraded,
+            "upgraded legacy documents to Loro snapshots"
+        );
+    }
     Ok(Some(store))
 }
 

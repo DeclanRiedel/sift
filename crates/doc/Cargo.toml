@@ -10,4 +10,5 @@ repository.workspace = true
 serde = { workspace = true }
 thiserror = { workspace = true }
 loro = { workspace = true }
+getrandom = { workspace = true }
 

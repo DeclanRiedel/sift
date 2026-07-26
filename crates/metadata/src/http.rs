@@ -10,7 +10,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use sift_protocol::{ConnectionSpec, Engine};
 
-use crate::{ApiTokenRow, CrdtType, CredentialMode, RoomKind, RoomRole};
+use crate::{ApiTokenRow, CredentialMode, RoomKind, RoomRole};
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct CreateRoomRequest {
@@ -29,8 +29,10 @@ pub struct AddRoomMemberRequest {
 pub struct CreateDocumentRequest {
     pub kind: String,
     pub title: String,
-    pub crdt_type: CrdtType,
-    pub crdt_state: Vec<u8>,
+    /// Optional initial SQL text. The server builds the canonical Loro snapshot;
+    /// clients no longer choose a CRDT backend or supply raw snapshot bytes.
+    #[serde(default)]
+    pub initial_text: Option<String>,
     pub position: i64,
     pub connection_profile_id: Option<i64>,
 }

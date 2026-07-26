@@ -18,6 +18,19 @@ use loro::{ExportMode, Frontiers, LoroDoc, LoroValue, VersionVector};
 /// container and nothing else.
 pub const TEXT_ROOT: &str = "text";
 
+/// Generate a durable, random, non-zero replica peer id from the OS RNG.
+///
+/// A future durable client persists this alongside the replica snapshot and
+/// reuses it; two concurrent writers must never share one document's peer id.
+pub fn random_peer_id() -> u64 {
+    let mut buf = [0u8; 8];
+    getrandom::getrandom(&mut buf).expect("OS RNG is available");
+    match u64::from_le_bytes(buf) {
+        0 => 1,
+        id => id,
+    }
+}
+
 /// Default ceiling on materialized UTF-8 text, mirrored by the server's
 /// `CollaborationConfig::max_document_text_bytes`.
 pub const DEFAULT_MAX_TEXT_BYTES: usize = 8 * 1024 * 1024;
@@ -196,6 +209,15 @@ impl TextReplica {
     /// replica. Errors if the frontier is not in retained history.
     pub fn materialize_at(&self, frontiers: &[u8]) -> Result<String, DocError> {
         Ok(self.fork_at(frontiers)?.text())
+    }
+
+    /// Fork an independent replica at the current version. Used to build a
+    /// throwaway validation replica so an untrusted update is imported and
+    /// checked without touching the committed replica.
+    pub fn fork(&self) -> TextReplica {
+        TextReplica {
+            doc: self.doc.fork(),
+        }
     }
 
     /// Fork an independent replica pinned at an encoded frontier. The fork keeps
