@@ -5,7 +5,7 @@ Runtime mode does not change deployment or authorization policy:
 
 | Use | Mode | Transport | Update ownership |
 | --- | --- | --- | --- |
-| Foreground/local parent | `in-process` | usually `loopback` | Parent selects a staged bundle |
+| Foreground/local parent | `in-process` | usually `loopback` | `sift-launcher` validates and selects a staged bundle |
 | Long-lived local or SSH server | `daemon` | `loopback`, `network`, or `ssh-proxy` | Explicit restart/bootstrap activates |
 | Immutable image | `container` | `loopback` or `network` | Container orchestrator; self-update is refused |
 
@@ -78,6 +78,8 @@ signature_url = "<distribution-supplied HTTPS signature URL>"
 state_dir = ".sift/updates"
 max_artifact_bytes = 536870912
 initial_delay_secs = 30
+check_interval_secs = 21600
+jitter_secs = 600
 ```
 
 The URL placeholders must be replaced with values supplied by the chosen
@@ -93,18 +95,21 @@ therefore cannot enter the install tree.
 
 Successful checks place immutable binaries under the updater state directory
 and atomically select a pending candidate. They never overwrite or interrupt
-the running process. The lifecycle owner starts the pending path and calls the
-updater's candidate commit only after `/ready` and the ADR-016 handshake
-succeed. On failure it clears the candidate selection and retains the current
-known-good pointer. Daemons activate only through explicit restart/bootstrap.
-Container mode rejects `updater.enabled = true`.
+the running process. Start local/daemon installations through `sift-launcher`;
+it launches the pending candidate, requires `/ready`, an ADR-016 handshake,
+and the signed release version, then commits the pointer. Failure terminates
+the candidate, clears its selection, and launches the retained known-good
+binary. SSH bootstrap applies the same commit gate after the remote handshake.
+Daemons activate only through explicit launcher restart/bootstrap. Container
+mode rejects `updater.enabled = true`.
 
 ## Release operator contract
 
 `.github/workflows/release.yml` builds native Linux x86-64, Linux ARM64, and
-macOS ARM64 artifacts, checks reproducibility for the server binary, emits
-checksums and CycloneDX SBOMs, builds the raw manifest, signs it, verifies a
-fixture with the public key, and publishes the assets for an existing tag.
+macOS ARM64 server, launcher, remote-helper, and administration artifacts,
+checks reproducibility for the server binary, emits checksums and CycloneDX
+SBOMs, builds the raw manifest, signs it, verifies a fixture with the public
+key, and publishes the assets for an existing tag.
 
 The workflow intentionally requires repository configuration rather than
 guessing distribution values:
@@ -113,6 +118,9 @@ guessing distribution values:
   unpadded base64url, embedded in every binary;
 - variable `SIFT_RELEASE_PUBLIC_KEY_PEM`: PEM public key used for the
   independent release-job verification;
+- variable `SIFT_MINIMUM_UPDATER_VERSION`: oldest updater semver permitted to
+  consume the manifest; this is intentionally independent from the new
+  release version;
 - variable `SIFT_RELEASE_ORIGIN`: exact HTTPS asset origin;
 - secret `SIFT_RELEASE_SIGNING_KEY_PEM_B64`: base64-encoded Ed25519 private
   signing key PEM.

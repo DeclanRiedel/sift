@@ -312,8 +312,10 @@ pub struct IssuedPasswordResetResponse {
     pub expires_at: DateTime<Utc>,
 }
 
-/// Claims carried by the future Phase H SSH-proxy capability. Phase E locks
-/// the narrow, instance-bound shape but exposes no issuance endpoint yet.
+/// Claims carried by the Phase H SSH-proxy capability.
+///
+/// The capability is issued through the authenticated SSH agent path and
+/// exchanged once over the forwarded HTTP transport.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct SshProxyCapabilityClaims {
     pub version: u8,

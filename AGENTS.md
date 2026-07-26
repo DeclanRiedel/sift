@@ -10,7 +10,8 @@ what sift is and the five product goals; this file is the operational subset.
 - `crates/driver-postgres`, `crates/driver-sqlserver` — engine impls.
 - `crates/server` — axum + sessions + rooms + metadata wiring.
 - `crates/metadata` — SQLite + refinery; secrets never live here.
-- `crates/doc` — text-document apply-op abstraction (real CRDT backend not yet chosen).
+- `crates/doc` — Loro query-text CRDT abstraction; CRDT state stays out of
+  results, schema, and sessions.
 - `crates/client-sdk` — thin reference HTTP + WebSocket consumer.
 - `crates/core` — reserved for shared server-internal types (currently empty).
 - `docs/DECISIONS.md` — load-bearing ADRs.

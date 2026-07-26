@@ -36,11 +36,10 @@
   independently page immutable result pages. Presence is leased and carries
   stable Loro selection anchors, lag recovery is explicit, and the reference
   SDK includes client-side follow-mode projection.
-- **Phase H design is complete.** ADR-021 locks direct SSH bootstrap and a
-  persistent remote daemon; ADR-016 now specifies a two-sided range handshake;
-  ADR-015 locks signed, restart-activated updates and lifecycle modes. The
-  implementation contract is
-  `docs/PLANS/phase-h-remote-development.md`.
+- **Phase H is complete.** Direct SSH bootstrap, the persistent authenticated
+  proxy daemon, protocol-v2 range negotiation, lifecycle modes, signed
+  periodic update staging, readiness-gated activation/rollback, and release
+  CI are implemented. See `docs/PLANS/phase-h-remote-development.md`.
 
 ---
 
@@ -285,18 +284,15 @@ handshake.
       authenticated channel); reconnect + state survival on SSH drop. The
       proxy establishes an instance-bound principal context and never inherits
       personal-loopback bypass (ADR-020/030).
-- [x] [Design] Version handshake. The client-sdk never sends or inspects
-      `X-Sift-Protocol-Version` today (`client-sdk/src/lib.rs` never
-      imports `PROTOCOL_VERSION`); the server emits it one-way. Both sides
-      need a real handshake once remote mode exists. ADR-016 now locks the
-      range negotiation and response-validation contract.
+- [x] [Design] Version handshake. ADR-016 locks the range negotiation and
+      response-validation contract.
 - [x] [Design] Background updater (release channel + signature
       verification); single-binary distribution modes (in-process / daemon
       / container). ADR-015 locks manifest trust, staging, activation, and
       rollback.
 - [x] [Implement] Remote bootstrap client helper; proxy-mode daemon; port-
-      forward analogue; background updater; `--mode` distribution modes;
-      CI release pipeline.
+      forward analogue; periodic background updater; launcher-owned verified
+      activation/rollback; `--mode` distribution modes; CI release pipeline.
 
 ## Phase I — Extensibility
 

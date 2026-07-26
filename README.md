@@ -29,6 +29,10 @@ load-bearing decisions, see `docs/DECISIONS.md`. Remote SSH operation,
 lifecycle modes, and signed release staging are covered in
 `docs/REMOTE-AND-UPDATES.md`.
 
+Installed local and daemon releases start through `sift-launcher`, which
+health-checks staged updates, commits healthy candidates, and rolls back failed
+candidates before handing the server lifecycle to the caller.
+
 ## The five goals this product wishes to achieve
 
 1. **The server is the product.** All product behavior lives in `sift-server`;

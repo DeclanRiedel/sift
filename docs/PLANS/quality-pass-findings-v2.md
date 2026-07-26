@@ -24,39 +24,27 @@ Two systemic themes worth graduating into ADRs so the patterns don't recur:
 
 ## Open — correctness / behavior
 
-- **NULL params typed as `TEXT` server-side** (`driver-postgres/src/stream.rs:286`,
-  `driver-sqlserver/src/lib.rs:1041`). `None::<String>` sends `oid = TEXT`,
-  forcing an implicit `text → <column type>` cast per param; can fail outright
-  for `bytea` / composite. Needs an untyped-NULL `ToSql`. Non-trivial.
 - **PG type coverage gaps** (`driver-postgres/src/decode.rs:34-62`). Arrays,
   `JSONPATH`, network types (CIDR/INET/MACADDR/MACADDR8), range types, XML,
   MONEY, HSTORE, TIMETZ fall through to a `Value::Engine` placeholder. Additive.
-- **MSSQL cancel permanently orphans the ConnHandle**
-  (`driver-sqlserver/src/lib.rs:344-374`). After cancel the next op on the same
-  handle returns `"no conn for handle"`; surface `Code::QueryCanceled` or
-  document the dead-by-contract connection explicitly.
+
+Resolved in the Phase I readiness pass: untyped PostgreSQL null parameters no
+longer masquerade as text, SQL Server requires `Value::TypedNull`, and native
+SQL Server cancellation tombstones the connection with stable
+`Code::ConnectionInvalidated` semantics. These wire additions advanced the
+application protocol to version 2.
 
 ## Open — hygiene / transactions (metadata)
 
-- **`list_saved_queries` mixes `?N` and `?` placeholders** (`lib.rs:1003-1041`).
-  Binding correctness is implicit on push order matching SQL append order; no
-  test pins it. Use named parameters or a small query builder.
-- **`create_principal` / `create_tenant` don't wrap INSERT+SELECT in a tx**
-  (`lib.rs:174-213`). Inconsistent with `create_room`; `create_tenant` has no
-  UNIQUE guard, so a retry after a failed SELECT can duplicate.
-- **`detach_room` is a quiet no-op for already-detached rows** (`lib.rs:819-832`).
-  Return a `bool` indicating a genuinely new detach so presence doesn't
-  republish on duplicate detach.
-- **`MetadataStore` derives `Clone` but every clone shares one handle**
-  (`lib.rs:71-75`). Document the semantics or return `Arc<MetadataStore>`.
-- **Broker credential accepted at upsert, rejected at resolve**
-  (`lib.rs:401-407` vs `:599-601`). Profile is storable but unusable; reject
-  `CredentialMode::Broker` at upsert until broker auth lands.
-- **Dead `principal_key` / `keypair_challenge` schema** (`V001__identity.sql:40-58`).
-  Created, never referenced. Drop or implement keypair auth (Phase E).
 - **V006 is a destructive migration with no backout** (`V006__rooms.sql:1-3`).
   `DROP TABLE IF EXISTS …`. Fine pre-release; document before any beta user has
   a DB they care about.
+
+Resolved in the Phase I readiness pass: saved-query filters use one placeholder
+style, principal and tenant creation are transactional, duplicate room detach
+is explicit, shared `MetadataStore` clone semantics are documented, unusable
+broker profiles are rejected at admission, and principal keys/challenges are
+live authentication paths.
 
 ## Open — scaling notes (fine today, flagged)
 
@@ -109,12 +97,12 @@ Two systemic themes worth graduating into ADRs so the patterns don't recur:
 
 ## Open — large-file refactors ("do last")
 
-- **`crates/server/src/http.rs` (~3,087 LoC)** → `router.rs` / `middleware.rs` /
+- **`crates/server/src/http.rs` (~7,000 LoC)** → `router.rs` / `middleware.rs` /
   `auth.rs` / `metadata_handlers.rs` / `session_handlers.rs` / `ws.rs` /
   `openapi.rs`, and generate the OpenAPI blob from `schemars`.
-- **`crates/driver-sqlserver/src/lib.rs` (~1,526 LoC)** → mirror PG's
+- **`crates/driver-sqlserver/src/lib.rs` (~1,800 LoC)** → mirror PG's
   conn / stream / decode / schema / bulk / quoting split.
-- **`crates/metadata/src/lib.rs` (~1,922 LoC)** → identity / connections / rooms /
+- **`crates/metadata/src/lib.rs` (~7,300 LoC)** → identity / connections / rooms /
   documents / history / audit / saved_queries; compress the near-identical
   `*_from_row` / `*_by_id_locked` helpers.
 - **`client-sdk` still missing methods for some routes** — audit reach.

@@ -2,6 +2,11 @@
 
 Date: 2026-07-08
 
+Status note (2026-07-26): this remains a historical timing baseline. Phase G
+replaced the document abstraction with Loro, and `sift-protocol` now has direct
+contract tests. The corrected descriptions below do not change the recorded
+timings.
+
 This note records the local component performance pass run against the current
 workspace. Numbers are useful as a baseline, not as a portable benchmark:
 hardware, kernel scheduler, Postgres configuration, release/debug profile, and
@@ -25,9 +30,7 @@ items were addressed:
 The strongest measured areas are the in-process server tests, metadata tests,
 and Postgres read/query paths. The weakest areas are coverage gaps rather than
 measured slowness: SQL Server live performance was not run, `client-sdk`,
-`protocol`, `driver-api`, and `core` have little or no direct crate-local
-tests, and `doc` is still a byte-buffer apply-op abstraction rather than a real
-CRDT.
+`driver-api` and `core` have little or no direct crate-local tests.
 
 ## Verification Run
 
@@ -60,12 +63,12 @@ Warm release-mode crate test timing, with release artifacts already built:
 | Component | Local result | Standard target | Best target | Notes |
 | --- | ---: | ---: | ---: | --- |
 | `sift-core` | 0.12s | <1s | <250ms | Empty placeholder crate. |
-| `sift-doc` | 0.14s | <1s | <250ms | Fast, but not a real CRDT yet. |
+| `sift-doc` | 0.14s | <1s | <250ms | Historical pre-Loro timing; remeasure after Phase G. |
 | `sift-driver-api` | 0.17s | <1s | <250ms | No direct tests. Mostly trait/types. |
 | `sift-driver-sqlserver` | 0.32s | <2s | <500ms | Unit path only; live path not measured. |
 | `sift-client-sdk` | 0.34s | <2s | <500ms | No direct tests; exercised via server integration tests. |
 | `sift-driver-postgres` | 0.44s | <2s | <500ms | Unit path only in this number. |
-| `sift-protocol` | 0.53s | <1s | <250ms | No direct tests despite public contract role. |
+| `sift-protocol` | 0.53s | <1s | <250ms | Direct serde contract tests now cover key wire types. |
 | `sift-metadata` | 0.59s | <2s | <750ms | Includes SQLite/refinery/secret tests. Good. |
 | `sift-server` | 1.00s | <5s | <2s | Broad integration suite. Good. |
 
@@ -145,10 +148,10 @@ This remains the largest measured-performance gap in the driver layer.
 | --- | --- | --- | --- |
 | SQL Server live performance | Harness exists but was not run in this pass. | Unknown latency and throughput under real TDS/MARS/TLS behavior. | Run `cargo run -p sift-driver-sqlserver --release --features live-mssql --example bench` against a real instance and record the table above. |
 | `client-sdk` | No crate-local tests. | SDK regressions may only be caught indirectly through server integration tests. | Add unit tests for URL construction, auth headers, response mapping, and WebSocket message handling with a mock server. |
-| `sift-protocol` | Public wire contract has no direct round-trip/schema snapshot tests. | Accidental serde shape changes may pass compile/tests but break clients. | Add JSON golden tests and schema snapshot tests for key request/response and WS messages. |
+| `sift-protocol` | Direct serde tests exist, but comprehensive schema snapshots are still absent. | An uncovered wire shape could drift without a deliberate protocol review. | Expand JSON golden and schema snapshot coverage as Phase I adds extensible identities. |
 | `driver-api` | Trait/handle layer has no direct tests. | Mock/stream semantics could drift silently. | Add tests for `ResultSetStream` behavior, `IdCounter`, handle identity/debug output, and mock driver contracts. |
 | `core` | Empty placeholder crate. | No runtime risk today, but it can become a dumping ground. | Keep empty until a real shared server-internal type is needed, or remove from workspace if it stays unused. |
-| `doc` | Fast, but not a real CRDT. | Collaboration correctness will fail under concurrent edits despite good local speed. | Replace the byte-buffer apply-op backend with the chosen CRDT and benchmark merge/apply/snapshot sizes. |
+| `doc` | The recorded timing predates the Loro backend. | Current merge/apply/snapshot costs are not represented by this baseline. | Benchmark Loro merge/apply/snapshot sizes under concurrent histories. |
 | Postgres benchmark harness | Was hardcoded to one socket path. | Performance tests could silently be skipped or fail outside one machine. | Fixed for env vars; next step is documenting fixture setup or adding a scripted runner. |
 | Server integration performance | Only command-level timings were measured. | Route-level latency regressions could hide inside a passing 1s suite. | Add route-level benchmark tests for session create/list, metadata operations, HTTP execute, and room WebSocket broadcast. |
 | Metadata scale | Current tests are small. | SQLite operations may degrade with many rooms, documents, history rows, and audit rows. | Add seeded scale tests for 10k+ audit/history rows, tenant lookup, token verification, and room membership queries. |

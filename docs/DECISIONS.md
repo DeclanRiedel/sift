@@ -211,7 +211,7 @@ escape, or reuses a post-cancel connection is an ADR violation, not just a bug.
 
 ## ADR-016 — Protocol Versioning and Negotiation
 
-**Context.** `PROTOCOL_VERSION` is a bare string (`"1"`) emitted in the
+**Context.** `PROTOCOL_VERSION` began as a bare string (`"1"`) emitted in the
 `x-sift-protocol-version` response header but never read from requests. A
 client built against a future, incompatible wire contract would hit confusing
 partial failures instead of a clear signal, and there was no way to reject an
@@ -231,7 +231,7 @@ to `POST /v1/handshake`. The server selects the highest mutually supported
 integer and returns its own range, the selected version, release version,
 opaque instance/generation identity, and a bounded capability set. No overlap
 returns HTTP 426 with `unsupported_protocol_version`. The initial range remains
-`[1, 1]`; release semver and application protocol compatibility are independent.
+`[2, 2]`; release semver and application protocol compatibility are independent.
 
 After selection, every HTTP request and WebSocket upgrade carries the exact
 `x-sift-protocol-version`. Every response, including an upgrade and an error,
@@ -899,9 +899,10 @@ Rust floor above the nominal MSRV 1.80; this is accepted because Loro is the
 product's collaboration substrate. Audit attribution is always the authenticated
 submitter, never client-controlled CRDT metadata. Full Loro history is retained
 inside each snapshot (bounded by a hard per-document history cap) so arbitrarily
-old replicas still synchronize. The public protocol stays version `"1"` because
-there are no external users yet. Automerge, shared rich-text marks, and CRDT
-state outside the SQL text are explicitly out of scope.
+old replicas still synchronize. Phase G initially retained protocol version
+`"1"`; the typed-null and invalidated-connection contract introduced during
+the Phase I readiness pass advances it to `"2"`. Automerge, shared rich-text
+marks, and CRDT state outside the SQL text are explicitly out of scope.
 
 ---
 
