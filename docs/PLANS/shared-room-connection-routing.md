@@ -99,7 +99,8 @@ Audit/history attribution stays the **submitter** (already the case:
 4. **Routing + `RoomConnectionUnbound`** — landed. `execute_query` routes a
    bound room to `execute_room_query`; an unbound room is hard-rejected.
 5. **Tests** — `MockDriver` integration: bound room routes end-to-end (200 +
-   room-attributed history); unbound rejected (400).
+   room-attributed history); unbound rejected (400); submitter-role gating —
+   viewer denied (403), editor routes (200).
 
 ## Remaining
 
@@ -107,8 +108,8 @@ Audit/history attribution stays the **submitter** (already the case:
   on unbind/rebind only; closing it when the last subscriber leaves, and on
   credential/membership revocation (via the `managed_connections` reverse
   index), is a resource-hygiene follow-up, not a correctness gap.
-- **Viewer / policy-blocked E2E coverage.** The submitter-scope denial is
-  wired; end-to-end tests for a viewer (denied) and a policy-blocked editor
-  are follow-ups (the `authorize` + `sql_policy` logic is already unit-proven).
+- **Policy-blocked E2E coverage.** Viewer-denied is now covered end-to-end; an
+  end-to-end test for a policy-blocked editor (read-only profile rejecting a
+  write) is a follow-up (the `sql_policy::enforce` path is already unit-proven).
 - **Pageable result reference.** The viewer-observes-results broadcast
   (`shared-connection-ownership.md`) is the last independent G9 slice.

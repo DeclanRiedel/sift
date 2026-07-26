@@ -2602,6 +2602,127 @@ async fn room_scoped_execute_requires_a_bound_connection() {
     assert_eq!(res.status(), StatusCode::BAD_REQUEST);
 }
 
+#[tokio::test]
+async fn room_scoped_execute_gates_on_submitter_role() {
+    let mut state = test_state_with_metadata(true);
+    let metadata = state.metadata.as_ref().unwrap();
+    let viewer = metadata
+        .create_principal("test:room-viewer", "Viewer", None)
+        .unwrap();
+    let editor = metadata
+        .create_principal("test:room-editor", "Editor", None)
+        .unwrap();
+    for principal in [viewer.id, editor.id] {
+        metadata
+            .upsert_tenant_membership(TenantId(1), principal, MembershipRole::Member)
+            .unwrap();
+    }
+    let room = metadata
+        .create_room(
+            TenantId(1),
+            PrincipalId(1),
+            NewRoom {
+                name: "role gate".into(),
+                kind: RoomKind::Shared,
+            },
+        )
+        .unwrap();
+    metadata
+        .add_room_member_authorized(
+            room.id,
+            PrincipalId(1),
+            viewer.id,
+            RoomRole::Viewer,
+            metadata_audit(PrincipalId(1), "add_member", "room", Some(room.id.0)),
+        )
+        .unwrap();
+    metadata
+        .add_room_member_authorized(
+            room.id,
+            PrincipalId(1),
+            editor.id,
+            RoomRole::Editor,
+            metadata_audit(PrincipalId(1), "add_member", "room", Some(room.id.0)),
+        )
+        .unwrap();
+    let profile = metadata
+        .upsert_connection_profile(
+            TenantId(1),
+            PrincipalId(1),
+            NewConnectionProfile {
+                name: "room pg".into(),
+                engine: Engine::Postgres,
+                spec: pg_spec(),
+                credential_mode: CredentialMode::Shared,
+                tags: Vec::new(),
+            },
+        )
+        .await
+        .unwrap();
+    metadata
+        .bind_room_connection(
+            room.id,
+            PrincipalId(1),
+            profile.id,
+            metadata_audit(PrincipalId(1), "bind_connection", "room", Some(room.id.0)),
+        )
+        .unwrap();
+    let (_, viewer_token) = metadata
+        .issue_api_token(viewer.id, Some(TenantId(1)), "viewer", None)
+        .unwrap();
+    let (_, editor_token) = metadata
+        .issue_api_token(editor.id, Some(TenantId(1)), "editor", None)
+        .unwrap();
+    state.auth.loopback_bypass = false;
+    let app = app(state);
+
+    let room_execute = |token: String| {
+        let app = app.clone();
+        async move {
+            let session: sift_protocol::SessionInfo = body_json(
+                app.clone()
+                    .oneshot(
+                        Request::post("/v1/sessions")
+                            .header("authorization", format!("Bearer {token}"))
+                            .header("content-type", "application/json")
+                            .body(Body::from(r#"{"tag":"role"}"#))
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap()
+                    .into_body(),
+            )
+            .await;
+            app.oneshot(
+                Request::post(format!("/v1/sessions/{}/queries", session.id))
+                    .header("authorization", format!("Bearer {token}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&ExecuteRequestHttp {
+                            connection: sift_protocol::ConnectionId(1),
+                            sql: "SELECT id, name FROM users".into(),
+                            params: Vec::new(),
+                            tx: None,
+                            room_id: Some(room.id.0),
+                            connection_profile_id: None,
+                        })
+                        .unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+        }
+    };
+
+    // Viewer cannot execute; editor routes through the room connection.
+    assert_eq!(
+        room_execute(viewer_token).await.status(),
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(room_execute(editor_token).await.status(), StatusCode::OK);
+}
+
 // --- Phase G collaborative document tests (Loro over the room WebSocket) ---
 
 /// Serve `state` on an ephemeral port and return its base URL plus the task.
