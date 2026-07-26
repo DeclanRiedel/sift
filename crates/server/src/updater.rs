@@ -149,9 +149,13 @@ impl Updater {
         let manifest_bytes = fetch_bounded(&self.client, manifest_url, MAX_MANIFEST_BYTES).await?;
         let signature = fetch_bounded(&self.client, signature_url, MAX_SIGNATURE_BYTES).await?;
         let (manifest, artifact) = self.verify_manifest_owned(&manifest_bytes, &signature)?;
+        if manifest.sequence == self.observed_sequence()? {
+            return Ok(CheckOutcome::Current);
+        }
         if semver::Version::parse(&manifest.release_version)?
             <= semver::Version::parse(crate::VERSION)?
         {
+            self.record_sequence(manifest.sequence)?;
             return Ok(CheckOutcome::Current);
         }
         let installed = self
@@ -292,6 +296,10 @@ impl Updater {
         Ok(self.read_pointers()?.pending)
     }
 
+    pub fn current_release(&self) -> anyhow::Result<Option<InstalledRelease>> {
+        Ok(self.read_pointers()?.current)
+    }
+
     /// Release selected for the next owner launch. Remote bootstrap uses this
     /// same verified cache instead of adding an SSH-specific download path.
     pub fn selected_release(&self) -> anyhow::Result<Option<InstalledRelease>> {
@@ -371,19 +379,38 @@ pub fn spawn_background(config: &Config) -> anyhow::Result<()> {
         return Ok(());
     }
     let updater = Updater::from_config(config)?;
-    let delay = Duration::from_secs(config.updater.initial_delay_secs);
+    let initial_delay = Duration::from_secs(config.updater.initial_delay_secs);
+    let check_interval = config.updater.check_interval_secs;
+    let jitter = config.updater.jitter_secs;
     tokio::spawn(async move {
-        tokio::time::sleep(delay).await;
-        match updater.check_and_stage().await {
-            Ok(CheckOutcome::Current) => tracing::debug!("release is current"),
-            Ok(CheckOutcome::Staged(release)) => tracing::info!(
-                release = %release.release_version,
-                "signed update staged for activation on restart"
-            ),
-            Err(error) => tracing::warn!(%error, "background update check failed"),
+        tokio::time::sleep(initial_delay).await;
+        loop {
+            match updater.check_and_stage().await {
+                Ok(CheckOutcome::Current) => tracing::debug!("release is current"),
+                Ok(CheckOutcome::Staged(release)) => tracing::info!(
+                    release = %release.release_version,
+                    "signed update staged for activation on restart"
+                ),
+                Err(error) => tracing::warn!(%error, "background update check failed"),
+            }
+            tokio::time::sleep(Duration::from_secs(
+                check_interval.saturating_add(random_jitter(jitter)),
+            ))
+            .await;
         }
     });
     Ok(())
+}
+
+fn random_jitter(maximum_secs: u64) -> u64 {
+    if maximum_secs == 0 {
+        return 0;
+    }
+    let mut bytes = [0_u8; 8];
+    if getrandom::getrandom(&mut bytes).is_err() {
+        return 0;
+    }
+    u64::from_le_bytes(bytes) % (maximum_secs + 1)
 }
 
 fn validate_manifest(
@@ -398,7 +425,7 @@ fn validate_manifest(
     if manifest.channel != channel {
         bail!("release manifest channel mismatch");
     }
-    if manifest.sequence <= observed_sequence {
+    if manifest.sequence < observed_sequence {
         bail!("release manifest sequence is stale or replayed");
     }
     if manifest.published_at > Utc::now() + chrono::Duration::minutes(5) {
@@ -649,6 +676,8 @@ mod tests {
             state_dir: Some(directory.display().to_string()),
             max_artifact_bytes: 1024,
             initial_delay_secs: 0,
+            check_interval_secs: 60,
+            jitter_secs: 5,
         };
         let updater = Updater::new(config, directory.into(), &encoded).unwrap();
         let artifact_bytes = b"fixture executable".to_vec();
@@ -711,7 +740,7 @@ mod tests {
     fn replay_expiry_target_and_archive_attacks_are_rejected() {
         let directory = tempfile::tempdir().unwrap();
         let (updater, signing, mut manifest, _) = fixture(directory.path());
-        updater.record_sequence(1).unwrap();
+        updater.record_sequence(2).unwrap();
         let (raw, signature) = signed(&signing, &manifest);
         assert!(updater.verify_manifest_owned(&raw, &signature).is_err());
 
@@ -791,5 +820,13 @@ mod tests {
         };
         assert!(config.validate().is_err());
         assert!(Updater::from_config(&config).is_err());
+    }
+
+    #[test]
+    fn background_jitter_is_bounded() {
+        assert_eq!(random_jitter(0), 0);
+        for _ in 0..100 {
+            assert!(random_jitter(5) <= 5);
+        }
     }
 }

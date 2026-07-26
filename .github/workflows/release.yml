@@ -47,14 +47,15 @@ jobs:
           RUSTFLAGS: --remap-path-prefix=${{ github.workspace }}=.
         run: |
           nix develop . --command cargo build --locked --release -p sift-server \
-            --bin sift-server --bin sift-remote --bin sift-admin
+            --bin sift-server --bin sift-launcher --bin sift-remote --bin sift-admin
           cp target/release/sift-server /tmp/sift-server-first
           nix develop . --command cargo clean -p sift-server
           nix develop . --command cargo build --locked --release -p sift-server \
-            --bin sift-server --bin sift-remote --bin sift-admin
+            --bin sift-server --bin sift-launcher --bin sift-remote --bin sift-admin
           cmp /tmp/sift-server-first target/release/sift-server
           mkdir -p dist
           cp target/release/sift-server "dist/sift-server-${{ matrix.target_name }}"
+          cp target/release/sift-launcher "dist/sift-launcher-${{ matrix.target_name }}"
           cp target/release/sift-remote "dist/sift-remote-${{ matrix.target_name }}"
           cp target/release/sift-admin "dist/sift-admin-${{ matrix.target_name }}"
           shasum -a 256 dist/* >"dist/checksums-${{ matrix.target_name }}.txt"
@@ -91,17 +92,25 @@ jobs:
           INPUT_CHANNEL: ${{ inputs.channel }}
           INPUT_SEQUENCE: ${{ inputs.sequence }}
           INPUT_VERSION: ${{ inputs.version }}
+          MINIMUM_UPDATER_VERSION: ${{ vars.SIFT_MINIMUM_UPDATER_VERSION }}
         run: |
+          test -n "$MINIMUM_UPDATER_VERSION"
           channel=${INPUT_CHANNEL:-stable}
           sequence=${INPUT_SEQUENCE:-$GITHUB_RUN_NUMBER}
           version=${INPUT_VERSION:-${GITHUB_REF_NAME#v}}
           release_tag="v$version"
           git rev-parse --verify "refs/tags/$release_tag"
           printf 'RELEASE_TAG=%s\n' "$release_tag" >>"$GITHUB_ENV"
+          protocol_version=$(
+            sed -n 's/pub const PROTOCOL_VERSION_NUMBER: u32 = \\([0-9][0-9]*\\);/\\1/p' \
+              crates/protocol/src/lib.rs
+          )
+          test -n "$protocol_version"
           published_at=$(date --utc +%Y-%m-%dT%H:%M:%SZ)
           expires_at=$(date --utc --date='+14 days' +%Y-%m-%dT%H:%M:%SZ)
           scripts/build-release-manifest.sh \
-            dist "$channel" "$sequence" "$version" "$RELEASE_ORIGIN" \
+            dist "$channel" "$sequence" "$version" "$MINIMUM_UPDATER_VERSION" \
+            "$protocol_version" "$RELEASE_ORIGIN" \
             "$published_at" "$expires_at"
       - name: Sign exact manifest bytes
         env:

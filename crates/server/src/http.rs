@@ -2465,7 +2465,8 @@ async fn exchange_ssh_proxy_capability(
         .await
     {
         Ok(issued) => issued,
-        Err(_) => {
+        Err(error) => {
+            tracing::warn!(%error, "SSH proxy capability exchange was denied");
             state.auth.runtime.record_ssh_capability_failure(source);
             record_auth_failure(metadata, "authenticate.ssh_capability", "denied")?;
             state.sessions.push_operation_full(

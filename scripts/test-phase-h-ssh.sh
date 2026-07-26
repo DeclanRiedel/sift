@@ -4,64 +4,73 @@ set -euo pipefail
 workspace=${1:-$(pwd)}
 scratch=$(mktemp -d)
 sshd_pid=
-user_created=0
+remote_state=".cache/sift-phase-h-test-$$"
+remote_binary="$remote_state/bin/sift-server"
+test_user=$(id -un)
+sshd_bin=$(command -v sshd)
+ssh_bin=$(command -v ssh)
+scp_bin=$(command -v scp)
+test_port=$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.close()')
 
 cleanup() {
+  if [[ -s $scratch/ssh_config ]]; then
+    "$ssh_bin" -F "$scratch/ssh_config" phase-h-good \
+      "python3 -c 'import json,os,signal; p=\"$remote_state/runtime/daemon.json\"; os.path.exists(p) and os.kill(json.load(open(p))[\"pid\"], signal.SIGTERM)' ; rm -rf $remote_state" \
+      >/dev/null 2>&1 || true
+  fi
   if [[ -n ${sshd_pid:-} ]]; then
     kill "$sshd_pid" 2>/dev/null || true
-  fi
-  if [[ $user_created -eq 1 ]]; then
-    sudo userdel --remove sift-phase-h 2>/dev/null || true
   fi
   rm -rf "$scratch"
 }
 trap cleanup EXIT
 
-sudo useradd --create-home --shell /bin/bash sift-phase-h
-user_created=1
 ssh-keygen -q -t ed25519 -N '' -f "$scratch/client-key"
-sudo install -d -m 700 -o sift-phase-h -g sift-phase-h /home/sift-phase-h/.ssh
-sudo install -m 600 -o sift-phase-h -g sift-phase-h \
-  "$scratch/client-key.pub" /home/sift-phase-h/.ssh/authorized_keys
-sudo ssh-keygen -q -t ed25519 -N '' -f "$scratch/host-key"
+cp "$scratch/client-key.pub" "$scratch/authorized_keys"
+chmod 600 "$scratch/authorized_keys"
+ssh-keygen -q -t ed25519 -N '' -f "$scratch/host-key"
 
 cat >"$scratch/sshd_config" <<EOF
-Port 2222
+Port $test_port
 ListenAddress 127.0.0.1
 HostKey $scratch/host-key
 PidFile $scratch/sshd.pid
-AuthorizedKeysFile .ssh/authorized_keys
+AuthorizedKeysFile $scratch/authorized_keys
+StrictModes no
 PasswordAuthentication no
 KbdInteractiveAuthentication no
 UsePAM no
-PermitRootLogin no
-AllowUsers sift-phase-h
+PermitRootLogin prohibit-password
+AllowUsers $test_user
 Subsystem sftp internal-sftp
 EOF
-sudo /usr/sbin/sshd -D -e -f "$scratch/sshd_config" >"$scratch/sshd.log" 2>&1 &
+"$sshd_bin" -D -e -f "$scratch/sshd_config" >"$scratch/sshd.log" 2>&1 &
 sshd_pid=$!
 
 for _ in $(seq 1 50); do
-  if ssh-keyscan -p 2222 127.0.0.1 >"$scratch/known_hosts" 2>/dev/null; then
+  if ssh-keyscan -p "$test_port" 127.0.0.1 >"$scratch/known_hosts" 2>/dev/null; then
     break
   fi
   sleep 0.1
 done
-test -s "$scratch/known_hosts"
+if [[ ! -s $scratch/known_hosts ]]; then
+  cat "$scratch/sshd.log" >&2
+  exit 1
+fi
 touch "$scratch/empty_known_hosts"
 cat >"$scratch/ssh_config" <<EOF
 Host phase-h-good
   HostName 127.0.0.1
-  Port 2222
-  User sift-phase-h
+  Port $test_port
+  User $test_user
   IdentityFile $scratch/client-key
   IdentitiesOnly yes
   StrictHostKeyChecking yes
   UserKnownHostsFile $scratch/known_hosts
 Host phase-h-bad
   HostName 127.0.0.1
-  Port 2222
-  User sift-phase-h
+  Port $test_port
+  User $test_user
   IdentityFile $scratch/client-key
   IdentitiesOnly yes
   StrictHostKeyChecking yes
@@ -74,17 +83,19 @@ cat >"$scratch/bin/ssh" <<EOF
 if [[ \${SIFT_TEST_DISABLE_MASTER:-0} == 1 && " \$* " == *" -M "* ]]; then
   exit 1
 fi
-exec /usr/bin/ssh -F "$scratch/ssh_config" "\$@"
+exec "$ssh_bin" -F "$scratch/ssh_config" "\$@"
 EOF
 cat >"$scratch/bin/scp" <<EOF
 #!/usr/bin/env bash
-exec /usr/bin/scp -F "$scratch/ssh_config" "\$@"
+exec "$scp_bin" -F "$scratch/ssh_config" "\$@"
 EOF
 chmod 700 "$scratch/bin/ssh" "$scratch/bin/scp"
 
 export PATH="$scratch/bin:$PATH"
 if "$workspace/target/debug/sift-remote" phase-h-bad \
   --local-server-binary "$workspace/target/debug/sift-server" \
+  --state-dir "$remote_state" \
+  --remote-binary "$remote_binary" \
   >"$scratch/bad.out" 2>"$scratch/bad.err"; then
   echo "host-key rejection unexpectedly succeeded" >&2
   exit 1
@@ -94,22 +105,34 @@ run_helper() {
   local output=$1
   "$workspace/target/debug/sift-remote" phase-h-good \
     --local-server-binary "$workspace/target/debug/sift-server" \
+    --state-dir "$remote_state" \
+    --remote-binary "$remote_binary" \
     >"$output" 2>"$output.err" &
   local helper_pid=$!
-  for _ in $(seq 1 200); do
+  # Debug binaries can exceed 150 MiB, so leave enough time for the initial
+  # content-addressed upload even on constrained CI runners.
+  for _ in $(seq 1 1200); do
     if [[ -s $output ]]; then
       kill -INT "$helper_pid"
       wait "$helper_pid"
       return
     fi
     if ! kill -0 "$helper_pid" 2>/dev/null; then
-      wait "$helper_pid"
+      wait "$helper_pid" || {
+        cat "$output.err" >&2
+        "$ssh_bin" -F "$scratch/ssh_config" phase-h-good \
+          "test ! -f $remote_state/daemon.log || cat $remote_state/daemon.log" >&2 || true
+        return 1
+      }
       return 1
     fi
     sleep 0.1
   done
   kill "$helper_pid" 2>/dev/null || true
   wait "$helper_pid" 2>/dev/null || true
+  cat "$output.err" >&2
+  "$ssh_bin" -F "$scratch/ssh_config" phase-h-good \
+    "test ! -f $remote_state/daemon.log || cat $remote_state/daemon.log" >&2 || true
   echo "remote helper did not become ready" >&2
   return 1
 }
@@ -133,12 +156,12 @@ test "$(jq -r .instance_id "$scratch/fallback.json")" = "$first_instance"
 test "$(jq -r .daemon_generation "$scratch/fallback.json")" = "$first_generation"
 
 remote_pid=$(
-  /usr/bin/ssh -F "$scratch/ssh_config" phase-h-good \
-    "python3 -c 'import json; print(json.load(open(\".local/state/sift/remote/runtime/daemon.json\"))[\"pid\"])'"
+  "$ssh_bin" -F "$scratch/ssh_config" phase-h-good \
+    "python3 -c 'import json; print(json.load(open(\"$remote_state/runtime/daemon.json\"))[\"pid\"])'"
 )
-/usr/bin/ssh -F "$scratch/ssh_config" phase-h-good "kill $remote_pid"
+"$ssh_bin" -F "$scratch/ssh_config" phase-h-good "kill $remote_pid"
 for _ in $(seq 1 50); do
-  if ! /usr/bin/ssh -F "$scratch/ssh_config" phase-h-good "kill -0 $remote_pid" 2>/dev/null; then
+  if ! "$ssh_bin" -F "$scratch/ssh_config" phase-h-good "kill -0 $remote_pid" 2>/dev/null; then
     break
   fi
   sleep 0.1

@@ -32,6 +32,7 @@ figment = { workspace = true }
 fs2 = { workspace = true }
 futures = { workspace = true }
 getrandom = { workspace = true }
+libc = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 schemars = { workspace = true }
@@ -84,3 +85,7 @@ path = "src/bin/sift-admin.rs"
 [[bin]]
 name = "sift-remote"
 path = "src/bin/sift-remote.rs"
+
+[[bin]]
+name = "sift-launcher"
+path = "src/bin/sift-launcher.rs"

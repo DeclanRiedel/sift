@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if [[ $# -ne 7 ]]; then
-  echo "usage: $0 <dist-dir> <channel> <sequence> <version> <origin> <published-at> <expires-at>" >&2
+if [[ $# -ne 9 ]]; then
+  echo "usage: $0 <dist-dir> <channel> <sequence> <version> <minimum-updater-version> <protocol-version> <origin> <published-at> <expires-at>" >&2
   exit 2
 fi
 
@@ -10,9 +10,11 @@ dist_dir=$1
 channel=$2
 sequence=$3
 version=${4#v}
-origin=${5%/}
-published_at=$6
-expires_at=$7
+minimum_updater_version=${5#v}
+protocol_version=$6
+origin=${7%/}
+published_at=$8
+expires_at=$9
 
 [[ $channel =~ ^[A-Za-z0-9_-]+$ ]] || {
   echo "unsafe release channel" >&2
@@ -20,6 +22,10 @@ expires_at=$7
 }
 [[ $sequence =~ ^[1-9][0-9]*$ ]] || {
   echo "release sequence must be a positive integer" >&2
+  exit 2
+}
+[[ $protocol_version =~ ^[1-9][0-9]*$ ]] || {
+  echo "protocol version must be a positive integer" >&2
   exit 2
 }
 [[ $origin == https://* ]] || {
@@ -62,7 +68,8 @@ jq -n \
   --arg release_version "$version" \
   --arg published_at "$published_at" \
   --arg expires_at "$expires_at" \
-  --arg minimum_updater_version "$version" \
+  --arg minimum_updater_version "$minimum_updater_version" \
+  --argjson protocol_version "$protocol_version" \
   --argjson targets "$targets" \
   '{
     schema_version: 1,
@@ -72,6 +79,6 @@ jq -n \
     published_at: $published_at,
     expires_at: $expires_at,
     minimum_updater_version: $minimum_updater_version,
-    protocol: {minimum: 1, maximum: 1},
+    protocol: {minimum: $protocol_version, maximum: $protocol_version},
     targets: $targets
   }' >"$dist_dir/manifest.json"

@@ -26,6 +26,7 @@ struct Options {
     remote_binary: String,
     remote_binary_explicit: bool,
     local_server_binary: Option<PathBuf>,
+    local_update_candidate: bool,
     sift_key_file: Option<PathBuf>,
     local_port: u16,
 }
@@ -62,16 +63,23 @@ async fn main() -> anyhow::Result<()> {
 }
 
 async fn run(mut options: Options, session: SshSession) -> anyhow::Result<()> {
+    if options.local_server_binary.is_none() {
+        let (local, pending) = select_local_server(&options).await?;
+        options.local_server_binary = Some(local);
+        options.local_update_candidate = pending;
+    }
     if !options.remote_binary_explicit {
-        let local = select_local_server(&options).await?;
-        let digest = sha256_file(&local)?;
+        let local = options
+            .local_server_binary
+            .as_ref()
+            .context("local server artifact was not selected")?;
+        let digest = sha256_file(local)?;
         options.remote_binary = format!(
             ".local/share/sift/bin/{}/{os}-{arch}/{digest}/sift-server",
             sift_server::VERSION,
             os = std::env::consts::OS,
             arch = std::env::consts::ARCH
         );
-        options.local_server_binary = Some(local);
     }
     validate_remote_path(&options.remote_binary)?;
     let mut probe = match session
@@ -166,6 +174,17 @@ async fn run(mut options: Options, session: SshSession) -> anyhow::Result<()> {
         server_version: negotiated.server_version,
         selected_protocol: negotiated.selected_protocol,
     };
+    if options.local_update_candidate {
+        let config = sift_server::config::load().context("reloading local update configuration")?;
+        let updater = sift_server::updater::Updater::from_config(&config)?;
+        let pending = updater
+            .pending_release()?
+            .context("pending local update candidate disappeared during remote bootstrap")?;
+        if Some(&pending.executable) != options.local_server_binary.as_ref() {
+            bail!("verified remote server did not match the pending local update candidate");
+        }
+        updater.commit_healthy_candidate()?;
+    }
     write_secret_json(&ready)?;
 
     // The consuming client watches stdout for replacement grants. Renewal is
@@ -307,7 +326,11 @@ async fn start_daemon(options: &Options, session: &SshSession) -> anyhow::Result
 }
 
 async fn install_server(options: &Options, session: &SshSession) -> anyhow::Result<()> {
-    let local = select_local_server(options).await?;
+    let local = options
+        .local_server_binary
+        .as_ref()
+        .context("local server artifact was not selected")?
+        .clone();
     if !local.is_file() {
         bail!("local sift-server binary is missing: {}", local.display());
     }
@@ -359,23 +382,29 @@ async fn install_server(options: &Options, session: &SshSession) -> anyhow::Resu
     Ok(())
 }
 
-async fn select_local_server(options: &Options) -> anyhow::Result<PathBuf> {
+async fn select_local_server(options: &Options) -> anyhow::Result<(PathBuf, bool)> {
     if let Some(path) = &options.local_server_binary {
-        return Ok(path.clone());
+        return Ok((path.clone(), false));
     }
     let config = sift_server::config::load().context("loading local update configuration")?;
     if config.updater.enabled {
         let updater = sift_server::updater::Updater::from_config(&config)?;
         let _ = updater.check_and_stage().await?;
-        return updater
+        let selected = updater
             .selected_release()?
-            .map(|release| release.executable)
-            .context("signed updater did not select a server artifact");
+            .context("signed updater did not select a server artifact")?;
+        let pending = updater
+            .pending_release()?
+            .is_some_and(|pending| pending.executable == selected.executable);
+        return Ok((selected.executable, pending));
     }
-    Ok(std::env::current_exe()?
-        .parent()
-        .context("sift-remote executable has no parent directory")?
-        .join("sift-server"))
+    Ok((
+        std::env::current_exe()?
+            .parent()
+            .context("sift-remote executable has no parent directory")?
+            .join("sift-server"),
+        false,
+    ))
 }
 
 async fn forward_connection(
@@ -555,6 +584,7 @@ fn parse_options(args: impl IntoIterator<Item = String>) -> anyhow::Result<Optio
         ),
         remote_binary_explicit: false,
         local_server_binary: None,
+        local_update_candidate: false,
         sift_key_file: None,
         local_port: 0,
     };

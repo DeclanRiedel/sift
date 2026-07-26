@@ -90,5 +90,5 @@ jobs:
         run: sudo apt-get update && sudo apt-get install --yes openssh-server jq
       - name: Build remote binaries
         run: nix develop . --command cargo build -p sift-server --bin sift-server --bin sift-remote
-      - name: Clean-account SSH bootstrap, host-key, reconnect, and restart matrix
+      - name: Ephemeral-account SSH bootstrap, host-key, reconnect, and restart matrix
         run: nix develop . --command scripts/test-phase-h-ssh.sh "$GITHUB_WORKSPACE"

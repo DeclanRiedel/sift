@@ -26,7 +26,14 @@ async fn main() -> anyhow::Result<()> {
             config
         }
         ServerCommand::RemoteDaemon { state_dir } => {
-            sift_server::remote_agent::prepare_remote_config(&state_dir)?
+            let config = sift_server::remote_agent::prepare_remote_config(&state_dir)?;
+            let metadata =
+                build_metadata_store(&config)?.context("remote daemon metadata is disabled")?;
+            metadata
+                .ensure_auth_system_keys()
+                .await
+                .context("provisioning remote authentication keys")?;
+            config
         }
         ServerCommand::RemoteProbe { state_dir } => {
             let response = sift_server::remote_agent::probe(&state_dir)?;

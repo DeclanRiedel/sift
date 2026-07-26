@@ -117,6 +117,10 @@ pub struct UpdaterConfig {
     pub max_artifact_bytes: u64,
     /// Delay before the first background check.
     pub initial_delay_secs: u64,
+    /// Base interval between successful or failed background checks.
+    pub check_interval_secs: u64,
+    /// Uniform random delay added to each background interval.
+    pub jitter_secs: u64,
 }
 
 impl Default for UpdaterConfig {
@@ -129,6 +133,8 @@ impl Default for UpdaterConfig {
             state_dir: None,
             max_artifact_bytes: 512 * 1024 * 1024,
             initial_delay_secs: 30,
+            check_interval_secs: 6 * 60 * 60,
+            jitter_secs: 10 * 60,
         }
     }
 }
@@ -336,6 +342,12 @@ impl Config {
             }
             if self.updater.max_artifact_bytes == 0 {
                 bail!("updater.max_artifact_bytes must be greater than zero");
+            }
+            if self.updater.check_interval_secs == 0 {
+                bail!("updater.check_interval_secs must be greater than zero");
+            }
+            if self.updater.jitter_secs > 24 * 60 * 60 {
+                bail!("updater.jitter_secs must not exceed 24 hours");
             }
             for (name, value) in [
                 ("updater.manifest_url", &self.updater.manifest_url),
