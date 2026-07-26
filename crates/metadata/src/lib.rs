@@ -2735,7 +2735,7 @@ impl MetadataStore {
         let conn = self.conn()?;
         let mut stmt = conn.prepare(
             "SELECT r.id, r.tenant_id, r.name, r.kind, r.created_by, r.created_at, r.updated_at,
-                    r.bound_connection_profile_id
+                    r.bound_connection_profile_id, r.bound_connection_by
              FROM room r
              JOIN room_member rm ON rm.room_id = r.id
              WHERE r.tenant_id = ?1 AND rm.principal_id = ?2
@@ -2769,8 +2769,8 @@ impl MetadataStore {
             return Err(MetadataError::TenantMismatch(profile, tenant));
         }
         tx.execute(
-            "UPDATE room SET bound_connection_profile_id = ?1, updated_at = ?2 WHERE id = ?3",
-            params![profile.0, now, room.0],
+            "UPDATE room SET bound_connection_profile_id = ?1, bound_connection_by = ?2, updated_at = ?3 WHERE id = ?4",
+            params![profile.0, actor.0, now, room.0],
         )?;
         let mut audit = audit;
         audit.actor_principal_id = Some(actor);
@@ -2792,7 +2792,7 @@ impl MetadataStore {
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         ensure_room_owner_locked(&tx, room, actor)?;
         tx.execute(
-            "UPDATE room SET bound_connection_profile_id = NULL, updated_at = ?1 WHERE id = ?2",
+            "UPDATE room SET bound_connection_profile_id = NULL, bound_connection_by = NULL, updated_at = ?1 WHERE id = ?2",
             params![now, room.0],
         )?;
         let mut audit = audit;
@@ -2810,7 +2810,7 @@ impl MetadataStore {
         let conn = self.conn()?;
         let mut stmt = conn.prepare(
             "SELECT r.id, r.tenant_id, r.name, r.kind, r.created_by, r.created_at, r.updated_at,
-                    r.bound_connection_profile_id
+                    r.bound_connection_profile_id, r.bound_connection_by
              FROM room r
              JOIN room_member rm ON rm.room_id = r.id
              WHERE r.tenant_id = ?1 AND rm.principal_id = ?2 AND r.kind = 'shared'
@@ -3730,7 +3730,7 @@ impl MetadataStore {
     fn room_by_id_locked(&self, conn: &Connection, id: RoomId) -> Result<Room> {
         conn.query_row(
             "SELECT id, tenant_id, name, kind, created_by, created_at, updated_at,
-                    bound_connection_profile_id
+                    bound_connection_profile_id, bound_connection_by
              FROM room WHERE id = ?1",
             params![id.0],
             room_from_row,
@@ -4250,6 +4250,7 @@ fn room_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Room> {
         created_at: parse_time_sql(row.get(5)?)?,
         updated_at: parse_time_sql(row.get(6)?)?,
         bound_connection_profile_id: row.get::<_, Option<i64>>(7)?.map(ConnectionProfileId),
+        bound_connection_by: row.get::<_, Option<i64>>(8)?.map(PrincipalId),
     })
 }
 
@@ -6368,6 +6369,7 @@ mod tests {
             )
             .unwrap();
         assert_eq!(bound.bound_connection_profile_id, Some(profile.id));
+        assert_eq!(bound.bound_connection_by, Some(PrincipalId(1)));
         assert_eq!(
             store.get_room(room.id).unwrap().bound_connection_profile_id,
             Some(profile.id)
@@ -6381,6 +6383,7 @@ mod tests {
             )
             .unwrap();
         assert!(unbound.bound_connection_profile_id.is_none());
+        assert!(unbound.bound_connection_by.is_none());
     }
 
     #[tokio::test]
