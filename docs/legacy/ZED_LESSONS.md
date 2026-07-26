@@ -189,29 +189,30 @@ is a CRDT because every byte is editable; in sift, almost nothing is.
 ## 6. Resulting ADR candidates
 
 These are not decisions yet. Each is tracked as a candidate against a phase
-in `docs/PLANS/server-build-list-v2.md`; none have graduated into
-`docs/DECISIONS.md`.
+in `docs/PLANS/server-build-list-v2.md`. The status notes below record where
+those historical candidates ended up.
 
 - **ADR-011 (candidate): result streaming via server-side cursors.** Keep DB
   cursors open server-side; clients page by cursor id; WS channel carries
   pages with backpressure tied to grid readiness. (Addresses the novel hard
-  part flagged in §5.) *Status: Phase C design; today cursors live inside
-  each driver with no server-side registry.*
+  part flagged in §5.) *Status: graduated as ADR-011 and implemented in
+  Phase C.*
 - **ADR-012 (candidate): workspace snapshot and restore.** *Status: superseded
-  — the rooms model (ADR-007) plus the `query_history` table cover the durable
-  pieces; tab/layout restore is a client concern.*
-- **ADR-013 (candidate): driver isolation.** Each driver crate (and possibly
+  and the number was reassigned to the schema-cache ADR. The rooms model
+  (ADR-007) plus query history cover durable server pieces; tab/layout restore
+  is a client concern.*
+- **ADR-013: driver isolation.** Each driver crate (and possibly
   each long-running query) runs in a sandboxed task or side process so a
   wedged driver cannot take the server down. Mirrors Zed's out-of-process LSP.
-  *Status: Phase B design; PG meets it (`catch_unwind` + `CancelToken`), SQL
-  Server does not yet.*
-- **ADR-014 (candidate): collaboration scope.** Covers (a) shared SQL editor
+  *Status: graduated and implemented through task isolation, timeout, cancel,
+  and abort/discard containment for both drivers.*
+- **ADR-014: collaboration scope.** Covers (a) shared SQL editor
   tabs via CRDT, (b) ephemeral presence, (c) shared session/connection state
   via server broadcast. Explicitly excludes result replication beyond
-  references. *Status: Phase G design; the `doc` crate is currently an
-  apply-op abstraction, not a real CRDT.*
-- **ADR-015 (candidate): background updater.** Background-fetch new server
-  binary, apply on next launch, no in-session modal. *Status: Phase H.*
+  references. *Status: graduated and implemented with Loro in Phase G.*
+- **ADR-015: background updater.** Background-fetch a signed server binary,
+  apply on next launch, no in-session modal. *Status: graduated in Phase H
+  design; implementation pending.*
 
 ---
 

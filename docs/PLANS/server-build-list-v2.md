@@ -36,8 +36,11 @@
   independently page immutable result pages. Presence is leased and carries
   stable Loro selection anchors, lag recovery is explicit, and the reference
   SDK includes client-side follow-mode projection.
-- **Still dead schema:** `principal_key` and `keypair_challenge` (V001) — wire
-  in Phase E or drop.
+- **Phase H design is complete.** ADR-021 locks direct SSH bootstrap and a
+  persistent remote daemon; ADR-016 now specifies a two-sided range handshake;
+  ADR-015 locks signed, restart-activated updates and lifecycle modes. The
+  implementation contract is
+  `docs/PLANS/phase-h-remote-development.md`.
 
 ---
 
@@ -272,22 +275,25 @@ Goal: a sift server can run remote while a thin client renders locally.
 Because sift is already server-first, this is mostly bootstrap + version
 handshake.
 
-- [ ] [Design] ADR-021 (candidate): direct SSH-tunneled remote topology (Zed
+- [x] [Design] ADR-021: direct SSH-tunneled remote topology (Zed
       model) using Phase E's instance-bound proxy capability. A hosted
       collaboration relay is a separate future topology, not required for
-      initial remote support.
-- [ ] [Design] Remote bootstrap (SSH control-master, binary fetch/upload,
+      initial remote support. See
+      `docs/PLANS/phase-h-remote-development.md`.
+- [x] [Design] Remote bootstrap (SSH control-master, binary fetch/upload,
       version check, daemon spawn/reconnect, capability handoff over the
       authenticated channel); reconnect + state survival on SSH drop. The
       proxy establishes an instance-bound principal context and never inherits
       personal-loopback bypass (ADR-020/030).
-- [ ] [Design] Version handshake. The client-sdk never sends or inspects
+- [x] [Design] Version handshake. The client-sdk never sends or inspects
       `X-Sift-Protocol-Version` today (`client-sdk/src/lib.rs` never
       imports `PROTOCOL_VERSION`); the server emits it one-way. Both sides
-      need a real handshake once remote mode exists.
-- [ ] [Design] Background updater (release channel + signature
+      need a real handshake once remote mode exists. ADR-016 now locks the
+      range negotiation and response-validation contract.
+- [x] [Design] Background updater (release channel + signature
       verification); single-binary distribution modes (in-process / daemon
-      / container).
+      / container). ADR-015 locks manifest trust, staging, activation, and
+      rollback.
 - [ ] [Implement] Remote bootstrap client helper; proxy-mode daemon; port-
       forward analogue; background updater; `--mode` distribution modes;
       CI release pipeline.
@@ -465,12 +471,13 @@ configurations without abandoning thin clients or breaking remote topology.
 | ADR-012 | schema cache with TTL + engine-specific invalidators                  | Phase C | written                                                        |
 | ADR-013 | driver isolation                                                      | Phase B | written; both engines meet the containment boundary            |
 | ADR-014 | collaboration scope (CRDT text only)                                  | Phase G | written; Loro single backend, CRDT limited to the SQL text     |
-| ADR-016 | protocol versioning + semver stability                                | Phase B | written; pin-or-proceed negotiation, monotonic integer version |
+| ADR-015 | signed background updater                                             | Phase H | written; verified staging and restart activation by mode       |
+| ADR-016 | protocol versioning + semver stability                                | Phase B | written; two-sided range handshake, monotonic integer version  |
 | ADR-017 | driver trait shape                                                    | Phase A | written; Phase A trait lock                                    |
 | ADR-018 | graceful shutdown contract                                            | Phase B | written                                                        |
 | ADR-019 | audit durability                                                      | Phase B | written                                                        |
 | ADR-020 | authorization model                                                   | Phase F | written                                                        |
-| ADR-021 | remote topology                                                       | Phase H | not written                                                    |
+| ADR-021 | remote topology                                                       | Phase H | written; direct SSH bootstrap + persistent proxy daemon        |
 | ADR-022 | driver extensibility                                                  | Phase I | not written                                                    |
 | ADR-023 | inline-edit conflict & row-identity model                             | Phase D | drafted in `docs/PLANS/inline-edit-dml.md`                     |
 | ADR-024 | search architecture (progressive schema index + bounded data fan-out) | Phase D | drafted in `docs/PLANS/schema-data-search.md`                  |

@@ -217,9 +217,8 @@ client built against a future, incompatible wire contract would hit confusing
 partial failures instead of a clear signal, and there was no way to reject an
 unsupported client.
 
-**Decision.** The protocol version is a single monotonically increasing integer
-string, not semver. It bumps only on a *breaking* wire change; additive changes
-do not.
+**Decision.** The protocol version is a monotonically increasing integer, not
+semver. It bumps only on a *breaking* wire change; additive changes do not.
 
 - Breaking (bump): removing or renaming a field or endpoint, changing a field's
   type or meaning, changing an existing enum variant's shape, or tightening
@@ -227,20 +226,28 @@ do not.
 - Additive (no bump): new endpoints, new optional request fields with defaults,
   new response fields, new enum variants existing clients can ignore.
 
-Negotiation is pin-or-proceed. A request may pin the version via the
-`x-sift-protocol-version` header. If present and it does not equal the server's
-version, the request is rejected before routing with `400` and error kind
-`unsupported_protocol_version`, naming the requested and supported versions. If
-absent, the request proceeds — an unpinned client is assumed compatible — and
-the server always advertises its version on the response. There is no range
-negotiation while a single version exists; a future multi-version window
-extends this by accepting a set and defining a deprecation window (N and N-1).
+Before its first product request, a client sends its inclusive supported range
+to `POST /v1/handshake`. The server selects the highest mutually supported
+integer and returns its own range, the selected version, release version,
+opaque instance/generation identity, and a bounded capability set. No overlap
+returns HTTP 426 with `unsupported_protocol_version`. The initial range remains
+`[1, 1]`; release semver and application protocol compatibility are independent.
 
-**Consequences.** A client pinned to a version the server no longer speaks
-fails fast with an actionable error instead of subtle misbehavior. Additive
-evolution stays cheap — most changes never touch the version. The check is a
-cheap header comparison in middleware. Unpinned clients keep working, so the
-gate is opt-in until a breaking change makes pinning meaningful.
+After selection, every HTTP request and WebSocket upgrade carries the exact
+`x-sift-protocol-version`. Every response, including an upgrade and an error,
+echoes it; the reference SDK rejects a missing or different value before
+decoding the body. A connection never changes protocol in place. Once Phase H
+ships, only handshake and health/readiness probes accept an absent version
+header. Supporting N and N-1 means advertising that explicit range, not
+silently treating an unpinned client as compatible.
+
+**Consequences.** Incompatible clients fail before authentication or product
+state is touched, while compatible releases need not have identical semver.
+Additive evolution stays cheap and most changes do not bump the protocol.
+Clients and servers must retain range-aware codecs for every version they
+advertise, and the SDK gains a small shared handshake state before normal
+requests. Detailed wire and reconnect behavior is in
+`docs/PLANS/phase-h-remote-development.md`.
 
 ---
 
@@ -895,3 +902,87 @@ inside each snapshot (bounded by a hard per-document history cap) so arbitrarily
 old replicas still synchronize. The public protocol stays version `"1"` because
 there are no external users yet. Automerge, shared rich-text marks, and CRDT
 state outside the SQL text are explicitly out of scope.
+
+---
+
+## ADR-015 — Signed Background Updates Activate On Restart
+
+**Context.** Local, daemon, and SSH-remote installations need low-friction
+updates, but replacing a running database server can interrupt queries and
+HTTPS alone does not establish that an artifact is an authorized Sift release.
+Containers have a different ownership boundary: their orchestrator, not a
+process inside the image, owns replacement and rollback.
+
+**Decision.** Sift checks a configured release channel in the background,
+downloads without interrupting work, and activates a verified candidate only
+on a later launch or explicit daemon restart. An Ed25519 signature over the
+exact raw manifest bytes is verified against public release keys embedded in
+the trusted binary before JSON parsing. The signed manifest binds channel,
+monotonic sequence, expiry, release/protocol versions, target, artifact URL,
+byte length, and SHA-256 digest. The updater rejects stale, expired,
+downgraded, wrong-target, oversized, malformed, unsafe-archive, or
+digest-mismatched input.
+
+Artifacts install into immutable versioned directories. An atomic pointer
+selects the next launch; the running executable is never overwritten and the
+previous known-good version is retained. Candidate activation requires process
+readiness and a compatible ADR-016 handshake, otherwise the pointer rolls back.
+`in-process` lifecycle is parent-owned, daemon mode may check and stage but
+does not restart active work automatically, and container mode disables
+self-update entirely. Remote bootstrap consumes the same signed manifest and
+content-addressed artifact cache rather than creating a second trust path.
+
+**Consequences.** Update checks are unobtrusive and a compromised artifact host
+cannot authorize a binary without a release signature. Sequence/expiry state,
+safe extraction, signing-key rotation, activation health, and rollback become
+release-critical code. Binary rollback cannot undo an irreversible metadata
+migration, so such a migration requires its own future release gate. The full
+manifest and mode contract is in
+`docs/PLANS/phase-h-remote-development.md`.
+
+---
+
+## ADR-021 — Direct SSH Bootstrap, Persistent Remote Daemon
+
+**Context.** Sift's server-first shape permits a thin client to render locally
+while product state and database access remain on a remote machine. Making a
+personal daemon publicly reachable would weaken the local trust model, while a
+hosted relay or Sift identity broker would add an unrelated service and trust
+boundary. Treating remote loopback traffic as implicitly trusted would also
+violate ADR-020 and ADR-030.
+
+**Decision.** Initial remote development is a direct OpenSSH topology. A local
+helper uses the user's system SSH configuration and host-key policy to probe or
+upload a verified server binary, start or reuse a detached remote daemon, and
+relay an ephemeral local loopback listener to the daemon's ephemeral remote
+loopback port. OpenSSH control-master multiplexing is an optimization with a
+dedicated-connection fallback. The daemon runs independently as
+`mode=daemon`, `transport=ssh-proxy`; that transport always requires explicit
+authentication and rejects loopback bypass.
+
+SSH protects bootstrap but does not by itself name an arbitrary Sift
+principal. A personal instance may map its privately owned OS state to the
+bootstrapped local principal; team instances require proof with a registered
+Sift Ed25519 principal key. Bootstrap returns a short-lived, one-use
+`SshProxyCapabilityClaims` envelope bound to the exact instance audience and
+principal; its one-use server record additionally binds the daemon generation.
+Exchange through the tunnel atomically consumes it for a short-lived access
+grant without a portable refresh token. Renewal repeats authenticated
+bootstrap. No capability, password, or private key enters arguments,
+environment variables, metadata secret bytes, or logs.
+
+An SSH drop closes transport channels but does not stop the daemon. Durable
+rooms, documents, profiles, history, and audit survive; process-local sessions,
+transactions, cursors, presence, and database connections may need reopening
+after a daemon generation change. Loro documents resynchronize normally.
+Interrupted requests with an unproven outcome are never automatically replayed.
+A hosted collaboration relay and central identity broker remain separate
+future designs.
+
+**Consequences.** Remote use gains local rendering and remote database locality
+without opening an inbound Sift port or weakening authentication. The client
+must own bootstrap, forwarding, capability renewal, reconnect classification,
+and verified binary selection. Remote correctness depends on the ADR-016
+handshake rather than equal executable versions. Detailed state machines,
+failure gates, and implementation order are in
+`docs/PLANS/phase-h-remote-development.md`.
