@@ -189,33 +189,47 @@ enforcement.
 Goal: graduate the room runtime from "foundation" to a real multiplayer SQL
 session. CRDT only for query text; everything else server-authoritative.
 
-- [ ] [Design] ADR-014 (candidate): lock collaboration scope — shared SQL
+- [x] [Design] ADR-014 (candidate): lock collaboration scope — shared SQL
       editor via CRDT, ephemeral presence, shared session/connection state
       via broadcast; explicitly exclude result replication beyond
-      references.
-- [ ] [Design] CRDT backend choice for `sift-doc`. **Today `sift-doc` is
-      not a CRDT** (`crates/doc/src/lib.rs:79-98`) — it is a UTF-8 byte
-      buffer with destructive `apply()`, no op-log, no merge, no pluggable
-      backend. The `CrdtKind::{Loro,Automerge}` tag is a label, never
-      dispatched on. Picking + wiring a real backend (Automerge vs Loro vs
-      Yjs) is the core Phase G deliverable.
-- [ ] [Design] Late-join protocol: snapshot + ops-since. Today only full
-      snapshots are persisted (`metadata/src/lib.rs:744-759`); there is no
-      bounded op-log and no compaction.
-- [ ] [Design] Presence vs durable separation: presence is ephemeral and
+      references. **Written** (`docs/DECISIONS.md` ADR-014); CRDT state
+      outside the SQL text is explicitly out of scope.
+- [x] [Design] CRDT backend choice for `sift-doc`. **Resolved: Loro**
+      (ADR-014). `sift-doc` is now a real Loro CRDT — the `CrdtKind`/
+      `Automerge` selector and positional-op contract were removed. Server
+      validates, durably sequences, and rebroadcasts native Loro updates;
+      all Loro CPU runs in a per-document blocking actor.
+- [x] [Design] Late-join protocol: snapshot + ops-since. **Implemented** —
+      version-vector `DocumentSync`, chunked snapshot/update transfer, a
+      bounded per-document op-log (`list_document_updates_since`,
+      `next_update_seq`), and `compact()` with covered-row truncation
+      (`crates/server/src/document_actor.rs`, `crates/metadata/src/lib.rs`).
+- [x] [Design] Presence vs durable separation: presence is ephemeral and
       fire-and-forget; document text is durable CRDT. Today presence rides
       the same `broadcast::channel(1024)` as document ops
-      (`room_runtime.rs:84`).
-- [ ] [Design] Shared-connection ownership: a connection opened in a room
+      (`room_runtime.rs:84`). Drafted in
+      `docs/PLANS/presence-durable-separation.md` (ADR-035): two per-room
+      broadcast lanes; durable-lane lag emits the (previously dead)
+      `ResyncRequired` and the client re-runs `DocumentSync`.
+- [x] [Design] Shared-connection ownership: a connection opened in a room
       is server-owned; members attach and run ops through it with role
       gating from ADR-020 (editor+ can run only operations also permitted by
-      tenant/profile policy; viewer observes result references).
+      tenant/profile policy; viewer observes result references). Drafted in
+      `docs/PLANS/shared-connection-ownership.md` (ADR-036): room binds one
+      connection profile (binder's credentials, revocable); execute resolves
+      the bound profile and runs `authorize()` with the submitter's scope
+      (intersection gating — already implemented in `authorization.rs`).
 - [ ] [Implement] Real CRDT in `sift-doc`; snapshot + op-log persistence in
       metadata; deterministic merge across peers.
 - [ ] [Implement] Late-join snapshot + ops-since over the room WS; bounded
       op log with background compaction.
-- [ ] [Implement] Ephemeral presence channel distinct from the durable
-      doc-op channel; not persisted.
+- [x] [Implement] Ephemeral presence channel distinct from the durable
+      doc-op channel; not persisted. Done (ADR-035): per-room
+      `presence_events` (cap 256) + `doc_events` (cap 1024) in
+      `room_runtime.rs`; `handle_room_ws` selects both lanes — presence lag
+      heals with a snapshot, doc lag emits `ResyncRequired`
+      (`runtime_epoch` + `event_seq` now wired). Fixes silent loss of
+      committed CRDT ops on a lagging peer.
 - [ ] [Implement] Shared room connection with role gating; result-reference
       broadcast (today the room emits a `RoomQueryResult` _summary_
       (`http.rs:1731-1738`), not a cursor reference peers can page from).
@@ -419,7 +433,7 @@ configurations without abandoning thin clients or breaking remote topology.
 | ADR-011 | server-side cursor registry (cap + LRA eviction + spill/resume)       | Phase C | written                                                        |
 | ADR-012 | schema cache with TTL + engine-specific invalidators                  | Phase C | written                                                        |
 | ADR-013 | driver isolation                                                      | Phase B | written; both engines meet the containment boundary            |
-| ADR-014 | collaboration scope (CRDT text only)                                  | Phase G | not written                                                    |
+| ADR-014 | collaboration scope (CRDT text only)                                  | Phase G | written; Loro single backend, CRDT limited to the SQL text     |
 | ADR-016 | protocol versioning + semver stability                                | Phase B | written; pin-or-proceed negotiation, monotonic integer version |
 | ADR-017 | driver trait shape                                                    | Phase A | written; Phase A trait lock                                    |
 | ADR-018 | graceful shutdown contract                                            | Phase B | written                                                        |
@@ -439,6 +453,8 @@ configurations without abandoning thin clients or breaking remote topology.
 | ADR-032 | SQL semantic service and dialect-pack boundary                        | Phase K | not written                                                    |
 | ADR-033 | catalog graph, schema diff, and migration safety                      | Phase K | not written                                                    |
 | ADR-034 | server-owned or hybrid workspace and VCS topology                     | Phase L | not written                                                    |
+| ADR-035 | room lane separation + CRDT-safe lag recovery                         | Phase G | drafted in `docs/PLANS/presence-durable-separation.md`         |
+| ADR-036 | room-owned connection binding + submitter-scoped authorization        | Phase G | drafted in `docs/PLANS/shared-connection-ownership.md`         |
 
 ## Reference: what is being stolen, and what is not
 
