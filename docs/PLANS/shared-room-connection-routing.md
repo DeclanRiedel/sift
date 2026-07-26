@@ -108,13 +108,17 @@ Audit/history attribution stays the **submitter** (already the case:
   end-to-end test for a policy-blocked editor (read-only profile rejecting a
   write) is a follow-up (the `sql_policy::enforce` path is already unit-proven).
 - **Pageable result reference.** The viewer-observes-results broadcast
-  (`shared-connection-ownership.md`) is the last independent G9 slice. Note it
-  is bigger than a broadcast: `execute_http` materializes and **removes** the
-  cursor after draining, and `/v1/cursors/:id/pages` authorizes by
-  `session_owner == requester`. A true pageable reference therefore needs (a)
-  room execution to keep a live cursor, and (b) a room-scoped cursor-authz path
-  so members (incl. viewers) can page a cursor owned by the room's
-  binder-owned session. Design this as its own slice.
+  (`shared-connection-ownership.md`) is the last independent G9 slice — and
+  bigger than a broadcast. Investigated during G9: room queries run through the
+  **HTTP** execute path, where `drain_stream_inner` always returns
+  `has_more: false` and **errors `ResultTooLarge`** past the cap — it never
+  spills a pageable cursor. `/v1/cursors/:id/pages` also authorizes by
+  `session_owner == requester`. So the real prerequisite is routing room
+  execution through the **streaming/cursor** path (WS execute + spill); only
+  then do the broadcast (`RoomQueryResult { cursor_id, has_more }`) and a
+  room-scoped cursor-authz relaxation (admit any member of the cursor's room,
+  read-only) deliver it. Full corrected design in
+  `shared-connection-ownership.md`. Gate on streaming room execution.
 
 ## Landed teardown
 

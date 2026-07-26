@@ -243,9 +243,11 @@ session. CRDT only for query text; everything else server-authoritative.
       is authorized by the submitter's room-role × the bound profile policy
       before routing, and an unbound room is hard-rejected. The connection is
       torn down on unbind/rebind and when the room empties (self-healing via
-      lazy reopen). Remaining: pageable result-reference broadcast (needs a
-      live cursor + room-scoped cursor authz) and a policy-blocked-editor E2E
-      test.
+      lazy reopen). Remaining: pageable result-reference broadcast — gated on
+      routing room execution through the **streaming/cursor** path, since HTTP
+      execute never spills a pageable cursor (`has_more` always false,
+      cap→`ResultTooLarge`); see `shared-connection-ownership.md`. Plus a
+      policy-blocked-editor E2E test.
 - [ ] [Implement] Observer lag recovery + follow mode.
 
 ## Phase H — Remote development & distribution
