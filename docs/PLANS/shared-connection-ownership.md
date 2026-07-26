@@ -74,6 +74,20 @@ When `room_id` is present:
 4. Run against the bound profile's connection (binder's credentials). The
    submitter never needs their own profile for the shared session.
 
+> **Landed vs deferred.** `execute_http` selects the live driver connection by
+> `ExecuteRequestHttp.connection` (a `ConnectionId`), not by
+> `connection_profile_id` (which is attribution/authz provenance only). So the
+> increment that landed with ADR-036 is: the room→connection **binding**
+> (metadata + owner-gated bind/unbind + audit) and **attribution override** —
+> when a room is bound, room-scoped execute attributes history to the bound
+> profile. The **hard `RoomConnectionUnbound` rejection (step 1) and the actual
+> routing of the query through a server-held room connection (step 4) land
+> together in G9** ("shared room connection"), because a reject without routing
+> would block members while queries still ran on their own connections — a
+> guardrail divorced from the security property. Steps 2–3 already hold: the
+> intersection evaluator (`authorize()`) is live and `RoomPermission::Write`
+> already denies viewers at the room-permission gate.
+
 ### Attribution
 
 Audit and history attribute the **submitting principal**, never the binder —
