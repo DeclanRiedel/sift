@@ -7,13 +7,14 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 use argon2::password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString};
 use argon2::Argon2;
+use base64::Engine as _;
 use chrono::{DateTime, Utc};
 use rand_core::OsRng;
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use sha2::{Digest, Sha256};
 use sift_protocol::{
-    AuthSessionSummary, ConnectionPolicy, ConnectionSpec, TenantResourceLimits,
-    UpdateConnectionPolicyRequest,
+    AuthSessionSummary, ConnectionPolicy, ConnectionSpec, SshProxyCapabilityClaims,
+    TenantResourceLimits, UpdateConnectionPolicyRequest,
 };
 use uuid::Uuid;
 
@@ -34,12 +35,14 @@ const SECRET_NAMESPACE: &str = "sift.local";
 const PASSWORD_SECRET_NAMESPACE: &str = "sift.auth.password";
 const AUTH_SYSTEM_SECRET_NAMESPACE: &str = "sift.auth.system";
 const AUTH_TOKEN_MAC_HANDLE: &str = "token-mac-v1";
+const SSH_PROXY_CAPABILITY_MAC_HANDLE: &str = "ssh-proxy-capability-mac-v1";
 const OAUTH_SECRET_NAMESPACE: &str = "sift.auth.oauth";
 const OAUTH_STATE_PREFIX: &str = "sift_oauth_";
 const GITHUB_HANDOFF_PREFIX: &str = "sift_gh_";
 const INVITATION_TOKEN_PREFIX: &str = "sift_inv_";
 const PASSWORD_RESET_TOKEN_PREFIX: &str = "sift_pr_";
 const ACCESS_TOKEN_PREFIX: &str = "sift_at_";
+const SSH_PROXY_CAPABILITY_PREFIX: &str = "sift_sshcap_v1.";
 const REFRESH_TOKEN_PREFIX: &str = "sift_rt_";
 const AUTH_TOKEN_LOOKUP_LEN: usize = 12;
 const ACCESS_TOKEN_TTL_MINUTES: i64 = 15;
@@ -139,6 +142,10 @@ pub enum MetadataError {
     PrincipalKeyNotFound(PrincipalKeyId),
     #[error("key challenge is invalid, expired, or consumed")]
     InvalidKeyChallenge,
+    #[error(
+        "SSH proxy capability is invalid, expired, consumed, revoked, or for another instance"
+    )]
+    InvalidSshProxyCapability,
     #[error("password reset token is invalid, expired, or already consumed")]
     InvalidPasswordReset,
     #[error("secret store error: {0}")]
@@ -1955,10 +1962,247 @@ impl MetadataStore {
         })
     }
 
+    pub async fn issue_ssh_proxy_capability(
+        &self,
+        claims: &SshProxyCapabilityClaims,
+        daemon_generation: &str,
+        principal_key_id: Option<PrincipalKeyId>,
+        audit: NewOperationAudit,
+    ) -> Result<IssuedSshProxyCapability> {
+        let now = Utc::now();
+        if claims.version != 1
+            || claims.instance_audience.is_empty()
+            || claims.instance_audience.len() > 512
+            || claims.capability_id.is_empty()
+            || claims.capability_id.len() > 128
+            || daemon_generation.is_empty()
+            || daemon_generation.len() > 128
+            || claims.issued_at > now + chrono::Duration::minutes(1)
+            || claims.expires_at <= now
+            || claims.expires_at <= claims.issued_at
+            || claims.expires_at > claims.issued_at + chrono::Duration::minutes(5)
+        {
+            return Err(MetadataError::InvalidSshProxyCapability);
+        }
+
+        let principal = PrincipalId(claims.principal_id);
+        let conn = self.conn()?;
+        let principal_enabled: bool = conn
+            .query_row(
+                "SELECT disabled_at IS NULL FROM principal WHERE id = ?1",
+                params![principal.0],
+                |row| row.get(0),
+            )
+            .optional()?
+            .ok_or(MetadataError::PrincipalNotFound(principal))?;
+        if !principal_enabled {
+            return Err(MetadataError::InvalidSshProxyCapability);
+        }
+        if let Some(key_id) = principal_key_id {
+            let valid_key: bool = conn.query_row(
+                "SELECT EXISTS(
+                        SELECT 1 FROM principal_key
+                        WHERE id = ?1 AND principal_id = ?2 AND revoked_at IS NULL
+                     )",
+                params![key_id.0, principal.0],
+                |row| row.get(0),
+            )?;
+            if !valid_key {
+                return Err(MetadataError::InvalidSshProxyCapability);
+            }
+        }
+        drop(conn);
+
+        let payload =
+            serde_json::to_vec(claims).map_err(|_| MetadataError::InvalidSshProxyCapability)?;
+        if payload.len() > 4 * 1024 {
+            return Err(MetadataError::InvalidSshProxyCapability);
+        }
+        let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(payload);
+        let signed = format!("{SSH_PROXY_CAPABILITY_PREFIX}{payload}");
+        let key = self.ssh_proxy_capability_mac_key().await?;
+        let mac = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(hmac_sha256(&key, signed.as_bytes()));
+        let capability = format!("{signed}.{mac}");
+        let digest = auth_token_digest(&key, &capability);
+
+        let mut conn = self.conn()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        tx.execute(
+            "INSERT INTO ssh_proxy_capability
+             (capability_id, capability_digest, principal_id, principal_key_id,
+              instance_audience, daemon_generation, issued_at, expires_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                claims.capability_id,
+                digest,
+                principal.0,
+                principal_key_id.map(|id| id.0),
+                claims.instance_audience,
+                daemon_generation,
+                claims.issued_at.to_rfc3339(),
+                claims.expires_at.to_rfc3339(),
+            ],
+        )?;
+        insert_operation_audit_row(&tx, &audit)?;
+        tx.commit()?;
+        Ok(IssuedSshProxyCapability {
+            capability,
+            expires_at: claims.expires_at,
+        })
+    }
+
+    pub async fn consume_ssh_proxy_capability(
+        &self,
+        presented: &str,
+        expected_audience: &str,
+        expected_generation: &str,
+        audit: NewOperationAudit,
+    ) -> Result<IssuedSshProxyAccess> {
+        if presented.len() > 8 * 1024 {
+            return Err(MetadataError::InvalidSshProxyCapability);
+        }
+        let body = presented
+            .strip_prefix(SSH_PROXY_CAPABILITY_PREFIX)
+            .ok_or(MetadataError::InvalidSshProxyCapability)?;
+        let mut parts = body.split('.');
+        let payload_text = parts
+            .next()
+            .filter(|part| !part.is_empty())
+            .ok_or(MetadataError::InvalidSshProxyCapability)?;
+        let presented_mac = parts
+            .next()
+            .filter(|part| !part.is_empty())
+            .ok_or(MetadataError::InvalidSshProxyCapability)?;
+        if parts.next().is_some() {
+            return Err(MetadataError::InvalidSshProxyCapability);
+        }
+
+        let capability_key = self.ssh_proxy_capability_mac_key().await?;
+        let signed = format!("{SSH_PROXY_CAPABILITY_PREFIX}{payload_text}");
+        let expected_mac = hmac_sha256(&capability_key, signed.as_bytes());
+        let presented_mac = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(presented_mac)
+            .map_err(|_| MetadataError::InvalidSshProxyCapability)?;
+        if !constant_time_eq(&expected_mac, &presented_mac) {
+            return Err(MetadataError::InvalidSshProxyCapability);
+        }
+        let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(payload_text)
+            .map_err(|_| MetadataError::InvalidSshProxyCapability)?;
+        if payload.len() > 4 * 1024 {
+            return Err(MetadataError::InvalidSshProxyCapability);
+        }
+        let claims: SshProxyCapabilityClaims = serde_json::from_slice(&payload)
+            .map_err(|_| MetadataError::InvalidSshProxyCapability)?;
+        let now = Utc::now();
+        if claims.version != 1
+            || claims.instance_audience != expected_audience
+            || claims.issued_at > now + chrono::Duration::minutes(1)
+            || claims.expires_at <= now
+        {
+            return Err(MetadataError::InvalidSshProxyCapability);
+        }
+
+        let capability_digest = auth_token_digest(&capability_key, presented);
+        let access_key = self.auth_token_mac_key().await?;
+        let access = new_token_material(ACCESS_TOKEN_PREFIX, &access_key);
+        let access_expires_at = now + chrono::Duration::minutes(ACCESS_TOKEN_TTL_MINUTES);
+        let session_id = Uuid::new_v4().to_string();
+        let family_id = Uuid::new_v4().to_string();
+
+        let mut conn = self.conn()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let stored: Option<(PrincipalId, Option<PrincipalKeyId>)> = tx
+            .query_row(
+                "SELECT c.principal_id, c.principal_key_id
+                 FROM ssh_proxy_capability c
+                 JOIN principal p ON p.id = c.principal_id
+                 WHERE c.capability_id = ?1
+                   AND c.capability_digest = ?2
+                   AND c.instance_audience = ?3
+                   AND c.daemon_generation = ?4
+                   AND c.consumed_at IS NULL
+                   AND c.revoked_at IS NULL
+                   AND c.expires_at > ?5
+                   AND p.disabled_at IS NULL
+                   AND (
+                       c.principal_key_id IS NULL OR EXISTS(
+                           SELECT 1 FROM principal_key k
+                           WHERE k.id = c.principal_key_id
+                             AND k.principal_id = c.principal_id
+                             AND k.revoked_at IS NULL
+                       )
+                   )",
+                params![
+                    claims.capability_id,
+                    capability_digest,
+                    expected_audience,
+                    expected_generation,
+                    now.to_rfc3339(),
+                ],
+                |row| {
+                    Ok((
+                        PrincipalId(row.get(0)?),
+                        row.get::<_, Option<i64>>(1)?.map(PrincipalKeyId),
+                    ))
+                },
+            )
+            .optional()?;
+        let Some((principal, _key)) = stored else {
+            return Err(MetadataError::InvalidSshProxyCapability);
+        };
+        if principal.0 != claims.principal_id {
+            return Err(MetadataError::InvalidSshProxyCapability);
+        }
+        let consumed = tx.execute(
+            "UPDATE ssh_proxy_capability SET consumed_at = ?1
+             WHERE capability_id = ?2 AND consumed_at IS NULL",
+            params![now.to_rfc3339(), claims.capability_id],
+        )?;
+        if consumed != 1 {
+            return Err(MetadataError::InvalidSshProxyCapability);
+        }
+        tx.execute(
+            "INSERT INTO auth_session
+             (id, principal_id, refresh_family_id, client_kind, client_label,
+              created_at, last_used_at, expires_at)
+             VALUES (?1, ?2, ?3, 'keypair', 'ssh-proxy', ?4, ?4, ?5)",
+            params![
+                session_id,
+                principal.0,
+                family_id,
+                now.to_rfc3339(),
+                access_expires_at.to_rfc3339(),
+            ],
+        )?;
+        insert_access_token(&tx, &session_id, &access, access_expires_at, now)?;
+        let mut audit = audit;
+        audit.actor_principal_id = Some(principal);
+        insert_operation_audit_row(&tx, &audit)?;
+        tx.commit()?;
+
+        Ok(IssuedSshProxyAccess {
+            session_id,
+            access_token: access.plaintext,
+            access_expires_at,
+            principal_id: principal,
+            daemon_generation: expected_generation.to_string(),
+        })
+    }
+
     async fn auth_token_mac_key(&self) -> Result<Vec<u8>> {
+        self.system_mac_key(AUTH_TOKEN_MAC_HANDLE).await
+    }
+
+    async fn ssh_proxy_capability_mac_key(&self) -> Result<Vec<u8>> {
+        self.system_mac_key(SSH_PROXY_CAPABILITY_MAC_HANDLE).await
+    }
+
+    async fn system_mac_key(&self, handle: &str) -> Result<Vec<u8>> {
         if let Some(key) = self
             .secrets
-            .get(AUTH_SYSTEM_SECRET_NAMESPACE, AUTH_TOKEN_MAC_HANDLE)
+            .get(AUTH_SYSTEM_SECRET_NAMESPACE, handle)
             .await?
         {
             if key.len() != 32 {
@@ -1970,7 +2214,7 @@ impl MetadataStore {
         getrandom::getrandom(&mut key)
             .map_err(|error| MetadataError::SecretStore(format!("rng failure: {error}")))?;
         self.secrets
-            .put(AUTH_SYSTEM_SECRET_NAMESPACE, AUTH_TOKEN_MAC_HANDLE, &key)
+            .put(AUTH_SYSTEM_SECRET_NAMESPACE, handle, &key)
             .await?;
         Ok(key)
     }
@@ -6843,5 +7087,187 @@ mod tests {
         assert_eq!(history.len(), 1);
         assert_eq!(history[0].sql_text, "select 1");
         assert_eq!(history[0].status, QueryStatus::Ok);
+    }
+
+    fn ssh_claims(audience: &str) -> SshProxyCapabilityClaims {
+        let now = Utc::now();
+        SshProxyCapabilityClaims {
+            version: 1,
+            instance_audience: audience.into(),
+            principal_id: 1,
+            capability_id: Uuid::new_v4().to_string(),
+            issued_at: now,
+            expires_at: now + chrono::Duration::minutes(2),
+        }
+    }
+
+    #[tokio::test]
+    async fn ssh_proxy_capability_is_instance_bound_one_use_and_access_only() {
+        let store = store();
+        store.bootstrap_local("local user").unwrap();
+        let claims = ssh_claims("sift:test-instance");
+        let issued = store
+            .issue_ssh_proxy_capability(
+                &claims,
+                "generation-a",
+                None,
+                test_audit("ssh_proxy.issue", "ssh_proxy_capability", None),
+            )
+            .await
+            .unwrap();
+
+        let wrong_generation = store
+            .consume_ssh_proxy_capability(
+                &issued.capability,
+                "sift:test-instance",
+                "generation-b",
+                test_audit("ssh_proxy.exchange", "auth_session", None),
+            )
+            .await;
+        assert!(matches!(
+            wrong_generation,
+            Err(MetadataError::InvalidSshProxyCapability)
+        ));
+
+        let access = store
+            .consume_ssh_proxy_capability(
+                &issued.capability,
+                "sift:test-instance",
+                "generation-a",
+                test_audit("ssh_proxy.exchange", "auth_session", None),
+            )
+            .await
+            .unwrap();
+        assert_eq!(access.principal_id, PrincipalId(1));
+        assert!(access.access_token.starts_with(ACCESS_TOKEN_PREFIX));
+        assert!(store
+            .verify_auth_access_token(&access.access_token)
+            .await
+            .unwrap()
+            .is_some());
+
+        let replay = store
+            .consume_ssh_proxy_capability(
+                &issued.capability,
+                "sift:test-instance",
+                "generation-a",
+                test_audit("ssh_proxy.exchange", "auth_session", None),
+            )
+            .await;
+        assert!(matches!(
+            replay,
+            Err(MetadataError::InvalidSshProxyCapability)
+        ));
+
+        let conn = store.conn().unwrap();
+        let refresh_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM auth_refresh_token art
+                 JOIN auth_session s ON s.id = art.auth_session_id
+                 WHERE s.id = ?1",
+                params![access.session_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(refresh_count, 0);
+        let durable: String = conn
+            .query_row(
+                "SELECT capability_digest FROM ssh_proxy_capability
+                 WHERE capability_id = ?1",
+                params![claims.capability_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(!durable.contains(&issued.capability));
+    }
+
+    #[tokio::test]
+    async fn ssh_proxy_capability_tamper_and_audience_mismatch_do_not_consume() {
+        let store = store();
+        store.bootstrap_local("local user").unwrap();
+        let claims = ssh_claims("sift:expected");
+        let issued = store
+            .issue_ssh_proxy_capability(
+                &claims,
+                "generation",
+                None,
+                test_audit("ssh_proxy.issue", "ssh_proxy_capability", None),
+            )
+            .await
+            .unwrap();
+        let mut tampered = issued.capability.clone().into_bytes();
+        let last = tampered.last_mut().unwrap();
+        *last = if *last == b'A' { b'B' } else { b'A' };
+        let tampered = String::from_utf8(tampered).unwrap();
+        assert!(store
+            .consume_ssh_proxy_capability(
+                &tampered,
+                "sift:expected",
+                "generation",
+                test_audit("ssh_proxy.exchange", "auth_session", None),
+            )
+            .await
+            .is_err());
+        assert!(store
+            .consume_ssh_proxy_capability(
+                &issued.capability,
+                "sift:other",
+                "generation",
+                test_audit("ssh_proxy.exchange", "auth_session", None),
+            )
+            .await
+            .is_err());
+        assert!(store
+            .consume_ssh_proxy_capability(
+                &issued.capability,
+                "sift:expected",
+                "generation",
+                test_audit("ssh_proxy.exchange", "auth_session", None),
+            )
+            .await
+            .is_ok());
+    }
+
+    #[tokio::test]
+    async fn ssh_proxy_capability_fails_after_issuing_key_is_revoked() {
+        let store = store();
+        store.bootstrap_local("local user").unwrap();
+        let key = store
+            .register_principal_key(
+                PrincipalId(1),
+                &[7; 32],
+                "SHA256:test-ssh-key",
+                "remote key",
+                test_audit("principal_key.register", "principal_key", None),
+            )
+            .unwrap();
+        let claims = ssh_claims("sift:key-revocation");
+        let issued = store
+            .issue_ssh_proxy_capability(
+                &claims,
+                "generation",
+                Some(key.id),
+                test_audit("ssh_proxy.issue", "ssh_proxy_capability", None),
+            )
+            .await
+            .unwrap();
+        store
+            .revoke_principal_key(
+                key.id,
+                PrincipalId(1),
+                test_audit("principal_key.revoke", "principal_key", Some(key.id.0)),
+            )
+            .unwrap();
+        assert!(matches!(
+            store
+                .consume_ssh_proxy_capability(
+                    &issued.capability,
+                    "sift:key-revocation",
+                    "generation",
+                    test_audit("ssh_proxy.exchange", "auth_session", None),
+                )
+                .await,
+            Err(MetadataError::InvalidSshProxyCapability)
+        ));
     }
 }

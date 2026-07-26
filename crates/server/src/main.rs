@@ -110,7 +110,7 @@ async fn main() -> anyhow::Result<()> {
                 .auth
                 .public_base_url
                 .clone()
-                .unwrap_or_else(|| "sift:local".into()),
+                .unwrap_or_else(|| format!("sift:instance:{}", runtime.instance_id)),
             instance_id: runtime.instance_id.clone(),
             daemon_generation: runtime.daemon_generation.clone(),
             allow_legacy_unversioned: false,

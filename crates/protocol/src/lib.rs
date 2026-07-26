@@ -43,7 +43,8 @@ pub use auth::{
     InvitationRole, IssuedPasswordResetResponse, IssuedTenantInvitationResponse,
     KeyAuthenticateRequest, KeyChallengeRequest, KeyChallengeResponse, PasswordLoginRequest,
     PasswordResetRequest, RedactedString, RefreshAuthRequest, RegisterPrincipalKeyRequest,
-    SshProxyCapabilityClaims, WebAuthResponse, WhoAmIResponse,
+    SshProxyAccessGrant, SshProxyCapabilityClaims, SshProxyCapabilityExchangeRequest,
+    WebAuthResponse, WhoAmIResponse,
 };
 pub use capability::{OperationCapability, OperationCapabilityContext, OperationKind};
 pub use column::{

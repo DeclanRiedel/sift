@@ -18,6 +18,7 @@ const MAX_PASSWORD_BYTES: usize = 1024;
 const LOGIN_WINDOW: Duration = Duration::from_secs(60);
 const MAX_SOURCE_FAILURES: u32 = 20;
 const MAX_IDENTITY_FAILURES: u32 = 5;
+const MAX_SSH_CAPABILITY_FAILURES: u32 = 10;
 const MAX_ARGON2_CONCURRENCY: usize = 4;
 const ARGON2_MEMORY_KIB: u32 = 19_456;
 const ARGON2_ITERATIONS: u32 = 2;
@@ -87,6 +88,21 @@ pub enum PasswordAuthOutcome {
 }
 
 impl AuthRuntime {
+    pub fn ssh_capability_is_limited(&self, source: &str) -> bool {
+        self.is_limited(
+            &format!("ssh-capability-source:{source}"),
+            MAX_SSH_CAPABILITY_FAILURES,
+        )
+    }
+
+    pub fn record_ssh_capability_failure(&self, source: &str) {
+        self.record_failure(format!("ssh-capability-source:{source}"));
+    }
+
+    pub fn clear_ssh_capability_failures(&self, source: &str) {
+        self.clear_failure(&format!("ssh-capability-source:{source}"));
+    }
+
     pub async fn hash_password_bounded(&self, password: Vec<u8>) -> anyhow::Result<Option<String>> {
         let permit = match Arc::clone(&self.verifier_slots).try_acquire_owned() {
             Ok(permit) => permit,

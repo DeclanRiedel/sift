@@ -164,6 +164,7 @@ impl ApiError {
                 | MetadataError::InvalidOAuthAttempt
                 | MetadataError::InvalidTenantInvitation
                 | MetadataError::InvalidKeyChallenge
+                | MetadataError::InvalidSshProxyCapability
                 | MetadataError::InvalidPasswordReset
                 | MetadataError::Json(_) => (StatusCode::BAD_REQUEST, "bad_request"),
                 MetadataError::Sqlite(_)

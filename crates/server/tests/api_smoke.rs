@@ -305,6 +305,83 @@ async fn handshake_rejects_a_disjoint_protocol_range() {
 }
 
 #[tokio::test]
+async fn ssh_proxy_capability_exchange_is_one_use_and_issues_access_only_grant() {
+    let mut state = test_state_with_metadata(false);
+    state.auth.transport = sift_server::config::Transport::SshProxy;
+    state.auth.runtime_mode = sift_server::config::RuntimeMode::Daemon;
+    state.auth.instance_audience = "sift:test-ssh".into();
+    state.auth.daemon_generation = "generation-test".into();
+    let now = chrono::Utc::now();
+    let claims = sift_protocol::SshProxyCapabilityClaims {
+        version: 1,
+        instance_audience: state.auth.instance_audience.clone(),
+        principal_id: 1,
+        capability_id: uuid::Uuid::new_v4().to_string(),
+        issued_at: now,
+        expires_at: now + chrono::Duration::minutes(2),
+    };
+    let capability = state
+        .metadata
+        .as_ref()
+        .unwrap()
+        .issue_ssh_proxy_capability(
+            &claims,
+            &state.auth.daemon_generation,
+            None,
+            NewOperationAudit {
+                actor_principal_id: Some(PrincipalId(1)),
+                action: "ssh_proxy.issue".into(),
+                target: "ssh_proxy_capability".into(),
+                target_id: None,
+                status: "succeeded".into(),
+                result_code: None,
+                row_count: None,
+                error_message: None,
+                correlation_id: None,
+            },
+        )
+        .await
+        .unwrap()
+        .capability;
+    let app = app(state);
+    let request = sift_protocol::SshProxyCapabilityExchangeRequest {
+        capability: capability.clone(),
+    };
+    assert!(!format!("{request:?}").contains(&capability));
+    let response = app
+        .clone()
+        .oneshot(post_json("/v1/auth/ssh-proxy/exchange", &request))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let grant: sift_protocol::SshProxyAccessGrant = body_json(response.into_body()).await;
+    assert_eq!(grant.principal_id, 1);
+    assert_eq!(grant.daemon_generation, "generation-test");
+    assert!(!format!("{grant:?}").contains(&grant.access_token));
+
+    let whoami = app
+        .clone()
+        .oneshot(
+            Request::get("/v1/auth/whoami")
+                .header("authorization", format!("Bearer {}", grant.access_token))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(whoami.status(), StatusCode::OK);
+
+    let replay = app
+        .oneshot(post_json(
+            "/v1/auth/ssh-proxy/exchange",
+            &sift_protocol::SshProxyCapabilityExchangeRequest { capability },
+        ))
+        .await
+        .unwrap();
+    assert_eq!(replay.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
 async fn production_protocol_gate_requires_version_after_handshake() {
     let mut state = test_state();
     state.auth.allow_legacy_unversioned = false;
@@ -514,6 +591,7 @@ const SDK_OPERATION_MANIFEST: &[&str] = &[
     "deleteMetadataSavedQuery",
     "deleteSpilledCursor",
     "disconnectMetadataConnectionProfile",
+    "exchangeSshProxyCapability",
     "executeQuery",
     "explainQuery",
     "exportQuery",

@@ -209,6 +209,22 @@ pub struct IssuedAuthTokens {
     pub refresh_expires_at: DateTime<Utc>,
 }
 
+/// Secret-bearing SSH bootstrap token. Intentionally not `Debug` or serde.
+pub struct IssuedSshProxyCapability {
+    pub capability: String,
+    pub expires_at: DateTime<Utc>,
+}
+
+/// Access-only authentication material. Unlike [`IssuedAuthTokens`], this has
+/// no refresh token and expires with its short proxy session.
+pub struct IssuedSshProxyAccess {
+    pub session_id: String,
+    pub access_token: String,
+    pub access_expires_at: DateTime<Utc>,
+    pub principal_id: PrincipalId,
+    pub daemon_generation: String,
+}
+
 #[derive(Debug, Clone)]
 pub struct AuthenticatedSession {
     pub session_id: String,

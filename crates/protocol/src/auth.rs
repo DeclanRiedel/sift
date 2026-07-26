@@ -327,6 +327,40 @@ pub struct SshProxyCapabilityClaims {
     pub expires_at: DateTime<Utc>,
 }
 
+#[derive(Clone, Serialize, Deserialize, JsonSchema)]
+pub struct SshProxyCapabilityExchangeRequest {
+    pub capability: String,
+}
+
+impl fmt::Debug for SshProxyCapabilityExchangeRequest {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SshProxyCapabilityExchangeRequest")
+            .field("capability", &"[REDACTED]")
+            .finish()
+    }
+}
+
+#[derive(Clone, Serialize, Deserialize, JsonSchema)]
+pub struct SshProxyAccessGrant {
+    pub access_token: String,
+    pub expires_at: DateTime<Utc>,
+    pub principal_id: i64,
+    pub daemon_generation: String,
+}
+
+impl fmt::Debug for SshProxyAccessGrant {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SshProxyAccessGrant")
+            .field("access_token", &"[REDACTED]")
+            .field("expires_at", &self.expires_at)
+            .field("principal_id", &self.principal_id)
+            .field("daemon_generation", &self.daemon_generation)
+            .finish()
+    }
+}
+
 impl fmt::Debug for IssuedPasswordResetResponse {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
@@ -401,12 +435,24 @@ mod tests {
             current_password: "current secret".into(),
             new_password: "new secret".into(),
         };
-        let debug = format!("{login:?} {refresh:?} {tokens:?} {change:?}");
+        let ssh_exchange = SshProxyCapabilityExchangeRequest {
+            capability: "sift_sshcap_secret".into(),
+        };
+        let ssh_grant = SshProxyAccessGrant {
+            access_token: "sift_ssh_access_secret".into(),
+            expires_at: Utc::now(),
+            principal_id: 1,
+            daemon_generation: "generation".into(),
+        };
+        let debug =
+            format!("{login:?} {refresh:?} {tokens:?} {change:?} {ssh_exchange:?} {ssh_grant:?}");
         assert!(!debug.contains("correct horse"));
         assert!(!debug.contains("sift_rt_secret"));
         assert!(!debug.contains("sift_at_secret"));
         assert!(!debug.contains("current secret"));
         assert!(!debug.contains("new secret"));
+        assert!(!debug.contains("sift_sshcap_secret"));
+        assert!(!debug.contains("sift_ssh_access_secret"));
     }
 
     #[test]

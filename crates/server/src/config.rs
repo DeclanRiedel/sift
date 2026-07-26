@@ -285,6 +285,13 @@ impl Config {
         if self.mode == RuntimeMode::Container && self.transport == Transport::SshProxy {
             bail!("mode=container cannot use transport=ssh-proxy");
         }
+        if self.transport == Transport::SshProxy
+            && (!self.metadata.enabled || self.metadata.secret_backend == "memory")
+        {
+            bail!(
+                "transport=ssh-proxy requires metadata.enabled=true and a durable secret backend"
+            );
+        }
 
         let github_partial =
             self.auth.github_client_id.is_some() != self.auth.github_client_secret.is_some();
@@ -569,6 +576,10 @@ mod tests {
                 loopback_bypass: false,
                 ..AuthConfig::default()
             },
+            metadata: MetadataConfig {
+                secret_backend: "file".into(),
+                ..MetadataConfig::default()
+            },
             ..Config::default()
         };
         ssh.validate().unwrap();
@@ -578,6 +589,10 @@ mod tests {
             auth: AuthConfig {
                 loopback_bypass: false,
                 ..AuthConfig::default()
+            },
+            metadata: MetadataConfig {
+                secret_backend: "file".into(),
+                ..MetadataConfig::default()
             },
             ..Config::default()
         };
@@ -593,6 +608,10 @@ mod tests {
             auth: AuthConfig {
                 loopback_bypass: false,
                 ..AuthConfig::default()
+            },
+            metadata: MetadataConfig {
+                secret_backend: "file".into(),
+                ..MetadataConfig::default()
             },
             ..Config::default()
         };

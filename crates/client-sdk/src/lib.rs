@@ -35,7 +35,8 @@ use sift_protocol::{
     Page, PasswordLoginRequest, PasswordResetRequest, PreviewEditsRequest, ProtocolRange,
     Readiness, RefreshAuthRequest, RegisterPrincipalKeyRequest, RoomQueryResult, RoomResultId,
     RoomResultPages, RoomSelection, SavepointRequest, SchemaSearchRequest, SchemaSearchResponse,
-    SchemaSnapshot, ServerInfo, SessionId, SessionInfo, TenantResourceLimits, TenantUsageSnapshot,
+    SchemaSnapshot, ServerInfo, SessionId, SessionInfo, SshProxyAccessGrant,
+    SshProxyCapabilityExchangeRequest, TenantResourceLimits, TenantUsageSnapshot,
     TransactionEndAction, TransactionInfo, TransactionPreview, TransactionPreviewRequest,
     TransactionState, TxHandleRef, TxId, TxMode, UpdateConnectionPolicyRequest,
     UpdateTenantLimitsRequest, Value, WebAuthResponse, WhoAmIResponse, WsClientMessage,
@@ -620,6 +621,17 @@ impl Client {
     ) -> Result<SessionTokenProvider> {
         let tokens: AuthTokensResponse = self.post("/v1/auth/keys/authenticate", &request).await?;
         Ok(SessionTokenProvider::new(tokens))
+    }
+
+    pub async fn exchange_ssh_proxy_capability(
+        &self,
+        capability: String,
+    ) -> Result<SshProxyAccessGrant> {
+        self.post(
+            "/v1/auth/ssh-proxy/exchange",
+            &SshProxyCapabilityExchangeRequest { capability },
+        )
+        .await
     }
 
     pub async fn health(&self) -> Result<Health> {

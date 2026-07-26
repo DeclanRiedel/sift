@@ -42,9 +42,10 @@ use sift_protocol::{
     ObjectPath, OpenConnectionRequest, OpenSessionRequest, Operation, OperationStatus,
     PasswordLoginRequest, PasswordResetRequest, ProtocolRange, Readiness, RefreshAuthRequest,
     RegisterPrincipalKeyRequest, RoomClientMessage, RoomQueryResult, RoomServerMessage,
-    SavepointRequest, SchemaFilter, SchemaScope, TransactionPreviewRequest,
-    UpdateConnectionPolicyRequest, UpdateTenantLimitsRequest, WebAuthResponse, WhoAmIResponse,
-    WsClientMessage, WsServerMessage, PROTOCOL_VERSION, PROTOCOL_VERSION_NUMBER,
+    SavepointRequest, SchemaFilter, SchemaScope, SshProxyAccessGrant,
+    SshProxyCapabilityExchangeRequest, TransactionPreviewRequest, UpdateConnectionPolicyRequest,
+    UpdateTenantLimitsRequest, WebAuthResponse, WhoAmIResponse, WsClientMessage, WsServerMessage,
+    PROTOCOL_VERSION, PROTOCOL_VERSION_NUMBER,
 };
 
 use crate::config::{DeploymentPolicy, RuntimeMode, Transport};
@@ -255,6 +256,16 @@ pub fn app(state: AppState) -> Router {
         .api_route(
             "/v1/auth/keys/authenticate",
             post_with(authenticate_key, doc("authenticateKey", "")),
+        )
+        .api_route(
+            "/v1/auth/ssh-proxy/exchange",
+            post_with(
+                exchange_ssh_proxy_capability,
+                doc(
+                    "exchangeSshProxyCapability",
+                    "Atomically exchange a one-use SSH bootstrap capability",
+                ),
+            ),
         )
         .api_route(
             "/v1/metadata/tenants",
@@ -1027,6 +1038,7 @@ fn is_public_path(path: &str) -> bool {
             | "/v1/auth/github/exchange"
             | "/v1/auth/keys/challenge"
             | "/v1/auth/keys/authenticate"
+            | "/v1/auth/ssh-proxy/exchange"
     )
 }
 
@@ -2413,6 +2425,79 @@ async fn authenticate_key(
         )
         .await?;
     Ok(Json(auth_tokens_response(tokens)))
+}
+
+async fn exchange_ssh_proxy_capability(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<SshProxyCapabilityExchangeRequest>,
+) -> ApiResult<Json<SshProxyAccessGrant>> {
+    if state.auth.transport != Transport::SshProxy {
+        return Err(ApiError::Forbidden(
+            "SSH proxy capability exchange is unavailable on this transport".into(),
+        ));
+    }
+    let source = headers
+        .get(&PEER_ADDR_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("unknown");
+    if state.auth.runtime.ssh_capability_is_limited(source) {
+        return Err(ApiError::TooManyAuthAttempts);
+    }
+    let metadata = metadata_store(&state)?;
+    let issued = match metadata
+        .consume_ssh_proxy_capability(
+            &request.capability,
+            &state.auth.instance_audience,
+            &state.auth.daemon_generation,
+            NewOperationAudit {
+                actor_principal_id: None,
+                action: "authenticate.ssh_capability".into(),
+                target: "auth_session".into(),
+                target_id: None,
+                status: "succeeded".into(),
+                result_code: None,
+                row_count: None,
+                error_message: None,
+                correlation_id: crate::correlation::current(),
+            },
+        )
+        .await
+    {
+        Ok(issued) => issued,
+        Err(_) => {
+            state.auth.runtime.record_ssh_capability_failure(source);
+            record_auth_failure(metadata, "authenticate.ssh_capability", "denied")?;
+            state.sessions.push_operation_full(
+                Operation::Authenticate {
+                    method: sift_protocol::AuthenticationMethod::SshCapability,
+                },
+                OperationStatus::Failed,
+                None,
+                Some("authentication_denied".into()),
+                None,
+                Some("authentication denied".into()),
+            );
+            return Err(ApiError::Unauthorized);
+        }
+    };
+    state.auth.runtime.clear_ssh_capability_failures(source);
+    state.sessions.push_operation_local(
+        Operation::Authenticate {
+            method: sift_protocol::AuthenticationMethod::SshCapability,
+        },
+        OperationStatus::Succeeded,
+        Some(issued.principal_id.0),
+        None,
+        None,
+        None,
+    );
+    Ok(Json(SshProxyAccessGrant {
+        access_token: issued.access_token,
+        expires_at: issued.access_expires_at,
+        principal_id: issued.principal_id.0,
+        daemon_generation: issued.daemon_generation,
+    }))
 }
 
 fn key_challenge_message(audience: &str, nonce: &str) -> String {
