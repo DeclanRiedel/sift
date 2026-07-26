@@ -361,6 +361,9 @@ pub struct Room {
     pub name: String,
     pub kind: RoomKind,
     pub created_by: PrincipalId,
+    /// The server-owned connection this room runs queries through, if bound
+    /// (ADR-036). `None` until an owner binds a connection profile.
+    pub bound_connection_profile_id: Option<ConnectionProfileId>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }

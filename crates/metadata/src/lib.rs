@@ -2734,7 +2734,8 @@ impl MetadataStore {
     ) -> Result<Vec<Room>> {
         let conn = self.conn()?;
         let mut stmt = conn.prepare(
-            "SELECT r.id, r.tenant_id, r.name, r.kind, r.created_by, r.created_at, r.updated_at
+            "SELECT r.id, r.tenant_id, r.name, r.kind, r.created_by, r.created_at, r.updated_at,
+                    r.bound_connection_profile_id
              FROM room r
              JOIN room_member rm ON rm.room_id = r.id
              WHERE r.tenant_id = ?1 AND rm.principal_id = ?2
@@ -2749,6 +2750,58 @@ impl MetadataStore {
         self.room_by_id_locked(&conn, id)
     }
 
+    /// Bind a connection profile to a room (ADR-036). Owner-gated; the profile
+    /// must belong to the room's tenant. Its credentials become the room's
+    /// server-owned connection until unbound.
+    pub fn bind_room_connection(
+        &self,
+        room: RoomId,
+        actor: PrincipalId,
+        profile: ConnectionProfileId,
+        audit: NewOperationAudit,
+    ) -> Result<Room> {
+        let now = now_text();
+        let mut conn = self.conn()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let tenant = ensure_room_owner_locked(&tx, room, actor)?;
+        let cp = connection_profile_by_id_locked(&tx, profile)?;
+        if cp.tenant_id != tenant {
+            return Err(MetadataError::TenantMismatch(profile, tenant));
+        }
+        tx.execute(
+            "UPDATE room SET bound_connection_profile_id = ?1, updated_at = ?2 WHERE id = ?3",
+            params![profile.0, now, room.0],
+        )?;
+        let mut audit = audit;
+        audit.actor_principal_id = Some(actor);
+        insert_operation_audit_row(&tx, &audit)?;
+        tx.commit()?;
+        self.room_by_id_locked(&conn, room)
+    }
+
+    /// Unbind the room's connection (ADR-036). Owner-gated. Subsequent
+    /// room-scoped execution is rejected until a connection is bound again.
+    pub fn unbind_room_connection(
+        &self,
+        room: RoomId,
+        actor: PrincipalId,
+        audit: NewOperationAudit,
+    ) -> Result<Room> {
+        let now = now_text();
+        let mut conn = self.conn()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        ensure_room_owner_locked(&tx, room, actor)?;
+        tx.execute(
+            "UPDATE room SET bound_connection_profile_id = NULL, updated_at = ?1 WHERE id = ?2",
+            params![now, room.0],
+        )?;
+        let mut audit = audit;
+        audit.actor_principal_id = Some(actor);
+        insert_operation_audit_row(&tx, &audit)?;
+        tx.commit()?;
+        self.room_by_id_locked(&conn, room)
+    }
+
     pub fn list_shared_rooms_for_principal(
         &self,
         tenant: TenantId,
@@ -2756,7 +2809,8 @@ impl MetadataStore {
     ) -> Result<Vec<Room>> {
         let conn = self.conn()?;
         let mut stmt = conn.prepare(
-            "SELECT r.id, r.tenant_id, r.name, r.kind, r.created_by, r.created_at, r.updated_at
+            "SELECT r.id, r.tenant_id, r.name, r.kind, r.created_by, r.created_at, r.updated_at,
+                    r.bound_connection_profile_id
              FROM room r
              JOIN room_member rm ON rm.room_id = r.id
              WHERE r.tenant_id = ?1 AND rm.principal_id = ?2 AND r.kind = 'shared'
@@ -3675,7 +3729,8 @@ impl MetadataStore {
 
     fn room_by_id_locked(&self, conn: &Connection, id: RoomId) -> Result<Room> {
         conn.query_row(
-            "SELECT id, tenant_id, name, kind, created_by, created_at, updated_at
+            "SELECT id, tenant_id, name, kind, created_by, created_at, updated_at,
+                    bound_connection_profile_id
              FROM room WHERE id = ?1",
             params![id.0],
             room_from_row,
@@ -4194,6 +4249,7 @@ fn room_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Room> {
         created_by: PrincipalId(row.get(4)?),
         created_at: parse_time_sql(row.get(5)?)?,
         updated_at: parse_time_sql(row.get(6)?)?,
+        bound_connection_profile_id: row.get::<_, Option<i64>>(7)?.map(ConnectionProfileId),
     })
 }
 
@@ -6269,6 +6325,147 @@ mod tests {
                 test_audit("leave", "room", Some(room.id.0)),
             ),
             Err(MetadataError::FinalRoomOwner(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn bind_and_unbind_room_connection_round_trip() {
+        let store = store();
+        store.bootstrap_local("owner").unwrap();
+        let room = store
+            .create_room(
+                TenantId(1),
+                PrincipalId(1),
+                NewRoom {
+                    name: "bind".to_string(),
+                    kind: RoomKind::Shared,
+                },
+            )
+            .unwrap();
+        assert!(room.bound_connection_profile_id.is_none());
+
+        let profile = store
+            .upsert_connection_profile(
+                TenantId(1),
+                PrincipalId(1),
+                NewConnectionProfile {
+                    name: "pg".to_string(),
+                    engine: Engine::Postgres,
+                    spec: spec(None),
+                    credential_mode: CredentialMode::Shared,
+                    tags: Vec::new(),
+                },
+            )
+            .await
+            .unwrap();
+
+        let bound = store
+            .bind_room_connection(
+                room.id,
+                PrincipalId(1),
+                profile.id,
+                test_audit("bind_connection", "room", Some(room.id.0)),
+            )
+            .unwrap();
+        assert_eq!(bound.bound_connection_profile_id, Some(profile.id));
+        assert_eq!(
+            store.get_room(room.id).unwrap().bound_connection_profile_id,
+            Some(profile.id)
+        );
+
+        let unbound = store
+            .unbind_room_connection(
+                room.id,
+                PrincipalId(1),
+                test_audit("unbind_connection", "room", Some(room.id.0)),
+            )
+            .unwrap();
+        assert!(unbound.bound_connection_profile_id.is_none());
+    }
+
+    #[tokio::test]
+    async fn bind_room_connection_rejects_non_owner_and_foreign_profile() {
+        let store = store();
+        store.bootstrap_local("owner").unwrap();
+        let room = store
+            .create_room(
+                TenantId(1),
+                PrincipalId(1),
+                NewRoom {
+                    name: "bind".to_string(),
+                    kind: RoomKind::Shared,
+                },
+            )
+            .unwrap();
+        let profile = store
+            .upsert_connection_profile(
+                TenantId(1),
+                PrincipalId(1),
+                NewConnectionProfile {
+                    name: "pg".to_string(),
+                    engine: Engine::Postgres,
+                    spec: spec(None),
+                    credential_mode: CredentialMode::Shared,
+                    tags: Vec::new(),
+                },
+            )
+            .await
+            .unwrap();
+
+        // A room editor (member, not owner) cannot bind.
+        let peer = store.create_principal("legacy:peer", "peer", None).unwrap();
+        store
+            .upsert_tenant_membership(TenantId(1), peer.id, MembershipRole::Member)
+            .unwrap();
+        store
+            .add_room_member_authorized(
+                room.id,
+                PrincipalId(1),
+                peer.id,
+                RoomRole::Editor,
+                test_audit("add_member", "room", Some(room.id.0)),
+            )
+            .unwrap();
+        assert!(matches!(
+            store.bind_room_connection(
+                room.id,
+                peer.id,
+                profile.id,
+                test_audit("bind_connection", "room", Some(room.id.0)),
+            ),
+            Err(MetadataError::RoomOwnerRequired { .. })
+        ));
+
+        // A profile from another tenant cannot be bound.
+        let foreign = store.create_tenant("foreign", TenantKind::Team).unwrap();
+        let f_owner = store
+            .create_principal("legacy:fowner", "fowner", None)
+            .unwrap();
+        store
+            .upsert_tenant_membership(foreign.id, f_owner.id, MembershipRole::Owner)
+            .unwrap();
+        let foreign_profile = store
+            .upsert_connection_profile(
+                foreign.id,
+                f_owner.id,
+                NewConnectionProfile {
+                    name: "fp".to_string(),
+                    engine: Engine::Postgres,
+                    spec: spec(None),
+                    credential_mode: CredentialMode::Shared,
+                    tags: Vec::new(),
+                },
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            store.bind_room_connection(
+                room.id,
+                PrincipalId(1),
+                foreign_profile.id,
+                test_audit("bind_connection", "room", Some(room.id.0)),
+            ),
+            Err(MetadataError::TenantMismatch(_, _))
         ));
     }
 

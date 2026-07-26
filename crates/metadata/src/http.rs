@@ -26,6 +26,11 @@ pub struct AddRoomMemberRequest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct BindRoomConnectionRequest {
+    pub connection_profile_id: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct CreateDocumentRequest {
     pub kind: String,
     pub title: String,

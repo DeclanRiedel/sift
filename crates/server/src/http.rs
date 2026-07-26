@@ -259,6 +259,11 @@ pub fn app(state: AppState) -> Router {
             delete_with(remove_metadata_room_member, doc("removeMetadataRoomMember", "Remove room member")),
         )
         .api_route(
+            "/v1/metadata/rooms/:id/connection",
+            put_with(bind_metadata_room_connection, doc("bindMetadataRoomConnection", "Bind a connection profile to a room"))
+                .delete_with(unbind_metadata_room_connection, doc("unbindMetadataRoomConnection", "Unbind the room's connection")),
+        )
+        .api_route(
             "/v1/metadata/rooms/:id/join",
             post_with(join_metadata_room, doc("joinMetadataRoom", "Join room as current principal")),
         )
@@ -1082,9 +1087,10 @@ struct HistoryQuery {
 }
 
 use sift_metadata::http::{
-    AddRoomMemberRequest, CreateDocumentRequest, CreateRoomRequest, CreateSavedQueryRequest,
-    IssueTokenRequest, IssueTokenResponse, OpenConnectionFromProfileRequest, SetCredentialRequest,
-    UpdateDocumentSnapshotRequest, UpdateSavedQueryRequest, UpsertConnectionProfileRequest,
+    AddRoomMemberRequest, BindRoomConnectionRequest, CreateDocumentRequest, CreateRoomRequest,
+    CreateSavedQueryRequest, IssueTokenRequest, IssueTokenResponse,
+    OpenConnectionFromProfileRequest, SetCredentialRequest, UpdateDocumentSnapshotRequest,
+    UpdateSavedQueryRequest, UpsertConnectionProfileRequest,
 };
 
 fn metadata_store(state: &AppState) -> ApiResult<&MetadataStore> {
@@ -2816,7 +2822,8 @@ async fn execute_metadata_context(
         .transpose()?;
     let metadata_for_check = metadata.clone();
     let auth_for_check = auth.clone();
-    metadata_blocking(move || {
+    let effective_profile = metadata_blocking(move || {
+        let mut effective = profile;
         if let Some(room) = room {
             ensure_room_permission(
                 &metadata_for_check,
@@ -2824,12 +2831,23 @@ async fn execute_metadata_context(
                 room,
                 RoomPermission::Write,
             )?;
+            // Attribution follows the room's server-owned connection when one
+            // is bound (ADR-036), overriding any client-supplied profile. The
+            // hard "unbound room cannot execute" rejection and the actual
+            // routing of the query through the bound connection land together
+            // with the shared room connection (Phase G, G9).
+            if let Some(bound) = metadata_for_check
+                .get_room(room)?
+                .bound_connection_profile_id
+            {
+                effective = Some(bound);
+            }
         }
-        if let Some(profile) = profile {
+        if let Some(profile) = effective {
             metadata_for_check
                 .get_connection_profile_for_principal(profile, auth_for_check.principal_id)?;
         }
-        Ok(())
+        Ok(effective)
     })
     .await?;
 
@@ -2837,7 +2855,7 @@ async fn execute_metadata_context(
         metadata,
         principal_id: auth.principal_id,
         room_id: room,
-        connection_profile_id: profile,
+        connection_profile_id: effective_profile,
     }))
 }
 
@@ -3391,6 +3409,55 @@ async fn remove_metadata_room_member(
     .await?;
     push_metadata_operation_local(&state, actor, "remove_member", "room", Some(room.0));
     Ok(Json(json!({"ok": true})))
+}
+
+async fn bind_metadata_room_connection(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+    Json(req): Json<BindRoomConnectionRequest>,
+) -> ApiResult<Json<sift_metadata::Room>> {
+    let metadata = metadata_store_cloned(&state)?;
+    let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
+    let room = room_id(id)?;
+    let profile = connection_profile_id(req.connection_profile_id)?;
+    let actor = auth.principal_id;
+    let room_row = metadata_blocking(move || {
+        metadata
+            .bind_room_connection(
+                room,
+                actor,
+                profile,
+                metadata_audit_record(actor, "bind_connection", "room", Some(room.0)),
+            )
+            .map_err(Into::into)
+    })
+    .await?;
+    push_metadata_operation_local(&state, actor, "bind_connection", "room", Some(room.0));
+    Ok(Json(room_row))
+}
+
+async fn unbind_metadata_room_connection(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+) -> ApiResult<Json<sift_metadata::Room>> {
+    let metadata = metadata_store_cloned(&state)?;
+    let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
+    let room = room_id(id)?;
+    let actor = auth.principal_id;
+    let room_row = metadata_blocking(move || {
+        metadata
+            .unbind_room_connection(
+                room,
+                actor,
+                metadata_audit_record(actor, "unbind_connection", "room", Some(room.0)),
+            )
+            .map_err(Into::into)
+    })
+    .await?;
+    push_metadata_operation_local(&state, actor, "unbind_connection", "room", Some(room.0));
+    Ok(Json(room_row))
 }
 
 async fn join_metadata_room(
