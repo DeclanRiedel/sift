@@ -26,6 +26,7 @@ pub mod plan;
 pub mod process;
 pub mod rate_limit;
 pub mod registry;
+pub mod remote_agent;
 pub mod resources;
 pub mod room_results;
 pub mod room_runtime;

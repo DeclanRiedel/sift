@@ -25,6 +25,7 @@ pub mod operation;
 pub mod plan;
 pub mod policy;
 pub mod process;
+pub mod remote;
 pub mod result;
 pub mod room;
 pub mod schema;
@@ -82,6 +83,10 @@ pub use policy::{
     TenantUsageSnapshot, UpdateConnectionPolicyRequest, UpdateTenantLimitsRequest,
 };
 pub use process::{DatabaseProcess, KillProcessRequest, KillProcessResponse};
+pub use remote::{
+    RemoteCapabilityResponse, RemoteDaemonDescriptor, RemoteKeyChallenge, RemoteProbeResponse,
+    RemoteReady,
+};
 pub use result::{CursorId, ExecuteRequest, Page, Row};
 pub use room::{
     DocumentErrorCode, DocumentTransferKind, RoomClientMessage, RoomPresence, RoomQueryResult,

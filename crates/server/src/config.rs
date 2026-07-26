@@ -496,6 +496,16 @@ pub fn load() -> anyhow::Result<Config> {
     Ok(fig.extract()?)
 }
 
+/// Load one explicit config file over defaults. Remote bootstrap uses this so
+/// it never depends on the SSH command's working directory.
+pub fn load_path(path: impl AsRef<std::path::Path>) -> anyhow::Result<Config> {
+    use figment::providers::{Format, Toml};
+    let fig = figment::Figment::new()
+        .merge(figment::providers::Serialized::defaults(Config::default()))
+        .merge(Toml::file(path.as_ref()));
+    Ok(fig.extract()?)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

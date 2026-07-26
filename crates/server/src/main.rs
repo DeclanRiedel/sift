@@ -16,10 +16,43 @@ use sift_server::{
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let mut cfg = load_config().context("loading config")?;
-    if let Some(mode) = mode_override()? {
-        cfg.mode = mode;
-    }
+    let command = parse_command(std::env::args().skip(1))?;
+    let cfg = match command {
+        ServerCommand::Serve { mode } => {
+            let mut config = load_config().context("loading config")?;
+            if let Some(mode) = mode {
+                config.mode = mode;
+            }
+            config
+        }
+        ServerCommand::RemoteDaemon { state_dir } => {
+            sift_server::remote_agent::prepare_remote_config(&state_dir)?
+        }
+        ServerCommand::RemoteProbe { state_dir } => {
+            let response = sift_server::remote_agent::probe(&state_dir)?;
+            sift_server::remote_agent::write_json(&response)?;
+            return Ok(());
+        }
+        ServerCommand::RemoteChallenge {
+            state_dir,
+            fingerprint,
+        } => {
+            let response = sift_server::remote_agent::challenge(&state_dir, &fingerprint)?;
+            sift_server::remote_agent::write_json(&response)?;
+            return Ok(());
+        }
+        ServerCommand::RemoteIssue { state_dir, proof } => {
+            let response = sift_server::remote_agent::issue_capability(
+                &state_dir,
+                proof
+                    .as_ref()
+                    .map(|proof| (proof.nonce.as_str(), proof.signature.as_str())),
+            )
+            .await?;
+            sift_server::remote_agent::write_json(&response)?;
+            return Ok(());
+        }
+    };
     cfg.validate().context("validating config")?;
     let mut runtime =
         sift_server::runtime::RuntimeState::acquire(&cfg).context("acquiring runtime state")?;
@@ -165,28 +198,98 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn mode_override() -> anyhow::Result<Option<RuntimeMode>> {
-    let mut mode = None;
-    let mut args = std::env::args().skip(1);
-    while let Some(argument) = args.next() {
-        let value = if argument == "--mode" {
-            Some(
-                args.next()
-                    .context("--mode requires in-process, daemon, or container")?,
-            )
-        } else {
-            argument.strip_prefix("--mode=").map(str::to_owned)
-        };
-        if let Some(value) = value {
+#[derive(Debug, PartialEq, Eq)]
+enum ServerCommand {
+    Serve {
+        mode: Option<RuntimeMode>,
+    },
+    RemoteDaemon {
+        state_dir: std::path::PathBuf,
+    },
+    RemoteProbe {
+        state_dir: std::path::PathBuf,
+    },
+    RemoteChallenge {
+        state_dir: std::path::PathBuf,
+        fingerprint: String,
+    },
+    RemoteIssue {
+        state_dir: std::path::PathBuf,
+        proof: Option<RemoteProof>,
+    },
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct RemoteProof {
+    nonce: String,
+    signature: String,
+}
+
+fn parse_command(args: impl IntoIterator<Item = String>) -> anyhow::Result<ServerCommand> {
+    let mut args = args.into_iter();
+    let Some(first) = args.next() else {
+        return Ok(ServerCommand::Serve { mode: None });
+    };
+    if first != "remote" {
+        let mut mode = None;
+        let mut arguments = std::iter::once(first).chain(args);
+        while let Some(argument) = arguments.next() {
+            let value = if argument == "--mode" {
+                Some(
+                    arguments
+                        .next()
+                        .context("--mode requires in-process, daemon, or container")?,
+                )
+            } else {
+                argument.strip_prefix("--mode=").map(str::to_owned)
+            };
+            let Some(value) = value else {
+                anyhow::bail!("unknown sift-server argument `{argument}`");
+            };
             if mode.is_some() {
                 anyhow::bail!("--mode may be specified only once");
             }
             mode = Some(value.parse().map_err(anyhow::Error::msg)?);
-        } else {
-            anyhow::bail!("unknown sift-server argument `{argument}`");
+        }
+        return Ok(ServerCommand::Serve { mode });
+    }
+
+    let action = args
+        .next()
+        .context("remote requires one of: daemon, probe, challenge, issue")?;
+    let mut state_dir = sift_server::remote_agent::default_remote_state_dir();
+    let mut fingerprint = None;
+    let mut nonce = None;
+    let mut signature = None;
+    while let Some(argument) = args.next() {
+        let value = args
+            .next()
+            .with_context(|| format!("{argument} requires a value"))?;
+        match argument.as_str() {
+            "--state-dir" => state_dir = value.into(),
+            "--fingerprint" => fingerprint = Some(value),
+            "--nonce" => nonce = Some(value),
+            "--signature" => signature = Some(value),
+            _ => anyhow::bail!("unknown remote argument `{argument}`"),
         }
     }
-    Ok(mode)
+    match action.as_str() {
+        "daemon" => Ok(ServerCommand::RemoteDaemon { state_dir }),
+        "probe" => Ok(ServerCommand::RemoteProbe { state_dir }),
+        "challenge" => Ok(ServerCommand::RemoteChallenge {
+            state_dir,
+            fingerprint: fingerprint.context("remote challenge requires --fingerprint")?,
+        }),
+        "issue" => {
+            let proof = match (nonce, signature) {
+                (Some(nonce), Some(signature)) => Some(RemoteProof { nonce, signature }),
+                (None, None) => None,
+                _ => anyhow::bail!("remote issue requires both --nonce and --signature"),
+            };
+            Ok(ServerCommand::RemoteIssue { state_dir, proof })
+        }
+        _ => anyhow::bail!("unknown remote action `{action}`"),
+    }
 }
 
 fn init_tracing(cfg: &Config) {
@@ -319,3 +422,43 @@ async fn wait_for_signal() {
 // pulling it into the local scope via a `use` (keeps the registry function
 // visually focused on driver wiring).
 use sift_protocol::SchemaScope;
+
+#[cfg(test)]
+mod command_tests {
+    use super::*;
+
+    fn args<'a>(values: &'a [&'a str]) -> impl Iterator<Item = String> + 'a {
+        values.iter().map(|value| (*value).to_string())
+    }
+
+    #[test]
+    fn parses_serve_and_remote_commands_without_secret_capability_arguments() {
+        assert_eq!(
+            parse_command(args(&["--mode=container"])).unwrap(),
+            ServerCommand::Serve {
+                mode: Some(RuntimeMode::Container)
+            }
+        );
+        assert_eq!(
+            parse_command(args(&[
+                "remote",
+                "issue",
+                "--state-dir",
+                "state",
+                "--nonce",
+                "nonce",
+                "--signature",
+                "signature"
+            ]))
+            .unwrap(),
+            ServerCommand::RemoteIssue {
+                state_dir: "state".into(),
+                proof: Some(RemoteProof {
+                    nonce: "nonce".into(),
+                    signature: "signature".into()
+                })
+            }
+        );
+        assert!(parse_command(args(&["remote", "issue", "--capability", "secret"])).is_err());
+    }
+}
