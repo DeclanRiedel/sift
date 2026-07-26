@@ -373,7 +373,7 @@ async fn fetch_scalar_text(
 fn value_to_text(v: Value) -> String {
     match v {
         Value::Text(s) => s,
-        Value::Null => String::new(),
+        Value::Null | Value::TypedNull { .. } => String::new(),
         other => format!("{other:?}"),
     }
 }

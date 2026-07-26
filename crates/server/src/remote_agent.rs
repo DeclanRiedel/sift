@@ -424,7 +424,10 @@ mod tests {
     fn probe_without_daemon_is_bounded_and_explicit() {
         let dir = tempfile::tempdir().unwrap();
         let response = probe(dir.path()).unwrap();
-        assert_eq!(response.protocol, ProtocolRange::exact(1));
+        assert_eq!(
+            response.protocol,
+            ProtocolRange::exact(sift_protocol::PROTOCOL_VERSION_NUMBER)
+        );
         assert!(response.daemon.is_none());
     }
 

@@ -10,7 +10,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use dashmap::DashMap;
+use dashmap::{DashMap, DashSet};
 use futures::StreamExt;
 use sift_driver_api::{
     BulkOp, BulkResult, ConnHandle, Driver, IdCounter, MssqlExt, ResultSetStream, TxHandle,
@@ -51,6 +51,8 @@ struct MssqlInner {
     /// conn_id → pool key that owns this conn's spec. Used to
     /// report `pool_warm_slots` on `ping()`.
     conn_pool_key: DashMap<u64, String>,
+    /// Tombstones for handles intentionally discarded after native cancel.
+    invalidated: DashSet<u64>,
 }
 
 struct MssqlPool {
@@ -74,6 +76,7 @@ impl MssqlDriver {
                 cursors: DashMap::new(),
                 pools: DashMap::new(),
                 conn_pool_key: DashMap::new(),
+                invalidated: DashSet::new(),
             }),
         }
     }
@@ -169,6 +172,13 @@ impl MssqlDriver {
     }
 
     async fn take_conn(&self, c: &ConnHandle) -> Result<MssqlConn, DriverError> {
+        if self.inner.invalidated.contains(&c.id()) {
+            return Err(DriverError::new(
+                Code::ConnectionInvalidated,
+                "SQL Server cancellation invalidated this connection; open a new connection",
+            )
+            .with_engine(Engine::SqlServer));
+        }
         self.inner
             .conns
             .lock()
@@ -178,7 +188,11 @@ impl MssqlDriver {
     }
 
     async fn put_conn(&self, c: &ConnHandle, conn: MssqlConn) {
-        self.inner.conns.lock().await.insert(c.id(), conn);
+        if self.inner.invalidated.contains(&c.id()) {
+            drop(conn);
+        } else {
+            self.inner.conns.lock().await.insert(c.id(), conn);
+        }
     }
 }
 
@@ -367,7 +381,9 @@ impl Driver for MssqlDriver {
             return Err(DriverError::new(Code::CursorNotFound, "cursor not active")
                 .with_engine(Engine::SqlServer));
         };
+        self.inner.invalidated.insert(conn_id);
         task.abort();
+        let _ = task.await;
         // Aborting the task drops the MssqlConn owned by its future, so
         // nothing will ever reinsert into `inner.conns` for this conn_id.
         // Evict any residue so the driver's internal invariant matches the
@@ -429,6 +445,7 @@ impl Driver for MssqlDriver {
         }
         self.inner.conns.lock().await.remove(&c.id());
         self.inner.conn_pool_key.remove(&c.id());
+        self.inner.invalidated.remove(&c.id());
         Ok(())
     }
 
@@ -1093,7 +1110,14 @@ fn params_to_mssql(params: Vec<Value>) -> Result<Vec<Box<dyn ToSql>>, DriverErro
     let mut out: Vec<Box<dyn ToSql>> = Vec::with_capacity(params.len());
     for value in params {
         let param: Box<dyn ToSql> = match value {
-            Value::Null => Box::new(None::<String>),
+            Value::Null => {
+                return Err(DriverError::new(
+                    Code::InvalidParameterValue,
+                    "SQL Server null parameters require Value::TypedNull with a native type name",
+                )
+                .with_engine(Engine::SqlServer));
+            }
+            Value::TypedNull { type_name } => mssql_typed_null(&type_name)?,
             Value::Bool(v) => Box::new(v),
             Value::Int16(v) => Box::new(v),
             Value::Int32(v) => Box::new(v),
@@ -1120,6 +1144,47 @@ fn params_to_mssql(params: Vec<Value>) -> Result<Vec<Box<dyn ToSql>>, DriverErro
         out.push(param);
     }
     Ok(out)
+}
+
+fn mssql_typed_null(type_name: &str) -> Result<Box<dyn ToSql>, DriverError> {
+    let normalized = type_name.trim().to_ascii_lowercase();
+    let base = match normalized.split_once('(') {
+        Some((base, modifiers)) if modifiers.ends_with(')') => base.trim(),
+        Some(_) => "",
+        None => normalized.as_str(),
+    };
+    let value: Box<dyn ToSql> = match base {
+        "bit" | "bool" | "boolean" => Box::new(None::<bool>),
+        "tinyint" => Box::new(None::<u8>),
+        "smallint" | "int2" => Box::new(None::<i16>),
+        "int" | "integer" | "int4" => Box::new(None::<i32>),
+        "bigint" | "int8" => Box::new(None::<i64>),
+        "real" | "float4" => Box::new(None::<f32>),
+        "float" | "float8" | "double precision" => Box::new(None::<f64>),
+        "binary" | "varbinary" | "image" | "blob" | "timestamp" | "rowversion" => {
+            Box::new(None::<Vec<u8>>)
+        }
+        "date" => Box::new(None::<chrono::NaiveDate>),
+        "time" => Box::new(None::<chrono::NaiveTime>),
+        "datetime" | "datetime2" | "smalldatetime" => Box::new(None::<chrono::NaiveDateTime>),
+        "datetimeoffset" | "timestamptz" => Box::new(None::<chrono::DateTime<chrono::FixedOffset>>),
+        "uniqueidentifier" | "uuid" => Box::new(None::<uuid::Uuid>),
+        "decimal" | "numeric" | "money" | "smallmoney" => {
+            Box::new(None::<tiberius::numeric::Numeric>)
+        }
+        "xml" => Box::new(None::<tiberius::xml::XmlData>),
+        "char" | "nchar" | "varchar" | "nvarchar" | "text" | "ntext" | "json" => {
+            Box::new(None::<String>)
+        }
+        _ => {
+            return Err(DriverError::new(
+                Code::InvalidParameterValue,
+                format!("unsupported SQL Server typed-null type `{type_name}`"),
+            )
+            .with_engine(Engine::SqlServer));
+        }
+    };
+    Ok(value)
 }
 
 async fn bulk_insert_csv(conn: &mut MssqlConn, op: BulkOp) -> Result<BulkResult, DriverError> {
@@ -1768,5 +1833,35 @@ mod tests {
         // OUTPUT clauses stream returned rows — must not route to execute().
         assert!(!is_pure_dml("INSERT INTO t OUTPUT INSERTED.id VALUES (1)"));
         assert!(!is_pure_dml("DELETE FROM t OUTPUT DELETED.id WHERE id = 1"));
+    }
+
+    #[test]
+    fn sqlserver_null_parameters_require_an_explicit_native_type() {
+        let error = match params_to_mssql(vec![Value::Null]) {
+            Ok(_) => panic!("untyped SQL Server null unexpectedly accepted"),
+            Err(error) => error,
+        };
+        assert_eq!(error.code, Code::InvalidParameterValue);
+        assert!(params_to_mssql(vec![Value::TypedNull {
+            type_name: "varbinary(max)".into(),
+        }])
+        .is_ok());
+        assert!(params_to_mssql(vec![Value::TypedNull {
+            type_name: "decimal(18, 2)".into(),
+        }])
+        .is_ok());
+        assert!(params_to_mssql(vec![Value::TypedNull {
+            type_name: "not-a-real-type".into(),
+        }])
+        .is_err());
+    }
+
+    #[tokio::test]
+    async fn canceled_connection_handle_has_a_stable_terminal_error() {
+        let driver = MssqlDriver::new();
+        let handle = ConnHandle::new(42, Engine::SqlServer);
+        driver.inner.invalidated.insert(handle.id());
+        let error = driver.take_conn(&handle).await.unwrap_err();
+        assert_eq!(error.code, Code::ConnectionInvalidated);
     }
 }

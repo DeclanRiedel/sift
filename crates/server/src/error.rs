@@ -71,6 +71,7 @@ impl ApiError {
                 }
                 Code::QueryTimedOut => (StatusCode::GATEWAY_TIMEOUT, "query_timeout"),
                 Code::QueryCanceled => (StatusCode::REQUEST_TIMEOUT, "query_canceled"),
+                Code::ConnectionInvalidated => (StatusCode::GONE, "connection_invalidated"),
                 Code::SyntaxError
                 | Code::UndefinedObject
                 | Code::DuplicateObject
@@ -153,7 +154,8 @@ impl ApiError {
                 | MetadataError::RoomOwnerRequired { .. } => (StatusCode::FORBIDDEN, "forbidden"),
                 MetadataError::TenantMismatch(_, _) => (StatusCode::FORBIDDEN, "forbidden"),
                 MetadataError::MissingCredential(_, _)
-                | MetadataError::BrokerCredentialUnsupported(_) => {
+                | MetadataError::BrokerCredentialUnsupported(_)
+                | MetadataError::BrokerCredentialModeUnsupported => {
                     (StatusCode::UNPROCESSABLE_ENTITY, "metadata_unavailable")
                 }
                 MetadataError::CredentialModeMismatch { .. } => {

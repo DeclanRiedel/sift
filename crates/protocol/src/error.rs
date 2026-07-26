@@ -15,6 +15,9 @@ pub enum Code {
     #[error("connection failed")]
     ConnectionFailed,
 
+    #[error("connection was invalidated and must be reopened")]
+    ConnectionInvalidated,
+
     #[error("authentication failed")]
     AuthFailed,
 

@@ -199,7 +199,7 @@ fn write_delimited_value(buf: &mut BytesMut, v: &Value, format: ExportFormat, nu
 
 fn write_csv_value(buf: &mut BytesMut, v: &Value, null_display: &str) {
     match v {
-        Value::Null => write_csv_str(buf, null_display),
+        Value::Null | Value::TypedNull { .. } => write_csv_str(buf, null_display),
         Value::Bool(true) => buf.extend_from_slice(b"true"),
         Value::Bool(false) => buf.extend_from_slice(b"false"),
         Value::Int16(i) => write!(buf, "{i}").expect("write to BytesMut"),
@@ -222,7 +222,7 @@ fn write_csv_value(buf: &mut BytesMut, v: &Value, null_display: &str) {
 
 fn write_tsv_value(buf: &mut BytesMut, v: &Value, null_display: &str) {
     match v {
-        Value::Null => write_tsv_str(buf, null_display),
+        Value::Null | Value::TypedNull { .. } => write_tsv_str(buf, null_display),
         Value::Bool(true) => buf.extend_from_slice(b"true"),
         Value::Bool(false) => buf.extend_from_slice(b"false"),
         Value::Int16(i) => write!(buf, "{i}").expect("write to BytesMut"),
@@ -344,7 +344,7 @@ fn write_json<T: Serialize + ?Sized>(buf: &mut BytesMut, value: &T) {
 
 fn write_json_value(buf: &mut BytesMut, v: &Value) {
     match v {
-        Value::Null => buf.extend_from_slice(b"null"),
+        Value::Null | Value::TypedNull { .. } => buf.extend_from_slice(b"null"),
         Value::Bool(b) => write_json(buf, b),
         Value::Int16(i) => write_json(buf, i),
         Value::Int32(i) => write_json(buf, i),

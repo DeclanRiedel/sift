@@ -187,6 +187,37 @@ async fn execute_select_decodes_types() {
 }
 
 #[tokio::test]
+async fn null_parameters_use_the_inferred_postgres_type() {
+    let driver = PgDriver::new();
+    let conn = driver.open(&spec()).await.unwrap();
+    let stream = driver
+        .execute(
+            conn.clone(),
+            sift_protocol::ExecuteRequest {
+                sql: "SELECT $1::bytea, $2::integer".into(),
+                params: vec![
+                    Value::Null,
+                    Value::TypedNull {
+                        type_name: "integer".into(),
+                    },
+                ],
+            },
+        )
+        .await
+        .expect("execute typed nulls");
+    let pages = drain(stream).await;
+    let row = pages
+        .iter()
+        .find_map(|page| match page {
+            Page::Rows { rows } => rows.first(),
+            _ => None,
+        })
+        .expect("one null row");
+    assert_eq!(row.values, vec![Value::Null, Value::Null]);
+    driver.close(conn).await.unwrap();
+}
+
+#[tokio::test]
 async fn execute_dml_reports_affected_rows() {
     let driver = PgDriver::new();
     let conn = driver.open(&spec()).await.unwrap();

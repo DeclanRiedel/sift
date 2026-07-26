@@ -555,7 +555,7 @@ async fn read_first_scalar(
 fn value_to_string(v: Value) -> String {
     match v {
         Value::Text(s) => s,
-        Value::Null => "".into(),
+        Value::Null | Value::TypedNull { .. } => "".into(),
         other => format!("{other:?}"),
     }
 }

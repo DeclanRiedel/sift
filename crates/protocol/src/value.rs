@@ -8,6 +8,11 @@ use serde::{Deserialize, Serialize};
 #[serde(tag = "kind", content = "value", rename_all = "snake_case")]
 pub enum Value {
     Null,
+    /// A null query parameter with an explicit native/provider type name.
+    /// Result decoding continues to use [`Value::Null`].
+    TypedNull {
+        type_name: String,
+    },
     Bool(bool),
     Int16(i16),
     Int32(i32),
@@ -46,12 +51,12 @@ pub enum Value {
 
 impl Value {
     pub fn is_null(&self) -> bool {
-        matches!(self, Value::Null)
+        matches!(self, Value::Null | Value::TypedNull { .. })
     }
 
     pub fn type_category(&self) -> &'static str {
         match self {
-            Value::Null => "null",
+            Value::Null | Value::TypedNull { .. } => "null",
             Value::Bool(_) => "bool",
             Value::Int16(_) | Value::Int32(_) | Value::Int64(_) => "int",
             Value::Float32(_) | Value::Float64(_) | Value::Decimal(_) => "float",

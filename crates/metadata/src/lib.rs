@@ -79,6 +79,8 @@ pub enum MetadataError {
     MissingCredential(ConnectionProfileId, PrincipalId),
     #[error("connection profile {0:?} uses broker credentials, which are not implemented")]
     BrokerCredentialUnsupported(ConnectionProfileId),
+    #[error("broker credentials cannot be stored until a credential-broker plugin is configured")]
+    BrokerCredentialModeUnsupported,
     #[error("connection profile {profile:?} uses {actual:?} credentials, not {expected:?}")]
     CredentialModeMismatch {
         profile: ConnectionProfileId,
@@ -281,6 +283,8 @@ impl DerefMut for ConnHandle<'_> {
     }
 }
 
+/// Cheap shared handle. Clones share the same connection pool/in-memory
+/// database and secret store; cloning never snapshots metadata state.
 #[derive(Clone)]
 pub struct MetadataStore {
     backend: Backend,
@@ -2199,6 +2203,14 @@ impl MetadataStore {
         self.system_mac_key(SSH_PROXY_CAPABILITY_MAC_HANDLE).await
     }
 
+    /// Provision the system authentication keys before multiple processes open
+    /// the same persistent secret backend.
+    pub async fn ensure_auth_system_keys(&self) -> Result<()> {
+        self.auth_token_mac_key().await?;
+        self.ssh_proxy_capability_mac_key().await?;
+        Ok(())
+    }
+
     async fn system_mac_key(&self, handle: &str) -> Result<Vec<u8>> {
         if let Some(key) = self
             .secrets
@@ -2221,20 +2233,23 @@ impl MetadataStore {
 
     pub fn create_tenant(&self, name: &str, kind: TenantKind) -> Result<Tenant> {
         let now = now_text();
-        let conn = self.conn()?;
-        conn.execute(
+        let mut conn = self.conn()?;
+        let tx = conn.transaction()?;
+        tx.execute(
             "INSERT INTO tenant (name, kind, created_at, updated_at)
              VALUES (?1, ?2, ?3, ?3)",
             params![name, kind.as_str(), now],
         )?;
-        let id = TenantId(conn.last_insert_rowid());
-        Ok(Tenant {
+        let id = TenantId(tx.last_insert_rowid());
+        let tenant = Tenant {
             id,
             name: name.to_string(),
             kind,
             created_at: parse_time(now.clone())?,
             updated_at: parse_time(now)?,
-        })
+        };
+        tx.commit()?;
+        Ok(tenant)
     }
 
     pub fn upsert_tenant_membership(
@@ -2615,6 +2630,9 @@ impl MetadataStore {
         max_profiles: Option<u64>,
         audit: NewOperationAudit,
     ) -> Result<ConnectionProfile> {
+        if input.credential_mode == CredentialMode::Broker {
+            return Err(MetadataError::BrokerCredentialModeUnsupported);
+        }
         let password = input.spec.password.take();
         let mut new_shared_secret_handle = None;
         if input.credential_mode == CredentialMode::Shared {
@@ -3591,19 +3609,29 @@ impl MetadataStore {
         self.room_attachment_by_id_locked(&conn, attachment_id)
     }
 
-    pub fn detach_room(&self, attachment: RoomAttachmentId) -> Result<RoomAttachment> {
+    pub fn detach_room(&self, attachment: RoomAttachmentId) -> Result<Option<RoomAttachment>> {
         let now = now_text();
         let conn = self.conn()?;
         let updated = conn.execute(
             "UPDATE room_attachment
-             SET detached_at = COALESCE(detached_at, ?1)
-             WHERE id = ?2",
+             SET detached_at = ?1
+             WHERE id = ?2 AND detached_at IS NULL",
             params![now, attachment.0],
         )?;
         if updated == 0 {
-            return Err(MetadataError::RoomAttachmentNotFound(attachment));
+            let exists: bool = conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM room_attachment WHERE id = ?1)",
+                params![attachment.0],
+                |row| row.get(0),
+            )?;
+            return if exists {
+                Ok(None)
+            } else {
+                Err(MetadataError::RoomAttachmentNotFound(attachment))
+            };
         }
         self.room_attachment_by_id_locked(&conn, attachment)
+            .map(Some)
     }
 
     pub fn list_active_room_attachments(&self, room: RoomId) -> Result<Vec<RoomAttachment>> {
@@ -3788,14 +3816,15 @@ impl MetadataStore {
             "SELECT id, tenant_id, principal_id, name, sql_text,
                     connection_profile_id, tags_json, created_at, updated_at
              FROM saved_query
-             WHERE tenant_id = ?1
-               AND (principal_id = ?2 OR principal_id IS NULL)",
+             WHERE tenant_id = ?
+               AND (principal_id = ? OR principal_id IS NULL)",
         );
         let mut params_dyn: Vec<Box<dyn rusqlite::ToSql>> =
             vec![Box::new(filter.tenant_id.0), Box::new(principal.0)];
         match filter.scope {
             Some(SavedQueryScope::Personal) => {
-                sql.push_str(" AND principal_id = ?2");
+                sql.push_str(" AND principal_id = ?");
+                params_dyn.push(Box::new(principal.0));
             }
             Some(SavedQueryScope::Shared) => {
                 sql.push_str(" AND principal_id IS NULL");
@@ -6131,6 +6160,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn broker_profile_is_rejected_before_persistence() {
+        let store = store();
+        store.bootstrap_local("local user").unwrap();
+        let result = store
+            .upsert_connection_profile(
+                TenantId(1),
+                PrincipalId(1),
+                NewConnectionProfile {
+                    name: "future broker".into(),
+                    engine: Engine::Postgres,
+                    spec: spec(Some("must-not-be-stored")),
+                    credential_mode: CredentialMode::Broker,
+                    tags: vec![],
+                },
+            )
+            .await;
+        assert!(matches!(
+            result,
+            Err(MetadataError::BrokerCredentialModeUnsupported)
+        ));
+        assert!(store
+            .list_connection_profiles(TenantId(1))
+            .unwrap()
+            .is_empty());
+    }
+
+    #[tokio::test]
     async fn connection_profile_limit_is_checked_in_the_write_transaction() {
         let store = store();
         store.bootstrap_local("local user").unwrap();
@@ -7045,8 +7101,9 @@ mod tests {
         assert_eq!(active.len(), 1);
         assert_eq!(active[0].client_id, "client-a");
 
-        let detached = store.detach_room(attachment.id).unwrap();
+        let detached = store.detach_room(attachment.id).unwrap().unwrap();
         assert!(detached.detached_at.is_some());
+        assert!(store.detach_room(attachment.id).unwrap().is_none());
         assert!(store
             .list_active_room_attachments(room.id)
             .unwrap()
@@ -7179,6 +7236,47 @@ mod tests {
             )
             .unwrap();
         assert!(!durable.contains(&issued.capability));
+    }
+
+    #[tokio::test]
+    async fn provisioned_auth_keys_work_across_persistent_store_instances() {
+        let directory = tempfile::tempdir().unwrap();
+        let metadata_path = directory.path().join("metadata.sqlite");
+        let secrets_path = directory.path().join("secrets.enc");
+        let key_path = directory.path().join("secret.key");
+        std::fs::write(&key_path, "11".repeat(32)).unwrap();
+
+        let open = || {
+            let secrets = Arc::new(FileSecretStore::open(&secrets_path, &key_path).unwrap());
+            MetadataStore::open(&metadata_path, secrets).unwrap()
+        };
+        let provisioner = open();
+        provisioner.ensure_auth_system_keys().await.unwrap();
+        drop(provisioner);
+
+        let issuer = open();
+        issuer.bootstrap_local("local user").unwrap();
+        let consumer = open();
+        let claims = ssh_claims("sift:persistent-instance");
+        let issued = issuer
+            .issue_ssh_proxy_capability(
+                &claims,
+                "generation",
+                None,
+                test_audit("ssh_proxy.issue", "ssh_proxy_capability", None),
+            )
+            .await
+            .unwrap();
+        let access = consumer
+            .consume_ssh_proxy_capability(
+                &issued.capability,
+                "sift:persistent-instance",
+                "generation",
+                test_audit("ssh_proxy.exchange", "auth_session", None),
+            )
+            .await
+            .unwrap();
+        assert_eq!(access.principal_id, PrincipalId(1));
     }
 
     #[tokio::test]

@@ -4,11 +4,12 @@
 use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 
+use bytes::BytesMut;
 use futures::{FutureExt, StreamExt};
 use sift_driver_api::{ConnHandle, ResultSetStream};
 use sift_protocol::{Code, CursorId, DriverError, DriverWarning, ExecuteRequest, Page, Row, Value};
 use tokio::sync::mpsc;
-use tokio_postgres::types::ToSql;
+use tokio_postgres::types::{IsNull, ToSql, Type};
 use tokio_postgres::SimpleQueryMessage;
 
 use crate::conn::{CursorEntry, PgDriverInner, PooledConn, SlotKind};
@@ -303,7 +304,10 @@ fn params_to_pg(params: Vec<Value>) -> Result<Vec<Box<dyn ToSql + Sync + Send>>,
     let mut out: Vec<Box<dyn ToSql + Sync + Send>> = Vec::with_capacity(params.len());
     for value in params {
         let param: Box<dyn ToSql + Sync + Send> = match value {
-            Value::Null => Box::new(None::<String>),
+            Value::Null => Box::new(PgNull { expected: None }),
+            Value::TypedNull { type_name } => Box::new(PgNull {
+                expected: Some(type_name),
+            }),
             Value::Bool(v) => Box::new(v),
             Value::Int16(v) => Box::new(v),
             Value::Int32(v) => Box::new(v),
@@ -330,6 +334,61 @@ fn params_to_pg(params: Vec<Value>) -> Result<Vec<Box<dyn ToSql + Sync + Send>>,
         out.push(param);
     }
     Ok(out)
+}
+
+#[derive(Debug)]
+struct PgNull {
+    expected: Option<String>,
+}
+
+impl ToSql for PgNull {
+    fn to_sql(
+        &self,
+        ty: &Type,
+        _out: &mut BytesMut,
+    ) -> Result<IsNull, Box<dyn std::error::Error + Sync + Send>> {
+        if let Some(expected) = &self.expected {
+            let expected = normalize_pg_type_name(expected);
+            let actual = normalize_pg_type_name(ty.name());
+            if expected != actual {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!("typed null declared `{expected}` but PostgreSQL inferred `{actual}`"),
+                )
+                .into());
+            }
+        }
+        Ok(IsNull::Yes)
+    }
+
+    fn accepts(_ty: &Type) -> bool {
+        true
+    }
+
+    tokio_postgres::types::to_sql_checked!();
+}
+
+fn normalize_pg_type_name(value: &str) -> String {
+    let normalized = value.trim().to_ascii_lowercase();
+    let base = match normalized.split_once('(') {
+        Some((base, modifiers)) if modifiers.ends_with(')') => base.trim(),
+        _ => normalized.as_str(),
+    };
+    match base {
+        "boolean" => "bool".into(),
+        "smallint" => "int2".into(),
+        "integer" | "int" => "int4".into(),
+        "bigint" => "int8".into(),
+        "real" => "float4".into(),
+        "double precision" => "float8".into(),
+        "decimal" => "numeric".into(),
+        "character varying" => "varchar".into(),
+        "timestamp without time zone" => "timestamp".into(),
+        "timestamp with time zone" => "timestamptz".into(),
+        "time without time zone" => "time".into(),
+        "time with time zone" => "timetz".into(),
+        normalized => normalized.into(),
+    }
 }
 
 /// Decode a single cell, surfacing decode errors as warnings + a placeholder
@@ -427,4 +486,34 @@ fn panic_message(p: Box<dyn std::any::Any + Send>) -> String {
         return s.clone();
     }
     "<non-string panic payload>".to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn postgres_null_parameter_is_not_forced_to_text() {
+        let params = params_to_pg(vec![Value::Null]).unwrap();
+        let mut bytes = BytesMut::new();
+        assert!(matches!(
+            params[0].to_sql_checked(&Type::BYTEA, &mut bytes),
+            Ok(IsNull::Yes)
+        ));
+    }
+
+    #[test]
+    fn postgres_typed_null_checks_the_inferred_native_type() {
+        let params = params_to_pg(vec![Value::TypedNull {
+            type_name: "numeric(18,2)".into(),
+        }])
+        .unwrap();
+        assert!(matches!(
+            params[0].to_sql_checked(&Type::NUMERIC, &mut BytesMut::new()),
+            Ok(IsNull::Yes)
+        ));
+        assert!(params[0]
+            .to_sql_checked(&Type::BYTEA, &mut BytesMut::new())
+            .is_err());
+    }
 }

@@ -139,7 +139,7 @@ fn value_bool(value: &Value) -> Option<bool> {
 
 fn value_string(value: &Value) -> Option<String> {
     match value {
-        Value::Null => None,
+        Value::Null | Value::TypedNull { .. } => None,
         Value::Text(value) => Some(value.clone()),
         Value::Engine { display_text, .. } => Some(display_text.clone()),
         _ => None,

@@ -98,6 +98,41 @@ async fn open_ping_execute_close() {
 }
 
 #[tokio::test]
+async fn typed_null_parameters_preserve_sql_server_native_types() {
+    let driver = MssqlDriver::new();
+    let conn = driver.open(&spec()).await.expect("open succeeds");
+    let pages = drain(
+        driver
+            .execute(
+                conn.clone(),
+                ExecuteRequest {
+                    sql: "SELECT CAST(@P1 AS varbinary(max)), CAST(@P2 AS int)".into(),
+                    params: vec![
+                        Value::TypedNull {
+                            type_name: "varbinary(max)".into(),
+                        },
+                        Value::TypedNull {
+                            type_name: "int".into(),
+                        },
+                    ],
+                },
+            )
+            .await
+            .expect("execute typed nulls"),
+    )
+    .await;
+    let row = pages
+        .iter()
+        .find_map(|page| match page {
+            Page::Rows { rows } => rows.first(),
+            _ => None,
+        })
+        .expect("one null row");
+    assert_eq!(row.values, vec![Value::Null, Value::Null]);
+    driver.close(conn).await.expect("close succeeds");
+}
+
+#[tokio::test]
 async fn bulk_insert_csv_round_trip() {
     let driver = MssqlDriver::new();
     let conn = driver.open(&spec()).await.expect("open succeeds");
