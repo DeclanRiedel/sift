@@ -104,12 +104,23 @@ Audit/history attribution stays the **submitter** (already the case:
 
 ## Remaining
 
-- **Teardown on room-empty / revocation.** Today the room connection is closed
-  on unbind/rebind only; closing it when the last subscriber leaves, and on
-  credential/membership revocation (via the `managed_connections` reverse
-  index), is a resource-hygiene follow-up, not a correctness gap.
 - **Policy-blocked E2E coverage.** Viewer-denied is now covered end-to-end; an
   end-to-end test for a policy-blocked editor (read-only profile rejecting a
   write) is a follow-up (the `sql_policy::enforce` path is already unit-proven).
 - **Pageable result reference.** The viewer-observes-results broadcast
-  (`shared-connection-ownership.md`) is the last independent G9 slice.
+  (`shared-connection-ownership.md`) is the last independent G9 slice. Note it
+  is bigger than a broadcast: `execute_http` materializes and **removes** the
+  cursor after draining, and `/v1/cursors/:id/pages` authorizes by
+  `session_owner == requester`. A true pageable reference therefore needs (a)
+  room execution to keep a live cursor, and (b) a room-scoped cursor-authz path
+  so members (incl. viewers) can page a cursor owned by the room's
+  binder-owned session. Design this as its own slice.
+
+## Landed teardown
+
+The room connection is closed on unbind/rebind and when a room empties: after a
+room WebSocket handler returns, if `RoomRuntime::is_active` reports the room was
+evicted (last subscription dropped), `close_room_connection` runs. Because open
+is lazy, a race with a rejoin self-heals (the next execute reopens). Membership
+revocation flows through the same path — a revoked member's WS ends, and if it
+was the last, the connection closes.

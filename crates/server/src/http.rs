@@ -5490,17 +5490,26 @@ async fn ws_room(
     let correlation_id = crate::correlation::current().unwrap_or_else(crate::correlation::generate);
     Ok(ws.on_upgrade(move |socket| {
         crate::correlation::scope(correlation_id, async move {
+            let room = room_row.id;
             if let Err(error) = handle_room_ws(
-                state,
+                state.clone(),
                 metadata,
                 auth,
-                room_row.id,
+                room,
                 room_row.tenant_id,
                 socket,
             )
             .await
             {
-                tracing::warn!(room_id = %room_row.id.0, error = %error, "room websocket ended with error");
+                tracing::warn!(room_id = %room.0, error = %error, "room websocket ended with error");
+            }
+            // handle_room_ws has dropped its subscription and attachment; if
+            // that emptied the room, close its server-owned connection so an
+            // abandoned room does not hold a database connection open. A later
+            // join lazily reopens it, so a race with a rejoin self-heals
+            // (ADR-037 teardown).
+            if !state.rooms.is_active(room.0) {
+                state.sessions.close_room_connection(room.0).await;
             }
         })
     }))

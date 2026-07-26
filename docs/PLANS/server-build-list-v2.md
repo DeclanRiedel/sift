@@ -241,9 +241,11 @@ session. CRDT only for query text; everything else server-authoritative.
       (`SessionStore::execute_room_query`, a hidden binder-owned session +
       managed connection, serialized by a per-room async mutex), room execute
       is authorized by the submitter's room-role × the bound profile policy
-      before routing, and an unbound room is hard-rejected. Remaining: teardown
-      on room-empty/revocation, viewer/policy E2E tests, and the pageable
-      result-reference broadcast.
+      before routing, and an unbound room is hard-rejected. The connection is
+      torn down on unbind/rebind and when the room empties (self-healing via
+      lazy reopen). Remaining: pageable result-reference broadcast (needs a
+      live cursor + room-scoped cursor authz) and a policy-blocked-editor E2E
+      test.
 - [ ] [Implement] Observer lag recovery + follow mode.
 
 ## Phase H — Remote development & distribution

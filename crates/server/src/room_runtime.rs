@@ -135,6 +135,12 @@ impl RoomRuntime {
         &self.inner.documents
     }
 
+    /// Whether the room still has live runtime state (subscribers or
+    /// presence). A room is evicted once its last subscription drops.
+    pub fn is_active(&self, room_id: i64) -> bool {
+        self.inner.rooms.contains_key(&room_id)
+    }
+
     pub fn presence(&self, room_id: i64) -> Vec<RoomPresence> {
         self.inner
             .rooms
@@ -264,6 +270,17 @@ mod tests {
         RoomServerMessage::Error {
             message: message.into(),
         }
+    }
+
+    #[test]
+    fn is_active_tracks_room_lifecycle() {
+        let runtime = RoomRuntime::default();
+        assert!(!runtime.is_active(5));
+        let subscription = runtime.subscribe(5);
+        assert!(runtime.is_active(5));
+        drop(subscription);
+        // Last subscription dropped -> room evicted -> teardown fires.
+        assert!(!runtime.is_active(5));
     }
 
     #[test]
