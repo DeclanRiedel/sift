@@ -1,6 +1,9 @@
 //! `sift-client-sdk` — thin reference consumer proving the HTTP API is
 //! buildable-against from outside the server crate.
 
+pub mod room_replica;
+pub use room_replica::{Ingest, RoomReplica};
+
 // Request/response DTOs shared with the server. Re-export so downstream
 // consumers can build requests without depending on sift_metadata::http
 // directly.
@@ -192,6 +195,83 @@ impl RoomWebSocket {
             ))),
         }
     }
+
+    /// Attach to the room, returning once the server acknowledges.
+    pub async fn attach(&mut self, client_id: impl Into<String>) -> Result<i64> {
+        self.send(sift_protocol::RoomClientMessage::Attach {
+            client_id: client_id.into(),
+        })
+        .await?;
+        loop {
+            match self.next().await? {
+                sift_protocol::RoomServerMessage::Attached { attachment_id, .. } => {
+                    return Ok(attachment_id)
+                }
+                sift_protocol::RoomServerMessage::Error { message } => {
+                    return Err(Error::Protocol(message))
+                }
+                _ => continue,
+            }
+        }
+    }
+
+    /// Drive a full `DocumentSync`: import the server's response and, when this
+    /// replica diverged offline, submit its missing updates.
+    pub async fn sync_document(&mut self, replica: &mut RoomReplica) -> Result<()> {
+        let (_, message) = replica.sync_message();
+        self.send(message).await?;
+        loop {
+            let incoming = self.next().await?;
+            match replica.ingest(&incoming).map_err(doc_err)? {
+                Ingest::Synced(server_version) => {
+                    // Offline divergence: submit everything the server is missing
+                    // and wait for it to durably commit before returning.
+                    if let Some(update) = replica.catch_up(&server_version).map_err(doc_err)? {
+                        self.submit_update(replica, update).await?;
+                    }
+                    return Ok(());
+                }
+                Ingest::Error { code, message } => {
+                    return Err(Error::Protocol(format!("{code:?}: {message}")))
+                }
+                _ => continue,
+            }
+        }
+    }
+
+    /// Send a prepared `DocumentUpdate` and wait for its durable ACK, importing
+    /// any peer commits that arrive meanwhile.
+    pub async fn submit_update(
+        &mut self,
+        replica: &mut RoomReplica,
+        message: sift_protocol::RoomClientMessage,
+    ) -> Result<()> {
+        let update_id = match &message {
+            sift_protocol::RoomClientMessage::DocumentUpdate { update_id, .. } => update_id.clone(),
+            _ => return Err(Error::Protocol("expected a document update message".into())),
+        };
+        self.send(message).await?;
+        loop {
+            let incoming = self.next().await?;
+            match replica.ingest(&incoming).map_err(doc_err)? {
+                Ingest::Acked(id) if id == update_id => return Ok(()),
+                Ingest::Error { code, message } => {
+                    return Err(Error::Protocol(format!("{code:?}: {message}")))
+                }
+                _ => continue,
+            }
+        }
+    }
+
+    /// Read one message and fold it into the replica (e.g. a peer's commit).
+    pub async fn pump(&mut self, replica: &mut RoomReplica) -> Result<Ingest> {
+        let incoming = self.next().await?;
+        replica.ingest(&incoming).map_err(doc_err)
+    }
+}
+
+fn doc_err(error: sift_doc::DocError) -> Error {
+    Error::Protocol(format!("crdt error: {error}"))
 }
 
 impl Client {

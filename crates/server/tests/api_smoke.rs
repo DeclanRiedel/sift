@@ -2509,9 +2509,229 @@ async fn http_execute_records_room_scoped_query_history() {
     assert_eq!(history[0]["row_count"], 2);
 }
 
-// Live document editing over the room WebSocket was removed with the positional
-// document-operation contract in Phase G's protocol reset. The Loro-backed
-// DocumentSync/DocumentUpdate path and its convergence tests land in G3.
+// --- Phase G collaborative document tests (Loro over the room WebSocket) ---
+
+/// Serve `state` on an ephemeral port and return its base URL plus the task.
+async fn serve_app(state: AppState) -> (String, tokio::task::JoinHandle<()>) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let handle = tokio::spawn(async move {
+        axum::serve(listener, app(state).into_make_service())
+            .await
+            .unwrap();
+    });
+    (format!("http://{addr}"), handle)
+}
+
+/// Seed a room + Loro document with `text`, returning (room, document).
+fn seed_room_document(
+    metadata: &MetadataStore,
+    text: &str,
+) -> (sift_metadata::Room, sift_metadata::Document) {
+    let room = metadata
+        .create_room(
+            TenantId(1),
+            PrincipalId(1),
+            NewRoom {
+                name: "collab".into(),
+                kind: RoomKind::Shared,
+            },
+        )
+        .unwrap();
+    let replica = sift_doc::TextReplica::new(1).unwrap();
+    if !text.is_empty() {
+        replica.insert(0, text).unwrap();
+    }
+    let document = metadata
+        .create_document(
+            room.id,
+            NewDocument {
+                kind: "sql".into(),
+                title: "collab.sql".into(),
+                crdt_state: replica.export_snapshot().unwrap(),
+                snapshot_version: replica.version_vector(),
+                position: 0,
+                connection_profile_id: None,
+            },
+        )
+        .unwrap();
+    (room, document)
+}
+
+fn add_editor(metadata: &MetadataStore, room_id: sift_metadata::RoomId, external: &str) -> String {
+    let principal = metadata.create_principal(external, external, None).unwrap();
+    metadata
+        .upsert_tenant_membership(TenantId(1), principal.id, MembershipRole::Member)
+        .unwrap();
+    metadata
+        .add_room_member_authorized(
+            room_id,
+            PrincipalId(1),
+            principal.id,
+            RoomRole::Editor,
+            metadata_audit(PrincipalId(1), "add_member", "room", Some(room_id.0)),
+        )
+        .unwrap();
+    let (_, token) = metadata
+        .issue_api_token(principal.id, Some(TenantId(1)), external, None)
+        .unwrap();
+    token
+}
+
+#[tokio::test]
+async fn two_online_editors_converge() {
+    let mut state = test_state_with_metadata(true);
+    state.auth.loopback_bypass = false;
+    let metadata = state.metadata.as_ref().unwrap().clone();
+    let (room, document) = seed_room_document(&metadata, "select 1");
+    let token_a = add_editor(&metadata, room.id, "test:a");
+    let token_b = add_editor(&metadata, room.id, "test:b");
+    let (url, server) = serve_app(state).await;
+
+    let client_a = sift_client_sdk::Client::new(url.clone()).with_bearer_token(token_a);
+    let client_b = sift_client_sdk::Client::new(url).with_bearer_token(token_b);
+    let mut ws_a = client_a.connect_room_websocket(room.id).await.unwrap();
+    let mut ws_b = client_b.connect_room_websocket(room.id).await.unwrap();
+    ws_a.attach("a").await.unwrap();
+    ws_b.attach("b").await.unwrap();
+
+    let mut replica_a = sift_client_sdk::RoomReplica::new(document.id.0, 0xA1, None).unwrap();
+    let mut replica_b = sift_client_sdk::RoomReplica::new(document.id.0, 0xB2, None).unwrap();
+    ws_a.sync_document(&mut replica_a).await.unwrap();
+    ws_b.sync_document(&mut replica_b).await.unwrap();
+    assert_eq!(replica_a.text(), "select 1");
+    assert_eq!(replica_b.text(), "select 1");
+
+    // Editor A appends; B receives the committed broadcast and converges.
+    let edit = replica_a.local_insert(8, " where id = 1").unwrap();
+    ws_a.submit_update(&mut replica_a, edit).await.unwrap();
+    for _ in 0..8 {
+        ws_b.pump(&mut replica_b).await.unwrap();
+        if replica_b.text() == replica_a.text() {
+            break;
+        }
+    }
+    assert_eq!(replica_b.text(), "select 1 where id = 1");
+    assert_eq!(replica_a.text(), replica_b.text());
+
+    server.abort();
+}
+
+#[tokio::test]
+async fn two_offline_editors_diverge_reconnect_and_converge() {
+    let mut state = test_state_with_metadata(true);
+    state.auth.loopback_bypass = false;
+    let metadata = state.metadata.as_ref().unwrap().clone();
+    let (room, document) = seed_room_document(&metadata, "base");
+    let token_a = add_editor(&metadata, room.id, "test:a");
+    let token_b = add_editor(&metadata, room.id, "test:b");
+    let (url, server) = serve_app(state).await;
+
+    let client_a = sift_client_sdk::Client::new(url.clone()).with_bearer_token(token_a);
+    let client_b = sift_client_sdk::Client::new(url).with_bearer_token(token_b);
+    let mut ws_a = client_a.connect_room_websocket(room.id).await.unwrap();
+    let mut ws_b = client_b.connect_room_websocket(room.id).await.unwrap();
+    ws_a.attach("a").await.unwrap();
+    ws_b.attach("b").await.unwrap();
+
+    let mut replica_a = sift_client_sdk::RoomReplica::new(document.id.0, 0xA1, None).unwrap();
+    let mut replica_b = sift_client_sdk::RoomReplica::new(document.id.0, 0xB2, None).unwrap();
+    ws_a.sync_document(&mut replica_a).await.unwrap();
+    ws_b.sync_document(&mut replica_b).await.unwrap();
+
+    // Diverge offline: each edits locally without submitting.
+    let _ = replica_a.local_insert(0, "A ").unwrap();
+    let _ = replica_b.local_insert(4, " B").unwrap();
+    assert_ne!(replica_a.text(), replica_b.text());
+
+    // Reconnect-style resync submits each replica's missing updates.
+    ws_a.sync_document(&mut replica_a).await.unwrap();
+    ws_b.sync_document(&mut replica_b).await.unwrap();
+    // A pulls B's committed edit via the broadcast.
+    for _ in 0..8 {
+        ws_a.pump(&mut replica_a).await.unwrap();
+        if replica_a.text() == replica_b.text() {
+            break;
+        }
+    }
+    assert_eq!(replica_a.text(), replica_b.text());
+    assert!(replica_a.text().contains("base"));
+    assert!(replica_a.text().starts_with("A "));
+
+    server.abort();
+}
+
+#[tokio::test]
+async fn viewer_synchronizes_but_cannot_submit() {
+    let mut state = test_state_with_metadata(true);
+    state.auth.loopback_bypass = false;
+    let metadata = state.metadata.as_ref().unwrap().clone();
+    let (room, document) = seed_room_document(&metadata, "select 1");
+    // A viewer principal.
+    let viewer = metadata.create_principal("test:v", "V", None).unwrap();
+    metadata
+        .upsert_tenant_membership(TenantId(1), viewer.id, MembershipRole::Member)
+        .unwrap();
+    metadata
+        .add_room_member_authorized(
+            room.id,
+            PrincipalId(1),
+            viewer.id,
+            RoomRole::Viewer,
+            metadata_audit(PrincipalId(1), "add_member", "room", Some(room.id.0)),
+        )
+        .unwrap();
+    let (_, viewer_token) = metadata
+        .issue_api_token(viewer.id, Some(TenantId(1)), "v", None)
+        .unwrap();
+    let (url, server) = serve_app(state).await;
+
+    let client = sift_client_sdk::Client::new(url).with_bearer_token(viewer_token);
+    let mut ws = client.connect_room_websocket(room.id).await.unwrap();
+    ws.attach("v").await.unwrap();
+    let mut replica = sift_client_sdk::RoomReplica::new(document.id.0, 0x5A, None).unwrap();
+    ws.sync_document(&mut replica).await.unwrap();
+    assert_eq!(replica.text(), "select 1");
+
+    let edit = replica.local_insert(8, "!").unwrap();
+    let err = ws.submit_update(&mut replica, edit).await.unwrap_err();
+    assert!(format!("{err}").to_lowercase().contains("forbidden"));
+
+    server.abort();
+}
+
+#[tokio::test]
+async fn duplicate_live_replica_writer_is_rejected() {
+    let mut state = test_state_with_metadata(true);
+    state.auth.loopback_bypass = false;
+    let metadata = state.metadata.as_ref().unwrap().clone();
+    let (room, document) = seed_room_document(&metadata, "x");
+    let token = add_editor(&metadata, room.id, "test:a");
+    let (url, server) = serve_app(state).await;
+
+    // Two connections for the same principal, both writing as replica id 0xDEAD.
+    let client1 = sift_client_sdk::Client::new(url.clone()).with_bearer_token(token.clone());
+    let client2 = sift_client_sdk::Client::new(url).with_bearer_token(token);
+    let mut ws1 = client1.connect_room_websocket(room.id).await.unwrap();
+    let mut ws2 = client2.connect_room_websocket(room.id).await.unwrap();
+    ws1.attach("c1").await.unwrap();
+    ws2.attach("c2").await.unwrap();
+
+    let mut replica1 = sift_client_sdk::RoomReplica::new(document.id.0, 0xDEAD, None).unwrap();
+    let mut replica2 = sift_client_sdk::RoomReplica::new(document.id.0, 0xDEAD, None).unwrap();
+    ws1.sync_document(&mut replica1).await.unwrap();
+    ws2.sync_document(&mut replica2).await.unwrap();
+
+    // ws1 acquires the live-writer lease for replica 0xDEAD.
+    let edit1 = replica1.local_insert(1, "1").unwrap();
+    ws1.submit_update(&mut replica1, edit1).await.unwrap();
+    // ws2 writing as the same replica is rejected.
+    let edit2 = replica2.local_insert(1, "2").unwrap();
+    let err = ws2.submit_update(&mut replica2, edit2).await.unwrap_err();
+    assert!(format!("{err}").to_lowercase().contains("replicainuse"));
+
+    server.abort();
+}
 
 #[tokio::test]
 async fn metadata_connection_profile_opens_session_connection() {

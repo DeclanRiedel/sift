@@ -181,6 +181,26 @@ impl TextReplica {
             .map_err(|e| DocError::Export(e.to_string()))
     }
 
+    /// Like [`export_updates_since`](Self::export_updates_since) but returns
+    /// `None` when the peer at `since` already has every operation this replica
+    /// holds. Loro's raw updates export returns a non-empty envelope even when
+    /// there are no new ops, so byte-emptiness cannot distinguish the two; this
+    /// compares version vectors instead.
+    pub fn updates_since_if_any(&self, since: &[u8]) -> Result<Option<Vec<u8>>, DocError> {
+        let vv = VersionVector::decode(since).map_err(|e| DocError::Decode {
+            what: "version vector",
+            detail: e.to_string(),
+        })?;
+        if vv.includes_vv(&self.doc.oplog_vv()) {
+            return Ok(None);
+        }
+        let bytes = self
+            .doc
+            .export(ExportMode::updates(&vv))
+            .map_err(|e| DocError::Export(e.to_string()))?;
+        Ok(Some(bytes))
+    }
+
     /// Export the replica's entire operation history as an update blob.
     pub fn export_all_updates(&self) -> Result<Vec<u8>, DocError> {
         self.doc

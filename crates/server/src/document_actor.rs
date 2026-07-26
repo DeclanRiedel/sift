@@ -122,6 +122,16 @@ impl DocumentActor {
         self.committed.version_vector()
     }
 
+    /// A fresh full snapshot of committed state, for bootstrapping a new replica.
+    pub fn snapshot(&self) -> Result<Vec<u8>, ApplyError> {
+        Ok(self.committed.export_snapshot()?)
+    }
+
+    /// The Loro updates a peer at `known_version` is missing.
+    pub fn updates_since(&self, known_version: &[u8]) -> Result<Vec<u8>, ApplyError> {
+        Ok(self.committed.export_updates_since(known_version)?)
+    }
+
     /// Durably apply one client update.
     ///
     /// Steps (matching the plan): enforce the decoded-size limit, import into a

@@ -3548,6 +3548,7 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
+ "sift-doc",
  "sift-metadata",
  "sift-protocol",
  "thiserror 1.0.69",

@@ -14,6 +14,7 @@ pub mod csv_import;
 pub mod cursors;
 pub mod ddl;
 pub mod document_actor;
+pub mod document_registry;
 pub mod edit;
 pub mod error;
 pub mod export;

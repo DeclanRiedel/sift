@@ -5,6 +5,8 @@ use dashmap::DashMap;
 use sift_protocol::{RoomPresence, RoomServerMessage};
 use tokio::sync::broadcast;
 
+use crate::document_registry::DocumentRegistry;
+
 #[derive(Clone, Default)]
 pub struct RoomRuntime {
     inner: Arc<RoomRuntimeInner>,
@@ -14,6 +16,7 @@ pub struct RoomRuntime {
 struct RoomRuntimeInner {
     rooms: DashMap<i64, Arc<RoomRuntimeRoom>>,
     next_attachment_id: AtomicI64,
+    documents: DocumentRegistry,
 }
 
 struct RoomRuntimeRoom {
@@ -100,6 +103,11 @@ impl RoomRuntime {
         if let Some(room) = self.inner.rooms.get(&room_id) {
             let _ = room.events.send(message);
         }
+    }
+
+    /// The process-wide document actor registry, leases, and runtime epoch.
+    pub fn documents(&self) -> &DocumentRegistry {
+        &self.inner.documents
     }
 
     pub fn presence(&self, room_id: i64) -> Vec<RoomPresence> {

@@ -243,6 +243,14 @@ pub enum Operation {
         room_id: i64,
         attachment_id: i64,
     },
+    /// Durably applied a collaborative document update. Carries only *where* and
+    /// *which* — never the CRDT bytes, replica id, or resulting text.
+    ApplyDocumentUpdate {
+        room_id: i64,
+        document_id: i64,
+        update_id: String,
+        server_seq: i64,
+    },
 }
 
 /// Sanitized projection of an [`Operation`] for the durable audit log. Carries
@@ -304,6 +312,7 @@ impl Operation {
             Self::Metadata { .. } => OperationKind::Metadata,
             Self::AttachRoom { .. } => OperationKind::AttachRoom,
             Self::DetachRoom { .. } => OperationKind::DetachRoom,
+            Self::ApplyDocumentUpdate { .. } => OperationKind::ApplyDocumentUpdate,
         }
     }
 
@@ -471,6 +480,9 @@ impl Operation {
             Operation::Metadata { action, target, id } => summary(action, target, *id),
             Operation::AttachRoom { room_id, .. } => summary("attach", "room", Some(*room_id)),
             Operation::DetachRoom { room_id, .. } => summary("detach", "room", Some(*room_id)),
+            Operation::ApplyDocumentUpdate { document_id, .. } => {
+                summary("apply_update", "document", Some(*document_id))
+            }
         }
     }
 }

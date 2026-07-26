@@ -5334,9 +5334,7 @@ async fn ws_room(
 
 async fn handle_room_ws(
     state: AppState,
-    // Reintroduced as the document-actor handle in G3; the room WS body currently
-    // reaches metadata through `state.metadata`.
-    _metadata: MetadataStore,
+    metadata: MetadataStore,
     mut auth: AuthContext,
     room: RoomId,
     tenant: TenantId,
@@ -5345,6 +5343,8 @@ async fn handle_room_ws(
     let (mut sender, mut receiver) = socket.split();
     let mut events = state.rooms.subscribe(room.0);
     let mut attachment_id = None;
+    // Releases every live-writer lease this connection acquired when it ends.
+    let mut leases = crate::document_registry::LeaseGuard::new(state.rooms.clone());
     let mut lease_tick = tokio::time::interval(std::time::Duration::from_secs(1));
 
     loop {
@@ -5419,6 +5419,55 @@ async fn handle_room_ws(
                             presence: state.rooms.presence(room.0),
                         }).await?;
                     }
+                    RoomClientMessage::DocumentSync {
+                        request_id,
+                        document_id: raw_document_id,
+                        replica_id: _,
+                        known_version,
+                    } => {
+                        if attachment_id.is_none() {
+                            send_json(&mut sender, &RoomServerMessage::Error {
+                                message: "attach before synchronizing documents".into(),
+                            }).await?;
+                            continue;
+                        }
+                        handle_document_sync(
+                            &state,
+                            &metadata,
+                            &mut sender,
+                            room,
+                            request_id,
+                            raw_document_id,
+                            known_version,
+                        ).await?;
+                    }
+                    RoomClientMessage::DocumentUpdate {
+                        request_id,
+                        update_id,
+                        document_id: raw_document_id,
+                        replica_id,
+                        update,
+                    } => {
+                        if attachment_id.is_none() {
+                            send_json(&mut sender, &RoomServerMessage::Error {
+                                message: "attach before submitting document updates".into(),
+                            }).await?;
+                            continue;
+                        }
+                        handle_document_update(
+                            &state,
+                            &metadata,
+                            &mut sender,
+                            &mut leases,
+                            room,
+                            &auth,
+                            request_id,
+                            update_id,
+                            raw_document_id,
+                            replica_id,
+                            update,
+                        ).await?;
+                    }
                 }
             }
             event = events.recv() => {
@@ -5443,6 +5492,323 @@ async fn handle_room_ws(
         }
     }
 
+    Ok(())
+}
+
+/// Decoded-byte size of each chunk in a document snapshot/update transfer.
+const SYNC_CHUNK_BYTES: usize = 256 * 1024;
+
+/// Map a durable-apply error onto a structured room error message.
+fn document_error(
+    request_id: Option<String>,
+    document_id: i64,
+    err: &crate::document_actor::ApplyError,
+) -> RoomServerMessage {
+    use crate::document_actor::ApplyError;
+    use sift_protocol::DocumentErrorCode as Code;
+    let code = match err {
+        ApplyError::InvalidUpdate(_) => Code::InvalidCrdtUpdate,
+        ApplyError::DependenciesMissing => Code::CrdtDependenciesMissing,
+        ApplyError::DocumentTooLarge => Code::DocumentTooLarge,
+        ApplyError::Doc(sift_doc::DocError::VersionNotFound) => Code::DocumentVersionNotFound,
+        ApplyError::Metadata(sift_metadata::MetadataError::DocumentNotFound(_)) => Code::NotFound,
+        _ => Code::Internal,
+    };
+    RoomServerMessage::DocumentError {
+        request_id,
+        document_id,
+        code,
+        message: err.to_string(),
+    }
+}
+
+/// Split `bytes` into 256 KiB chunks and stream them as one transfer. An empty
+/// payload still sends a single empty chunk so the client sees the transfer.
+#[allow(clippy::too_many_arguments)]
+async fn send_document_transfer(
+    sender: &mut futures::stream::SplitSink<WebSocket, Message>,
+    request_id: &str,
+    document_id: i64,
+    transfer_id: &str,
+    payload_kind: sift_protocol::DocumentTransferKind,
+    bytes: &[u8],
+    snapshot_seq: i64,
+    server_version: &[u8],
+) -> ApiResult<()> {
+    let chunks: Vec<&[u8]> = if bytes.is_empty() {
+        vec![&[]]
+    } else {
+        bytes.chunks(SYNC_CHUNK_BYTES).collect()
+    };
+    let count = chunks.len() as u32;
+    for (index, chunk) in chunks.into_iter().enumerate() {
+        send_json(
+            sender,
+            &RoomServerMessage::DocumentChunk {
+                request_id: request_id.to_string(),
+                document_id,
+                transfer_id: transfer_id.to_string(),
+                index: index as u32,
+                count,
+                payload_kind,
+                payload: sift_protocol::CrdtUpdate::new(chunk.to_vec()),
+                snapshot_seq,
+                server_version: sift_protocol::DocumentVersion::new(server_version.to_vec()),
+            },
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+struct SyncPlan {
+    kind: sift_protocol::DocumentTransferKind,
+    bytes: Vec<u8>,
+    server_version: Vec<u8>,
+    snapshot_seq: i64,
+}
+
+/// Answer a `DocumentSync`: send the snapshot (new replica) or the missing
+/// update range (known replica), then a terminal `DocumentSynced`.
+async fn handle_document_sync(
+    state: &AppState,
+    metadata: &MetadataStore,
+    sender: &mut futures::stream::SplitSink<WebSocket, Message>,
+    room: RoomId,
+    request_id: String,
+    raw_document_id: i64,
+    known_version: sift_protocol::DocumentVersion,
+) -> ApiResult<()> {
+    let document = document_id(raw_document_id)?;
+    let md = metadata.clone();
+    let rooms = state.rooms.clone();
+    let known = known_version.into_bytes();
+    let room_id = room.0;
+    let planned = tokio::task::spawn_blocking(
+        move || -> Result<SyncPlan, crate::document_actor::ApplyError> {
+            let row = md.get_document(document)?;
+            if row.room_id.0 != room_id {
+                return Err(crate::document_actor::ApplyError::Metadata(
+                    sift_metadata::MetadataError::DocumentNotFound(document),
+                ));
+            }
+            let actor = rooms.documents().get_or_load(&md, document)?;
+            let guard = actor.lock().expect("document actor mutex poisoned");
+            let server_version = guard.version_vector();
+            let (kind, bytes) = if known.is_empty() {
+                (
+                    sift_protocol::DocumentTransferKind::Snapshot,
+                    guard.snapshot()?,
+                )
+            } else {
+                (
+                    sift_protocol::DocumentTransferKind::Update,
+                    guard.updates_since(&known)?,
+                )
+            };
+            Ok(SyncPlan {
+                kind,
+                bytes,
+                server_version,
+                snapshot_seq: row.snapshot_seq,
+            })
+        },
+    )
+    .await
+    .map_err(|e| ApiError::Internal(format!("document sync task failed: {e}")))?;
+
+    let plan = match planned {
+        Ok(plan) => plan,
+        Err(err) => {
+            send_json(
+                sender,
+                &document_error(Some(request_id), raw_document_id, &err),
+            )
+            .await?;
+            return Ok(());
+        }
+    };
+    let transfer_id = uuid::Uuid::new_v4().to_string();
+    send_document_transfer(
+        sender,
+        &request_id,
+        raw_document_id,
+        &transfer_id,
+        plan.kind,
+        &plan.bytes,
+        plan.snapshot_seq,
+        &plan.server_version,
+    )
+    .await?;
+    send_json(
+        sender,
+        &RoomServerMessage::DocumentSynced {
+            request_id,
+            document_id: raw_document_id,
+            server_version: sift_protocol::DocumentVersion::new(plan.server_version),
+        },
+    )
+    .await?;
+    Ok(())
+}
+
+/// Durably apply a `DocumentUpdate`: enforce editor role and the writer lease,
+/// commit through the document actor, then ACK the submitter and broadcast the
+/// committed update to the room.
+#[allow(clippy::too_many_arguments)]
+async fn handle_document_update(
+    state: &AppState,
+    metadata: &MetadataStore,
+    sender: &mut futures::stream::SplitSink<WebSocket, Message>,
+    leases: &mut crate::document_registry::LeaseGuard,
+    room: RoomId,
+    auth: &AuthContext,
+    request_id: String,
+    update_id: String,
+    raw_document_id: i64,
+    replica_id: sift_protocol::ReplicaId,
+    update: sift_protocol::CrdtUpdate,
+) -> ApiResult<()> {
+    let document = document_id(raw_document_id)?;
+    let principal = auth.principal_id;
+
+    // Editor/owner role and document-in-room, re-checked on every update.
+    let md = metadata.clone();
+    let room_id = room.0;
+    let role = tokio::task::spawn_blocking(move || -> ApiResult<sift_metadata::RoomRole> {
+        let row = md.get_document(document)?;
+        if row.room_id.0 != room_id {
+            return Err(ApiError::Forbidden("document is not in this room".into()));
+        }
+        let member = md
+            .get_room_member(RoomId(room_id), principal)?
+            .ok_or_else(|| ApiError::Forbidden("not a room member".into()))?;
+        Ok(member.role)
+    })
+    .await
+    .map_err(|e| ApiError::Internal(format!("room role task failed: {e}")))??;
+    if matches!(role, sift_metadata::RoomRole::Viewer) {
+        send_json(
+            sender,
+            &RoomServerMessage::DocumentError {
+                request_id: Some(request_id),
+                document_id: raw_document_id,
+                code: sift_protocol::DocumentErrorCode::Forbidden,
+                message: "viewers cannot submit document updates".into(),
+            },
+        )
+        .await?;
+        return Ok(());
+    }
+
+    // One live writer per (document, replica).
+    let replica_str = replica_id.to_string();
+    if !leases.ensure(raw_document_id, &replica_str) {
+        send_json(
+            sender,
+            &RoomServerMessage::DocumentError {
+                request_id: Some(request_id),
+                document_id: raw_document_id,
+                code: sift_protocol::DocumentErrorCode::ReplicaInUse,
+                message: "another live connection is writing as this replica".into(),
+            },
+        )
+        .await?;
+        return Ok(());
+    }
+
+    let md = metadata.clone();
+    let rooms = state.rooms.clone();
+    let update_bytes = update.into_bytes();
+    // Peers import the exact bytes the submitter sent; keep a copy for broadcast.
+    let broadcast_bytes = update_bytes.clone();
+    let apply_replica = replica_str.clone();
+    let apply_update_id = update_id.clone();
+    let applied = tokio::task::spawn_blocking(
+        move || -> Result<(crate::document_actor::ApplyOutcome, Vec<u8>), crate::document_actor::ApplyError> {
+            let actor = rooms.documents().get_or_load(&md, document)?;
+            let mut guard = actor.lock().expect("document actor mutex poisoned");
+            let outcome = guard.apply_update(
+                &md,
+                principal,
+                &apply_replica,
+                &apply_update_id,
+                &update_bytes,
+            )?;
+            if guard.should_compact() {
+                // Best-effort: a failed compaction leaves the log intact.
+                let _ = guard.compact(&md);
+            }
+            let version = guard.version_vector();
+            Ok((outcome, version))
+        },
+    )
+    .await
+    .map_err(|e| ApiError::Internal(format!("document apply task failed: {e}")))?;
+
+    let (outcome, server_version) = match applied {
+        Ok(result) => result,
+        Err(err) => {
+            send_json(
+                sender,
+                &document_error(Some(request_id), raw_document_id, &err),
+            )
+            .await?;
+            return Ok(());
+        }
+    };
+
+    match outcome {
+        crate::document_actor::ApplyOutcome::Idempotent => {
+            send_json(
+                sender,
+                &RoomServerMessage::DocumentUpdateAck {
+                    request_id,
+                    update_id,
+                    document_id: raw_document_id,
+                    server_seq: -1,
+                    version_fingerprint: String::new(),
+                },
+            )
+            .await?;
+        }
+        crate::document_actor::ApplyOutcome::Applied {
+            server_seq,
+            version_fingerprint,
+        } => {
+            // ACK the submitter, then broadcast the committed update.
+            send_json(
+                sender,
+                &RoomServerMessage::DocumentUpdateAck {
+                    request_id,
+                    update_id: update_id.clone(),
+                    document_id: raw_document_id,
+                    server_seq,
+                    version_fingerprint,
+                },
+            )
+            .await?;
+            state.rooms.publish(
+                room.0,
+                RoomServerMessage::DocumentUpdateCommitted {
+                    document_id: raw_document_id,
+                    replica_id,
+                    server_seq,
+                    update: sift_protocol::CrdtUpdate::new(broadcast_bytes),
+                    server_version: sift_protocol::DocumentVersion::new(server_version),
+                },
+            );
+            state.sessions.push_operation(
+                Operation::ApplyDocumentUpdate {
+                    room_id: room.0,
+                    document_id: raw_document_id,
+                    update_id,
+                    server_seq,
+                },
+                OperationStatus::Succeeded,
+            );
+        }
+    }
     Ok(())
 }
 

@@ -104,7 +104,7 @@ fn unavailable_reason(
             Some("session context required")
         }
         CloseSession | OpenConnection | ListTransactions => None,
-        AttachRoom | DetachRoom => Some("room context required"),
+        AttachRoom | DetachRoom | ApplyDocumentUpdate => Some("room context required"),
         BeginTransaction if !has_connection => Some("connection context required"),
         BeginTransaction if has_active_transaction => {
             Some("connection already has an active transaction")
