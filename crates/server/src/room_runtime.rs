@@ -1,8 +1,9 @@
 use std::sync::atomic::{AtomicI64, AtomicUsize, Ordering};
 use std::sync::{Arc, Weak};
+use std::time::{Duration, Instant};
 
 use dashmap::DashMap;
-use sift_protocol::{RoomPresence, RoomServerMessage};
+use sift_protocol::{RoomPresence, RoomSelection, RoomServerMessage};
 use tokio::sync::broadcast;
 
 use crate::document_registry::DocumentRegistry;
@@ -17,10 +18,11 @@ struct RoomRuntimeInner {
     rooms: DashMap<i64, Arc<RoomRuntimeRoom>>,
     next_attachment_id: AtomicI64,
     documents: DocumentRegistry,
+    results: crate::room_results::RoomResultRegistry,
 }
 
 struct RoomRuntimeRoom {
-    presence: DashMap<i64, RoomPresence>,
+    presence: DashMap<i64, PresenceEntry>,
     /// Ephemeral lane: presence, attach refresh, query-result references,
     /// rate-limit notices. A lagged consumer heals with a presence snapshot.
     presence_events: broadcast::Sender<RoomServerMessage>,
@@ -30,12 +32,18 @@ struct RoomRuntimeRoom {
     subscribers: AtomicUsize,
 }
 
+struct PresenceEntry {
+    presence: RoomPresence,
+    last_seen: Instant,
+}
+
 /// Ring capacity for the ephemeral presence lane. Newest-wins is fine — a
 /// lagged consumer refreshes from the authoritative presence map.
 const PRESENCE_CHANNEL_CAPACITY: usize = 256;
 /// Ring capacity for the durable document lane. Deeper buffer buys resync-free
 /// recovery for briefly slow consumers before `ResyncRequired` is forced.
 const DOC_CHANNEL_CAPACITY: usize = 1024;
+const PRESENCE_LEASE: Duration = Duration::from_secs(30);
 
 pub struct RoomSubscription {
     room_id: i64,
@@ -68,10 +76,15 @@ impl RoomRuntime {
             + 1;
         room.presence.insert(
             attachment_id,
-            RoomPresence {
-                attachment_id,
-                principal_id,
-                client_id,
+            PresenceEntry {
+                presence: RoomPresence {
+                    attachment_id,
+                    principal_id,
+                    client_id,
+                    active_document_id: None,
+                    selection: None,
+                },
+                last_seen: Instant::now(),
             },
         );
         let presence = Self::presence_for(&room);
@@ -135,6 +148,10 @@ impl RoomRuntime {
         &self.inner.documents
     }
 
+    pub fn results(&self) -> &crate::room_results::RoomResultRegistry {
+        &self.inner.results
+    }
+
     /// Whether the room still has live runtime state (subscribers or
     /// presence). A room is evicted once its last subscription drops.
     pub fn is_active(&self, room_id: i64) -> bool {
@@ -147,6 +164,68 @@ impl RoomRuntime {
             .get(&room_id)
             .map(|room| Self::presence_for(&room))
             .unwrap_or_default()
+    }
+
+    /// Renew an attachment's ephemeral lease. Returns false when the
+    /// attachment no longer exists (for example after lease expiry).
+    pub fn heartbeat(&self, room_id: i64, attachment_id: i64) -> bool {
+        let Some(room) = self.inner.rooms.get(&room_id) else {
+            return false;
+        };
+        let Some(mut entry) = room.presence.get_mut(&attachment_id) else {
+            return false;
+        };
+        entry.last_seen = Instant::now();
+        true
+    }
+
+    pub fn update_presence(
+        &self,
+        room_id: i64,
+        attachment_id: i64,
+        active_document_id: Option<i64>,
+        selection: Option<RoomSelection>,
+    ) -> bool {
+        let Some(room) = self.inner.rooms.get(&room_id) else {
+            return false;
+        };
+        let Some(mut entry) = room.presence.get_mut(&attachment_id) else {
+            return false;
+        };
+        entry.presence.active_document_id = active_document_id;
+        entry.presence.selection = selection;
+        entry.last_seen = Instant::now();
+        drop(entry);
+        let presence = Self::presence_for(&room);
+        let _ = room
+            .presence_events
+            .send(RoomServerMessage::Presence { presence });
+        true
+    }
+
+    /// Remove attachments whose heartbeat lease elapsed and publish one
+    /// authoritative snapshot if anything changed.
+    pub fn expire_presence(&self, room_id: i64) -> Vec<i64> {
+        let Some(room) = self.inner.rooms.get(&room_id).map(|entry| entry.clone()) else {
+            return Vec::new();
+        };
+        let now = Instant::now();
+        let expired: Vec<_> = room
+            .presence
+            .iter()
+            .filter(|entry| now.duration_since(entry.last_seen) >= PRESENCE_LEASE)
+            .map(|entry| *entry.key())
+            .collect();
+        for attachment_id in &expired {
+            room.presence.remove(attachment_id);
+        }
+        if !expired.is_empty() {
+            let presence = Self::presence_for(&room);
+            let _ = room
+                .presence_events
+                .send(RoomServerMessage::Presence { presence });
+        }
+        expired
     }
 
     fn room(&self, room_id: i64) -> Arc<RoomRuntimeRoom> {
@@ -170,7 +249,7 @@ impl RoomRuntime {
         let mut presence: Vec<_> = room
             .presence
             .iter()
-            .map(|entry| entry.value().clone())
+            .map(|entry| entry.value().presence.clone())
             .collect();
         presence.sort_by_key(|presence| presence.attachment_id);
         presence

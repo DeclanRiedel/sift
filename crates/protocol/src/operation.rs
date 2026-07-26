@@ -251,6 +251,10 @@ pub enum Operation {
         update_id: String,
         server_seq: i64,
     },
+    ReadSharedResult {
+        room_id: i64,
+        result_id: crate::RoomResultId,
+    },
 }
 
 /// Sanitized projection of an [`Operation`] for the durable audit log. Carries
@@ -313,6 +317,7 @@ impl Operation {
             Self::AttachRoom { .. } => OperationKind::AttachRoom,
             Self::DetachRoom { .. } => OperationKind::DetachRoom,
             Self::ApplyDocumentUpdate { .. } => OperationKind::ApplyDocumentUpdate,
+            Self::ReadSharedResult { .. } => OperationKind::ReadSharedResult,
         }
     }
 
@@ -482,6 +487,9 @@ impl Operation {
             Operation::DetachRoom { room_id, .. } => summary("detach", "room", Some(*room_id)),
             Operation::ApplyDocumentUpdate { document_id, .. } => {
                 summary("apply_update", "document", Some(*document_id))
+            }
+            Operation::ReadSharedResult { room_id, .. } => {
+                summary("read", "room_result", Some(*room_id))
             }
         }
     }

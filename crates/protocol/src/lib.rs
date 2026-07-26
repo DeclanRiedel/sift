@@ -78,7 +78,7 @@ pub use process::{DatabaseProcess, KillProcessRequest, KillProcessResponse};
 pub use result::{CursorId, ExecuteRequest, Page, Row};
 pub use room::{
     DocumentErrorCode, DocumentTransferKind, RoomClientMessage, RoomPresence, RoomQueryResult,
-    RoomQueryStatus, RoomServerMessage,
+    RoomQueryStatus, RoomResultPage, RoomResultPages, RoomSelection, RoomServerMessage,
 };
 pub use schema::{
     CatalogTree, ConstraintInfo, ConstraintKind, IndexInfo, IndexKind, ObjectDdl, ObjectInfo,

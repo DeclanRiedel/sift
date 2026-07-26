@@ -27,6 +27,7 @@ pub mod process;
 pub mod rate_limit;
 pub mod registry;
 pub mod resources;
+pub mod room_results;
 pub mod room_runtime;
 pub mod room_service;
 pub mod schema_cache;

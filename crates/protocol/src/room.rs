@@ -1,30 +1,60 @@
 use serde::{Deserialize, Serialize};
 
-use crate::crdt::{CrdtUpdate, DocumentVersion, ReplicaId};
+use crate::crdt::{CrdtCursor, CrdtUpdate, DocumentVersion, ReplicaId, RoomResultId};
+use crate::Page;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct RoomSelection {
+    pub anchor: CrdtCursor,
+    pub head: CrdtCursor,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct RoomPresence {
     pub attachment_id: i64,
     pub principal_id: i64,
     pub client_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_document_id: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selection: Option<RoomSelection>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum RoomQueryStatus {
+    Running,
     Ok,
     Error,
+    Canceled,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct RoomQueryResult {
+    pub result_id: RoomResultId,
     pub room_id: i64,
     pub actor_principal_id: i64,
     pub connection_profile_id: Option<i64>,
-    pub sql_text: String,
     pub row_count: Option<i64>,
+    pub page_count: u64,
     pub status: RoomQueryStatus,
     pub error_message: Option<String>,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub finished_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct RoomResultPage {
+    pub seq: u64,
+    pub page: Page,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct RoomResultPages {
+    pub result_id: RoomResultId,
+    pub pages: Vec<RoomResultPage>,
+    pub next_seq: u64,
+    pub done: bool,
 }
 
 /// Stable error codes for the collaborative document protocol.
@@ -63,6 +93,12 @@ pub enum RoomClientMessage {
         client_id: String,
     },
     Detach,
+    PresenceHeartbeat,
+    PresenceUpdate {
+        active_document_id: Option<i64>,
+        selection: Option<RoomSelection>,
+    },
+    /// Backward-compatible alias for clients built before leased presence.
     PresencePing,
     /// Ask the server to bring this replica up to date. `known_version` is the
     /// client's encoded Loro version vector; an empty vector requests a full

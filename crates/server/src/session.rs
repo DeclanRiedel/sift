@@ -162,6 +162,12 @@ pub struct RoomConnProvenance {
     pub policy_revision: u64,
 }
 
+pub struct RoomQueryExecution {
+    pub response: ExecuteResponse,
+    pub pages: Vec<Page>,
+    pub retention_guards: Vec<crate::resources::ResourceGuard>,
+}
+
 /// TTL for a cached per-connection search index before it is rebuilt.
 const SEARCH_INDEX_TTL: Duration = Duration::from_secs(60);
 
@@ -1036,7 +1042,7 @@ impl SessionStore {
         &self,
         provenance: RoomConnProvenance,
         req: ExecuteRequestHttp,
-    ) -> ApiResult<ExecuteResponse> {
+    ) -> ApiResult<RoomQueryExecution> {
         let slot = self
             .inner
             .room_connections
@@ -1044,17 +1050,87 @@ impl SessionStore {
             .or_default()
             .clone();
         let mut guard = slot.lock().await;
-        let room_conn = match guard.as_ref() {
+        let room_conn = match guard
+            .as_ref()
+            .filter(|existing| self.room_connection_is_live(existing))
+        {
             Some(existing) => existing.clone(),
             None => {
+                if let Some(stale) = guard.take() {
+                    let _ = self.close_session(stale.session_id);
+                }
                 let opened = self.open_room_connection(&provenance).await?;
                 *guard = Some(opened.clone());
                 opened
             }
         };
-        let mut req = req;
-        req.connection = room_conn.conn_id;
-        self.execute_http(room_conn.session_id, req).await
+        let stream = match self
+            .execute_stream(
+                room_conn.session_id,
+                room_conn.conn_id,
+                ExecuteRequest {
+                    sql: req.sql,
+                    params: req.params,
+                },
+                None,
+            )
+            .await
+        {
+            Ok(stream) => stream,
+            Err(error) => {
+                if matches!(
+                    &error,
+                    ApiError::Driver(DriverError {
+                        code: Code::ConnectionFailed,
+                        ..
+                    })
+                ) {
+                    guard.take();
+                    let _ = self.close_session(room_conn.session_id);
+                }
+                return Err(error);
+            }
+        };
+        let (max_rows, max_bytes) = self.result_limits();
+        let cursor_id = stream.cursor_id;
+        let duration = self.request_timeout();
+        let drain = drain_room_stream(
+            self,
+            stream,
+            max_rows,
+            max_bytes,
+            (self.resource_manager(), provenance.tenant),
+        );
+        let result = if duration.is_zero() {
+            drain.await
+        } else {
+            match tokio::time::timeout(duration, drain).await {
+                Ok(result) => result,
+                Err(_) => {
+                    self.cancel_after_timeout(room_conn.session_id, room_conn.conn_id, cursor_id)
+                        .await;
+                    Err(timeout_error("room execute"))
+                }
+            }
+        };
+        if matches!(
+            &result,
+            Err(ApiError::Driver(DriverError {
+                code: Code::ConnectionFailed,
+                ..
+            }))
+        ) {
+            guard.take();
+            let _ = self.close_session(room_conn.session_id);
+        }
+        result
+    }
+
+    fn room_connection_is_live(&self, room_conn: &RoomConn) -> bool {
+        self.inner
+            .sessions
+            .get(&room_conn.session_id)
+            .is_some_and(|session| session.connections.contains_key(&room_conn.conn_id))
     }
 
     /// Open the room's hidden session (owned by the binder) and its managed
@@ -1079,7 +1155,7 @@ impl SessionStore {
             Some(p.tenant),
             false,
         )?;
-        let info = self
+        let info = match self
             .open_managed_connection(
                 session.id,
                 p.engine,
@@ -1090,7 +1166,14 @@ impl SessionStore {
                 p.policy_revision,
                 false,
             )
-            .await?;
+            .await
+        {
+            Ok(info) => info,
+            Err(error) => {
+                let _ = self.close_session(session.id);
+                return Err(error);
+            }
+        };
         Ok(RoomConn {
             session_id: session.id,
             conn_id: info.id,
@@ -1666,7 +1749,24 @@ impl SessionStore {
         )?;
         let resource_guards = self.reserve_query_resources(&entry)?;
         let retained_context = self.retained_byte_context(&entry);
-        let stream = entry.driver.execute(entry.handle.clone(), req).await?;
+        let driver = entry.driver.clone();
+        let handle = entry.handle.clone();
+        let mut task = tokio::spawn(async move { driver.execute(handle, req).await });
+        let duration = self.request_timeout();
+        let stream = if duration.is_zero() {
+            task.await
+                .map_err(|error| ApiError::Internal(format!("execute task failed: {error}")))??
+        } else {
+            match tokio::time::timeout(duration, &mut task).await {
+                Ok(joined) => joined.map_err(|error| {
+                    ApiError::Internal(format!("execute task failed: {error}"))
+                })??,
+                Err(_) => {
+                    task.abort();
+                    return Err(timeout_error("execute"));
+                }
+            }
+        };
         let cursor_id = stream.cursor_id;
         // Hand the driver's stream to the registry-owned pump. Wrapping
         // enforces the per-session cap (evicting the LRA cursor of the
@@ -3149,6 +3249,95 @@ pub async fn drain_stream(
     max_bytes: usize,
 ) -> Result<ExecuteResponse, DriverError> {
     drain_stream_inner(stream, max_rows, max_bytes, None).await
+}
+
+async fn drain_room_stream(
+    sessions: &SessionStore,
+    stream: ResultSetStream,
+    max_response_rows: usize,
+    max_response_bytes: usize,
+    retention: (crate::resources::ResourceManager, sift_metadata::TenantId),
+) -> ApiResult<RoomQueryExecution> {
+    let cursor_id = stream.cursor_id;
+    let mut rx = stream.rows;
+    let mut pages = Vec::new();
+    let mut columns = Vec::new();
+    let mut rows = Vec::new();
+    let mut response_bytes = 0usize;
+    let mut affected_rows = None;
+    let mut warnings = Vec::new();
+    let mut has_more = false;
+    let mut retention_guards = Vec::new();
+
+    while let Some(page) = rx.recv().await {
+        sessions.cursor_page_received(cursor_id);
+        match &page {
+            Page::NextResult { columns: next } if columns.is_empty() => {
+                columns = next.clone();
+            }
+            Page::Rows { rows: next } => {
+                for row in next {
+                    let bytes = row_bytes(row);
+                    if rows.len() < max_response_rows
+                        && response_bytes.saturating_add(bytes) <= max_response_bytes
+                    {
+                        response_bytes = response_bytes.saturating_add(bytes);
+                        rows.push(row.clone());
+                    } else {
+                        has_more = true;
+                    }
+                }
+            }
+            Page::Error { error } => {
+                sessions.cursor_page_processed(cursor_id);
+                sessions.cursor_remove(cursor_id);
+                return Err(ApiError::Driver(error.clone()));
+            }
+            Page::Done {
+                affected_rows: next_affected,
+                warnings: next_warnings,
+            } => {
+                affected_rows = *next_affected;
+                warnings = next_warnings.clone();
+            }
+            Page::NextResult { .. } => {}
+        }
+        let retained_bytes = match serde_json::to_vec(&page) {
+            Ok(encoded) => encoded.len() as u64,
+            Err(error) => {
+                sessions.cursor_page_processed(cursor_id);
+                sessions.cursor_remove(cursor_id);
+                return Err(ApiError::Internal(error.to_string()));
+            }
+        };
+        match retention.0.reserve(
+            retention.1,
+            sift_protocol::TenantResource::RetainedResultBytes,
+            retained_bytes,
+        ) {
+            Ok(guard) => retention_guards.push(guard),
+            Err(error) => {
+                sessions.cursor_page_processed(cursor_id);
+                sessions.cursor_remove(cursor_id);
+                return Err(error);
+            }
+        }
+        pages.push(page);
+        sessions.cursor_page_processed(cursor_id);
+    }
+    sessions.cursor_remove(cursor_id);
+    Ok(RoomQueryExecution {
+        response: ExecuteResponse {
+            cursor_id,
+            columns,
+            rows,
+            affected_rows,
+            warnings,
+            has_more,
+        },
+        pages,
+        retention_guards,
+    })
 }
 
 async fn drain_stream_accounted(

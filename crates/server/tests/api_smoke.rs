@@ -407,6 +407,7 @@ const SDK_OPERATION_MANIFEST: &[&str] = &[
     "applyEdits",
     "authenticateKey",
     "beginTransaction",
+    "bindMetadataRoomConnection",
     "bulkInsert",
     "cancelQuery",
     "changePassword",
@@ -433,6 +434,8 @@ const SDK_OPERATION_MANIFEST: &[&str] = &[
     "getMetadataConnectionPolicy",
     "getMetadataSavedQuery",
     "getObjectDdl",
+    "getRoomResult",
+    "getRoomResultPages",
     "getSchema",
     "getSession",
     "getTenantUsage",
@@ -462,6 +465,7 @@ const SDK_OPERATION_MANIFEST: &[&str] = &[
     "listOperations",
     "listPrincipalKeys",
     "listProcesses",
+    "listRoomResults",
     "listSessions",
     "listTenantInvitations",
     "listTransactions",
@@ -497,6 +501,7 @@ const SDK_OPERATION_MANIFEST: &[&str] = &[
     "updateMetadataConnectionPolicy",
     "updateMetadataDocument",
     "updateMetadataSavedQuery",
+    "unbindMetadataRoomConnection",
     "upsertMetadataConnectionProfile",
     "whoAmI",
 ];
@@ -2525,15 +2530,16 @@ async fn http_execute_records_room_scoped_query_history() {
     assert_eq!(res.status(), StatusCode::OK);
 
     let history: Vec<serde_json::Value> = body_json(
-        app.oneshot(
-            Request::get(format!("/v1/metadata/history?room={}&limit=10", room.id.0))
-                .header("authorization", format!("Bearer {token}"))
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap()
-        .into_body(),
+        app.clone()
+            .oneshot(
+                Request::get(format!("/v1/metadata/history?room={}&limit=10", room.id.0))
+                    .header("authorization", format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+            .into_body(),
     )
     .await;
     assert_eq!(history.len(), 1);
@@ -2673,6 +2679,9 @@ async fn room_scoped_execute_gates_on_submitter_role() {
     let (_, editor_token) = metadata
         .issue_api_token(editor.id, Some(TenantId(1)), "editor", None)
         .unwrap();
+    let (_, owner_token) = metadata
+        .issue_api_token(PrincipalId(1), Some(TenantId(1)), "owner", None)
+        .unwrap();
     state.auth.loopback_bypass = false;
     let app = app(state);
 
@@ -2717,10 +2726,76 @@ async fn room_scoped_execute_gates_on_submitter_role() {
 
     // Viewer cannot execute; editor routes through the room connection.
     assert_eq!(
-        room_execute(viewer_token).await.status(),
+        room_execute(viewer_token.clone()).await.status(),
         StatusCode::FORBIDDEN
     );
-    assert_eq!(room_execute(editor_token).await.status(), StatusCode::OK);
+    assert_eq!(
+        room_execute(editor_token.clone()).await.status(),
+        StatusCode::OK
+    );
+
+    // The editor's query is retained as an opaque shared result. A current
+    // viewer can discover and independently page it without profile access.
+    let results: Vec<sift_protocol::RoomQueryResult> = body_json(
+        app.clone()
+            .oneshot(
+                Request::get(format!("/v1/metadata/rooms/{}/results", room.id.0))
+                    .header("authorization", format!("Bearer {viewer_token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+            .into_body(),
+    )
+    .await;
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].actor_principal_id, editor.id.0);
+    let pages: sift_protocol::RoomResultPages = body_json(
+        app.clone()
+            .oneshot(
+                Request::get(format!(
+                    "/v1/metadata/rooms/{}/results/{}/pages?from_seq=0&limit=1",
+                    room.id.0, results[0].result_id
+                ))
+                .header("authorization", format!("Bearer {viewer_token}"))
+                .body(Body::empty())
+                .unwrap(),
+            )
+            .await
+            .unwrap()
+            .into_body(),
+    )
+    .await;
+    assert_eq!(pages.pages.len(), 1);
+    assert_eq!(pages.pages[0].seq, 0);
+
+    // Room role is only a ceiling: the bound profile policy can still deny
+    // execution to an editor, and the live room connection is revoked.
+    let policy_update = app
+        .clone()
+        .oneshot(
+            Request::put(format!("/v1/metadata/connections/{}/policy", profile.id.0))
+                .header("authorization", format!("Bearer {owner_token}"))
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::to_vec(&serde_json::json!({
+                        "expected_revision": 0,
+                        "minimum_tenant_role": "member",
+                        "read_only": false,
+                        "blocked_ops": ["execute_query"]
+                    }))
+                    .unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(policy_update.status(), StatusCode::OK);
+    assert_eq!(
+        room_execute(editor_token).await.status(),
+        StatusCode::FORBIDDEN
+    );
 }
 
 // --- Phase G collaborative document tests (Loro over the room WebSocket) ---

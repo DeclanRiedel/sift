@@ -13,6 +13,11 @@ ignore = [
   "RUSTSEC-2026-0098",
   "RUSTSEC-2026-0099",
   "RUSTSEC-2026-0104",
+  # Target-specific transitive through Loro -> postcard -> heapless 0.7.
+  # `atomic-polyfill` is archived, but it is not selected on Sift's supported
+  # server targets and the advisory reports no vulnerability or safe upgrade.
+  # Remove when Loro's postcard chain moves to heapless >= 0.8.
+  "RUSTSEC-2023-0089",
 ]
 
 [licenses]
@@ -27,6 +32,7 @@ allow = [
   "CDLA-Permissive-2.0",
   "ISC",
   "MIT",
+  "MPL-2.0",
   "Unicode-3.0",
   "Zlib",
 ]

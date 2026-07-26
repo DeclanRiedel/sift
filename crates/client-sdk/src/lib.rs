@@ -2,15 +2,16 @@
 //! buildable-against from outside the server crate.
 
 pub mod room_replica;
-pub use room_replica::{Ingest, RoomReplica};
+pub use room_replica::{FollowEvent, FollowMode, Ingest, RoomReplica};
 
 // Request/response DTOs shared with the server. Re-export so downstream
 // consumers can build requests without depending on sift_metadata::http
 // directly.
 pub use sift_metadata::http::{
-    AddRoomMemberRequest, CreateDocumentRequest, CreateRoomRequest, CreateSavedQueryRequest,
-    IssueTokenRequest, IssueTokenResponse, OpenConnectionFromProfileRequest, SetCredentialRequest,
-    UpdateDocumentSnapshotRequest, UpdateSavedQueryRequest, UpsertConnectionProfileRequest,
+    AddRoomMemberRequest, BindRoomConnectionRequest, CreateDocumentRequest, CreateRoomRequest,
+    CreateSavedQueryRequest, IssueTokenRequest, IssueTokenResponse,
+    OpenConnectionFromProfileRequest, SetCredentialRequest, UpdateDocumentSnapshotRequest,
+    UpdateSavedQueryRequest, UpsertConnectionProfileRequest,
 };
 use sift_metadata::{
     ApiTokenId, ConnectionProfile, ConnectionProfileId, Document, DocumentId, GithubAllowlistEntry,
@@ -32,12 +33,12 @@ use sift_protocol::{
     KeyChallengeResponse, KillProcessRequest, KillProcessResponse, OpenConnectionRequest,
     OpenSessionRequest, OperationCapability, OperationCapabilityContext, Page,
     PasswordLoginRequest, PasswordResetRequest, PreviewEditsRequest, Readiness, RefreshAuthRequest,
-    RegisterPrincipalKeyRequest, SavepointRequest, SchemaSearchRequest, SchemaSearchResponse,
-    SchemaSnapshot, ServerInfo, SessionId, SessionInfo, TenantResourceLimits, TenantUsageSnapshot,
-    TransactionEndAction, TransactionInfo, TransactionPreview, TransactionPreviewRequest,
-    TransactionState, TxHandleRef, TxId, TxMode, UpdateConnectionPolicyRequest,
-    UpdateTenantLimitsRequest, Value, WebAuthResponse, WhoAmIResponse, WsClientMessage,
-    WsServerMessage,
+    RegisterPrincipalKeyRequest, RoomQueryResult, RoomResultId, RoomResultPages, RoomSelection,
+    SavepointRequest, SchemaSearchRequest, SchemaSearchResponse, SchemaSnapshot, ServerInfo,
+    SessionId, SessionInfo, TenantResourceLimits, TenantUsageSnapshot, TransactionEndAction,
+    TransactionInfo, TransactionPreview, TransactionPreviewRequest, TransactionState, TxHandleRef,
+    TxId, TxMode, UpdateConnectionPolicyRequest, UpdateTenantLimitsRequest, Value, WebAuthResponse,
+    WhoAmIResponse, WsClientMessage, WsServerMessage,
 };
 
 #[derive(Clone)]
@@ -172,6 +173,23 @@ impl RoomWebSocket {
 
     pub async fn next(&mut self) -> Result<sift_protocol::RoomServerMessage> {
         next_room_ws(&mut self.socket).await
+    }
+
+    pub async fn heartbeat(&mut self) -> Result<()> {
+        self.send(sift_protocol::RoomClientMessage::PresenceHeartbeat)
+            .await
+    }
+
+    pub async fn update_presence(
+        &mut self,
+        active_document_id: Option<i64>,
+        selection: Option<RoomSelection>,
+    ) -> Result<()> {
+        self.send(sift_protocol::RoomClientMessage::PresenceUpdate {
+            active_document_id,
+            selection,
+        })
+        .await
     }
 
     pub async fn reauthenticate(
@@ -1076,9 +1094,52 @@ impl Client {
         self.delete(&format!("/v1/metadata/rooms/{}", room.0)).await
     }
 
+    pub async fn bind_room_connection(
+        &self,
+        room: RoomId,
+        connection_profile_id: i64,
+    ) -> Result<Room> {
+        self.put(
+            &format!("/v1/metadata/rooms/{}/connection", room.0),
+            &BindRoomConnectionRequest {
+                connection_profile_id,
+            },
+        )
+        .await
+    }
+
+    pub async fn unbind_room_connection(&self, room: RoomId) -> Result<()> {
+        self.delete(&format!("/v1/metadata/rooms/{}/connection", room.0))
+            .await
+    }
+
     pub async fn room_members(&self, room: RoomId) -> Result<Vec<RoomMember>> {
         self.get(&format!("/v1/metadata/rooms/{}/members", room.0))
             .await
+    }
+
+    pub async fn room_results(&self, room: RoomId) -> Result<Vec<RoomQueryResult>> {
+        self.get(&format!("/v1/metadata/rooms/{}/results", room.0))
+            .await
+    }
+
+    pub async fn room_result(&self, room: RoomId, result: RoomResultId) -> Result<RoomQueryResult> {
+        self.get(&format!("/v1/metadata/rooms/{}/results/{}", room.0, result))
+            .await
+    }
+
+    pub async fn room_result_pages(
+        &self,
+        room: RoomId,
+        result: RoomResultId,
+        from_seq: u64,
+        limit: usize,
+    ) -> Result<RoomResultPages> {
+        self.get(&format!(
+            "/v1/metadata/rooms/{}/results/{}/pages?from_seq={from_seq}&limit={limit}",
+            room.0, result
+        ))
+        .await
     }
 
     pub async fn add_room_member(

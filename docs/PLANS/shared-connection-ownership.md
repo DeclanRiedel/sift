@@ -1,6 +1,6 @@
 # Design — Shared-connection ownership (Phase G)
 
-> Status: **implemented** (result reference pending — see below). Phase G
+> Status: **implemented.** Phase G
 > collaboration item G5. A connection used inside a
 > room becomes **room-owned**: the room binds exactly one connection profile,
 > every member's room-scoped execute runs server-side through that bound
@@ -112,23 +112,13 @@ result broadcast graduates from summary to a **pageable reference**:
   references." Fan-out result *replication* remains explicitly out of scope
   (ADR-014): peers page the one server-held cursor, they do not receive copies.
 
-> The full pageable-reference wiring is Phase G implement item G9; this design
-> fixes its **shape** (registry cursor id on the ephemeral lane, submitter-
-> scoped paging) so the implement step has no open contract questions.
->
-> **Prerequisite discovered during G9 (not yet built).** A pageable reference
-> needs a live server-side cursor, and today's room execute has none: room
-> queries run through the **HTTP** execute path (`execute_room_query` →
-> `execute_http`), and `drain_stream_inner` always returns `has_more: false`
-> and **errors `ResultTooLarge`** past the row/byte cap — it never spills a
-> pageable cursor. Only the **WebSocket streaming** execute path registers a
-> cursor + spill that `/v1/cursors/:id/pages` can read. So "viewers observe
-> results" first requires routing room execution (or a room-result variant of
-> it) through the streaming/cursor path; *then* the broadcast + a room-scoped
-> cursor-authz relaxation (admit any member of the cursor's room, read-only)
-> deliver it. The protocol already anticipates this — `DocumentErrorCode`
-> carries `RoomResultNotFound` / `RoomResultExpired`. Treat streaming room
-> execution as the gating slice; the broadcast-and-authz work is small on top.
+> **Implemented.** Room execution now consumes `execute_stream`, then stores
+> immutable protocol pages in the room-result registry under an opaque
+> `RoomResultId` (the driver `CursorId` stays private). The first 16 MiB stays
+> in memory and overflow pages use process-keyed ChaCha20-Poly1305 spill files.
+> Current room members independently list, inspect, and page these results
+> through `/v1/metadata/rooms/:id/results/...`; reading never advances another
+> observer. The ephemeral broadcast contains only the sanitized reference.
 
 ## Non-goals
 

@@ -248,9 +248,7 @@ pub fn upgrade_legacy_documents(metadata: &MetadataStore) -> Result<usize, Apply
         }
         built.push((doc.id, replica.export_snapshot()?, replica.version_vector()));
     }
-    for (id, snapshot, version) in &built {
-        metadata.upgrade_document_to_loro(*id, snapshot.clone(), version.clone())?;
-    }
+    metadata.upgrade_documents_to_loro(&built)?;
     Ok(built.len())
 }
 

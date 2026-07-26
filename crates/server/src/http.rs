@@ -40,8 +40,8 @@ use sift_protocol::{
     KeyChallengeRequest, KeyChallengeResponse, KillProcessRequest, ObjectPath,
     OpenConnectionRequest, OpenSessionRequest, Operation, OperationStatus, PasswordLoginRequest,
     PasswordResetRequest, Readiness, RefreshAuthRequest, RegisterPrincipalKeyRequest,
-    RoomClientMessage, RoomQueryResult, RoomQueryStatus, RoomServerMessage, SavepointRequest,
-    SchemaFilter, SchemaScope, TransactionPreviewRequest, UpdateConnectionPolicyRequest,
+    RoomClientMessage, RoomQueryResult, RoomServerMessage, SavepointRequest, SchemaFilter,
+    SchemaScope, TransactionPreviewRequest, UpdateConnectionPolicyRequest,
     UpdateTenantLimitsRequest, WebAuthResponse, WhoAmIResponse, WsClientMessage, WsServerMessage,
     PROTOCOL_VERSION,
 };
@@ -274,6 +274,18 @@ pub fn app(state: AppState) -> Router {
         .api_route(
             "/v1/metadata/rooms/:id/ws",
             get_with(ws_room, doc("roomWebSocket", "WebSocket room presence and document operations; protocol uses RoomClientMessage/RoomServerMessage")),
+        )
+        .api_route(
+            "/v1/metadata/rooms/:id/results",
+            get_with(list_room_results, doc("listRoomResults", "List transient shared results visible to current room members")),
+        )
+        .api_route(
+            "/v1/metadata/rooms/:id/results/:result_id",
+            get_with(get_room_result, doc("getRoomResult", "Get one transient shared-result reference")),
+        )
+        .api_route(
+            "/v1/metadata/rooms/:id/results/:result_id/pages",
+            get_with(get_room_result_pages, doc("getRoomResultPages", "Independently page a transient shared result; query params: from_seq and limit")),
         )
         .api_route(
             "/v1/metadata/rooms/:id/documents",
@@ -1088,6 +1100,18 @@ struct TenantQuery {
 #[derive(Deserialize, JsonSchema)]
 struct RoomListQuery {
     tenant: i64,
+}
+
+#[derive(Deserialize, JsonSchema)]
+struct RoomResultPagesQuery {
+    #[serde(default)]
+    from_seq: u64,
+    #[serde(default = "default_room_result_page_limit")]
+    limit: usize,
+}
+
+fn default_room_result_page_limit() -> usize {
+    32
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -2988,27 +3012,6 @@ async fn record_execute_history(
     }
 }
 
-fn room_query_result(
-    context: &ExecuteMetadataContext,
-    sql_text: String,
-    result: &ApiResult<sift_protocol::ExecuteResponse>,
-) -> Option<RoomQueryResult> {
-    let room_id = context.room_id?;
-    let (status, row_count, error_message) = match result {
-        Ok(response) => (RoomQueryStatus::Ok, Some(response.rows.len() as i64), None),
-        Err(error) => (RoomQueryStatus::Error, None, Some(error.to_string())),
-    };
-    Some(RoomQueryResult {
-        room_id: room_id.0,
-        actor_principal_id: context.principal_id.0,
-        connection_profile_id: context.connection_profile_id.map(|id| id.0),
-        sql_text,
-        row_count,
-        status,
-        error_message,
-    })
-}
-
 async fn health(State(state): State<AppState>) -> Json<Health> {
     Json(Health {
         status: "ok".to_string(),
@@ -3423,6 +3426,8 @@ async fn delete_metadata_room(
         Ok(())
     })
     .await?;
+    state.sessions.close_room_connection(room.0).await;
+    state.rooms.results().remove_room(room.0);
     push_metadata_operation(&state, actor, "delete", "room", Some(room.0));
     Ok(Json(json!({"ok": true})))
 }
@@ -5043,10 +5048,14 @@ async fn execute_query(
     // in-flight queries continue draining even after `begin_drain`.
     let _query_guard = state.shutdown.track_query();
     let actor = metadata_context.as_ref().map(|c| c.principal_id.0);
+    let inactive_room_connection = metadata_context
+        .as_ref()
+        .and_then(|context| context.room_id)
+        .filter(|room| !state.rooms.is_active(room.0));
     let started = Instant::now();
     // A bound room routes execution through its server-owned connection
     // (ADR-037); everything else runs on the caller's session connection.
-    let result = match metadata_context
+    let (result, shared_pages, shared_retention_guards) = match metadata_context
         .as_ref()
         .and_then(|c| c.room_routing.clone())
     {
@@ -5059,13 +5068,48 @@ async fn execute_query(
                 engine: routing.engine,
                 policy_revision: routing.policy_revision,
             };
-            state.sessions.execute_room_query(provenance, req).await
+            match state.sessions.execute_room_query(provenance, req).await {
+                Ok(execution) => (
+                    Ok(execution.response),
+                    Some(execution.pages),
+                    execution.retention_guards,
+                ),
+                Err(error) => (Err(error), Some(Vec::new()), Vec::new()),
+            }
         }
-        None => state.sessions.execute_http(id, req).await,
+        None => (state.sessions.execute_http(id, req).await, None, Vec::new()),
     };
     let duration_ms = started.elapsed().as_millis().min(i64::MAX as u128) as i64;
     if let Some(context) = metadata_context {
-        if let Some(summary) = room_query_result(&context, sql_text.clone(), &result) {
+        if let Some(room_id) = context.room_id {
+            let row_count = shared_pages.as_ref().map(|pages| {
+                pages
+                    .iter()
+                    .map(|page| match page {
+                        sift_protocol::Page::Rows { rows } => rows.len() as i64,
+                        _ => 0,
+                    })
+                    .sum()
+            });
+            let registry = state.rooms.results().clone();
+            let actor_principal_id = context.principal_id.0;
+            let connection_profile_id = context.connection_profile_id.map(|id| id.0);
+            let error_message = result.as_ref().err().map(ToString::to_string);
+            let summary = tokio::task::spawn_blocking(move || {
+                registry.insert(crate::room_results::NewRoomResult {
+                    room_id: room_id.0,
+                    actor_principal_id,
+                    connection_profile_id,
+                    pages: shared_pages.unwrap_or_default(),
+                    row_count,
+                    error_message,
+                    retention_guards: shared_retention_guards,
+                })
+            })
+            .await
+            .map_err(|error| {
+                ApiError::Internal(format!("room result retention task failed: {error}"))
+            })?;
             state.rooms.publish_presence(
                 summary.room_id,
                 RoomServerMessage::QueryResult { result: summary },
@@ -5079,6 +5123,9 @@ async fn execute_query(
             crate::fingerprint::sql(&sql_text)
         };
         record_execute_history(context, history_sql, duration_ms, &result).await;
+    }
+    if let Some(room) = inactive_room_connection.filter(|room| !state.rooms.is_active(room.0)) {
+        state.sessions.close_room_connection(room.0).await;
     }
     match result {
         Ok(resp) => {
@@ -5472,6 +5519,78 @@ async fn ws_session(
     })
 }
 
+async fn list_room_results(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+) -> ApiResult<Json<Vec<RoomQueryResult>>> {
+    authorize_room_result_read(&state, headers, id).await?;
+    Ok(Json(state.rooms.results().list(id)))
+}
+
+async fn get_room_result(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path((id, result_id)): Path<(i64, uuid::Uuid)>,
+) -> ApiResult<Json<RoomQueryResult>> {
+    authorize_room_result_read(&state, headers, id).await?;
+    let result_id = sift_protocol::RoomResultId(result_id);
+    let result = state.rooms.results().get(id, result_id);
+    finish_operation(
+        &state.sessions,
+        Operation::ReadSharedResult {
+            room_id: id,
+            result_id,
+        },
+        result,
+        |_| None,
+    )
+    .map(Json)
+}
+
+async fn get_room_result_pages(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path((id, result_id)): Path<(i64, uuid::Uuid)>,
+    Query(query): Query<RoomResultPagesQuery>,
+) -> ApiResult<Json<sift_protocol::RoomResultPages>> {
+    authorize_room_result_read(&state, headers, id).await?;
+    let result_id = sift_protocol::RoomResultId(result_id);
+    let registry = state.rooms.results().clone();
+    let result = tokio::task::spawn_blocking(move || {
+        registry.pages(id, result_id, query.from_seq, query.limit)
+    })
+    .await
+    .map_err(|error| ApiError::Internal(format!("room result read task failed: {error}")))?;
+    finish_operation(
+        &state.sessions,
+        Operation::ReadSharedResult {
+            room_id: id,
+            result_id,
+        },
+        result,
+        |pages| Some(pages.pages.len() as i64),
+    )
+    .map(Json)
+}
+
+async fn authorize_room_result_read(
+    state: &AppState,
+    headers: HeaderMap,
+    id: i64,
+) -> ApiResult<()> {
+    let metadata = metadata_store_cloned(state)?;
+    let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
+    let room = room_id(id)?;
+    metadata_blocking({
+        let metadata = metadata.clone();
+        let auth = auth.clone();
+        move || ensure_room_permission(&metadata, &auth, room, RoomPermission::Read).map(|_| ())
+    })
+    .await?;
+    Ok(())
+}
+
 async fn ws_room(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -5598,10 +5717,34 @@ async fn handle_room_ws(
                         }).await?;
                     }
                     RoomClientMessage::Detach => break,
-                    RoomClientMessage::PresencePing => {
+                    RoomClientMessage::PresenceHeartbeat | RoomClientMessage::PresencePing => {
+                        if let Some(attachment) = attachment_id.as_ref() {
+                            state.rooms.heartbeat(room.0, attachment.id());
+                        }
                         send_json(&mut sender, &RoomServerMessage::Presence {
                             presence: state.rooms.presence(room.0),
                         }).await?;
+                    }
+                    RoomClientMessage::PresenceUpdate {
+                        active_document_id,
+                        selection,
+                    } => {
+                        let Some(attachment) = attachment_id.as_ref() else {
+                            send_json(&mut sender, &RoomServerMessage::Error {
+                                message: "attach before updating presence".into(),
+                            }).await?;
+                            continue;
+                        };
+                        if !state.rooms.update_presence(
+                            room.0,
+                            attachment.id(),
+                            active_document_id,
+                            selection,
+                        ) {
+                            send_json(&mut sender, &RoomServerMessage::Error {
+                                message: "presence lease expired; attach again".into(),
+                            }).await?;
+                        }
                     }
                     RoomClientMessage::DocumentSync {
                         request_id,
@@ -5684,6 +5827,16 @@ async fn handle_room_ws(
                 }
             }
             _ = lease_tick.tick() => {
+                let expired = state.rooms.expire_presence(room.0);
+                if attachment_id
+                    .as_ref()
+                    .is_some_and(|attachment| expired.contains(&attachment.id()))
+                {
+                    send_json(&mut sender, &RoomServerMessage::Error {
+                        message: "presence lease expired; attach again".into(),
+                    }).await?;
+                    break;
+                }
                 if !ws_lease_is_valid(&state, &auth, Some(room))? {
                     send_json(&mut sender, &RoomServerMessage::Error {
                         message: "authentication lease or room membership was revoked".into(),
@@ -6018,6 +6171,15 @@ struct AuditedRoomAttachment {
     attachment: Option<crate::room_runtime::RoomAttachment>,
     sessions: SessionStore,
     room_id: i64,
+}
+
+impl AuditedRoomAttachment {
+    fn id(&self) -> i64 {
+        self.attachment
+            .as_ref()
+            .map(crate::room_runtime::RoomAttachment::id)
+            .unwrap_or_default()
+    }
 }
 
 impl Drop for AuditedRoomAttachment {

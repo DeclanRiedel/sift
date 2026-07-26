@@ -3554,6 +3554,7 @@ dependencies = [
  "thiserror 1.0.69",
  "tokio",
  "tokio-tungstenite 0.26.2",
+ "uuid",
 ]
 
 [[package]]
@@ -3688,12 +3689,14 @@ dependencies = [
  "axum",
  "base64 0.22.1",
  "bytes",
+ "chacha20poly1305",
  "chrono",
  "csv",
  "dashmap",
  "ed25519-dalek",
  "figment",
  "futures",
+ "getrandom 0.2.17",
  "rand_core 0.6.4",
  "reqwest",
  "roxmltree",

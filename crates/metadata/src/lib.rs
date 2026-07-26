@@ -3276,6 +3276,31 @@ impl MetadataStore {
         Ok(())
     }
 
+    /// Atomically upgrade a validated batch of legacy document rows. A
+    /// concurrent upgrade or missing row aborts the whole batch.
+    pub fn upgrade_documents_to_loro(
+        &self,
+        documents: &[(DocumentId, Vec<u8>, Vec<u8>)],
+    ) -> Result<()> {
+        let now = now_text();
+        let mut conn = self.conn()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        for (document, snapshot_bytes, snapshot_version) in documents {
+            let updated = tx.execute(
+                "UPDATE document
+                 SET crdt_state = ?1, snapshot_version = ?2,
+                     crdt_format_version = 1, updated_at = ?3
+                 WHERE id = ?4 AND crdt_format_version = 0",
+                params![snapshot_bytes, snapshot_version, now, document.0],
+            )?;
+            if updated != 1 {
+                return Err(MetadataError::DocumentNotFound(*document));
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
     pub fn delete_document(&self, document: DocumentId) -> Result<()> {
         let conn = self.conn()?;
         let deleted = conn.execute("DELETE FROM document WHERE id = ?1", params![document.0])?;

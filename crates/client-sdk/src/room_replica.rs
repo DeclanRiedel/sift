@@ -12,6 +12,78 @@ use std::collections::HashMap;
 use sift_doc::{DocError, TextReplica};
 use sift_protocol::{CrdtUpdate, DocumentVersion, ReplicaId, RoomClientMessage, RoomServerMessage};
 
+/// Client-side projection used by a UI that follows another room attachment.
+/// The server remains authoritative; follow state can always be rebuilt from
+/// a presence snapshot plus shared-result discovery after `NeedsRecovery`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FollowEvent {
+    Unchanged,
+    PresenceChanged {
+        active_document_id: Option<i64>,
+        selection: Option<sift_protocol::RoomSelection>,
+    },
+    ResultChanged(sift_protocol::RoomQueryResult),
+    TargetLeft,
+    NeedsRecovery,
+}
+
+#[derive(Debug, Clone)]
+pub struct FollowMode {
+    attachment_id: i64,
+    principal_id: Option<i64>,
+    active_document_id: Option<i64>,
+    selection: Option<sift_protocol::RoomSelection>,
+}
+
+impl FollowMode {
+    pub fn new(attachment_id: i64) -> Self {
+        Self {
+            attachment_id,
+            principal_id: None,
+            active_document_id: None,
+            selection: None,
+        }
+    }
+
+    pub fn attachment_id(&self) -> i64 {
+        self.attachment_id
+    }
+
+    pub fn ingest(&mut self, message: &RoomServerMessage) -> FollowEvent {
+        match message {
+            RoomServerMessage::Attached { presence, .. }
+            | RoomServerMessage::Presence { presence } => {
+                let Some(target) = presence
+                    .iter()
+                    .find(|presence| presence.attachment_id == self.attachment_id)
+                else {
+                    return FollowEvent::TargetLeft;
+                };
+                if self.active_document_id == target.active_document_id
+                    && self.selection == target.selection
+                    && self.principal_id == Some(target.principal_id)
+                {
+                    return FollowEvent::Unchanged;
+                }
+                self.principal_id = Some(target.principal_id);
+                self.active_document_id = target.active_document_id;
+                self.selection = target.selection.clone();
+                FollowEvent::PresenceChanged {
+                    active_document_id: self.active_document_id,
+                    selection: self.selection.clone(),
+                }
+            }
+            RoomServerMessage::QueryResult { result }
+                if self.principal_id == Some(result.actor_principal_id) =>
+            {
+                FollowEvent::ResultChanged(result.clone())
+            }
+            RoomServerMessage::ResyncRequired { .. } => FollowEvent::NeedsRecovery,
+            _ => FollowEvent::Unchanged,
+        }
+    }
+}
+
 /// What ingesting one server message meant for the replica.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Ingest {
@@ -275,5 +347,51 @@ mod tests {
         };
         assert_eq!(replica.ingest(&ack).unwrap(), Ingest::Acked(update_id));
         assert_eq!(replica.pending_count(), 0);
+    }
+
+    #[test]
+    fn follow_mode_projects_presence_and_result_references() {
+        let mut follow = FollowMode::new(12);
+        let presence = RoomServerMessage::Presence {
+            presence: vec![sift_protocol::RoomPresence {
+                attachment_id: 12,
+                principal_id: 7,
+                client_id: "editor".into(),
+                active_document_id: Some(3),
+                selection: None,
+            }],
+        };
+        assert_eq!(
+            follow.ingest(&presence),
+            FollowEvent::PresenceChanged {
+                active_document_id: Some(3),
+                selection: None,
+            }
+        );
+        let result = sift_protocol::RoomQueryResult {
+            result_id: sift_protocol::RoomResultId(uuid::Uuid::nil()),
+            room_id: 1,
+            actor_principal_id: 7,
+            connection_profile_id: Some(9),
+            row_count: Some(1),
+            page_count: 2,
+            status: sift_protocol::RoomQueryStatus::Ok,
+            error_message: None,
+            created_at: chrono::Utc::now(),
+            finished_at: Some(chrono::Utc::now()),
+        };
+        assert_eq!(
+            follow.ingest(&RoomServerMessage::QueryResult {
+                result: result.clone()
+            }),
+            FollowEvent::ResultChanged(result)
+        );
+        assert_eq!(
+            follow.ingest(&RoomServerMessage::ResyncRequired {
+                runtime_epoch: "new".into(),
+                event_seq: 3,
+            }),
+            FollowEvent::NeedsRecovery
+        );
     }
 }

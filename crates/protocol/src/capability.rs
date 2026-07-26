@@ -50,10 +50,11 @@ pub enum OperationKind {
     AttachRoom,
     DetachRoom,
     ApplyDocumentUpdate,
+    ReadSharedResult,
 }
 
 impl OperationKind {
-    pub const ALL: [Self; 45] = [
+    pub const ALL: [Self; 46] = [
         Self::Authenticate,
         Self::RefreshAuthSession,
         Self::Logout,
@@ -99,6 +100,7 @@ impl OperationKind {
         Self::AttachRoom,
         Self::DetachRoom,
         Self::ApplyDocumentUpdate,
+        Self::ReadSharedResult,
     ];
 
     pub fn destructive(self) -> bool {

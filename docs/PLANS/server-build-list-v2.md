@@ -31,6 +31,11 @@
   priority-one DDL fidelity were polished. The explicitly listed v1 and DDL
   gaps are accepted follow-ups, not Phase E prerequisites. See
   `docs/PLANS/phase-d-readiness.md`.
+- **Phase G is complete.** Room execution consumes the streaming cursor path
+  and publishes opaque, transient result references; current members
+  independently page immutable result pages. Presence is leased and carries
+  stable Loro selection anchors, lag recovery is explicit, and the reference
+  SDK includes client-side follow-mode projection.
 - **Still dead schema:** `principal_key` and `keypair_challenge` (V001) — wire
   in Phase E or drop.
 
@@ -237,10 +242,8 @@ session. CRDT only for query text; everything else server-authoritative.
       heals with a snapshot, doc lag emits `ResyncRequired`
       (`runtime_epoch` + `event_seq` now wired). Fixes silent loss of
       committed CRDT ops on a lagging peer.
-- [ ] [Implement] Shared room connection with role gating; result-reference
-      broadcast (today the room emits a `RoomQueryResult` _summary_
-      (`http.rs:1731-1738`), not a cursor reference peers can page from).
-      _Mostly landed (ADR-036/037):_ room→connection **binding** (nullable
+- [x] [Implement] Shared room connection with role gating; result-reference
+      broadcast. Room→connection **binding** (nullable
       `room.bound_connection_profile_id` + `bound_connection_by`, migrations
       V020/V021, owner-gated bind/unbind + `PUT/DELETE
       /v1/metadata/rooms/:id/connection`) **and routing** — a bound room opens
@@ -250,12 +253,18 @@ session. CRDT only for query text; everything else server-authoritative.
       is authorized by the submitter's room-role × the bound profile policy
       before routing, and an unbound room is hard-rejected. The connection is
       torn down on unbind/rebind and when the room empties (self-healing via
-      lazy reopen). Remaining: pageable result-reference broadcast — gated on
-      routing room execution through the **streaming/cursor** path, since HTTP
-      execute never spills a pageable cursor (`has_more` always false,
-      cap→`ResultTooLarge`); see `shared-connection-ownership.md`. Plus a
-      policy-blocked-editor E2E test.
-- [ ] [Implement] Observer lag recovery + follow mode.
+      lazy reopen). Room execution consumes the streaming cursor path, retains
+      immutable pages behind an opaque `RoomResultId`, spills overflow with a
+      process-random ChaCha20-Poly1305 key, and broadcasts only the sanitized
+      result reference (never SQL or rows). Current viewers can list/get/page
+      results independently. The E2E matrix covers viewer paging and
+      profile-policy denial of an editor.
+- [x] [Implement] Observer lag recovery + follow mode. Presence heartbeats use
+      a 30-second lease; presence updates carry active-document and Loro-stable
+      selection anchors. Durable-lane lag emits `ResyncRequired`, ephemeral
+      lag refreshes presence and shared results are rediscovered over HTTP.
+      `sift-client-sdk::FollowMode` projects presence/result events and exposes
+      `NeedsRecovery` without putting follow state in the CRDT.
 
 ## Phase H — Remote development & distribution
 
@@ -477,7 +486,7 @@ configurations without abandoning thin clients or breaking remote topology.
 | ADR-034 | server-owned or hybrid workspace and VCS topology                     | Phase L | not written                                                    |
 | ADR-035 | room lane separation + CRDT-safe lag recovery                         | Phase G | implemented; `docs/PLANS/presence-durable-separation.md`       |
 | ADR-036 | room-owned connection binding + submitter-scoped authorization        | Phase G | implemented; `docs/PLANS/shared-connection-ownership.md`       |
-| ADR-037 | room-owned system session + submitter-scoped pre-authorization        | Phase G | implemented (result reference pending); `docs/PLANS/shared-room-connection-routing.md` |
+| ADR-037 | room-owned system session + submitter-scoped pre-authorization        | Phase G | implemented; `docs/PLANS/shared-room-connection-routing.md` |
 
 ## Reference: what is being stolen, and what is not
 

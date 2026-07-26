@@ -1,6 +1,6 @@
 # Design — Shared room connection routing (Phase G, G9)
 
-> Status: **implemented** (result reference pending — see "Remaining"). Routes
+> Status: **implemented.** Routes
 > room-scoped query execution through a single
 > server-owned connection the room opens from its bound profile (ADR-036),
 > instead of each member's own connection. Completes the G9 "shared room
@@ -18,7 +18,7 @@
 1. **Topology = room-owned system session.** The room lazily owns a hidden
    `SessionId` holding one connection opened from the bound profile.
    Room-scoped execute resolves to `(room_session, room_conn)` and reuses
-   `execute_http`, the cursor registry, transactions, resource accounting, and
+   `execute_stream`, the cursor registry, resource accounting, and
    the schema cache unchanged. No parallel connection registry.
 2. **Concurrency = serialize on a single connection.** One DB connection per
    room; concurrent member queries queue behind a per-room async lock (a DB
@@ -44,7 +44,7 @@ submitting member's viewer/editor role**. That defeats ADR-036's whole point.
   ADR-036 intersection: viewer → `RoomEditorRequired`; an editor whose SQL/op
   is blocked by the bound profile's policy → denied. Reuses the existing
   evaluator; no second authorization model.
-- **Connection-owner layer (existing), during routing.** `execute_http` on the
+- **Connection-owner layer (existing), during routing.** `execute_stream` on the
   room session still runs `authorize_connection_operation`, which authorizes as
   the binder — always passes for a validly bound connection, and keeps the
   policy-revision refresh + `sql_policy` enforcement the managed path already
@@ -67,7 +67,7 @@ Audit/history attribution stays the **submitter** (already the case:
   conn, engine, lock }`.
 - **Routing.** `execute_query` detects a bound room, acquires the per-room
   lock, rewrites the target to `(room_session, room_conn)`, and calls
-  `execute_http`. The client's `session`/`req.connection` are ignored for
+  `execute_stream`. The client's `session`/`req.connection` are ignored for
   room-scoped execute.
 - **`RoomConnectionUnbound`.** With routing in place, a room-scoped execute on
   an unbound room is rejected (the soft attribution-only behavior from the
@@ -80,9 +80,8 @@ Audit/history attribution stays the **submitter** (already the case:
 ## Non-goals
 
 - **No per-room pool.** Single serialized connection (decision 2).
-- **No result replication.** The pageable result-reference broadcast (viewer
-  observes results) is the remaining G9 slice, designed in
-  `shared-connection-ownership.md`; it is independent of routing.
+- **No result replication.** Viewers page one immutable server-held result;
+  broadcasts contain a reference, never result rows.
 - **No cross-room connection sharing.** One connection per room.
 
 ## Build slices
@@ -99,27 +98,18 @@ Audit/history attribution stays the **submitter** (already the case:
    the room-execute pre-check before routing.
 4. **Routing + `RoomConnectionUnbound`** — landed. `execute_query` routes a
    bound room to `execute_room_query`; an unbound room is hard-rejected.
-5. **Tests** — `MockDriver` integration: bound room routes end-to-end (200 +
-   room-attributed history); unbound rejected (400); submitter-role gating —
-   viewer denied (403), editor routes (200).
+5. **Results + tests** — room execution consumes the streaming path and stores
+   independently pageable result references with encrypted overflow spill.
+   `MockDriver` integration covers room-attributed history, unbound rejection,
+   viewer denial, viewer result paging, editor execution, and profile-policy
+   denial of an editor.
 
 ## Remaining
 
-- **Policy-blocked E2E coverage.** Viewer-denied is now covered end-to-end; an
-  end-to-end test for a policy-blocked editor (read-only profile rejecting a
-  write) is a follow-up (the `sql_policy::enforce` path is already unit-proven).
-- **Pageable result reference.** The viewer-observes-results broadcast
-  (`shared-connection-ownership.md`) is the last independent G9 slice — and
-  bigger than a broadcast. Investigated during G9: room queries run through the
-  **HTTP** execute path, where `drain_stream_inner` always returns
-  `has_more: false` and **errors `ResultTooLarge`** past the cap — it never
-  spills a pageable cursor. `/v1/cursors/:id/pages` also authorizes by
-  `session_owner == requester`. So the real prerequisite is routing room
-  execution through the **streaming/cursor** path (WS execute + spill); only
-  then do the broadcast (`RoomQueryResult { cursor_id, has_more }`) and a
-  room-scoped cursor-authz relaxation (admit any member of the cursor's room,
-  read-only) deliver it. Full corrected design in
-  `shared-connection-ownership.md`. Gate on streaming room execution.
+- None for the Phase G checklist. Dedicated exact-frontier execution and
+  explicit room-result cancellation remain represented in the broader
+  `phase-g-collaboration-depth.md` design, but are not part of ADR-037's
+  connection-routing contract.
 
 ## Landed teardown
 
