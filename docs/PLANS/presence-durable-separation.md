@@ -1,6 +1,6 @@
 # Design — Presence vs durable separation (Phase G)
 
-> Status: **drafted.** Phase G collaboration item G4. Splits the room
+> Status: **implemented.** Phase G collaboration item G4. Splits the room
 > broadcast into an **ephemeral presence lane** (drop-OK) and a **durable
 > document-op lane** (lag ⇒ forced resync), and wires the already-built but
 > dead lag-recovery scaffolding (`runtime_epoch`, `next_event_seq`,

@@ -1,6 +1,7 @@
 # Design — Shared-connection ownership (Phase G)
 
-> Status: **drafted.** Phase G collaboration item G5. A connection used inside a
+> Status: **implemented** (result reference pending — see below). Phase G
+> collaboration item G5. A connection used inside a
 > room becomes **room-owned**: the room binds exactly one connection profile,
 > every member's room-scoped execute runs server-side through that bound
 > connection, and per-op authorization is the **intersection** of the

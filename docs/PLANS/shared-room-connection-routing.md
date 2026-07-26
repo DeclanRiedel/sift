@@ -1,6 +1,7 @@
 # Design — Shared room connection routing (Phase G, G9)
 
-> Status: **drafted.** Routes room-scoped query execution through a single
+> Status: **implemented** (result reference pending — see "Remaining"). Routes
+> room-scoped query execution through a single
 > server-owned connection the room opens from its bound profile (ADR-036),
 > instead of each member's own connection. Completes the G9 "shared room
 > connection with role gating" implement item. Composes over the existing

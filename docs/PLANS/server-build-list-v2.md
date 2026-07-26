@@ -219,10 +219,17 @@ session. CRDT only for query text; everything else server-authoritative.
       connection profile (binder's credentials, revocable); execute resolves
       the bound profile and runs `authorize()` with the submitter's scope
       (intersection gating — already implemented in `authorization.rs`).
-- [ ] [Implement] Real CRDT in `sift-doc`; snapshot + op-log persistence in
-      metadata; deterministic merge across peers.
-- [ ] [Implement] Late-join snapshot + ops-since over the room WS; bounded
-      op log with background compaction.
+- [x] [Implement] Real CRDT in `sift-doc`; snapshot + op-log persistence in
+      metadata; deterministic merge across peers. Done: Loro replica
+      (`crates/doc`), per-document blocking actor + `DocumentRegistry`, durable
+      `crdt_state` snapshot + `document_update` op-log in metadata; Loro
+      provides deterministic cross-peer merge (ADR-014).
+- [x] [Implement] Late-join snapshot + ops-since over the room WS; bounded
+      op log with background compaction. Done: version-vector `DocumentSync`,
+      chunked snapshot/update transfer, `list_document_updates_since`,
+      `next_update_seq`, `should_compact`/`compact` with covered-row
+      truncation. (Compaction runs inline on write via `should_compact`, not a
+      separate background task.)
 - [x] [Implement] Ephemeral presence channel distinct from the durable
       doc-op channel; not persisted. Done (ADR-035): per-room
       `presence_events` (cap 256) + `doc_events` (cap 1024) in
@@ -468,9 +475,9 @@ configurations without abandoning thin clients or breaking remote topology.
 | ADR-032 | SQL semantic service and dialect-pack boundary                        | Phase K | not written                                                    |
 | ADR-033 | catalog graph, schema diff, and migration safety                      | Phase K | not written                                                    |
 | ADR-034 | server-owned or hybrid workspace and VCS topology                     | Phase L | not written                                                    |
-| ADR-035 | room lane separation + CRDT-safe lag recovery                         | Phase G | drafted in `docs/PLANS/presence-durable-separation.md`         |
-| ADR-036 | room-owned connection binding + submitter-scoped authorization        | Phase G | drafted in `docs/PLANS/shared-connection-ownership.md`         |
-| ADR-037 | room-owned system session + submitter-scoped pre-authorization        | Phase G | drafted in `docs/PLANS/shared-room-connection-routing.md`      |
+| ADR-035 | room lane separation + CRDT-safe lag recovery                         | Phase G | implemented; `docs/PLANS/presence-durable-separation.md`       |
+| ADR-036 | room-owned connection binding + submitter-scoped authorization        | Phase G | implemented; `docs/PLANS/shared-connection-ownership.md`       |
+| ADR-037 | room-owned system session + submitter-scoped pre-authorization        | Phase G | implemented (result reference pending); `docs/PLANS/shared-room-connection-routing.md` |
 
 ## Reference: what is being stolen, and what is not
 
