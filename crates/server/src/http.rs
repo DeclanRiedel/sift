@@ -35,15 +35,16 @@ use sift_protocol::{
     AuthTokensResponse, BeginTransactionRequest, BulkInsertRequest, CancelRequest,
     ChangePasswordRequest, CreateGithubAllowlistRequest, CreateTenantInvitationRequest,
     CsvImportRequest, EndTransactionRequest, ExecuteRequest, ExecuteRequestHttp,
-    GithubNativeAuthExchangeRequest, GithubNativeAuthStartResponse, Health, InvitationRole,
+    GithubNativeAuthExchangeRequest, GithubNativeAuthStartResponse, HandshakeDeployment,
+    HandshakeRequest, HandshakeResponse, HandshakeTransport, Health, InvitationRole,
     IssuedPasswordResetResponse, IssuedTenantInvitationResponse, KeyAuthenticateRequest,
     KeyChallengeRequest, KeyChallengeResponse, KillProcessRequest, ObjectPath,
     OpenConnectionRequest, OpenSessionRequest, Operation, OperationStatus, PasswordLoginRequest,
-    PasswordResetRequest, Readiness, RefreshAuthRequest, RegisterPrincipalKeyRequest,
-    RoomClientMessage, RoomQueryResult, RoomServerMessage, SavepointRequest, SchemaFilter,
-    SchemaScope, TransactionPreviewRequest, UpdateConnectionPolicyRequest,
-    UpdateTenantLimitsRequest, WebAuthResponse, WhoAmIResponse, WsClientMessage, WsServerMessage,
-    PROTOCOL_VERSION,
+    PasswordResetRequest, ProtocolRange, Readiness, RefreshAuthRequest,
+    RegisterPrincipalKeyRequest, RoomClientMessage, RoomQueryResult, RoomServerMessage,
+    SavepointRequest, SchemaFilter, SchemaScope, TransactionPreviewRequest,
+    UpdateConnectionPolicyRequest, UpdateTenantLimitsRequest, WebAuthResponse, WhoAmIResponse,
+    WsClientMessage, WsServerMessage, PROTOCOL_VERSION, PROTOCOL_VERSION_NUMBER,
 };
 
 use crate::config::{DeploymentPolicy, Transport};
@@ -72,6 +73,11 @@ pub struct AuthState {
     pub runtime: crate::identity::AuthRuntime,
     pub github: Option<crate::identity::GithubOAuthConfig>,
     pub instance_audience: String,
+    pub instance_id: String,
+    pub daemon_generation: String,
+    /// Transitional test/embed escape hatch. The production binary always
+    /// requires a negotiated version on product routes.
+    pub allow_legacy_unversioned: bool,
     pub rate_limiter: crate::rate_limit::RateLimiter,
 }
 
@@ -85,6 +91,9 @@ impl Default for AuthState {
             runtime: crate::identity::AuthRuntime::default(),
             github: None,
             instance_audience: "sift:local".into(),
+            instance_id: uuid::Uuid::new_v4().to_string(),
+            daemon_generation: uuid::Uuid::new_v4().to_string(),
+            allow_legacy_unversioned: true,
             rate_limiter: crate::rate_limit::RateLimiter::default(),
         }
     }
@@ -95,6 +104,13 @@ pub fn app(state: AppState) -> Router {
         state.sessions.set_authorization_store(metadata.clone());
     }
     let router = ApiRouter::new()
+        .api_route(
+            "/v1/handshake",
+            post_with(
+                handshake,
+                doc("handshake", "Negotiate the application protocol version"),
+            ),
+        )
         .api_route(
             "/v1/health",
             get_with(health, doc("health", "Liveness and registered engines")),
@@ -477,7 +493,10 @@ pub fn app(state: AppState) -> Router {
         .layer(from_fn_with_state(state.clone(), auth_middleware))
         .layer(from_fn(inject_peer_addr))
         .layer(from_fn_with_state(state.sessions.clone(), audit_middleware))
-        .layer(from_fn(protocol_version_middleware))
+        .layer(from_fn_with_state(
+            state.clone(),
+            protocol_version_middleware,
+        ))
         .layer(from_fn(correlation_middleware))
         .layer(
             tower_http::compression::CompressionLayer::new()
@@ -532,20 +551,43 @@ const PROTOCOL_VERSION_HEADER: HeaderName = HeaderName::from_static("x-sift-prot
 /// `x-sift-protocol-version` header; a mismatch is rejected before routing.
 /// Absent header = unpinned = proceed. The server's version is always
 /// advertised on the response.
-async fn protocol_version_middleware(req: Request<Body>, next: Next) -> Response {
-    if let Some(requested) = req
-        .headers()
-        .get(&PROTOCOL_VERSION_HEADER)
-        .and_then(|value| value.to_str().ok())
-    {
-        if requested != PROTOCOL_VERSION {
-            return ApiError::UnsupportedProtocolVersion {
-                requested: requested.to_string(),
+async fn protocol_version_middleware(
+    State(state): State<AppState>,
+    req: Request<Body>,
+    next: Next,
+) -> Response {
+    let path = req.uri().path();
+    let presented = req.headers().get(&PROTOCOL_VERSION_HEADER);
+    if let Some(value) = presented {
+        let requested = match value.to_str() {
+            Ok(value) => value,
+            Err(_) => {
+                return with_protocol_header(
+                    ApiError::UnsupportedProtocolVersion {
+                        requested: "<invalid header>".into(),
+                    }
+                    .into_response(),
+                )
             }
-            .into_response();
+        };
+        if requested != PROTOCOL_VERSION {
+            return with_protocol_header(
+                ApiError::UnsupportedProtocolVersion {
+                    requested: requested.to_string(),
+                }
+                .into_response(),
+            );
         }
+    } else if !state.auth.allow_legacy_unversioned
+        && !matches!(path, "/v1/handshake" | "/v1/health" | "/v1/ready")
+    {
+        return with_protocol_header(ApiError::ProtocolHandshakeRequired.into_response());
     }
-    let mut response = next.run(req).await;
+
+    with_protocol_header(next.run(req).await)
+}
+
+fn with_protocol_header(mut response: Response) -> Response {
     response.headers_mut().insert(
         PROTOCOL_VERSION_HEADER,
         HeaderValue::from_static(PROTOCOL_VERSION),
@@ -971,7 +1013,8 @@ fn metadata_tenant_resource(path: &str) -> Option<MetadataTenantResource> {
 fn is_public_path(path: &str) -> bool {
     matches!(
         path,
-        "/v1/health"
+        "/v1/handshake"
+            | "/v1/health"
             | "/v1/ready"
             | "/v1/openapi.json"
             | "/v1/auth/login"
@@ -3010,6 +3053,41 @@ async fn record_execute_history(
     {
         tracing::warn!(%error, "failed to record query history");
     }
+}
+
+async fn handshake(
+    State(state): State<AppState>,
+    Json(request): Json<HandshakeRequest>,
+) -> ApiResult<Json<HandshakeResponse>> {
+    if !request.protocol.is_valid() {
+        return Err(ApiError::BadRequest(
+            "protocol range minimum must not exceed maximum".into(),
+        ));
+    }
+    let supported = ProtocolRange::exact(PROTOCOL_VERSION_NUMBER);
+    let selected = request.protocol.highest_common(supported).ok_or_else(|| {
+        ApiError::UnsupportedProtocolVersion {
+            requested: format!("{}-{}", request.protocol.minimum, request.protocol.maximum),
+        }
+    })?;
+
+    Ok(Json(HandshakeResponse {
+        server_version: VERSION.to_string(),
+        protocol: supported,
+        selected_protocol: selected,
+        instance_id: state.auth.instance_id.clone(),
+        daemon_generation: state.auth.daemon_generation.clone(),
+        deployment: match state.auth.deployment {
+            DeploymentPolicy::Personal => HandshakeDeployment::Personal,
+            DeploymentPolicy::Team => HandshakeDeployment::Team,
+        },
+        transport: match state.auth.transport {
+            Transport::Loopback => HandshakeTransport::Loopback,
+            Transport::Network => HandshakeTransport::Network,
+            Transport::SshProxy => HandshakeTransport::SshProxy,
+        },
+        capabilities: vec!["protocol_handshake".into()],
+    }))
 }
 
 async fn health(State(state): State<AppState>) -> Json<Health> {

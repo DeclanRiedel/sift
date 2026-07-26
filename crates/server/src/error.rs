@@ -52,6 +52,9 @@ pub enum ApiError {
     )]
     UnsupportedProtocolVersion { requested: String },
 
+    #[error("protocol handshake required")]
+    ProtocolHandshakeRequired,
+
     #[error("metadata error: {0}")]
     Metadata(#[from] MetadataError),
 
@@ -117,7 +120,10 @@ impl ApiError {
             }
             ApiError::ServiceDraining => (StatusCode::SERVICE_UNAVAILABLE, "service_draining"),
             ApiError::UnsupportedProtocolVersion { .. } => {
-                (StatusCode::BAD_REQUEST, "unsupported_protocol_version")
+                (StatusCode::UPGRADE_REQUIRED, "unsupported_protocol_version")
+            }
+            ApiError::ProtocolHandshakeRequired => {
+                (StatusCode::UPGRADE_REQUIRED, "protocol_handshake_required")
             }
             ApiError::Metadata(error) => match error {
                 MetadataError::ConnectionProfileNotFound(_)

@@ -5,8 +5,9 @@
 //! error codes, and serde models — and nothing else. No `tokio`, no
 //! networking, no filesystem.
 
-/// Current wire protocol version. Sent by the server as
-/// `X-Sift-Protocol-Version` on every HTTP response.
+/// Current wire protocol version.
+pub const PROTOCOL_VERSION_NUMBER: u32 = 1;
+/// Header representation of [`PROTOCOL_VERSION_NUMBER`].
 pub const PROTOCOL_VERSION: &str = "1";
 
 pub mod auth;
@@ -19,6 +20,7 @@ pub mod csv_import;
 pub mod edit;
 pub mod engine;
 pub mod error;
+pub mod handshake;
 pub mod operation;
 pub mod plan;
 pub mod policy;
@@ -65,6 +67,10 @@ pub use edit::{
 };
 pub use engine::Engine;
 pub use error::{Code, DriverError, DriverWarning};
+pub use handshake::{
+    HandshakeClientKind, HandshakeDeployment, HandshakeRequest, HandshakeResponse,
+    HandshakeTransport, ProtocolRange,
+};
 pub use operation::{
     AuthenticationMethod, IdentityAdminAction, Operation, OperationSummary, PolicyAdminAction,
 };

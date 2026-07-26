@@ -251,6 +251,91 @@ async fn health_lists_registered_engines() {
 }
 
 #[tokio::test]
+async fn handshake_selects_protocol_and_identifies_server_generation() {
+    let state = test_state();
+    let expected_instance = state.auth.instance_id.clone();
+    let expected_generation = state.auth.daemon_generation.clone();
+    let app = app(state);
+    let res = app
+        .oneshot(post_json(
+            "/v1/handshake",
+            &sift_protocol::HandshakeRequest {
+                client_version: "test-client".into(),
+                client_kind: sift_protocol::HandshakeClientKind::Sdk,
+                protocol: sift_protocol::ProtocolRange::exact(
+                    sift_protocol::PROTOCOL_VERSION_NUMBER,
+                ),
+            },
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(
+        res.headers()
+            .get("x-sift-protocol-version")
+            .and_then(|value| value.to_str().ok()),
+        Some(sift_protocol::PROTOCOL_VERSION)
+    );
+    let body: sift_protocol::HandshakeResponse = body_json(res.into_body()).await;
+    assert_eq!(
+        body.selected_protocol,
+        sift_protocol::PROTOCOL_VERSION_NUMBER
+    );
+    assert_eq!(body.instance_id, expected_instance);
+    assert_eq!(body.daemon_generation, expected_generation);
+}
+
+#[tokio::test]
+async fn handshake_rejects_a_disjoint_protocol_range() {
+    let app = app(test_state());
+    let res = app
+        .oneshot(post_json(
+            "/v1/handshake",
+            &sift_protocol::HandshakeRequest {
+                client_version: "future-client".into(),
+                client_kind: sift_protocol::HandshakeClientKind::Sdk,
+                protocol: sift_protocol::ProtocolRange::exact(999),
+            },
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::UPGRADE_REQUIRED);
+    let body: sift_protocol::ApiErrorResponse = body_json(res.into_body()).await;
+    assert_eq!(body.kind, "unsupported_protocol_version");
+}
+
+#[tokio::test]
+async fn production_protocol_gate_requires_version_after_handshake() {
+    let mut state = test_state();
+    state.auth.allow_legacy_unversioned = false;
+    let app = app(state);
+
+    let missing = app
+        .clone()
+        .oneshot(
+            Request::get("/v1/openapi.json")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(missing.status(), StatusCode::UPGRADE_REQUIRED);
+    let body: sift_protocol::ApiErrorResponse = body_json(missing.into_body()).await;
+    assert_eq!(body.kind, "protocol_handshake_required");
+
+    let accepted = app
+        .oneshot(
+            Request::get("/v1/openapi.json")
+                .header("x-sift-protocol-version", sift_protocol::PROTOCOL_VERSION)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(accepted.status(), StatusCode::OK);
+}
+
+#[tokio::test]
 async fn openapi_is_published() {
     let app = app(test_state());
     let res = app
@@ -268,6 +353,7 @@ async fn openapi_is_published() {
         body["x-sift-protocol-version"],
         sift_protocol::PROTOCOL_VERSION
     );
+    assert!(body["paths"]["/v1/handshake"].is_object());
     assert!(body["paths"]["/v1/sessions/{id}/ws"].is_object());
     assert!(body["paths"]["/v1/sessions/{id}/transactions"].is_object());
     assert!(body["paths"]["/v1/sessions/{id}/transactions/{tx_id}/savepoints"].is_object());
@@ -442,6 +528,7 @@ const SDK_OPERATION_MANIFEST: &[&str] = &[
     "githubAuthCallback",
     "githubAuthStart",
     "githubNativeAuthExchange",
+    "handshake",
     "health",
     "importCsv",
     "issueAuthToken",

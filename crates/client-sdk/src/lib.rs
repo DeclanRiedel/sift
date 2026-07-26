@@ -28,17 +28,18 @@ use sift_protocol::{
     CsvImportResponse, CursorId, DataSearchRequest, DataSearchResponse, DatabaseProcess,
     DisconnectManagedConnectionsResponse, EditPlan, EndTransactionRequest, ExecuteRequestHttp,
     ExecuteResponse, ExplainRequest, ExplainResponse, GithubNativeAuthExchangeRequest,
-    GithubNativeAuthStartResponse, Health, IssuedPasswordResetResponse,
-    IssuedTenantInvitationResponse, KeyAuthenticateRequest, KeyChallengeRequest,
-    KeyChallengeResponse, KillProcessRequest, KillProcessResponse, OpenConnectionRequest,
-    OpenSessionRequest, OperationCapability, OperationCapabilityContext, Page,
-    PasswordLoginRequest, PasswordResetRequest, PreviewEditsRequest, Readiness, RefreshAuthRequest,
-    RegisterPrincipalKeyRequest, RoomQueryResult, RoomResultId, RoomResultPages, RoomSelection,
-    SavepointRequest, SchemaSearchRequest, SchemaSearchResponse, SchemaSnapshot, ServerInfo,
-    SessionId, SessionInfo, TenantResourceLimits, TenantUsageSnapshot, TransactionEndAction,
-    TransactionInfo, TransactionPreview, TransactionPreviewRequest, TransactionState, TxHandleRef,
-    TxId, TxMode, UpdateConnectionPolicyRequest, UpdateTenantLimitsRequest, Value, WebAuthResponse,
-    WhoAmIResponse, WsClientMessage, WsServerMessage,
+    GithubNativeAuthStartResponse, HandshakeClientKind, HandshakeRequest, HandshakeResponse,
+    Health, IssuedPasswordResetResponse, IssuedTenantInvitationResponse, KeyAuthenticateRequest,
+    KeyChallengeRequest, KeyChallengeResponse, KillProcessRequest, KillProcessResponse,
+    OpenConnectionRequest, OpenSessionRequest, OperationCapability, OperationCapabilityContext,
+    Page, PasswordLoginRequest, PasswordResetRequest, PreviewEditsRequest, ProtocolRange,
+    Readiness, RefreshAuthRequest, RegisterPrincipalKeyRequest, RoomQueryResult, RoomResultId,
+    RoomResultPages, RoomSelection, SavepointRequest, SchemaSearchRequest, SchemaSearchResponse,
+    SchemaSnapshot, ServerInfo, SessionId, SessionInfo, TenantResourceLimits, TenantUsageSnapshot,
+    TransactionEndAction, TransactionInfo, TransactionPreview, TransactionPreviewRequest,
+    TransactionState, TxHandleRef, TxId, TxMode, UpdateConnectionPolicyRequest,
+    UpdateTenantLimitsRequest, Value, WebAuthResponse, WhoAmIResponse, WsClientMessage,
+    WsServerMessage, PROTOCOL_VERSION_NUMBER,
 };
 
 #[derive(Clone)]
@@ -114,10 +115,13 @@ pub struct Client {
     token: Option<String>,
     session_tokens: Option<SessionTokenProvider>,
     http: reqwest::Client,
+    handshake: std::sync::Arc<tokio::sync::OnceCell<HandshakeResponse>>,
 }
 
 type TransportWebSocket =
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
+
+const PROTOCOL_VERSION_HEADER: &str = "x-sift-protocol-version";
 
 pub struct SessionWebSocket {
     socket: TransportWebSocket,
@@ -299,7 +303,56 @@ impl Client {
             token: None,
             session_tokens: None,
             http: reqwest::Client::new(),
+            handshake: std::sync::Arc::new(tokio::sync::OnceCell::new()),
         }
+    }
+
+    /// Eagerly negotiate compatibility and return the selected server
+    /// contract. Normal methods perform this lazily and share the same result.
+    pub async fn connect(&self) -> Result<HandshakeResponse> {
+        Ok(self.negotiated().await?.clone())
+    }
+
+    async fn negotiated(&self) -> Result<&HandshakeResponse> {
+        self.handshake
+            .get_or_try_init(|| async {
+                let response = self
+                    .http
+                    .post(self.url("/v1/handshake"))
+                    .json(&HandshakeRequest {
+                        client_version: env!("CARGO_PKG_VERSION").into(),
+                        client_kind: HandshakeClientKind::Sdk,
+                        protocol: ProtocolRange::exact(PROTOCOL_VERSION_NUMBER),
+                    })
+                    .send()
+                    .await?;
+                let status = response.status();
+                if !status.is_success() {
+                    return Err(server_error(response).await);
+                }
+                let selected = response
+                    .headers()
+                    .get(PROTOCOL_VERSION_HEADER)
+                    .and_then(|value| value.to_str().ok())
+                    .map(str::to_owned)
+                    .ok_or_else(|| {
+                        Error::Protocol(
+                            "handshake response omitted X-Sift-Protocol-Version".into(),
+                        )
+                    })?;
+                let body: HandshakeResponse = response.json().await?;
+                if selected != body.selected_protocol.to_string()
+                    || body.selected_protocol != PROTOCOL_VERSION_NUMBER
+                    || !body.protocol.is_valid()
+                {
+                    return Err(Error::Protocol(format!(
+                        "invalid handshake selection: header={selected}, body={}, server_range={}-{}",
+                        body.selected_protocol, body.protocol.minimum, body.protocol.maximum
+                    )));
+                }
+                Ok(body)
+            })
+            .await
     }
 
     pub fn with_bearer_token(mut self, token: impl Into<String>) -> Self {
@@ -318,13 +371,7 @@ impl Client {
         &self,
         request: PasswordLoginRequest,
     ) -> Result<SessionTokenProvider> {
-        let response = self
-            .http
-            .post(self.url("/v1/auth/login"))
-            .json(&request)
-            .send()
-            .await?;
-        let tokens = response_json(response).await?;
+        let tokens: AuthTokensResponse = self.post("/v1/auth/login", &request).await?;
         Ok(SessionTokenProvider::new(tokens))
     }
 
@@ -332,15 +379,14 @@ impl Client {
         let provider = self.session_tokens.as_ref().ok_or_else(|| {
             Error::Protocol("client has no interactive session token provider".into())
         })?;
-        let response = self
-            .http
-            .post(self.url("/v1/auth/refresh"))
-            .json(&RefreshAuthRequest {
-                refresh_token: Some(provider.refresh_token().await),
-            })
-            .send()
+        let tokens: AuthTokensResponse = self
+            .post(
+                "/v1/auth/refresh",
+                &RefreshAuthRequest {
+                    refresh_token: Some(provider.refresh_token().await),
+                },
+            )
             .await?;
-        let tokens = response_json(response).await?;
         provider.replace(tokens).await;
         Ok(())
     }
@@ -373,10 +419,13 @@ impl Client {
         let client = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
             .build()?;
+        let selected = self.negotiated().await?.selected_protocol;
         let response = client
             .get(self.url("/v1/auth/github/start?client_kind=web"))
+            .header(PROTOCOL_VERSION_HEADER, selected.to_string())
             .send()
             .await?;
+        validate_response_protocol(&response, selected).map_err(Error::Protocol)?;
         if !response.status().is_redirection() {
             return Err(server_error(response).await);
         }
@@ -581,11 +630,9 @@ impl Client {
     /// and `503` (not ready) — inspect [`Readiness::ready`] for the verdict.
     /// Other statuses (e.g. auth failure) surface as [`Error::Server`].
     pub async fn ready(&self) -> Result<Readiness> {
-        let mut request = self.http.get(self.url("/v1/ready"));
-        if let Some(token) = self.current_bearer().await {
-            request = request.bearer_auth(token);
-        }
-        let response = request.send().await?;
+        let response = self
+            .send_response(self.http.get(self.url("/v1/ready")))
+            .await?;
         let status = response.status();
         if status == reqwest::StatusCode::OK || status == reqwest::StatusCode::SERVICE_UNAVAILABLE {
             Ok(response.json().await?)
@@ -681,16 +728,13 @@ impl Client {
         connection: ConnectionId,
         request: sift_protocol::ExportRequest,
     ) -> Result<Vec<u8>> {
-        let mut req = self
+        let req = self
             .http
             .post(self.url(&format!(
                 "/v1/sessions/{session}/connections/{connection}/export"
             )))
             .json(&request);
-        if let Some(token) = self.current_bearer().await {
-            req = req.bearer_auth(token);
-        }
-        let resp = req.send().await?;
+        let resp = self.send_response(req).await?;
         let status = resp.status();
         if !status.is_success() {
             return Err(server_error(resp).await);
@@ -1446,6 +1490,8 @@ impl Client {
         use tokio_tungstenite::tungstenite::Message;
 
         let mut request = self.ws_url(session).into_client_request()?;
+        let selected = self.negotiated().await?.selected_protocol;
+        insert_ws_protocol_header(&mut request, selected).map_err(Error::Protocol)?;
         if let Some(token) = self.current_bearer().await {
             request.headers_mut().insert(
                 "authorization",
@@ -1454,7 +1500,8 @@ impl Client {
                     .map_err(|e| Error::Protocol(format!("invalid bearer token header: {e}")))?,
             );
         }
-        let (mut ws, _) = tokio_tungstenite::connect_async(request).await?;
+        let (mut ws, response) = tokio_tungstenite::connect_async(request).await?;
+        validate_ws_response_protocol(&response, selected).map_err(Error::Protocol)?;
         let request_id = "sdk-stream-query".to_string();
         ws.send(Message::Text(
             serde_json::to_string(&WsClientMessage::Execute {
@@ -1514,6 +1561,8 @@ impl Client {
         use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 
         let mut request = self.ws_url(session).into_client_request()?;
+        let selected = self.negotiated().await?.selected_protocol;
+        insert_ws_protocol_header(&mut request, selected).map_err(Error::Protocol)?;
         if let Some(token) = self.current_bearer().await {
             request.headers_mut().insert(
                 "authorization",
@@ -1522,7 +1571,8 @@ impl Client {
                 })?,
             );
         }
-        let (socket, _) = tokio_tungstenite::connect_async(request).await?;
+        let (socket, response) = tokio_tungstenite::connect_async(request).await?;
+        validate_ws_response_protocol(&response, selected).map_err(Error::Protocol)?;
         Ok(SessionWebSocket { socket })
     }
 
@@ -1530,6 +1580,8 @@ impl Client {
         use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 
         let mut request = self.room_ws_url(room).into_client_request()?;
+        let selected = self.negotiated().await?.selected_protocol;
+        insert_ws_protocol_header(&mut request, selected).map_err(Error::Protocol)?;
         if let Some(token) = self.current_bearer().await {
             request.headers_mut().insert(
                 "authorization",
@@ -1538,7 +1590,8 @@ impl Client {
                 })?,
             );
         }
-        let (socket, _) = tokio_tungstenite::connect_async(request).await?;
+        let (socket, response) = tokio_tungstenite::connect_async(request).await?;
+        validate_ws_response_protocol(&response, selected).map_err(Error::Protocol)?;
         Ok(RoomWebSocket { socket })
     }
 
@@ -1554,6 +1607,8 @@ impl Client {
         use tokio_tungstenite::tungstenite::Message;
 
         let mut request = self.ws_url(session).into_client_request()?;
+        let selected = self.negotiated().await?.selected_protocol;
+        insert_ws_protocol_header(&mut request, selected).map_err(Error::Protocol)?;
         if let Some(token) = self.current_bearer().await {
             request.headers_mut().insert(
                 "authorization",
@@ -1562,7 +1617,8 @@ impl Client {
                     .map_err(|e| Error::Protocol(format!("invalid bearer token header: {e}")))?,
             );
         }
-        let (mut ws, _) = tokio_tungstenite::connect_async(request).await?;
+        let (mut ws, response) = tokio_tungstenite::connect_async(request).await?;
+        validate_ws_response_protocol(&response, selected).map_err(Error::Protocol)?;
         let request_id = "sdk-listen".to_string();
         ws.send(Message::Text(
             serde_json::to_string(&WsClientMessage::Listen {
@@ -1657,17 +1713,28 @@ impl Client {
 
     async fn send<T: serde::de::DeserializeOwned>(
         &self,
-        mut request: reqwest::RequestBuilder,
+        request: reqwest::RequestBuilder,
     ) -> Result<T> {
-        if let Some(token) = self.current_bearer().await {
-            request = request.bearer_auth(token);
-        }
-        let response = request.send().await?;
+        let response = self.send_response(request).await?;
         let status = response.status();
         if !status.is_success() {
             return Err(server_error(response).await);
         }
         Ok(response.json().await?)
+    }
+
+    async fn send_response(
+        &self,
+        mut request: reqwest::RequestBuilder,
+    ) -> Result<reqwest::Response> {
+        let selected = self.negotiated().await?.selected_protocol;
+        request = request.header(PROTOCOL_VERSION_HEADER, selected.to_string());
+        if let Some(token) = self.current_bearer().await {
+            request = request.bearer_auth(token);
+        }
+        let response = request.send().await?;
+        validate_response_protocol(&response, selected).map_err(Error::Protocol)?;
+        Ok(response)
     }
 
     fn url(&self, path: &str) -> String {
@@ -1682,12 +1749,54 @@ impl Client {
     }
 }
 
-async fn response_json<T: serde::de::DeserializeOwned>(response: reqwest::Response) -> Result<T> {
-    let status = response.status();
-    if !status.is_success() {
-        return Err(server_error(response).await);
+fn validate_response_protocol(
+    response: &reqwest::Response,
+    expected: u32,
+) -> std::result::Result<(), String> {
+    let actual = response
+        .headers()
+        .get(PROTOCOL_VERSION_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .ok_or_else(|| "response omitted X-Sift-Protocol-Version after handshake".to_string())?;
+    if actual != expected.to_string() {
+        return Err(format!(
+            "response protocol version mismatch: selected {expected}, received {actual}"
+        ));
     }
-    Ok(response.json().await?)
+    Ok(())
+}
+
+fn insert_ws_protocol_header(
+    request: &mut tokio_tungstenite::tungstenite::http::Request<()>,
+    selected: u32,
+) -> std::result::Result<(), String> {
+    request.headers_mut().insert(
+        PROTOCOL_VERSION_HEADER,
+        selected
+            .to_string()
+            .parse()
+            .map_err(|error| format!("invalid protocol version header: {error}"))?,
+    );
+    Ok(())
+}
+
+fn validate_ws_response_protocol(
+    response: &tokio_tungstenite::tungstenite::handshake::client::Response,
+    expected: u32,
+) -> std::result::Result<(), String> {
+    let actual = response
+        .headers()
+        .get(PROTOCOL_VERSION_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .ok_or_else(|| {
+            "WebSocket upgrade omitted X-Sift-Protocol-Version after handshake".to_string()
+        })?;
+    if actual != expected.to_string() {
+        return Err(format!(
+            "WebSocket protocol version mismatch: selected {expected}, received {actual}"
+        ));
+    }
+    Ok(())
 }
 
 async fn server_error(response: reqwest::Response) -> Error {

@@ -146,7 +146,7 @@ async fn pinning_unsupported_protocol_version_is_rejected() {
         .body(Body::empty())
         .unwrap();
     let res = app.oneshot(request).await.unwrap();
-    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(res.status(), StatusCode::UPGRADE_REQUIRED);
     let body: serde_json::Value = body_json(res.into_body()).await;
     assert_eq!(body["kind"], "unsupported_protocol_version");
 }
