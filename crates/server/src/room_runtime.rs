@@ -21,15 +21,28 @@ struct RoomRuntimeInner {
 
 struct RoomRuntimeRoom {
     presence: DashMap<i64, RoomPresence>,
-    events: broadcast::Sender<RoomServerMessage>,
+    /// Ephemeral lane: presence, attach refresh, query-result references,
+    /// rate-limit notices. A lagged consumer heals with a presence snapshot.
+    presence_events: broadcast::Sender<RoomServerMessage>,
+    /// Durable lane: committed CRDT document ops. A lagged consumer must
+    /// resynchronize (`ResyncRequired`), not silently drop the op.
+    doc_events: broadcast::Sender<RoomServerMessage>,
     subscribers: AtomicUsize,
 }
+
+/// Ring capacity for the ephemeral presence lane. Newest-wins is fine — a
+/// lagged consumer refreshes from the authoritative presence map.
+const PRESENCE_CHANNEL_CAPACITY: usize = 256;
+/// Ring capacity for the durable document lane. Deeper buffer buys resync-free
+/// recovery for briefly slow consumers before `ResyncRequired` is forced.
+const DOC_CHANNEL_CAPACITY: usize = 1024;
 
 pub struct RoomSubscription {
     room_id: i64,
     room: Arc<RoomRuntimeRoom>,
     runtime: Weak<RoomRuntimeInner>,
-    receiver: broadcast::Receiver<RoomServerMessage>,
+    presence_rx: broadcast::Receiver<RoomServerMessage>,
+    doc_rx: broadcast::Receiver<RoomServerMessage>,
 }
 
 #[must_use = "dropping the attachment detaches it from room presence"]
@@ -62,7 +75,7 @@ impl RoomRuntime {
             },
         );
         let presence = Self::presence_for(&room);
-        let _ = room.events.send(RoomServerMessage::Presence {
+        let _ = room.presence_events.send(RoomServerMessage::Presence {
             presence: presence.clone(),
         });
         (
@@ -82,7 +95,7 @@ impl RoomRuntime {
         };
         room.presence.remove(&attachment_id);
         let presence = Self::presence_for(&room);
-        let _ = room.events.send(RoomServerMessage::Presence {
+        let _ = room.presence_events.send(RoomServerMessage::Presence {
             presence: presence.clone(),
         });
         presence
@@ -93,15 +106,27 @@ impl RoomRuntime {
         room.subscribers.fetch_add(1, Ordering::AcqRel);
         RoomSubscription {
             room_id,
-            receiver: room.events.subscribe(),
+            presence_rx: room.presence_events.subscribe(),
+            doc_rx: room.doc_events.subscribe(),
             room,
             runtime: Arc::downgrade(&self.inner),
         }
     }
 
-    pub fn publish(&self, room_id: i64, message: RoomServerMessage) {
+    /// Publish on the ephemeral presence lane (presence, query-result
+    /// references, rate-limit notices). Loss on lag is healed by a snapshot.
+    pub fn publish_presence(&self, room_id: i64, message: RoomServerMessage) {
         if let Some(room) = self.inner.rooms.get(&room_id) {
-            let _ = room.events.send(message);
+            let _ = room.presence_events.send(message);
+        }
+    }
+
+    /// Publish a committed CRDT op on the durable document lane and advance the
+    /// runtime event sequence. Loss on lag forces the consumer to resync.
+    pub fn publish_doc(&self, room_id: i64, message: RoomServerMessage) {
+        if let Some(room) = self.inner.rooms.get(&room_id) {
+            let _ = room.doc_events.send(message);
+            self.inner.documents.next_event_seq();
         }
     }
 
@@ -123,10 +148,12 @@ impl RoomRuntime {
             .rooms
             .entry(room_id)
             .or_insert_with(|| {
-                let (events, _) = broadcast::channel(1024);
+                let (presence_events, _) = broadcast::channel(PRESENCE_CHANNEL_CAPACITY);
+                let (doc_events, _) = broadcast::channel(DOC_CHANNEL_CAPACITY);
                 Arc::new(RoomRuntimeRoom {
                     presence: DashMap::new(),
-                    events,
+                    presence_events,
+                    doc_events,
                     subscribers: AtomicUsize::new(0),
                 })
             })
@@ -150,8 +177,16 @@ impl RoomRuntime {
 }
 
 impl RoomSubscription {
-    pub async fn recv(&mut self) -> Result<RoomServerMessage, broadcast::error::RecvError> {
-        self.receiver.recv().await
+    /// Disjoint mutable handles to both lanes so a single `select!` can await
+    /// them concurrently: `(presence, document)`. The presence lane heals a
+    /// `Lagged` with a snapshot; the document lane must resync on `Lagged`.
+    pub fn receivers(
+        &mut self,
+    ) -> (
+        &mut broadcast::Receiver<RoomServerMessage>,
+        &mut broadcast::Receiver<RoomServerMessage>,
+    ) {
+        (&mut self.presence_rx, &mut self.doc_rx)
     }
 }
 
@@ -201,7 +236,7 @@ mod tests {
     fn read_only_access_does_not_create_room_state() {
         let runtime = RoomRuntime::default();
         assert!(runtime.presence(10).is_empty());
-        runtime.publish(
+        runtime.publish_presence(
             10,
             RoomServerMessage::Presence {
                 presence: Vec::new(),
@@ -223,6 +258,60 @@ mod tests {
         assert_eq!(runtime.room_count(), 1);
         drop(second);
         assert_eq!(runtime.room_count(), 0);
+    }
+
+    fn sample(message: &str) -> RoomServerMessage {
+        RoomServerMessage::Error {
+            message: message.into(),
+        }
+    }
+
+    #[test]
+    fn presence_overflow_does_not_evict_durable_doc_ops() {
+        let runtime = RoomRuntime::default();
+        let mut sub = runtime.subscribe(7);
+        // One durable op sits undrained on the document lane.
+        runtime.publish_doc(7, sample("commit"));
+        // Flood the presence lane far past its capacity.
+        for i in 0..(PRESENCE_CHANNEL_CAPACITY * 2) {
+            runtime.publish_presence(7, sample(&format!("p{i}")));
+        }
+        let (presence_rx, doc_rx) = sub.receivers();
+        // The presence lane lagged...
+        assert!(matches!(
+            presence_rx.try_recv(),
+            Err(broadcast::error::TryRecvError::Lagged(_))
+        ));
+        // ...but the durable op survived on its own lane.
+        assert!(matches!(
+            doc_rx.try_recv(),
+            Ok(RoomServerMessage::Error { .. })
+        ));
+    }
+
+    #[test]
+    fn doc_lane_overflow_reports_lagged() {
+        let runtime = RoomRuntime::default();
+        let mut sub = runtime.subscribe(8);
+        for i in 0..(DOC_CHANNEL_CAPACITY + 5) {
+            runtime.publish_doc(8, sample(&format!("c{i}")));
+        }
+        let (_presence_rx, doc_rx) = sub.receivers();
+        assert!(matches!(
+            doc_rx.try_recv(),
+            Err(broadcast::error::TryRecvError::Lagged(_))
+        ));
+    }
+
+    #[test]
+    fn publish_doc_advances_event_seq_but_presence_does_not() {
+        let runtime = RoomRuntime::default();
+        let _sub = runtime.subscribe(9);
+        let before = runtime.documents().current_event_seq();
+        runtime.publish_doc(9, sample("c"));
+        assert_eq!(runtime.documents().current_event_seq(), before + 1);
+        runtime.publish_presence(9, sample("p"));
+        assert_eq!(runtime.documents().current_event_seq(), before + 1);
     }
 
     #[test]

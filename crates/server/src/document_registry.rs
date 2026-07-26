@@ -58,6 +58,12 @@ impl DocumentRegistry {
         self.event_seq.fetch_add(1, Ordering::Relaxed) + 1
     }
 
+    /// The current event-sequence high-water mark, without advancing it.
+    /// Reported in `ResyncRequired` as an opaque cursor for lagged consumers.
+    pub fn current_event_seq(&self) -> u64 {
+        self.event_seq.load(Ordering::Relaxed)
+    }
+
     /// Load (or return the cached) actor for `document`. Blocking: call from a
     /// `spawn_blocking` task.
     pub fn get_or_load(

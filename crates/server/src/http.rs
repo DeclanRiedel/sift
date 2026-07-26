@@ -4892,7 +4892,7 @@ async fn execute_query(
     let duration_ms = started.elapsed().as_millis().min(i64::MAX as u128) as i64;
     if let Some(context) = metadata_context {
         if let Some(summary) = room_query_result(&context, sql_text.clone(), &result) {
-            state.rooms.publish(
+            state.rooms.publish_presence(
                 summary.room_id,
                 RoomServerMessage::QueryResult { result: summary },
             );
@@ -5341,13 +5341,14 @@ async fn handle_room_ws(
     socket: WebSocket,
 ) -> ApiResult<()> {
     let (mut sender, mut receiver) = socket.split();
-    let mut events = state.rooms.subscribe(room.0);
+    let mut subscription = state.rooms.subscribe(room.0);
     let mut attachment_id = None;
     // Releases every live-writer lease this connection acquired when it ends.
     let mut leases = crate::document_registry::LeaseGuard::new(state.rooms.clone());
     let mut lease_tick = tokio::time::interval(std::time::Duration::from_secs(1));
 
     loop {
+        let (presence_rx, doc_rx) = subscription.receivers();
         tokio::select! {
             Some(message) = receiver.next() => {
                 let message = message.map_err(|error| ApiError::BadRequest(error.to_string()))?;
@@ -5470,12 +5471,30 @@ async fn handle_room_ws(
                     }
                 }
             }
-            event = events.recv() => {
+            event = presence_rx.recv() => {
                 match event {
                     Ok(message) => send_json(&mut sender, &message).await?,
+                    // Ephemeral lane: a lagged consumer heals with a fresh
+                    // presence snapshot; nothing durable is lost.
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
                         send_json(&mut sender, &RoomServerMessage::Presence {
                             presence: state.rooms.presence(room.0),
+                        }).await?;
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                }
+            }
+            event = doc_rx.recv() => {
+                match event {
+                    Ok(message) => send_json(&mut sender, &message).await?,
+                    // Durable lane: a dropped committed op cannot be replayed
+                    // from the ring, so force a CRDT resync. The client
+                    // re-issues DocumentSync from its version vector and Loro
+                    // merges the delta idempotently.
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                        send_json(&mut sender, &RoomServerMessage::ResyncRequired {
+                            runtime_epoch: state.rooms.documents().runtime_epoch().to_string(),
+                            event_seq: state.rooms.documents().current_event_seq(),
                         }).await?;
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
@@ -5788,7 +5807,7 @@ async fn handle_document_update(
                 },
             )
             .await?;
-            state.rooms.publish(
+            state.rooms.publish_doc(
                 room.0,
                 RoomServerMessage::DocumentUpdateCommitted {
                     document_id: raw_document_id,
