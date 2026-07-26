@@ -9,6 +9,7 @@ use sift_protocol::{
 };
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::AsyncReadExt;
@@ -23,6 +24,7 @@ struct Options {
     destination: String,
     state_dir: String,
     remote_binary: String,
+    remote_binary_explicit: bool,
     local_server_binary: Option<PathBuf>,
     sift_key_file: Option<PathBuf>,
     local_port: u16,
@@ -33,6 +35,7 @@ struct SshSession {
     destination: Arc<str>,
     control_socket: Arc<PathBuf>,
     control_guard: Arc<Mutex<()>>,
+    multiplex: Arc<AtomicBool>,
 }
 
 #[tokio::main]
@@ -48,6 +51,7 @@ async fn main() -> anyhow::Result<()> {
         destination: options.destination.clone().into(),
         control_socket: Arc::new(control_dir.join("control")),
         control_guard: Arc::new(Mutex::new(())),
+        multiplex: Arc::new(AtomicBool::new(true)),
     };
 
     session.ensure_master().await?;
@@ -57,7 +61,19 @@ async fn main() -> anyhow::Result<()> {
     result
 }
 
-async fn run(options: Options, session: SshSession) -> anyhow::Result<()> {
+async fn run(mut options: Options, session: SshSession) -> anyhow::Result<()> {
+    if !options.remote_binary_explicit {
+        let local = select_local_server(&options).await?;
+        let digest = sha256_file(&local)?;
+        options.remote_binary = format!(
+            ".local/share/sift/bin/{}/{os}-{arch}/{digest}/sift-server",
+            sift_server::VERSION,
+            os = std::env::consts::OS,
+            arch = std::env::consts::ARCH
+        );
+        options.local_server_binary = Some(local);
+    }
+    validate_remote_path(&options.remote_binary)?;
     let mut probe = match session
         .agent_json::<RemoteProbeResponse>(&[
             &options.remote_binary,
@@ -312,10 +328,13 @@ async fn install_server(options: &Options, session: &SshSession) -> anyhow::Resu
     session
         .ssh_status(&[&format!("mkdir -p {parent} && chmod 700 {parent}")])
         .await?;
-    let status = Command::new("scp")
-        .arg("-q")
-        .arg("-o")
-        .arg(format!("ControlPath={}", session.control_socket.display()))
+    let mut scp = Command::new("scp");
+    scp.arg("-q");
+    if session.multiplex.load(Ordering::Acquire) {
+        scp.arg("-o")
+            .arg(format!("ControlPath={}", session.control_socket.display()));
+    }
+    let status = scp
         .arg(&local)
         .arg(format!("{}:{staging}", session.destination))
         .status()
@@ -365,9 +384,11 @@ async fn forward_connection(
     stream: TcpStream,
 ) -> anyhow::Result<()> {
     session.ensure_master().await?;
-    let mut child = Command::new("ssh")
-        .arg("-S")
-        .arg(session.control_socket.as_ref())
+    let mut command = Command::new("ssh");
+    if session.multiplex.load(Ordering::Acquire) {
+        command.arg("-S").arg(session.control_socket.as_ref());
+    }
+    let mut child = command
         .arg("-W")
         .arg(endpoint)
         .arg(session.destination.as_ref())
@@ -389,7 +410,13 @@ async fn forward_connection(
 
 impl SshSession {
     async fn ensure_master(&self) -> anyhow::Result<()> {
+        if !self.multiplex.load(Ordering::Acquire) {
+            return Ok(());
+        }
         let _guard = self.control_guard.lock().await;
+        if !self.multiplex.load(Ordering::Acquire) {
+            return Ok(());
+        }
         let check = Command::new("ssh")
             .arg("-S")
             .arg(self.control_socket.as_ref())
@@ -416,12 +443,15 @@ impl SshSession {
             .await
             .context("starting OpenSSH control master")?;
         if !status.success() {
-            bail!("OpenSSH control master failed with {status}");
+            self.multiplex.store(false, Ordering::Release);
         }
         Ok(())
     }
 
     async fn close_master(&self) {
+        if !self.multiplex.load(Ordering::Acquire) {
+            return;
+        }
         let _ = Command::new("ssh")
             .arg("-S")
             .arg(self.control_socket.as_ref())
@@ -444,9 +474,11 @@ impl SshSession {
 
     async fn ssh_output(&self, remote_args: &[&str]) -> anyhow::Result<Vec<u8>> {
         self.ensure_master().await?;
-        let mut child = Command::new("ssh")
-            .arg("-S")
-            .arg(self.control_socket.as_ref())
+        let mut command = Command::new("ssh");
+        if self.multiplex.load(Ordering::Acquire) {
+            command.arg("-S").arg(self.control_socket.as_ref());
+        }
+        let mut child = command
             .arg(self.destination.as_ref())
             .args(remote_args)
             .stdout(Stdio::piped())
@@ -487,9 +519,11 @@ impl SshSession {
 
     async fn ssh_status(&self, remote_args: &[&str]) -> anyhow::Result<()> {
         self.ensure_master().await?;
-        let status = Command::new("ssh")
-            .arg("-S")
-            .arg(self.control_socket.as_ref())
+        let mut command = Command::new("ssh");
+        if self.multiplex.load(Ordering::Acquire) {
+            command.arg("-S").arg(self.control_socket.as_ref());
+        }
+        let status = command
             .arg(self.destination.as_ref())
             .args(remote_args)
             .status()
@@ -519,6 +553,7 @@ fn parse_options(args: impl IntoIterator<Item = String>) -> anyhow::Result<Optio
             os = std::env::consts::OS,
             arch = std::env::consts::ARCH
         ),
+        remote_binary_explicit: false,
         local_server_binary: None,
         sift_key_file: None,
         local_port: 0,
@@ -529,7 +564,10 @@ fn parse_options(args: impl IntoIterator<Item = String>) -> anyhow::Result<Optio
             .with_context(|| format!("{argument} requires a value"))?;
         match argument.as_str() {
             "--state-dir" => options.state_dir = value,
-            "--remote-binary" => options.remote_binary = value,
+            "--remote-binary" => {
+                options.remote_binary = value;
+                options.remote_binary_explicit = true;
+            }
             "--local-server-binary" => options.local_server_binary = Some(value.into()),
             "--sift-key-file" => options.sift_key_file = Some(value.into()),
             "--local-port" => options.local_port = value.parse().context("invalid local port")?,

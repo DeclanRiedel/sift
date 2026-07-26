@@ -25,7 +25,9 @@ The server substrate is the active work surface: two real drivers (Postgres,
 SQL Server), HTTP + WebSocket surfaces, sessions, rooms, metadata, and audit
 are in place. No product GUI exists yet (ADR-010). For the code-grounded
 backlog and verified gaps, see `docs/PLANS/server-build-list-v2.md`; for
-load-bearing decisions, see `docs/DECISIONS.md`.
+load-bearing decisions, see `docs/DECISIONS.md`. Remote SSH operation,
+lifecycle modes, and signed release staging are covered in
+`docs/REMOTE-AND-UPDATES.md`.
 
 ## The five goals this product wishes to achieve
 

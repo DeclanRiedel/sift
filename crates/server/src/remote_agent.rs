@@ -62,10 +62,18 @@ pub fn prepare_remote_config(state_dir: &Path) -> anyhow::Result<Config> {
 }
 
 pub fn probe(state_dir: &Path) -> anyhow::Result<RemoteProbeResponse> {
-    let descriptor_path = state_dir.join(RUNTIME_DIR).join("daemon.json");
+    let runtime_dir = state_dir.join(RUNTIME_DIR);
+    let descriptor_path = runtime_dir.join("daemon.json");
     let daemon = if descriptor_path.exists() {
-        let descriptor = read_daemon_descriptor(&state_dir.join(RUNTIME_DIR))?;
-        Some(remote_descriptor(descriptor))
+        let descriptor = read_daemon_descriptor(&runtime_dir)?;
+        if descriptor.endpoint.ip().is_loopback()
+            && TcpStream::connect_timeout(&descriptor.endpoint, Duration::from_millis(500)).is_ok()
+        {
+            Some(remote_descriptor(descriptor))
+        } else {
+            clear_stale_descriptor(&runtime_dir, &descriptor_path)?;
+            None
+        }
     } else {
         None
     };
@@ -78,6 +86,29 @@ pub fn probe(state_dir: &Path) -> anyhow::Result<RemoteProbeResponse> {
         install_layout_version: 1,
         daemon,
     })
+}
+
+fn clear_stale_descriptor(runtime_dir: &Path, descriptor: &Path) -> anyhow::Result<()> {
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true).write(true).create(true);
+    private_file_mode(&mut options);
+    let lock = options.open(runtime_dir.join("daemon.lock"))?;
+    match lock.try_lock_exclusive() {
+        Ok(()) => {
+            match std::fs::remove_file(descriptor) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
+            }
+            fs2::FileExt::unlock(&lock)?;
+            Ok(())
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+            // A live owner may be between binding and publishing readiness.
+            Ok(())
+        }
+        Err(error) => Err(error.into()),
+    }
 }
 
 /// Verify an upload from inside that executable, serialize concurrent
@@ -406,5 +437,33 @@ mod tests {
         ensure_secret_key(&path).unwrap();
         assert_eq!(std::fs::read(&path).unwrap(), first);
         assert_eq!(first.len(), 65);
+    }
+
+    #[test]
+    fn probe_clears_a_stale_descriptor_without_a_live_lock_owner() {
+        let dir = tempfile::tempdir().unwrap();
+        let runtime = dir.path().join(RUNTIME_DIR);
+        ensure_private_dir(&runtime).unwrap();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let endpoint = listener.local_addr().unwrap();
+        drop(listener);
+        let descriptor = DaemonDescriptor {
+            schema_version: 1,
+            instance_id: uuid::Uuid::new_v4().to_string(),
+            daemon_generation: uuid::Uuid::new_v4().to_string(),
+            pid: u32::MAX,
+            started_at: chrono::Utc::now(),
+            endpoint,
+            server_version: crate::VERSION.into(),
+            protocol: ProtocolRange::exact(sift_protocol::PROTOCOL_VERSION_NUMBER),
+        };
+        std::fs::write(
+            runtime.join("daemon.json"),
+            serde_json::to_vec(&descriptor).unwrap(),
+        )
+        .unwrap();
+
+        assert!(probe(dir.path()).unwrap().daemon.is_none());
+        assert!(!runtime.join("daemon.json").exists());
     }
 }

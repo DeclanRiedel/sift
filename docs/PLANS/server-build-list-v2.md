@@ -294,7 +294,7 @@ handshake.
       verification); single-binary distribution modes (in-process / daemon
       / container). ADR-015 locks manifest trust, staging, activation, and
       rollback.
-- [ ] [Implement] Remote bootstrap client helper; proxy-mode daemon; port-
+- [x] [Implement] Remote bootstrap client helper; proxy-mode daemon; port-
       forward analogue; background updater; `--mode` distribution modes;
       CI release pipeline.
 

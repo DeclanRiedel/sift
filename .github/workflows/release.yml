@@ -1,0 +1,138 @@
+name: Signed release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      channel:
+        description: Signed release channel
+        required: true
+        default: stable
+      sequence:
+        description: Monotonic channel sequence
+        required: true
+      version:
+        description: Existing v-prefixed tag version
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  artifacts:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            target_name: linux-x86_64
+          - runner: ubuntu-24.04-arm
+            target_name: linux-aarch64
+          - runner: macos-14
+            target_name: macos-aarch64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: DeterminateSystems/nix-installer-action@v16
+      - uses: DeterminateSystems/magic-nix-cache-action@v8
+      - name: Require embedded release trust
+        env:
+          RELEASE_KEYS: ${{ vars.SIFT_RELEASE_PUBLIC_KEYS }}
+        run: test -n "$RELEASE_KEYS"
+      - name: Build release binaries
+        env:
+          SIFT_RELEASE_PUBLIC_KEYS: ${{ vars.SIFT_RELEASE_PUBLIC_KEYS }}
+          SOURCE_DATE_EPOCH: "1"
+          RUSTFLAGS: --remap-path-prefix=${{ github.workspace }}=.
+        run: |
+          nix develop . --command cargo build --locked --release -p sift-server \
+            --bin sift-server --bin sift-remote --bin sift-admin
+          cp target/release/sift-server /tmp/sift-server-first
+          nix develop . --command cargo clean -p sift-server
+          nix develop . --command cargo build --locked --release -p sift-server \
+            --bin sift-server --bin sift-remote --bin sift-admin
+          cmp /tmp/sift-server-first target/release/sift-server
+          mkdir -p dist
+          cp target/release/sift-server "dist/sift-server-${{ matrix.target_name }}"
+          cp target/release/sift-remote "dist/sift-remote-${{ matrix.target_name }}"
+          cp target/release/sift-admin "dist/sift-admin-${{ matrix.target_name }}"
+          shasum -a 256 dist/* >"dist/checksums-${{ matrix.target_name }}.txt"
+      - name: Generate target SBOM
+        uses: anchore/sbom-action@v0
+        with:
+          path: dist
+          format: cyclonedx-json
+          output-file: dist/sbom-${{ matrix.target_name }}.cdx.json
+          artifact-name: sbom-${{ matrix.target_name }}.cdx.json
+          upload-artifact: false
+          upload-release-assets: false
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.target_name }}
+          path: dist/
+          if-no-files-found: error
+
+  sign:
+    needs: artifacts
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          path: dist
+          merge-multiple: true
+      - name: Build exact raw manifest
+        env:
+          RELEASE_ORIGIN: ${{ vars.SIFT_RELEASE_ORIGIN }}
+          INPUT_CHANNEL: ${{ inputs.channel }}
+          INPUT_SEQUENCE: ${{ inputs.sequence }}
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          channel=${INPUT_CHANNEL:-stable}
+          sequence=${INPUT_SEQUENCE:-$GITHUB_RUN_NUMBER}
+          version=${INPUT_VERSION:-${GITHUB_REF_NAME#v}}
+          release_tag="v$version"
+          git rev-parse --verify "refs/tags/$release_tag"
+          printf 'RELEASE_TAG=%s\n' "$release_tag" >>"$GITHUB_ENV"
+          published_at=$(date --utc +%Y-%m-%dT%H:%M:%SZ)
+          expires_at=$(date --utc --date='+14 days' +%Y-%m-%dT%H:%M:%SZ)
+          scripts/build-release-manifest.sh \
+            dist "$channel" "$sequence" "$version" "$RELEASE_ORIGIN" \
+            "$published_at" "$expires_at"
+      - name: Sign exact manifest bytes
+        env:
+          SIGNING_KEY_PEM_B64: ${{ secrets.SIFT_RELEASE_SIGNING_KEY_PEM_B64 }}
+        run: |
+          test -n "$SIGNING_KEY_PEM_B64"
+          umask 077
+          printf '%s' "$SIGNING_KEY_PEM_B64" | base64 --decode >release-signing-key.pem
+          openssl pkeyutl -sign -rawin -inkey release-signing-key.pem \
+            -in dist/manifest.json -out dist/manifest.sig.raw
+          base64 --wrap=0 dist/manifest.sig.raw |
+            tr '+/' '-_' |
+            tr -d '=' >dist/manifest.sig
+          rm release-signing-key.pem dist/manifest.sig.raw
+      - name: Verify release signature fixture
+        env:
+          RELEASE_PUBLIC_KEY_PEM: ${{ vars.SIFT_RELEASE_PUBLIC_KEY_PEM }}
+        run: |
+          test -n "$RELEASE_PUBLIC_KEY_PEM"
+          printf '%s\n' "$RELEASE_PUBLIC_KEY_PEM" >release-public-key.pem
+          tr '_-' '/+' <dist/manifest.sig >dist/manifest.sig.b64
+          padding=$(( (4 - $(wc -c <dist/manifest.sig.b64) % 4) % 4 ))
+          for _ in $(seq 1 "$padding"); do printf '=' >>dist/manifest.sig.b64; done
+          base64 --decode dist/manifest.sig.b64 >dist/manifest.sig.raw
+          openssl pkeyutl -verify -rawin -pubin -inkey release-public-key.pem \
+            -in dist/manifest.json -sigfile dist/manifest.sig.raw
+          rm release-public-key.pem dist/manifest.sig.b64 dist/manifest.sig.raw
+      - name: Publish release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view "$RELEASE_TAG" >/dev/null 2>&1 ||
+            gh release create "$RELEASE_TAG" --verify-tag --title "$RELEASE_TAG"
+          gh release upload "$RELEASE_TAG" dist/* --clobber

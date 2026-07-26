@@ -761,6 +761,25 @@ mod tests {
     }
 
     #[test]
+    fn staging_rejects_digest_mismatch_and_oversized_artifacts() {
+        let directory = tempfile::tempdir().unwrap();
+        let (updater, _, mut manifest, artifact_bytes) = fixture(directory.path());
+        let staging_dir = updater.state_dir.join("staging");
+        ensure_private_dir(&staging_dir).unwrap();
+        let staging = staging_dir.join("tampered.part");
+        std::fs::write(&staging, b"tampered artifact").unwrap();
+        assert!(updater
+            .install_staging(&manifest, &manifest.targets[0], &staging)
+            .is_err());
+
+        manifest.targets[0].byte_length = updater.config.max_artifact_bytes + 1;
+        assert!(
+            validate_artifact(&manifest.targets[0], updater.config.max_artifact_bytes).is_err()
+        );
+        assert_ne!(std::fs::read(&staging).unwrap(), artifact_bytes);
+    }
+
+    #[test]
     fn container_mode_refuses_self_update() {
         let config = Config {
             mode: RuntimeMode::Container,

@@ -1,6 +1,6 @@
 # Phase H — Remote Development And Distribution
 
-Status: design complete; implementation not started.
+Status: implemented; release and SSH matrices are enforced in CI.
 
 This plan graduates ADR-021, refines ADR-016, and graduates ADR-015. It is the
 implementation contract for Phase H in `server-build-list-v2.md`.
