@@ -3,7 +3,7 @@
 This file keeps only current, load-bearing decisions. Reference material
 (feature checklist, Zed-lessons rationale) lives under `docs/legacy/`; the
 code-grounded ordered backlog is `docs/PLANS/server-build-list-v2.md`.
-Candidates ADR-011 through ADR-022 are listed there against their phase.
+Written and candidate ADRs are indexed there against their phase.
 
 Format is ADR-lite: **Context · Decision · Consequences.**
 
@@ -248,6 +248,145 @@ Clients and servers must retain range-aware codecs for every version they
 advertise, and the SDK gains a small shared handshake state before normal
 requests. Detailed wire and reconnect behavior is in
 `docs/PLANS/phase-h-remote-development.md`.
+
+---
+
+## ADR-022 — Provider Extensibility Uses A Versioned Out-Of-Process Driver RPC
+
+**Context.** PostgreSQL and SQL Server currently implement the locked ADR-017
+`Driver` trait, while public dispatch depends on a closed `Engine` enum,
+engine-specific connection unions, and `as_pg`/`as_mssql` downcasts. Adding an
+enum variant and downcast for every provider would make core releases the only
+way to extend Sift. Treating arbitrary providers as PostgreSQL or SQL Server
+would be worse: it would make clients infer unsupported capabilities and hide
+provider-specific correctness gaps. ODBC and JDBC offer breadth but also add
+driver-manager/JVM packaging, discovery, blocking, type, schema, cancellation,
+and fidelity problems that are unrelated to proving Sift's extension boundary.
+
+**Decision.** Phase I introduces immutable validated `ProviderId` and
+`DialectId` values, versioned provider descriptors, JSON Schemas for provider
+configuration and credential fields, and explicit capability families. Built-in
+PostgreSQL and SQL Server map to `sift/postgres` + `sift/postgresql` and
+`sift/sql-server` + `sift/tsql`. The existing `Engine` remains a protocol-v2
+compatibility hint for those built-ins; protocol v3 uses provider identity as
+the external dispatch key. Missing capabilities fail explicitly and are never
+inferred from a provider name.
+
+First-party PostgreSQL and SQL Server remain native in-process drivers during
+Phase I but register through the provider-neutral registry. Third-party drivers
+run as supervised local child processes. Driver RPC v1 uses bounded
+length-prefixed UTF-8 JSON over dedicated stdin/stdout, a mandatory compatible
+range and manifest-identity handshake, generation-scoped opaque handles,
+structured errors, absolute deadlines, and host-granted byte credit for result
+pages. Stdio is the only v1 transport; plugins cannot open a control listener
+or choose an alternate socket. JSON is the only v1 encoding.
+
+The logical RPC requires the ADR-017 core verbs: open, ping, schema, begin,
+commit, rollback, execute, cancel, and close. Optional behavior is callable
+only through negotiated, versioned capability families. Core continues to own
+public cursors, paging/spill, sessions, transactions, result references,
+timeouts, cancellation orchestration, quotas, and audit. A timed-out or
+protocol-violating process is canceled then killed; every handle from that
+process generation is invalidated. Discovery may retry, but queries, writes,
+and transactions are never replayed automatically.
+
+Connection profiles store provider ids, validated non-secret configuration,
+and opaque credential handles. Secret values travel only in the admitted RPC
+request, never in arguments, environment, metadata, logs, or audit. The first
+external provider is a purpose-built conformance fixture. ODBC/JDBC bridges,
+DSN/JAR/JVM discovery, and any automatic IDE-fidelity claim are deferred.
+
+**Consequences.** Sift can add providers without weakening the stable public
+contract or loading third-party libraries into the server. The provider RPC,
+SDK/schema artifacts, fault corpus, and certification matrix become public
+compatibility surfaces. JSON framing costs some throughput, accepted for v1 in
+exchange for inspectability and broad implementation support; a future encoding
+requires an explicitly negotiated RPC version. Built-ins and external
+providers share logical semantics without forcing proven in-process drivers
+through a new IPC path. Detailed message, credit, cancellation, and migration
+rules are in `docs/PLANS/phase-i-extensibility.md`.
+
+---
+
+## ADR-031 — Extensions Are Declarative-First, Capability-Gated, And Core-Governed
+
+**Context.** Drivers are only one extensibility need. Sift also needs connection
+tunnels, credential brokers, hooks, formats, SQL tooling, commands, governed
+agent tools, and future client contributions. An unrestricted plugin API could
+bypass the invariants that make the server the product: authorization, audit,
+secret isolation, durable shared state, quotas, and cancellation. Zed
+demonstrates useful extension ergonomics through a small versioned manifest,
+declarative contributions, a narrow procedural API, explicit capabilities,
+development overrides, and reviewed publication. Sift must adapt those ideas
+to an operator-owned, long-lived server.
+
+**Decision.** Every package has a strict versioned `sift-extension.toml`, an
+immutable `publisher/name` id, content hashes, target artifacts, compatibility
+ranges, contributions, requested capabilities, and provenance. Unknown v1
+manifest fields fail closed. Packages install content-addressed. Provenance is
+reported as bundled, verified, local, or development; a registry index never
+substitutes for verification of the exact package. Development overrides are
+local/personal by default and require an explicit instance-admin setting on
+hosted deployments.
+
+Most contributions are declarative and start no code. Third-party procedural
+server extensions are out of process by default and a v1 package has at most
+one supervised executable per target. Manifest discovery never requires
+starting that executable. Data-bearing executable contributions use separate
+tenant-scoped process generations; an extension process never receives multiple
+tenants' credentials or row data. The supervisor owns generation identity,
+handshake, health, deadlines, bounded logs, restart backoff, quarantine, drain,
+atomic activation, and rollback. It starts the exact self-contained artifact
+without a shell or inherited environment. Process isolation contains failure
+but is not called a sandbox; runtime records distinguish host-enforced,
+platform-sandboxed, and process-only isolation.
+
+Requested capabilities are inert until granted by an instance administrator.
+Effective permission is the intersection of the manifest request, instance
+policy, tenant allowlist, and per-operation authorization. Capabilities cover
+scoped database/network access, one-call secret delivery, extension storage,
+explicit filesystem/process/HTTP access, operation invocation, event
+publication, and tool registration. Tenant users may select allowed
+contributions but cannot install server code.
+
+Plugins cannot access metadata SQLite, arbitrary secret handles, raw routes,
+another plugin's storage, trusted-local identity, or untracked product
+resources. User-visible plugin work enters core through a namespaced extension
+operation with a manifest-locked read/execute-read/write/destructive/
+administrative classification and an audit-safe schema projection. Phase F
+authorization, connection policy, rate/quota admission, approval, deadline,
+cancellation, and audit run before dispatch. Plugins cannot mint approvals or
+weaken their classification.
+
+Core provides quota-bound namespaced opaque storage with revisions and declared
+migrations. Disable retains data. Uninstall removes code and grants but retains
+orphaned data; destructive purge is a separate audited admin action. Upgrades
+start a candidate generation beside the old for stateless checks, then block
+new work and drain/cancel old handles before staging storage migration. Package
+and versioned-storage pointers switch atomically only after health passes; no
+live handle migration is promised.
+
+Connection brokers, tunnels, and hooks participate in a deterministic
+core-owned pipeline and return validated leases or patches rather than mutating
+profiles directly. `sift mcp` exposes explicitly described, currently
+authorized tools through normal Sift sessions. Writes and destructive/admin
+actions require narrowly bound approval by default. Declarative client panels
+may reference registered operations and typed data but cannot ship arbitrary
+JavaScript or bypass server dispatch.
+
+Phase I reserves contribution identities for later SQL semantic and workspace
+contracts without invoking them before Phase K/L. A marketplace service,
+mandatory OS sandbox, Wasmtime tooling host, ODBC/JDBC bridges, and arbitrary
+client UI code remain reversible future work.
+
+**Consequences.** Extension ergonomics follow Zed's strongest patterns without
+copying a desktop trust model into the server. An installation remains useful
+and administrable with no optional plugin or registry connection. Native
+plugins remain operator-trusted where the OS cannot enforce their declared
+permissions, and Sift reports that honestly. Manifest, grant, operation,
+lifecycle, storage, MCP approval, and conformance contracts become
+load-bearing public surfaces. The complete scope and graduation matrix are in
+`docs/PLANS/phase-i-extensibility.md`.
 
 ---
 

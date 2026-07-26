@@ -1,8 +1,8 @@
 # Sift Core And Plugin Boundary
 
-Status: **planning note for incomplete phases.** This is input to the Phase I
-extension ADRs, not a locked decision and not a reason to reopen completed
-phases. Companion:
+Status: **historical design input.** Phase I decisions are now locked by
+ADR-022, ADR-031, and `docs/PLANS/phase-i-extensibility.md`. This note remains
+useful rationale and does not reopen completed phases. Companion:
 `docs/PLANS/ide-parity-and-provider-extensibility.md`.
 
 ## Purpose
@@ -143,7 +143,7 @@ executables. Packaging is separate from architectural ownership.
 ### Database connectivity
 
 - database providers beyond the explicitly selected first-party set;
-- ODBC and JDBC compatibility bridges;
+- future ODBC and JDBC compatibility bridges (explicitly beyond Phase I);
 - vendor-specific authentication helpers and cloud database discovery;
 - provider-specific bulk, notification, replication, or administrative tools
   not promoted into a stable generic capability;
@@ -259,8 +259,9 @@ does not learn provider secrets or plugin-specific relational schemas.
 The project should publish a capability matrix rather than imply that every
 plugin has first-party fidelity:
 
-- **Core compatible** — handshake and safety conformance only.
-- **Query capable** — connect, execute, page, cancel, transactions, and types.
+- **Compatible** — handshake and safety conformance only.
+- **Query capable** — connect, execute, page, cancel, close, and types.
+- **Transactional** — begin/commit/rollback and failure-state conformance.
 - **IDE capable** — deep schema, completion/dialect metadata, DDL, plans, edits,
   import/export, and invalidation.
 - **Sift certified** — maintained test corpus, fault isolation, performance,
@@ -272,16 +273,11 @@ providers and formats. Hosted operators decide which additional plugins are
 available to their tenants; ordinary users cannot install server code unless an
 explicit future policy grants that ability.
 
-## Phase I decisions to lock
+## Phase I decisions locked
 
-1. Exact mandatory core crate/process boundary.
-2. Which first-party components are static crates versus supervised sibling
-   processes.
-3. Plugin manifest, contribution ids, permissions, and trust states.
-4. Namespaced extension `Operation` and policy model.
-5. Plugin storage, migration, backup, and uninstall semantics.
-6. Capability and certification levels.
-7. Whether any plugin class may run in-process; default answer is no for
-   third-party server plugins.
-8. Which components ship in the standard distribution without becoming core.
-
+ADR-022, ADR-031, and `docs/PLANS/phase-i-extensibility.md` resolve the boundary
+questions above: built-in drivers remain native behind the provider-neutral
+registry; third-party server code is supervised out of process; manifest,
+identity, grants, operations, storage, lifecycle, and certification are
+versioned core contracts; and the standard bundle remains useful without
+optional extensions.

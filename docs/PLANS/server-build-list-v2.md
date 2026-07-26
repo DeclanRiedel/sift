@@ -40,6 +40,11 @@
   proxy daemon, protocol-v2 range negotiation, lifecycle modes, signed
   periodic update staging, readiness-gated activation/rollback, and release
   CI are implemented. See `docs/PLANS/phase-h-remote-development.md`.
+- **Phase I design is complete.** ADR-022 and ADR-031 lock provider identity,
+  Driver RPC v1, the manifest/capability/lifecycle boundary, namespaced
+  operations, storage, connection hooks, MCP governance, and declarative
+  client discovery. ODBC/JDBC bridges are explicitly deferred. See
+  `docs/PLANS/phase-i-extensibility.md`.
 
 ---
 
@@ -298,47 +303,48 @@ handshake.
 
 Goal: a strong, versioned plugin system for database providers, SQL tooling,
 automation, and connection-time hooks without forking or destabilizing the
-server. Detailed design input:
+server. The decision-complete contract is
+`docs/PLANS/phase-i-extensibility.md`; earlier inputs remain in
 `docs/PLANS/ide-parity-and-provider-extensibility.md` and
 `docs/PLANS/core-plugin-boundary.md`.
 
-- [ ] [Design] ADR-022 (candidate): driver extensibility — in-tree drivers
-      remain first-class native Rust implementations; third-party drivers run
-      out of process behind a language-neutral local RPC protocol. Optional
-      ODBC and JDBC bridges are plugins, never core runtime dependencies.
-- [ ] [Design] Extensible provider identity and capability discovery. Replace
-      external reliance on the closed `Engine` enum and accumulating
-      `as_pg`/`as_mssql` downcasts with a namespaced provider id, dialect id,
-      manifest, configuration schema, and negotiated capability families.
-- [ ] [Design] Driver RPC Protocol contract: version handshake, framing,
-      connection/transaction/cursor handles, streaming `Page` backpressure,
-      cancellation, structured errors, deadlines, health/restart, and
-      conformance fixtures. The proxy must preserve ADR-013 isolation.
-- [ ] [Design] General plugin manifest and lifecycle: contribution types,
-      protocol ranges, install provenance, checksums/signatures, permissions,
-      enable/disable/update policy, health, crash reporting, and
-      operator-visible trust. Third-party server code is out-of-process by
-      default; do not load arbitrary dynamic libraries into `sift-server`.
-- [ ] [Design] ADR-031: lock the mandatory-core, first-party-bundle, and
-      optional-plugin boundary, including forbidden plugin access, scoped host
-      capabilities, plugin storage, and provider certification levels.
-- [ ] [Design] Extension contribution points for drivers, tunnels, credential
-      brokers, hooks, import/export formats, dialect/analyzer packs, commands,
-      agent context providers, governed tools, and declarative client panels.
-- [ ] [Design] Namespaced extension operations. Every extension-triggered
-      user-visible action remains typed/audited and consumes central auth,
-      policy, rate, quota, timeout, cancellation, and secret boundaries.
-- [ ] [Design] MCP server surface (`sift mcp`): every `Operation` is a
-      tool; results are protocol types.
-- [ ] [Design] MCP governance layer (operation classification, per-
-      connection policy, approval flow for write/destructive ops); it consumes
-      the Phase F evaluator and must not create a second authorization model.
-- [ ] [Design] Connection hooks (`PreConnect`/`PostConnect`/etc); tunneling
-      for user DBs (SSH/SOCKS5/HTTP CONNECT/SSM); plugin/extension loading.
-- [ ] [Implement] Plugin supervisor + manifest registry; Driver RPC host and
-      SDK; first external-driver conformance fixture; optional bridge packaging
-      boundary; `sift mcp`; governance middleware; connection hooks; tunnel
-      profiles; contribution registry; extension management API.
+- [x] [Design] ADR-022: built-ins remain native behind a provider-neutral
+      registry; third-party providers use supervised Driver RPC v1 over
+      length-prefixed JSON stdio. ODBC/JDBC and automatic bridge discovery are
+      deferred.
+- [x] [Design] Provider identity and discovery: immutable namespaced provider,
+      dialect, extension, and contribution ids; protocol-v3 descriptors;
+      JSON-schema configuration; explicit versioned capability families; v2
+      remains built-in-only.
+- [x] [Design] Driver RPC v1: identity/version handshake, generation-scoped
+      handles, 16 MiB hard frame ceiling, host byte-credit backpressure,
+      structured errors, deadlines, cancel/kill, restart/quarantine, and a
+      hostile conformance corpus.
+- [x] [Design] ADR-031: strict manifest v1, content-addressed packages,
+      provenance/signatures, operator grants, honest isolation labels,
+      declarative-first contributions, lifecycle/update/rollback, and
+      forbidden plugin access.
+- [x] [Design] Core/bundle/plugin boundary and contribution points. Phase I
+      activates providers, connection pipeline contributions, commands/tools,
+      MCP, and discovery; Phase K/L own semantic/workspace contracts.
+- [x] [Design] Namespaced extension operations and storage. Manifest-locked
+      classifications consume Phase F policy, audit, rate, quota, timeout,
+      cancellation, and approval; uninstall retains data until explicit purge.
+- [x] [Design] MCP governance. `sift mcp` uses a normal authenticated session
+      and explicit tool descriptors; writes/destructive/admin actions require
+      narrowly bound approval by default.
+- [x] [Design] Deterministic connection pipeline for hooks, credential brokers,
+      and tunnel leases with reverse cleanup and no secret arguments/env/logs.
+- [x] [Design] Declarative client contribution descriptors only; no arbitrary
+      extension JavaScript or raw routes.
+- [ ] [Implement I0–I3] Contract crates, protocol v3, package registry,
+      supervisor, provider-neutral registry, and built-in adapters.
+- [ ] [Implement I4–I6] Driver RPC host/SDK + conformance provider,
+      namespaced operations/storage, and connection-pipeline fixtures.
+- [ ] [Implement I7–I8] Governed command/tool registry, approval records,
+      `sift mcp`, management APIs, and declarative client discovery.
+- [ ] [Implement I9] Fault/security matrices, compatibility/certification
+      artifacts, and operational documentation.
 - [ ] [Graduate] A plugin crash, timeout, protocol violation, secret-handling
       failure, or incompatible version cannot freeze or compromise the server;
       provider capability and compatibility matrices are public API artifacts.
@@ -474,7 +480,7 @@ configurations without abandoning thin clients or breaking remote topology.
 | ADR-019 | audit durability                                                      | Phase B | written                                                        |
 | ADR-020 | authorization model                                                   | Phase F | written                                                        |
 | ADR-021 | remote topology                                                       | Phase H | written; direct SSH bootstrap + persistent proxy daemon        |
-| ADR-022 | driver extensibility                                                  | Phase I | not written                                                    |
+| ADR-022 | driver extensibility                                                  | Phase I | written; provider ids + supervised JSON/stdio Driver RPC v1    |
 | ADR-023 | inline-edit conflict & row-identity model                             | Phase D | drafted in `docs/PLANS/inline-edit-dml.md`                     |
 | ADR-024 | search architecture (progressive schema index + bounded data fan-out) | Phase D | drafted in `docs/PLANS/schema-data-search.md`                  |
 | ADR-025 | execution-plan model (typed PlanNode + XML dep + ANALYZE-rollback)    | Phase D | drafted in `docs/PLANS/execution-plans.md`                     |
@@ -483,7 +489,7 @@ configurations without abandoning thin clients or breaking remote topology.
 | ADR-028 | server-derived operation capabilities                                 | Phase D | written                                                        |
 | ADR-029 | normalized CSV import                                                 | Phase D | written                                                        |
 | ADR-030 | instance-owned closed registration + hosted identity                  | Phase E | written                                                        |
-| ADR-031 | plugin manifest, isolation, permissions, and lifecycle                | Phase I | not written                                                    |
+| ADR-031 | plugin manifest, isolation, permissions, and lifecycle                | Phase I | written; declarative-first packages + core-governed operations |
 | ADR-032 | SQL semantic service and dialect-pack boundary                        | Phase K | not written                                                    |
 | ADR-033 | catalog graph, schema diff, and migration safety                      | Phase K | not written                                                    |
 | ADR-034 | server-owned or hybrid workspace and VCS topology                     | Phase L | not written                                                    |

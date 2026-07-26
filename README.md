@@ -33,6 +33,11 @@ Installed local and daemon releases start through `sift-launcher`, which
 health-checks staged updates, commits healthy candidates, and rolls back failed
 candidates before handing the server lifecycle to the caller.
 
+Phase I extensibility is decision-complete in
+`docs/PLANS/phase-i-extensibility.md`; implementation is ordered there from
+protocol/package contracts through Driver RPC, governance, MCP, and graduation.
+ODBC/JDBC compatibility bridges are deliberately outside that phase.
+
 ## The five goals this product wishes to achieve
 
 1. **The server is the product.** All product behavior lives in `sift-server`;

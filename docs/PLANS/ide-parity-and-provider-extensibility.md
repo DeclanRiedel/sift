@@ -103,15 +103,14 @@ bottleneck for third-party drivers.
 1. **First-party native drivers.** Important providers receive custom Rust
    implementations in-tree. They offer the best latency, cancellation,
    introspection, bulk paths, diagnostics, and release confidence.
-2. **Driver RPC plugins.** Other providers run out of process and implement a
-   language-neutral, versioned Sift Driver Protocol over local stdio or a local
-   socket. A plugin may be written in Rust, Go, Python, .NET, Java, or anything
-   else; Sift inherits none of those runtimes as a core dependency.
-3. **Optional compatibility bridges.** An ODBC bridge plugin can expose
-   installed ODBC drivers. A JDBC bridge plugin can expose JDBC providers for
-   users who explicitly install Java. Neither bridge ships in or is required by
-   the Sift server. Bridges trade fidelity and deployment simplicity for broad
-   reach and are not treated as equivalent to certified native drivers.
+2. **Driver RPC plugins.** Other providers run out of process and implement the
+   language-neutral, versioned Sift Driver RPC over local stdio. A plugin may
+   be written in any language; Sift inherits none of those runtimes as a core
+   dependency.
+3. **Deferred compatibility bridges.** ODBC/JDBC, DSN/JAR/JVM discovery, and
+   automatic IDE-fidelity claims are outside Phase I. A future bridge must use
+   Driver RPC and pass the same explicit capability/conformance gates rather
+   than receiving special treatment.
 
 ODBC is not a dependency-free universal answer. It avoids Java but depends on a
 platform driver manager, native vendor drivers, DSN/configuration behavior, and
@@ -143,10 +142,9 @@ closed engine downcasts with discovery:
 - conformance fixtures and certification levels so “loads” is not confused
   with “full IDE support.”
 
-The wire encoding is less important than the semantics. A length-delimited
-serde format over stdio is adequate initially and avoids committing to a large
-runtime. The design should permit a more efficient encoding later through
-handshake negotiation without changing the logical protocol.
+Driver RPC v1 uses length-prefixed UTF-8 JSON over stdio. Alternate local
+sockets and encodings require a future negotiated RPC version rather than
+speculative v1 switches.
 
 ### Engine identity and capability discovery
 
@@ -194,14 +192,13 @@ an audited core or namespaced extension `Operation`; authorization, rate and
 resource admission, secret handling, timeout, and cancellation remain owned by
 the server.
 
-## Decisions to lock in future ADRs
+## Decision status
 
-- Provider identity and capability model replacing closed dispatch at the
-  external boundary.
-- Driver RPC transport, framing, compatibility, and backpressure.
-- Plugin manifest, permissions, installation, trust, and update model.
-- Whether process isolation is mandatory for all third-party server plugins.
-- Namespaced extension operations and their audit/policy representation.
-- Server-owned or hybrid workspace and VCS topology.
-- Shared SQL semantic service and dialect-pack boundary.
-- Certification tiers for providers and extensions.
+ADR-022, ADR-031, and `docs/PLANS/phase-i-extensibility.md` now lock the Phase I
+provider identity, capability, Driver RPC, manifest, permissions, installation,
+trust, lifecycle, process isolation, namespaced operation, storage, MCP, and
+certification decisions.
+
+Server-owned versus hybrid workspace/VCS topology remains Phase L (ADR-034).
+The SQL semantic service and dialect-pack execution contract remains Phase K
+(ADR-032); Phase I reserves its contribution identity only.
