@@ -4,7 +4,8 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 pub use sift_extension_protocol::{
-    ContributionId, ExtensionId, HostCapabilityKind, OperationClassification, SegmentId,
+    ContributionContext, ContributionId, ExtensionId, HostCapabilityKind, OperationClassification,
+    SegmentId,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

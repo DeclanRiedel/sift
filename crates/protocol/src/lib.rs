@@ -11,6 +11,7 @@ pub const PROTOCOL_VERSION_NUMBER: u32 = 1;
 pub const PROTOCOL_VERSION: &str = "1";
 
 pub mod auth;
+pub mod automation;
 pub mod capability;
 pub mod column;
 pub mod completion;
@@ -49,6 +50,7 @@ pub use auth::{
     SshProxyAccessGrant, SshProxyCapabilityClaims, SshProxyCapabilityExchangeRequest,
     WebAuthResponse, WhoAmIResponse,
 };
+pub use automation::*;
 pub use capability::{OperationCapability, OperationCapabilityContext, OperationKind};
 pub use column::{
     EngineColumnFacets, MssqlColumnFacets, Nullability, PgColumnFacets, PrimitiveType,

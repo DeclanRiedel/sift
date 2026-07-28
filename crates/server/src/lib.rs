@@ -7,6 +7,7 @@
 
 pub mod authorization;
 pub mod autocomplete;
+pub mod automation;
 pub mod capability;
 pub mod config;
 pub mod connection_pipeline;

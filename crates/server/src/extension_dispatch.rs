@@ -45,6 +45,7 @@ pub struct ExtensionOperationDispatcher {
     correlation_counter: Arc<AtomicU64>,
 }
 
+#[derive(Clone)]
 pub struct DispatchContext {
     pub authorization: AuthorizationScope,
     pub principal_id: PrincipalId,
