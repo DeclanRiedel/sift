@@ -392,7 +392,7 @@ impl SessionStore {
             .clone()
     }
 
-    pub fn refresh_extension_providers(&self) -> ApiResult<()> {
+    pub fn refresh_extension_runtimes(&self) -> ApiResult<()> {
         let packages = self
             .package_registry()
             .ok_or(ApiError::MetadataUnavailable)?;
@@ -403,12 +403,21 @@ impl SessionStore {
             .unwrap()
             .clone()
             .ok_or(ApiError::MetadataUnavailable)?;
-        let providers =
-            crate::extension_runtime::installed_provider_runtimes(&packages, &metadata)?;
+        let runtimes =
+            crate::extension_runtime::installed_extension_runtimes(&packages, &metadata)?;
+        if let Some(tools) = self.tool_registry() {
+            tools
+                .dispatcher()
+                .replace(runtimes.actions)
+                .map_err(|error| ApiError::Internal(error.to_string()))?;
+            tools
+                .replace(runtimes.tools)
+                .map_err(|error| ApiError::Internal(error.to_string()))?;
+        }
         self.inner
             .registry
             .providers()
-            .replace_extensions(providers)?;
+            .replace_extensions(runtimes.providers)?;
         Ok(())
     }
 

@@ -11,7 +11,7 @@ use sift_extension_protocol::{
     OperationClassification, Request, RequestContext, ResponseResult, SegmentId, WireId,
 };
 use sift_metadata::{MetadataStore, NewOperationAudit, PrincipalId};
-use sift_plugin_host::SupervisedProcess;
+use sift_plugin_host::{SupervisedProcess, SupervisorError};
 use sift_protocol::{ExtensionOperation, InvokeExtensionResponse};
 
 use crate::authorization::{authorize_extension, AuthorizationDenial, AuthorizationScope};
@@ -28,7 +28,27 @@ pub struct ActionRegistration {
     pub output_schema: serde_json::Value,
     pub timeout: Duration,
     pub max_result_bytes: u64,
-    pub process: Arc<SupervisedProcess>,
+    pub invoker: Arc<dyn ActionInvoker>,
+}
+
+#[async_trait::async_trait]
+pub trait ActionInvoker: Send + Sync {
+    async fn request(
+        &self,
+        tenant_id: Option<i64>,
+        request: Request,
+    ) -> Result<sift_extension_protocol::Response, SupervisorError>;
+}
+
+#[async_trait::async_trait]
+impl ActionInvoker for SupervisedProcess {
+    async fn request(
+        &self,
+        _tenant_id: Option<i64>,
+        request: Request,
+    ) -> Result<sift_extension_protocol::Response, SupervisorError> {
+        SupervisedProcess::request(self, request).await
+    }
 }
 
 struct CompiledAction {
@@ -225,8 +245,8 @@ impl ExtensionOperationDispatcher {
         };
         let response = action
             .registration
-            .process
-            .request(request)
+            .invoker
+            .request(context.tenant_id, request)
             .await
             .map_err(|_| ExtensionDispatchError::InvocationFailed)?;
         let payload = match response.result {

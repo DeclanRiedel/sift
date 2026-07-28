@@ -49,11 +49,10 @@ impl RpcProvider {
         contribution_id: ContributionId,
         process: Arc<SupervisedProcess>,
     ) -> Result<Self, DriverError> {
-        let contribution_prefix = format!("{}/", descriptor.provider.provider_id);
-        if !contribution_id.as_str().starts_with(&contribution_prefix) {
+        if contribution_id.publisher() != descriptor.provider.provider_id.publisher() {
             return Err(DriverError::new(
                 Code::InvalidParameterValue,
-                "provider and contribution must belong to the same extension",
+                "provider and contribution must belong to the same publisher",
             ));
         }
         Ok(Self {

@@ -8,20 +8,23 @@ use std::{
     time::Duration,
 };
 
+use sha2::{Digest as _, Sha256};
 use sift_extension_protocol::{
-    ContributionId, ExtensionId, ExtensionManifest, LifecycleMode, WireId,
+    ContributionContext, ContributionId, ExtensionId, ExtensionManifest, LifecycleMode, Request,
+    Response, SegmentId, WireId,
 };
 use sift_metadata::{MetadataStore, SelectedExtensionPackage};
 use sift_plugin_host::{
     ExtensionPackageRegistry, ProcessSpec, SupervisedProcess, SupervisorLimits,
 };
 use sift_protocol::{
-    Code, DriverError, Engine, ExecuteRequest, ProviderCapability, ProviderDescriptor,
-    ProviderQuality, ProviderRef, SchemaScope, TxMode,
+    Code, DriverError, Engine, ExecuteRequest, ExtensionOperation, GovernedToolDescriptor,
+    ProviderCapability, ProviderDescriptor, ProviderQuality, ProviderRef, SchemaScope, TxMode,
 };
 use tokio::sync::Mutex;
 
 use crate::{
+    extension_dispatch::{ActionInvoker, ActionRegistration},
     registry::{
         ProviderConnectionHandle, ProviderOpenRequest, ProviderResultStream,
         ProviderTransactionHandle,
@@ -30,6 +33,8 @@ use crate::{
 };
 
 static NEXT_GENERATION: AtomicU64 = AtomicU64::new(1);
+
+type TenantProcessCell = Arc<tokio::sync::OnceCell<Arc<SupervisedProcess>>>;
 
 struct ExtensionProcessRuntime {
     extension_id: ExtensionId,
@@ -41,7 +46,31 @@ struct ExtensionProcessRuntime {
     granted_capabilities: Vec<String>,
     limits: SupervisorLimits,
     metadata: MetadataStore,
-    processes: Mutex<HashMap<Option<i64>, Arc<SupervisedProcess>>>,
+    processes: Mutex<HashMap<Option<i64>, TenantProcessCell>>,
+}
+
+struct RuntimeActionInvoker {
+    runtime: Arc<ExtensionProcessRuntime>,
+}
+
+#[async_trait::async_trait]
+impl ActionInvoker for RuntimeActionInvoker {
+    async fn request(
+        &self,
+        tenant_id: Option<i64>,
+        request: Request,
+    ) -> Result<Response, sift_plugin_host::SupervisorError> {
+        let process = self.runtime.process(tenant_id).await.map_err(|error| {
+            sift_plugin_host::SupervisorError::ProtocolViolation(error.to_string())
+        })?;
+        process.request(request).await
+    }
+}
+
+pub struct InstalledExtensionRuntimes {
+    pub providers: Vec<Arc<dyn DatabaseProvider>>,
+    pub actions: Vec<ActionRegistration>,
+    pub tools: Vec<GovernedToolDescriptor>,
 }
 
 impl ExtensionProcessRuntime {
@@ -58,34 +87,40 @@ impl ExtensionProcessRuntime {
                 ));
             }
         }
-        let mut processes = self.processes.lock().await;
-        if let Some(process) = processes.get(&tenant_id) {
-            return Ok(process.clone());
-        }
-        let generation = NEXT_GENERATION.fetch_add(1, Ordering::Relaxed);
-        let process = SupervisedProcess::start(
-            ProcessSpec {
-                executable: self.executable.clone(),
-                working_directory: self.working_directory.clone(),
-                extension_id: self.extension_id.clone(),
-                extension_version: self.extension_version.clone(),
-                manifest_sha256: self.manifest_sha256.clone(),
-                expected_contributions: self.expected_contributions.clone(),
-                generation: WireId::from_u128(u128::from(generation)),
-                granted_capabilities: self.granted_capabilities.clone(),
-            },
-            self.limits.clone(),
-        )
-        .await
-        .map_err(|error| {
-            DriverError::new(
-                Code::ConnectionFailed,
-                format!("extension process failed to start: {error}"),
-            )
-        })?;
-        let process = Arc::new(process);
-        processes.insert(tenant_id, process.clone());
-        Ok(process)
+        let process = {
+            let mut processes = self.processes.lock().await;
+            processes
+                .entry(tenant_id)
+                .or_insert_with(|| Arc::new(tokio::sync::OnceCell::new()))
+                .clone()
+        };
+        process
+            .get_or_try_init(|| async {
+                let generation = NEXT_GENERATION.fetch_add(1, Ordering::Relaxed);
+                SupervisedProcess::start(
+                    ProcessSpec {
+                        executable: self.executable.clone(),
+                        working_directory: self.working_directory.clone(),
+                        extension_id: self.extension_id.clone(),
+                        extension_version: self.extension_version.clone(),
+                        manifest_sha256: self.manifest_sha256.clone(),
+                        expected_contributions: self.expected_contributions.clone(),
+                        generation: WireId::from_u128(u128::from(generation)),
+                        granted_capabilities: self.granted_capabilities.clone(),
+                    },
+                    self.limits.clone(),
+                )
+                .await
+                .map(Arc::new)
+                .map_err(|error| {
+                    DriverError::new(
+                        Code::ConnectionFailed,
+                        format!("extension process failed to start: {error}"),
+                    )
+                })
+            })
+            .await
+            .cloned()
     }
 }
 
@@ -233,11 +268,13 @@ impl DatabaseProvider for TenantScopedRpcProvider {
     }
 }
 
-pub fn installed_provider_runtimes(
+pub fn installed_extension_runtimes(
     registry: &ExtensionPackageRegistry,
     metadata: &MetadataStore,
-) -> Result<Vec<Arc<dyn DatabaseProvider>>, DriverError> {
+) -> Result<InstalledExtensionRuntimes, DriverError> {
     let mut providers = Vec::new();
+    let mut actions = Vec::new();
+    let mut tools = Vec::new();
     for package in metadata
         .selected_extension_packages()
         .map_err(metadata_error)?
@@ -247,7 +284,7 @@ pub fn installed_provider_runtimes(
         }
         let manifest: ExtensionManifest =
             serde_json::from_str(&package.manifest_json).map_err(protocol_error)?;
-        if manifest.contributions.database_provider.is_empty() {
+        if manifest.artifacts.is_empty() {
             continue;
         }
         let root = registry
@@ -324,6 +361,61 @@ pub fn installed_provider_runtimes(
                 runtime: runtime.clone(),
             }) as Arc<dyn DatabaseProvider>);
         }
+        for (kind, contribution) in manifest
+            .contributions
+            .command
+            .iter()
+            .map(|contribution| ("command", contribution))
+            .chain(
+                manifest
+                    .contributions
+                    .governed_tool
+                    .iter()
+                    .map(|contribution| ("governed_tool", contribution)),
+            )
+        {
+            let contribution_id =
+                ContributionId::new(format!("{}/{kind}/{}", manifest.id, contribution.id))
+                    .map_err(|error| protocol_error(error.to_string()))?;
+            let input_schema = load_schema(registry, &package, &contribution.input_schema)?;
+            let output_schema = load_schema(registry, &package, &contribution.output_schema)?;
+            let operation = ExtensionOperation {
+                extension_id: manifest.id.clone(),
+                contribution_id: contribution_id.clone(),
+                action: contribution.action.clone(),
+                classification: contribution.classification,
+                target_kind: target_kind(&contribution.required_context)?,
+                target_id: None,
+                sanitized_arguments: BTreeMap::new(),
+            };
+            actions.push(ActionRegistration {
+                extension_id: manifest.id.clone(),
+                contribution_id: contribution_id.clone(),
+                action: contribution.action.clone(),
+                classification: contribution.classification,
+                input_schema: input_schema.clone(),
+                output_schema: output_schema.clone(),
+                timeout: Duration::from_millis(u64::from(contribution.timeout_ms)),
+                max_result_bytes: contribution.max_result_bytes,
+                invoker: Arc::new(RuntimeActionInvoker {
+                    runtime: runtime.clone(),
+                }),
+            });
+            if kind == "governed_tool" {
+                tools.push(GovernedToolDescriptor {
+                    id: governed_tool_id(&contribution_id, &contribution.action),
+                    title: contribution.id.to_string(),
+                    description: manifest.description.clone(),
+                    operation,
+                    input_schema,
+                    output_schema,
+                    required_context: contribution.required_context.clone(),
+                    mcp_exposable: contribution.mcp_exposable,
+                    schedulable: contribution.schedulable,
+                    interactive: contribution.interactive,
+                });
+            }
+        }
         if manifest.lifecycle.mode == LifecycleMode::Eager {
             tracing::debug!(
                 extension_id = %manifest.id,
@@ -331,7 +423,32 @@ pub fn installed_provider_runtimes(
             );
         }
     }
-    Ok(providers)
+    Ok(InstalledExtensionRuntimes {
+        providers,
+        actions,
+        tools,
+    })
+}
+
+fn governed_tool_id(contribution_id: &ContributionId, action: &SegmentId) -> String {
+    let readable = format!("{}.{}", contribution_id.as_str().replace('/', "."), action);
+    if readable.len() <= 128 {
+        return readable;
+    }
+    let digest = Sha256::digest(readable.as_bytes());
+    format!("sift.extension.{digest:x}")
+}
+
+fn target_kind(contexts: &[ContributionContext]) -> Result<SegmentId, DriverError> {
+    let value = match contexts.last() {
+        None | Some(ContributionContext::Instance) => "instance",
+        Some(ContributionContext::Tenant) => "tenant",
+        Some(ContributionContext::Room) => "room",
+        Some(ContributionContext::Profile) => "profile",
+        Some(ContributionContext::Connection) => "connection",
+        Some(ContributionContext::Document) => "document",
+    };
+    SegmentId::new(value).map_err(|error| protocol_error(error.to_string()))
 }
 
 fn load_schema(
@@ -399,6 +516,25 @@ mod tests {
     use super::*;
     use sift_metadata::{secrets::MemorySecretStore, UpdateExtensionSelection};
     use sift_protocol::{ExtensionIsolation, ExtensionLifecycleState};
+
+    #[test]
+    fn governed_tool_ids_are_mcp_safe_and_bounded() {
+        let ordinary = ContributionId::new("acme/conformance/governed_tool/inspect").unwrap();
+        let action = SegmentId::new("run").unwrap();
+        assert_eq!(
+            governed_tool_id(&ordinary, &action),
+            "acme.conformance.governed_tool.inspect.run"
+        );
+
+        let segment = "a".repeat(45);
+        let long =
+            ContributionId::new(format!("{segment}/{segment}/governed_tool/{segment}")).unwrap();
+        let id = governed_tool_id(&long, &action);
+        assert!(id.len() <= 128);
+        assert!(id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.')));
+    }
 
     #[tokio::test]
     async fn selected_provider_is_discovered_but_tenant_start_is_deny_by_default() {
@@ -476,13 +612,17 @@ capabilities = ["driver.core@1"]
             })
             .unwrap();
 
-        let providers = installed_provider_runtimes(&registry, &metadata).unwrap();
-        assert_eq!(providers.len(), 1);
+        let runtimes = installed_extension_runtimes(&registry, &metadata).unwrap();
+        assert_eq!(runtimes.providers.len(), 1);
         assert_eq!(
-            providers[0].descriptor().provider.provider_id.as_str(),
+            runtimes.providers[0]
+                .descriptor()
+                .provider
+                .provider_id
+                .as_str(),
             "acme/conformance"
         );
-        let result = providers[0]
+        let result = runtimes.providers[0]
             .open(ProviderOpenRequest {
                 configuration: serde_json::json!({}),
                 credentials: HashMap::new(),

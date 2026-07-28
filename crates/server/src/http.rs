@@ -3563,7 +3563,7 @@ async fn update_extension_selection(
         quarantine_reason: None,
         expected_revision: request.expected_revision,
     })?;
-    state.sessions.refresh_extension_providers()?;
+    state.sessions.refresh_extension_runtimes()?;
     record_extension_admin(
         &state,
         auth.principal_id,
@@ -3596,7 +3596,7 @@ async fn update_extension_grants(
             .collect(),
         expected_revision: request.expected_revision,
     })?;
-    state.sessions.refresh_extension_providers()?;
+    state.sessions.refresh_extension_runtimes()?;
     record_extension_admin(
         &state,
         auth.principal_id,
@@ -3646,7 +3646,7 @@ async fn rollback_extension(
     let id = extension_id(&publisher, &name)?;
     let metadata = metadata_store_cloned(&state)?;
     metadata.rollback_extension_selection(id.as_str(), request.expected_revision)?;
-    state.sessions.refresh_extension_providers()?;
+    state.sessions.refresh_extension_runtimes()?;
     record_extension_admin(
         &state,
         auth.principal_id,
@@ -3667,7 +3667,7 @@ async fn uninstall_extension(
     let id = extension_id(&publisher, &name)?;
     let metadata = metadata_store_cloned(&state)?;
     metadata.uninstall_extension(id.as_str(), request.expected_revision)?;
-    state.sessions.refresh_extension_providers()?;
+    state.sessions.refresh_extension_runtimes()?;
     record_extension_admin(
         &state,
         auth.principal_id,
