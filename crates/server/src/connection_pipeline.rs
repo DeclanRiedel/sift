@@ -207,6 +207,7 @@ pub async fn open_connection_pipeline(
         .open(ProviderOpenRequest {
             configuration: request.configuration.clone(),
             credentials: request.credentials,
+            tenant_id: request.tenant_id,
         })
         .await
     {

@@ -69,6 +69,7 @@ pub trait DatabaseProvider: Send + Sync {
 pub struct ProviderOpenRequest {
     pub configuration: serde_json::Value,
     pub credentials: HashMap<String, Vec<u8>>,
+    pub tenant_id: Option<i64>,
 }
 
 #[derive(Debug, Clone)]
@@ -482,6 +483,7 @@ impl RuntimeDriver {
         &self,
         configuration: &serde_json::Value,
         credentials: &HashMap<String, Vec<u8>>,
+        tenant_id: Option<i64>,
     ) -> Result<RuntimeConnectionHandle, DriverError> {
         match self {
             Self::Builtin { driver, .. } => {
@@ -510,6 +512,7 @@ impl RuntimeDriver {
                 .open(ProviderOpenRequest {
                     configuration: configuration.clone(),
                     credentials: credentials.clone(),
+                    tenant_id,
                 })
                 .await
                 .map(RuntimeConnectionHandle::External),
@@ -962,6 +965,73 @@ impl ProviderRegistry {
                         format!("duplicate built-in engine `{engine}`"),
                     ));
                 }
+            }
+            let generation = self.next_generation.fetch_add(1, Ordering::Relaxed);
+            next.providers.insert(
+                provider_id,
+                RegisteredProvider {
+                    provider,
+                    generation,
+                },
+            );
+        }
+        self.snapshot.store(Arc::new(next));
+        Ok(())
+    }
+
+    pub fn register_or_replace(
+        &self,
+        provider: Arc<dyn DatabaseProvider>,
+    ) -> Result<(), DriverError> {
+        let _guard = self
+            .mutation
+            .lock()
+            .expect("provider mutation lock poisoned");
+        let mut next = (*self.snapshot.load_full()).clone();
+        let provider_id = provider.descriptor().provider.provider_id.clone();
+        if provider_id.is_first_party() && next.providers.contains_key(&provider_id) {
+            return Err(DriverError::new(
+                Code::AuthFailed,
+                "extensions cannot replace a first-party provider",
+            ));
+        }
+        let generation = self.next_generation.fetch_add(1, Ordering::Relaxed);
+        next.providers.insert(
+            provider_id,
+            RegisteredProvider {
+                provider,
+                generation,
+            },
+        );
+        self.snapshot.store(Arc::new(next));
+        Ok(())
+    }
+
+    pub fn replace_extensions(
+        &self,
+        providers: impl IntoIterator<Item = Arc<dyn DatabaseProvider>>,
+    ) -> Result<(), DriverError> {
+        let _guard = self
+            .mutation
+            .lock()
+            .expect("provider mutation lock poisoned");
+        let current = self.snapshot.load_full();
+        let mut next = ProviderSnapshot {
+            providers: current
+                .providers
+                .iter()
+                .filter(|(_, registered)| registered.provider.legacy_driver().is_some())
+                .map(|(id, registered)| (id.clone(), registered.clone()))
+                .collect(),
+            legacy: current.legacy.clone(),
+        };
+        for provider in providers {
+            let provider_id = provider.descriptor().provider.provider_id.clone();
+            if provider_id.is_first_party() || next.providers.contains_key(&provider_id) {
+                return Err(DriverError::new(
+                    Code::AuthFailed,
+                    format!("extension provider id `{provider_id}` is reserved or duplicated"),
+                ));
             }
             let generation = self.next_generation.fetch_add(1, Ordering::Relaxed);
             next.providers.insert(

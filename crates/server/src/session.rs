@@ -392,6 +392,26 @@ impl SessionStore {
             .clone()
     }
 
+    pub fn refresh_extension_providers(&self) -> ApiResult<()> {
+        let packages = self
+            .package_registry()
+            .ok_or(ApiError::MetadataUnavailable)?;
+        let metadata = self
+            .inner
+            .authorization_store
+            .read()
+            .unwrap()
+            .clone()
+            .ok_or(ApiError::MetadataUnavailable)?;
+        let providers =
+            crate::extension_runtime::installed_provider_runtimes(&packages, &metadata)?;
+        self.inner
+            .registry
+            .providers()
+            .replace_extensions(providers)?;
+        Ok(())
+    }
+
     /// Set the per-request driver deadline. A zero duration disables the
     /// bound (driver calls run to completion). Called by the server at
     /// startup with `config.timeouts.request_secs`.
@@ -1081,7 +1101,11 @@ impl SessionStore {
             } => Some((*principal_id, *tenant_id, *profile_id)),
             ConnectionProvenance::TrustedLocal => None,
         };
-        let handle = driver.open(&configuration, &credentials).await?;
+        let tenant_id = match &provenance {
+            ConnectionProvenance::Managed { tenant_id, .. } => Some(tenant_id.0),
+            ConnectionProvenance::TrustedLocal => None,
+        };
+        let handle = driver.open(&configuration, &credentials, tenant_id).await?;
         let info = {
             let Some(session) = self.inner.sessions.get(&session_id) else {
                 driver.close(handle).await?;
@@ -1635,7 +1659,7 @@ impl SessionStore {
         session_id: SessionId,
         conn_id: ConnectionId,
     ) -> ApiResult<RuntimeConnectionHandle> {
-        let (driver, configuration, credentials, old_handle) = {
+        let (driver, configuration, credentials, tenant_id, old_handle) = {
             let session = self
                 .inner
                 .sessions
@@ -1649,13 +1673,17 @@ impl SessionStore {
                 entry.driver.clone(),
                 entry.configuration.clone(),
                 entry.credentials.clone(),
+                match &entry.provenance {
+                    ConnectionProvenance::Managed { tenant_id, .. } => Some(tenant_id.0),
+                    ConnectionProvenance::TrustedLocal => None,
+                },
                 entry.handle.clone(),
             )
         };
         let opener = driver.clone();
         let new_handle = self
             .run_bounded("reconnect", async move {
-                opener.open(&configuration, &credentials).await
+                opener.open(&configuration, &credentials, tenant_id).await
             })
             .await?;
         self.with_session(&session_id, |s| {

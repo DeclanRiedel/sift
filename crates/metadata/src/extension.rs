@@ -578,6 +578,29 @@ impl MetadataStore {
         Ok(revision)
     }
 
+    pub fn extension_tenant_allowed(&self, extension_id: &str, tenant_id: i64) -> Result<bool> {
+        let conn = self.conn()?;
+        conn.query_row(
+            "SELECT allowed FROM extension_tenant_allowlist
+             WHERE extension_id = ?1 AND tenant_id = ?2",
+            params![extension_id, tenant_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map(|allowed| allowed.unwrap_or(false))
+        .map_err(Into::into)
+    }
+
+    pub fn extension_grants(&self, extension_id: &str) -> Result<Vec<String>> {
+        let conn = self.conn()?;
+        let mut statement = conn.prepare(
+            "SELECT capability FROM extension_grant
+             WHERE extension_id = ?1 ORDER BY capability",
+        )?;
+        let grants = super::rows(statement.query_map([extension_id], |row| row.get(0))?);
+        grants
+    }
+
     pub fn rollback_extension_selection(
         &self,
         extension_id: &str,

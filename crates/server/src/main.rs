@@ -146,6 +146,7 @@ async fn main() -> anyhow::Result<()> {
     ));
     if let Some(store) = &metadata {
         sessions.set_audit_store(store.clone());
+        sessions.set_authorization_store(store.clone());
         let package_registry = sift_plugin_host::ExtensionPackageRegistry::new(
             cfg.runtime_state_dir().join("extensions"),
             sift_plugin_host::PackageLimits::default(),
@@ -160,6 +161,7 @@ async fn main() -> anyhow::Result<()> {
         }
         let package_registry = std::sync::Arc::new(package_registry);
         sessions.set_package_registry(package_registry);
+        sessions.refresh_extension_providers()?;
         let metadata = std::sync::Arc::new(store.clone());
         let dispatcher =
             sift_server::extension_dispatch::ExtensionOperationDispatcher::new(metadata.clone());

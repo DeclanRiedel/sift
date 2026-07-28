@@ -253,6 +253,21 @@ impl ExtensionPackageRegistry {
             .package_path(&selected.selected_archive_sha256)
             .is_some())
     }
+
+    pub fn package_root(&self, archive_sha256: &str) -> Result<PathBuf, RegistryError> {
+        if let Some(root) = self
+            .development
+            .read()
+            .expect("development override registry poisoned")
+            .get(archive_sha256)
+            .cloned()
+        {
+            return Ok(root);
+        }
+        self.packages
+            .package_path(archive_sha256)
+            .ok_or_else(|| PackageError::ImmutableCollision.into())
+    }
 }
 
 fn validate_development_manifest(
