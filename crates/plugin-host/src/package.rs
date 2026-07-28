@@ -10,7 +10,8 @@ use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use semver::Version;
 use sha2::{Digest, Sha256};
 use sift_extension_protocol::{
-    ExtensionManifest, LockedFile, PackageLock, DRIVER_RPC_VERSION, EXTENSION_RPC_VERSION,
+    ActionContribution, ExtensionManifest, GenericContribution, LockedFile, PackageLock,
+    DRIVER_RPC_VERSION, EXTENSION_RPC_VERSION,
 };
 use thiserror::Error;
 use zip::ZipArchive;
@@ -19,6 +20,8 @@ pub const MANIFEST_PATH: &str = "sift-extension.toml";
 pub const LOCK_PATH: &str = "sift-extension.lock";
 pub const SIGNATURE_PATH: &str = "sift-extension.sig";
 const MAX_CONTROL_FILE_BYTES: u64 = 1024 * 1024;
+const MAX_SCHEMA_BYTES: u64 = 256 * 1024;
+const MAX_SCHEMA_DEPTH: usize = 64;
 
 #[derive(Debug, Clone)]
 pub struct PackageLimits {
@@ -181,6 +184,7 @@ impl PackageValidator {
         )
         .map_err(|error| PackageError::InvalidManifest(error.to_string()))?;
         validate_manifest(&manifest, &lock)?;
+        validate_manifest_schemas(archive, &entries, &manifest, &lock)?;
 
         Ok(ValidatedPackage {
             archive_sha256,
@@ -574,6 +578,301 @@ fn validate_manifest(manifest: &ExtensionManifest, lock: &PackageLock) -> Result
     Ok(())
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SchemaKind {
+    Configuration,
+    Credential,
+}
+
+fn validate_manifest_schemas<R: Read + Seek>(
+    archive: &mut ZipArchive<R>,
+    entries: &BTreeMap<String, IndexedEntry>,
+    manifest: &ExtensionManifest,
+    lock: &PackageLock,
+) -> Result<(), PackageError> {
+    let mut roots = Vec::new();
+    for contribution in &manifest.contributions.database_provider {
+        roots.push((
+            contribution.config_schema.as_str(),
+            SchemaKind::Configuration,
+        ));
+        roots.push((
+            contribution.credential_schema.as_str(),
+            SchemaKind::Credential,
+        ));
+    }
+    for contribution in manifest
+        .contributions
+        .command
+        .iter()
+        .chain(&manifest.contributions.governed_tool)
+    {
+        add_action_schemas(&mut roots, contribution);
+    }
+    for contribution in generic_contributions(manifest) {
+        add_generic_schema(&mut roots, contribution);
+    }
+
+    let locked: BTreeSet<_> = lock.files.iter().map(|file| file.path.as_str()).collect();
+    let mut schemas = BTreeMap::new();
+    let mut kinds = BTreeMap::new();
+    let mut pending: Vec<_> = roots
+        .into_iter()
+        .map(|(path, kind)| (path.to_owned(), kind))
+        .collect();
+    while let Some((path, kind)) = pending.pop() {
+        let path = normalize_path(&path)?;
+        if !locked.contains(path.as_str()) {
+            return Err(PackageError::InvalidManifest(format!(
+                "schema {path} is not declared in the package lock"
+            )));
+        }
+        if entries
+            .get(&path)
+            .map_or(true, |entry| entry.size > MAX_SCHEMA_BYTES)
+        {
+            return Err(PackageError::InvalidManifest(format!(
+                "schema {path} is missing or exceeds {MAX_SCHEMA_BYTES} bytes"
+            )));
+        }
+        if let Some(previous) = kinds.insert(path.clone(), kind) {
+            if previous != kind {
+                return Err(PackageError::InvalidManifest(format!(
+                    "schema {path} cannot be both configuration and credential schema"
+                )));
+            }
+        }
+        if schemas.contains_key(&path) {
+            continue;
+        }
+        let bytes = read_indexed(archive, entries, &path)?
+            .ok_or_else(|| PackageError::InvalidManifest(format!("schema {path} is missing")))?;
+        let schema: serde_json::Value = serde_json::from_slice(&bytes).map_err(|error| {
+            PackageError::InvalidManifest(format!("schema {path} is invalid JSON: {error}"))
+        })?;
+        validate_schema_node(&schema, kind, 0)?;
+        for reference in schema_references(&schema) {
+            if let Some(referenced_path) = resolve_schema_reference(&path, reference)? {
+                pending.push((referenced_path, kind));
+            }
+        }
+        schemas.insert(path, schema);
+    }
+
+    let retriever = PackageSchemaRetriever {
+        schemas: schemas
+            .iter()
+            .map(|(path, schema)| (schema_uri(path), schema.clone()))
+            .collect(),
+    };
+    for (path, schema) in &schemas {
+        jsonschema::options()
+            .with_draft(jsonschema::Draft::Draft202012)
+            .with_base_uri(schema_uri(path))
+            .with_retriever(retriever.clone())
+            .build(schema)
+            .map_err(|error| {
+                PackageError::InvalidManifest(format!(
+                    "schema {path} is not valid Draft 2020-12: {error}"
+                ))
+            })?;
+    }
+    Ok(())
+}
+
+fn add_action_schemas<'a>(
+    roots: &mut Vec<(&'a str, SchemaKind)>,
+    contribution: &'a ActionContribution,
+) {
+    roots.push((
+        contribution.input_schema.as_str(),
+        SchemaKind::Configuration,
+    ));
+    roots.push((
+        contribution.output_schema.as_str(),
+        SchemaKind::Configuration,
+    ));
+}
+
+fn add_generic_schema<'a>(
+    roots: &mut Vec<(&'a str, SchemaKind)>,
+    contribution: &'a GenericContribution,
+) {
+    if let Some(schema) = &contribution.config_schema {
+        roots.push((schema, SchemaKind::Configuration));
+    }
+}
+
+fn generic_contributions(
+    manifest: &ExtensionManifest,
+) -> impl Iterator<Item = &GenericContribution> {
+    manifest
+        .contributions
+        .tunnel_provider
+        .iter()
+        .chain(&manifest.contributions.credential_broker)
+        .chain(&manifest.contributions.connection_hook)
+        .chain(&manifest.contributions.import_format)
+        .chain(&manifest.contributions.export_format)
+        .chain(&manifest.contributions.dialect_pack)
+        .chain(&manifest.contributions.agent_context)
+        .chain(&manifest.contributions.client_panel)
+}
+
+fn validate_schema_node(
+    value: &serde_json::Value,
+    kind: SchemaKind,
+    depth: usize,
+) -> Result<(), PackageError> {
+    if depth > MAX_SCHEMA_DEPTH {
+        return Err(PackageError::InvalidManifest(
+            "schema exceeds the validation depth limit".into(),
+        ));
+    }
+    match value {
+        serde_json::Value::Object(object) => {
+            if let Some(id) = object.get("$id").and_then(serde_json::Value::as_str) {
+                if !id.starts_with('#') {
+                    return Err(PackageError::InvalidManifest(
+                        "schema $id may only be a local fragment".into(),
+                    ));
+                }
+            }
+            if let Some(annotation) = object.get("x-sift-secret") {
+                if kind != SchemaKind::Credential || annotation != &serde_json::Value::Bool(true) {
+                    return Err(PackageError::InvalidManifest(
+                        "x-sift-secret is only valid as true in credential schemas".into(),
+                    ));
+                }
+            }
+            if let Some(properties) = object
+                .get("properties")
+                .and_then(serde_json::Value::as_object)
+            {
+                for (name, property) in properties {
+                    if secret_shaped_name(name) {
+                        let marked = property
+                            .get("x-sift-secret")
+                            .and_then(serde_json::Value::as_bool)
+                            == Some(true);
+                        match kind {
+                            SchemaKind::Configuration => {
+                                return Err(PackageError::InvalidManifest(format!(
+                                    "secret-shaped field `{name}` is forbidden in configuration schemas"
+                                )));
+                            }
+                            SchemaKind::Credential if !marked => {
+                                return Err(PackageError::InvalidManifest(format!(
+                                    "credential field `{name}` must set x-sift-secret = true"
+                                )));
+                            }
+                            SchemaKind::Credential => {}
+                        }
+                    }
+                }
+            }
+            for child in object.values() {
+                validate_schema_node(child, kind, depth + 1)?;
+            }
+        }
+        serde_json::Value::Array(values) => {
+            for child in values {
+                validate_schema_node(child, kind, depth + 1)?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn schema_references(schema: &serde_json::Value) -> Vec<&str> {
+    let mut references = Vec::new();
+    collect_schema_references(schema, &mut references);
+    references
+}
+
+fn collect_schema_references<'a>(value: &'a serde_json::Value, output: &mut Vec<&'a str>) {
+    match value {
+        serde_json::Value::Object(object) => {
+            if let Some(reference) = object.get("$ref").and_then(serde_json::Value::as_str) {
+                output.push(reference);
+            }
+            for child in object.values() {
+                collect_schema_references(child, output);
+            }
+        }
+        serde_json::Value::Array(values) => {
+            for child in values {
+                collect_schema_references(child, output);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn resolve_schema_reference(source: &str, reference: &str) -> Result<Option<String>, PackageError> {
+    if reference.starts_with('#') {
+        return Ok(None);
+    }
+    let path = reference.split('#').next().unwrap_or_default();
+    if path.is_empty()
+        || path.starts_with('/')
+        || path.contains(':')
+        || path.contains('?')
+        || path.contains('%')
+        || path.contains('\\')
+    {
+        return Err(PackageError::InvalidManifest(format!(
+            "schema {source} contains forbidden reference `{reference}`"
+        )));
+    }
+    let parent = Path::new(source).parent().unwrap_or_else(|| Path::new(""));
+    let joined = parent.join(path);
+    let joined = joined.to_str().ok_or_else(|| {
+        PackageError::InvalidManifest(format!("schema {source} has a non-UTF-8 reference"))
+    })?;
+    normalize_path(joined).map(Some)
+}
+
+fn secret_shaped_name(name: &str) -> bool {
+    let normalized: String = name
+        .chars()
+        .filter(|character| character.is_ascii_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect();
+    [
+        "password",
+        "passwd",
+        "secret",
+        "token",
+        "apikey",
+        "privatekey",
+    ]
+    .iter()
+    .any(|shape| normalized.contains(shape))
+}
+
+fn schema_uri(path: &str) -> String {
+    format!("sift-package:///{path}")
+}
+
+#[derive(Clone)]
+struct PackageSchemaRetriever {
+    schemas: BTreeMap<String, serde_json::Value>,
+}
+
+impl jsonschema::Retrieve for PackageSchemaRetriever {
+    fn retrieve(
+        &self,
+        uri: &jsonschema::Uri<String>,
+    ) -> Result<serde_json::Value, Box<dyn std::error::Error + Send + Sync>> {
+        self.schemas
+            .get(uri.as_str())
+            .cloned()
+            .ok_or_else(|| format!("package schema not found: {uri}").into())
+    }
+}
+
 fn extract_verified(
     archive_path: &Path,
     destination: &Path,
@@ -727,6 +1026,48 @@ driver_rpc = { minimum = 1, maximum = 1 }
         archive.finish().unwrap();
     }
 
+    fn build_provider_package(path: &Path, configuration_schema: &str) {
+        let manifest = format!(
+            r#"{MANIFEST}
+[[contributions.database_provider]]
+id = "example"
+provider_id = "acme/example"
+dialect_id = "acme/sql"
+config_schema = "z-config.json"
+credential_schema = "z-credential.json"
+"#
+        );
+        let credential_schema =
+            r#"{"type":"object","properties":{"password":{"type":"string","x-sift-secret":true}}}"#;
+        let files = [
+            (MANIFEST_PATH, manifest.as_bytes()),
+            ("z-config.json", configuration_schema.as_bytes()),
+            ("z-credential.json", credential_schema.as_bytes()),
+        ];
+        let lock = PackageLock {
+            manifest_sha256: hash_reader(manifest.as_bytes()).unwrap().0,
+            files: files
+                .iter()
+                .map(|(path, bytes)| LockedFile {
+                    path: (*path).into(),
+                    sha256: hash_reader(*bytes).unwrap().0,
+                    byte_length: bytes.len() as u64,
+                })
+                .collect(),
+        };
+        let lock_bytes = canonical_lock(&lock).unwrap();
+        let mut archive = zip::ZipWriter::new(File::create(path).unwrap());
+        let options =
+            SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+        for (file_path, bytes) in files {
+            archive.start_file(file_path, options).unwrap();
+            archive.write_all(bytes).unwrap();
+        }
+        archive.start_file(LOCK_PATH, options).unwrap();
+        archive.write_all(lock_bytes.as_bytes()).unwrap();
+        archive.finish().unwrap();
+    }
+
     #[test]
     fn validates_signed_package_before_installing_immutable_bytes() {
         let temp = tempfile::tempdir().unwrap();
@@ -808,5 +1149,83 @@ driver_rpc = { minimum = 1, maximum = 1 }
         let removed = store.reconcile_staging().unwrap();
         assert_eq!(removed, vec![abandoned.clone()]);
         assert!(!abandoned.exists());
+    }
+
+    #[test]
+    fn configuration_schemas_reject_secret_fields_and_annotations() {
+        let secret_field = serde_json::json!({
+            "type": "object",
+            "properties": {"api_token": {"type": "string"}}
+        });
+        assert!(validate_schema_node(&secret_field, SchemaKind::Configuration, 0).is_err());
+
+        let annotation = serde_json::json!({
+            "type": "object",
+            "properties": {"value": {"type": "string", "x-sift-secret": true}}
+        });
+        assert!(validate_schema_node(&annotation, SchemaKind::Configuration, 0).is_err());
+    }
+
+    #[test]
+    fn credential_schemas_require_explicit_secret_annotations() {
+        let missing = serde_json::json!({
+            "type": "object",
+            "properties": {"password": {"type": "string"}}
+        });
+        assert!(validate_schema_node(&missing, SchemaKind::Credential, 0).is_err());
+
+        let marked = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "username": {"type": "string"},
+                "password": {"type": "string", "x-sift-secret": true}
+            }
+        });
+        validate_schema_node(&marked, SchemaKind::Credential, 0).unwrap();
+    }
+
+    #[test]
+    fn schema_references_are_package_local() {
+        assert_eq!(
+            resolve_schema_reference("schemas/config.json", "shared.json#/$defs/value").unwrap(),
+            Some("schemas/shared.json".into())
+        );
+        for reference in [
+            "https://example.invalid/schema.json",
+            "/etc/passwd",
+            "../outside.json",
+            "encoded%2fpath.json",
+        ] {
+            assert!(resolve_schema_reference("schemas/config.json", reference).is_err());
+        }
+        assert_eq!(
+            resolve_schema_reference("schemas/config.json", "#/$defs/value").unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn package_validation_enforces_contribution_schema_policy() {
+        let temp = tempfile::tempdir().unwrap();
+        let valid = temp.path().join("valid.sift-extension");
+        build_provider_package(
+            &valid,
+            r#"{"type":"object","properties":{"host":{"type":"string"}}}"#,
+        );
+        PackageValidator::new(PackageLimits::default())
+            .validate_path(&valid, SignaturePolicy::AllowUnsigned)
+            .unwrap();
+
+        let secret = temp.path().join("secret.sift-extension");
+        build_provider_package(
+            &secret,
+            r#"{"type":"object","properties":{"api_token":{"type":"string"}}}"#,
+        );
+        assert!(matches!(
+            PackageValidator::new(PackageLimits::default())
+                .validate_path(&secret, SignaturePolicy::AllowUnsigned),
+            Err(PackageError::InvalidManifest(message))
+                if message.contains("secret-shaped field")
+        ));
     }
 }
