@@ -19,11 +19,13 @@ use sift_protocol::{
 use uuid::Uuid;
 
 mod extension;
+mod extension_storage;
 pub mod http;
 pub mod schema;
 pub mod secrets;
 
 pub use extension::*;
+pub use extension_storage::*;
 pub use schema::*;
 #[cfg(feature = "os-keychain")]
 pub use secrets::OsKeychainSecretStore;
@@ -106,6 +108,16 @@ pub enum MetadataError {
     ExtensionContributionConflict(String),
     #[error("extension revision conflict: expected {expected}, current {current}")]
     ExtensionRevisionConflict { expected: u64, current: u64 },
+    #[error("extension storage key is invalid")]
+    ExtensionStorageInvalidKey,
+    #[error("extension storage value exceeds the {limit}-byte limit")]
+    ExtensionStorageValueTooLarge { limit: usize },
+    #[error("extension storage quota exceeded: requested {requested}, limit {limit}")]
+    ExtensionStorageQuotaExceeded { requested: u64, limit: u64 },
+    #[error("extension storage revision conflict")]
+    ExtensionStorageRevisionConflict,
+    #[error("extension storage namespace not found")]
+    ExtensionStorageNamespaceNotFound,
     #[error("tenant administrator access required")]
     TenantAdminRequired,
     #[error("tenant member access required")]
