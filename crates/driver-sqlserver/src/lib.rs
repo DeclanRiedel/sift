@@ -1786,7 +1786,10 @@ mod tests {
             kind: std::io::ErrorKind::ConnectionReset,
             message: "reset".into(),
         };
-        assert_eq!(ms_err(io).engine, Some(Engine::SqlServer));
+        assert_eq!(
+            ms_err(io).provider_id,
+            Some(Engine::SqlServer.provider_id())
+        );
     }
 
     #[test]

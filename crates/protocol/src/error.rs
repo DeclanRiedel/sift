@@ -2,7 +2,7 @@
 //! the trait boundary translates them into [`DriverError`] carrying a
 //! stable [`Code`] (ADR-004).
 
-use crate::Engine;
+use crate::{Engine, ProviderId};
 use serde::{Deserialize, Serialize};
 
 /// Stable error codes. Grows as implementation surfaces real cases; existing
@@ -84,17 +84,17 @@ pub enum Code {
 
 /// Error returned by every [`crate::Driver`] method. Serializes flat for the
 /// wire; never carries raw driver strings (those go into `message` cleaned,
-/// or into `engine_sqlstate` for codes that map cleanly).
+/// or into `native_code` for codes that map cleanly).
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema, thiserror::Error)]
 #[error("{code}: {message}")]
 pub struct DriverError {
     pub code: Code,
     pub message: String,
-    pub engine: Option<Engine>,
+    pub provider_id: Option<ProviderId>,
     /// PG SQLSTATE (5-char) or tiberius error number, when available. Used by
     /// clients that want to dispatch on the engine's native classification
     /// without re-parsing `message`.
-    pub engine_sqlstate: Option<String>,
+    pub native_code: Option<String>,
     /// Set on `Code::CursorEvicted` errors when the server spilled the
     /// cursor's remaining pages to disk. The client can `GET` this URL
     /// (with an optional `?from_seq=N` query) to resume streaming
@@ -108,19 +108,29 @@ impl DriverError {
         Self {
             code,
             message: message.into(),
-            engine: None,
-            engine_sqlstate: None,
+            provider_id: None,
+            native_code: None,
             resume_url: None,
         }
     }
 
     pub fn with_engine(mut self, engine: Engine) -> Self {
-        self.engine = Some(engine);
+        self.provider_id = Some(engine.provider_id());
         self
     }
 
     pub fn with_sqlstate(mut self, sqlstate: impl Into<String>) -> Self {
-        self.engine_sqlstate = Some(sqlstate.into());
+        self.native_code = Some(sqlstate.into());
+        self
+    }
+
+    pub fn with_provider(mut self, provider_id: ProviderId) -> Self {
+        self.provider_id = Some(provider_id);
+        self
+    }
+
+    pub fn with_native_code(mut self, native_code: impl Into<String>) -> Self {
+        self.native_code = Some(native_code.into());
         self
     }
 

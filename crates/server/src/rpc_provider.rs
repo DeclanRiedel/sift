@@ -432,7 +432,7 @@ fn supervisor_error(error: SupervisorError) -> DriverError {
             let code = serde_json::from_value::<Code>(serde_json::json!({"code": error.code}))
                 .unwrap_or(Code::DriverInternal);
             let mut mapped = DriverError::new(code, error.message);
-            mapped.engine_sqlstate = error.native_code;
+            mapped.native_code = error.native_code;
             mapped
         }
         SupervisorError::ProcessStopped => DriverError::new(
