@@ -591,6 +591,16 @@ impl MetadataStore {
         .map_err(Into::into)
     }
 
+    pub fn extension_allowed_tenants(&self, extension_id: &str) -> Result<Vec<i64>> {
+        let conn = self.conn()?;
+        let mut statement = conn.prepare(
+            "SELECT tenant_id FROM extension_tenant_allowlist
+             WHERE extension_id = ?1 AND allowed = 1 ORDER BY tenant_id",
+        )?;
+        let tenants = super::rows(statement.query_map([extension_id], |row| row.get(0))?);
+        tenants
+    }
+
     pub fn extension_grants(&self, extension_id: &str) -> Result<Vec<String>> {
         let conn = self.conn()?;
         let mut statement = conn.prepare(
@@ -890,6 +900,31 @@ mod tests {
             store.record_extension_package(&package('c'), &[]),
             Err(MetadataError::ExtensionVersionDigestConflict { .. })
         ));
+    }
+
+    #[test]
+    fn allowed_extension_tenants_are_filtered_and_ordered() {
+        let store = MetadataStore::open_in_memory(Arc::new(MemorySecretStore::new())).unwrap();
+        store.record_extension_package(&package('a'), &[]).unwrap();
+        let first = store
+            .create_tenant("first", crate::TenantKind::Team)
+            .unwrap();
+        let second = store
+            .create_tenant("second", crate::TenantKind::Team)
+            .unwrap();
+        store
+            .set_extension_tenant_allowed("acme/example", second.id.0, true, 0)
+            .unwrap();
+        store
+            .set_extension_tenant_allowed("acme/example", first.id.0, true, 1)
+            .unwrap();
+        store
+            .set_extension_tenant_allowed("acme/example", second.id.0, false, 2)
+            .unwrap();
+        assert_eq!(
+            store.extension_allowed_tenants("acme/example").unwrap(),
+            vec![first.id.0]
+        );
     }
 
     #[test]

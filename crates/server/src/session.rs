@@ -97,6 +97,7 @@ struct SessionStoreInner {
     tool_registry: RwLock<Option<crate::automation::GovernedToolRegistry>>,
     package_registry: RwLock<Option<Arc<sift_plugin_host::ExtensionPackageRegistry>>>,
     extension_generation_limiter: Arc<sift_plugin_host::GenerationLimiter>,
+    extension_runtime_monitor: RwLock<crate::extension_runtime::ExtensionRuntimeMonitor>,
     /// Reverse index for immediate hard-revocation cleanup.
     managed_connections: DashMap<
         (
@@ -252,6 +253,7 @@ impl SessionStore {
                 extension_generation_limiter: Arc::new(sift_plugin_host::GenerationLimiter::new(
                     Default::default(),
                 )),
+                extension_runtime_monitor: RwLock::new(Default::default()),
                 managed_connections: DashMap::new(),
                 room_connections: DashMap::new(),
                 resource_manager: RwLock::new(crate::resources::ResourceManager::default()),
@@ -297,6 +299,7 @@ impl SessionStore {
                 extension_generation_limiter: Arc::new(sift_plugin_host::GenerationLimiter::new(
                     Default::default(),
                 )),
+                extension_runtime_monitor: RwLock::new(Default::default()),
                 managed_connections: DashMap::new(),
                 room_connections: DashMap::new(),
                 resource_manager: RwLock::new(crate::resources::ResourceManager::default()),
@@ -399,7 +402,7 @@ impl SessionStore {
             .clone()
     }
 
-    pub fn refresh_extension_runtimes(&self) -> ApiResult<()> {
+    pub async fn refresh_extension_runtimes(&self) -> ApiResult<()> {
         let packages = self
             .package_registry()
             .ok_or(ApiError::MetadataUnavailable)?;
@@ -415,6 +418,8 @@ impl SessionStore {
             &metadata,
             self.inner.extension_generation_limiter.clone(),
         )?;
+        let monitor = runtimes.monitor.clone();
+        runtimes.start_eager().await?;
         if let Some(tools) = self.tool_registry() {
             tools
                 .dispatcher()
@@ -428,7 +433,35 @@ impl SessionStore {
             .registry
             .providers()
             .replace_extensions(runtimes.providers)?;
+        let previous = std::mem::replace(
+            &mut *self
+                .inner
+                .extension_runtime_monitor
+                .write()
+                .expect("extension runtime monitor lock poisoned"),
+            monitor,
+        );
+        let deadline = match self.request_timeout() {
+            duration if duration.is_zero() => Duration::from_secs(30),
+            duration => duration,
+        };
+        tokio::spawn(async move {
+            previous.drain_and_shutdown(deadline).await;
+        });
         Ok(())
+    }
+
+    pub async fn extension_runtime_diagnostics(
+        &self,
+        extension_id: &sift_extension_protocol::ExtensionId,
+    ) -> (Option<String>, Vec<String>) {
+        let monitor = self
+            .inner
+            .extension_runtime_monitor
+            .read()
+            .expect("extension runtime monitor lock poisoned")
+            .clone();
+        monitor.diagnostics(extension_id).await
     }
 
     /// Set the per-request driver deadline. A zero duration disables the

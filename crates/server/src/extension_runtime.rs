@@ -2,7 +2,7 @@ use std::{
     collections::{BTreeMap, HashMap},
     path::PathBuf,
     sync::{
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         Arc,
     },
     time::{Duration, Instant},
@@ -71,6 +71,7 @@ struct ExtensionProcessRuntime {
     limits: SupervisorLimits,
     metadata: MetadataStore,
     generation_limiter: Arc<GenerationLimiter>,
+    accepting: AtomicBool,
     processes: Mutex<HashMap<Option<i64>, TenantProcessSlotRef>>,
 }
 
@@ -96,10 +97,121 @@ pub struct InstalledExtensionRuntimes {
     pub providers: Vec<Arc<dyn DatabaseProvider>>,
     pub actions: Vec<ActionRegistration>,
     pub tools: Vec<GovernedToolDescriptor>,
+    eager: Vec<(Arc<ExtensionProcessRuntime>, i64)>,
+    pub monitor: ExtensionRuntimeMonitor,
+}
+
+#[derive(Clone, Default)]
+pub struct ExtensionRuntimeMonitor {
+    runtimes: Arc<HashMap<ExtensionId, Arc<ExtensionProcessRuntime>>>,
+}
+
+impl InstalledExtensionRuntimes {
+    pub async fn start_eager(&self) -> Result<(), DriverError> {
+        let mut starts = tokio::task::JoinSet::new();
+        for (runtime, tenant_id) in &self.eager {
+            let runtime = runtime.clone();
+            let tenant_id = *tenant_id;
+            starts.spawn(async move { runtime.process(Some(tenant_id)).await.map(|_| ()) });
+        }
+        while let Some(result) = starts.join_next().await {
+            result.map_err(|error| {
+                DriverError::new(
+                    Code::DriverInternal,
+                    format!("eager extension start task failed: {error}"),
+                )
+            })??;
+        }
+        Ok(())
+    }
+}
+
+impl ExtensionRuntimeMonitor {
+    pub async fn diagnostics(&self, extension_id: &ExtensionId) -> (Option<String>, Vec<String>) {
+        let Some(runtime) = self.runtimes.get(extension_id) else {
+            return (None, Vec::new());
+        };
+        let slots: Vec<_> = runtime.processes.lock().await.values().cloned().collect();
+        let mut health = None;
+        let mut messages = Vec::new();
+        for slot in slots {
+            let slot = slot.lock().await;
+            if slot.quarantined {
+                health = Some(sift_plugin_host::GenerationHealth::Quarantined);
+                messages.push("extension restart budget exhausted".into());
+            }
+            if let Some(generation) = &slot.process {
+                let generation_health = generation.process.health().await;
+                health = Some(worse_health(health, generation_health));
+                messages.extend(generation.process.diagnostics().await);
+            }
+        }
+        messages.sort();
+        messages.dedup();
+        (
+            health.map(|value| format!("{value:?}").to_ascii_lowercase()),
+            messages,
+        )
+    }
+
+    pub async fn drain_and_shutdown(&self, deadline: Duration) {
+        let mut processes = Vec::new();
+        for runtime in self.runtimes.values() {
+            runtime.accepting.store(false, Ordering::Release);
+            let slots: Vec<_> = runtime.processes.lock().await.values().cloned().collect();
+            for slot in slots {
+                if let Some(generation) = &slot.lock().await.process {
+                    generation.process.begin_drain();
+                    processes.push(generation.process.clone());
+                }
+            }
+        }
+        let wait = async {
+            loop {
+                let mut active = 0;
+                for process in &processes {
+                    active += process.active_work().await;
+                }
+                if active == 0 {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        };
+        let _ = tokio::time::timeout(deadline, wait).await;
+        for process in processes {
+            let _ = process.shutdown("extension generation replaced").await;
+        }
+    }
+}
+
+fn worse_health(
+    current: Option<sift_plugin_host::GenerationHealth>,
+    candidate: sift_plugin_host::GenerationHealth,
+) -> sift_plugin_host::GenerationHealth {
+    use sift_plugin_host::GenerationHealth;
+    fn rank(value: GenerationHealth) -> u8 {
+        match value {
+            GenerationHealth::Ready => 0,
+            GenerationHealth::Starting => 1,
+            GenerationHealth::Stopped => 2,
+            GenerationHealth::Degraded => 3,
+            GenerationHealth::Quarantined => 4,
+        }
+    }
+    current
+        .filter(|current| rank(*current) >= rank(candidate))
+        .unwrap_or(candidate)
 }
 
 impl ExtensionProcessRuntime {
     async fn process(&self, tenant_id: Option<i64>) -> Result<Arc<SupervisedProcess>, DriverError> {
+        if !self.accepting.load(Ordering::Acquire) {
+            return Err(DriverError::new(
+                Code::ConnectionInvalidated,
+                "extension generation is draining",
+            ));
+        }
         if let Some(tenant_id) = tenant_id {
             if !self
                 .metadata
@@ -120,6 +232,12 @@ impl ExtensionProcessRuntime {
                 .clone()
         };
         let mut slot = slot.lock().await;
+        if !self.accepting.load(Ordering::Acquire) {
+            return Err(DriverError::new(
+                Code::ConnectionInvalidated,
+                "extension generation is draining",
+            ));
+        }
         if let Some(generation) = &slot.process {
             if generation.process.health().await == sift_plugin_host::GenerationHealth::Ready {
                 return Ok(generation.process.clone());
@@ -351,6 +469,8 @@ pub fn installed_extension_runtimes(
     let mut providers = Vec::new();
     let mut actions = Vec::new();
     let mut tools = Vec::new();
+    let mut eager = Vec::new();
+    let mut monitored = HashMap::new();
     for package in metadata
         .selected_extension_packages()
         .map_err(metadata_error)?
@@ -399,8 +519,10 @@ pub fn installed_extension_runtimes(
             limits,
             metadata: metadata.clone(),
             generation_limiter: generation_limiter.clone(),
+            accepting: AtomicBool::new(true),
             processes: Mutex::new(HashMap::new()),
         });
+        monitored.insert(manifest.id.clone(), runtime.clone());
         for contribution in &manifest.contributions.database_provider {
             let contribution_id = ContributionId::new(format!(
                 "{}/database_provider/{}",
@@ -494,16 +616,32 @@ pub fn installed_extension_runtimes(
             }
         }
         if manifest.lifecycle.mode == LifecycleMode::Eager {
-            tracing::debug!(
-                extension_id = %manifest.id,
-                "eager extension awaits its first tenant context"
-            );
+            for tenant_id in metadata
+                .extension_allowed_tenants(manifest.id.as_str())
+                .map_err(metadata_error)?
+            {
+                eager.push((runtime.clone(), tenant_id));
+            }
+        }
+    }
+    let mut provider_ids = std::collections::BTreeSet::new();
+    for provider in &providers {
+        let provider_id = &provider.descriptor().provider.provider_id;
+        if provider_id.is_first_party() || !provider_ids.insert(provider_id.clone()) {
+            return Err(DriverError::new(
+                Code::AuthFailed,
+                format!("extension provider id `{provider_id}` is reserved or duplicated"),
+            ));
         }
     }
     Ok(InstalledExtensionRuntimes {
         providers,
         actions,
         tools,
+        eager,
+        monitor: ExtensionRuntimeMonitor {
+            runtimes: Arc::new(monitored),
+        },
     })
 }
 

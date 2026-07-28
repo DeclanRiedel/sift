@@ -174,6 +174,7 @@ pub struct SupervisedProcess {
     diagnostics: Arc<Mutex<DiagnosticRing>>,
     request_counter: AtomicU64,
     maximum_concurrent_requests: u32,
+    accepting: AtomicBool,
     stopped: Arc<AtomicBool>,
     reader_task: JoinHandle<()>,
     stderr_task: JoinHandle<()>,
@@ -303,6 +304,7 @@ impl SupervisedProcess {
             diagnostics,
             request_counter: AtomicU64::new(1),
             maximum_concurrent_requests: selected_requests,
+            accepting: AtomicBool::new(true),
             stopped,
             reader_task,
             stderr_task,
@@ -328,8 +330,18 @@ impl SupervisedProcess {
             .collect()
     }
 
+    pub fn begin_drain(&self) {
+        self.accepting.store(false, Ordering::Release);
+    }
+
+    pub async fn active_work(&self) -> usize {
+        let pending = self.pending.lock().await.len();
+        let streams = self.streams.lock().expect("stream map poisoned").len();
+        pending.saturating_add(streams)
+    }
+
     pub async fn request(&self, mut request: Request) -> Result<Response, SupervisorError> {
-        if self.stopped.load(Ordering::Acquire) {
+        if !self.accepting.load(Ordering::Acquire) || self.stopped.load(Ordering::Acquire) {
             return Err(SupervisorError::ProcessStopped);
         }
         request.id = next_wire_id(&self.request_counter, self.spec.generation);
@@ -445,6 +457,7 @@ impl SupervisedProcess {
     }
 
     pub async fn shutdown(&self, reason: &str) -> Result<(), SupervisorError> {
+        self.begin_drain();
         if self.stopped.swap(true, Ordering::AcqRel) {
             return Ok(());
         }

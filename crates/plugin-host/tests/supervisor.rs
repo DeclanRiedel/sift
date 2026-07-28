@@ -318,3 +318,25 @@ async fn out_of_order_stream_is_contained_as_a_protocol_violation() {
         .iter()
         .any(|line| line.contains("out-of-order stream sequence")));
 }
+
+#[tokio::test]
+async fn generation_drain_closes_admission_without_affecting_the_host() {
+    let temp = tempfile::tempdir().unwrap();
+    let process = SupervisedProcess::start(
+        process_spec(temp.path()),
+        SupervisorLimits {
+            heartbeat_interval: Duration::from_secs(30),
+            ..SupervisorLimits::default()
+        },
+    )
+    .await
+    .unwrap();
+    process.begin_drain();
+    let error = process
+        .request(request("ping", deadline_after(Duration::from_secs(1))))
+        .await
+        .unwrap_err();
+    assert!(matches!(error, SupervisorError::ProcessStopped));
+    assert_eq!(process.health().await, GenerationHealth::Ready);
+    process.shutdown("drain complete").await.unwrap();
+}

@@ -169,7 +169,7 @@ async fn main() -> anyhow::Result<()> {
             metadata,
             sift_server::automation::ToolApprovalPolicy::default(),
         ));
-        sessions.refresh_extension_runtimes()?;
+        sessions.refresh_extension_runtimes().await?;
     }
     let shutdown = Shutdown::default();
     let state = AppState {
