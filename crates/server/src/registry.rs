@@ -1,6 +1,7 @@
 //! Provider-neutral registry with lock-free immutable read snapshots.
 
 use std::{
+    any::Any,
     collections::HashMap,
     sync::{
         atomic::{AtomicU64, Ordering},
@@ -11,14 +12,97 @@ use std::{
 use arc_swap::ArcSwap;
 use sift_driver_api::Driver;
 use sift_protocol::{
-    Code, DialectId, DriverError, Engine, ProviderCapability, ProviderDescriptor, ProviderId,
-    ProviderQuality, ProviderRef,
+    Code, DialectId, DriverError, Engine, ExecuteRequest, Page, ProviderCapability,
+    ProviderDescriptor, ProviderId, ProviderQuality, ProviderRef, SchemaScope, SchemaSnapshot,
+    ServerInfo, TxMode,
 };
+use tokio::sync::mpsc;
 
+#[async_trait::async_trait]
 pub trait DatabaseProvider: Send + Sync {
     fn descriptor(&self) -> &ProviderDescriptor;
     fn legacy_engine(&self) -> Option<Engine>;
-    fn driver(&self) -> Arc<dyn Driver>;
+    fn legacy_driver(&self) -> Option<Arc<dyn Driver>> {
+        None
+    }
+    async fn open(
+        &self,
+        request: ProviderOpenRequest,
+    ) -> Result<ProviderConnectionHandle, DriverError>;
+    async fn ping(&self, connection: &ProviderConnectionHandle) -> Result<ServerInfo, DriverError>;
+    async fn schema(
+        &self,
+        connection: &ProviderConnectionHandle,
+        scope: SchemaScope,
+    ) -> Result<SchemaSnapshot, DriverError>;
+    async fn begin(
+        &self,
+        connection: &ProviderConnectionHandle,
+        mode: TxMode,
+    ) -> Result<ProviderTransactionHandle, DriverError>;
+    async fn commit(&self, transaction: ProviderTransactionHandle) -> Result<(), DriverError>;
+    async fn rollback(&self, transaction: ProviderTransactionHandle) -> Result<(), DriverError>;
+    async fn execute(
+        &self,
+        connection: &ProviderConnectionHandle,
+        request: ExecuteRequest,
+    ) -> Result<ProviderResultStream, DriverError>;
+    async fn cancel(
+        &self,
+        connection: &ProviderConnectionHandle,
+        cursor: sift_protocol::CursorId,
+    ) -> Result<(), DriverError>;
+    async fn close(&self, connection: ProviderConnectionHandle) -> Result<(), DriverError>;
+}
+
+#[derive(Clone)]
+pub struct ProviderOpenRequest {
+    pub configuration: serde_json::Value,
+    pub credentials: HashMap<String, Vec<u8>>,
+}
+
+#[derive(Clone)]
+pub struct ProviderConnectionHandle {
+    provider_id: ProviderId,
+    inner: Arc<dyn Any + Send + Sync>,
+}
+
+impl ProviderConnectionHandle {
+    pub fn provider_id(&self) -> &ProviderId {
+        &self.provider_id
+    }
+
+    pub(crate) fn new<T>(provider_id: ProviderId, inner: T) -> Self
+    where
+        T: Any + Send + Sync,
+    {
+        Self {
+            provider_id,
+            inner: Arc::new(inner),
+        }
+    }
+
+    fn downcast_ref<T: Any>(&self) -> Option<&T> {
+        self.inner.downcast_ref()
+    }
+}
+
+#[derive(Clone)]
+pub struct ProviderTransactionHandle {
+    provider_id: ProviderId,
+    inner: Arc<dyn Any + Send + Sync>,
+}
+
+impl ProviderTransactionHandle {
+    pub fn provider_id(&self) -> &ProviderId {
+        &self.provider_id
+    }
+}
+
+pub struct ProviderResultStream {
+    pub cursor_id: sift_protocol::CursorId,
+    pub rows: mpsc::Receiver<Page>,
+    pub server_side_cursor: bool,
 }
 
 pub struct BuiltinProviderAdapter {
@@ -88,6 +172,7 @@ impl BuiltinProviderAdapter {
     }
 }
 
+#[async_trait::async_trait]
 impl DatabaseProvider for BuiltinProviderAdapter {
     fn descriptor(&self) -> &ProviderDescriptor {
         &self.descriptor
@@ -97,8 +182,155 @@ impl DatabaseProvider for BuiltinProviderAdapter {
         Some(self.driver.engine())
     }
 
-    fn driver(&self) -> Arc<dyn Driver> {
-        self.driver.clone()
+    fn legacy_driver(&self) -> Option<Arc<dyn Driver>> {
+        Some(self.driver.clone())
+    }
+
+    async fn open(
+        &self,
+        mut request: ProviderOpenRequest,
+    ) -> Result<ProviderConnectionHandle, DriverError> {
+        let password = request
+            .credentials
+            .remove("password")
+            .map(|bytes| {
+                String::from_utf8(bytes).map_err(|_| {
+                    DriverError::new(
+                        Code::InvalidParameterValue,
+                        "password credential is not valid UTF-8",
+                    )
+                })
+            })
+            .transpose()?;
+        if let Some(object) = request.configuration.as_object_mut() {
+            object.insert(
+                "password".into(),
+                password.map_or(serde_json::Value::Null, serde_json::Value::String),
+            );
+        }
+        let spec: sift_protocol::ConnectionSpec = serde_json::from_value(request.configuration)
+            .map_err(|error| {
+                DriverError::new(
+                    Code::InvalidParameterValue,
+                    format!("invalid built-in provider configuration: {error}"),
+                )
+            })?;
+        let handle = self.driver.open(&spec).await?;
+        Ok(ProviderConnectionHandle::new(
+            self.descriptor.provider.provider_id.clone(),
+            handle,
+        ))
+    }
+
+    async fn ping(&self, connection: &ProviderConnectionHandle) -> Result<ServerInfo, DriverError> {
+        self.driver.ping(self.connection(connection)?.clone()).await
+    }
+
+    async fn schema(
+        &self,
+        connection: &ProviderConnectionHandle,
+        scope: SchemaScope,
+    ) -> Result<SchemaSnapshot, DriverError> {
+        self.driver
+            .schema(self.connection(connection)?.clone(), scope)
+            .await
+    }
+
+    async fn begin(
+        &self,
+        connection: &ProviderConnectionHandle,
+        mode: TxMode,
+    ) -> Result<ProviderTransactionHandle, DriverError> {
+        let transaction = self
+            .driver
+            .begin(self.connection(connection)?.clone(), mode)
+            .await?;
+        Ok(ProviderTransactionHandle {
+            provider_id: self.descriptor.provider.provider_id.clone(),
+            inner: Arc::new(transaction),
+        })
+    }
+
+    async fn commit(&self, transaction: ProviderTransactionHandle) -> Result<(), DriverError> {
+        self.driver
+            .commit(self.transaction(&transaction)?.clone())
+            .await
+    }
+
+    async fn rollback(&self, transaction: ProviderTransactionHandle) -> Result<(), DriverError> {
+        self.driver
+            .rollback(self.transaction(&transaction)?.clone())
+            .await
+    }
+
+    async fn execute(
+        &self,
+        connection: &ProviderConnectionHandle,
+        request: ExecuteRequest,
+    ) -> Result<ProviderResultStream, DriverError> {
+        let stream = self
+            .driver
+            .execute(self.connection(connection)?.clone(), request)
+            .await?;
+        Ok(ProviderResultStream {
+            cursor_id: stream.cursor_id,
+            rows: stream.rows,
+            server_side_cursor: stream.server_side_cursor,
+        })
+    }
+
+    async fn cancel(
+        &self,
+        connection: &ProviderConnectionHandle,
+        cursor: sift_protocol::CursorId,
+    ) -> Result<(), DriverError> {
+        self.driver
+            .cancel(self.connection(connection)?.clone(), cursor)
+            .await
+    }
+
+    async fn close(&self, connection: ProviderConnectionHandle) -> Result<(), DriverError> {
+        self.driver
+            .close(self.connection(&connection)?.clone())
+            .await
+    }
+}
+
+impl BuiltinProviderAdapter {
+    fn connection<'a>(
+        &self,
+        handle: &'a ProviderConnectionHandle,
+    ) -> Result<&'a sift_driver_api::ConnHandle, DriverError> {
+        if handle.provider_id != self.descriptor.provider.provider_id {
+            return Err(DriverError::new(
+                Code::ConnectionInvalidated,
+                "connection belongs to a different provider",
+            ));
+        }
+        handle.downcast_ref().ok_or_else(|| {
+            DriverError::new(
+                Code::ConnectionInvalidated,
+                "connection handle kind does not match provider",
+            )
+        })
+    }
+
+    fn transaction<'a>(
+        &self,
+        handle: &'a ProviderTransactionHandle,
+    ) -> Result<&'a sift_driver_api::TxHandle, DriverError> {
+        if handle.provider_id != self.descriptor.provider.provider_id {
+            return Err(DriverError::new(
+                Code::TransactionNotFound,
+                "transaction belongs to a different provider",
+            ));
+        }
+        handle.inner.downcast_ref().ok_or_else(|| {
+            DriverError::new(
+                Code::TransactionNotFound,
+                "transaction handle kind does not match provider",
+            )
+        })
     }
 }
 
@@ -234,7 +466,16 @@ impl DriverRegistry {
     }
 
     pub fn get(&self, engine: Engine) -> Result<Arc<dyn Driver>, DriverError> {
-        Ok(self.providers.get_legacy(engine)?.provider.driver())
+        self.providers
+            .get_legacy(engine)?
+            .provider
+            .legacy_driver()
+            .ok_or_else(|| {
+                DriverError::new(
+                    Code::UnsupportedForEngine,
+                    "provider has no legacy driver adapter",
+                )
+            })
     }
 
     pub fn get_provider(
