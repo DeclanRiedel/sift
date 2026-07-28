@@ -8,6 +8,7 @@ repository.workspace = true
 
 [dependencies]
 base64.workspace = true
+getrandom.workspace = true
 ed25519-dalek.workspace = true
 semver.workspace = true
 serde_json.workspace = true
@@ -17,6 +18,8 @@ sift-metadata.workspace = true
 sift-protocol.workspace = true
 tempfile.workspace = true
 thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
 toml.workspace = true
 zip.workspace = true
 
