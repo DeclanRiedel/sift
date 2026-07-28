@@ -260,7 +260,11 @@ async fn ingest_abort(
     prepared: &PreparedCsv,
 ) -> ApiResult<u64> {
     let driver = entry.driver;
-    let handle = entry.handle;
+    let handle = entry
+        .handle
+        .builtin()
+        .cloned()
+        .ok_or_else(|| missing_ext(driver.engine()))?;
     let table = request.table.clone();
     let data = request.data.clone();
     let columns = prepared

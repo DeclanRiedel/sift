@@ -549,7 +549,8 @@ async fn openapi_is_published() {
     }
     assert!(body["components"]["schemas"]["ExecuteResponse"]["properties"]["rows"].is_object());
     assert!(
-        body["components"]["schemas"]["OpenConnectionRequest"]["properties"]["engine"].is_object()
+        body["components"]["schemas"]["OpenConnectionRequest"]["properties"]["provider_id"]
+            .is_object()
     );
     assert!(body["components"]["schemas"]["Page"].is_object());
     assert!(
@@ -3445,7 +3446,7 @@ async fn deployment_transport_matrix_only_allows_personal_loopback_raw_specs() {
                     .header("authorization", "Bearer matrix-token")
                     .header("content-type", "application/json")
                     .body(Body::from(
-                        r#"{"engine":"postgres","host":"mock","user":"alice"}"#,
+                        r#"{"provider_id":"sift/postgres","host":"mock","user":"alice"}"#,
                     ))
                     .unwrap(),
             )
@@ -3664,7 +3665,7 @@ async fn connection_open_ping_close() {
 
     // Open connection.
     let open_req = serde_json::json!({
-        "engine": "postgres",
+        "provider_id": "sift/postgres",
         "host": "mock.invalid",
         "port": 5432,
         "database": "mock",
@@ -3766,7 +3767,7 @@ async fn execute_returns_drained_rows_and_affected_count() {
     let sid = session.id;
 
     let open_req = serde_json::json!({
-        "engine": "postgres",
+        "provider_id": "sift/postgres",
         "host": "mock.invalid",
         "port": 5432,
         "database": "mock",
@@ -3856,7 +3857,7 @@ async fn http_execute_rejects_results_over_row_cap() {
             .oneshot(post_json(
                 format!("/v1/sessions/{}/connections", session.id),
                 serde_json::json!({
-                    "engine": "postgres",
+                    "provider_id": "sift/postgres",
                     "host": "mock.invalid",
                     "user": "mock",
                 }),
@@ -3936,7 +3937,7 @@ async fn http_execute_rejects_multi_result_batches() {
             .oneshot(post_json(
                 format!("/v1/sessions/{}/connections", session.id),
                 serde_json::json!({
-                    "engine": "postgres",
+                    "provider_id": "sift/postgres",
                     "host": "mock.invalid",
                     "user": "mock",
                 }),
@@ -3983,7 +3984,7 @@ async fn transaction_flow_requires_explicit_tx_ref() {
             .oneshot(post_json(
                 format!("/v1/sessions/{sid}/connections"),
                 serde_json::json!({
-                    "engine": "postgres",
+                    "provider_id": "sift/postgres",
                     "host": "mock.invalid",
                     "port": 5432,
                     "database": "mock",
@@ -4082,7 +4083,7 @@ async fn unregistered_engine_yields_422() {
         .oneshot(post_json(
             format!("/v1/sessions/{sid}/connections"),
             serde_json::json!({
-                "engine": "sql_server",
+                "provider_id": "sift/sql-server",
                 "host": "mock.invalid",
                 "user": "mock",
             }),
@@ -4262,7 +4263,7 @@ async fn execute_stream_error_maps_to_http_error() {
             .oneshot(post_json(
                 format!("/v1/sessions/{sid}/connections"),
                 serde_json::json!({
-                    "engine": "postgres",
+                    "provider_id": "sift/postgres",
                     "host": "mock.invalid",
                     "user": "mock",
                 }),
@@ -4327,7 +4328,7 @@ async fn savepoint_routes_dispatch_to_ext_traits() {
             .oneshot(post_json(
                 format!("/v1/sessions/{sid}/connections"),
                 serde_json::json!({
-                    "engine": "postgres",
+                    "provider_id": "sift/postgres",
                     "host": "mock.invalid",
                     "user": "mock",
                 }),
@@ -4426,7 +4427,7 @@ async fn transaction_panel_lists_previews_and_tracks_savepoints() {
             .oneshot(post_json(
                 format!("/v1/sessions/{}/connections", session.id),
                 serde_json::json!({
-                    "engine": "postgres",
+                    "provider_id": "sift/postgres",
                     "host": "mock.invalid",
                     "user": "mock",
                 }),

@@ -5506,23 +5506,15 @@ async fn open_connection(
             "raw connection specifications are available only in personal-loopback mode".into(),
         ));
     }
-    let engine = state
-        .sessions
-        .registry()
-        .get_provider(&req.provider_id)?
-        .provider
-        .legacy_engine()
-        .ok_or_else(|| {
-            ApiError::BadRequest(
-                "provider does not support the temporary raw-spec compatibility path".into(),
-            )
-        })?;
     let operation = Operation::OpenConnection {
         session: id,
         request: req.clone(),
     };
     let spec = req.spec;
-    let info = state.sessions.open_connection(id, engine, spec).await?;
+    let info = state
+        .sessions
+        .open_provider_connection(id, req.provider_id, spec)
+        .await?;
     state
         .sessions
         .push_operation(operation, OperationStatus::Succeeded);

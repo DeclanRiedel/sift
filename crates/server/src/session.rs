@@ -15,10 +15,7 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use dashmap::DashMap;
-use sift_driver_api::{
-    BulkOp, ConnHandle, Driver, MssqlSavepoint, NotificationStream, PgSavepoint, ResultSetStream,
-    TxHandle,
-};
+use sift_driver_api::{BulkOp, MssqlSavepoint, NotificationStream, PgSavepoint, ResultSetStream};
 use sift_protocol::{
     AuditEntry, BeginTransactionRequest, BulkInsertFormat, BulkInsertRequest, BulkInsertResponse,
     Code, ColumnMetadata, ConnectionId, ConnectionInfo, ConnectionSpec, CursorId, DriverError,
@@ -33,7 +30,9 @@ use sift_metadata::{MetadataStore, NewOperationAudit, PrincipalId};
 
 use crate::cursors::CursorRegistry;
 use crate::error::{ApiError, ApiResult};
-use crate::registry::DriverRegistry;
+use crate::registry::{
+    DriverRegistry, RuntimeConnectionHandle, RuntimeDriver, RuntimeTransactionHandle,
+};
 use crate::schema_cache::{CachedSchema, SchemaCache};
 
 /// Fallback per-request timeout used until the server wires
@@ -959,12 +958,30 @@ impl SessionStore {
         engine: Engine,
         spec: ConnectionSpec,
     ) -> ApiResult<ConnectionInfo> {
+        self.open_provider_connection(session_id, engine.provider_id(), spec)
+            .await
+    }
+
+    pub async fn open_provider_connection(
+        &self,
+        session_id: SessionId,
+        provider_id: sift_protocol::ProviderId,
+        spec: ConnectionSpec,
+    ) -> ApiResult<ConnectionInfo> {
+        let registered = self.inner.registry.get_provider(&provider_id)?;
+        let runtime = RuntimeDriver::from_registered(registered);
+        let engine = runtime.semantic_engine().ok_or_else(|| {
+            ApiError::BadRequest(format!(
+                "provider `{provider_id}` uses a dialect not supported by the Phase I SQL policy"
+            ))
+        })?;
         self.open_connection_with_provenance(
             session_id,
             engine,
             spec,
             ConnectionProvenance::TrustedLocal,
             None,
+            runtime,
         )
         .await
     }
@@ -1006,6 +1023,9 @@ impl SessionStore {
                 quota_exempt: !enforce_limits,
             },
             connection_guard,
+            RuntimeDriver::from_registered(
+                self.inner.registry.get_provider(&engine.provider_id())?,
+            ),
         )
         .await
     }
@@ -1017,6 +1037,7 @@ impl SessionStore {
         spec: ConnectionSpec,
         provenance: ConnectionProvenance,
         resource_guard: Option<crate::resources::ResourceGuard>,
+        driver: RuntimeDriver,
     ) -> ApiResult<ConnectionInfo> {
         if !self.inner.sessions.contains_key(&session_id) {
             return Err(ApiError::SessionNotFound(session_id));
@@ -1031,7 +1052,6 @@ impl SessionStore {
             } => Some((*principal_id, *tenant_id, *profile_id)),
             ConnectionProvenance::TrustedLocal => None,
         };
-        let driver = self.inner.registry.get(engine)?;
         let handle = driver.open(&spec).await?;
         let info = {
             let Some(session) = self.inner.sessions.get(&session_id) else {
@@ -1042,7 +1062,7 @@ impl SessionStore {
             let display_name = display_name_for(&spec);
             let info = ConnectionInfo {
                 id,
-                provider_id: engine.provider_id(),
+                provider_id: driver.provider().provider_id.clone(),
                 display_name,
                 created_at: chrono::Utc::now(),
             };
@@ -1526,11 +1546,11 @@ impl SessionStore {
             }
             other => other,
         };
-        if let Ok(snapshot) = &result {
+        if let (Ok(snapshot), Some(legacy)) = (&result, driver.legacy_driver()) {
             if let Some(cached) =
                 self.inner
                     .schema_cache
-                    .insert(&spec, &scope, snapshot.clone(), driver)
+                    .insert(&spec, &scope, snapshot.clone(), legacy.clone())
             {
                 if let Some(gate) = &fetch_gate {
                     self.inner.schema_cache.clear_fetch_gate(gate);
@@ -1570,7 +1590,7 @@ impl SessionStore {
         &self,
         session_id: SessionId,
         conn_id: ConnectionId,
-    ) -> ApiResult<ConnHandle> {
+    ) -> ApiResult<RuntimeConnectionHandle> {
         let (driver, spec, old_handle) = {
             let session = self
                 .inner
@@ -1931,7 +1951,12 @@ impl SessionStore {
                 .with_engine(entry.driver.engine()),
             )
         })?;
-        Ok(pg.listen(entry.handle.clone(), channels).await?)
+        let handle = entry
+            .handle
+            .builtin()
+            .cloned()
+            .ok_or_else(native_provider_only)?;
+        Ok(pg.listen(handle, channels).await?)
     }
 
     pub async fn cancel(
@@ -2011,7 +2036,11 @@ impl SessionStore {
         }
 
         let driver = entry.driver.clone();
-        let handle = entry.handle.clone();
+        let handle = entry
+            .handle
+            .builtin()
+            .cloned()
+            .ok_or_else(native_provider_only)?;
         let table = req.table;
         let data = req.data;
         let result = self
@@ -2074,9 +2103,9 @@ impl SessionStore {
             )
             .await?;
         let info = TransactionInfo {
-            tx_id: handle.tx_id,
+            tx_id: handle.tx_id(),
             connection: req.connection,
-            mode: handle.mode,
+            mode: handle.mode(),
             opened_at: chrono::Utc::now(),
         };
         let tx = TransactionEntry {
@@ -2260,6 +2289,10 @@ impl SessionStore {
         }
         self.ensure_savepoint_name_available(session_id, req.tx_id, &name)?;
         let tx_handle = self.tx_handle_for(session_id, req.connection, req.tx_id)?;
+        let tx_handle = tx_handle
+            .builtin()
+            .cloned()
+            .ok_or_else(native_provider_only)?;
         let entry = self.get_conn_entry(session_id, req.connection)?;
         let driver = entry.driver.clone();
         let driver_name = name.clone();
@@ -2303,6 +2336,10 @@ impl SessionStore {
             &[],
         )?;
         let tx_handle = self.tx_handle_for(session_id, req.connection, req.tx_id)?;
+        let tx_handle = tx_handle
+            .builtin()
+            .cloned()
+            .ok_or_else(native_provider_only)?;
         let entry = self.get_conn_entry(session_id, req.connection)?;
         let driver = entry.driver.clone();
         let name = req.name;
@@ -2365,6 +2402,10 @@ impl SessionStore {
         )?;
         // Validate tx is active on the connection before dispatching.
         let tx_handle = self.tx_handle_for(session_id, req.connection, req.tx_id)?;
+        let tx_handle = tx_handle
+            .builtin()
+            .cloned()
+            .ok_or_else(native_provider_only)?;
         let entry = self.get_conn_entry(session_id, req.connection)?;
         let driver = entry.driver.clone();
         let name = req.name;
@@ -2474,7 +2515,7 @@ impl SessionStore {
         session_id: SessionId,
         conn_id: ConnectionId,
         tx_id: TxId,
-    ) -> ApiResult<TxHandle> {
+    ) -> ApiResult<RuntimeTransactionHandle> {
         let session = self
             .inner
             .sessions
@@ -2502,7 +2543,7 @@ impl SessionStore {
         session_id: SessionId,
         conn_id: ConnectionId,
         tx_id: TxId,
-    ) -> ApiResult<TxHandle> {
+    ) -> ApiResult<RuntimeTransactionHandle> {
         let session = self
             .inner
             .sessions
@@ -2638,8 +2679,16 @@ impl SessionStore {
             None,
             &[&object],
         )?;
-        let driver = entry.driver.clone();
-        let handle = entry.handle.clone();
+        let driver = entry
+            .driver
+            .legacy_driver()
+            .cloned()
+            .ok_or_else(native_provider_only)?;
+        let handle = entry
+            .handle
+            .builtin()
+            .cloned()
+            .ok_or_else(native_provider_only)?;
         let result = crate::ddl::generate_ddl(&*driver, handle, object).await?;
         Ok(result)
     }
@@ -2659,8 +2708,16 @@ impl SessionStore {
             None,
             &[&edit_set.table],
         )?;
-        let driver = entry.driver.clone();
-        let handle = entry.handle.clone();
+        let driver = entry
+            .driver
+            .legacy_driver()
+            .cloned()
+            .ok_or_else(native_provider_only)?;
+        let handle = entry
+            .handle
+            .builtin()
+            .cloned()
+            .ok_or_else(native_provider_only)?;
         crate::edit::build_plan(&*driver, handle, &edit_set)
             .await
             .map_err(ApiError::Driver)
@@ -2687,8 +2744,16 @@ impl SessionStore {
         )?;
         let plan = {
             let entry = self.get_conn_entry(session_id, conn_id)?;
-            let driver = entry.driver.clone();
-            let handle = entry.handle.clone();
+            let driver = entry
+                .driver
+                .legacy_driver()
+                .cloned()
+                .ok_or_else(native_provider_only)?;
+            let handle = entry
+                .handle
+                .builtin()
+                .cloned()
+                .ok_or_else(native_provider_only)?;
             crate::edit::build_plan(&*driver, handle, &req.edit_set)
                 .await
                 .map_err(ApiError::Driver)?
@@ -3038,8 +3103,8 @@ impl SessionStore {
 
 /// Cheap clone of a connection entry (just Arc + ConnHandle Arc).
 pub struct ConnectionEntryClone {
-    pub driver: Arc<dyn Driver>,
-    pub handle: ConnHandle,
+    pub driver: RuntimeDriver,
+    pub handle: RuntimeConnectionHandle,
     pub provenance: ConnectionProvenance,
 }
 
@@ -3084,8 +3149,8 @@ impl Session {
 pub struct ConnectionEntry {
     pub id: ConnectionId,
     pub engine: Engine,
-    pub handle: ConnHandle,
-    pub driver: Arc<dyn Driver>,
+    pub handle: RuntimeConnectionHandle,
+    pub driver: RuntimeDriver,
     pub info: ConnectionInfo,
     /// Original spec, retained so a broken connection can be transparently
     /// re-established for idempotent operations (ping/schema).
@@ -3096,7 +3161,7 @@ pub struct ConnectionEntry {
 
 pub struct TransactionEntry {
     pub info: TransactionInfo,
-    pub handle: TxHandle,
+    pub handle: RuntimeTransactionHandle,
     pub savepoints: Mutex<Vec<SavepointInfo>>,
     ending: AtomicBool,
 }
@@ -3136,6 +3201,13 @@ fn sanitize_operation(operation: Operation) -> Operation {
         }
         other => other,
     }
+}
+
+fn native_provider_only() -> ApiError {
+    ApiError::Driver(DriverError::new(
+        Code::UnsupportedForEngine,
+        "operation requires a bundled provider native extension",
+    ))
 }
 
 /// Whether a driver failure signals a broken connection that is safe to

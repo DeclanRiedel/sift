@@ -10,16 +10,20 @@ use std::{
 };
 
 use arc_swap::ArcSwap;
-use sift_driver_api::Driver;
+use sift_driver_api::{Driver, ResultSetStream};
 use sift_extension_protocol::{
     DriverCatalog, DriverColumn, DriverNamespace, DriverSchemaDepth, DriverSchemaObject,
     DriverSchemaScope, DriverSchemaSnapshot, DriverStreamPayload, DriverValue,
 };
 use sift_protocol::{
-    Code, DialectId, DriverError, Engine, ExecuteRequest, ProviderCapability, ProviderDescriptor,
-    ProviderId, ProviderQuality, ProviderRef, SchemaDepth, SchemaScope, TxMode, TypeRef, Value,
+    Code, ColumnMetadata, DialectId, DriverError, DriverWarning, Engine, ExecuteRequest, Page,
+    PrimitiveType, ProviderCapability, ProviderDescriptor, ProviderId, ProviderQuality,
+    ProviderRef, SchemaDepth, SchemaScope, SchemaSnapshot, ServerInfo, TxMode, TypeCategory,
+    TypeRef, Value,
 };
 use tokio::sync::mpsc;
+
+static NEXT_EXTERNAL_TX_ID: AtomicU64 = AtomicU64::new(1);
 
 #[async_trait::async_trait]
 pub trait DatabaseProvider: Send + Sync {
@@ -391,6 +395,476 @@ impl BuiltinProviderAdapter {
 pub struct RegisteredProvider {
     pub provider: Arc<dyn DatabaseProvider>,
     pub generation: u64,
+}
+
+#[derive(Clone)]
+pub enum RuntimeDriver {
+    Builtin {
+        provider: ProviderRef,
+        driver: Arc<dyn Driver>,
+    },
+    External(RegisteredProvider),
+}
+
+#[derive(Clone)]
+pub enum RuntimeConnectionHandle {
+    Builtin(sift_driver_api::ConnHandle),
+    External(ProviderConnectionHandle),
+}
+
+#[derive(Clone)]
+pub enum RuntimeTransactionHandle {
+    Builtin {
+        driver: Arc<dyn Driver>,
+        handle: sift_driver_api::TxHandle,
+    },
+    External {
+        provider: RegisteredProvider,
+        handle: ProviderTransactionHandle,
+        tx_id: sift_protocol::TxId,
+        mode: TxMode,
+    },
+}
+
+impl RuntimeDriver {
+    pub fn from_registered(provider: RegisteredProvider) -> Self {
+        if let Some(driver) = provider.provider.legacy_driver() {
+            Self::Builtin {
+                provider: provider.provider.descriptor().provider.clone(),
+                driver,
+            }
+        } else {
+            Self::External(provider)
+        }
+    }
+
+    pub fn provider(&self) -> &ProviderRef {
+        match self {
+            Self::Builtin { provider, .. } => provider,
+            Self::External(provider) => &provider.provider.descriptor().provider,
+        }
+    }
+
+    pub fn semantic_engine(&self) -> Option<Engine> {
+        match self {
+            Self::Builtin { driver, .. } => Some(driver.engine()),
+            Self::External(provider) => {
+                match provider.provider.descriptor().provider.dialect_id.as_str() {
+                    "sift/postgresql" => Some(Engine::Postgres),
+                    "sift/tsql" => Some(Engine::SqlServer),
+                    _ => None,
+                }
+            }
+        }
+    }
+
+    pub fn engine(&self) -> Engine {
+        self.semantic_engine()
+            .expect("runtime admission rejects unsupported dialects")
+    }
+
+    pub fn legacy_driver(&self) -> Option<&Arc<dyn Driver>> {
+        match self {
+            Self::Builtin { driver, .. } => Some(driver),
+            Self::External(_) => None,
+        }
+    }
+
+    pub fn as_pg(&self) -> Option<&dyn sift_driver_api::PgExt> {
+        self.legacy_driver().and_then(|driver| driver.as_pg())
+    }
+
+    pub fn as_mssql(&self) -> Option<&dyn sift_driver_api::MssqlExt> {
+        self.legacy_driver().and_then(|driver| driver.as_mssql())
+    }
+
+    pub async fn open(
+        &self,
+        spec: &sift_protocol::ConnectionSpec,
+    ) -> Result<RuntimeConnectionHandle, DriverError> {
+        match self {
+            Self::Builtin { driver, .. } => driver
+                .open(spec)
+                .await
+                .map(RuntimeConnectionHandle::Builtin),
+            Self::External(registered) => {
+                let mut sanitized = spec.clone();
+                let mut credentials = HashMap::new();
+                if let Some(password) = sanitized.password.take() {
+                    credentials.insert("password".into(), password.into_bytes());
+                }
+                registered
+                    .provider
+                    .open(ProviderOpenRequest {
+                        configuration: serde_json::to_value(sanitized).map_err(|error| {
+                            DriverError::new(
+                                Code::InvalidParameterValue,
+                                format!("provider configuration is not serializable: {error}"),
+                            )
+                        })?,
+                        credentials,
+                    })
+                    .await
+                    .map(RuntimeConnectionHandle::External)
+            }
+        }
+    }
+
+    pub async fn ping(&self, handle: RuntimeConnectionHandle) -> Result<ServerInfo, DriverError> {
+        match (self, handle) {
+            (Self::Builtin { driver, .. }, RuntimeConnectionHandle::Builtin(handle)) => {
+                driver.ping(handle).await
+            }
+            (Self::External(provider), RuntimeConnectionHandle::External(handle)) => {
+                let info = provider.provider.ping(&handle).await?;
+                Ok(ServerInfo {
+                    provider: info.provider,
+                    server_version: info.server_version,
+                    current_database: info.current_database,
+                    current_user: info.current_user,
+                    pool_warm_slots: info.pool_warm_slots,
+                })
+            }
+            _ => Err(runtime_handle_mismatch()),
+        }
+    }
+
+    pub async fn schema(
+        &self,
+        handle: RuntimeConnectionHandle,
+        scope: SchemaScope,
+    ) -> Result<SchemaSnapshot, DriverError> {
+        match (self, handle) {
+            (Self::Builtin { driver, .. }, RuntimeConnectionHandle::Builtin(handle)) => {
+                driver.schema(handle, scope).await
+            }
+            (Self::External(provider), RuntimeConnectionHandle::External(handle)) => provider
+                .provider
+                .schema(&handle, scope.clone())
+                .await
+                .and_then(|snapshot| provider_schema(snapshot, scope, self.provider())),
+            _ => Err(runtime_handle_mismatch()),
+        }
+    }
+
+    pub async fn begin(
+        &self,
+        handle: RuntimeConnectionHandle,
+        mode: TxMode,
+    ) -> Result<RuntimeTransactionHandle, DriverError> {
+        match (self, handle) {
+            (Self::Builtin { driver, .. }, RuntimeConnectionHandle::Builtin(handle)) => driver
+                .begin(handle, mode)
+                .await
+                .map(|handle| RuntimeTransactionHandle::Builtin {
+                    driver: driver.clone(),
+                    handle,
+                }),
+            (Self::External(provider), RuntimeConnectionHandle::External(handle)) => {
+                provider.provider.begin(&handle, mode).await.map(|handle| {
+                    RuntimeTransactionHandle::External {
+                        provider: provider.clone(),
+                        handle,
+                        tx_id: sift_protocol::TxId::new(
+                            NEXT_EXTERNAL_TX_ID.fetch_add(1, Ordering::Relaxed),
+                        ),
+                        mode,
+                    }
+                })
+            }
+            _ => Err(runtime_handle_mismatch()),
+        }
+    }
+
+    pub async fn execute(
+        &self,
+        handle: RuntimeConnectionHandle,
+        request: ExecuteRequest,
+    ) -> Result<ResultSetStream, DriverError> {
+        match (self, handle) {
+            (Self::Builtin { driver, .. }, RuntimeConnectionHandle::Builtin(handle)) => {
+                driver.execute(handle, request).await
+            }
+            (Self::External(provider), RuntimeConnectionHandle::External(handle)) => {
+                let stream = provider.provider.execute(&handle, request).await?;
+                Ok(provider_stream(stream, self.provider().clone()))
+            }
+            _ => Err(runtime_handle_mismatch()),
+        }
+    }
+
+    pub async fn cancel(
+        &self,
+        handle: RuntimeConnectionHandle,
+        cursor: sift_protocol::CursorId,
+    ) -> Result<(), DriverError> {
+        match (self, handle) {
+            (Self::Builtin { driver, .. }, RuntimeConnectionHandle::Builtin(handle)) => {
+                driver.cancel(handle, cursor).await
+            }
+            (Self::External(provider), RuntimeConnectionHandle::External(handle)) => {
+                provider.provider.cancel(&handle, cursor).await
+            }
+            _ => Err(runtime_handle_mismatch()),
+        }
+    }
+
+    pub async fn close(&self, handle: RuntimeConnectionHandle) -> Result<(), DriverError> {
+        match (self, handle) {
+            (Self::Builtin { driver, .. }, RuntimeConnectionHandle::Builtin(handle)) => {
+                driver.close(handle).await
+            }
+            (Self::External(provider), RuntimeConnectionHandle::External(handle)) => {
+                provider.provider.close(handle).await
+            }
+            _ => Err(runtime_handle_mismatch()),
+        }
+    }
+
+    pub async fn commit(&self, transaction: RuntimeTransactionHandle) -> Result<(), DriverError> {
+        transaction.commit().await
+    }
+
+    pub async fn rollback(&self, transaction: RuntimeTransactionHandle) -> Result<(), DriverError> {
+        transaction.rollback().await
+    }
+}
+
+impl RuntimeTransactionHandle {
+    pub fn tx_id(&self) -> sift_protocol::TxId {
+        match self {
+            Self::Builtin { handle, .. } => handle.tx_id,
+            Self::External { tx_id, .. } => *tx_id,
+        }
+    }
+
+    pub fn mode(&self) -> TxMode {
+        match self {
+            Self::Builtin { handle, .. } => handle.mode,
+            Self::External { mode, .. } => *mode,
+        }
+    }
+
+    pub async fn commit(self) -> Result<(), DriverError> {
+        match self {
+            Self::Builtin { driver, handle } => driver.commit(handle).await,
+            Self::External {
+                provider, handle, ..
+            } => provider.provider.commit(handle).await,
+        }
+    }
+
+    pub async fn rollback(self) -> Result<(), DriverError> {
+        match self {
+            Self::Builtin { driver, handle } => driver.rollback(handle).await,
+            Self::External {
+                provider, handle, ..
+            } => provider.provider.rollback(handle).await,
+        }
+    }
+}
+
+impl RuntimeConnectionHandle {
+    pub fn builtin(&self) -> Option<&sift_driver_api::ConnHandle> {
+        match self {
+            Self::Builtin(handle) => Some(handle),
+            Self::External(_) => None,
+        }
+    }
+}
+
+impl RuntimeTransactionHandle {
+    pub fn builtin(&self) -> Option<&sift_driver_api::TxHandle> {
+        match self {
+            Self::Builtin { handle, .. } => Some(handle),
+            Self::External { .. } => None,
+        }
+    }
+}
+
+fn runtime_handle_mismatch() -> DriverError {
+    DriverError::new(
+        Code::DriverInternal,
+        "connection handle belongs to a different provider runtime",
+    )
+}
+
+fn provider_stream(stream: ProviderResultStream, provider: ProviderRef) -> ResultSetStream {
+    let (sender, receiver) = mpsc::channel(16);
+    let cursor_id = stream.cursor_id;
+    tokio::spawn(async move {
+        let mut rows = stream.rows;
+        while let Some(payload) = rows.recv().await {
+            let terminal = matches!(
+                payload,
+                DriverStreamPayload::Done { .. } | DriverStreamPayload::Error { .. }
+            );
+            if sender
+                .send(provider_page(payload, &provider))
+                .await
+                .is_err()
+                || terminal
+            {
+                break;
+            }
+        }
+    });
+    ResultSetStream::with_cursor_mode(cursor_id, receiver, stream.server_side_cursor)
+}
+
+fn provider_page(payload: DriverStreamPayload, provider: &ProviderRef) -> Page {
+    match payload {
+        DriverStreamPayload::NextResult { columns } => Page::NextResult {
+            columns: columns
+                .into_iter()
+                .map(|column| provider_column(column, provider))
+                .collect(),
+        },
+        DriverStreamPayload::Rows { rows } => Page::Rows {
+            rows: rows
+                .into_iter()
+                .map(|values| {
+                    sift_protocol::Row::new(values.into_iter().map(provider_value).collect())
+                })
+                .collect(),
+        },
+        DriverStreamPayload::Done {
+            affected_rows,
+            warnings,
+        } => Page::Done {
+            affected_rows,
+            warnings: warnings.into_iter().map(DriverWarning::new).collect(),
+        },
+        DriverStreamPayload::Error { message, .. } => Page::Error {
+            error: DriverError::new(Code::DriverInternal, message),
+        },
+    }
+}
+
+fn provider_column(column: DriverColumn, provider: &ProviderRef) -> ColumnMetadata {
+    let primitive = match column.type_name.as_str() {
+        "int2" | "smallint" => Some(PrimitiveType::Int16),
+        "int4" | "integer" | "int" => Some(PrimitiveType::Int32),
+        "int8" | "bigint" => Some(PrimitiveType::Int64),
+        "float4" | "real" => Some(PrimitiveType::Float32),
+        "float8" | "double precision" | "float" => Some(PrimitiveType::Float64),
+        "numeric" | "decimal" | "money" => Some(PrimitiveType::Decimal),
+        "bool" | "boolean" | "bit" => Some(PrimitiveType::Bool),
+        "bytea" | "binary" | "varbinary" => Some(PrimitiveType::Blob),
+        "date" => Some(PrimitiveType::Date),
+        "time" => Some(PrimitiveType::Time),
+        "timestamp" | "datetime" | "datetime2" => Some(PrimitiveType::Timestamp),
+        "timestamptz" | "datetimeoffset" => Some(PrimitiveType::TimestampTz),
+        "uuid" | "uniqueidentifier" => Some(PrimitiveType::Uuid),
+        "json" => Some(PrimitiveType::Json),
+        "jsonb" => Some(PrimitiveType::Jsonb),
+        "text" | "varchar" | "nvarchar" | "char" | "nchar" => Some(PrimitiveType::Text),
+        _ => None,
+    };
+    ColumnMetadata {
+        name: column.name,
+        type_ref: primitive.map_or_else(
+            || TypeRef::Engine {
+                engine: semantic_engine(provider).unwrap_or(Engine::Postgres),
+                name: column.type_name,
+                category: TypeCategory::Other,
+            },
+            TypeRef::Primitive,
+        ),
+        nullable: if column.nullable {
+            sift_protocol::Nullability::Nullable
+        } else {
+            sift_protocol::Nullability::NotNullable
+        },
+        auto_increment: false,
+        primary_key: false,
+        facets: Default::default(),
+    }
+}
+
+fn provider_value(value: DriverValue) -> Value {
+    match value {
+        DriverValue::Null { type_name } => Value::TypedNull { type_name },
+        DriverValue::Bool(value) => Value::Bool(value),
+        DriverValue::I64(value) => Value::Int64(value),
+        DriverValue::U64(value) => i64::try_from(value)
+            .map(Value::Int64)
+            .unwrap_or_else(|_| Value::Decimal(value.to_string())),
+        DriverValue::F64(value) => Value::Float64(value),
+        DriverValue::Decimal(value) => Value::Decimal(value),
+        DriverValue::String(value) => Value::Text(value),
+        DriverValue::Bytes(value) => Value::Blob(value),
+        DriverValue::Json(value) => Value::Json(value),
+        DriverValue::Date(value)
+        | DriverValue::Time(value)
+        | DriverValue::Timestamp(value)
+        | DriverValue::TimestampTz(value)
+        | DriverValue::Uuid(value) => Value::Text(value),
+        DriverValue::IntervalMicros(value) => {
+            Value::Interval(chrono::Duration::microseconds(value))
+        }
+        DriverValue::Engine { type_name, display } => Value::Engine {
+            engine: Engine::Postgres,
+            type_name,
+            display_text: display,
+        },
+    }
+}
+
+fn semantic_engine(provider: &ProviderRef) -> Option<Engine> {
+    match provider.dialect_id.as_str() {
+        "sift/postgresql" => Some(Engine::Postgres),
+        "sift/tsql" => Some(Engine::SqlServer),
+        _ => None,
+    }
+}
+
+fn provider_schema(
+    snapshot: DriverSchemaSnapshot,
+    scope: SchemaScope,
+    provider: &ProviderRef,
+) -> Result<SchemaSnapshot, DriverError> {
+    let fetched_at = chrono::DateTime::from_timestamp_millis(snapshot.fetched_at_unix_ms)
+        .ok_or_else(|| {
+            DriverError::new(Code::DriverInternal, "invalid provider schema timestamp")
+        })?;
+    let trees = snapshot
+        .catalogs
+        .into_iter()
+        .map(|catalog| sift_protocol::CatalogTree {
+            name: catalog.name,
+            schemas: catalog
+                .namespaces
+                .into_iter()
+                .map(|namespace| sift_protocol::SchemaTree {
+                    name: namespace.name,
+                    objects: namespace
+                        .objects
+                        .into_iter()
+                        .map(|object| {
+                            let kind = serde_json::from_value(serde_json::Value::String(
+                                object.kind.clone(),
+                            ))
+                            .unwrap_or(sift_protocol::ObjectKind::Table);
+                            let mut info = sift_protocol::ObjectInfo::new(object.name, kind);
+                            info.columns = object
+                                .columns
+                                .into_iter()
+                                .map(|column| provider_column(column, provider))
+                                .collect();
+                            info
+                        })
+                        .collect(),
+                })
+                .collect(),
+        })
+        .collect();
+    Ok(SchemaSnapshot {
+        trees,
+        fetched_at,
+        scope,
+        incomplete: snapshot.incomplete,
+    })
 }
 
 #[derive(Clone, Default)]
@@ -813,8 +1287,148 @@ pub(crate) fn driver_value(value: Value) -> DriverValue {
 #[cfg(test)]
 mod tests {
     use sift_driver_api::mock::MockDriver;
+    use sift_extension_protocol::DriverSchemaScope;
 
     use super::*;
+
+    struct ExternalFixture {
+        descriptor: ProviderDescriptor,
+    }
+
+    impl ExternalFixture {
+        fn new() -> Self {
+            Self {
+                descriptor: ProviderDescriptor {
+                    provider: ProviderRef {
+                        provider_id: ProviderId::new("acme/external").unwrap(),
+                        dialect_id: DialectId::new("sift/postgresql").unwrap(),
+                        provider_version: "1.0.0".into(),
+                    },
+                    display_name: "External fixture".into(),
+                    configuration_schema: serde_json::json!({"type": "object"}),
+                    credential_schema: serde_json::json!({"type": "object"}),
+                    configuration_schema_version: 1,
+                    capabilities: vec![],
+                    quality: Some(ProviderQuality::SiftCertified),
+                    available: true,
+                },
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl DatabaseProvider for ExternalFixture {
+        fn descriptor(&self) -> &ProviderDescriptor {
+            &self.descriptor
+        }
+
+        fn legacy_engine(&self) -> Option<Engine> {
+            None
+        }
+
+        async fn open(
+            &self,
+            _: ProviderOpenRequest,
+        ) -> Result<ProviderConnectionHandle, DriverError> {
+            Ok(ProviderConnectionHandle::new(
+                self.descriptor.provider.provider_id.clone(),
+                1_u64,
+            ))
+        }
+
+        async fn ping(
+            &self,
+            _: &ProviderConnectionHandle,
+        ) -> Result<ProviderServerInfo, DriverError> {
+            Ok(ProviderServerInfo {
+                provider: self.descriptor.provider.clone(),
+                server_version: "fixture-1".into(),
+                current_database: "fixture".into(),
+                current_user: "fixture".into(),
+                pool_warm_slots: None,
+            })
+        }
+
+        async fn schema(
+            &self,
+            _: &ProviderConnectionHandle,
+            _: SchemaScope,
+        ) -> Result<DriverSchemaSnapshot, DriverError> {
+            Ok(DriverSchemaSnapshot {
+                catalogs: vec![],
+                fetched_at_unix_ms: 0,
+                scope: DriverSchemaScope {
+                    depth: DriverSchemaDepth::Shallow,
+                    catalog: None,
+                    namespace: None,
+                    object: None,
+                },
+                incomplete: false,
+            })
+        }
+
+        async fn begin(
+            &self,
+            _: &ProviderConnectionHandle,
+            _: TxMode,
+        ) -> Result<ProviderTransactionHandle, DriverError> {
+            Ok(ProviderTransactionHandle::new(
+                self.descriptor.provider.provider_id.clone(),
+                2_u64,
+            ))
+        }
+
+        async fn commit(&self, _: ProviderTransactionHandle) -> Result<(), DriverError> {
+            Ok(())
+        }
+
+        async fn rollback(&self, _: ProviderTransactionHandle) -> Result<(), DriverError> {
+            Ok(())
+        }
+
+        async fn execute(
+            &self,
+            _: &ProviderConnectionHandle,
+            _: ExecuteRequest,
+        ) -> Result<ProviderResultStream, DriverError> {
+            let (sender, receiver) = mpsc::channel(3);
+            for payload in [
+                DriverStreamPayload::NextResult {
+                    columns: vec![DriverColumn {
+                        name: "answer".into(),
+                        type_name: "int8".into(),
+                        nullable: false,
+                    }],
+                },
+                DriverStreamPayload::Rows {
+                    rows: vec![vec![DriverValue::I64(42)]],
+                },
+                DriverStreamPayload::Done {
+                    affected_rows: None,
+                    warnings: vec![],
+                },
+            ] {
+                sender.try_send(payload).unwrap();
+            }
+            Ok(ProviderResultStream {
+                cursor_id: sift_protocol::CursorId::new(77),
+                rows: receiver,
+                server_side_cursor: true,
+            })
+        }
+
+        async fn cancel(
+            &self,
+            _: &ProviderConnectionHandle,
+            _: sift_protocol::CursorId,
+        ) -> Result<(), DriverError> {
+            Ok(())
+        }
+
+        async fn close(&self, _: ProviderConnectionHandle) -> Result<(), DriverError> {
+            Ok(())
+        }
+    }
 
     #[test]
     fn builtins_dispatch_through_provider_ids_and_legacy_facade() {
@@ -850,5 +1464,84 @@ mod tests {
         providers.replace([replacement]).unwrap();
         assert_ne!(captured.generation, providers.get(&id).unwrap().generation);
         assert_eq!(captured.provider.descriptor().provider.provider_id, id);
+    }
+
+    #[tokio::test]
+    async fn external_provider_serves_a_normal_session_end_to_end() {
+        let registry = DriverRegistry::new();
+        let provider: Arc<dyn DatabaseProvider> = Arc::new(ExternalFixture::new());
+        registry.providers().replace([provider]).unwrap();
+        let store = crate::SessionStore::new(registry);
+        let session = store.open_session(sift_protocol::OpenSessionRequest {
+            tag: None,
+            tenant_id: None,
+        });
+        let provider_id = ProviderId::new("acme/external").unwrap();
+        let connection = store
+            .open_provider_connection(
+                session.id,
+                provider_id.clone(),
+                sift_protocol::ConnectionSpec {
+                    host: "fixture".into(),
+                    port: None,
+                    database: None,
+                    user: "fixture".into(),
+                    password: Some("not-persisted".into()),
+                    ssl_mode: None,
+                    engine_specific: None,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(connection.provider_id, provider_id);
+        assert_eq!(
+            store
+                .ping(session.id, connection.id)
+                .await
+                .unwrap()
+                .provider
+                .provider_id,
+            provider_id
+        );
+        let result = store
+            .execute_http(
+                session.id,
+                sift_protocol::ExecuteRequestHttp {
+                    connection: connection.id,
+                    sql: "select 42".into(),
+                    params: vec![],
+                    tx: None,
+                    room_id: None,
+                    connection_profile_id: None,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(result.rows[0].values, vec![Value::Int64(42)]);
+
+        let transaction = store
+            .begin_transaction(
+                session.id,
+                sift_protocol::BeginTransactionRequest {
+                    connection: connection.id,
+                    mode: TxMode::default(),
+                },
+            )
+            .await
+            .unwrap();
+        store
+            .commit_transaction(
+                session.id,
+                sift_protocol::EndTransactionRequest {
+                    connection: connection.id,
+                    tx_id: transaction.tx_id,
+                },
+            )
+            .await
+            .unwrap();
+        store
+            .close_connection(session.id, connection.id)
+            .await
+            .unwrap();
     }
 }
