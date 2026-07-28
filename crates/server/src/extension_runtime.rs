@@ -5,7 +5,7 @@ use std::{
         atomic::{AtomicU64, Ordering},
         Arc,
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use sha2::{Digest as _, Sha256};
@@ -15,7 +15,8 @@ use sift_extension_protocol::{
 };
 use sift_metadata::{MetadataStore, SelectedExtensionPackage};
 use sift_plugin_host::{
-    ExtensionPackageRegistry, ProcessSpec, SupervisedProcess, SupervisorLimits,
+    ExtensionPackageRegistry, GenerationKey, GenerationLimiter, GenerationPermit, ProcessSpec,
+    RestartBudget, SupervisedProcess, SupervisorLimits,
 };
 use sift_protocol::{
     Code, DriverError, Engine, ExecuteRequest, ExtensionOperation, GovernedToolDescriptor,
@@ -34,7 +35,30 @@ use crate::{
 
 static NEXT_GENERATION: AtomicU64 = AtomicU64::new(1);
 
-type TenantProcessCell = Arc<tokio::sync::OnceCell<Arc<SupervisedProcess>>>;
+struct RuntimeProcess {
+    process: Arc<SupervisedProcess>,
+    _permit: GenerationPermit,
+}
+
+struct TenantProcessSlot {
+    process: Option<Arc<RuntimeProcess>>,
+    restart: RestartBudget,
+    retry_at: Option<Instant>,
+    quarantined: bool,
+}
+
+impl Default for TenantProcessSlot {
+    fn default() -> Self {
+        Self {
+            process: None,
+            restart: RestartBudget::new(Default::default()),
+            retry_at: None,
+            quarantined: false,
+        }
+    }
+}
+
+type TenantProcessSlotRef = Arc<Mutex<TenantProcessSlot>>;
 
 struct ExtensionProcessRuntime {
     extension_id: ExtensionId,
@@ -46,7 +70,8 @@ struct ExtensionProcessRuntime {
     granted_capabilities: Vec<String>,
     limits: SupervisorLimits,
     metadata: MetadataStore,
-    processes: Mutex<HashMap<Option<i64>, TenantProcessCell>>,
+    generation_limiter: Arc<GenerationLimiter>,
+    processes: Mutex<HashMap<Option<i64>, TenantProcessSlotRef>>,
 }
 
 struct RuntimeActionInvoker {
@@ -87,41 +112,91 @@ impl ExtensionProcessRuntime {
                 ));
             }
         }
-        let process = {
+        let slot = {
             let mut processes = self.processes.lock().await;
             processes
                 .entry(tenant_id)
-                .or_insert_with(|| Arc::new(tokio::sync::OnceCell::new()))
+                .or_insert_with(|| Arc::new(Mutex::new(TenantProcessSlot::default())))
                 .clone()
         };
-        process
-            .get_or_try_init(|| async {
-                let generation = NEXT_GENERATION.fetch_add(1, Ordering::Relaxed);
-                SupervisedProcess::start(
-                    ProcessSpec {
-                        executable: self.executable.clone(),
-                        working_directory: self.working_directory.clone(),
-                        extension_id: self.extension_id.clone(),
-                        extension_version: self.extension_version.clone(),
-                        manifest_sha256: self.manifest_sha256.clone(),
-                        expected_contributions: self.expected_contributions.clone(),
-                        generation: WireId::from_u128(u128::from(generation)),
-                        granted_capabilities: self.granted_capabilities.clone(),
-                    },
-                    self.limits.clone(),
-                )
-                .await
-                .map(Arc::new)
-                .map_err(|error| {
-                    DriverError::new(
-                        Code::ConnectionFailed,
-                        format!("extension process failed to start: {error}"),
-                    )
-                })
+        let mut slot = slot.lock().await;
+        if let Some(generation) = &slot.process {
+            if generation.process.health().await == sift_plugin_host::GenerationHealth::Ready {
+                return Ok(generation.process.clone());
+            }
+            slot.process = None;
+            record_failure(&mut slot)?;
+        }
+        if slot.quarantined {
+            return Err(quarantined());
+        }
+        if let Some(retry_at) = slot.retry_at {
+            tokio::time::sleep(retry_at.saturating_duration_since(Instant::now())).await;
+            slot.retry_at = None;
+        }
+        let permit = self
+            .generation_limiter
+            .acquire(GenerationKey {
+                extension_id: self.extension_id.clone(),
+                tenant_id: tenant_id.unwrap_or(i64::MIN),
             })
-            .await
-            .cloned()
+            .map_err(|error| {
+                DriverError::new(
+                    Code::TenantResourceExhausted,
+                    format!("extension process admission failed: {error}"),
+                )
+            })?;
+        let generation = NEXT_GENERATION.fetch_add(1, Ordering::Relaxed);
+        let process = match SupervisedProcess::start(
+            ProcessSpec {
+                executable: self.executable.clone(),
+                working_directory: self.working_directory.clone(),
+                extension_id: self.extension_id.clone(),
+                extension_version: self.extension_version.clone(),
+                manifest_sha256: self.manifest_sha256.clone(),
+                expected_contributions: self.expected_contributions.clone(),
+                generation: WireId::from_u128(u128::from(generation)),
+                granted_capabilities: self.granted_capabilities.clone(),
+            },
+            self.limits.clone(),
+        )
+        .await
+        {
+            Ok(process) => Arc::new(process),
+            Err(error) => {
+                record_failure(&mut slot)?;
+                return Err(DriverError::new(
+                    Code::ConnectionFailed,
+                    format!("extension process failed to start: {error}"),
+                ));
+            }
+        };
+        slot.process = Some(Arc::new(RuntimeProcess {
+            process: process.clone(),
+            _permit: permit,
+        }));
+        Ok(process)
     }
+}
+
+fn record_failure(slot: &mut TenantProcessSlot) -> Result<(), DriverError> {
+    match slot.restart.record_failure(Instant::now()) {
+        Some(backoff) => {
+            slot.retry_at = Some(Instant::now() + backoff);
+            Ok(())
+        }
+        None => {
+            slot.quarantined = true;
+            Err(quarantined())
+        }
+    }
+}
+
+fn quarantined() -> DriverError {
+    DriverError::new(
+        Code::ConnectionFailed,
+        "extension restart budget exhausted; generation is quarantined",
+    )
 }
 
 struct TenantScopedRpcProvider {
@@ -271,6 +346,7 @@ impl DatabaseProvider for TenantScopedRpcProvider {
 pub fn installed_extension_runtimes(
     registry: &ExtensionPackageRegistry,
     metadata: &MetadataStore,
+    generation_limiter: Arc<GenerationLimiter>,
 ) -> Result<InstalledExtensionRuntimes, DriverError> {
     let mut providers = Vec::new();
     let mut actions = Vec::new();
@@ -322,6 +398,7 @@ pub fn installed_extension_runtimes(
             granted_capabilities,
             limits,
             metadata: metadata.clone(),
+            generation_limiter: generation_limiter.clone(),
             processes: Mutex::new(HashMap::new()),
         });
         for contribution in &manifest.contributions.database_provider {
@@ -536,6 +613,16 @@ mod tests {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.')));
     }
 
+    #[test]
+    fn repeated_generation_failures_quarantine_the_tenant_slot() {
+        let mut slot = TenantProcessSlot::default();
+        for _ in 0..5 {
+            record_failure(&mut slot).unwrap();
+        }
+        assert!(record_failure(&mut slot).is_err());
+        assert!(slot.quarantined);
+    }
+
     #[tokio::test]
     async fn selected_provider_is_discovered_but_tenant_start_is_deny_by_default() {
         let directory = tempfile::tempdir().unwrap();
@@ -612,7 +699,12 @@ capabilities = ["driver.core@1"]
             })
             .unwrap();
 
-        let runtimes = installed_extension_runtimes(&registry, &metadata).unwrap();
+        let runtimes = installed_extension_runtimes(
+            &registry,
+            &metadata,
+            Arc::new(GenerationLimiter::new(Default::default())),
+        )
+        .unwrap();
         assert_eq!(runtimes.providers.len(), 1);
         assert_eq!(
             runtimes.providers[0]

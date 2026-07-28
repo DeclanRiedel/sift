@@ -96,6 +96,7 @@ struct SessionStoreInner {
     authorization_store: RwLock<Option<MetadataStore>>,
     tool_registry: RwLock<Option<crate::automation::GovernedToolRegistry>>,
     package_registry: RwLock<Option<Arc<sift_plugin_host::ExtensionPackageRegistry>>>,
+    extension_generation_limiter: Arc<sift_plugin_host::GenerationLimiter>,
     /// Reverse index for immediate hard-revocation cleanup.
     managed_connections: DashMap<
         (
@@ -248,6 +249,9 @@ impl SessionStore {
                 authorization_store: RwLock::new(None),
                 tool_registry: RwLock::new(None),
                 package_registry: RwLock::new(None),
+                extension_generation_limiter: Arc::new(sift_plugin_host::GenerationLimiter::new(
+                    Default::default(),
+                )),
                 managed_connections: DashMap::new(),
                 room_connections: DashMap::new(),
                 resource_manager: RwLock::new(crate::resources::ResourceManager::default()),
@@ -290,6 +294,9 @@ impl SessionStore {
                 authorization_store: RwLock::new(None),
                 tool_registry: RwLock::new(None),
                 package_registry: RwLock::new(None),
+                extension_generation_limiter: Arc::new(sift_plugin_host::GenerationLimiter::new(
+                    Default::default(),
+                )),
                 managed_connections: DashMap::new(),
                 room_connections: DashMap::new(),
                 resource_manager: RwLock::new(crate::resources::ResourceManager::default()),
@@ -403,8 +410,11 @@ impl SessionStore {
             .unwrap()
             .clone()
             .ok_or(ApiError::MetadataUnavailable)?;
-        let runtimes =
-            crate::extension_runtime::installed_extension_runtimes(&packages, &metadata)?;
+        let runtimes = crate::extension_runtime::installed_extension_runtimes(
+            &packages,
+            &metadata,
+            self.inner.extension_generation_limiter.clone(),
+        )?;
         if let Some(tools) = self.tool_registry() {
             tools
                 .dispatcher()
