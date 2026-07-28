@@ -41,7 +41,9 @@ pub mod updater;
 
 pub use config::Config;
 pub use error::ApiError;
-pub use registry::DriverRegistry;
+pub use registry::{
+    BuiltinProviderAdapter, DatabaseProvider, DriverRegistry, ProviderRegistry, RegisteredProvider,
+};
 pub use room_runtime::RoomRuntime;
 pub use session::{ConnectionEntry, ConnectionProvenance, Session, SessionStore};
 pub use shutdown::Shutdown;

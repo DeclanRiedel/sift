@@ -44,6 +44,7 @@ roxmltree = "0.20"
 schemars = { version = "0.8", features = ["chrono", "uuid1"] }
 thiserror = "1.0"
 anyhow = "1.0"
+arc-swap = "1"
 async-trait = "0.1"
 bytes = "1"
 tokio = { version = "1", features = ["full"] }
