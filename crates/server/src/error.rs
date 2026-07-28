@@ -157,6 +157,9 @@ impl ApiError {
                 MetadataError::ExtensionStorageRevisionConflict => {
                     (StatusCode::CONFLICT, "extension_storage_revision_conflict")
                 }
+                MetadataError::InvalidOperationApproval => {
+                    (StatusCode::CONFLICT, "invalid_operation_approval")
+                }
                 MetadataError::ExtensionStorageQuotaExceeded { .. } => {
                     (StatusCode::CONFLICT, "extension_storage_quota_exceeded")
                 }

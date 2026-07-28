@@ -18,12 +18,14 @@ use sift_protocol::{
 };
 use uuid::Uuid;
 
+mod approval;
 mod extension;
 mod extension_storage;
 pub mod http;
 pub mod schema;
 pub mod secrets;
 
+pub use approval::*;
 pub use extension::*;
 pub use extension_storage::*;
 pub use schema::*;
@@ -118,6 +120,8 @@ pub enum MetadataError {
     ExtensionStorageRevisionConflict,
     #[error("extension storage namespace not found")]
     ExtensionStorageNamespaceNotFound,
+    #[error("operation approval is invalid, expired, consumed, or mismatched")]
+    InvalidOperationApproval,
     #[error("tenant administrator access required")]
     TenantAdminRequired,
     #[error("tenant member access required")]
