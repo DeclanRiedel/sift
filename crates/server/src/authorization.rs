@@ -215,8 +215,12 @@ mod tests {
     #[test]
     fn extension_classification_cannot_weaken_core_policy() {
         let mut scope = member_scope(ConnectionPolicy::default());
-        scope.room_role = Some(AuthorizationRoomRole::Viewer);
         assert!(authorize_extension(&scope, OperationClassification::Read).is_ok());
+        scope.room_role = Some(AuthorizationRoomRole::Viewer);
+        assert_eq!(
+            authorize_extension(&scope, OperationClassification::Read),
+            Err(AuthorizationDenial::RoomEditorRequired)
+        );
         assert_eq!(
             authorize_extension(&scope, OperationClassification::Write),
             Err(AuthorizationDenial::RoomEditorRequired)
