@@ -6,9 +6,9 @@
 //! networking, no filesystem.
 
 /// Current wire protocol version.
-pub const PROTOCOL_VERSION_NUMBER: u32 = 2;
+pub const PROTOCOL_VERSION_NUMBER: u32 = 1;
 /// Header representation of [`PROTOCOL_VERSION_NUMBER`].
-pub const PROTOCOL_VERSION: &str = "2";
+pub const PROTOCOL_VERSION: &str = "1";
 
 pub mod auth;
 pub mod capability;
@@ -20,11 +20,13 @@ pub mod csv_import;
 pub mod edit;
 pub mod engine;
 pub mod error;
+pub mod extension;
 pub mod handshake;
 pub mod operation;
 pub mod plan;
 pub mod policy;
 pub mod process;
+pub mod provider;
 pub mod remote;
 pub mod result;
 pub mod room;
@@ -69,12 +71,14 @@ pub use edit::{
 };
 pub use engine::Engine;
 pub use error::{Code, DriverError, DriverWarning};
+pub use extension::*;
 pub use handshake::{
     HandshakeClientKind, HandshakeDeployment, HandshakeRequest, HandshakeResponse,
     HandshakeRuntimeMode, HandshakeTransport, ProtocolRange,
 };
 pub use operation::{
-    AuthenticationMethod, IdentityAdminAction, Operation, OperationSummary, PolicyAdminAction,
+    AuthenticationMethod, ExtensionAdminAction, IdentityAdminAction, Operation, OperationSummary,
+    PolicyAdminAction,
 };
 pub use plan::{ExplainRequest, ExplainResponse, PlanNode};
 pub use policy::{
@@ -83,6 +87,7 @@ pub use policy::{
     TenantUsageSnapshot, UpdateConnectionPolicyRequest, UpdateTenantLimitsRequest,
 };
 pub use process::{DatabaseProcess, KillProcessRequest, KillProcessResponse};
+pub use provider::*;
 pub use remote::{
     RemoteCapabilityResponse, RemoteDaemonDescriptor, RemoteKeyChallenge, RemoteProbeResponse,
     RemoteReady,

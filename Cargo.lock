@@ -3648,6 +3648,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "sift-extension-protocol"
+version = "0.1.0"
+dependencies = [
+ "schemars",
+ "serde",
+ "serde_json",
+ "toml",
+]
+
+[[package]]
 name = "sift-metadata"
 version = "0.1.0"
 dependencies = [
@@ -3684,6 +3694,7 @@ dependencies = [
  "serde",
  "serde_bytes",
  "serde_json",
+ "sift-extension-protocol",
  "thiserror 1.0.69",
  "uuid",
 ]

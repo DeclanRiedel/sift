@@ -1,0 +1,32 @@
+schema_version = 1
+id = "acme/example"
+name = "Example"
+version = "1.2.3"
+authors = ["Acme"]
+description = "Example provider"
+license = "Apache-2.0"
+repository = "https://example.invalid/acme/example"
+minimum_sift_version = "0.2.0"
+
+[compatibility]
+public_protocol = { minimum = 1, maximum = 1 }
+extension_rpc = { minimum = 1, maximum = 1 }
+driver_rpc = { minimum = 1, maximum = 1 }
+
+[[capabilities]]
+kind = "database.connect"
+required = true
+
+[[artifacts]]
+target = "linux-x86_64"
+path = "bin/example"
+sha256 = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+byte_length = 123
+
+[[contributions.database_provider]]
+id = "example-db"
+provider_id = "acme/example-db"
+dialect_id = "acme/example-sql"
+config_schema = "schemas/config.json"
+credential_schema = "schemas/credentials.json"
+capabilities = ["driver.core@1"]

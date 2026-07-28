@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/protocol",
+    "crates/extension-protocol",
     "crates/core",
     "crates/driver-api",
     "crates/driver-postgres",
@@ -23,6 +24,7 @@ repository = "https://github.com/declan/sift"
 [workspace.dependencies]
 # Internal crates
 sift-protocol = { path = "crates/protocol", version = "0.1.0" }
+sift-extension-protocol = { path = "crates/extension-protocol", version = "0.1.0" }
 sift-core = { path = "crates/core", version = "0.1.0" }
 sift-driver-api = { path = "crates/driver-api", version = "0.1.0" }
 sift-driver-postgres = { path = "crates/driver-postgres", version = "0.1.0" }

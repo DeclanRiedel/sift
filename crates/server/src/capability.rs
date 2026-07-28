@@ -92,13 +92,16 @@ fn unavailable_reason(
         | ManagePrincipalKey
         | ManageTenantInvitation
         | ManageConnectionPolicy
-        | ManageTenantLimits => Some("administrator context required"),
+        | ManageTenantLimits
+        | ManageExtension => Some("administrator context required"),
         RefreshAuthSession
         | Logout
         | ChangePassword
         | OpenSession
         | ListSessions
         | ListAvailableOperations
+        | InvokeExtension
+        | ApproveOperation
         | Metadata => None,
         CloseSession | OpenConnection | ListTransactions if !has_session => {
             Some("session context required")

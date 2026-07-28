@@ -44,6 +44,22 @@ pub enum PolicyAdminAction {
     Disconnect,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ExtensionAdminAction {
+    Validate,
+    Install,
+    Enable,
+    Disable,
+    Grant,
+    Revoke,
+    AllowTenant,
+    DenyTenant,
+    Rollback,
+    Uninstall,
+    Purge,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum Operation {
@@ -88,6 +104,16 @@ pub enum Operation {
     ManageTenantLimits {
         action: PolicyAdminAction,
         tenant_id: i64,
+    },
+    ManageExtension {
+        action: ExtensionAdminAction,
+        extension_id: crate::ExtensionId,
+    },
+    InvokeExtension {
+        operation: crate::ExtensionOperation,
+    },
+    ApproveOperation {
+        approval_id: String,
     },
     RateLimitRejected {
         class: crate::RateLimitClass,
@@ -281,6 +307,9 @@ impl Operation {
             Self::ManageTenantInvitation { .. } => OperationKind::ManageTenantInvitation,
             Self::ManageConnectionPolicy { .. } => OperationKind::ManageConnectionPolicy,
             Self::ManageTenantLimits { .. } => OperationKind::ManageTenantLimits,
+            Self::ManageExtension { .. } => OperationKind::ManageExtension,
+            Self::InvokeExtension { .. } => OperationKind::InvokeExtension,
+            Self::ApproveOperation { .. } => OperationKind::ApproveOperation,
             Self::RateLimitRejected { .. } => OperationKind::Metadata,
             Self::OpenSession { .. } => OperationKind::OpenSession,
             Self::ListSessions => OperationKind::ListSessions,
@@ -388,6 +417,20 @@ impl Operation {
                 "tenant",
                 Some(*tenant_id),
             ),
+            Operation::ManageExtension {
+                action,
+                extension_id,
+            } => summary(
+                &format!("extension_{action:?}").to_lowercase(),
+                extension_id.as_str(),
+                None,
+            ),
+            Operation::InvokeExtension { operation } => summary(
+                operation.action.as_str(),
+                operation.contribution_id.as_str(),
+                None,
+            ),
+            Operation::ApproveOperation { .. } => summary("approve", "operation_approval", None),
             Operation::RateLimitRejected {
                 route, tenant_id, ..
             } => summary("rate_limit_rejected", route, *tenant_id),
