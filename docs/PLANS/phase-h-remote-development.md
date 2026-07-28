@@ -243,7 +243,7 @@ small pure-serde request and response:
   descriptors, and a bounded set of stable capability names.
 
 The server selects the highest mutually supported integer. Initially both
-ranges are `[2, 2]`; the range contract exists now so adding N-1 support later
+ranges are `[1, 1]`; the range contract exists now so adding N-1 support later
 does not require inventing a second negotiation mechanism. No overlap returns
 HTTP 426 with `unsupported_protocol_version` and the server's supported range.
 The handshake response carries the selected value in

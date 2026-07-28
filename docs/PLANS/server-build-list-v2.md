@@ -37,7 +37,7 @@
   stable Loro selection anchors, lag recovery is explicit, and the reference
   SDK includes client-side follow-mode projection.
 - **Phase H is complete.** Direct SSH bootstrap, the persistent authenticated
-  proxy daemon, protocol-v2 range negotiation, lifecycle modes, signed
+  proxy daemon, pre-release protocol range negotiation, lifecycle modes, signed
   periodic update staging, readiness-gated activation/rollback, and release
   CI are implemented. See `docs/PLANS/phase-h-remote-development.md`.
 - **Phase I design is complete.** ADR-022 and ADR-031 lock provider identity,
@@ -313,9 +313,8 @@ server. The decision-complete contract is
       length-prefixed JSON stdio. ODBC/JDBC and automatic bridge discovery are
       deferred.
 - [x] [Design] Provider identity and discovery: immutable namespaced provider,
-      dialect, extension, and contribution ids; protocol-v3 descriptors;
-      JSON-schema configuration; explicit versioned capability families; v2
-      remains built-in-only.
+      dialect, extension, and contribution ids; protocol-v1 descriptors;
+      JSON-schema configuration; explicit versioned capability families.
 - [x] [Design] Driver RPC v1: identity/version handshake, generation-scoped
       handles, 16 MiB hard frame ceiling, host byte-credit backpressure,
       structured errors, deadlines, cancel/kill, restart/quarantine, and a
@@ -337,7 +336,7 @@ server. The decision-complete contract is
       and tunnel leases with reverse cleanup and no secret arguments/env/logs.
 - [x] [Design] Declarative client contribution descriptors only; no arbitrary
       extension JavaScript or raw routes.
-- [ ] [Implement I0–I3] Contract crates, protocol v3, package registry,
+- [ ] [Implement I0–I3] Contract crates, protocol v1, package registry,
       supervisor, provider-neutral registry, and built-in adapters.
 - [ ] [Implement I4–I6] Driver RPC host/SDK + conformance provider,
       namespaced operations/storage, and connection-pipeline fixtures.

@@ -60,7 +60,7 @@ and reviewed-registry patterns. It diverges where its workload requires it:
    package provenance, development overrides, enable/disable, and inspection.
 2. Extension registry and supervisor with generation-scoped processes, health,
    deadlines, bounded logs, restart backoff, quarantine, and atomic upgrade.
-3. Extensible provider identity and capability discovery in public protocol v3.
+3. Extensible provider identity and capability discovery in public protocol v1.
 4. Driver RPC v1 over stdio, a host adapter, SDK/schema artifacts, and an
    external conformance provider.
 5. Namespaced extension operations, central policy classification, audit, and
@@ -159,10 +159,10 @@ Display names are mutable localized text and are never dispatch keys.
 
 ### Built-in compatibility
 
-Public protocol v3 introduces provider-neutral identities and capabilities.
-The existing `Engine::{Postgres, SqlServer}` remains available as a legacy
-dialect hint during the v2 compatibility window, but it stops being the
-external dispatch key.
+Public protocol v1 introduces provider-neutral identities and capabilities.
+The pre-release `Engine::{Postgres, SqlServer}` wire shape is replaced rather
+than retained as a compatibility layer; there are no external users requiring
+a historical codec.
 
 Built-ins map as follows:
 
@@ -193,9 +193,8 @@ package. Remote `$ref` resolution is forbidden. Credential schemas mark fields
 with `x-sift-secret = true`; ordinary settings/config schemas reject that
 annotation and secret-shaped field names.
 
-Protocol v2 clients continue to see and create the two built-in engines only.
-External providers require protocol v3. No external provider pretends to be
-PostgreSQL or SQL Server to reach old clients.
+All protocol v1 clients use provider-neutral shapes. No external provider
+pretends to be PostgreSQL or SQL Server.
 
 ### Capability discovery
 
@@ -318,13 +317,13 @@ traversal, duplicate normalized paths, case-fold collisions, symlinks,
 hardlinks, devices, more than 4,096 entries, and configured compressed or
 expanded byte ceilings.
 
-The archive contains:
+The archive contains only:
 
 - `sift-extension.toml`;
 - `sift-extension.lock`, RFC 8785 JSON Canonicalization Scheme (JCS) bytes
-  containing the manifest digest and listing every payload file's normalized
-  path, SHA-256, and byte length (the lock and signature files are excluded
-  from their own list);
+  containing the manifest digest and listing `sift-extension.toml` plus every
+  payload file's normalized path, SHA-256, and byte length (only the lock and
+  signature files are excluded from the list);
 - `sift-extension.sig`, an optional unpadded-base64url Ed25519 signature over
   the exact lock bytes;
 - the declared artifacts and data files.
@@ -337,7 +336,17 @@ and an atomic rename selects the content-addressed install. For verified
 packages, the raw lock signature is checked before the manifest or payload is
 trusted or activated. Validation also rejects lock bytes that do not exactly
 match the RFC 8785 serialization of their parsed value; verifiers do not
-silently rewrite signed input.
+silently rewrite signed input. The manifest entry's digest must equal the
+separate `manifest_sha256` field. Undeclared archive entries are rejected.
+
+Package files and database selection cannot share one transaction, so install
+uses an explicit recovery protocol. The host fully writes and syncs a private
+staging directory, atomically renames it on the same filesystem to an immutable
+archive-digest directory, and only then selects that digest in an immediate
+SQLite transaction. Startup reconciliation removes abandoned staging
+directories, tolerates unreferenced immutable packages until garbage
+collection, and quarantines a selected record whose immutable directory is
+missing or fails revalidation. Activation never points at staging bytes.
 
 ### Contribution kinds reserved by v1
 
@@ -489,10 +498,19 @@ Default supervisor limits are:
 | Restart backoff | 250 ms exponential, capped at 30 seconds, plus jitter |
 | Structured/stderr log input | 64 KiB/s per generation |
 | Retained diagnostic ring | 1 MiB per generation |
+| Concurrent generations per extension and tenant | 1 active + 1 upgrade candidate |
+| Concurrent tenant generations per extension | 32 |
+| Concurrent extension generations per instance | 256 |
+| Idle lazy-generation lifetime | 5 minutes |
+| Single storage value | 1 MiB |
+| Storage migration working set | 64 MiB |
 
 Operators may lower these values. Raising them is bounded by server hard
 ceilings so a manifest cannot request unbounded startup, cancellation, logs, or
-restarts.
+restarts. Tenant generations start lazily, idle generations are evicted only
+when they own no live handles, and admission fails with a stable resource error
+when a limit cannot be satisfied. Upgrade candidates consume the explicitly
+reserved second per-tenant slot rather than bypassing instance ceilings.
 
 Extension RPC message kinds are `hello`, `welcome`, `request`, `response`,
 `stream`, `credit`, `cancel`, `heartbeat`, `log`, and `shutdown`. Unknown
@@ -570,6 +588,11 @@ Every request carries:
 - admitted tenant/room context reduced to what the plugin needs;
 - optional stream id.
 
+Request ids, stream ids, and opaque 128-bit handles are fixed-width lowercase
+hex strings on the JSON wire, never JSON numbers. The host is authoritative for
+deadline enforcement; the absolute deadline sent to a plugin is advisory and
+cannot extend the host timer.
+
 Responses are `ok`, structured `error`, or stream start. Driver errors preserve
 stable `Code`, retryability, provider-native code, sanitized message, and
 warnings. Unknown error codes map to `Internal` without discarding the native
@@ -603,6 +626,12 @@ must graduate as typed capability families and audited operations.
 The provider may send `NextResult`, `Rows`, `Done`, or `Error` frames only while
 credit is available. Credit is charged by encoded frame bytes before receipt
 and replenished after the core cursor registry accepts the page.
+
+Data-stream credit is independent from a small bounded control-frame allowance,
+so cancellation, terminal errors, heartbeats, and credit updates cannot
+deadlock behind result data. Initial data credit is at least one negotiated
+maximum legal result frame. A sender computes charge from the complete encoded
+length-prefixed frame; exceeding either credit pool is a protocol violation.
 
 The provider must split pages to fit the negotiated frame and row/byte limits.
 A single value that cannot fit returns `ResultTooLarge`; it is not fragmented
@@ -681,20 +710,17 @@ accounting apply independently to each namespace.
 
 ## Public protocol transition
 
-Phase I advances the application protocol to version 3 and the server
-advertises `[2, 3]` only after it has real codecs for both versions.
+Phase I publishes application protocol version 1. The earlier numeric version
+and engine-specific shapes were pre-release implementation details with no
+users, so the server does not retain or advertise them.
 
-- v2 routes and DTOs continue to expose the two built-in `Engine` variants.
-- v2 cannot create, select, or receive an external provider.
-- v3 provider-neutral DTOs carry provider refs, capability descriptors, and
-  schema-validated configuration.
-- internal state always uses provider ids; the v2 adapter maps only the two
-  reserved built-ins.
-- a v3 client never receives an `Engine` value as its capability source.
+- protocol-v1 provider-neutral DTOs carry provider refs, capability
+  descriptors, and schema-validated configuration;
+- internal state always uses provider ids;
+- clients never receive an `Engine` value as their capability source.
 
 The handshake selects one version for the whole connection as required by
-ADR-016. Sift does not advertise v2 after deleting its adapter and does not
-serialize one response shape conditionally inside a selected version.
+ADR-016. The initial published server range is `[1, 1]`.
 
 ## Connection pipeline
 
@@ -758,7 +784,7 @@ provider. It is not reimplemented as a Phase I plugin.
 
 ## Namespaced operations
 
-Protocol v3 adds:
+Protocol v1 includes:
 
 ```text
 ExtensionOperation {
@@ -807,6 +833,15 @@ Core provides:
 
 Extensions cannot execute SQL against metadata SQLite or see another
 extension's namespace.
+
+Keys, values, namespace totals, and migration working sets have independent
+hard ceilings. Values above the single-value ceiling are rejected before a
+SQLite write transaction begins. Upgrade staging is copy-on-write: unchanged
+values reference immutable content-addressed blobs, while a staged namespace
+records only changed keys and tombstones. Blob reference counts and the active
+namespace pointer change in the same immediate transaction. Startup
+reconciliation deletes unreachable blobs only after proving that no active,
+staged, rollback, or orphaned namespace references them.
 
 Disabling stops invocation but retains package and data. Uninstall removes the
 package and grants but retains data as orphaned state. Purge is a separate
@@ -958,7 +993,7 @@ context.
 Every mutation is a typed audited operation. Package bytes are never accepted
 from a URL the server invents or guesses.
 
-The negotiated-v3 HTTP surface remains under the stable `/v1` route prefix:
+The protocol-v1 HTTP surface remains under the stable `/v1` route prefix:
 
 - `GET /v1/providers`
 - `GET /v1/extensions`
@@ -982,7 +1017,7 @@ an expected revision/`If-Match`; retries cannot duplicate activation, grants,
 purge, or approval. Diagnostics are bounded and redacted. The OpenAPI and
 client-SDK coverage manifests include every route before Phase I graduation.
 
-Protocol v3 adds typed `ManageExtension`, `InvokeExtension`, and
+Protocol v1 includes typed `ManageExtension`, `InvokeExtension`, and
 `ApproveOperation` operation variants. HTTP transport auditing remains in
 addition to, not instead of, these semantic operations.
 
@@ -1033,13 +1068,13 @@ RPC corpus, and the full repository gates remain green.
 ## Ordered implementation milestones
 
 1. **I0 — Contract crates.** Add pure-serde extension/manifest/provider/RPC
-   types and golden/schema fixtures. Protocol v3 handshake support begins.
+   types and golden/schema fixtures. Publish protocol v1.
 2. **I1 — Package registry.** Validate/install content-addressed packages,
    provenance, grants, dev overrides, inspection, and metadata migrations.
 3. **I2 — Supervisor.** Process generations, stdio framing, health, deadlines,
    logs, restart/quarantine, update/drain/rollback.
 4. **I3 — Provider-neutral core.** Provider ids/capabilities/config schemas,
-   dynamic registry, v2 built-in compatibility, and built-in adapters.
+   dynamic registry, and built-in adapters.
 5. **I4 — Driver RPC.** Host adapter, SDK/schema, credit streaming, handle
    safety, cancellation, and external conformance provider.
 6. **I5 — Operations and storage.** Namespaced actions, policy mapping, audit

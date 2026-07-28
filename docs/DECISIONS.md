@@ -217,8 +217,12 @@ client built against a future, incompatible wire contract would hit confusing
 partial failures instead of a clear signal, and there was no way to reject an
 unsupported client.
 
-**Decision.** The protocol version is a monotonically increasing integer, not
-semver. It bumps only on a *breaking* wire change; additive changes do not.
+**Decision.** The public protocol starts at version `1`. Earlier protocol
+numbers existed only during pre-user development and carried no compatibility
+promise, so Phase I replaces those draft shapes instead of shipping parallel
+codecs for consumers that do not exist. After protocol v1 is published, the
+version is a monotonically increasing integer, not semver. It bumps only on a
+*breaking* wire change; additive changes do not.
 
 - Breaking (bump): removing or renaming a field or endpoint, changing a field's
   type or meaning, changing an existing enum variant's shape, or tightening
@@ -230,8 +234,9 @@ Before its first product request, a client sends its inclusive supported range
 to `POST /v1/handshake`. The server selects the highest mutually supported
 integer and returns its own range, the selected version, release version,
 opaque instance/generation identity, and a bounded capability set. No overlap
-returns HTTP 426 with `unsupported_protocol_version`. The initial range remains
-`[2, 2]`; release semver and application protocol compatibility are independent.
+returns HTTP 426 with `unsupported_protocol_version`. The initial published
+range is `[1, 1]`; release semver and application protocol compatibility are
+independent.
 
 After selection, every HTTP request and WebSocket upgrade carries the exact
 `x-sift-protocol-version`. Every response, including an upgrade and an error,
@@ -244,8 +249,9 @@ silently treating an unpinned client as compatible.
 **Consequences.** Incompatible clients fail before authentication or product
 state is touched, while compatible releases need not have identical semver.
 Additive evolution stays cheap and most changes do not bump the protocol.
-Clients and servers must retain range-aware codecs for every version they
-advertise, and the SDK gains a small shared handshake state before normal
+Clients and servers must retain range-aware codecs for every published version
+they advertise; unreleased development shapes do not create permanent
+compatibility debt. The SDK gains a small shared handshake state before normal
 requests. Detailed wire and reconnect behavior is in
 `docs/PLANS/phase-h-remote-development.md`.
 
@@ -267,10 +273,10 @@ and fidelity problems that are unrelated to proving Sift's extension boundary.
 `DialectId` values, versioned provider descriptors, JSON Schemas for provider
 configuration and credential fields, and explicit capability families. Built-in
 PostgreSQL and SQL Server map to `sift/postgres` + `sift/postgresql` and
-`sift/sql-server` + `sift/tsql`. The existing `Engine` remains a protocol-v2
-compatibility hint for those built-ins; protocol v3 uses provider identity as
-the external dispatch key. Missing capabilities fail explicitly and are never
-inferred from a provider name.
+`sift/sql-server` + `sift/tsql`. Public protocol v1 uses provider identity as
+the external dispatch key. The pre-release `Engine` dispatch shape is replaced,
+not retained as a compatibility codec. Missing capabilities fail explicitly
+and are never inferred from a provider name.
 
 First-party PostgreSQL and SQL Server remain native in-process drivers during
 Phase I but register through the provider-neutral registry. Third-party drivers
@@ -280,6 +286,12 @@ range and manifest-identity handshake, generation-scoped opaque handles,
 structured errors, absolute deadlines, and host-granted byte credit for result
 pages. Stdio is the only v1 transport; plugins cannot open a control listener
 or choose an alternate socket. JSON is the only v1 encoding.
+
+Opaque 128-bit handles and request/stream ids are fixed-width lowercase hex
+strings rather than JSON numbers. The host alone enforces deadlines. Result
+data credit is charged by exact encoded frame bytes and is independent from a
+small bounded control-frame allowance; initial credit always permits one
+maximum legal result frame.
 
 The logical RPC requires the ADR-017 core verbs: open, ping, schema, begin,
 commit, rollback, execute, cancel, and close. Optional behavior is callable
@@ -341,6 +353,12 @@ without a shell or inherited environment. Process isolation contains failure
 but is not called a sandbox; runtime records distinguish host-enforced,
 platform-sandboxed, and process-only isolation.
 
+Package activation uses immutable content-addressed directories plus a
+transactional SQLite selection pointer; startup reconciliation handles
+abandoned staging directories, unreferenced packages, and missing selected
+bytes. Signed package locks cover the manifest and every payload entry, reject
+undeclared archive files, and exclude only the lock and signature themselves.
+
 Requested capabilities are inert until granted by an instance administrator.
 Effective permission is the intersection of the manifest request, instance
 policy, tenant allowlist, and per-operation authorization. Capabilities cover
@@ -365,6 +383,12 @@ start a candidate generation beside the old for stateless checks, then block
 new work and drain/cancel old handles before staging storage migration. Package
 and versioned-storage pointers switch atomically only after health passes; no
 live handle migration is promised.
+
+Process generations, storage values, namespace totals, and migration working
+sets have server hard ceilings. Tenant generations start lazily and idle
+generations with no live handles may be evicted. Storage upgrade staging is
+copy-on-write over immutable content-addressed blobs so a small migration does
+not duplicate an entire namespace.
 
 Connection brokers, tunnels, and hooks participate in a deterministic
 core-owned pipeline and return validated leases or patches rather than mutating
