@@ -2,7 +2,7 @@
 
 use std::{
     any::Any,
-    collections::HashMap,
+    collections::{BTreeMap, HashMap},
     sync::{
         atomic::{AtomicU64, Ordering},
         Arc, Mutex,
@@ -11,10 +11,13 @@ use std::{
 
 use arc_swap::ArcSwap;
 use sift_driver_api::Driver;
+use sift_extension_protocol::{
+    DriverCatalog, DriverColumn, DriverNamespace, DriverSchemaDepth, DriverSchemaObject,
+    DriverSchemaScope, DriverSchemaSnapshot, DriverStreamPayload, DriverValue,
+};
 use sift_protocol::{
-    Code, DialectId, DriverError, Engine, ExecuteRequest, Page, ProviderCapability,
-    ProviderDescriptor, ProviderId, ProviderQuality, ProviderRef, SchemaScope, SchemaSnapshot,
-    ServerInfo, TxMode,
+    Code, DialectId, DriverError, Engine, ExecuteRequest, ProviderCapability, ProviderDescriptor,
+    ProviderId, ProviderQuality, ProviderRef, SchemaDepth, SchemaScope, TxMode, TypeRef, Value,
 };
 use tokio::sync::mpsc;
 
@@ -29,12 +32,15 @@ pub trait DatabaseProvider: Send + Sync {
         &self,
         request: ProviderOpenRequest,
     ) -> Result<ProviderConnectionHandle, DriverError>;
-    async fn ping(&self, connection: &ProviderConnectionHandle) -> Result<ServerInfo, DriverError>;
+    async fn ping(
+        &self,
+        connection: &ProviderConnectionHandle,
+    ) -> Result<ProviderServerInfo, DriverError>;
     async fn schema(
         &self,
         connection: &ProviderConnectionHandle,
         scope: SchemaScope,
-    ) -> Result<SchemaSnapshot, DriverError>;
+    ) -> Result<DriverSchemaSnapshot, DriverError>;
     async fn begin(
         &self,
         connection: &ProviderConnectionHandle,
@@ -61,6 +67,15 @@ pub struct ProviderOpenRequest {
     pub credentials: HashMap<String, Vec<u8>>,
 }
 
+#[derive(Debug, Clone)]
+pub struct ProviderServerInfo {
+    pub provider: ProviderRef,
+    pub server_version: String,
+    pub current_database: String,
+    pub current_user: String,
+    pub pool_warm_slots: Option<u32>,
+}
+
 #[derive(Clone)]
 pub struct ProviderConnectionHandle {
     provider_id: ProviderId,
@@ -82,7 +97,7 @@ impl ProviderConnectionHandle {
         }
     }
 
-    fn downcast_ref<T: Any>(&self) -> Option<&T> {
+    pub(crate) fn downcast_ref<T: Any>(&self) -> Option<&T> {
         self.inner.downcast_ref()
     }
 }
@@ -97,11 +112,25 @@ impl ProviderTransactionHandle {
     pub fn provider_id(&self) -> &ProviderId {
         &self.provider_id
     }
+
+    pub(crate) fn new<T>(provider_id: ProviderId, inner: T) -> Self
+    where
+        T: Any + Send + Sync,
+    {
+        Self {
+            provider_id,
+            inner: Arc::new(inner),
+        }
+    }
+
+    pub(crate) fn downcast_ref<T: Any>(&self) -> Option<&T> {
+        self.inner.downcast_ref()
+    }
 }
 
 pub struct ProviderResultStream {
     pub cursor_id: sift_protocol::CursorId,
-    pub rows: mpsc::Receiver<Page>,
+    pub rows: mpsc::Receiver<DriverStreamPayload>,
     pub server_side_cursor: bool,
 }
 
@@ -222,18 +251,33 @@ impl DatabaseProvider for BuiltinProviderAdapter {
         ))
     }
 
-    async fn ping(&self, connection: &ProviderConnectionHandle) -> Result<ServerInfo, DriverError> {
-        self.driver.ping(self.connection(connection)?.clone()).await
+    async fn ping(
+        &self,
+        connection: &ProviderConnectionHandle,
+    ) -> Result<ProviderServerInfo, DriverError> {
+        let info = self
+            .driver
+            .ping(self.connection(connection)?.clone())
+            .await?;
+        Ok(ProviderServerInfo {
+            provider: self.descriptor.provider.clone(),
+            server_version: info.server_version,
+            current_database: info.current_database,
+            current_user: info.current_user,
+            pool_warm_slots: info.pool_warm_slots,
+        })
     }
 
     async fn schema(
         &self,
         connection: &ProviderConnectionHandle,
         scope: SchemaScope,
-    ) -> Result<SchemaSnapshot, DriverError> {
-        self.driver
+    ) -> Result<DriverSchemaSnapshot, DriverError> {
+        let snapshot = self
+            .driver
             .schema(self.connection(connection)?.clone(), scope)
-            .await
+            .await?;
+        Ok(driver_schema(snapshot))
     }
 
     async fn begin(
@@ -245,10 +289,10 @@ impl DatabaseProvider for BuiltinProviderAdapter {
             .driver
             .begin(self.connection(connection)?.clone(), mode)
             .await?;
-        Ok(ProviderTransactionHandle {
-            provider_id: self.descriptor.provider.provider_id.clone(),
-            inner: Arc::new(transaction),
-        })
+        Ok(ProviderTransactionHandle::new(
+            self.descriptor.provider.provider_id.clone(),
+            transaction,
+        ))
     }
 
     async fn commit(&self, transaction: ProviderTransactionHandle) -> Result<(), DriverError> {
@@ -272,9 +316,18 @@ impl DatabaseProvider for BuiltinProviderAdapter {
             .driver
             .execute(self.connection(connection)?.clone(), request)
             .await?;
+        let (sender, receiver) = mpsc::channel(8);
+        tokio::spawn(async move {
+            let mut pages = stream.rows;
+            while let Some(page) = pages.recv().await {
+                if sender.send(driver_page(page)).await.is_err() {
+                    break;
+                }
+            }
+        });
         Ok(ProviderResultStream {
             cursor_id: stream.cursor_id,
-            rows: stream.rows,
+            rows: receiver,
             server_side_cursor: stream.server_side_cursor,
         })
     }
@@ -325,7 +378,7 @@ impl BuiltinProviderAdapter {
                 "transaction belongs to a different provider",
             ));
         }
-        handle.inner.downcast_ref().ok_or_else(|| {
+        handle.downcast_ref().ok_or_else(|| {
             DriverError::new(
                 Code::TransactionNotFound,
                 "transaction handle kind does not match provider",
@@ -590,6 +643,171 @@ fn builtin_credential_schema() -> serde_json::Value {
             }
         }
     })
+}
+
+fn driver_schema(snapshot: sift_protocol::SchemaSnapshot) -> DriverSchemaSnapshot {
+    let scope = match &snapshot.scope.depth {
+        SchemaDepth::Shallow => DriverSchemaScope {
+            depth: DriverSchemaDepth::Shallow,
+            catalog: snapshot
+                .scope
+                .filter
+                .as_ref()
+                .and_then(|filter| filter.catalogs.as_ref())
+                .and_then(|catalogs| catalogs.first())
+                .cloned(),
+            namespace: snapshot
+                .scope
+                .filter
+                .as_ref()
+                .and_then(|filter| filter.schemas.as_ref())
+                .and_then(|schemas| schemas.first())
+                .cloned(),
+            object: snapshot
+                .scope
+                .filter
+                .as_ref()
+                .and_then(|filter| filter.name_pattern.clone()),
+        },
+        SchemaDepth::Deep { object } => DriverSchemaScope {
+            depth: DriverSchemaDepth::Deep,
+            catalog: object.catalog.clone(),
+            namespace: object.schema.clone(),
+            object: Some(object.name.clone()),
+        },
+    };
+    DriverSchemaSnapshot {
+        catalogs: snapshot
+            .trees
+            .into_iter()
+            .map(|catalog| DriverCatalog {
+                name: catalog.name,
+                namespaces: catalog
+                    .schemas
+                    .into_iter()
+                    .map(|namespace| DriverNamespace {
+                        name: namespace.name,
+                        objects: namespace
+                            .objects
+                            .into_iter()
+                            .map(|object| {
+                                let kind = serde_json::to_value(object.kind)
+                                    .ok()
+                                    .and_then(|value| value.as_str().map(str::to_owned))
+                                    .unwrap_or_else(|| "unknown".into());
+                                let mut attributes = match serde_json::to_value(&object) {
+                                    Ok(serde_json::Value::Object(fields)) => fields
+                                        .into_iter()
+                                        .filter(|(key, _)| {
+                                            !matches!(key.as_str(), "name" | "kind" | "columns")
+                                        })
+                                        .collect(),
+                                    _ => BTreeMap::new(),
+                                };
+                                attributes.retain(|_, value| !value.is_null());
+                                DriverSchemaObject {
+                                    name: object.name,
+                                    kind,
+                                    columns: object
+                                        .columns
+                                        .into_iter()
+                                        .map(driver_column)
+                                        .collect(),
+                                    attributes,
+                                }
+                            })
+                            .collect(),
+                    })
+                    .collect(),
+            })
+            .collect(),
+        fetched_at_unix_ms: snapshot.fetched_at.timestamp_millis(),
+        scope,
+        incomplete: snapshot.incomplete,
+    }
+}
+
+fn driver_column(column: sift_protocol::ColumnMetadata) -> DriverColumn {
+    let type_name = match column.type_ref {
+        TypeRef::Primitive(primitive) => serde_json::to_value(primitive)
+            .ok()
+            .and_then(|value| value.as_str().map(str::to_owned))
+            .unwrap_or_else(|| "unknown".into()),
+        TypeRef::Engine { name, .. } => name,
+    };
+    DriverColumn {
+        name: column.name,
+        type_name,
+        nullable: !matches!(column.nullable, sift_protocol::Nullability::NotNullable),
+    }
+}
+
+fn driver_page(page: sift_protocol::Page) -> DriverStreamPayload {
+    match page {
+        sift_protocol::Page::Rows { rows } => DriverStreamPayload::Rows {
+            rows: rows
+                .into_iter()
+                .map(|row| row.values.into_iter().map(driver_value).collect())
+                .collect(),
+        },
+        sift_protocol::Page::NextResult { columns } => DriverStreamPayload::NextResult {
+            columns: columns.into_iter().map(driver_column).collect(),
+        },
+        sift_protocol::Page::Error { error } => DriverStreamPayload::Error {
+            code: format!("{:?}", error.code),
+            message: error.message,
+            disposition: sift_extension_protocol::ConnectionDisposition::Unknown,
+        },
+        sift_protocol::Page::Done {
+            affected_rows,
+            warnings,
+        } => DriverStreamPayload::Done {
+            affected_rows,
+            warnings: warnings
+                .into_iter()
+                .map(|warning| warning.message)
+                .collect(),
+        },
+    }
+}
+
+pub(crate) fn driver_value(value: Value) -> DriverValue {
+    match value {
+        Value::Null => DriverValue::Null {
+            type_name: "unknown".into(),
+        },
+        Value::TypedNull { type_name } => DriverValue::Null { type_name },
+        Value::Bool(value) => DriverValue::Bool(value),
+        Value::Int16(value) => DriverValue::I64(i64::from(value)),
+        Value::Int32(value) => DriverValue::I64(i64::from(value)),
+        Value::Int64(value) => DriverValue::I64(value),
+        Value::Float32(value) => DriverValue::F64(f64::from(value)),
+        Value::Float64(value) => DriverValue::F64(value),
+        Value::Decimal(value) => DriverValue::Decimal(value),
+        Value::Text(value) => DriverValue::String(value),
+        Value::Blob(value) => DriverValue::Bytes(value),
+        Value::Date(value) => DriverValue::Date(value.to_string()),
+        Value::Time(value) => DriverValue::Time(value.to_string()),
+        Value::Timestamp(value) => DriverValue::Timestamp(value.to_string()),
+        Value::TimestampTz(value) => DriverValue::TimestampTz(value.to_rfc3339()),
+        Value::Interval(value) => DriverValue::IntervalMicros(value.num_microseconds().unwrap_or(
+            if value < chrono::Duration::zero() {
+                i64::MIN
+            } else {
+                i64::MAX
+            },
+        )),
+        Value::Uuid(value) => DriverValue::Uuid(value.to_string()),
+        Value::Json(value) => DriverValue::Json(value),
+        Value::Engine {
+            type_name,
+            display_text,
+            ..
+        } => DriverValue::Engine {
+            type_name,
+            display: display_text,
+        },
+    }
 }
 
 #[cfg(test)]

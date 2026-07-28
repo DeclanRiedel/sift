@@ -38,8 +38,12 @@ async fn supervised_conformance_process_handshakes_and_serves_requests() {
             id: WireId::from_u128(0),
             contribution_id: ContributionId::new("acme/conformance/database_provider/fixture")
                 .unwrap(),
-            method: "ping".into(),
-            payload: serde_json::json!({"probe": true}),
+            method: "open".into(),
+            payload: serde_json::to_value(sift_extension_protocol::OpenRequest {
+                configuration: serde_json::json!({}),
+                credentials: vec![],
+            })
+            .unwrap(),
             correlation_id: WireId::from_u128(99),
             deadline_unix_ms: deadline,
             context: Some(RequestContext {
@@ -52,7 +56,9 @@ async fn supervised_conformance_process_handshakes_and_serves_requests() {
         .unwrap();
     match response.result {
         sift_extension_protocol::ResponseResult::Ok { payload } => {
-            assert_eq!(payload, serde_json::json!({"probe": true}));
+            let opened: sift_extension_protocol::OpenResponse =
+                serde_json::from_value(payload).unwrap();
+            assert_eq!(opened.connection, WireId::from_u128(100));
         }
         other => panic!("unexpected response: {other:?}"),
     }
@@ -68,7 +74,12 @@ async fn supervised_conformance_process_handshakes_and_serves_requests() {
             contribution_id: ContributionId::new("acme/conformance/database_provider/fixture")
                 .unwrap(),
             method: "execute".into(),
-            payload: serde_json::json!({}),
+            payload: serde_json::to_value(sift_extension_protocol::ExecuteDriverRequest {
+                connection: WireId::from_u128(100),
+                sql: "select 42".into(),
+                params: vec![],
+            })
+            .unwrap(),
             correlation_id: WireId::from_u128(100),
             deadline_unix_ms: deadline,
             context: None,

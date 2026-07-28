@@ -31,6 +31,7 @@ pub mod resources;
 pub mod room_results;
 pub mod room_runtime;
 pub mod room_service;
+mod rpc_provider;
 pub mod runtime;
 pub mod schema_cache;
 pub mod search;
@@ -42,9 +43,11 @@ pub mod updater;
 pub use config::Config;
 pub use error::ApiError;
 pub use registry::{
-    BuiltinProviderAdapter, DatabaseProvider, DriverRegistry, ProviderRegistry, RegisteredProvider,
+    BuiltinProviderAdapter, DatabaseProvider, DriverRegistry, ProviderRegistry, ProviderServerInfo,
+    RegisteredProvider,
 };
 pub use room_runtime::RoomRuntime;
+pub use rpc_provider::RpcProvider;
 pub use session::{ConnectionEntry, ConnectionProvenance, Session, SessionStore};
 pub use shutdown::Shutdown;
 
