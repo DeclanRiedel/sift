@@ -3,12 +3,14 @@
 //! This crate deliberately contains no process, filesystem, networking, or
 //! asynchronous runtime code.
 
+pub mod connection;
 pub mod driver;
 pub mod identity;
 pub mod manifest;
 pub mod operation;
 pub mod rpc;
 
+pub use connection::*;
 pub use driver::*;
 pub use identity::*;
 pub use manifest::*;

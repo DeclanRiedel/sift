@@ -9,6 +9,7 @@ pub mod authorization;
 pub mod autocomplete;
 pub mod capability;
 pub mod config;
+pub mod connection_pipeline;
 pub mod correlation;
 pub mod csv_import;
 pub mod cursors;
