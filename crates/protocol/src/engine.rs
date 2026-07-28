@@ -16,6 +16,17 @@ impl Engine {
             Engine::SqlServer => "sql_server",
         }
     }
+
+    /// Provider id used by the two bundled adapters. `Engine` remains an
+    /// internal/native-type discriminator; public capability selection uses
+    /// this provider identity.
+    pub fn provider_id(self) -> crate::ProviderId {
+        crate::ProviderId::new(match self {
+            Engine::Postgres => "sift/postgres",
+            Engine::SqlServer => "sift/sql-server",
+        })
+        .expect("bundled provider ids are valid")
+    }
 }
 
 impl std::fmt::Display for Engine {

@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::{ConnectionId, Engine, SessionId, TxId};
+use crate::{ConnectionId, ProviderId, SessionId, TxId};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
@@ -156,5 +156,5 @@ pub struct OperationCapability {
     pub available: bool,
     pub reason: Option<String>,
     pub destructive: bool,
-    pub engine: Option<Engine>,
+    pub provider_id: Option<ProviderId>,
 }

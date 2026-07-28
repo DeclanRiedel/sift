@@ -232,7 +232,7 @@ fn put_json(uri: impl Into<String>, body: impl serde::Serialize) -> Request<Body
 }
 
 #[tokio::test]
-async fn health_lists_registered_engines() {
+async fn health_lists_registered_provider_ids() {
     let app = app(test_state());
     let res = app
         .oneshot(Request::get("/v1/health").body(Body::empty()).unwrap())
@@ -247,7 +247,7 @@ async fn health_lists_registered_engines() {
     );
     let health: Health = body_json(res.into_body()).await;
     assert_eq!(health.status, "ok");
-    assert!(health.engines.contains(&Engine::Postgres));
+    assert!(health.providers.contains(&Engine::Postgres.provider_id()));
 }
 
 #[tokio::test]
@@ -833,7 +833,7 @@ async fn bulk_insert_is_public_http_api() {
             .oneshot(post_json(
                 format!("/v1/sessions/{}/connections", session.id),
                 sift_protocol::OpenConnectionRequest {
-                    engine: Engine::SqlServer,
+                    provider_id: Engine::SqlServer.provider_id(),
                     spec: mssql_spec(),
                 },
             ))
@@ -900,7 +900,7 @@ async fn native_bulk_insert_is_explicitly_rejected() {
             .oneshot(post_json(
                 format!("/v1/sessions/{}/connections", session.id),
                 sift_protocol::OpenConnectionRequest {
-                    engine: Engine::SqlServer,
+                    provider_id: Engine::SqlServer.provider_id(),
                     spec: mssql_spec(),
                 },
             ))
@@ -1026,14 +1026,14 @@ async fn client_sdk_consumes_public_http_api() {
 
     let client = sift_client_sdk::Client::new(format!("http://{addr}"));
     let health = client.health().await.unwrap();
-    assert!(health.engines.contains(&Engine::Postgres));
+    assert!(health.providers.contains(&Engine::Postgres.provider_id()));
 
     let session = client.open_session(Some("sdk".into())).await.unwrap();
     let conn = client
         .open_connection(
             session.id,
             sift_protocol::OpenConnectionRequest {
-                engine: Engine::Postgres,
+                provider_id: Engine::Postgres.provider_id(),
                 spec: pg_spec(),
             },
         )
@@ -1138,7 +1138,7 @@ async fn client_sdk_consumes_public_websocket_api() {
         .open_connection(
             session.id,
             sift_protocol::OpenConnectionRequest {
-                engine: Engine::Postgres,
+                provider_id: Engine::Postgres.provider_id(),
                 spec: pg_spec(),
             },
         )
@@ -1211,7 +1211,7 @@ async fn websocket_mid_stream_cancel_stops_paging() {
         .open_connection(
             session.id,
             sift_protocol::OpenConnectionRequest {
-                engine: Engine::Postgres,
+                provider_id: Engine::Postgres.provider_id(),
                 spec: pg_spec(),
             },
         )
@@ -1304,7 +1304,7 @@ async fn websocket_execute_requires_active_tx_ref() {
         .open_connection(
             session.id,
             sift_protocol::OpenConnectionRequest {
-                engine: Engine::Postgres,
+                provider_id: Engine::Postgres.provider_id(),
                 spec: pg_spec(),
             },
         )
@@ -1375,7 +1375,7 @@ async fn client_sdk_consumes_postgres_notifications() {
         .open_connection(
             session.id,
             sift_protocol::OpenConnectionRequest {
-                engine: Engine::Postgres,
+                provider_id: Engine::Postgres.provider_id(),
                 spec: pg_spec(),
             },
         )
@@ -2677,7 +2677,7 @@ async fn http_execute_records_room_scoped_query_history() {
                     .header("content-type", "application/json")
                     .body(Body::from(
                         serde_json::to_vec(&sift_protocol::OpenConnectionRequest {
-                            engine: Engine::Postgres,
+                            provider_id: Engine::Postgres.provider_id(),
                             spec: pg_spec(),
                         })
                         .unwrap(),
@@ -3278,7 +3278,7 @@ async fn metadata_connection_profile_opens_session_connection() {
         .unwrap();
     assert_eq!(res.status(), StatusCode::OK);
     let conn: sift_protocol::ConnectionInfo = body_json(res.into_body()).await;
-    assert_eq!(conn.engine, Engine::Postgres);
+    assert_eq!(conn.provider_id, Engine::Postgres.provider_id());
     assert_eq!(
         sessions.conn_entry(session.id, conn.id).unwrap().provenance,
         sift_server::ConnectionProvenance::Managed {
@@ -3685,7 +3685,7 @@ async fn connection_open_ping_close() {
         "open_connection should succeed"
     );
     let conn: sift_protocol::ConnectionInfo = body_json(res.into_body()).await;
-    assert_eq!(conn.engine, Engine::Postgres);
+    assert_eq!(conn.provider_id, Engine::Postgres.provider_id());
     let cid = conn.id;
 
     // List.
@@ -4158,7 +4158,7 @@ async fn cancel_rejects_different_session_owner() {
                     .header("content-type", "application/json")
                     .body(Body::from(
                         serde_json::to_vec(&sift_protocol::OpenConnectionRequest {
-                            engine: Engine::Postgres,
+                            provider_id: Engine::Postgres.provider_id(),
                             spec: pg_spec(),
                         })
                         .unwrap(),
@@ -4582,7 +4582,7 @@ async fn ws_streaming_bounded_memory_across_many_pages() {
         .open_connection(
             session.id,
             sift_protocol::OpenConnectionRequest {
-                engine: Engine::Postgres,
+                provider_id: Engine::Postgres.provider_id(),
                 spec: pg_spec(),
             },
         )
@@ -4656,7 +4656,7 @@ async fn ws_streaming_bounded_memory_across_one_million_pages() {
         .open_connection(
             session.id,
             sift_protocol::OpenConnectionRequest {
-                engine: Engine::Postgres,
+                provider_id: Engine::Postgres.provider_id(),
                 spec: pg_spec(),
             },
         )
@@ -4708,7 +4708,7 @@ async fn schema_cache_serves_second_call_without_touching_driver() {
         .open_connection(
             session.id,
             sift_protocol::OpenConnectionRequest {
-                engine: Engine::Postgres,
+                provider_id: Engine::Postgres.provider_id(),
                 spec: pg_spec(),
             },
         )
@@ -4757,7 +4757,7 @@ async fn schema_cache_coalesces_concurrent_misses() {
         .open_connection(
             session.id,
             sift_protocol::OpenConnectionRequest {
-                engine: Engine::Postgres,
+                provider_id: Engine::Postgres.provider_id(),
                 spec: pg_spec(),
             },
         )
@@ -4839,7 +4839,7 @@ async fn export_query_csv_and_json_streaming() {
             .open_connection(
                 session.id,
                 sift_protocol::OpenConnectionRequest {
-                    engine: Engine::Postgres,
+                    provider_id: Engine::Postgres.provider_id(),
                     spec: pg_spec(),
                 },
             )
@@ -4944,7 +4944,7 @@ async fn ddl_generation_view_uses_execute_pg_get_viewdef() {
         .open_connection(
             session.id,
             sift_protocol::OpenConnectionRequest {
-                engine: Engine::Postgres,
+                provider_id: Engine::Postgres.provider_id(),
                 spec: pg_spec(),
             },
         )
@@ -5045,7 +5045,7 @@ async fn ddl_generation_table_composes_from_deep_schema() {
         .open_connection(
             session.id,
             sift_protocol::OpenConnectionRequest {
-                engine: Engine::Postgres,
+                provider_id: Engine::Postgres.provider_id(),
                 spec: pg_spec(),
             },
         )

@@ -1042,7 +1042,7 @@ impl SessionStore {
             let display_name = display_name_for(&spec);
             let info = ConnectionInfo {
                 id,
-                engine,
+                provider_id: engine.provider_id(),
                 display_name,
                 created_at: chrono::Utc::now(),
             };

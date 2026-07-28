@@ -6,8 +6,8 @@
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    ColumnMetadata, ConnectionSpec, CursorId, DriverWarning, Engine, Operation, Page, Row, TxId,
-    TxMode, Value,
+    ColumnMetadata, ConnectionSpec, CursorId, DriverWarning, Operation, Page, ProviderId, Row,
+    TxId, TxMode, Value,
 };
 
 /// Opaque session id. Stable for the lifetime of the session.
@@ -45,7 +45,7 @@ pub struct OpenSessionRequest {
 /// Body of `POST /v1/sessions/:id/connections`.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct OpenConnectionRequest {
-    pub engine: Engine,
+    pub provider_id: ProviderId,
     #[serde(flatten)]
     pub spec: ConnectionSpec,
 }
@@ -67,7 +67,7 @@ pub struct SessionInfo {
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ConnectionInfo {
     pub id: ConnectionId,
-    pub engine: Engine,
+    pub provider_id: ProviderId,
     /// Display name — host/database for PG/SQL Server.
     pub display_name: String,
     pub created_at: chrono::DateTime<chrono::Utc>,
@@ -237,7 +237,7 @@ pub struct Ack {
 pub struct Health {
     pub status: String,
     pub version: String,
-    pub engines: Vec<Engine>,
+    pub providers: Vec<ProviderId>,
 }
 
 /// Server-reported readiness. `GET /v1/ready` returns `200` with `ready:
@@ -255,7 +255,7 @@ pub struct Readiness {
     /// Metadata store reachability: `None` when metadata is disabled (nothing
     /// to reach), `Some(true/false)` for reachable / unreachable when enabled.
     pub metadata_ok: Option<bool>,
-    pub engines: Vec<Engine>,
+    pub providers: Vec<ProviderId>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]

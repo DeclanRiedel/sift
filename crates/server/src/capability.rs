@@ -61,7 +61,7 @@ pub fn evaluate(
                 available: reason.is_none(),
                 reason: reason.map(str::to_string),
                 destructive: operation.destructive(),
-                engine,
+                provider_id: engine.map(Engine::provider_id),
             }
         })
         .collect())

@@ -3252,7 +3252,14 @@ async fn health(State(state): State<AppState>) -> Json<Health> {
     Json(Health {
         status: "ok".to_string(),
         version: VERSION.to_string(),
-        engines: state.sessions.registry().engines(),
+        providers: state
+            .sessions
+            .registry()
+            .providers()
+            .descriptors()
+            .into_iter()
+            .map(|descriptor| descriptor.provider.provider_id)
+            .collect(),
     })
 }
 
@@ -3262,8 +3269,15 @@ async fn health(State(state): State<AppState>) -> Json<Health> {
 /// is returned in both cases so callers can see which check failed.
 async fn ready(State(state): State<AppState>) -> Response {
     let draining = state.shutdown.is_draining();
-    let engines = state.sessions.registry().engines();
-    let drivers_registered = !engines.is_empty();
+    let providers: Vec<_> = state
+        .sessions
+        .registry()
+        .providers()
+        .descriptors()
+        .into_iter()
+        .map(|descriptor| descriptor.provider.provider_id)
+        .collect();
+    let drivers_registered = !providers.is_empty();
     let metadata_ok = match state.metadata.clone() {
         None => None,
         Some(store) => Some(
@@ -3279,7 +3293,7 @@ async fn ready(State(state): State<AppState>) -> Response {
         draining,
         drivers_registered,
         metadata_ok,
-        engines,
+        providers,
     };
     let status = if ready {
         StatusCode::OK
@@ -5492,7 +5506,17 @@ async fn open_connection(
             "raw connection specifications are available only in personal-loopback mode".into(),
         ));
     }
-    let engine = req.engine;
+    let engine = state
+        .sessions
+        .registry()
+        .get_provider(&req.provider_id)?
+        .provider
+        .legacy_engine()
+        .ok_or_else(|| {
+            ApiError::BadRequest(
+                "provider does not support the temporary raw-spec compatibility path".into(),
+            )
+        })?;
     let operation = Operation::OpenConnection {
         session: id,
         request: req.clone(),
