@@ -159,6 +159,7 @@ pub struct RoomConnProvenance {
     pub binder: PrincipalId,
     pub tenant: sift_metadata::TenantId,
     pub profile_id: sift_metadata::ConnectionProfileId,
+    pub provider_id: sift_protocol::ProviderId,
     pub engine: Engine,
     pub policy_revision: u64,
 }
@@ -966,7 +967,33 @@ impl SessionStore {
         &self,
         session_id: SessionId,
         provider_id: sift_protocol::ProviderId,
-        spec: ConnectionSpec,
+        mut spec: ConnectionSpec,
+    ) -> ApiResult<ConnectionInfo> {
+        let mut credentials = std::collections::HashMap::new();
+        if let Some(password) = spec.password.take() {
+            credentials.insert("password".to_string(), password.into_bytes());
+        }
+        let configuration =
+            serde_json::to_value(spec).map_err(|error| ApiError::BadRequest(error.to_string()))?;
+        self.open_provider_configuration(
+            session_id,
+            provider_id,
+            configuration,
+            credentials,
+            ConnectionProvenance::TrustedLocal,
+            None,
+        )
+        .await
+    }
+
+    async fn open_provider_configuration(
+        &self,
+        session_id: SessionId,
+        provider_id: sift_protocol::ProviderId,
+        configuration: serde_json::Value,
+        credentials: std::collections::HashMap<String, Vec<u8>>,
+        provenance: ConnectionProvenance,
+        resource_guard: Option<crate::resources::ResourceGuard>,
     ) -> ApiResult<ConnectionInfo> {
         let registered = self.inner.registry.get_provider(&provider_id)?;
         let runtime = RuntimeDriver::from_registered(registered);
@@ -978,9 +1005,10 @@ impl SessionStore {
         self.open_connection_with_provenance(
             session_id,
             engine,
-            spec,
-            ConnectionProvenance::TrustedLocal,
-            None,
+            configuration,
+            credentials,
+            provenance,
+            resource_guard,
             runtime,
         )
         .await
@@ -990,8 +1018,9 @@ impl SessionStore {
     pub async fn open_managed_connection(
         &self,
         session_id: SessionId,
-        engine: Engine,
-        spec: ConnectionSpec,
+        provider_id: sift_protocol::ProviderId,
+        configuration: serde_json::Value,
+        credentials: std::collections::HashMap<String, Vec<u8>>,
         principal_id: PrincipalId,
         tenant_id: sift_metadata::TenantId,
         profile_id: sift_metadata::ConnectionProfileId,
@@ -1011,10 +1040,11 @@ impl SessionStore {
         } else {
             None
         };
-        self.open_connection_with_provenance(
+        self.open_provider_configuration(
             session_id,
-            engine,
-            spec,
+            provider_id,
+            configuration,
+            credentials,
             ConnectionProvenance::Managed {
                 principal_id,
                 tenant_id,
@@ -1023,18 +1053,17 @@ impl SessionStore {
                 quota_exempt: !enforce_limits,
             },
             connection_guard,
-            RuntimeDriver::from_registered(
-                self.inner.registry.get_provider(&engine.provider_id())?,
-            ),
         )
         .await
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn open_connection_with_provenance(
         &self,
         session_id: SessionId,
         engine: Engine,
-        spec: ConnectionSpec,
+        configuration: serde_json::Value,
+        credentials: std::collections::HashMap<String, Vec<u8>>,
         provenance: ConnectionProvenance,
         resource_guard: Option<crate::resources::ResourceGuard>,
         driver: RuntimeDriver,
@@ -1052,14 +1081,14 @@ impl SessionStore {
             } => Some((*principal_id, *tenant_id, *profile_id)),
             ConnectionProvenance::TrustedLocal => None,
         };
-        let handle = driver.open(&spec).await?;
+        let handle = driver.open(&configuration, &credentials).await?;
         let info = {
             let Some(session) = self.inner.sessions.get(&session_id) else {
                 driver.close(handle).await?;
                 return Err(ApiError::SessionNotFound(session_id));
             };
             let id = ConnectionId(session.next_conn_id.fetch_add(1, Ordering::Relaxed));
-            let display_name = display_name_for(&spec);
+            let display_name = display_name_for_configuration(&configuration, driver.provider());
             let info = ConnectionInfo {
                 id,
                 provider_id: driver.provider().provider_id.clone(),
@@ -1074,7 +1103,8 @@ impl SessionStore {
                     handle: handle.clone(),
                     driver: driver.clone(),
                     info: info.clone(),
-                    spec,
+                    configuration,
+                    credentials,
                     provenance,
                     _resource_guard: resource_guard,
                 },
@@ -1201,8 +1231,8 @@ impl SessionStore {
             .unwrap()
             .clone()
             .ok_or(ApiError::MetadataUnavailable)?;
-        let spec = metadata
-            .resolve_connection_spec(p.tenant, p.binder, p.profile_id)
+        let (configuration, credentials) = metadata
+            .resolve_provider_connection(p.tenant, p.binder, p.profile_id)
             .await?;
         let session = self.open_session_with_owner(
             OpenSessionRequest {
@@ -1216,8 +1246,9 @@ impl SessionStore {
         let info = match self
             .open_managed_connection(
                 session.id,
-                p.engine,
-                spec,
+                p.provider_id.clone(),
+                configuration,
+                credentials,
                 p.binder,
                 p.tenant,
                 p.profile_id,
@@ -1511,19 +1542,25 @@ impl SessionStore {
         scope: SchemaScope,
     ) -> ApiResult<CachedSchema> {
         let entry = self.get_conn_entry(session_id, conn_id)?;
-        let spec = self.spec_for_conn(session_id, conn_id)?;
+        let cache_spec = self.spec_for_conn(session_id, conn_id)?;
         // Cache lookup: return immediately if a fresh snapshot exists
         // for this (spec, scope).
-        if let Some(cached) = self.inner.schema_cache.get_cached(&spec, &scope) {
-            return Ok(cached);
+        if let Some(spec) = cache_spec.as_ref() {
+            if let Some(cached) = self.inner.schema_cache.get_cached(spec, &scope) {
+                return Ok(cached);
+            }
         }
-        let fetch_gate = self.inner.schema_cache.fetch_gate(&spec, &scope).ok();
+        let fetch_gate = cache_spec
+            .as_ref()
+            .and_then(|spec| self.inner.schema_cache.fetch_gate(spec, &scope).ok());
         let _fetch_guard = match fetch_gate.as_ref() {
             Some(gate) => Some(gate.lock().await),
             None => None,
         };
-        if let Some(cached) = self.inner.schema_cache.get_cached(&spec, &scope) {
-            return Ok(cached);
+        if let Some(spec) = cache_spec.as_ref() {
+            if let Some(cached) = self.inner.schema_cache.get_cached(spec, &scope) {
+                return Ok(cached);
+            }
         }
         let driver = entry.driver.clone();
         let handle = entry.handle.clone();
@@ -1546,11 +1583,13 @@ impl SessionStore {
             }
             other => other,
         };
-        if let (Ok(snapshot), Some(legacy)) = (&result, driver.legacy_driver()) {
+        if let (Ok(snapshot), Some(legacy), Some(spec)) =
+            (&result, driver.legacy_driver(), cache_spec.as_ref())
+        {
             if let Some(cached) =
                 self.inner
                     .schema_cache
-                    .insert(&spec, &scope, snapshot.clone(), legacy.clone())
+                    .insert(spec, &scope, snapshot.clone(), legacy.clone())
             {
                 if let Some(gate) = &fetch_gate {
                     self.inner.schema_cache.clear_fetch_gate(gate);
@@ -1568,7 +1607,7 @@ impl SessionStore {
         &self,
         session_id: SessionId,
         conn_id: ConnectionId,
-    ) -> ApiResult<ConnectionSpec> {
+    ) -> ApiResult<Option<ConnectionSpec>> {
         let session = self
             .inner
             .sessions
@@ -1578,7 +1617,12 @@ impl SessionStore {
             .connections
             .get(&conn_id)
             .ok_or(ApiError::ConnectionNotFound(conn_id))?;
-        Ok(entry.spec.clone())
+        if entry.driver.legacy_driver().is_none() {
+            return Ok(None);
+        }
+        serde_json::from_value(entry.configuration.clone())
+            .map(Some)
+            .map_err(|error| ApiError::Internal(error.to_string()))
     }
 
     /// Re-establish a broken connection in place: open a fresh backend session
@@ -1591,7 +1635,7 @@ impl SessionStore {
         session_id: SessionId,
         conn_id: ConnectionId,
     ) -> ApiResult<RuntimeConnectionHandle> {
-        let (driver, spec, old_handle) = {
+        let (driver, configuration, credentials, old_handle) = {
             let session = self
                 .inner
                 .sessions
@@ -1603,13 +1647,16 @@ impl SessionStore {
                 .ok_or(ApiError::ConnectionNotFound(conn_id))?;
             (
                 entry.driver.clone(),
-                entry.spec.clone(),
+                entry.configuration.clone(),
+                entry.credentials.clone(),
                 entry.handle.clone(),
             )
         };
         let opener = driver.clone();
         let new_handle = self
-            .run_bounded("reconnect", async move { opener.open(&spec).await })
+            .run_bounded("reconnect", async move {
+                opener.open(&configuration, &credentials).await
+            })
             .await?;
         self.with_session(&session_id, |s| {
             if let Some(mut entry) = s.connections.get_mut(&conn_id) {
@@ -3152,9 +3199,10 @@ pub struct ConnectionEntry {
     pub handle: RuntimeConnectionHandle,
     pub driver: RuntimeDriver,
     pub info: ConnectionInfo,
-    /// Original spec, retained so a broken connection can be transparently
+    /// Original provider input, retained so a broken connection can be transparently
     /// re-established for idempotent operations (ping/schema).
-    pub spec: ConnectionSpec,
+    pub configuration: serde_json::Value,
+    pub credentials: std::collections::HashMap<String, Vec<u8>>,
     pub provenance: ConnectionProvenance,
     _resource_guard: Option<crate::resources::ResourceGuard>,
 }
@@ -3598,7 +3646,13 @@ fn object_path_from_qualified_name(value: &str) -> ApiResult<sift_protocol::Obje
     })
 }
 
-fn display_name_for(spec: &ConnectionSpec) -> String {
+fn display_name_for_configuration(
+    configuration: &serde_json::Value,
+    provider: &sift_protocol::ProviderRef,
+) -> String {
+    let Ok(spec) = serde_json::from_value::<ConnectionSpec>(configuration.clone()) else {
+        return provider.provider_id.to_string();
+    };
     let db = spec.database.as_deref().unwrap_or("?");
     let host = if spec.host.starts_with('/') {
         // Unix socket directory — show the path's basename + db.

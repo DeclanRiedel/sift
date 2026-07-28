@@ -12,9 +12,11 @@ use chrono::{DateTime, Utc};
 use rand_core::OsRng;
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use sha2::{Digest, Sha256};
+#[cfg(test)]
+use sift_protocol::ConnectionSpec;
 use sift_protocol::{
-    AuthSessionSummary, ConnectionPolicy, ConnectionSpec, SshProxyCapabilityClaims,
-    TenantResourceLimits, UpdateConnectionPolicyRequest,
+    AuthSessionSummary, ConnectionPolicy, SshProxyCapabilityClaims, TenantResourceLimits,
+    UpdateConnectionPolicyRequest,
 };
 use uuid::Uuid;
 
@@ -93,6 +95,10 @@ pub enum MetadataError {
         expected: CredentialMode,
         actual: CredentialMode,
     },
+    #[error("provider credentials must be a non-empty JSON object")]
+    InvalidCredentialObject,
+    #[error("inline provider credentials require shared credential mode")]
+    InlineCredentialsRequireSharedMode,
     #[error("connection profile {0:?} is not in tenant {1:?}")]
     TenantMismatch(ConnectionProfileId, TenantId),
     #[error("connection profile policy revision conflict: expected {expected}, current {current}")]
@@ -2453,7 +2459,7 @@ impl MetadataStore {
         let mut stmt = conn.prepare(
             "SELECT id, tenant_id, name, engine, spec_json, credential_mode,
                     shared_secret_handle, tags_json, created_by, created_at, updated_at,
-                    policy_json, policy_revision
+                    policy_json, policy_revision, provider_id, configuration_json
              FROM connection_profile
              WHERE tenant_id = ?1
              ORDER BY name",
@@ -2666,20 +2672,23 @@ impl MetadataStore {
         if input.credential_mode == CredentialMode::Broker {
             return Err(MetadataError::BrokerCredentialModeUnsupported);
         }
-        let password = input.spec.password.take();
+        let credentials = input.credentials.take();
         let mut new_shared_secret_handle = None;
         if input.credential_mode == CredentialMode::Shared {
-            if let Some(password) = password.as_deref() {
+            if let Some(credentials) = credentials.as_ref() {
+                validate_provider_credentials(credentials)?;
                 let handle = Uuid::new_v4().to_string();
                 self.secrets
-                    .put(SECRET_NAMESPACE, &handle, password.as_bytes())
+                    .put(SECRET_NAMESPACE, &handle, &serde_json::to_vec(credentials)?)
                     .await?;
                 new_shared_secret_handle = Some(handle);
             }
+        } else if credentials.is_some() {
+            return Err(MetadataError::InlineCredentialsRequireSharedMode);
         }
 
         let now = now_text();
-        let spec_json = serde_json::to_string(&input.spec)?;
+        let configuration_json = serde_json::to_string(&input.configuration)?;
         let tags_json = serde_json::to_string(&input.tags)?;
         let backend = self.backend.clone();
         let db_shared_secret_handle = new_shared_secret_handle.clone();
@@ -2718,11 +2727,13 @@ impl MetadataStore {
             let write_result = tx.execute(
                 "INSERT INTO connection_profile
                  (tenant_id, name, engine, spec_json, credential_mode, shared_secret_handle,
-                  tags_json, created_by, created_at, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?9)
+                  tags_json, created_by, created_at, updated_at, provider_id, configuration_json)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?9, ?10, ?4)
                  ON CONFLICT(tenant_id, name) DO UPDATE SET
                     engine = excluded.engine,
                     spec_json = excluded.spec_json,
+                    provider_id = excluded.provider_id,
+                    configuration_json = excluded.configuration_json,
                     credential_mode = excluded.credential_mode,
                     shared_secret_handle = CASE
                         WHEN excluded.credential_mode = 'shared'
@@ -2734,13 +2745,14 @@ impl MetadataStore {
                 params![
                     tenant.0,
                     input.name,
-                    input.engine.as_str(),
-                    spec_json,
+                    input.semantic_engine.as_str(),
+                    configuration_json,
                     input.credential_mode.as_str(),
                     db_shared_secret_handle.as_deref(),
                     tags_json,
                     actor.0,
-                    now
+                    now,
+                    input.provider_id.as_str(),
                 ],
             );
             if let Err(error) = write_result {
@@ -2882,11 +2894,14 @@ impl MetadataStore {
         &self,
         profile_id: ConnectionProfileId,
         principal_id: PrincipalId,
-        secret: &[u8],
+        credentials: &serde_json::Value,
         audit: NewOperationAudit,
     ) -> Result<()> {
+        validate_provider_credentials(credentials)?;
         let handle = Uuid::new_v4().to_string();
-        self.secrets.put(SECRET_NAMESPACE, &handle, secret).await?;
+        self.secrets
+            .put(SECRET_NAMESPACE, &handle, &serde_json::to_vec(credentials)?)
+            .await?;
         let now = now_text();
         let backend = self.backend.clone();
         let db_handle = handle.clone();
@@ -2953,12 +2968,15 @@ impl MetadataStore {
         Ok(())
     }
 
-    pub async fn resolve_connection_spec(
+    pub async fn resolve_provider_connection(
         &self,
         tenant: TenantId,
         principal: PrincipalId,
         id: ConnectionProfileId,
-    ) -> Result<ConnectionSpec> {
+    ) -> Result<(
+        serde_json::Value,
+        std::collections::HashMap<String, Vec<u8>>,
+    )> {
         let backend = self.backend.clone();
         let (profile, handle) = sqlite_blocking(move || {
             let conn = backend.conn()?;
@@ -2985,16 +3003,26 @@ impl MetadataStore {
             Ok((profile, handle))
         })
         .await?;
-        let mut spec = profile.spec;
+        let mut credentials = std::collections::HashMap::new();
         if let Some(handle) = handle {
             let secret = self
                 .secrets
                 .get(SECRET_NAMESPACE, &handle)
                 .await?
                 .ok_or(MetadataError::MissingCredential(id, principal))?;
-            spec.password = Some(String::from_utf8_lossy(&secret).into_owned());
+            let object: serde_json::Value = serde_json::from_slice(&secret)?;
+            let object = object
+                .as_object()
+                .ok_or(MetadataError::InvalidCredentialObject)?;
+            for (name, value) in object {
+                let bytes = match value {
+                    serde_json::Value::String(value) => value.as_bytes().to_vec(),
+                    value => serde_json::to_vec(value)?,
+                };
+                credentials.insert(name.clone(), bytes);
+            }
         }
-        Ok(spec)
+        Ok((profile.configuration, credentials))
     }
 
     pub fn create_room(
@@ -4224,7 +4252,7 @@ fn connection_profile_by_id_locked(
     conn.query_row(
         "SELECT id, tenant_id, name, engine, spec_json, credential_mode,
                     shared_secret_handle, tags_json, created_by, created_at, updated_at,
-                    policy_json, policy_revision
+                    policy_json, policy_revision, provider_id, configuration_json
              FROM connection_profile WHERE id = ?1",
         params![id.0],
         connection_profile_from_row,
@@ -4568,7 +4596,8 @@ fn api_token_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ApiTokenRow> 
 
 fn connection_profile_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ConnectionProfile> {
     let engine: String = row.get(3)?;
-    let spec_json: String = row.get(4)?;
+    let provider_id: String = row.get(13)?;
+    let configuration_json: String = row.get(14)?;
     let credential_mode: String = row.get(5)?;
     let tags_json: String = row.get(7)?;
     let policy_json: String = row.get(11)?;
@@ -4581,8 +4610,10 @@ fn connection_profile_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Conn
         id: ConnectionProfileId(row.get(0)?),
         tenant_id: TenantId(row.get(1)?),
         name: row.get(2)?,
-        engine: engine.parse().map_err(sql_message_error)?,
-        spec: serde_json::from_str(&spec_json).map_err(sql_conversion_error)?,
+        provider_id: sift_protocol::ProviderId::new(provider_id)
+            .map_err(|error| sql_message_error(error.to_string()))?,
+        configuration: serde_json::from_str(&configuration_json).map_err(sql_conversion_error)?,
+        semantic_engine: engine.parse().map_err(sql_message_error)?,
         credential_mode: parse_credential_mode_sql(credential_mode)?,
         shared_secret_handle: row.get(6)?,
         tags: serde_json::from_str(&tags_json).map_err(sql_conversion_error)?,
@@ -4591,6 +4622,28 @@ fn connection_profile_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Conn
         created_at: parse_time_sql(row.get(9)?)?,
         updated_at: parse_time_sql(row.get(10)?)?,
     })
+}
+
+fn validate_provider_credentials(credentials: &serde_json::Value) -> Result<()> {
+    const MAX_CREDENTIAL_BYTES: usize = 256 * 1024;
+    const MAX_CREDENTIAL_FIELDS: usize = 64;
+    const MAX_CREDENTIAL_NAME_BYTES: usize = 128;
+
+    let object = credentials
+        .as_object()
+        .filter(|object| !object.is_empty())
+        .ok_or(MetadataError::InvalidCredentialObject)?;
+    if object.len() > MAX_CREDENTIAL_FIELDS
+        || object.keys().any(|name| {
+            name.is_empty()
+                || name.len() > MAX_CREDENTIAL_NAME_BYTES
+                || name.bytes().any(|byte| byte.is_ascii_control())
+        })
+        || serde_json::to_vec(credentials)?.len() > MAX_CREDENTIAL_BYTES
+    {
+        return Err(MetadataError::InvalidCredentialObject);
+    }
+    Ok(())
 }
 
 fn tenant_limit_override_from_row(
@@ -6204,8 +6257,10 @@ mod tests {
                 PrincipalId(1),
                 NewConnectionProfile {
                     name: "local pg".to_string(),
-                    engine: Engine::Postgres,
-                    spec: spec(Some("secret")),
+                    provider_id: Engine::Postgres.provider_id(),
+                    configuration: serde_json::to_value(spec(None)).unwrap(),
+                    semantic_engine: Engine::Postgres,
+                    credentials: Some(serde_json::json!({"password": "secret"})),
                     credential_mode: CredentialMode::Shared,
                     tags: vec!["dev".to_string()],
                 },
@@ -6213,19 +6268,29 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(profile.spec.password.is_none());
+        assert_eq!(profile.provider_id, Engine::Postgres.provider_id());
+        assert!(profile
+            .configuration
+            .get("password")
+            .is_none_or(|value| value.is_null()));
         assert!(profile.shared_secret_handle.is_some());
 
         let listed = store.list_connection_profiles(TenantId(1)).unwrap();
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0].name, "local pg");
-        assert!(listed[0].spec.password.is_none());
+        assert!(listed[0]
+            .configuration
+            .get("password")
+            .is_none_or(|value| value.is_null()));
 
-        let resolved = store
-            .resolve_connection_spec(TenantId(1), PrincipalId(1), profile.id)
+        let (_, credentials) = store
+            .resolve_provider_connection(TenantId(1), PrincipalId(1), profile.id)
             .await
             .unwrap();
-        assert_eq!(resolved.password.as_deref(), Some("secret"));
+        assert_eq!(
+            credentials.get("password").map(Vec::as_slice),
+            Some(b"secret".as_slice())
+        );
     }
 
     #[tokio::test]
@@ -6238,8 +6303,10 @@ mod tests {
                 PrincipalId(1),
                 NewConnectionProfile {
                     name: "future broker".into(),
-                    engine: Engine::Postgres,
-                    spec: spec(Some("must-not-be-stored")),
+                    provider_id: Engine::Postgres.provider_id(),
+                    configuration: serde_json::to_value(spec(None)).unwrap(),
+                    semantic_engine: Engine::Postgres,
+                    credentials: Some(serde_json::json!({"password": "must-not-be-stored"})),
                     credential_mode: CredentialMode::Broker,
                     tags: vec![],
                 },
@@ -6261,8 +6328,10 @@ mod tests {
         store.bootstrap_local("local user").unwrap();
         let input = |name: &str| NewConnectionProfile {
             name: name.into(),
-            engine: Engine::Postgres,
-            spec: spec(None),
+            provider_id: Engine::Postgres.provider_id(),
+            configuration: serde_json::to_value(spec(None)).unwrap(),
+            semantic_engine: Engine::Postgres,
+            credentials: None,
             credential_mode: CredentialMode::PerUser,
             tags: Vec::new(),
         };
@@ -6312,8 +6381,10 @@ mod tests {
             .unwrap();
         let input = || NewConnectionProfile {
             name: "admin only".to_string(),
-            engine: Engine::Postgres,
-            spec: spec(None),
+            provider_id: Engine::Postgres.provider_id(),
+            configuration: serde_json::to_value(spec(None)).unwrap(),
+            semantic_engine: Engine::Postgres,
+            credentials: None,
             credential_mode: CredentialMode::PerUser,
             tags: Vec::new(),
         };
@@ -6355,8 +6426,10 @@ mod tests {
                 PrincipalId(1),
                 NewConnectionProfile {
                     name: "policy pg".to_string(),
-                    engine: Engine::Postgres,
-                    spec: spec(None),
+                    provider_id: Engine::Postgres.provider_id(),
+                    configuration: serde_json::to_value(spec(None)).unwrap(),
+                    semantic_engine: Engine::Postgres,
+                    credentials: None,
                     credential_mode: CredentialMode::Shared,
                     tags: Vec::new(),
                 },
@@ -6465,8 +6538,10 @@ mod tests {
                 PrincipalId(1),
                 NewConnectionProfile {
                     name: "local pg".to_string(),
-                    engine: Engine::Postgres,
-                    spec: spec(Some("first-secret")),
+                    provider_id: Engine::Postgres.provider_id(),
+                    configuration: serde_json::to_value(spec(None)).unwrap(),
+                    semantic_engine: Engine::Postgres,
+                    credentials: Some(serde_json::json!({"password": "first-secret"})),
                     credential_mode: CredentialMode::Shared,
                     tags: Vec::new(),
                 },
@@ -6481,8 +6556,10 @@ mod tests {
                 PrincipalId(1),
                 NewConnectionProfile {
                     name: "local pg".to_string(),
-                    engine: Engine::Postgres,
-                    spec: spec(Some("second-secret")),
+                    provider_id: Engine::Postgres.provider_id(),
+                    configuration: serde_json::to_value(spec(None)).unwrap(),
+                    semantic_engine: Engine::Postgres,
+                    credentials: Some(serde_json::json!({"password": "second-secret"})),
                     credential_mode: CredentialMode::Shared,
                     tags: Vec::new(),
                 },
@@ -6503,7 +6580,7 @@ mod tests {
                 .await
                 .unwrap()
                 .as_deref(),
-            Some(&b"second-secret"[..])
+            Some(&br#"{"password":"second-secret"}"#[..])
         );
 
         let per_user = store
@@ -6512,8 +6589,10 @@ mod tests {
                 PrincipalId(1),
                 NewConnectionProfile {
                     name: "local pg".to_string(),
-                    engine: Engine::Postgres,
-                    spec: spec(None),
+                    provider_id: Engine::Postgres.provider_id(),
+                    configuration: serde_json::to_value(spec(None)).unwrap(),
+                    semantic_engine: Engine::Postgres,
+                    credentials: None,
                     credential_mode: CredentialMode::PerUser,
                     tags: Vec::new(),
                 },
@@ -6548,8 +6627,10 @@ mod tests {
                 PrincipalId(1),
                 NewConnectionProfile {
                     name: "shared pg".to_string(),
-                    engine: Engine::Postgres,
-                    spec: spec(None),
+                    provider_id: Engine::Postgres.provider_id(),
+                    configuration: serde_json::to_value(spec(None)).unwrap(),
+                    semantic_engine: Engine::Postgres,
+                    credentials: None,
                     credential_mode: CredentialMode::Shared,
                     tags: Vec::new(),
                 },
@@ -6562,7 +6643,7 @@ mod tests {
                 .set_per_user_credential(
                     profile.id,
                     PrincipalId(1),
-                    b"must-not-persist",
+                    &serde_json::json!({"password": "must-not-persist"}),
                     test_audit("set_credential", "connection_profile", Some(profile.id.0)),
                 )
                 .await,
@@ -6582,8 +6663,10 @@ mod tests {
                 PrincipalId(1),
                 NewConnectionProfile {
                     name: "per-user pg".to_string(),
-                    engine: Engine::Postgres,
-                    spec: spec(None),
+                    provider_id: Engine::Postgres.provider_id(),
+                    configuration: serde_json::to_value(spec(None)).unwrap(),
+                    semantic_engine: Engine::Postgres,
+                    credentials: None,
                     credential_mode: CredentialMode::PerUser,
                     tags: Vec::new(),
                 },
@@ -6593,7 +6676,7 @@ mod tests {
 
         assert!(matches!(
             store
-                .resolve_connection_spec(TenantId(1), PrincipalId(1), profile.id)
+                .resolve_provider_connection(TenantId(1), PrincipalId(1), profile.id)
                 .await,
             Err(MetadataError::MissingCredential(_, _))
         ));
@@ -6602,16 +6685,19 @@ mod tests {
             .set_per_user_credential(
                 profile.id,
                 PrincipalId(1),
-                b"user-secret",
+                &serde_json::json!({"password": "user-secret"}),
                 test_audit("set_credential", "connection_profile", Some(profile.id.0)),
             )
             .await
             .unwrap();
-        let resolved = store
-            .resolve_connection_spec(TenantId(1), PrincipalId(1), profile.id)
+        let (_, credentials) = store
+            .resolve_provider_connection(TenantId(1), PrincipalId(1), profile.id)
             .await
             .unwrap();
-        assert_eq!(resolved.password.as_deref(), Some("user-secret"));
+        assert_eq!(
+            credentials.get("password").map(Vec::as_slice),
+            Some(b"user-secret".as_slice())
+        );
     }
 
     #[test]
@@ -6745,8 +6831,10 @@ mod tests {
                 PrincipalId(1),
                 NewConnectionProfile {
                     name: "pg".to_string(),
-                    engine: Engine::Postgres,
-                    spec: spec(None),
+                    provider_id: Engine::Postgres.provider_id(),
+                    configuration: serde_json::to_value(spec(None)).unwrap(),
+                    semantic_engine: Engine::Postgres,
+                    credentials: None,
                     credential_mode: CredentialMode::Shared,
                     tags: Vec::new(),
                 },
@@ -6800,8 +6888,10 @@ mod tests {
                 PrincipalId(1),
                 NewConnectionProfile {
                     name: "pg".to_string(),
-                    engine: Engine::Postgres,
-                    spec: spec(None),
+                    provider_id: Engine::Postgres.provider_id(),
+                    configuration: serde_json::to_value(spec(None)).unwrap(),
+                    semantic_engine: Engine::Postgres,
+                    credentials: None,
                     credential_mode: CredentialMode::Shared,
                     tags: Vec::new(),
                 },
@@ -6847,8 +6937,10 @@ mod tests {
                 f_owner.id,
                 NewConnectionProfile {
                     name: "fp".to_string(),
-                    engine: Engine::Postgres,
-                    spec: spec(None),
+                    provider_id: Engine::Postgres.provider_id(),
+                    configuration: serde_json::to_value(spec(None)).unwrap(),
+                    semantic_engine: Engine::Postgres,
+                    credentials: None,
                     credential_mode: CredentialMode::Shared,
                     tags: Vec::new(),
                 },
@@ -7017,8 +7109,10 @@ mod tests {
                 foreign_principal.id,
                 NewConnectionProfile {
                     name: "foreign pg".to_string(),
-                    engine: Engine::Postgres,
-                    spec: spec(None),
+                    provider_id: Engine::Postgres.provider_id(),
+                    configuration: serde_json::to_value(spec(None)).unwrap(),
+                    semantic_engine: Engine::Postgres,
+                    credentials: None,
                     credential_mode: CredentialMode::PerUser,
                     tags: Vec::new(),
                 },

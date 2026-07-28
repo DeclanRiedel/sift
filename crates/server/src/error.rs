@@ -183,6 +183,8 @@ impl ApiError {
                     (StatusCode::UNPROCESSABLE_ENTITY, "credential_mode_mismatch")
                 }
                 MetadataError::InvalidEnum { .. }
+                | MetadataError::InvalidCredentialObject
+                | MetadataError::InlineCredentialsRequireSharedMode
                 | MetadataError::InvalidTimestamp { .. }
                 | MetadataError::InvalidOAuthAttempt
                 | MetadataError::InvalidTenantInvitation

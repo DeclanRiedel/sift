@@ -8,7 +8,7 @@
 use chrono::{DateTime, Utc};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use sift_protocol::{ConnectionSpec, Engine};
+use sift_protocol::ProviderId;
 
 use crate::{ApiTokenRow, CredentialMode, RoomKind, RoomRole};
 
@@ -51,8 +51,10 @@ pub struct UpdateDocumentSnapshotRequest {
 pub struct UpsertConnectionProfileRequest {
     pub tenant_id: i64,
     pub name: String,
-    pub engine: Engine,
-    pub spec: ConnectionSpec,
+    pub provider_id: ProviderId,
+    pub configuration: serde_json::Value,
+    #[serde(default)]
+    pub credentials: Option<serde_json::Value>,
     pub credential_mode: CredentialMode,
     #[serde(default)]
     pub tags: Vec<String>,
@@ -60,7 +62,7 @@ pub struct UpsertConnectionProfileRequest {
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct SetCredentialRequest {
-    pub secret: String,
+    pub credentials: serde_json::Value,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]

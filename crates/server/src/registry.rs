@@ -480,33 +480,39 @@ impl RuntimeDriver {
 
     pub async fn open(
         &self,
-        spec: &sift_protocol::ConnectionSpec,
+        configuration: &serde_json::Value,
+        credentials: &HashMap<String, Vec<u8>>,
     ) -> Result<RuntimeConnectionHandle, DriverError> {
         match self {
-            Self::Builtin { driver, .. } => driver
-                .open(spec)
-                .await
-                .map(RuntimeConnectionHandle::Builtin),
-            Self::External(registered) => {
-                let mut sanitized = spec.clone();
-                let mut credentials = HashMap::new();
-                if let Some(password) = sanitized.password.take() {
-                    credentials.insert("password".into(), password.into_bytes());
+            Self::Builtin { driver, .. } => {
+                let mut spec: sift_protocol::ConnectionSpec =
+                    serde_json::from_value(configuration.clone()).map_err(|error| {
+                        DriverError::new(
+                            Code::InvalidParameterValue,
+                            format!("invalid bundled provider configuration: {error}"),
+                        )
+                    })?;
+                if let Some(password) = credentials.get("password") {
+                    spec.password = Some(String::from_utf8(password.clone()).map_err(|_| {
+                        DriverError::new(
+                            Code::InvalidParameterValue,
+                            "bundled provider password must be UTF-8",
+                        )
+                    })?);
                 }
-                registered
-                    .provider
-                    .open(ProviderOpenRequest {
-                        configuration: serde_json::to_value(sanitized).map_err(|error| {
-                            DriverError::new(
-                                Code::InvalidParameterValue,
-                                format!("provider configuration is not serializable: {error}"),
-                            )
-                        })?,
-                        credentials,
-                    })
+                driver
+                    .open(&spec)
                     .await
-                    .map(RuntimeConnectionHandle::External)
+                    .map(RuntimeConnectionHandle::Builtin)
             }
+            Self::External(registered) => registered
+                .provider
+                .open(ProviderOpenRequest {
+                    configuration: configuration.clone(),
+                    credentials: credentials.clone(),
+                })
+                .await
+                .map(RuntimeConnectionHandle::External),
         }
     }
 
@@ -1067,6 +1073,13 @@ fn builtin_configuration_schema(engine: Engine) -> serde_json::Value {
     properties.insert(
         "user".into(),
         serde_json::json!({"type": "string", "minLength": 1, "maxLength": 255}),
+    );
+    properties.insert(
+        "ssl_mode".into(),
+        serde_json::json!({
+            "type": ["string", "null"],
+            "enum": ["disable", "prefer", "require", "verify_ca", "verify_full", null]
+        }),
     );
     let engine_properties = match engine {
         Engine::Postgres => serde_json::json!({

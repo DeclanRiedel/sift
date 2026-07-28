@@ -2597,8 +2597,10 @@ async fn document_creation_rejects_cross_tenant_connection_profile() {
             PrincipalId(1),
             NewConnectionProfile {
                 name: "other-tenant-profile".into(),
-                engine: Engine::Postgres,
-                spec: pg_spec(),
+                provider_id: Engine::Postgres.provider_id(),
+                configuration: serde_json::to_value(pg_spec()).unwrap(),
+                semantic_engine: Engine::Postgres,
+                credentials: None,
                 credential_mode: CredentialMode::Shared,
                 tags: Vec::new(),
             },
@@ -2642,8 +2644,10 @@ async fn http_execute_records_room_scoped_query_history() {
             PrincipalId(1),
             NewConnectionProfile {
                 name: "room pg".into(),
-                engine: Engine::Postgres,
-                spec: pg_spec(),
+                provider_id: Engine::Postgres.provider_id(),
+                configuration: serde_json::to_value(pg_spec()).unwrap(),
+                semantic_engine: Engine::Postgres,
+                credentials: None,
                 credential_mode: CredentialMode::Shared,
                 tags: Vec::new(),
             },
@@ -2862,8 +2866,10 @@ async fn room_scoped_execute_gates_on_submitter_role() {
             PrincipalId(1),
             NewConnectionProfile {
                 name: "room pg".into(),
-                engine: Engine::Postgres,
-                spec: pg_spec(),
+                provider_id: Engine::Postgres.provider_id(),
+                configuration: serde_json::to_value(pg_spec()).unwrap(),
+                semantic_engine: Engine::Postgres,
+                credentials: None,
                 credential_mode: CredentialMode::Shared,
                 tags: Vec::new(),
             },
@@ -3248,8 +3254,8 @@ async fn metadata_connection_profile_opens_session_connection() {
                 serde_json::json!({
                     "tenant_id": 1,
                     "name": "local pg",
-                    "engine": "postgres",
-                    "spec": {
+                    "provider_id": "sift/postgres",
+                    "configuration": {
                         "host": "mock.invalid",
                         "port": 5432,
                         "database": "mock",
@@ -3312,8 +3318,8 @@ async fn connection_policy_and_admin_disconnect_are_public_and_revision_safe() {
                 serde_json::json!({
                     "tenant_id": 1,
                     "name": "policy pg",
-                    "engine": "postgres",
-                    "spec": {
+                    "provider_id": "sift/postgres",
+                    "configuration": {
                         "host": "mock.invalid",
                         "port": 5432,
                         "database": "mock",

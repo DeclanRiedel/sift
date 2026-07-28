@@ -1210,6 +1210,7 @@ struct RoomRouting {
     binder: PrincipalId,
     tenant: TenantId,
     profile_id: ConnectionProfileId,
+    provider_id: sift_protocol::ProviderId,
     engine: sift_protocol::Engine,
     policy_revision: u64,
 }
@@ -3095,7 +3096,7 @@ async fn execute_metadata_context(
                 .map_err(|denial| ApiError::Forbidden(denial.public_reason().into()))?;
             crate::sql_policy::enforce(
                 &bound_profile.policy,
-                bound_profile.engine,
+                bound_profile.semantic_engine,
                 sift_protocol::OperationKind::ExecuteQuery,
                 Some(&sql),
                 &[],
@@ -3106,7 +3107,8 @@ async fn execute_metadata_context(
                 binder,
                 tenant: room_row.tenant_id,
                 profile_id,
-                engine: bound_profile.engine,
+                provider_id: bound_profile.provider_id,
+                engine: bound_profile.semantic_engine,
                 policy_revision: bound_profile.policy.revision,
             });
         } else if let Some(profile) = effective {
@@ -4690,14 +4692,31 @@ async fn upsert_metadata_connection(
     } else {
         None
     };
+    let registered = state.sessions.registry().get_provider(&req.provider_id)?;
+    let descriptor = registered.provider.descriptor();
+    let semantic_engine = registered.provider.legacy_engine().ok_or_else(|| {
+        ApiError::BadRequest(format!(
+            "provider `{}` uses a dialect not supported by the Phase I SQL policy",
+            req.provider_id
+        ))
+    })?;
+    let validator = jsonschema::draft202012::new(&descriptor.configuration_schema)
+        .map_err(|error| ApiError::Internal(error.to_string()))?;
+    if let Err(error) = validator.validate(&req.configuration) {
+        return Err(ApiError::BadRequest(format!(
+            "provider configuration is invalid: {error}"
+        )));
+    }
     let profile = metadata
         .upsert_connection_profile_with_limit(
             tenant,
             auth.principal_id,
             NewConnectionProfile {
                 name: req.name,
-                engine: req.engine,
-                spec: req.spec,
+                provider_id: req.provider_id,
+                configuration: req.configuration,
+                semantic_engine,
+                credentials: req.credentials,
                 credential_mode: req.credential_mode,
                 tags: req.tags,
             },
@@ -4773,7 +4792,7 @@ async fn set_metadata_connection_credential(
         Some(profile_id.0),
     );
     metadata
-        .set_per_user_credential(profile_id, auth.principal_id, req.secret.as_bytes(), audit)
+        .set_per_user_credential(profile_id, auth.principal_id, &req.credentials, audit)
         .await?;
     state
         .sessions
@@ -5363,15 +5382,16 @@ async fn open_connection_from_profile(
     };
     crate::authorization::authorize(&authorization, sift_protocol::OperationKind::OpenConnection)
         .map_err(|denial| ApiError::Forbidden(denial.public_reason().into()))?;
-    let spec = metadata
-        .resolve_connection_spec(tenant, auth.principal_id, profile_id)
+    let (configuration, credentials) = metadata
+        .resolve_provider_connection(tenant, auth.principal_id, profile_id)
         .await?;
     let info = state
         .sessions
         .open_managed_connection(
             session_id,
-            profile.engine,
-            spec,
+            profile.provider_id,
+            configuration,
+            credentials,
             auth.principal_id,
             tenant,
             profile_id,
@@ -6015,6 +6035,7 @@ async fn execute_query(
                 binder: routing.binder,
                 tenant: routing.tenant,
                 profile_id: routing.profile_id,
+                provider_id: routing.provider_id,
                 engine: routing.engine,
                 policy_revision: routing.policy_revision,
             };

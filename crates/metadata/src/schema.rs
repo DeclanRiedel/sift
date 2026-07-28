@@ -1,7 +1,7 @@
 use chrono::{DateTime, Utc};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use sift_protocol::{ConnectionPolicy, ConnectionSpec, Engine, TenantResourceLimits, TenantRole};
+use sift_protocol::{ConnectionPolicy, Engine, ProviderId, TenantResourceLimits, TenantRole};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 pub struct TenantId(pub i64);
@@ -341,9 +341,14 @@ pub struct ConnectionProfile {
     pub id: ConnectionProfileId,
     pub tenant_id: TenantId,
     pub name: String,
-    pub engine: Engine,
-    pub spec: ConnectionSpec,
+    pub provider_id: ProviderId,
+    pub configuration: serde_json::Value,
+    #[serde(skip, default = "default_semantic_engine")]
+    #[schemars(skip)]
+    pub semantic_engine: Engine,
     pub credential_mode: CredentialMode,
+    #[serde(skip)]
+    #[schemars(skip)]
     pub shared_secret_handle: Option<String>,
     pub tags: Vec<String>,
     pub policy: ConnectionPolicy,
@@ -364,10 +369,16 @@ pub struct TenantLimitOverride {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct NewConnectionProfile {
     pub name: String,
-    pub engine: Engine,
-    pub spec: ConnectionSpec,
+    pub provider_id: ProviderId,
+    pub configuration: serde_json::Value,
+    pub semantic_engine: Engine,
+    pub credentials: Option<serde_json::Value>,
     pub credential_mode: CredentialMode,
     pub tags: Vec<String>,
+}
+
+fn default_semantic_engine() -> Engine {
+    Engine::Postgres
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
