@@ -6,11 +6,13 @@
 pub mod driver;
 pub mod identity;
 pub mod manifest;
+pub mod operation;
 pub mod rpc;
 
 pub use driver::*;
 pub use identity::*;
 pub use manifest::*;
+pub use operation::*;
 pub use rpc::*;
 
 /// Extension process-envelope protocol version.

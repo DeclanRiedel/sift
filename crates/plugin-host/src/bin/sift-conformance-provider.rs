@@ -98,6 +98,13 @@ fn serve_request(
             handle: WireId::from_u128(200),
         })?,
         "commit" | "rollback" | "cancel" | "close" => serde_json::json!({}),
+        "invoke" => {
+            let request: sift_extension_protocol::InvokeActionRequest =
+                serde_json::from_value(request.payload)?;
+            serde_json::to_value(sift_extension_protocol::InvokeActionResponse {
+                result: request.arguments,
+            })?
+        }
         "execute" => {
             let _: sift_extension_protocol::ExecuteDriverRequest =
                 serde_json::from_value(request.payload)?;

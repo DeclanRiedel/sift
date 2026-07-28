@@ -1,6 +1,6 @@
 //! Central Phase F authorization evaluator (ADR-020).
 
-use sift_protocol::{ConnectionPolicy, OperationKind, TenantRole};
+use sift_protocol::{ConnectionPolicy, OperationClassification, OperationKind, TenantRole};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AuthorizationRoomRole {
@@ -125,6 +125,30 @@ pub fn authorize(
     Ok(())
 }
 
+pub fn authorize_extension(
+    scope: &AuthorizationScope,
+    classification: OperationClassification,
+) -> Result<(), AuthorizationDenial> {
+    if classification == OperationClassification::Administrative {
+        if !scope.authenticated {
+            return Err(AuthorizationDenial::AuthenticationRequired);
+        }
+        return scope
+            .instance_admin
+            .then_some(())
+            .ok_or(AuthorizationDenial::InstanceAdminRequired);
+    }
+    let operation = match classification {
+        OperationClassification::Read => OperationKind::RefreshSchema,
+        OperationClassification::ExecuteRead => OperationKind::ExecuteQuery,
+        OperationClassification::Write | OperationClassification::Destructive => {
+            OperationKind::ApplyEdits
+        }
+        OperationClassification::Administrative => unreachable!(),
+    };
+    authorize(scope, operation)
+}
+
 pub const fn is_connection_operation(operation: OperationKind) -> bool {
     use OperationKind::*;
     matches!(
@@ -185,6 +209,21 @@ mod tests {
         assert_eq!(
             authorize(&scope, OperationKind::ExecuteQuery),
             Err(AuthorizationDenial::OperationBlocked)
+        );
+    }
+
+    #[test]
+    fn extension_classification_cannot_weaken_core_policy() {
+        let mut scope = member_scope(ConnectionPolicy::default());
+        scope.room_role = Some(AuthorizationRoomRole::Viewer);
+        assert!(authorize_extension(&scope, OperationClassification::Read).is_ok());
+        assert_eq!(
+            authorize_extension(&scope, OperationClassification::Write),
+            Err(AuthorizationDenial::RoomEditorRequired)
+        );
+        assert_eq!(
+            authorize_extension(&scope, OperationClassification::Administrative),
+            Err(AuthorizationDenial::InstanceAdminRequired)
         );
     }
 

@@ -63,6 +63,32 @@ async fn supervised_conformance_process_handshakes_and_serves_requests() {
         other => panic!("unexpected response: {other:?}"),
     }
 
+    let response = process
+        .request(Request {
+            id: WireId::from_u128(0),
+            contribution_id: ContributionId::new("acme/conformance/database_provider/fixture")
+                .unwrap(),
+            method: "invoke".into(),
+            payload: serde_json::to_value(sift_extension_protocol::InvokeActionRequest {
+                action: sift_extension_protocol::SegmentId::new("echo").unwrap(),
+                target_kind: sift_extension_protocol::SegmentId::new("fixture").unwrap(),
+                target_id: None,
+                arguments: serde_json::json!({"safe": true}),
+            })
+            .unwrap(),
+            correlation_id: WireId::from_u128(101),
+            deadline_unix_ms: deadline,
+            context: None,
+            stream_id: None,
+        })
+        .await
+        .unwrap();
+    assert!(matches!(
+        response.result,
+        sift_extension_protocol::ResponseResult::Ok { payload }
+            if payload == serde_json::json!({"result": {"safe": true}})
+    ));
+
     let deadline = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()

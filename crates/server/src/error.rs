@@ -138,7 +138,10 @@ impl ApiError {
                 | MetadataError::AuthSessionNotFound(_)
                 | MetadataError::PrincipalKeyNotFound(_)
                 | MetadataError::GithubAllowlistNotFound(_)
-                | MetadataError::ExtensionNotFound(_) => (StatusCode::NOT_FOUND, "not_found"),
+                | MetadataError::ExtensionNotFound(_)
+                | MetadataError::ExtensionStorageNamespaceNotFound => {
+                    (StatusCode::NOT_FOUND, "not_found")
+                }
                 MetadataError::ConnectionProfileLimitReached(_) => {
                     (StatusCode::CONFLICT, "tenant_resource_exhausted")
                 }
@@ -150,6 +153,12 @@ impl ApiError {
                 }
                 MetadataError::ExtensionRevisionConflict { .. } => {
                     (StatusCode::CONFLICT, "extension_revision_conflict")
+                }
+                MetadataError::ExtensionStorageRevisionConflict => {
+                    (StatusCode::CONFLICT, "extension_storage_revision_conflict")
+                }
+                MetadataError::ExtensionStorageQuotaExceeded { .. } => {
+                    (StatusCode::CONFLICT, "extension_storage_quota_exceeded")
                 }
                 MetadataError::ExtensionVersionDigestConflict { .. }
                 | MetadataError::ExtensionContributionConflict(_) => {
@@ -176,7 +185,11 @@ impl ApiError {
                 | MetadataError::InvalidKeyChallenge
                 | MetadataError::InvalidSshProxyCapability
                 | MetadataError::InvalidPasswordReset
+                | MetadataError::ExtensionStorageInvalidKey
                 | MetadataError::Json(_) => (StatusCode::BAD_REQUEST, "bad_request"),
+                MetadataError::ExtensionStorageValueTooLarge { .. } => {
+                    (StatusCode::PAYLOAD_TOO_LARGE, "payload_too_large")
+                }
                 MetadataError::Sqlite(_)
                 | MetadataError::Migration(_)
                 | MetadataError::PasswordHash(_)

@@ -35,6 +35,7 @@ figment = { workspace = true }
 fs2 = { workspace = true }
 futures = { workspace = true }
 getrandom = { workspace = true }
+jsonschema = { workspace = true }
 libc = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

@@ -18,6 +18,7 @@ pub mod document_registry;
 pub mod edit;
 pub mod error;
 pub mod export;
+pub mod extension_dispatch;
 pub mod fingerprint;
 pub mod http;
 pub mod identity;

@@ -3713,6 +3713,42 @@ impl MetadataStore {
         .map_err(Into::into)
     }
 
+    pub fn finish_operation_audit(
+        &self,
+        id: OperationAuditId,
+        status: &str,
+        result_code: Option<&str>,
+        error_message: Option<&str>,
+    ) -> Result<OperationAudit> {
+        if !matches!(status, "succeeded" | "failed") {
+            return Err(MetadataError::InvalidEnum {
+                field: "operation_audit.status",
+                value: status.into(),
+            });
+        }
+        let conn = self.conn()?;
+        let changed = conn.execute(
+            "UPDATE operation_audit
+             SET status = ?2, result_code = ?3, error_message = ?4
+             WHERE id = ?1 AND status = 'started'",
+            params![id.0, status, result_code, error_message],
+        )?;
+        if changed != 1 {
+            return Err(MetadataError::InvalidEnum {
+                field: "operation_audit.transition",
+                value: id.0.to_string(),
+            });
+        }
+        conn.query_row(
+            "SELECT id, at, actor_principal_id, action, target, target_id, status,
+                    result_code, row_count, error_message, correlation_id
+             FROM operation_audit WHERE id = ?1",
+            [id.0],
+            operation_audit_from_row,
+        )
+        .map_err(Into::into)
+    }
+
     pub fn list_operation_audit(&self, limit: u32) -> Result<Vec<OperationAudit>> {
         let conn = self.conn()?;
         let mut stmt = conn.prepare(
