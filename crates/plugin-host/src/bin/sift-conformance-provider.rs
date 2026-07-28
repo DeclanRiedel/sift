@@ -6,6 +6,10 @@ use sift_extension_protocol::{
 };
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let mode = std::fs::read_to_string(".sift-conformance-mode")
+        .unwrap_or_else(|_| "normal".into())
+        .trim()
+        .to_owned();
     let contribution = ContributionId::new("acme/conformance/database_provider/fixture")?;
     write_message(&Message::Hello(Hello {
         extension_rpc: VersionRange {
@@ -19,7 +23,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 maximum: 1,
             },
         }],
-        extension_id: ExtensionId::new("acme/conformance")?,
+        extension_id: ExtensionId::new(if mode == "wrong_identity" {
+            "acme/impostor"
+        } else {
+            "acme/conformance"
+        })?,
         extension_version: "1.0.0".into(),
         manifest_sha256: "a".repeat(64),
         process_nonce: WireId::from_u128(1),
@@ -30,39 +38,57 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Message::Welcome(_) => {}
         _ => return Err("host did not send welcome".into()),
     }
+    if mode == "unknown_response" {
+        write_message(&Message::Response(Response {
+            id: WireId::from_u128(u128::MAX),
+            result: ResponseResult::Ok {
+                payload: serde_json::json!({}),
+            },
+        }))?;
+    }
+    if mode == "stderr_secret" {
+        eprintln!("password=hunter2");
+    }
 
     let mut heartbeat = 0;
     loop {
         match read_message()? {
             Message::Request(request) => {
-                serve_request(request)?;
+                if mode != "ignore_requests" {
+                    serve_request(request, &mode)?;
+                }
             }
             Message::Cancel(cancel) => {
-                write_message(&Message::Response(Response {
-                    id: cancel.request_id,
-                    result: ResponseResult::Error {
-                        error: sift_extension_protocol::RpcError {
-                            code: "canceled".into(),
-                            message: "request canceled".into(),
-                            retryable: false,
-                            native_code: None,
+                if mode != "ignore_requests" {
+                    write_message(&Message::Response(Response {
+                        id: cancel.request_id,
+                        result: ResponseResult::Error {
+                            error: sift_extension_protocol::RpcError {
+                                code: "canceled".into(),
+                                message: "request canceled".into(),
+                                retryable: false,
+                                native_code: None,
+                            },
                         },
-                    },
-                }))?;
+                    }))?;
+                }
             }
             Message::Credit(_) => {}
             Message::Shutdown(_) => return Ok(()),
             _ => return Err("unexpected host message".into()),
         }
-        heartbeat += 1;
-        write_message(&Message::Heartbeat(Heartbeat {
-            sequence: heartbeat,
-        }))?;
+        if mode != "ignore_heartbeats" {
+            heartbeat += 1;
+            write_message(&Message::Heartbeat(Heartbeat {
+                sequence: heartbeat,
+            }))?;
+        }
     }
 }
 
 fn serve_request(
     request: sift_extension_protocol::Request,
+    mode: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
     use sift_extension_protocol::{
         DriverCatalog, DriverNamespace, DriverSchemaSnapshot, DriverStreamPayload, DriverValue,
@@ -139,7 +165,11 @@ fn serve_request(
             {
                 write_message(&Message::Stream(sift_extension_protocol::StreamFrame {
                     stream_id,
-                    sequence: sequence as u64,
+                    sequence: if mode == "out_of_order_stream" && sequence == 1 {
+                        2
+                    } else {
+                        sequence as u64
+                    },
                     payload: serde_json::to_value(payload)?,
                 }))?;
             }

@@ -288,6 +288,7 @@ impl SupervisedProcess {
             stopped.clone(),
             child.clone(),
             pending.clone(),
+            streams.clone(),
             diagnostics.clone(),
         );
 
@@ -468,6 +469,7 @@ impl SupervisedProcess {
         }
         *self.health.write().await = GenerationHealth::Stopped;
         self.pending.lock().await.clear();
+        self.streams.lock().expect("stream map poisoned").clear();
         Ok(())
     }
 }
@@ -628,6 +630,7 @@ fn spawn_reader(
         stopped.store(true, Ordering::Release);
         *health.write().await = GenerationHealth::Degraded;
         pending.lock().await.clear();
+        streams.lock().expect("stream map poisoned").clear();
         let _ = child.lock().await.kill().await;
     })
 }
@@ -641,6 +644,7 @@ fn spawn_heartbeat_monitor(
     stopped: Arc<AtomicBool>,
     child: Arc<Mutex<Child>>,
     pending: Pending,
+    streams: Streams,
     diagnostics: Arc<Mutex<DiagnosticRing>>,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
@@ -660,6 +664,7 @@ fn spawn_heartbeat_monitor(
             stopped.store(true, Ordering::Release);
             *health.write().await = GenerationHealth::Degraded;
             pending.lock().await.clear();
+            streams.lock().expect("stream map poisoned").clear();
             let _ = child.lock().await.kill().await;
             return;
         }

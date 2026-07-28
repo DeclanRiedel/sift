@@ -152,4 +152,24 @@ mod tests {
             })
         ));
     }
+
+    #[tokio::test]
+    async fn empty_and_malformed_frames_fail_closed() {
+        let (mut empty_client, empty_server) = tokio::io::duplex(16);
+        empty_client.write_u32(0).await.unwrap();
+        let mut reader = FrameReader::new(empty_server, 64).unwrap();
+        assert!(matches!(
+            reader.read_message().await,
+            Err(FrameError::Empty)
+        ));
+
+        let (mut invalid_client, invalid_server) = tokio::io::duplex(32);
+        invalid_client.write_u32(8).await.unwrap();
+        invalid_client.write_all(b"not-json").await.unwrap();
+        let mut reader = FrameReader::new(invalid_server, 64).unwrap();
+        assert!(matches!(
+            reader.read_message().await,
+            Err(FrameError::InvalidJson(_))
+        ));
+    }
 }
