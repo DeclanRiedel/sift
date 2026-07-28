@@ -146,12 +146,19 @@ async fn main() -> anyhow::Result<()> {
     ));
     if let Some(store) = &metadata {
         sessions.set_audit_store(store.clone());
-        let package_registry =
-            std::sync::Arc::new(sift_plugin_host::ExtensionPackageRegistry::new(
-                cfg.runtime_state_dir().join("extensions"),
-                sift_plugin_host::PackageLimits::default(),
-                store.clone(),
-            ));
+        let package_registry = sift_plugin_host::ExtensionPackageRegistry::new(
+            cfg.runtime_state_dir().join("extensions"),
+            sift_plugin_host::PackageLimits::default(),
+            store.clone(),
+        );
+        for path in &cfg.extensions.development_overrides {
+            package_registry.register_development_override(
+                std::path::Path::new(path),
+                cfg.deployment == sift_server::config::DeploymentPolicy::Team,
+                cfg.extensions.allow_hosted_development,
+            )?;
+        }
+        let package_registry = std::sync::Arc::new(package_registry);
         sessions.set_package_registry(package_registry);
         let metadata = std::sync::Arc::new(store.clone());
         let dispatcher =

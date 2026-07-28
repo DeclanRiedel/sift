@@ -69,6 +69,8 @@ pub struct Config {
     pub log: LogConfig,
     /// Driver-registration knobs.
     pub drivers: DriversConfig,
+    /// Operator-controlled extension development policy.
+    pub extensions: ExtensionsConfig,
     /// Operational timeouts.
     pub timeouts: TimeoutConfig,
     /// Minimal Phase 0 auth hook.
@@ -148,6 +150,15 @@ pub struct DriversConfig {
     /// If true, register `MockDriver` for an extra synthetic engine slot.
     /// Off by default.
     pub mock_extra: bool,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ExtensionsConfig {
+    /// Canonicalized local development directories registered at startup.
+    pub development_overrides: Vec<String>,
+    /// Team deployments reject development paths unless explicitly enabled.
+    pub allow_hosted_development: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -275,6 +286,7 @@ impl Default for Config {
             bind: "127.0.0.1:7474".to_string(),
             log: LogConfig::default(),
             drivers: DriversConfig::default(),
+            extensions: ExtensionsConfig::default(),
             timeouts: TimeoutConfig::default(),
             auth: AuthConfig::default(),
             metadata: MetadataConfig::default(),
