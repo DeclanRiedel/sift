@@ -138,6 +138,13 @@ pub struct InvokeExtensionResponse {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum InvokeExtensionOutcome {
+    Completed { result: serde_json::Value },
+    ApprovalRequired { approval: OperationApproval },
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct CreateOperationApprovalRequest {
     pub operation: ExtensionOperation,
     pub input_fingerprint: String,
@@ -176,4 +183,29 @@ pub struct ExtensionGrantRequest {
 pub struct ExtensionTenantSelectionRequest {
     pub allowed: bool,
     pub expected_revision: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct ValidatedExtensionPackage {
+    pub extension_id: ExtensionId,
+    pub name: String,
+    pub version: String,
+    pub archive_sha256: String,
+    pub manifest_sha256: String,
+    pub signed: bool,
+    pub contributions: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ExtensionDiagnostics {
+    pub extension_id: ExtensionId,
+    pub lifecycle: ExtensionLifecycleState,
+    pub quarantine_reason: Option<String>,
+    pub generation_health: Option<String>,
+    pub messages: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ExtensionPurgeResponse {
+    pub purged_namespaces: u64,
 }

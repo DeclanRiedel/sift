@@ -164,7 +164,8 @@ impl ApiError {
                     (StatusCode::CONFLICT, "extension_storage_quota_exceeded")
                 }
                 MetadataError::ExtensionVersionDigestConflict { .. }
-                | MetadataError::ExtensionContributionConflict(_) => {
+                | MetadataError::ExtensionContributionConflict(_)
+                | MetadataError::ExtensionRollbackUnavailable(_) => {
                     (StatusCode::CONFLICT, "extension_conflict")
                 }
                 MetadataError::TenantAdminRequired

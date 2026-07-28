@@ -27,21 +27,24 @@ use sift_protocol::{
     CreateGithubAllowlistRequest, CreateTenantInvitationRequest, CsvImportRequest,
     CsvImportResponse, CursorId, DataSearchRequest, DataSearchResponse, DatabaseProcess,
     DisconnectManagedConnectionsResponse, EditPlan, EndTransactionRequest, ExecuteRequestHttp,
-    ExecuteResponse, ExplainRequest, ExplainResponse, GithubNativeAuthExchangeRequest,
+    ExecuteResponse, ExpectedRevision, ExplainRequest, ExplainResponse, ExtensionDescriptor,
+    ExtensionDiagnostics, ExtensionGrantRequest, ExtensionPurgeResponse, ExtensionSelectionRequest,
+    ExtensionTenantSelectionRequest, GithubNativeAuthExchangeRequest,
     GithubNativeAuthStartResponse, GovernedToolDescriptor, HandshakeClientKind, HandshakeRequest,
-    HandshakeResponse, Health, InvokeToolRequest, InvokeToolResponse, IssuedPasswordResetResponse,
-    IssuedTenantInvitationResponse, KeyAuthenticateRequest, KeyChallengeRequest,
-    KeyChallengeResponse, KillProcessRequest, KillProcessResponse, OpenConnectionRequest,
-    OpenSessionRequest, OperationCapability, OperationCapabilityContext, Page,
-    PasswordLoginRequest, PasswordResetRequest, PreviewEditsRequest, ProtocolRange, Readiness,
+    HandshakeResponse, Health, InvokeExtensionOutcome, InvokeExtensionRequest, InvokeToolRequest,
+    InvokeToolResponse, IssuedPasswordResetResponse, IssuedTenantInvitationResponse,
+    KeyAuthenticateRequest, KeyChallengeRequest, KeyChallengeResponse, KillProcessRequest,
+    KillProcessResponse, OpenConnectionRequest, OpenSessionRequest, OperationApproval,
+    OperationCapability, OperationCapabilityContext, Page, PasswordLoginRequest,
+    PasswordResetRequest, PreviewEditsRequest, ProtocolRange, ProviderDescriptor, Readiness,
     RefreshAuthRequest, RegisterPrincipalKeyRequest, RoomQueryResult, RoomResultId,
     RoomResultPages, RoomSelection, SavepointRequest, SchemaSearchRequest, SchemaSearchResponse,
     SchemaSnapshot, ServerInfo, SessionId, SessionInfo, SshProxyAccessGrant,
     SshProxyCapabilityExchangeRequest, TenantResourceLimits, TenantUsageSnapshot, ToolContext,
     TransactionEndAction, TransactionInfo, TransactionPreview, TransactionPreviewRequest,
     TransactionState, TxHandleRef, TxId, TxMode, UpdateConnectionPolicyRequest,
-    UpdateTenantLimitsRequest, Value, WebAuthResponse, WhoAmIResponse, WsClientMessage,
-    WsServerMessage, PROTOCOL_VERSION_NUMBER,
+    UpdateTenantLimitsRequest, ValidatedExtensionPackage, Value, WebAuthResponse, WhoAmIResponse,
+    WsClientMessage, WsServerMessage, PROTOCOL_VERSION_NUMBER,
 };
 
 #[derive(Clone)]
@@ -1514,6 +1517,137 @@ impl Client {
         self.post("/v1/tools/invoke", request).await
     }
 
+    pub async fn providers(&self) -> Result<Vec<ProviderDescriptor>> {
+        self.get("/v1/providers").await
+    }
+
+    pub async fn extensions(&self) -> Result<Vec<ExtensionDescriptor>> {
+        self.get("/v1/extensions").await
+    }
+
+    pub async fn extension(&self, publisher: &str, name: &str) -> Result<ExtensionDescriptor> {
+        self.get(&format!("/v1/extensions/{publisher}/{name}"))
+            .await
+    }
+
+    pub async fn validate_extension(&self, archive: Vec<u8>) -> Result<ValidatedExtensionPackage> {
+        self.post_archive("/v1/extensions/validate", archive).await
+    }
+
+    pub async fn install_extension(&self, archive: Vec<u8>) -> Result<ValidatedExtensionPackage> {
+        self.post_archive("/v1/extensions/install", archive).await
+    }
+
+    pub async fn select_extension(
+        &self,
+        publisher: &str,
+        name: &str,
+        request: &ExtensionSelectionRequest,
+    ) -> Result<ExtensionDescriptor> {
+        self.put(
+            &format!("/v1/extensions/{publisher}/{name}/selection"),
+            request,
+        )
+        .await
+    }
+
+    pub async fn grant_extension(
+        &self,
+        publisher: &str,
+        name: &str,
+        request: &ExtensionGrantRequest,
+    ) -> Result<ExtensionDescriptor> {
+        self.put(
+            &format!("/v1/extensions/{publisher}/{name}/grants"),
+            request,
+        )
+        .await
+    }
+
+    pub async fn allow_extension_tenant(
+        &self,
+        publisher: &str,
+        name: &str,
+        tenant_id: i64,
+        request: &ExtensionTenantSelectionRequest,
+    ) -> Result<ExtensionDescriptor> {
+        self.put(
+            &format!("/v1/extensions/{publisher}/{name}/tenants/{tenant_id}"),
+            request,
+        )
+        .await
+    }
+
+    pub async fn rollback_extension(
+        &self,
+        publisher: &str,
+        name: &str,
+        request: &ExpectedRevision,
+    ) -> Result<ExtensionDescriptor> {
+        self.post(
+            &format!("/v1/extensions/{publisher}/{name}/rollback"),
+            request,
+        )
+        .await
+    }
+
+    pub async fn uninstall_extension(
+        &self,
+        publisher: &str,
+        name: &str,
+        expected_revision: u64,
+    ) -> Result<ExtensionDescriptor> {
+        self.send(self.http.delete(self.url(&format!(
+            "/v1/extensions/{publisher}/{name}?expected_revision={expected_revision}"
+        ))))
+        .await
+    }
+
+    pub async fn purge_extension(
+        &self,
+        publisher: &str,
+        name: &str,
+        request: &ExpectedRevision,
+    ) -> Result<ExtensionPurgeResponse> {
+        self.post(&format!("/v1/extensions/{publisher}/{name}/purge"), request)
+            .await
+    }
+
+    pub async fn extension_diagnostics(
+        &self,
+        publisher: &str,
+        name: &str,
+    ) -> Result<ExtensionDiagnostics> {
+        self.get(&format!("/v1/extensions/{publisher}/{name}/diagnostics"))
+            .await
+    }
+
+    pub async fn invoke_extension(
+        &self,
+        request: &InvokeExtensionRequest,
+    ) -> Result<InvokeExtensionOutcome> {
+        self.post("/v1/extension-actions/invoke", request).await
+    }
+
+    pub async fn create_operation_approval(
+        &self,
+        request: &sift_protocol::CreateOperationApprovalRequest,
+    ) -> Result<OperationApproval> {
+        self.post("/v1/operation-approvals", request).await
+    }
+
+    pub async fn approve_operation(
+        &self,
+        approval_id: &str,
+        request: &ExpectedRevision,
+    ) -> Result<OperationApproval> {
+        self.post(
+            &format!("/v1/operation-approvals/{approval_id}/approve"),
+            request,
+        )
+        .await
+    }
+
     /// Durable operation-audit rows (actor, target, result code, row count,
     /// sanitized failure message). Requires a configured metadata store.
     pub async fn operation_audit(&self) -> Result<Vec<sift_metadata::OperationAudit>> {
@@ -1728,6 +1862,20 @@ impl Client {
         body: &B,
     ) -> Result<T> {
         self.send(self.http.post(self.url(path)).json(body)).await
+    }
+
+    async fn post_archive<T: serde::de::DeserializeOwned>(
+        &self,
+        path: &str,
+        archive: Vec<u8>,
+    ) -> Result<T> {
+        self.send(
+            self.http
+                .post(self.url(path))
+                .header(reqwest::header::CONTENT_TYPE, "application/octet-stream")
+                .body(archive),
+        )
+        .await
     }
 
     async fn put<T: serde::de::DeserializeOwned, B: serde::Serialize>(

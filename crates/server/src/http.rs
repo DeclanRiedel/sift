@@ -146,6 +146,71 @@ pub fn app(state: AppState) -> Router {
             get_with(list_operation_audit_log, doc("listOperationAudit", "List durable operation audit rows (actor, target, result, rows)")),
         )
         .api_route(
+            "/v1/providers",
+            get_with(list_providers, doc("listProviders", "List provider-neutral database capabilities")),
+        )
+        .api_route(
+            "/v1/extensions",
+            get_with(list_extensions, doc("listExtensions", "List installed extension descriptors")),
+        )
+        .api_route(
+            "/v1/extensions/:publisher/:name",
+            get_with(get_extension, doc("getExtension", "Inspect one installed extension"))
+                .delete_with(uninstall_extension, doc("uninstallExtension", "Uninstall an extension while retaining orphaned data")),
+        )
+        .api_route(
+            "/v1/extensions/validate",
+            post_with(validate_extension, doc("validateExtension", "Validate a bounded local extension archive")),
+        )
+        .api_route(
+            "/v1/extensions/install",
+            post_with(install_extension, doc("installExtension", "Validate and install a bounded local extension archive")),
+        )
+        .api_route(
+            "/v1/extensions/:publisher/:name/selection",
+            put_with(update_extension_selection, doc("updateExtensionSelection", "Enable or disable an extension with revision checking")),
+        )
+        .api_route(
+            "/v1/extensions/:publisher/:name/grants",
+            put_with(update_extension_grants, doc("updateExtensionGrants", "Replace extension grants with revision checking")),
+        )
+        .api_route(
+            "/v1/extensions/:publisher/:name/tenants/:tenant_id",
+            put_with(update_extension_tenant, doc("updateExtensionTenant", "Allow or deny an extension for one tenant")),
+        )
+        .api_route(
+            "/v1/extensions/:publisher/:name/rollback",
+            post_with(rollback_extension, doc("rollbackExtension", "Select the previous installed package")),
+        )
+        .api_route(
+            "/v1/extensions/:publisher/:name/purge",
+            post_with(purge_extension, doc("purgeExtension", "Purge orphaned extension data")),
+        )
+        .api_route(
+            "/v1/extensions/:publisher/:name/diagnostics",
+            get_with(extension_diagnostics, doc("extensionDiagnostics", "Inspect bounded extension lifecycle diagnostics")),
+        )
+        .api_route(
+            "/v1/extension-actions/invoke",
+            post_with(invoke_extension_action, doc("invokeExtensionAction", "Invoke a schema-validated governed extension action")),
+        )
+        .api_route(
+            "/v1/operation-approvals",
+            post_with(create_operation_approval, doc("createOperationApproval", "Create a narrowly bound one-use approval request")),
+        )
+        .api_route(
+            "/v1/operation-approvals/:approval_id/approve",
+            post_with(approve_operation, doc("approveOperation", "Approve a pending operation request")),
+        )
+        .api_route(
+            "/v1/tools",
+            get_with(list_governed_tools, doc("listGovernedTools", "List governed tools available in context")),
+        )
+        .api_route(
+            "/v1/tools/invoke",
+            post_with(invoke_governed_tool, doc("invokeGovernedTool", "Invoke a governed tool through policy and approval admission")),
+        )
+        .api_route(
             "/v1/openapi.json",
             get_with(openapi, doc("openapi", "OpenAPI document")),
         )
@@ -3368,6 +3433,701 @@ async fn list_operation_audit_log(
     Ok(Json(
         metadata_blocking(move || metadata.list_operation_audit(limit).map_err(Into::into)).await?,
     ))
+}
+
+async fn list_providers(
+    State(state): State<AppState>,
+) -> Json<Vec<sift_protocol::ProviderDescriptor>> {
+    Json(state.sessions.registry().providers().descriptors())
+}
+
+async fn list_extensions(
+    State(state): State<AppState>,
+) -> ApiResult<Json<Vec<sift_protocol::ExtensionDescriptor>>> {
+    let metadata = metadata_store_cloned(&state)?;
+    let packages = metadata.selected_extension_packages()?;
+    let mut descriptors = Vec::with_capacity(packages.len());
+    for package in packages {
+        descriptors.push(extension_descriptor(&state, &metadata, package)?);
+    }
+    Ok(Json(descriptors))
+}
+
+async fn get_extension(
+    State(state): State<AppState>,
+    Path((publisher, name)): Path<(String, String)>,
+) -> ApiResult<Json<sift_protocol::ExtensionDescriptor>> {
+    let id = extension_id(&publisher, &name)?;
+    let metadata = metadata_store_cloned(&state)?;
+    let package = metadata.selected_extension_package(id.as_str())?;
+    Ok(Json(extension_descriptor(&state, &metadata, package)?))
+}
+
+async fn validate_extension(
+    State(state): State<AppState>,
+    auth: Option<Extension<AuthContext>>,
+    body: Body,
+) -> ApiResult<Json<sift_protocol::ValidatedExtensionPackage>> {
+    require_instance_admin(&state, auth.as_ref().map(|Extension(auth)| auth))?;
+    let registry = state
+        .sessions
+        .package_registry()
+        .ok_or(ApiError::MetadataUnavailable)?;
+    let archive = receive_extension_archive(body).await?;
+    let path = archive.to_path_buf();
+    let validated = tokio::task::spawn_blocking(move || {
+        registry.validate(&path, sift_plugin_host::SignaturePolicy::AllowUnsigned)
+    })
+    .await
+    .map_err(|error| ApiError::Internal(error.to_string()))?
+    .map_err(|error| ApiError::BadRequest(error.to_string()))?;
+    Ok(Json(validated_package(&validated)))
+}
+
+async fn install_extension(
+    State(state): State<AppState>,
+    auth: Option<Extension<AuthContext>>,
+    body: Body,
+) -> ApiResult<Json<sift_protocol::ValidatedExtensionPackage>> {
+    let auth = require_instance_admin(&state, auth.as_ref().map(|Extension(auth)| auth))?;
+    let registry = state
+        .sessions
+        .package_registry()
+        .ok_or(ApiError::MetadataUnavailable)?;
+    let archive = receive_extension_archive(body).await?;
+    let path = archive.to_path_buf();
+    let installed = tokio::task::spawn_blocking(move || {
+        registry.install(
+            &path,
+            sift_plugin_host::SignaturePolicy::AllowUnsigned,
+            sift_protocol::ExtensionProvenance::Local,
+        )
+    })
+    .await
+    .map_err(|error| ApiError::Internal(error.to_string()))?
+    .map_err(|error| ApiError::BadRequest(error.to_string()))?;
+    state.sessions.push_operation_full(
+        Operation::ManageExtension {
+            action: sift_protocol::ExtensionAdminAction::Install,
+            extension_id: installed.validated.manifest.id.clone(),
+        },
+        OperationStatus::Succeeded,
+        Some(auth.principal_id.0),
+        None,
+        None,
+        None,
+    );
+    Ok(Json(validated_package(&installed.validated)))
+}
+
+async fn update_extension_selection(
+    State(state): State<AppState>,
+    auth: Option<Extension<AuthContext>>,
+    Path((publisher, name)): Path<(String, String)>,
+    Json(request): Json<sift_protocol::ExtensionSelectionRequest>,
+) -> ApiResult<Json<sift_protocol::ExtensionDescriptor>> {
+    let auth = require_instance_admin(&state, auth.as_ref().map(|Extension(auth)| auth))?;
+    let id = extension_id(&publisher, &name)?;
+    let metadata = metadata_store_cloned(&state)?;
+    let current = metadata.extension_selection(id.as_str())?;
+    let lifecycle = if request.enabled {
+        sift_protocol::ExtensionLifecycleState::Ready
+    } else {
+        sift_protocol::ExtensionLifecycleState::Disabled
+    };
+    metadata.update_extension_selection(sift_metadata::UpdateExtensionSelection {
+        extension_id: id.as_str(),
+        selected_archive_sha256: None,
+        enabled: request.enabled,
+        lifecycle,
+        isolation: current.isolation,
+        quarantine_reason: None,
+        expected_revision: request.expected_revision,
+    })?;
+    record_extension_admin(
+        &state,
+        auth.principal_id,
+        if request.enabled {
+            sift_protocol::ExtensionAdminAction::Enable
+        } else {
+            sift_protocol::ExtensionAdminAction::Disable
+        },
+        id.clone(),
+    );
+    let package = metadata.selected_extension_package(id.as_str())?;
+    Ok(Json(extension_descriptor(&state, &metadata, package)?))
+}
+
+async fn update_extension_grants(
+    State(state): State<AppState>,
+    auth: Option<Extension<AuthContext>>,
+    Path((publisher, name)): Path<(String, String)>,
+    Json(request): Json<sift_protocol::ExtensionGrantRequest>,
+) -> ApiResult<Json<sift_protocol::ExtensionDescriptor>> {
+    let auth = require_instance_admin(&state, auth.as_ref().map(|Extension(auth)| auth))?;
+    let id = extension_id(&publisher, &name)?;
+    let metadata = metadata_store_cloned(&state)?;
+    metadata.replace_extension_grants(&sift_metadata::ReplaceExtensionGrants {
+        extension_id: id.to_string(),
+        grants: request
+            .granted
+            .into_iter()
+            .map(|capability| (capability, "{}".into()))
+            .collect(),
+        expected_revision: request.expected_revision,
+    })?;
+    record_extension_admin(
+        &state,
+        auth.principal_id,
+        sift_protocol::ExtensionAdminAction::Grant,
+        id.clone(),
+    );
+    let package = metadata.selected_extension_package(id.as_str())?;
+    Ok(Json(extension_descriptor(&state, &metadata, package)?))
+}
+
+async fn update_extension_tenant(
+    State(state): State<AppState>,
+    auth: Option<Extension<AuthContext>>,
+    Path((publisher, name, tenant_id)): Path<(String, String, i64)>,
+    Json(request): Json<sift_protocol::ExtensionTenantSelectionRequest>,
+) -> ApiResult<Json<sift_protocol::ExtensionDescriptor>> {
+    let auth = require_instance_admin(&state, auth.as_ref().map(|Extension(auth)| auth))?;
+    let id = extension_id(&publisher, &name)?;
+    let metadata = metadata_store_cloned(&state)?;
+    metadata.set_extension_tenant_allowed(
+        id.as_str(),
+        tenant_id,
+        request.allowed,
+        request.expected_revision,
+    )?;
+    record_extension_admin(
+        &state,
+        auth.principal_id,
+        if request.allowed {
+            sift_protocol::ExtensionAdminAction::AllowTenant
+        } else {
+            sift_protocol::ExtensionAdminAction::DenyTenant
+        },
+        id.clone(),
+    );
+    let package = metadata.selected_extension_package(id.as_str())?;
+    Ok(Json(extension_descriptor(&state, &metadata, package)?))
+}
+
+async fn rollback_extension(
+    State(state): State<AppState>,
+    auth: Option<Extension<AuthContext>>,
+    Path((publisher, name)): Path<(String, String)>,
+    Json(request): Json<sift_protocol::ExpectedRevision>,
+) -> ApiResult<Json<sift_protocol::ExtensionDescriptor>> {
+    let auth = require_instance_admin(&state, auth.as_ref().map(|Extension(auth)| auth))?;
+    let id = extension_id(&publisher, &name)?;
+    let metadata = metadata_store_cloned(&state)?;
+    metadata.rollback_extension_selection(id.as_str(), request.expected_revision)?;
+    record_extension_admin(
+        &state,
+        auth.principal_id,
+        sift_protocol::ExtensionAdminAction::Rollback,
+        id.clone(),
+    );
+    let package = metadata.selected_extension_package(id.as_str())?;
+    Ok(Json(extension_descriptor(&state, &metadata, package)?))
+}
+
+async fn uninstall_extension(
+    State(state): State<AppState>,
+    auth: Option<Extension<AuthContext>>,
+    Path((publisher, name)): Path<(String, String)>,
+    Query(request): Query<sift_protocol::ExpectedRevision>,
+) -> ApiResult<Json<sift_protocol::ExtensionDescriptor>> {
+    let auth = require_instance_admin(&state, auth.as_ref().map(|Extension(auth)| auth))?;
+    let id = extension_id(&publisher, &name)?;
+    let metadata = metadata_store_cloned(&state)?;
+    metadata.uninstall_extension(id.as_str(), request.expected_revision)?;
+    record_extension_admin(
+        &state,
+        auth.principal_id,
+        sift_protocol::ExtensionAdminAction::Uninstall,
+        id.clone(),
+    );
+    let package = metadata.selected_extension_package(id.as_str())?;
+    Ok(Json(extension_descriptor(&state, &metadata, package)?))
+}
+
+async fn purge_extension(
+    State(state): State<AppState>,
+    auth: Option<Extension<AuthContext>>,
+    Path((publisher, name)): Path<(String, String)>,
+    Json(request): Json<sift_protocol::ExpectedRevision>,
+) -> ApiResult<Json<sift_protocol::ExtensionPurgeResponse>> {
+    let auth = require_instance_admin(&state, auth.as_ref().map(|Extension(auth)| auth))?;
+    let id = extension_id(&publisher, &name)?;
+    let metadata = metadata_store_cloned(&state)?;
+    let selection = metadata.extension_selection(id.as_str())?;
+    if selection.revision != request.expected_revision
+        || selection.lifecycle != sift_protocol::ExtensionLifecycleState::Uninstalled
+    {
+        return Err(ApiError::BadRequest(
+            "extension must be uninstalled at the expected revision before purge".into(),
+        ));
+    }
+    let purged_namespaces = metadata.purge_extension_storage(id.as_str())?;
+    record_extension_admin(
+        &state,
+        auth.principal_id,
+        sift_protocol::ExtensionAdminAction::Purge,
+        id,
+    );
+    Ok(Json(sift_protocol::ExtensionPurgeResponse {
+        purged_namespaces,
+    }))
+}
+
+async fn extension_diagnostics(
+    State(state): State<AppState>,
+    Path((publisher, name)): Path<(String, String)>,
+) -> ApiResult<Json<sift_protocol::ExtensionDiagnostics>> {
+    let id = extension_id(&publisher, &name)?;
+    let selection = metadata_store_cloned(&state)?.extension_selection(id.as_str())?;
+    Ok(Json(sift_protocol::ExtensionDiagnostics {
+        extension_id: id,
+        lifecycle: selection.lifecycle,
+        quarantine_reason: selection.quarantine_reason,
+        generation_health: None,
+        messages: vec![],
+    }))
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct ToolListQuery {
+    #[serde(default)]
+    mcp_only: bool,
+    tenant_id: Option<i64>,
+    room_id: Option<i64>,
+    profile_id: Option<i64>,
+    connection_id: Option<String>,
+    document_id: Option<String>,
+}
+
+async fn list_governed_tools(
+    State(state): State<AppState>,
+    auth: Option<Extension<AuthContext>>,
+    Query(query): Query<ToolListQuery>,
+) -> ApiResult<Json<Vec<sift_protocol::GovernedToolDescriptor>>> {
+    let auth = auth
+        .as_ref()
+        .map(|Extension(auth)| auth)
+        .ok_or(ApiError::Unauthorized)?;
+    let context = tool_context(&query);
+    let authorization = tool_authorization_scope(&state, auth, &context)?;
+    let registry = state
+        .sessions
+        .tool_registry()
+        .ok_or(ApiError::MetadataUnavailable)?;
+    Ok(Json(registry.list(
+        &authorization,
+        &context,
+        query.mcp_only,
+    )))
+}
+
+async fn invoke_governed_tool(
+    State(state): State<AppState>,
+    auth: Option<Extension<AuthContext>>,
+    Json(request): Json<sift_protocol::InvokeToolRequest>,
+) -> ApiResult<Json<sift_protocol::InvokeToolResponse>> {
+    let auth = auth
+        .as_ref()
+        .map(|Extension(auth)| auth)
+        .ok_or(ApiError::Unauthorized)?;
+    let authorization = tool_authorization_scope(&state, auth, &request.context)?;
+    let registry = state
+        .sessions
+        .tool_registry()
+        .ok_or(ApiError::MetadataUnavailable)?;
+    let tenant_id = request.context.tenant_id;
+    let room_id = request.context.room_id;
+    let response = registry
+        .invoke(
+            request,
+            crate::extension_dispatch::DispatchContext {
+                authorization,
+                principal_id: auth.principal_id,
+                tenant_id,
+                room_id,
+                correlation_id: crate::correlation::current()
+                    .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
+            },
+        )
+        .await
+        .map_err(tool_error)?;
+    Ok(Json(response))
+}
+
+async fn invoke_extension_action(
+    State(state): State<AppState>,
+    auth: Option<Extension<AuthContext>>,
+    Json(request): Json<sift_protocol::InvokeExtensionRequest>,
+) -> ApiResult<Json<sift_protocol::InvokeExtensionOutcome>> {
+    let auth = auth
+        .as_ref()
+        .map(|Extension(auth)| auth)
+        .ok_or(ApiError::Unauthorized)?;
+    let context = sift_protocol::ToolContext {
+        tenant_id: None,
+        room_id: None,
+        profile_id: None,
+        connection_id: None,
+        document_id: None,
+    };
+    let authorization = tool_authorization_scope(&state, auth, &context)?;
+    let metadata = metadata_store_cloned(&state)?;
+    let operation_id = format!(
+        "{}#{}",
+        request.operation.contribution_id, request.operation.action
+    );
+    let binding = sift_metadata::ApprovalBinding {
+        principal_id: auth.principal_id,
+        operation_id,
+        context_fingerprint: crate::automation::fingerprint(
+            &serde_json::to_value(&request.operation)
+                .map_err(|error| ApiError::BadRequest(error.to_string()))?,
+        )
+        .map_err(|error| ApiError::BadRequest(error.to_string()))?,
+        input_fingerprint: crate::automation::fingerprint(&request.arguments)
+            .map_err(|error| ApiError::BadRequest(error.to_string()))?,
+    };
+    if sift_protocol::classification_requires_approval(request.operation.classification) {
+        if let Some(approval_id) = request.approval_id {
+            metadata.consume_operation_approval(&approval_id, &binding)?;
+        } else {
+            let approval = metadata.create_operation_approval(&binding, None)?;
+            return Ok(Json(
+                sift_protocol::InvokeExtensionOutcome::ApprovalRequired { approval },
+            ));
+        }
+    }
+    let registry = state
+        .sessions
+        .tool_registry()
+        .ok_or(ApiError::MetadataUnavailable)?;
+    let (_, response) = registry
+        .dispatcher()
+        .dispatch(
+            request.operation,
+            request.arguments,
+            crate::extension_dispatch::DispatchContext {
+                authorization,
+                principal_id: auth.principal_id,
+                tenant_id: None,
+                room_id: None,
+                correlation_id: crate::correlation::current()
+                    .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
+            },
+        )
+        .await
+        .map_err(|error| ApiError::BadRequest(error.to_string()))?;
+    Ok(Json(sift_protocol::InvokeExtensionOutcome::Completed {
+        result: response.result,
+    }))
+}
+
+async fn create_operation_approval(
+    State(state): State<AppState>,
+    auth: Option<Extension<AuthContext>>,
+    Json(request): Json<sift_protocol::CreateOperationApprovalRequest>,
+) -> ApiResult<Json<sift_protocol::OperationApproval>> {
+    let auth = auth
+        .as_ref()
+        .map(|Extension(auth)| auth)
+        .ok_or(ApiError::Unauthorized)?;
+    let operation_id = format!(
+        "{}#{}",
+        request.operation.contribution_id, request.operation.action
+    );
+    let context_fingerprint = crate::automation::fingerprint(
+        &serde_json::to_value(&request.operation)
+            .map_err(|error| ApiError::BadRequest(error.to_string()))?,
+    )
+    .map_err(|error| ApiError::BadRequest(error.to_string()))?;
+    let binding = sift_metadata::ApprovalBinding {
+        principal_id: auth.principal_id,
+        operation_id,
+        context_fingerprint,
+        input_fingerprint: request.input_fingerprint,
+    };
+    Ok(Json(
+        metadata_store_cloned(&state)?.create_operation_approval(&binding, None)?,
+    ))
+}
+
+async fn approve_operation(
+    State(state): State<AppState>,
+    auth: Option<Extension<AuthContext>>,
+    Path(approval_id): Path<String>,
+    Json(request): Json<sift_protocol::ExpectedRevision>,
+) -> ApiResult<Json<sift_protocol::OperationApproval>> {
+    let auth = auth
+        .as_ref()
+        .map(|Extension(auth)| auth)
+        .ok_or(ApiError::Unauthorized)?;
+    Ok(Json(metadata_store_cloned(&state)?.approve_operation(
+        &approval_id,
+        auth.principal_id,
+        request.expected_revision,
+    )?))
+}
+
+fn extension_descriptor(
+    state: &AppState,
+    metadata: &MetadataStore,
+    package: sift_metadata::SelectedExtensionPackage,
+) -> ApiResult<sift_protocol::ExtensionDescriptor> {
+    let manifest: sift_extension_protocol::ExtensionManifest =
+        serde_json::from_str(&package.manifest_json)
+            .map_err(|error| ApiError::Internal(error.to_string()))?;
+    let stored = metadata.extension_contributions(&package.selection.selected_archive_sha256)?;
+    let registry = state.sessions.package_registry();
+    let required_capabilities: Vec<_> = manifest
+        .capabilities
+        .iter()
+        .filter(|capability| capability.required)
+        .map(|capability| capability.kind)
+        .collect();
+    let mut contributions = Vec::with_capacity(stored.len());
+    for contribution in stored {
+        let id = sift_protocol::ContributionId::new(contribution.contribution_id.clone())
+            .map_err(|error| ApiError::Internal(error.to_string()))?;
+        let mut operation = None;
+        let mut client = None;
+        let action = if matches!(contribution.kind.as_str(), "command" | "governed_tool") {
+            Some(
+                serde_json::from_str::<sift_extension_protocol::ActionContribution>(
+                    &contribution.descriptor_json,
+                )
+                .map_err(|error| ApiError::Internal(error.to_string()))?,
+            )
+        } else {
+            None
+        };
+        if let Some(action) = action {
+            let input_schema = load_package_schema(
+                registry.as_ref(),
+                &package.selection.selected_archive_sha256,
+                &action.input_schema,
+            )?;
+            let output_schema = load_package_schema(
+                registry.as_ref(),
+                &package.selection.selected_archive_sha256,
+                &action.output_schema,
+            )?;
+            operation = Some(sift_protocol::ExtensionActionDescriptor {
+                action: action.action.clone(),
+                classification: action.classification,
+                input_schema,
+                output_schema,
+                timeout_ms: action.timeout_ms,
+                max_result_bytes: action.max_result_bytes,
+            });
+            if contribution.kind == "command" {
+                client = Some(sift_protocol::ClientContributionDescriptor::Command {
+                    title: contribution.local_id.clone(),
+                    action: action.action,
+                });
+            }
+        }
+        let invocable_kind = matches!(
+            contribution.kind.as_str(),
+            "database_provider" | "command" | "governed_tool"
+        );
+        contributions.push(sift_protocol::ContributionDescriptor {
+            id,
+            kind: contribution.kind,
+            display_name: contribution.local_id,
+            active: package.selection.enabled,
+            invocable: package.selection.enabled
+                && package.selection.lifecycle == sift_protocol::ExtensionLifecycleState::Ready
+                && invocable_kind,
+            required_capabilities: required_capabilities.clone(),
+            operation,
+            client,
+        });
+    }
+    Ok(sift_protocol::ExtensionDescriptor {
+        id: manifest.id,
+        name: manifest.name,
+        version: package.version,
+        archive_sha256: package.selection.selected_archive_sha256,
+        manifest_sha256: package.manifest_sha256,
+        provenance: package.provenance,
+        lifecycle: package.selection.lifecycle,
+        isolation: package.selection.isolation,
+        enabled: package.selection.enabled,
+        revision: package.selection.revision,
+        contributions,
+    })
+}
+
+fn load_package_schema(
+    registry: Option<&Arc<sift_plugin_host::ExtensionPackageRegistry>>,
+    digest: &str,
+    path: &str,
+) -> ApiResult<serde_json::Value> {
+    let registry = registry.ok_or(ApiError::MetadataUnavailable)?;
+    let bytes = registry
+        .read_package_file(digest, path, 1024 * 1024)
+        .map_err(|error| ApiError::Internal(error.to_string()))?;
+    serde_json::from_slice(&bytes).map_err(|error| ApiError::Internal(error.to_string()))
+}
+
+fn validated_package(
+    package: &sift_plugin_host::ValidatedPackage,
+) -> sift_protocol::ValidatedExtensionPackage {
+    let contributions = package.manifest.contributions.database_provider.len()
+        + package.manifest.contributions.tunnel_provider.len()
+        + package.manifest.contributions.credential_broker.len()
+        + package.manifest.contributions.connection_hook.len()
+        + package.manifest.contributions.import_format.len()
+        + package.manifest.contributions.export_format.len()
+        + package.manifest.contributions.dialect_pack.len()
+        + package.manifest.contributions.command.len()
+        + package.manifest.contributions.governed_tool.len()
+        + package.manifest.contributions.agent_context.len()
+        + package.manifest.contributions.client_panel.len();
+    sift_protocol::ValidatedExtensionPackage {
+        extension_id: package.manifest.id.clone(),
+        name: package.manifest.name.clone(),
+        version: package.manifest.version.clone(),
+        archive_sha256: package.archive_sha256.clone(),
+        manifest_sha256: package.manifest_sha256.clone(),
+        signed: package.signed,
+        contributions,
+    }
+}
+
+async fn receive_extension_archive(body: Body) -> ApiResult<tempfile::TempPath> {
+    use tokio::io::AsyncWriteExt;
+
+    const MAX_ARCHIVE_BYTES: u64 = 256 * 1024 * 1024;
+    let temporary =
+        tempfile::NamedTempFile::new().map_err(|error| ApiError::Internal(error.to_string()))?;
+    let path = temporary.into_temp_path();
+    let mut file = tokio::fs::File::create(&path)
+        .await
+        .map_err(|error| ApiError::Internal(error.to_string()))?;
+    let mut received = 0_u64;
+    let mut stream = body.into_data_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|error| ApiError::BadRequest(error.to_string()))?;
+        received = received
+            .checked_add(chunk.len() as u64)
+            .ok_or_else(|| ApiError::BadRequest("extension archive is too large".into()))?;
+        if received > MAX_ARCHIVE_BYTES {
+            return Err(ApiError::BadRequest(
+                "extension archive exceeds the byte limit".into(),
+            ));
+        }
+        file.write_all(&chunk)
+            .await
+            .map_err(|error| ApiError::Internal(error.to_string()))?;
+    }
+    file.flush()
+        .await
+        .map_err(|error| ApiError::Internal(error.to_string()))?;
+    file.sync_all()
+        .await
+        .map_err(|error| ApiError::Internal(error.to_string()))?;
+    drop(file);
+    Ok(path)
+}
+
+fn extension_id(publisher: &str, name: &str) -> ApiResult<sift_protocol::ExtensionId> {
+    sift_protocol::ExtensionId::new(format!("{publisher}/{name}"))
+        .map_err(|error| ApiError::BadRequest(error.to_string()))
+}
+
+fn require_instance_admin<'a>(
+    state: &AppState,
+    auth: Option<&'a AuthContext>,
+) -> ApiResult<&'a AuthContext> {
+    let auth = auth.ok_or(ApiError::Unauthorized)?;
+    if auth.trusted_local
+        && state.auth.deployment == DeploymentPolicy::Personal
+        && state.auth.transport == Transport::Loopback
+    {
+        return Ok(auth);
+    }
+    let metadata = metadata_store(state)?;
+    let principal = metadata
+        .principal_by_id(auth.principal_id)?
+        .ok_or(ApiError::Unauthorized)?;
+    if principal.is_instance_admin {
+        Ok(auth)
+    } else {
+        Err(ApiError::Forbidden(
+            "instance administrator context required".into(),
+        ))
+    }
+}
+
+fn record_extension_admin(
+    state: &AppState,
+    principal: PrincipalId,
+    action: sift_protocol::ExtensionAdminAction,
+    extension_id: sift_protocol::ExtensionId,
+) {
+    state.sessions.push_operation_full(
+        Operation::ManageExtension {
+            action,
+            extension_id,
+        },
+        OperationStatus::Succeeded,
+        Some(principal.0),
+        None,
+        None,
+        None,
+    );
+}
+
+fn tool_context(query: &ToolListQuery) -> sift_protocol::ToolContext {
+    sift_protocol::ToolContext {
+        tenant_id: query.tenant_id,
+        room_id: query.room_id,
+        profile_id: query.profile_id,
+        connection_id: query.connection_id.clone(),
+        document_id: query.document_id.clone(),
+    }
+}
+
+fn tool_authorization_scope(
+    state: &AppState,
+    auth: &AuthContext,
+    context: &sift_protocol::ToolContext,
+) -> ApiResult<crate::authorization::AuthorizationScope> {
+    let operation_context = sift_protocol::OperationCapabilityContext {
+        tenant_id: context.tenant_id,
+        room_id: context.room_id,
+        connection_profile_id: context.profile_id,
+        session: None,
+        connection: None,
+        transaction: None,
+    };
+    capability_authorization_scope(state, Some(auth), &operation_context)?
+        .ok_or(ApiError::Unauthorized)
+}
+
+fn tool_error(error: crate::automation::ToolRegistryError) -> ApiError {
+    match error {
+        crate::automation::ToolRegistryError::NotFound => {
+            ApiError::BadRequest("tool is not available".into())
+        }
+        crate::automation::ToolRegistryError::Denied => {
+            ApiError::Forbidden("tool operation is not authorized".into())
+        }
+        crate::automation::ToolRegistryError::Approval(error) => ApiError::Metadata(error),
+        other => ApiError::BadRequest(other.to_string()),
+    }
 }
 
 /// Serve the immutable OpenAPI document generated once at startup and stored as

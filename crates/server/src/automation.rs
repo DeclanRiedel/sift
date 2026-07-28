@@ -82,6 +82,10 @@ impl GovernedToolRegistry {
         Ok(())
     }
 
+    pub fn dispatcher(&self) -> ExtensionOperationDispatcher {
+        self.dispatcher.clone()
+    }
+
     pub fn list(
         &self,
         authorization: &AuthorizationScope,
@@ -198,7 +202,7 @@ fn requires_approval(classification: OperationClassification, policy: ToolApprov
         || (classification == OperationClassification::ExecuteRead && policy.execute_reads)
 }
 
-fn fingerprint(value: &serde_json::Value) -> Result<String, ToolRegistryError> {
+pub(crate) fn fingerprint(value: &serde_json::Value) -> Result<String, ToolRegistryError> {
     let mut canonical = String::new();
     write_canonical(value, &mut canonical)?;
     let digest = Sha256::digest(canonical.as_bytes());

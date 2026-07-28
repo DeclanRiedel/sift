@@ -66,6 +66,27 @@ impl ExtensionPackageRegistry {
         Ok(installed)
     }
 
+    pub fn validate(
+        &self,
+        archive_path: &Path,
+        signature_policy: SignaturePolicy<'_>,
+    ) -> Result<crate::ValidatedPackage, RegistryError> {
+        self.packages
+            .validate(archive_path, signature_policy)
+            .map_err(Into::into)
+    }
+
+    pub fn read_package_file(
+        &self,
+        archive_sha256: &str,
+        relative_path: &str,
+        max_bytes: usize,
+    ) -> Result<Vec<u8>, RegistryError> {
+        self.packages
+            .read_package_file(archive_sha256, relative_path, max_bytes)
+            .map_err(Into::into)
+    }
+
     pub fn reconcile_staging(&self) -> Result<Vec<std::path::PathBuf>, RegistryError> {
         self.packages.reconcile_staging().map_err(Into::into)
     }

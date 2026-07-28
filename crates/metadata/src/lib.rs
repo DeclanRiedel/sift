@@ -106,6 +106,8 @@ pub enum MetadataError {
     },
     #[error("extension {0} is not installed")]
     ExtensionNotFound(String),
+    #[error("extension {0} has no previous package available for rollback")]
+    ExtensionRollbackUnavailable(String),
     #[error("extension contribution id is already owned: {0}")]
     ExtensionContributionConflict(String),
     #[error("extension revision conflict: expected {expected}, current {current}")]

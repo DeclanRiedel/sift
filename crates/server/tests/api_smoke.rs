@@ -457,6 +457,11 @@ async fn openapi_is_published() {
     assert!(body["paths"]["/v1/metadata/connections/{id}/disconnect"].is_object());
     assert!(body["paths"]["/v1/metadata/tenants/{id}/usage"].is_object());
     assert!(body["paths"]["/v1/admin/tenants/{id}/limits"].is_object());
+    assert!(body["paths"]["/v1/providers"].is_object());
+    assert!(body["paths"]["/v1/extensions"].is_object());
+    assert!(body["paths"]["/v1/extension-actions/invoke"].is_object());
+    assert!(body["paths"]["/v1/operation-approvals"].is_object());
+    assert!(body["paths"]["/v1/tools"].is_object());
     assert!(body["components"]["schemas"]["ApiErrorResponse"].is_object());
     // Every generated operation carries the sanitized error body as its default
     // response (see `ApiError`'s `OperationOutput` impl).
@@ -552,6 +557,23 @@ async fn openapi_is_published() {
     );
 }
 
+#[tokio::test]
+async fn provider_discovery_is_provider_neutral() {
+    let app = app(test_state());
+    let response = app
+        .oneshot(Request::get("/v1/providers").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let providers: Vec<sift_protocol::ProviderDescriptor> = body_json(response.into_body()).await;
+    assert_eq!(providers.len(), 1);
+    assert_eq!(providers[0].provider.provider_id.as_str(), "sift/postgres");
+    let encoded = serde_json::to_value(&providers).unwrap();
+    assert!(
+        encoded.to_string().contains("provider_id") && !encoded.to_string().contains("\"engine\"")
+    );
+}
+
 /// Explicit client-SDK coverage manifest: every HTTP operation the server
 /// publishes must be listed here, keeping the generated OpenAPI, the live
 /// router, and the client SDK in lockstep. Adding or removing a route is a
@@ -568,6 +590,7 @@ const SDK_OPERATION_MANIFEST: &[&str] = &[
     "adminSetPrincipalDisabled",
     "adminUnlinkIdentity",
     "applyEdits",
+    "approveOperation",
     "authenticateKey",
     "beginTransaction",
     "bindMetadataRoomConnection",
@@ -579,6 +602,7 @@ const SDK_OPERATION_MANIFEST: &[&str] = &[
     "closeSession",
     "commitTransaction",
     "createGithubAllowlist",
+    "createOperationApproval",
     "createMetadataDocument",
     "createMetadataRoom",
     "createMetadataSavedQuery",
@@ -603,12 +627,16 @@ const SDK_OPERATION_MANIFEST: &[&str] = &[
     "getSchema",
     "getSession",
     "getTenantUsage",
+    "getExtension",
     "githubAuthCallback",
     "githubAuthStart",
     "githubNativeAuthExchange",
     "handshake",
     "health",
     "importCsv",
+    "installExtension",
+    "invokeExtensionAction",
+    "invokeGovernedTool",
     "issueAuthToken",
     "issueKeyChallenge",
     "joinMetadataRoom",
@@ -618,6 +646,7 @@ const SDK_OPERATION_MANIFEST: &[&str] = &[
     "listAuthTokens",
     "listAvailableOperations",
     "listConnections",
+    "listExtensions",
     "listGithubAllowlist",
     "listMetadataConnectionProfiles",
     "listMetadataDocuments",
@@ -628,11 +657,13 @@ const SDK_OPERATION_MANIFEST: &[&str] = &[
     "listMetadataTenants",
     "listOperationAudit",
     "listOperations",
+    "listProviders",
     "listPrincipalKeys",
     "listProcesses",
     "listRoomResults",
     "listSessions",
     "listTenantInvitations",
+    "listGovernedTools",
     "listTransactions",
     "logoutAllAuth",
     "logoutAuth",
@@ -644,6 +675,7 @@ const SDK_OPERATION_MANIFEST: &[&str] = &[
     "postCompletion",
     "previewEdits",
     "previewTransaction",
+    "purgeExtension",
     "readSpilledCursorPages",
     "ready",
     "refreshAuth",
@@ -656,6 +688,7 @@ const SDK_OPERATION_MANIFEST: &[&str] = &[
     "revokePrincipalKey",
     "revokeTenantInvitation",
     "rollbackToSavepoint",
+    "rollbackExtension",
     "rollbackTransaction",
     "roomWebSocket",
     "searchData",
@@ -663,11 +696,17 @@ const SDK_OPERATION_MANIFEST: &[&str] = &[
     "sessionWebSocket",
     "setMetadataConnectionCredential",
     "setTenantLimits",
+    "uninstallExtension",
+    "updateExtensionGrants",
+    "updateExtensionSelection",
+    "updateExtensionTenant",
     "updateMetadataConnectionPolicy",
     "updateMetadataDocument",
     "updateMetadataSavedQuery",
     "unbindMetadataRoomConnection",
     "upsertMetadataConnectionProfile",
+    "validateExtension",
+    "extensionDiagnostics",
     "whoAmI",
 ];
 

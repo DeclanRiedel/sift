@@ -95,6 +95,8 @@ struct SessionStoreInner {
     audit_tx: Mutex<Option<SyncSender<NewOperationAudit>>>,
     /// Durable policy source used by the dispatcher for managed connections.
     authorization_store: RwLock<Option<MetadataStore>>,
+    tool_registry: RwLock<Option<crate::automation::GovernedToolRegistry>>,
+    package_registry: RwLock<Option<Arc<sift_plugin_host::ExtensionPackageRegistry>>>,
     /// Reverse index for immediate hard-revocation cleanup.
     managed_connections: DashMap<
         (
@@ -244,6 +246,8 @@ impl SessionStore {
                 request_timeout_ms: AtomicU64::new(DEFAULT_REQUEST_TIMEOUT_MS),
                 audit_tx: Mutex::new(None),
                 authorization_store: RwLock::new(None),
+                tool_registry: RwLock::new(None),
+                package_registry: RwLock::new(None),
                 managed_connections: DashMap::new(),
                 room_connections: DashMap::new(),
                 resource_manager: RwLock::new(crate::resources::ResourceManager::default()),
@@ -284,6 +288,8 @@ impl SessionStore {
                 request_timeout_ms: AtomicU64::new(DEFAULT_REQUEST_TIMEOUT_MS),
                 audit_tx: Mutex::new(None),
                 authorization_store: RwLock::new(None),
+                tool_registry: RwLock::new(None),
+                package_registry: RwLock::new(None),
                 managed_connections: DashMap::new(),
                 room_connections: DashMap::new(),
                 resource_manager: RwLock::new(crate::resources::ResourceManager::default()),
@@ -352,6 +358,38 @@ impl SessionStore {
 
     pub fn registry(&self) -> &DriverRegistry {
         &self.inner.registry
+    }
+
+    pub fn set_tool_registry(&self, registry: crate::automation::GovernedToolRegistry) {
+        *self
+            .inner
+            .tool_registry
+            .write()
+            .expect("tool registry lock poisoned") = Some(registry);
+    }
+
+    pub fn tool_registry(&self) -> Option<crate::automation::GovernedToolRegistry> {
+        self.inner
+            .tool_registry
+            .read()
+            .expect("tool registry lock poisoned")
+            .clone()
+    }
+
+    pub fn set_package_registry(&self, registry: Arc<sift_plugin_host::ExtensionPackageRegistry>) {
+        *self
+            .inner
+            .package_registry
+            .write()
+            .expect("package registry lock poisoned") = Some(registry);
+    }
+
+    pub fn package_registry(&self) -> Option<Arc<sift_plugin_host::ExtensionPackageRegistry>> {
+        self.inner
+            .package_registry
+            .read()
+            .expect("package registry lock poisoned")
+            .clone()
     }
 
     /// Set the per-request driver deadline. A zero duration disables the

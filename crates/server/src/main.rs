@@ -146,6 +146,21 @@ async fn main() -> anyhow::Result<()> {
     ));
     if let Some(store) = &metadata {
         sessions.set_audit_store(store.clone());
+        let package_registry =
+            std::sync::Arc::new(sift_plugin_host::ExtensionPackageRegistry::new(
+                cfg.runtime_state_dir().join("extensions"),
+                sift_plugin_host::PackageLimits::default(),
+                store.clone(),
+            ));
+        sessions.set_package_registry(package_registry);
+        let metadata = std::sync::Arc::new(store.clone());
+        let dispatcher =
+            sift_server::extension_dispatch::ExtensionOperationDispatcher::new(metadata.clone());
+        sessions.set_tool_registry(sift_server::automation::GovernedToolRegistry::new(
+            dispatcher,
+            metadata,
+            sift_server::automation::ToolApprovalPolicy::default(),
+        ));
     }
     let shutdown = Shutdown::default();
     let state = AppState {

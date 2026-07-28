@@ -264,6 +264,32 @@ impl PackageStore {
         })
     }
 
+    pub fn validate(
+        &self,
+        archive_path: &Path,
+        signature_policy: SignaturePolicy<'_>,
+    ) -> Result<ValidatedPackage, PackageError> {
+        self.validator.validate_path(archive_path, signature_policy)
+    }
+
+    pub fn read_package_file(
+        &self,
+        archive_sha256: &str,
+        relative_path: &str,
+        max_bytes: usize,
+    ) -> Result<Vec<u8>, PackageError> {
+        let relative_path = normalize_path(relative_path)?;
+        let package = self
+            .package_path(archive_sha256)
+            .ok_or(PackageError::ImmutableCollision)?;
+        let path = package.join(relative_path);
+        let metadata = fs::metadata(&path)?;
+        if !metadata.is_file() || metadata.len() > max_bytes as u64 {
+            return Err(PackageError::ArchiveTooLarge);
+        }
+        fs::read(path).map_err(Into::into)
+    }
+
     pub fn reconcile_staging(&self) -> Result<Vec<PathBuf>, PackageError> {
         let staging = self.root.join("staging");
         if !staging.exists() {

@@ -24,6 +24,23 @@ pub struct NewExtensionContribution {
     pub descriptor_json: String,
 }
 
+#[derive(Debug, Clone)]
+pub struct SelectedExtensionPackage {
+    pub selection: ExtensionSelection,
+    pub version: String,
+    pub manifest_sha256: String,
+    pub manifest_json: String,
+    pub provenance: ExtensionProvenance,
+}
+
+#[derive(Debug, Clone)]
+pub struct StoredExtensionContribution {
+    pub contribution_id: String,
+    pub kind: String,
+    pub local_id: String,
+    pub descriptor_json: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExtensionSelection {
     pub extension_id: String,
@@ -54,6 +71,72 @@ pub struct UpdateExtensionSelection<'a> {
 }
 
 impl MetadataStore {
+    pub fn selected_extension_packages(&self) -> Result<Vec<SelectedExtensionPackage>> {
+        let selections = self.list_extension_selections()?;
+        selections
+            .into_iter()
+            .map(|selection| self.selected_extension_package_for(selection))
+            .collect()
+    }
+
+    pub fn selected_extension_package(
+        &self,
+        extension_id: &str,
+    ) -> Result<SelectedExtensionPackage> {
+        let selection = self.extension_selection(extension_id)?;
+        self.selected_extension_package_for(selection)
+    }
+
+    fn selected_extension_package_for(
+        &self,
+        selection: ExtensionSelection,
+    ) -> Result<SelectedExtensionPackage> {
+        let conn = self.conn()?;
+        let package = conn.query_row(
+            "SELECT version, manifest_sha256, manifest_json, provenance
+             FROM extension_package WHERE archive_sha256 = ?1",
+            [&selection.selected_archive_sha256],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                ))
+            },
+        )?;
+        Ok(SelectedExtensionPackage {
+            selection,
+            version: package.0,
+            manifest_sha256: package.1,
+            manifest_json: package.2,
+            provenance: parse_provenance(package.3)?,
+        })
+    }
+
+    pub fn extension_contributions(
+        &self,
+        archive_sha256: &str,
+    ) -> Result<Vec<StoredExtensionContribution>> {
+        let conn = self.conn()?;
+        let mut statement = conn.prepare(
+            "SELECT contribution_id, kind, local_id, descriptor_json
+             FROM extension_contribution WHERE archive_sha256 = ?1
+             ORDER BY contribution_id",
+        )?;
+        let contributions: Vec<StoredExtensionContribution> = statement
+            .query_map([archive_sha256], |row| {
+                Ok(StoredExtensionContribution {
+                    contribution_id: row.get(0)?,
+                    kind: row.get(1)?,
+                    local_id: row.get(2)?,
+                    descriptor_json: row.get(3)?,
+                })
+            })?
+            .collect::<std::result::Result<_, _>>()?;
+        Ok(contributions)
+    }
+
     pub fn record_extension_package(
         &self,
         package: &NewExtensionPackage,
@@ -337,6 +420,108 @@ impl MetadataStore {
         tx.commit()?;
         Ok(revision)
     }
+
+    pub fn rollback_extension_selection(
+        &self,
+        extension_id: &str,
+        expected_revision: u64,
+    ) -> Result<ExtensionSelection> {
+        let current = self.extension_selection(extension_id)?;
+        if current.revision != expected_revision {
+            return Err(MetadataError::ExtensionRevisionConflict {
+                expected: expected_revision,
+                current: current.revision,
+            });
+        }
+        let conn = self.conn()?;
+        let previous: String = conn
+            .query_row(
+                "SELECT archive_sha256 FROM extension_package
+                 WHERE extension_id = ?1 AND archive_sha256 <> ?2
+                 ORDER BY installed_at DESC, archive_sha256 DESC LIMIT 1",
+                params![extension_id, current.selected_archive_sha256],
+                |row| row.get(0),
+            )
+            .optional()?
+            .ok_or_else(|| MetadataError::ExtensionRollbackUnavailable(extension_id.into()))?;
+        drop(conn);
+        self.update_extension_selection(UpdateExtensionSelection {
+            extension_id,
+            selected_archive_sha256: Some(&previous),
+            enabled: current.enabled,
+            lifecycle: if current.enabled {
+                ExtensionLifecycleState::Starting
+            } else {
+                ExtensionLifecycleState::Disabled
+            },
+            isolation: current.isolation,
+            quarantine_reason: None,
+            expected_revision,
+        })
+    }
+
+    pub fn uninstall_extension(
+        &self,
+        extension_id: &str,
+        expected_revision: u64,
+    ) -> Result<ExtensionSelection> {
+        let mut conn = self.conn()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let current = tx
+            .query_row(
+                "SELECT extension_id, selected_archive_sha256, enabled, lifecycle_state,
+                        isolation, quarantine_reason, revision
+                 FROM extension_selection WHERE extension_id = ?1",
+                [extension_id],
+                selection_from_row,
+            )
+            .optional()?
+            .ok_or_else(|| MetadataError::ExtensionNotFound(extension_id.into()))?;
+        if current.revision != expected_revision {
+            return Err(MetadataError::ExtensionRevisionConflict {
+                expected: expected_revision,
+                current: current.revision,
+            });
+        }
+        let revision =
+            current
+                .revision
+                .checked_add(1)
+                .ok_or(MetadataError::ExtensionRevisionConflict {
+                    expected: expected_revision,
+                    current: current.revision,
+                })?;
+        tx.execute(
+            "DELETE FROM extension_grant WHERE extension_id = ?1",
+            [extension_id],
+        )?;
+        tx.execute(
+            "DELETE FROM extension_tenant_allowlist WHERE extension_id = ?1",
+            [extension_id],
+        )?;
+        tx.execute(
+            "UPDATE extension_storage_namespace
+             SET state = 'orphaned', updated_at = ?2 WHERE extension_id = ?1",
+            params![extension_id, now_text()],
+        )?;
+        tx.execute(
+            "UPDATE extension_selection
+             SET enabled = 0, lifecycle_state = 'uninstalled',
+                 quarantine_reason = NULL, revision = ?2, updated_at = ?3
+             WHERE extension_id = ?1",
+            params![
+                extension_id,
+                i64::try_from(revision).map_err(|_| MetadataError::ExtensionRevisionConflict {
+                    expected: expected_revision,
+                    current: current.revision,
+                })?,
+                now_text()
+            ],
+        )?;
+        tx.commit()?;
+        drop(conn);
+        self.extension_selection(extension_id)
+    }
 }
 
 fn selection_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ExtensionSelection> {
@@ -364,6 +549,16 @@ fn provenance_text(value: ExtensionProvenance) -> &'static str {
         ExtensionProvenance::Verified => "verified",
         ExtensionProvenance::Local => "local",
         ExtensionProvenance::Development => "development",
+    }
+}
+
+fn parse_provenance(value: String) -> rusqlite::Result<ExtensionProvenance> {
+    match value.as_str() {
+        "bundled" => Ok(ExtensionProvenance::Bundled),
+        "verified" => Ok(ExtensionProvenance::Verified),
+        "local" => Ok(ExtensionProvenance::Local),
+        "development" => Ok(ExtensionProvenance::Development),
+        _ => Err(rusqlite::Error::InvalidQuery),
     }
 }
 
