@@ -81,6 +81,7 @@ pub enum PackageError {
 pub enum SignaturePolicy<'a> {
     AllowUnsigned,
     Require(&'a VerifyingKey),
+    RequireAny(&'a [VerifyingKey]),
 }
 
 #[derive(Debug, Clone)]
@@ -466,7 +467,9 @@ fn verify_signature(
     let Some(raw) = signature_bytes else {
         return match policy {
             SignaturePolicy::AllowUnsigned => Ok(false),
-            SignaturePolicy::Require(_) => Err(PackageError::SignatureRequired),
+            SignaturePolicy::Require(_) | SignaturePolicy::RequireAny(_) => {
+                Err(PackageError::SignatureRequired)
+            }
         };
     };
     let text = std::str::from_utf8(raw).map_err(|_| PackageError::InvalidSignatureEncoding)?;
@@ -481,6 +484,15 @@ fn verify_signature(
             key.verify(lock_bytes, &signature)
                 .map_err(|_| PackageError::InvalidSignature)?;
             Ok(true)
+        }
+        SignaturePolicy::RequireAny(keys) => {
+            if keys.is_empty() {
+                return Err(PackageError::SignatureRequired);
+            }
+            keys.iter()
+                .any(|key| key.verify(lock_bytes, &signature).is_ok())
+                .then_some(true)
+                .ok_or(PackageError::InvalidSignature)
         }
     }
 }
@@ -753,6 +765,25 @@ driver_rpc = { minimum = 1, maximum = 1 }
         assert!(matches!(
             validator.validate_path(&extra, SignaturePolicy::AllowUnsigned),
             Err(PackageError::UndeclaredFile(path)) if path == "extra.txt"
+        ));
+    }
+
+    #[test]
+    fn any_trusted_publisher_key_can_verify_the_exact_lock() {
+        let temp = tempfile::tempdir().unwrap();
+        let package = temp.path().join("signed.sift-extension");
+        let signing = SigningKey::from_bytes(&[9; 32]);
+        let unrelated = SigningKey::from_bytes(&[10; 32]).verifying_key();
+        let trusted = signing.verifying_key();
+        build_package(&package, Some(&signing), None);
+        let validator = PackageValidator::new(PackageLimits::default());
+        let validated = validator
+            .validate_path(&package, SignaturePolicy::RequireAny(&[unrelated, trusted]))
+            .unwrap();
+        assert!(validated.signed);
+        assert!(matches!(
+            validator.validate_path(&package, SignaturePolicy::RequireAny(&[unrelated])),
+            Err(PackageError::InvalidSignature)
         ));
     }
 

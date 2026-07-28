@@ -6,6 +6,17 @@ use sift_protocol::{
 
 use super::{now_text, MetadataError, MetadataStore, Result};
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExtensionPublisherKey {
+    pub publisher: String,
+    pub fingerprint: String,
+    pub public_key: [u8; 32],
+    pub valid_from: String,
+    pub valid_until: Option<String>,
+    pub revoked_at: Option<String>,
+    pub revision: u64,
+}
+
 #[derive(Debug, Clone)]
 pub struct NewExtensionPackage {
     pub archive_sha256: String,
@@ -71,6 +82,152 @@ pub struct UpdateExtensionSelection<'a> {
 }
 
 impl MetadataStore {
+    pub fn put_extension_publisher_key(
+        &self,
+        key: &ExtensionPublisherKey,
+        expected_revision: Option<u64>,
+    ) -> Result<ExtensionPublisherKey> {
+        let mut conn = self.conn()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let current: Option<i64> = tx
+            .query_row(
+                "SELECT revision FROM extension_publisher_key
+                 WHERE publisher = ?1 AND fingerprint = ?2",
+                params![key.publisher, key.fingerprint],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let current_revision = current
+            .map(|value| {
+                u64::try_from(value).map_err(|_| MetadataError::ExtensionRevisionConflict {
+                    expected: expected_revision.unwrap_or(0),
+                    current: 0,
+                })
+            })
+            .transpose()?;
+        if current_revision != expected_revision {
+            return Err(MetadataError::ExtensionRevisionConflict {
+                expected: expected_revision.unwrap_or(0),
+                current: current_revision.unwrap_or(0),
+            });
+        }
+        let revision = current_revision.map_or(0, |value| value.saturating_add(1));
+        tx.execute(
+            "INSERT INTO extension_publisher_key
+             (publisher, fingerprint, public_key, valid_from, valid_until, revoked_at, revision)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+             ON CONFLICT(publisher, fingerprint) DO UPDATE SET
+               public_key = excluded.public_key,
+               valid_from = excluded.valid_from,
+               valid_until = excluded.valid_until,
+               revoked_at = excluded.revoked_at,
+               revision = excluded.revision",
+            params![
+                key.publisher,
+                key.fingerprint,
+                key.public_key.as_slice(),
+                key.valid_from,
+                key.valid_until,
+                key.revoked_at,
+                i64::try_from(revision).map_err(|_| {
+                    MetadataError::ExtensionRevisionConflict {
+                        expected: expected_revision.unwrap_or(0),
+                        current: current_revision.unwrap_or(0),
+                    }
+                })?,
+            ],
+        )?;
+        tx.commit()?;
+        drop(conn);
+        self.extension_publisher_key(&key.publisher, &key.fingerprint)
+    }
+
+    pub fn extension_publisher_key(
+        &self,
+        publisher: &str,
+        fingerprint: &str,
+    ) -> Result<ExtensionPublisherKey> {
+        let conn = self.conn()?;
+        conn.query_row(
+            "SELECT publisher, fingerprint, public_key, valid_from, valid_until,
+                    revoked_at, revision
+             FROM extension_publisher_key
+             WHERE publisher = ?1 AND fingerprint = ?2",
+            params![publisher, fingerprint],
+            publisher_key_from_row,
+        )
+        .optional()?
+        .ok_or_else(|| MetadataError::ExtensionNotFound(format!("{publisher}/{fingerprint}")))
+    }
+
+    pub fn active_extension_publisher_keys(
+        &self,
+        publisher: &str,
+    ) -> Result<Vec<ExtensionPublisherKey>> {
+        let conn = self.conn()?;
+        let at = now_text();
+        let mut statement = conn.prepare(
+            "SELECT publisher, fingerprint, public_key, valid_from, valid_until,
+                    revoked_at, revision
+             FROM extension_publisher_key
+             WHERE publisher = ?1
+               AND revoked_at IS NULL
+               AND valid_from <= ?2
+               AND (valid_until IS NULL OR valid_until > ?2)
+             ORDER BY fingerprint",
+        )?;
+        let keys = statement
+            .query_map(params![publisher, at], publisher_key_from_row)?
+            .collect::<std::result::Result<_, _>>()
+            .map_err(MetadataError::from)?;
+        Ok(keys)
+    }
+
+    pub fn revoke_extension_publisher_key(
+        &self,
+        publisher: &str,
+        fingerprint: &str,
+        expected_revision: u64,
+    ) -> Result<ExtensionPublisherKey> {
+        let revision =
+            expected_revision
+                .checked_add(1)
+                .ok_or(MetadataError::ExtensionRevisionConflict {
+                    expected: expected_revision,
+                    current: expected_revision,
+                })?;
+        let changed = self.conn()?.execute(
+            "UPDATE extension_publisher_key
+             SET revoked_at = COALESCE(revoked_at, ?3), revision = ?4
+             WHERE publisher = ?1 AND fingerprint = ?2 AND revision = ?5",
+            params![
+                publisher,
+                fingerprint,
+                now_text(),
+                i64::try_from(revision).map_err(|_| {
+                    MetadataError::ExtensionRevisionConflict {
+                        expected: expected_revision,
+                        current: expected_revision,
+                    }
+                })?,
+                i64::try_from(expected_revision).map_err(|_| {
+                    MetadataError::ExtensionRevisionConflict {
+                        expected: expected_revision,
+                        current: expected_revision,
+                    }
+                })?,
+            ],
+        )?;
+        if changed == 0 {
+            let current = self.extension_publisher_key(publisher, fingerprint)?;
+            return Err(MetadataError::ExtensionRevisionConflict {
+                expected: expected_revision,
+                current: current.revision,
+            });
+        }
+        self.extension_publisher_key(publisher, fingerprint)
+    }
+
     pub fn selected_extension_packages(&self) -> Result<Vec<SelectedExtensionPackage>> {
         let selections = self.list_extension_selections()?;
         selections
@@ -524,6 +681,33 @@ impl MetadataStore {
     }
 }
 
+fn publisher_key_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ExtensionPublisherKey> {
+    let bytes: Vec<u8> = row.get(2)?;
+    let public_key: [u8; 32] = bytes.try_into().map_err(|_| {
+        rusqlite::Error::FromSqlConversionFailure(
+            2,
+            rusqlite::types::Type::Blob,
+            "publisher key must be exactly 32 bytes".into(),
+        )
+    })?;
+    let revision: i64 = row.get(6)?;
+    Ok(ExtensionPublisherKey {
+        publisher: row.get(0)?,
+        fingerprint: row.get(1)?,
+        public_key,
+        valid_from: row.get(3)?,
+        valid_until: row.get(4)?,
+        revoked_at: row.get(5)?,
+        revision: revision.try_into().map_err(|_| {
+            rusqlite::Error::FromSqlConversionFailure(
+                6,
+                rusqlite::types::Type::Integer,
+                "negative publisher key revision".into(),
+            )
+        })?,
+    })
+}
+
 fn selection_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ExtensionSelection> {
     let revision: i64 = row.get(6)?;
     Ok(ExtensionSelection {
@@ -682,6 +866,43 @@ mod tests {
         assert!(matches!(
             store.record_extension_package(&package('c'), &[]),
             Err(MetadataError::ExtensionVersionDigestConflict { .. })
+        ));
+    }
+
+    #[test]
+    fn publisher_keys_are_namespace_scoped_expiring_and_revision_guarded() {
+        let store = MetadataStore::open_in_memory(Arc::new(MemorySecretStore::new())).unwrap();
+        let key = ExtensionPublisherKey {
+            publisher: "acme".into(),
+            fingerprint: "sha256:test".into(),
+            public_key: [7; 32],
+            valid_from: "2000-01-01T00:00:00Z".into(),
+            valid_until: None,
+            revoked_at: None,
+            revision: 0,
+        };
+        let inserted = store.put_extension_publisher_key(&key, None).unwrap();
+        assert_eq!(inserted.revision, 0);
+        assert_eq!(
+            store.active_extension_publisher_keys("acme").unwrap(),
+            vec![inserted.clone()]
+        );
+        assert!(store
+            .active_extension_publisher_keys("other")
+            .unwrap()
+            .is_empty());
+        let revoked = store
+            .revoke_extension_publisher_key("acme", "sha256:test", 0)
+            .unwrap();
+        assert_eq!(revoked.revision, 1);
+        assert!(revoked.revoked_at.is_some());
+        assert!(store
+            .active_extension_publisher_keys("acme")
+            .unwrap()
+            .is_empty());
+        assert!(matches!(
+            store.revoke_extension_publisher_key("acme", "sha256:test", 0),
+            Err(MetadataError::ExtensionRevisionConflict { current: 1, .. })
         ));
     }
 }

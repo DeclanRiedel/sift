@@ -1,5 +1,6 @@
 use std::path::Path;
 
+use ed25519_dalek::VerifyingKey;
 use sift_extension_protocol::{ContributionId, ExtensionManifest, SegmentId};
 use sift_metadata::{MetadataStore, NewExtensionContribution, NewExtensionPackage};
 use sift_protocol::ExtensionProvenance;
@@ -17,6 +18,10 @@ pub enum RegistryError {
     InvalidContribution(String),
     #[error("signed provenance requires a verified signature")]
     UnverifiedProvenance,
+    #[error("unsigned extension installation was not explicitly authorized")]
+    UnsignedDenied,
+    #[error("trusted publisher key is malformed")]
+    InvalidPublisherKey,
 }
 
 pub struct ExtensionPackageRegistry {
@@ -64,6 +69,42 @@ impl ExtensionPackageRegistry {
         self.metadata
             .record_extension_package(&package, &contributions)?;
         Ok(installed)
+    }
+
+    /// Installs using active keys for the exact publisher, or an explicit
+    /// checksum-pinned local-install authorization when no trusted key exists.
+    pub fn install_authorized(
+        &self,
+        archive_path: &Path,
+        allow_unsigned_local: bool,
+    ) -> Result<InstalledPackage, RegistryError> {
+        let inspected = self
+            .packages
+            .validate(archive_path, SignaturePolicy::AllowUnsigned)?;
+        let keys = self
+            .metadata
+            .active_extension_publisher_keys(inspected.manifest.id.publisher())?
+            .into_iter()
+            .map(|key| {
+                VerifyingKey::from_bytes(&key.public_key)
+                    .map_err(|_| RegistryError::InvalidPublisherKey)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        if !keys.is_empty() {
+            return self.install(
+                archive_path,
+                SignaturePolicy::RequireAny(&keys),
+                ExtensionProvenance::Verified,
+            );
+        }
+        if !allow_unsigned_local {
+            return Err(RegistryError::UnsignedDenied);
+        }
+        self.install(
+            archive_path,
+            SignaturePolicy::AllowUnsigned,
+            ExtensionProvenance::Local,
+        )
     }
 
     pub fn validate(

@@ -1534,8 +1534,16 @@ impl Client {
         self.post_archive("/v1/extensions/validate", archive).await
     }
 
-    pub async fn install_extension(&self, archive: Vec<u8>) -> Result<ValidatedExtensionPackage> {
-        self.post_archive("/v1/extensions/install", archive).await
+    pub async fn install_extension(
+        &self,
+        archive: Vec<u8>,
+        allow_unsigned_local: bool,
+    ) -> Result<ValidatedExtensionPackage> {
+        self.post_archive(
+            &format!("/v1/extensions/install?allow_unsigned_local={allow_unsigned_local}"),
+            archive,
+        )
+        .await
     }
 
     pub async fn select_extension(

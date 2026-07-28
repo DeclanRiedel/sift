@@ -3487,6 +3487,7 @@ async fn validate_extension(
 async fn install_extension(
     State(state): State<AppState>,
     auth: Option<Extension<AuthContext>>,
+    Query(request): Query<ExtensionInstallQuery>,
     body: Body,
 ) -> ApiResult<Json<sift_protocol::ValidatedExtensionPackage>> {
     let auth = require_instance_admin(&state, auth.as_ref().map(|Extension(auth)| auth))?;
@@ -3497,11 +3498,7 @@ async fn install_extension(
     let archive = receive_extension_archive(body).await?;
     let path = archive.to_path_buf();
     let installed = tokio::task::spawn_blocking(move || {
-        registry.install(
-            &path,
-            sift_plugin_host::SignaturePolicy::AllowUnsigned,
-            sift_protocol::ExtensionProvenance::Local,
-        )
+        registry.install_authorized(&path, request.allow_unsigned_local)
     })
     .await
     .map_err(|error| ApiError::Internal(error.to_string()))?
@@ -3518,6 +3515,12 @@ async fn install_extension(
         None,
     );
     Ok(Json(validated_package(&installed.validated)))
+}
+
+#[derive(Debug, Default, Deserialize, JsonSchema)]
+struct ExtensionInstallQuery {
+    #[serde(default)]
+    allow_unsigned_local: bool,
 }
 
 async fn update_extension_selection(
