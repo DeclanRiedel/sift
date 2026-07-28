@@ -28,15 +28,16 @@ use sift_protocol::{
     CsvImportResponse, CursorId, DataSearchRequest, DataSearchResponse, DatabaseProcess,
     DisconnectManagedConnectionsResponse, EditPlan, EndTransactionRequest, ExecuteRequestHttp,
     ExecuteResponse, ExplainRequest, ExplainResponse, GithubNativeAuthExchangeRequest,
-    GithubNativeAuthStartResponse, HandshakeClientKind, HandshakeRequest, HandshakeResponse,
-    Health, IssuedPasswordResetResponse, IssuedTenantInvitationResponse, KeyAuthenticateRequest,
-    KeyChallengeRequest, KeyChallengeResponse, KillProcessRequest, KillProcessResponse,
-    OpenConnectionRequest, OpenSessionRequest, OperationCapability, OperationCapabilityContext,
-    Page, PasswordLoginRequest, PasswordResetRequest, PreviewEditsRequest, ProtocolRange,
-    Readiness, RefreshAuthRequest, RegisterPrincipalKeyRequest, RoomQueryResult, RoomResultId,
+    GithubNativeAuthStartResponse, GovernedToolDescriptor, HandshakeClientKind, HandshakeRequest,
+    HandshakeResponse, Health, InvokeToolRequest, InvokeToolResponse, IssuedPasswordResetResponse,
+    IssuedTenantInvitationResponse, KeyAuthenticateRequest, KeyChallengeRequest,
+    KeyChallengeResponse, KillProcessRequest, KillProcessResponse, OpenConnectionRequest,
+    OpenSessionRequest, OperationCapability, OperationCapabilityContext, Page,
+    PasswordLoginRequest, PasswordResetRequest, PreviewEditsRequest, ProtocolRange, Readiness,
+    RefreshAuthRequest, RegisterPrincipalKeyRequest, RoomQueryResult, RoomResultId,
     RoomResultPages, RoomSelection, SavepointRequest, SchemaSearchRequest, SchemaSearchResponse,
     SchemaSnapshot, ServerInfo, SessionId, SessionInfo, SshProxyAccessGrant,
-    SshProxyCapabilityExchangeRequest, TenantResourceLimits, TenantUsageSnapshot,
+    SshProxyCapabilityExchangeRequest, TenantResourceLimits, TenantUsageSnapshot, ToolContext,
     TransactionEndAction, TransactionInfo, TransactionPreview, TransactionPreviewRequest,
     TransactionState, TxHandleRef, TxId, TxMode, UpdateConnectionPolicyRequest,
     UpdateTenantLimitsRequest, Value, WebAuthResponse, WhoAmIResponse, WsClientMessage,
@@ -1483,6 +1484,34 @@ impl Client {
             format!("?{}", query.join("&"))
         };
         self.get(&format!("/v1/operations/available{suffix}")).await
+    }
+
+    pub async fn governed_tools(
+        &self,
+        context: &ToolContext,
+        mcp_only: bool,
+    ) -> Result<Vec<GovernedToolDescriptor>> {
+        let mut query = vec![format!("mcp_only={mcp_only}")];
+        if let Some(value) = context.tenant_id {
+            query.push(format!("tenant_id={value}"));
+        }
+        if let Some(value) = context.room_id {
+            query.push(format!("room_id={value}"));
+        }
+        if let Some(value) = context.profile_id {
+            query.push(format!("profile_id={value}"));
+        }
+        if let Some(value) = &context.connection_id {
+            query.push(format!("connection_id={value}"));
+        }
+        if let Some(value) = &context.document_id {
+            query.push(format!("document_id={value}"));
+        }
+        self.get(&format!("/v1/tools?{}", query.join("&"))).await
+    }
+
+    pub async fn invoke_tool(&self, request: &InvokeToolRequest) -> Result<InvokeToolResponse> {
+        self.post("/v1/tools/invoke", request).await
     }
 
     /// Durable operation-audit rows (actor, target, result code, row count,

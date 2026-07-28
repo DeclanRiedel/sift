@@ -93,3 +93,7 @@ path = "src/bin/sift-remote.rs"
 [[bin]]
 name = "sift-launcher"
 path = "src/bin/sift-launcher.rs"
+
+[[bin]]
+name = "sift"
+path = "src/bin/sift.rs"
