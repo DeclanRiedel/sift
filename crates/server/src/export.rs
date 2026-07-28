@@ -216,7 +216,7 @@ fn write_csv_value(buf: &mut BytesMut, v: &Value, null_display: &str) {
         Value::Uuid(u) => write!(buf, "{u}").expect("write to BytesMut"),
         Value::Json(v) => write_csv_str(buf, &v.to_string()),
         Value::Interval(_) => write_csv_str(buf, &format!("{v:?}")),
-        Value::Engine { display_text, .. } => write_csv_str(buf, display_text),
+        Value::Native { display_text, .. } => write_csv_str(buf, display_text),
     }
 }
 
@@ -239,7 +239,7 @@ fn write_tsv_value(buf: &mut BytesMut, v: &Value, null_display: &str) {
         Value::Uuid(u) => write!(buf, "{u}").expect("write to BytesMut"),
         Value::Json(v) => write_tsv_str(buf, &v.to_string()),
         Value::Interval(_) => write_tsv_str(buf, &format!("{v:?}")),
-        Value::Engine { display_text, .. } => write_tsv_str(buf, display_text),
+        Value::Native { display_text, .. } => write_tsv_str(buf, display_text),
     }
 }
 
@@ -360,6 +360,6 @@ fn write_json_value(buf: &mut BytesMut, v: &Value) {
         Value::Uuid(u) => write_json(buf, &u.to_string()),
         Value::Json(v) => write_json(buf, v),
         Value::Interval(_) => write_json(buf, &format!("{v:?}")),
-        Value::Engine { display_text, .. } => write_json(buf, display_text),
+        Value::Native { display_text, .. } => write_json(buf, display_text),
     }
 }

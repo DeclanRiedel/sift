@@ -97,7 +97,7 @@ async fn csv_import_skip_reports_inserted_and_duplicate_rows() {
                 Request::post(format!("/v1/sessions/{}/connections", session.id))
                     .header("content-type", "application/json")
                     .body(Body::from(
-                        r#"{"engine":"postgres","host":"mock","user":"alice"}"#,
+                        r#"{"provider_id": "sift/postgres","host":"mock","user":"alice"}"#,
                     ))
                     .unwrap(),
             )

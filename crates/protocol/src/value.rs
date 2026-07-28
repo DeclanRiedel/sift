@@ -1,7 +1,7 @@
 //! Cell values. Union of both engines' primitive types plus an
 //! engine-native escape hatch that carries display text for unknown types.
 
-use crate::Engine;
+use crate::ProviderId;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
@@ -33,17 +33,17 @@ pub enum Value {
     TimestampTz(chrono::DateTime<chrono::Utc>),
     /// Time interval. chrono::Duration doesn't capture PG's month-aware
     /// intervals (e.g. "1 month 3 days"); for those, fall through to
-    /// [`Value::Engine`]. Duration is fine for day/microsecond intervals.
+    /// [`Value::Native`]. Duration is fine for day/microsecond intervals.
     #[schemars(with = "String")]
     Interval(chrono::Duration),
     Uuid(uuid::Uuid),
     Json(serde_json::Value),
-    /// Engine-native type we didn't decode. Carries the engine, the native
+    /// Provider-native type we didn't decode. Carries the provider, the native
     /// type name, and a pre-formatted display string for the client to show.
     /// The raw bytes are omitted over the wire; if a future feature wants
     /// them, a parallel variant is added.
-    Engine {
-        engine: Engine,
+    Native {
+        provider_id: ProviderId,
         type_name: String,
         display_text: String,
     },
@@ -69,7 +69,7 @@ impl Value {
             Value::Interval(_) => "interval",
             Value::Uuid(_) => "uuid",
             Value::Json(_) => "json",
-            Value::Engine { .. } => "engine",
+            Value::Native { .. } => "native",
         }
     }
 }

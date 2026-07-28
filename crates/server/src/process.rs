@@ -141,7 +141,7 @@ fn value_string(value: &Value) -> Option<String> {
     match value {
         Value::Null | Value::TypedNull { .. } => None,
         Value::Text(value) => Some(value.clone()),
-        Value::Engine { display_text, .. } => Some(display_text.clone()),
+        Value::Native { display_text, .. } => Some(display_text.clone()),
         _ => None,
     }
 }

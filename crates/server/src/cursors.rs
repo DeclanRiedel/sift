@@ -906,7 +906,7 @@ fn approx_value_bytes(value: &sift_protocol::Value) -> usize {
         Value::Text(s) | Value::Decimal(s) => s.len(),
         Value::Blob(bytes) => bytes.len(),
         Value::Json(value) => value.to_string().len(),
-        Value::Engine {
+        Value::Native {
             type_name,
             display_text,
             ..

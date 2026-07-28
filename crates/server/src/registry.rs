@@ -724,7 +724,12 @@ fn provider_page(payload: DriverStreamPayload, provider: &ProviderRef) -> Page {
             rows: rows
                 .into_iter()
                 .map(|values| {
-                    sift_protocol::Row::new(values.into_iter().map(provider_value).collect())
+                    sift_protocol::Row::new(
+                        values
+                            .into_iter()
+                            .map(|value| provider_value(value, provider))
+                            .collect(),
+                    )
                 })
                 .collect(),
         },
@@ -764,8 +769,8 @@ fn provider_column(column: DriverColumn, provider: &ProviderRef) -> ColumnMetada
     ColumnMetadata {
         name: column.name,
         type_ref: primitive.map_or_else(
-            || TypeRef::Engine {
-                engine: semantic_engine(provider).unwrap_or(Engine::Postgres),
+            || TypeRef::Native {
+                provider_id: provider.provider_id.clone(),
                 name: column.type_name,
                 category: TypeCategory::Other,
             },
@@ -782,7 +787,7 @@ fn provider_column(column: DriverColumn, provider: &ProviderRef) -> ColumnMetada
     }
 }
 
-fn provider_value(value: DriverValue) -> Value {
+fn provider_value(value: DriverValue, provider: &ProviderRef) -> Value {
     match value {
         DriverValue::Null { type_name } => Value::TypedNull { type_name },
         DriverValue::Bool(value) => Value::Bool(value),
@@ -803,19 +808,11 @@ fn provider_value(value: DriverValue) -> Value {
         DriverValue::IntervalMicros(value) => {
             Value::Interval(chrono::Duration::microseconds(value))
         }
-        DriverValue::Engine { type_name, display } => Value::Engine {
-            engine: Engine::Postgres,
+        DriverValue::Engine { type_name, display } => Value::Native {
+            provider_id: provider.provider_id.clone(),
             type_name,
             display_text: display,
         },
-    }
-}
-
-fn semantic_engine(provider: &ProviderRef) -> Option<Engine> {
-    match provider.dialect_id.as_str() {
-        "sift/postgresql" => Some(Engine::Postgres),
-        "sift/tsql" => Some(Engine::SqlServer),
-        _ => None,
     }
 }
 
@@ -1207,7 +1204,7 @@ fn driver_column(column: sift_protocol::ColumnMetadata) -> DriverColumn {
             .ok()
             .and_then(|value| value.as_str().map(str::to_owned))
             .unwrap_or_else(|| "unknown".into()),
-        TypeRef::Engine { name, .. } => name,
+        TypeRef::Native { name, .. } => name,
     };
     DriverColumn {
         name: column.name,
@@ -1273,7 +1270,7 @@ pub(crate) fn driver_value(value: Value) -> DriverValue {
         )),
         Value::Uuid(value) => DriverValue::Uuid(value.to_string()),
         Value::Json(value) => DriverValue::Json(value),
-        Value::Engine {
+        Value::Native {
             type_name,
             display_text,
             ..

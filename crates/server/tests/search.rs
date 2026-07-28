@@ -127,7 +127,7 @@ async fn setup(
         .oneshot(post_json(
             format!("/v1/sessions/{sid}/connections"),
             serde_json::json!({
-                "engine": "postgres", "host": "mock.invalid", "port": 5432,
+                "provider_id": "sift/postgres", "host": "mock.invalid", "port": 5432,
                 "database": "mock", "user": "mock", "ssl_mode": "disable",
             }),
         ))

@@ -49,7 +49,7 @@ async fn body_json<T: serde::de::DeserializeOwned>(body: Body) -> T {
 
 async fn setup(
     driver: MockDriver,
-    engine: &str,
+    provider_id: &str,
     port: u16,
 ) -> (
     axum::Router,
@@ -74,7 +74,7 @@ async fn setup(
         .oneshot(post_json(
             format!("/v1/sessions/{sid}/connections"),
             serde_json::json!({
-                "engine": engine, "host": "mock.invalid", "port": port,
+                "provider_id": provider_id, "host": "mock.invalid", "port": port,
                 "database": "mock", "user": "mock", "ssl_mode": "disable",
             }),
         ))
@@ -122,7 +122,7 @@ async fn pg_explain_estimate_returns_typed_plan() {
     let driver = base_builder(Engine::Postgres)
         .execute_ok(pg_plan_pages())
         .build();
-    let (router, sid, cid) = setup(driver, "postgres", 5432).await;
+    let (router, sid, cid) = setup(driver, "sift/postgres", 5432).await;
 
     let res = router
         .oneshot(post_json(
@@ -148,7 +148,7 @@ async fn pg_explain_analyze_write_is_wrapped_and_rolled_back() {
     let driver = base_builder(Engine::Postgres)
         .execute_ok(pg_plan_pages())
         .build();
-    let (router, sid, cid) = setup(driver, "postgres", 5432).await;
+    let (router, sid, cid) = setup(driver, "sift/postgres", 5432).await;
 
     let res = router
         .oneshot(post_json(
@@ -200,7 +200,7 @@ async fn mssql_explain_estimate_parses_showplan_xml() {
             warnings: vec![],
         }])
         .build();
-    let (router, sid, cid) = setup(driver, "sql_server", 1433).await;
+    let (router, sid, cid) = setup(driver, "sift/sql-server", 1433).await;
 
     let res = router
         .oneshot(post_json(
@@ -220,7 +220,7 @@ async fn mssql_explain_estimate_parses_showplan_xml() {
 #[tokio::test]
 async fn mssql_explain_analyze_is_rejected() {
     let driver = base_builder(Engine::SqlServer).build();
-    let (router, sid, cid) = setup(driver, "sql_server", 1433).await;
+    let (router, sid, cid) = setup(driver, "sift/sql-server", 1433).await;
 
     let res = router
         .oneshot(post_json(

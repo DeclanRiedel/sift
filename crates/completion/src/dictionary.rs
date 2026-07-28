@@ -147,7 +147,7 @@ fn build_sorted_name_index(objects: &[ObjectEntry]) -> Vec<usize> {
 
 fn type_display(t: &sift_protocol::TypeRef) -> String {
     match t {
-        sift_protocol::TypeRef::Engine { name, .. } => name.clone(),
+        sift_protocol::TypeRef::Native { name, .. } => name.clone(),
         sift_protocol::TypeRef::Primitive(p) => format!("{p:?}").to_ascii_lowercase(),
     }
 }

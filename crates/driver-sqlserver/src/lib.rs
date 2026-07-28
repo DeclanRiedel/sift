@@ -1062,8 +1062,8 @@ fn ms_value(row: &tiberius::Row, idx: usize) -> Value {
                 Value::TimestampTz(v.into())
             })
         }
-        ColumnType::SSVariant | ColumnType::Udt => Value::Engine {
-            engine: Engine::SqlServer,
+        ColumnType::SSVariant | ColumnType::Udt => Value::Native {
+            provider_id: Engine::SqlServer.provider_id(),
             type_name: format!("{ty:?}"),
             display_text: format!("<undecoded {ty:?}>"),
         },
@@ -1072,7 +1072,7 @@ fn ms_value(row: &tiberius::Row, idx: usize) -> Value {
 }
 
 /// Decode one cell as `T` and map it to a [`Value`]. A decode *error* is
-/// surfaced as a `Value::Engine { "<decode error: …>" }` placeholder plus
+/// surfaced as a `Value::Native { "<decode error: …>" }` placeholder plus
 /// a warning log — never silently swallowed to `Null`. This matches the
 /// Postgres driver's contract (`decode_cell`); the previous
 /// `.ok().flatten()` arms turned every decode failure into an
@@ -1099,8 +1099,8 @@ where
 }
 
 fn ms_decode_error_value(ty: ColumnType, error: tiberius::error::Error) -> Value {
-    Value::Engine {
-        engine: Engine::SqlServer,
+    Value::Native {
+        provider_id: Engine::SqlServer.provider_id(),
         type_name: format!("{ty:?}"),
         display_text: format!("<decode error: {error}>"),
     }
@@ -1133,7 +1133,7 @@ fn params_to_mssql(params: Vec<Value>) -> Result<Vec<Box<dyn ToSql>>, DriverErro
             Value::TimestampTz(v) => Box::new(v),
             Value::Uuid(v) => Box::new(v),
             Value::Json(v) => Box::new(v.to_string()),
-            Value::Interval(_) | Value::Engine { .. } => {
+            Value::Interval(_) | Value::Native { .. } => {
                 return Err(DriverError::new(
                     Code::UnsupportedForEngine,
                     "parameter type is not supported by SQL Server driver yet",
@@ -1393,8 +1393,8 @@ fn ms_type_ref(ty: ColumnType) -> TypeRef {
     };
     primitive
         .map(TypeRef::Primitive)
-        .unwrap_or_else(|| TypeRef::Engine {
-            engine: Engine::SqlServer,
+        .unwrap_or_else(|| TypeRef::Native {
+            provider_id: Engine::SqlServer.provider_id(),
             name: format!("{ty:?}"),
             category: TypeCategory::Other,
         })
@@ -1422,8 +1422,8 @@ fn mssql_type_name_ref(type_name: &str) -> TypeRef {
     };
     primitive
         .map(TypeRef::Primitive)
-        .unwrap_or_else(|| TypeRef::Engine {
-            engine: Engine::SqlServer,
+        .unwrap_or_else(|| TypeRef::Native {
+            provider_id: Engine::SqlServer.provider_id(),
             name: type_name.to_string(),
             category: TypeCategory::Other,
         })

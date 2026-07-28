@@ -96,7 +96,7 @@ async fn new_connection_is_rejected_while_draining() {
         .oneshot(post(
             &format!("/v1/sessions/{}/connections", session.id),
             serde_json::json!({
-                "engine": "postgres",
+                "provider_id": "sift/postgres",
                 "host": "mock.invalid",
                 "database": "mock",
                 "user": "mock",

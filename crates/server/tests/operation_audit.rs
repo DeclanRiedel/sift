@@ -116,7 +116,7 @@ async fn open_session_and_connection(app: &axum::Router) -> (i64, i64) {
         .clone()
         .oneshot(post(
             &format!("/v1/sessions/{}/connections", session.id),
-            serde_json::json!({ "engine": "postgres", "host": "mock", "user": "mock" }),
+            serde_json::json!({ "provider_id": "sift/postgres", "host": "mock", "user": "mock" }),
         ))
         .await
         .unwrap();
@@ -269,7 +269,7 @@ async fn operation_trail_is_fingerprinted_and_secret_free() {
         .oneshot(post(
             &format!("/v1/sessions/{}/connections", session.id),
             serde_json::json!({
-                "engine": "postgres", "host": "mock", "user": "mock", "password": secret
+                "provider_id": "sift/postgres", "host": "mock", "user": "mock", "password": secret
             }),
         ))
         .await

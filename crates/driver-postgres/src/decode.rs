@@ -28,7 +28,7 @@ impl<'a> FromSql<'a> for PgValue {
     }
 }
 
-/// Dispatch on PG type OID. Unknown types fall through to [`Value::Engine`]
+/// Dispatch on PG type OID. Unknown types fall through to [`Value::Native`]
 /// with the native name + a placeholder display string; clients render them
 /// as opaque text.
 fn decode_value(ty: &Type, raw: &[u8]) -> Result<Value, Box<dyn std::error::Error + Sync + Send>> {
@@ -53,8 +53,8 @@ fn decode_value(ty: &Type, raw: &[u8]) -> Result<Value, Box<dyn std::error::Erro
         }
         Type::NUMERIC => Value::Decimal(decode_numeric(raw)?),
         Type::INTERVAL => decode_interval(raw)?,
-        _ => Value::Engine {
-            engine: Engine::Postgres,
+        _ => Value::Native {
+            provider_id: Engine::Postgres.provider_id(),
             type_name: ty.name().to_string(),
             display_text: format!("<undecoded {}>", ty.name()),
         },
@@ -186,8 +186,8 @@ fn decode_interval(raw: &[u8]) -> Result<Value, Box<dyn std::error::Error + Sync
     let days = i32::from_be_bytes(raw[8..12].try_into()?);
     let months = i32::from_be_bytes(raw[12..16].try_into()?);
     if months != 0 {
-        return Ok(Value::Engine {
-            engine: Engine::Postgres,
+        return Ok(Value::Native {
+            provider_id: Engine::Postgres.provider_id(),
             type_name: "interval".to_string(),
             display_text: format!("{months} months {days} days {micros} microseconds"),
         });
@@ -200,7 +200,7 @@ fn decode_interval(raw: &[u8]) -> Result<Value, Box<dyn std::error::Error + Sync
 
 /// Map a PG [`Type`] to our protocol-level [`TypeRef`]. Known primitives
 /// collapse to [`TypeRef::Primitive`]; everything else is
-/// [`TypeRef::Engine`] carrying the native name verbatim (no LCD flattening).
+/// [`TypeRef::Native`] carrying the native name verbatim (no LCD flattening).
 pub(crate) fn pg_type_to_type_ref(ty: &Type) -> TypeRef {
     let prim = match *ty {
         Type::BOOL => Some(PrimitiveType::Bool),
@@ -223,8 +223,8 @@ pub(crate) fn pg_type_to_type_ref(ty: &Type) -> TypeRef {
         _ => None,
     };
     prim.map(TypeRef::Primitive)
-        .unwrap_or_else(|| TypeRef::Engine {
-            engine: Engine::Postgres,
+        .unwrap_or_else(|| TypeRef::Native {
+            provider_id: Engine::Postgres.provider_id(),
             name: ty.name().to_string(),
             category: pg_type_category(ty),
         })
@@ -319,34 +319,34 @@ mod tests {
     #[test]
     fn unknown_types_carry_native_name_verbatim() {
         // MONEY exists in tokio-postgres core but isn't in our Primitive
-        // enum, so it falls through to the Engine escape hatch.
+        // enum, so it falls through to the provider-native escape hatch.
         let r = pg_type_to_type_ref(&Type::MONEY);
         match r {
-            TypeRef::Engine {
-                engine,
+            TypeRef::Native {
+                provider_id,
                 name,
                 category,
             } => {
-                assert_eq!(engine, Engine::Postgres);
+                assert_eq!(provider_id, Engine::Postgres.provider_id());
                 assert_eq!(name, "money");
                 assert_eq!(category, TypeCategory::Other);
             }
-            other => panic!("expected Engine variant, got {other:?}"),
+            other => panic!("expected Native variant, got {other:?}"),
         }
     }
 
     #[test]
     fn array_types_categorized_as_array() {
-        // INT4_ARRAY exists in tokio-postgres core. It maps via the Engine
+        // INT4_ARRAY exists in tokio-postgres core. It maps via the Native
         // path (no Primitive variant for arrays); category must be Array.
         let r = pg_type_to_type_ref(&Type::INT4_ARRAY);
         match r {
-            TypeRef::Engine {
-                engine,
+            TypeRef::Native {
+                provider_id,
                 name,
                 category,
             } => {
-                assert_eq!(engine, Engine::Postgres);
+                assert_eq!(provider_id, Engine::Postgres.provider_id());
                 assert_eq!(category, TypeCategory::Array);
                 assert_eq!(name, "_int4"); // PG canonical array type name
             }

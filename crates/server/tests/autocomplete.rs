@@ -149,7 +149,7 @@ async fn setup_with_state(
     let sid = session.id;
 
     let open_req = serde_json::json!({
-        "engine": "postgres",
+        "provider_id": "sift/postgres",
         "host": "mock.invalid",
         "port": 5432,
         "database": "mock",

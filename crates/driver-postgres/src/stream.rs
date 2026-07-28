@@ -323,7 +323,7 @@ fn params_to_pg(params: Vec<Value>) -> Result<Vec<Box<dyn ToSql + Sync + Send>>,
             Value::TimestampTz(v) => Box::new(v),
             Value::Uuid(v) => Box::new(v),
             Value::Json(v) => Box::new(v),
-            Value::Interval(_) | Value::Engine { .. } => {
+            Value::Interval(_) | Value::Native { .. } => {
                 return Err(DriverError::new(
                     Code::UnsupportedForEngine,
                     "parameter type is not supported by Postgres driver yet",
@@ -392,7 +392,7 @@ fn normalize_pg_type_name(value: &str) -> String {
 }
 
 /// Decode a single cell, surfacing decode errors as warnings + a placeholder
-/// `Value::Engine` instead of silently dropping to `Null`.
+/// `Value::Native` instead of silently dropping to `Null`.
 fn decode_cell(
     row: &tokio_postgres::Row,
     i: usize,
@@ -407,8 +407,8 @@ fn decode_cell(
             let msg = e.to_string();
             tracing::warn!(cursor_id_num, idx = i, "cell decode error: {msg}");
             warnings.push(format!("cell {} ({}): decode error: {msg}", i, col_name));
-            Value::Engine {
-                engine: sift_protocol::Engine::Postgres,
+            Value::Native {
+                provider_id: sift_protocol::Engine::Postgres.provider_id(),
                 type_name: "?".to_string(),
                 display_text: "<decode error>".to_string(),
             }

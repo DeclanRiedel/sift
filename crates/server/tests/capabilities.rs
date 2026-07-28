@@ -81,7 +81,7 @@ async fn capabilities_follow_live_connection_and_transaction_context() {
                 Request::post(format!("/v1/sessions/{}/connections", session.id))
                     .header("content-type", "application/json")
                     .body(Body::from(
-                        r#"{"engine":"postgres","host":"mock","user":"alice"}"#,
+                        r#"{"provider_id": "sift/postgres","host":"mock","user":"alice"}"#,
                     ))
                     .unwrap(),
             )

@@ -308,8 +308,8 @@ async fn query_columns(
         // Build TypeRef from the type OID via tokio_postgres::Type::from_oid.
         let type_ref = tokio_postgres::types::Type::from_oid(type_oid)
             .map(|t| crate::decode::pg_type_to_type_ref(&t))
-            .unwrap_or_else(|| TypeRef::Engine {
-                engine: sift_protocol::Engine::Postgres,
+            .unwrap_or_else(|| TypeRef::Native {
+                provider_id: sift_protocol::Engine::Postgres.provider_id(),
                 name: format!("oid={type_oid}"),
                 category: TypeCategory::Other,
             });

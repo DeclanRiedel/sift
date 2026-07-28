@@ -415,11 +415,11 @@ pub(crate) fn quote_ident(name: &str, engine: Engine) -> String {
 
 pub(crate) fn type_to_sql(t: &TypeRef, engine: Engine) -> String {
     // Prefer the engine-native name when the driver preserved it via
-    // Value::Engine facets — that's how deep-schema type introspection
+    // Value::Native facets — that's how deep-schema type introspection
     // reports SQL Server's `nvarchar(64)` etc. Fall back to a
     // Primitive-to-generic-SQL mapping.
     match t {
-        TypeRef::Engine { name, .. } => name.clone(),
+        TypeRef::Native { name, .. } => name.clone(),
         TypeRef::Primitive(p) => primitive_to_sql(*p, engine),
     }
 }
