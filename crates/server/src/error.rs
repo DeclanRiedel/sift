@@ -137,7 +137,8 @@ impl ApiError {
                 | MetadataError::AuthIdentityNotFound(_)
                 | MetadataError::AuthSessionNotFound(_)
                 | MetadataError::PrincipalKeyNotFound(_)
-                | MetadataError::GithubAllowlistNotFound(_) => (StatusCode::NOT_FOUND, "not_found"),
+                | MetadataError::GithubAllowlistNotFound(_)
+                | MetadataError::ExtensionNotFound(_) => (StatusCode::NOT_FOUND, "not_found"),
                 MetadataError::ConnectionProfileLimitReached(_) => {
                     (StatusCode::CONFLICT, "tenant_resource_exhausted")
                 }
@@ -146,6 +147,13 @@ impl ApiError {
                 | MetadataError::FinalRoomOwner(_) => (StatusCode::CONFLICT, "conflict"),
                 MetadataError::PolicyRevisionConflict { .. } => {
                     (StatusCode::CONFLICT, "policy_revision_conflict")
+                }
+                MetadataError::ExtensionRevisionConflict { .. } => {
+                    (StatusCode::CONFLICT, "extension_revision_conflict")
+                }
+                MetadataError::ExtensionVersionDigestConflict { .. }
+                | MetadataError::ExtensionContributionConflict(_) => {
+                    (StatusCode::CONFLICT, "extension_conflict")
                 }
                 MetadataError::TenantAdminRequired
                 | MetadataError::TenantMemberRequired

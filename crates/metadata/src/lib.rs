@@ -18,10 +18,12 @@ use sift_protocol::{
 };
 use uuid::Uuid;
 
+mod extension;
 pub mod http;
 pub mod schema;
 pub mod secrets;
 
+pub use extension::*;
 pub use schema::*;
 #[cfg(feature = "os-keychain")]
 pub use secrets::OsKeychainSecretStore;
@@ -91,6 +93,19 @@ pub enum MetadataError {
     TenantMismatch(ConnectionProfileId, TenantId),
     #[error("connection profile policy revision conflict: expected {expected}, current {current}")]
     PolicyRevisionConflict { expected: u64, current: u64 },
+    #[error(
+        "extension {extension_id} version {version} already exists with a different archive digest"
+    )]
+    ExtensionVersionDigestConflict {
+        extension_id: String,
+        version: String,
+    },
+    #[error("extension {0} is not installed")]
+    ExtensionNotFound(String),
+    #[error("extension contribution id is already owned: {0}")]
+    ExtensionContributionConflict(String),
+    #[error("extension revision conflict: expected {expected}, current {current}")]
+    ExtensionRevisionConflict { expected: u64, current: u64 },
     #[error("tenant administrator access required")]
     TenantAdminRequired,
     #[error("tenant member access required")]
