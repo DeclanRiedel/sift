@@ -24,6 +24,12 @@ pub struct FrameReader<R> {
     maximum: usize,
 }
 
+#[derive(Debug)]
+pub struct ReceivedMessage {
+    pub message: Message,
+    pub encoded_bytes: usize,
+}
+
 impl<R> FrameReader<R>
 where
     R: AsyncRead + Unpin,
@@ -34,6 +40,10 @@ where
     }
 
     pub async fn read_message(&mut self) -> Result<Message, FrameError> {
+        Ok(self.read_frame().await?.message)
+    }
+
+    pub async fn read_frame(&mut self) -> Result<ReceivedMessage, FrameError> {
         let length = self.inner.read_u32().await? as usize;
         if length == 0 {
             return Err(FrameError::Empty);
@@ -46,7 +56,10 @@ where
         }
         let mut payload = vec![0_u8; length];
         self.inner.read_exact(&mut payload).await?;
-        serde_json::from_slice(&payload).map_err(Into::into)
+        Ok(ReceivedMessage {
+            message: serde_json::from_slice(&payload)?,
+            encoded_bytes: length + 4,
+        })
     }
 }
 

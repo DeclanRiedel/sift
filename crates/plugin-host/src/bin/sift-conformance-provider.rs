@@ -35,12 +35,50 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     loop {
         match read_message()? {
             Message::Request(request) => {
-                write_message(&Message::Response(Response {
-                    id: request.id,
-                    result: ResponseResult::Ok {
-                        payload: request.payload,
-                    },
-                }))?;
+                if request.method == "execute" {
+                    let stream_id = request.stream_id.ok_or("execute requires stream id")?;
+                    write_message(&Message::Response(Response {
+                        id: request.id,
+                        result: ResponseResult::Stream {
+                            stream_id,
+                            payload: serde_json::to_value(sift_extension_protocol::ExecuteStart {
+                                query: WireId::from_u128(500),
+                            })?,
+                        },
+                    }))?;
+                    for (sequence, payload) in [
+                        sift_extension_protocol::DriverStreamPayload::NextResult {
+                            columns: vec![sift_extension_protocol::DriverColumn {
+                                name: "answer".into(),
+                                type_name: "int8".into(),
+                                nullable: false,
+                            }],
+                        },
+                        sift_extension_protocol::DriverStreamPayload::Rows {
+                            rows: vec![vec![sift_extension_protocol::DriverValue::I64(42)]],
+                        },
+                        sift_extension_protocol::DriverStreamPayload::Done {
+                            affected_rows: None,
+                            warnings: vec![],
+                        },
+                    ]
+                    .into_iter()
+                    .enumerate()
+                    {
+                        write_message(&Message::Stream(sift_extension_protocol::StreamFrame {
+                            stream_id,
+                            sequence: sequence as u64,
+                            payload: serde_json::to_value(payload)?,
+                        }))?;
+                    }
+                } else {
+                    write_message(&Message::Response(Response {
+                        id: request.id,
+                        result: ResponseResult::Ok {
+                            payload: request.payload,
+                        },
+                    }))?;
+                }
             }
             Message::Cancel(cancel) => {
                 write_message(&Message::Response(Response {
@@ -55,6 +93,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     },
                 }))?;
             }
+            Message::Credit(_) => {}
             Message::Shutdown(_) => return Ok(()),
             _ => return Err("unexpected host message".into()),
         }

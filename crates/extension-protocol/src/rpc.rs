@@ -74,9 +74,16 @@ pub struct RequestContext {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum ResponseResult {
-    Ok { payload: serde_json::Value },
-    Error { error: RpcError },
-    Stream { stream_id: WireId },
+    Ok {
+        payload: serde_json::Value,
+    },
+    Error {
+        error: RpcError,
+    },
+    Stream {
+        stream_id: WireId,
+        payload: serde_json::Value,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]

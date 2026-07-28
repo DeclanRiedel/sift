@@ -56,5 +56,42 @@ async fn supervised_conformance_process_handshakes_and_serves_requests() {
         }
         other => panic!("unexpected response: {other:?}"),
     }
+
+    let deadline = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64
+        + 5_000;
+    let (mut stream, start) = process
+        .request_stream(Request {
+            id: WireId::from_u128(0),
+            contribution_id: ContributionId::new("acme/conformance/database_provider/fixture")
+                .unwrap(),
+            method: "execute".into(),
+            payload: serde_json::json!({}),
+            correlation_id: WireId::from_u128(100),
+            deadline_unix_ms: deadline,
+            context: None,
+            stream_id: None,
+        })
+        .await
+        .unwrap();
+    let start: sift_extension_protocol::ExecuteStart = serde_json::from_value(start).unwrap();
+    assert_eq!(start.query, WireId::from_u128(500));
+    let mut payloads = Vec::new();
+    for _ in 0..3 {
+        let frame = stream.next().await.unwrap();
+        payloads.push(
+            serde_json::from_value::<sift_extension_protocol::DriverStreamPayload>(
+                frame.frame.payload.clone(),
+            )
+            .unwrap(),
+        );
+        stream.accept(&frame).await.unwrap();
+    }
+    assert!(matches!(
+        payloads.last(),
+        Some(sift_extension_protocol::DriverStreamPayload::Done { .. })
+    ));
     process.shutdown("test complete").await.unwrap();
 }

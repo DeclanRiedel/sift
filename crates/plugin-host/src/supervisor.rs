@@ -4,14 +4,14 @@ use std::{
     process::Stdio,
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
-        Arc,
+        Arc, Mutex as StdMutex,
     },
     time::Duration,
 };
 
 use sift_extension_protocol::{
-    Cancel, ExtensionId, Hello, Message, Request, Response, RpcError, RpcLimits, Shutdown, Welcome,
-    WireId, EXTENSION_RPC_VERSION,
+    Cancel, Credit, ExtensionId, Hello, Message, Request, Response, ResponseResult, RpcError,
+    RpcLimits, Shutdown, StreamFrame, Welcome, WireId, EXTENSION_RPC_VERSION,
 };
 use thiserror::Error;
 use tokio::{
@@ -97,6 +97,71 @@ pub enum SupervisorError {
 }
 
 type Pending = Arc<Mutex<HashMap<WireId, oneshot::Sender<Response>>>>;
+type Streams = Arc<StdMutex<HashMap<WireId, StreamSink>>>;
+
+struct StreamSink {
+    sender: tokio::sync::mpsc::UnboundedSender<ReceivedStreamFrame>,
+    remaining_credit: u64,
+    next_sequence: u64,
+}
+
+#[derive(Debug)]
+pub struct ReceivedStreamFrame {
+    pub frame: StreamFrame,
+    pub encoded_bytes: usize,
+}
+
+pub struct RpcStream {
+    stream_id: WireId,
+    receiver: tokio::sync::mpsc::UnboundedReceiver<ReceivedStreamFrame>,
+    writer: Arc<Mutex<FrameWriter<tokio::process::ChildStdin>>>,
+    streams: Streams,
+}
+
+impl RpcStream {
+    pub async fn next(&mut self) -> Option<ReceivedStreamFrame> {
+        self.receiver.recv().await
+    }
+
+    pub async fn accept(&self, frame: &ReceivedStreamFrame) -> Result<(), SupervisorError> {
+        {
+            let mut streams = self.streams.lock().expect("stream map poisoned");
+            if let Some(stream) = streams.get_mut(&self.stream_id) {
+                stream.remaining_credit = stream
+                    .remaining_credit
+                    .saturating_add(frame.encoded_bytes as u64);
+            }
+        }
+        if let Err(error) = self
+            .writer
+            .lock()
+            .await
+            .write_message(&Message::Credit(Credit {
+                stream_id: self.stream_id,
+                bytes: frame.encoded_bytes as u64,
+            }))
+            .await
+        {
+            let mut streams = self.streams.lock().expect("stream map poisoned");
+            if let Some(stream) = streams.get_mut(&self.stream_id) {
+                stream.remaining_credit = stream
+                    .remaining_credit
+                    .saturating_sub(frame.encoded_bytes as u64);
+            }
+            return Err(error.into());
+        }
+        Ok(())
+    }
+}
+
+impl Drop for RpcStream {
+    fn drop(&mut self) {
+        self.streams
+            .lock()
+            .expect("stream map poisoned")
+            .remove(&self.stream_id);
+    }
+}
 
 pub struct SupervisedProcess {
     spec: ProcessSpec,
@@ -104,6 +169,7 @@ pub struct SupervisedProcess {
     writer: Arc<Mutex<FrameWriter<tokio::process::ChildStdin>>>,
     child: Arc<Mutex<Child>>,
     pending: Pending,
+    streams: Streams,
     health: Arc<RwLock<GenerationHealth>>,
     diagnostics: Arc<Mutex<DiagnosticRing>>,
     request_counter: AtomicU64,
@@ -194,6 +260,7 @@ impl SupervisedProcess {
         let writer = Arc::new(Mutex::new(writer));
         let child = Arc::new(Mutex::new(child));
         let pending = Pending::default();
+        let streams = Streams::default();
         let health = Arc::new(RwLock::new(GenerationHealth::Ready));
         let diagnostics = Arc::new(Mutex::new(DiagnosticRing::new(
             limits.retained_diagnostic_bytes,
@@ -202,12 +269,15 @@ impl SupervisedProcess {
         let last_heartbeat = Arc::new(Mutex::new(tokio::time::Instant::now()));
         let reader_task = spawn_reader(
             reader,
-            pending.clone(),
-            health.clone(),
-            stopped.clone(),
-            diagnostics.clone(),
-            child.clone(),
-            last_heartbeat.clone(),
+            ReaderState {
+                pending: pending.clone(),
+                health: health.clone(),
+                stopped: stopped.clone(),
+                diagnostics: diagnostics.clone(),
+                child: child.clone(),
+                last_heartbeat: last_heartbeat.clone(),
+                streams: streams.clone(),
+            },
         );
         let stderr_task = spawn_stderr(stderr, diagnostics.clone(), stopped.clone());
         let heartbeat_task = spawn_heartbeat_monitor(
@@ -227,6 +297,7 @@ impl SupervisedProcess {
             writer,
             child,
             pending,
+            streams,
             health,
             diagnostics,
             request_counter: AtomicU64::new(1),
@@ -311,6 +382,67 @@ impl SupervisedProcess {
         }
     }
 
+    pub async fn request_stream(
+        &self,
+        mut request: Request,
+    ) -> Result<(RpcStream, serde_json::Value), SupervisorError> {
+        let stream_id = request
+            .stream_id
+            .unwrap_or_else(|| next_wire_id(&self.request_counter, self.spec.generation));
+        request.stream_id = Some(stream_id);
+        let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+        {
+            let mut streams = self.streams.lock().expect("stream map poisoned");
+            if streams.contains_key(&stream_id) {
+                return Err(SupervisorError::ProtocolViolation(
+                    "duplicate stream id".into(),
+                ));
+            }
+            streams.insert(
+                stream_id,
+                StreamSink {
+                    sender,
+                    remaining_credit: self.limits.max_frame_bytes as u64 + 4,
+                    next_sequence: 0,
+                },
+            );
+        }
+        match self.request(request).await {
+            Ok(Response {
+                result:
+                    ResponseResult::Stream {
+                        stream_id: returned,
+                        payload,
+                    },
+                ..
+            }) if returned == stream_id => Ok((
+                RpcStream {
+                    stream_id,
+                    receiver,
+                    writer: self.writer.clone(),
+                    streams: self.streams.clone(),
+                },
+                payload,
+            )),
+            Ok(_) => {
+                self.streams
+                    .lock()
+                    .expect("stream map poisoned")
+                    .remove(&stream_id);
+                Err(SupervisorError::ProtocolViolation(
+                    "stream request returned a mismatched response".into(),
+                ))
+            }
+            Err(error) => {
+                self.streams
+                    .lock()
+                    .expect("stream map poisoned")
+                    .remove(&stream_id);
+                Err(error)
+            }
+        }
+    }
+
     pub async fn shutdown(&self, reason: &str) -> Result<(), SupervisorError> {
         if self.stopped.swap(true, Ordering::AcqRel) {
             return Ok(());
@@ -386,19 +518,36 @@ fn validate_hello(spec: &ProcessSpec, hello: &Hello) -> Result<(), SupervisorErr
     Ok(())
 }
 
-fn spawn_reader(
-    mut reader: FrameReader<tokio::process::ChildStdout>,
+struct ReaderState {
     pending: Pending,
     health: Arc<RwLock<GenerationHealth>>,
     stopped: Arc<AtomicBool>,
     diagnostics: Arc<Mutex<DiagnosticRing>>,
     child: Arc<Mutex<Child>>,
     last_heartbeat: Arc<Mutex<tokio::time::Instant>>,
+    streams: Streams,
+}
+
+fn spawn_reader(
+    mut reader: FrameReader<tokio::process::ChildStdout>,
+    state: ReaderState,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
+        let ReaderState {
+            pending,
+            health,
+            stopped,
+            diagnostics,
+            child,
+            last_heartbeat,
+            streams,
+        } = state;
         loop {
-            match reader.read_message().await {
-                Ok(Message::Response(response)) => {
+            match reader.read_frame().await {
+                Ok(crate::ReceivedMessage {
+                    message: Message::Response(response),
+                    ..
+                }) => {
                     if let Some(sender) = pending.lock().await.remove(&response.id) {
                         let _ = sender.send(response);
                     } else {
@@ -410,13 +559,59 @@ fn spawn_reader(
                         break;
                     }
                 }
-                Ok(Message::Heartbeat(_)) => {
+                Ok(crate::ReceivedMessage {
+                    message: Message::Heartbeat(_),
+                    ..
+                }) => {
                     *last_heartbeat.lock().await = tokio::time::Instant::now();
                 }
-                Ok(Message::Log(record)) => {
+                Ok(crate::ReceivedMessage {
+                    message: Message::Log(record),
+                    ..
+                }) => {
                     record_diagnostic(&diagnostics, &record.message).await;
                 }
-                Ok(message) => {
+                Ok(crate::ReceivedMessage {
+                    message: Message::Stream(frame),
+                    encoded_bytes,
+                }) => {
+                    let outcome = {
+                        let mut streams = streams.lock().expect("stream map poisoned");
+                        streams.get_mut(&frame.stream_id).map(|stream| {
+                            if frame.sequence != stream.next_sequence {
+                                return Err("out-of-order stream sequence");
+                            }
+                            if encoded_bytes as u64 > stream.remaining_credit {
+                                return Err("stream byte credit exceeded");
+                            }
+                            stream.next_sequence += 1;
+                            stream.remaining_credit -= encoded_bytes as u64;
+                            stream
+                                .sender
+                                .send(ReceivedStreamFrame {
+                                    frame,
+                                    encoded_bytes,
+                                })
+                                .map_err(|_| "stream consumer stopped")
+                        })
+                    };
+                    match outcome {
+                        Some(Ok(())) => {}
+                        Some(Err(reason)) => {
+                            record_diagnostic(&diagnostics, reason).await;
+                            break;
+                        }
+                        None => {
+                            record_diagnostic(
+                                &diagnostics,
+                                "protocol violation: unknown stream id",
+                            )
+                            .await;
+                            break;
+                        }
+                    }
+                }
+                Ok(crate::ReceivedMessage { message, .. }) => {
                     record_diagnostic(
                         &diagnostics,
                         &format!("protocol violation: unexpected {message:?}"),
