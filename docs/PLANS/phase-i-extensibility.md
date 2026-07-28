@@ -1,6 +1,6 @@
 # Phase I — Extensibility Design
 
-Status: **decision-complete design; implementation not started.**
+Status: **implemented and graduated on 2026-07-28.**
 
 This document is the implementation contract for Phase I. The load-bearing
 choices are graduated as ADR-022 and ADR-031 in `docs/DECISIONS.md`.

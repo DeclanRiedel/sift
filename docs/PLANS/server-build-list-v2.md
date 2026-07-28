@@ -40,11 +40,12 @@
   proxy daemon, pre-release protocol range negotiation, lifecycle modes, signed
   periodic update staging, readiness-gated activation/rollback, and release
   CI are implemented. See `docs/PLANS/phase-h-remote-development.md`.
-- **Phase I design is complete.** ADR-022 and ADR-031 lock provider identity,
-  Driver RPC v1, the manifest/capability/lifecycle boundary, namespaced
-  operations, storage, connection hooks, MCP governance, and declarative
-  client discovery. ODBC/JDBC bridges are explicitly deferred. See
-  `docs/PLANS/phase-i-extensibility.md`.
+- **Phase I is complete.** Provider-neutral protocol v1, strict signed
+  packages, supervised tenant-scoped Driver RPC, governed automation/MCP,
+  connection-pipeline contracts, lifecycle management, hostile conformance,
+  and public operational artifacts are implemented. ODBC/JDBC bridges remain
+  explicitly deferred. See `docs/PLANS/phase-i-extensibility.md` and
+  `docs/EXTENSIONS.md`.
 
 ---
 
@@ -336,15 +337,15 @@ server. The decision-complete contract is
       and tunnel leases with reverse cleanup and no secret arguments/env/logs.
 - [x] [Design] Declarative client contribution descriptors only; no arbitrary
       extension JavaScript or raw routes.
-- [ ] [Implement I0–I3] Contract crates, protocol v1, package registry,
+- [x] [Implement I0–I3] Contract crates, protocol v1, package registry,
       supervisor, provider-neutral registry, and built-in adapters.
-- [ ] [Implement I4–I6] Driver RPC host/SDK + conformance provider,
+- [x] [Implement I4–I6] Driver RPC host/SDK + conformance provider,
       namespaced operations/storage, and connection-pipeline fixtures.
-- [ ] [Implement I7–I8] Governed command/tool registry, approval records,
+- [x] [Implement I7–I8] Governed command/tool registry, approval records,
       `sift mcp`, management APIs, and declarative client discovery.
-- [ ] [Implement I9] Fault/security matrices, compatibility/certification
+- [x] [Implement I9] Fault/security matrices, compatibility/certification
       artifacts, and operational documentation.
-- [ ] [Graduate] A plugin crash, timeout, protocol violation, secret-handling
+- [x] [Graduate] A plugin crash, timeout, protocol violation, secret-handling
       failure, or incompatible version cannot freeze or compromise the server;
       provider capability and compatibility matrices are public API artifacts.
 

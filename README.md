@@ -33,10 +33,10 @@ Installed local and daemon releases start through `sift-launcher`, which
 health-checks staged updates, commits healthy candidates, and rolls back failed
 candidates before handing the server lifecycle to the caller.
 
-Phase I extensibility is decision-complete in
-`docs/PLANS/phase-i-extensibility.md`; implementation is ordered there from
-protocol/package contracts through Driver RPC, governance, MCP, and graduation.
-ODBC/JDBC compatibility bridges are deliberately outside that phase.
+Phase I extensibility is implemented and graduated. The normative contract is
+`docs/PLANS/phase-i-extensibility.md`; the public compatibility, security, and
+operator guide is `docs/EXTENSIONS.md`. ODBC/JDBC compatibility bridges remain
+deliberately deferred.
 
 ## The five goals this product wishes to achieve
 
