@@ -27,6 +27,19 @@ impl Engine {
         })
         .expect("bundled provider ids are valid")
     }
+
+    pub fn provider_ref(self, provider_version: impl Into<String>) -> crate::ProviderRef {
+        let dialect_id = crate::DialectId::new(match self {
+            Engine::Postgres => "sift/postgresql",
+            Engine::SqlServer => "sift/tsql",
+        })
+        .expect("bundled dialect ids are valid");
+        crate::ProviderRef {
+            provider_id: self.provider_id(),
+            dialect_id,
+            provider_version: provider_version.into(),
+        }
+    }
 }
 
 impl std::fmt::Display for Engine {

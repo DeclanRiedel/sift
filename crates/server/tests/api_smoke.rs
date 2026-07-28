@@ -48,7 +48,7 @@ fn mock_postgres_driver() -> MockDriver {
     MockDriver::builder()
         .engine(Engine::Postgres)
         .ping_ok(ServerInfo {
-            engine: Engine::Postgres,
+            provider: Engine::Postgres.provider_ref("test"),
             server_version: "MockDB 0.1".into(),
             current_database: "mock".into(),
             current_user: "mock".into(),
@@ -3713,7 +3713,7 @@ async fn connection_open_ping_close() {
         .unwrap();
     assert_eq!(res.status(), StatusCode::OK);
     let info: ServerInfo = body_json(res.into_body()).await;
-    assert_eq!(info.engine, Engine::Postgres);
+    assert_eq!(info.provider.provider_id, Engine::Postgres.provider_id());
 
     // Schema.
     let res = app

@@ -246,7 +246,7 @@ impl Driver for MssqlDriver {
                 .map_err(ms_err)?
                 .ok_or_else(|| DriverError::new(Code::DriverInternal, "ping returned no row"))?;
             Ok::<_, DriverError>(ServerInfo {
-                engine: Engine::SqlServer,
+                provider: Engine::SqlServer.provider_ref(env!("CARGO_PKG_VERSION")),
                 server_version: row.try_get::<&str, _>(0).map_err(ms_err)?.unwrap_or_default().to_string(),
                 current_database: row.try_get::<&str, _>(1).map_err(ms_err)?.unwrap_or_default().to_string(),
                 current_user: row.try_get::<&str, _>(2).map_err(ms_err)?.unwrap_or_default().to_string(),

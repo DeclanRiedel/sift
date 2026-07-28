@@ -53,7 +53,7 @@ async fn open_ping_execute_close() {
     let driver = MssqlDriver::new();
     let conn = driver.open(&spec()).await.expect("open succeeds");
     let info = driver.ping(conn.clone()).await.expect("ping succeeds");
-    assert_eq!(info.engine, Engine::SqlServer);
+    assert_eq!(info.provider.provider_id, Engine::SqlServer.provider_id());
 
     let pages = drain(
         driver

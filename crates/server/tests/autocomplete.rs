@@ -79,7 +79,7 @@ fn mock_driver() -> MockDriver {
     MockDriver::builder()
         .engine(Engine::Postgres)
         .ping_ok(ServerInfo {
-            engine: Engine::Postgres,
+            provider: Engine::Postgres.provider_ref("test"),
             server_version: "MockDB 0.1".into(),
             current_database: "mock".into(),
             current_user: "mock".into(),
@@ -197,7 +197,7 @@ async fn complete_dotted_returns_columns() {
     let driver = MockDriver::builder()
         .engine(Engine::Postgres)
         .ping_ok(ServerInfo {
-            engine: Engine::Postgres,
+            provider: Engine::Postgres.provider_ref("test"),
             server_version: "MockDB 0.1".into(),
             current_database: "mock".into(),
             current_user: "mock".into(),

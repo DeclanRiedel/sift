@@ -22,7 +22,7 @@ fn state() -> AppState {
     let driver = MockDriver::builder()
         .engine(Engine::Postgres)
         .ping_ok(ServerInfo {
-            engine: Engine::Postgres,
+            provider: Engine::Postgres.provider_ref("test"),
             server_version: "mock".into(),
             current_database: "app".into(),
             current_user: "alice".into(),

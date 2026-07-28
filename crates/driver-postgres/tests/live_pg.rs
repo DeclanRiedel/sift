@@ -112,7 +112,7 @@ async fn open_and_ping() {
     let driver = PgDriver::new();
     let conn = driver.open(&spec()).await.expect("open succeeds");
     let info = driver.ping(conn.clone()).await.expect("ping succeeds");
-    assert_eq!(info.engine, Engine::Postgres);
+    assert_eq!(info.provider.provider_id, Engine::Postgres.provider_id());
     assert!(info.current_user.contains("sift"));
     assert_eq!(
         info.current_database,

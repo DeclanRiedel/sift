@@ -1,6 +1,6 @@
 //! Connection specifications + post-connect server-reported metadata.
 
-use crate::Engine;
+use crate::ProviderRef;
 use serde::{Deserialize, Serialize};
 
 /// All a driver needs to open a connection. The engine is NOT carried here
@@ -76,7 +76,7 @@ pub struct MssqlConnectionSpec {
 /// Reported by `Driver::ping` after a successful round-trip.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ServerInfo {
-    pub engine: Engine,
+    pub provider: ProviderRef,
     pub server_version: String,
     pub current_database: String,
     pub current_user: String,

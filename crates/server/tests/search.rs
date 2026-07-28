@@ -70,7 +70,7 @@ fn base_builder() -> sift_driver_api::mock::MockDriverBuilder {
     MockDriver::builder()
         .engine(Engine::Postgres)
         .ping_ok(ServerInfo {
-            engine: Engine::Postgres,
+            provider: Engine::Postgres.provider_ref("test"),
             server_version: "MockDB 0.1".into(),
             current_database: "mock".into(),
             current_user: "mock".into(),

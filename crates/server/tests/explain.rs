@@ -15,7 +15,7 @@ use tower::ServiceExt;
 
 fn base_builder(engine: Engine) -> sift_driver_api::mock::MockDriverBuilder {
     MockDriver::builder().engine(engine).ping_ok(ServerInfo {
-        engine,
+        provider: engine.provider_ref("test"),
         server_version: "MockDB 0.1".into(),
         current_database: "mock".into(),
         current_user: "mock".into(),

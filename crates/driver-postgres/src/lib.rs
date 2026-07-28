@@ -71,7 +71,7 @@ impl Driver for PgDriver {
                 .await
                 .map_err(pg_err)?;
             Ok::<_, DriverError>(ServerInfo {
-                engine: Engine::Postgres,
+                provider: Engine::Postgres.provider_ref(env!("CARGO_PKG_VERSION")),
                 server_version: row.try_get::<_, String>(0).map_err(pg_err)?,
                 current_user: row.try_get::<_, String>(1).map_err(pg_err)?,
                 current_database: row.try_get::<_, String>(2).map_err(pg_err)?,

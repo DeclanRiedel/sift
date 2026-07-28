@@ -13,7 +13,7 @@ use sift_server::ApiError;
 
 fn server_info() -> ServerInfo {
     ServerInfo {
-        engine: Engine::Postgres,
+        provider: Engine::Postgres.provider_ref("test"),
         server_version: "MockDB 0.1".into(),
         current_database: "mock".into(),
         current_user: "mock".into(),

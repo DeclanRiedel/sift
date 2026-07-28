@@ -361,7 +361,7 @@ fn build_registry(cfg: &Config) -> DriverRegistry {
         // tests without a DB. Real driver registration is gated behind
         // config so a `mock=true` sift.toml gives a runnable-no-PG server.
         let server_info = sift_protocol::ServerInfo {
-            engine: sift_protocol::Engine::Postgres,
+            provider: sift_protocol::Engine::Postgres.provider_ref(env!("CARGO_PKG_VERSION")),
             server_version: "MockDB 0.1".to_string(),
             current_database: "mock".to_string(),
             current_user: "mock".to_string(),

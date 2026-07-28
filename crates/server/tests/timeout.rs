@@ -150,7 +150,7 @@ async fn wedged_execute_does_not_block_other_work() {
         .engine(Engine::Postgres)
         .execute_hang()
         .ping_ok(ServerInfo {
-            engine: Engine::Postgres,
+            provider: Engine::Postgres.provider_ref("test"),
             server_version: "MockDB 0.1".into(),
             current_database: "mock".into(),
             current_user: "mock".into(),
