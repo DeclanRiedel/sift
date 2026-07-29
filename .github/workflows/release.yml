@@ -36,6 +36,8 @@ jobs:
       - uses: actions/checkout@v4
       - uses: DeterminateSystems/nix-installer-action@v16
       - uses: DeterminateSystems/magic-nix-cache-action@v8
+        with:
+          use-flakehub: false
       - name: Require embedded release trust
         env:
           RELEASE_KEYS: ${{ vars.SIFT_RELEASE_PUBLIC_KEYS }}

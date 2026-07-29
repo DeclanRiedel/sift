@@ -12,6 +12,8 @@ jobs:
       - uses: actions/checkout@v4
       - uses: DeterminateSystems/nix-installer-action@v16
       - uses: DeterminateSystems/magic-nix-cache-action@v8
+        with:
+          use-flakehub: false
       - name: Format
         run: nix develop . --command cargo fmt --all --check
       - name: Clippy
@@ -63,6 +65,8 @@ jobs:
       - uses: actions/checkout@v4
       - uses: DeterminateSystems/nix-installer-action@v16
       - uses: DeterminateSystems/magic-nix-cache-action@v8
+        with:
+          use-flakehub: false
       - name: Wait for SQL Server
         run: |
           for i in {1..30}; do
@@ -86,9 +90,13 @@ jobs:
       - uses: actions/checkout@v4
       - uses: DeterminateSystems/nix-installer-action@v16
       - uses: DeterminateSystems/magic-nix-cache-action@v8
+        with:
+          use-flakehub: false
       - name: Install OpenSSH test daemon
         run: sudo apt-get update && sudo apt-get install --yes openssh-server jq
       - name: Build remote binaries
-        run: nix develop . --command cargo build -p sift-server --bin sift-server --bin sift-remote
+        run: nix develop . --command cargo build --release -p sift-server --bin sift-server --bin sift-remote
       - name: Ephemeral-account SSH bootstrap, host-key, reconnect, and restart matrix
+        env:
+          SIFT_PHASE_H_PROFILE: release
         run: nix develop . --command scripts/test-phase-h-ssh.sh "$GITHUB_WORKSPACE"

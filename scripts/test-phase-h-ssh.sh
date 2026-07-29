@@ -2,6 +2,22 @@
 set -euo pipefail
 
 workspace=${1:-$(pwd)}
+profile=${SIFT_PHASE_H_PROFILE:-debug}
+ready_timeout_secs=${SIFT_PHASE_H_READY_TIMEOUT_SECS:-180}
+case "$profile" in
+  debug|release) ;;
+  *)
+    echo "SIFT_PHASE_H_PROFILE must be debug or release" >&2
+    exit 2
+    ;;
+esac
+if [[ ! $ready_timeout_secs =~ ^[1-9][0-9]*$ ]]; then
+  echo "SIFT_PHASE_H_READY_TIMEOUT_SECS must be a positive integer" >&2
+  exit 2
+fi
+binary_dir="$workspace/target/$profile"
+helper_binary="$binary_dir/sift-remote"
+server_binary="$binary_dir/sift-server"
 scratch=$(mktemp -d)
 sshd_pid=
 remote_state=".cache/sift-phase-h-test-$$"
@@ -92,8 +108,14 @@ EOF
 chmod 700 "$scratch/bin/ssh" "$scratch/bin/scp"
 
 export PATH="$scratch/bin:$PATH"
-if "$workspace/target/debug/sift-remote" phase-h-bad \
-  --local-server-binary "$workspace/target/debug/sift-server" \
+if [[ ! -x $helper_binary || ! -x $server_binary ]]; then
+  echo "Phase H binaries are missing for profile $profile" >&2
+  ls -lh "$binary_dir" >&2 2>/dev/null || true
+  exit 1
+fi
+
+if "$helper_binary" phase-h-bad \
+  --local-server-binary "$server_binary" \
   --state-dir "$remote_state" \
   --remote-binary "$remote_binary" \
   >"$scratch/bad.out" 2>"$scratch/bad.err"; then
@@ -101,39 +123,61 @@ if "$workspace/target/debug/sift-remote" phase-h-bad \
   exit 1
 fi
 
+dump_helper_diagnostics() {
+  local output=$1
+  local helper_pid=$2
+  echo "Phase H helper diagnostics:" >&2
+  echo "  profile=$profile timeout=${ready_timeout_secs}s" >&2
+  ls -lh "$helper_binary" "$server_binary" >&2 2>/dev/null || true
+  ps -o pid,ppid,stat,etime,cmd -p "$helper_pid" >&2 2>/dev/null || true
+  if [[ -s $output.err ]]; then
+    echo "sift-remote stderr:" >&2
+    cat "$output.err" >&2
+  fi
+  if [[ -s $scratch/sshd.log ]]; then
+    echo "test sshd log:" >&2
+    cat "$scratch/sshd.log" >&2
+  fi
+  "$ssh_bin" -F "$scratch/ssh_config" phase-h-good \
+    "echo 'remote state:'; find $remote_state -maxdepth 3 -type f -printf '%p %s bytes\n' 2>/dev/null; test ! -f $remote_state/daemon.log || { echo 'remote daemon log:'; cat $remote_state/daemon.log; }" \
+    >&2 2>/dev/null || true
+}
+
 run_helper() {
   local output=$1
-  "$workspace/target/debug/sift-remote" phase-h-good \
-    --local-server-binary "$workspace/target/debug/sift-server" \
+  "$helper_binary" phase-h-good \
+    --local-server-binary "$server_binary" \
     --state-dir "$remote_state" \
     --remote-binary "$remote_binary" \
     >"$output" 2>"$output.err" &
   local helper_pid=$!
-  # Debug binaries can exceed 150 MiB, so leave enough time for the initial
-  # content-addressed upload even on constrained CI runners.
-  for _ in $(seq 1 1200); do
-    if [[ -s $output ]]; then
+  local attempts=$((ready_timeout_secs * 10))
+  for attempt in $(seq 1 "$attempts"); do
+    if [[ -s $output ]] && jq -e \
+      'type == "object" and (.instance_id | type == "string") and (.daemon_generation | type == "string")' \
+      "$output" >/dev/null 2>&1; then
       kill -INT "$helper_pid"
       wait "$helper_pid"
       return
     fi
     if ! kill -0 "$helper_pid" 2>/dev/null; then
       wait "$helper_pid" || {
-        cat "$output.err" >&2
-        "$ssh_bin" -F "$scratch/ssh_config" phase-h-good \
-          "test ! -f $remote_state/daemon.log || cat $remote_state/daemon.log" >&2 || true
+        dump_helper_diagnostics "$output" "$helper_pid"
         return 1
       }
+      dump_helper_diagnostics "$output" "$helper_pid"
       return 1
+    fi
+    if (( attempt % 300 == 0 )); then
+      echo "waiting for Phase H remote helper ($((attempt / 10))s/${ready_timeout_secs}s)" >&2
+      ps -o pid,stat,etime,cmd -p "$helper_pid" >&2 2>/dev/null || true
     fi
     sleep 0.1
   done
   kill "$helper_pid" 2>/dev/null || true
   wait "$helper_pid" 2>/dev/null || true
-  cat "$output.err" >&2
-  "$ssh_bin" -F "$scratch/ssh_config" phase-h-good \
-    "test ! -f $remote_state/daemon.log || cat $remote_state/daemon.log" >&2 || true
-  echo "remote helper did not become ready" >&2
+  dump_helper_diagnostics "$output" "$helper_pid"
+  echo "remote helper did not become ready within ${ready_timeout_secs}s" >&2
   return 1
 }
 
