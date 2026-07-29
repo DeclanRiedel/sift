@@ -84,7 +84,7 @@ jobs:
       - name: Live SQL Server tests
         run: nix develop . --command cargo test -p sift-driver-sqlserver --features live-mssql --test live_mssql -- --nocapture
 
-  phase-h-ssh:
+  ssh-remote-integration:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -96,7 +96,7 @@ jobs:
         run: sudo apt-get update && sudo apt-get install --yes openssh-server jq
       - name: Build remote binaries
         run: nix develop . --command cargo build --release -p sift-server --bin sift-server --bin sift-remote
-      - name: Ephemeral-account SSH bootstrap, host-key, reconnect, and restart matrix
+      - name: SSH remote bootstrap, host-key, reconnect, and restart matrix
         env:
-          SIFT_PHASE_H_PROFILE: release
-        run: nix develop . --command scripts/test-phase-h-ssh.sh "$GITHUB_WORKSPACE"
+          SIFT_SSH_REMOTE_PROFILE: release
+        run: nix develop . --command scripts/test-ssh-remote.sh "$GITHUB_WORKSPACE"

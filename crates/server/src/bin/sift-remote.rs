@@ -15,9 +15,11 @@ use std::time::Duration;
 use tokio::io::AsyncReadExt;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::process::Command;
-use tokio::sync::Mutex;
+use tokio::sync::{mpsc, Mutex};
 
 const MAX_AGENT_OUTPUT: usize = 64 * 1024;
+const SSH_COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
+const REMOTE_BOOTSTRAP_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Debug)]
 struct Options {
@@ -137,6 +139,7 @@ async fn run(mut options: Options, session: SshSession) -> anyhow::Result<()> {
         .context("binding local remote-proxy listener")?;
     let local_addr = listener.local_addr()?;
     let forward_session = session.clone();
+    let (forward_error_tx, mut forward_error_rx) = mpsc::unbounded_channel();
     tokio::spawn(async move {
         loop {
             let Ok((stream, _)) = listener.accept().await else {
@@ -144,26 +147,46 @@ async fn run(mut options: Options, session: SshSession) -> anyhow::Result<()> {
             };
             let session = forward_session.clone();
             let endpoint = endpoint.clone();
+            let forward_error_tx = forward_error_tx.clone();
             tokio::spawn(async move {
                 if let Err(error) = forward_connection(session, &endpoint, stream).await {
-                    tracing::debug!(%error, "SSH forwarding connection ended");
+                    let _ = forward_error_tx.send(error);
                 }
             });
         }
     });
 
     let base = format!("http://{local_addr}");
-    let capability = issue_capability(&options, &session).await?;
-    let client = sift_client_sdk::Client::new(&base);
-    let negotiated = client.connect().await?;
-    if negotiated.instance_id != capability.daemon.instance_id
-        || negotiated.daemon_generation != capability.daemon.daemon_generation
-    {
-        bail!("forwarded handshake reached a different remote daemon generation");
-    }
-    let grant = client
-        .exchange_ssh_proxy_capability(capability.capability)
-        .await?;
+    let bootstrap = async {
+        eprintln!("sift-remote: issuing remote access capability");
+        let capability = issue_capability(&options, &session).await?;
+        eprintln!("sift-remote: opening authenticated SSH forwarding channel");
+        let client = sift_client_sdk::Client::new(&base);
+        let negotiated = client.connect().await?;
+        if negotiated.instance_id != capability.daemon.instance_id
+            || negotiated.daemon_generation != capability.daemon.daemon_generation
+        {
+            bail!("forwarded handshake reached a different remote daemon generation");
+        }
+        eprintln!("sift-remote: exchanging one-use access capability");
+        let grant = client
+            .exchange_ssh_proxy_capability(capability.capability)
+            .await?;
+        anyhow::Ok((negotiated, grant))
+    };
+    let (negotiated, grant) = tokio::time::timeout(REMOTE_BOOTSTRAP_TIMEOUT, async {
+        tokio::select! {
+            result = bootstrap => result,
+            error = forward_error_rx.recv() => {
+                match error {
+                    Some(error) => Err(error.context("opening SSH forwarding channel")),
+                    None => bail!("SSH forwarding task stopped before bootstrap completed"),
+                }
+            }
+        }
+    })
+    .await
+    .context("remote bootstrap timed out after daemon readiness")??;
     let ready = RemoteReady {
         local_base_url: base,
         access_token: grant.access_token,
@@ -412,28 +435,59 @@ async fn forward_connection(
     endpoint: &str,
     stream: TcpStream,
 ) -> anyhow::Result<()> {
-    session.ensure_master().await?;
+    // Data channels deliberately use a dedicated connection. A stalled or
+    // degraded control master must not turn an accepted local TCP connection
+    // into an unbounded HTTP wait.
     let mut command = Command::new("ssh");
-    if session.multiplex.load(Ordering::Acquire) {
-        command.arg("-S").arg(session.control_socket.as_ref());
-    }
     let mut child = command
+        .arg("-o")
+        .arg("BatchMode=yes")
+        .arg("-o")
+        .arg("ConnectTimeout=10")
+        .arg("-o")
+        .arg("ConnectionAttempts=1")
         .arg("-W")
         .arg(endpoint)
         .arg(session.destination.as_ref())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
         .spawn()
         .context("starting SSH direct-stream channel")?;
     let (mut socket_read, mut socket_write) = stream.into_split();
     let mut child_stdin = child.stdin.take().context("SSH channel omitted stdin")?;
     let mut child_stdout = child.stdout.take().context("SSH channel omitted stdout")?;
+    let child_stderr = child.stderr.take().context("SSH channel omitted stderr")?;
     let upload = tokio::io::copy(&mut socket_read, &mut child_stdin);
     let download = tokio::io::copy(&mut child_stdout, &mut socket_write);
-    let _ = tokio::try_join!(upload, download);
-    let _ = child.kill().await;
-    let _ = child.wait().await;
+    let stderr_read = async {
+        let mut bytes = Vec::with_capacity(4096);
+        child_stderr
+            .take((MAX_AGENT_OUTPUT + 1) as u64)
+            .read_to_end(&mut bytes)
+            .await?;
+        std::io::Result::Ok(bytes)
+    };
+    let transfer = async {
+        tokio::try_join!(upload, download, stderr_read).context("copying SSH direct-stream channel")
+    };
+    let wait = async {
+        child
+            .wait()
+            .await
+            .context("waiting for SSH direct-stream channel")
+    };
+    let ((_, _, stderr), status) = tokio::try_join!(transfer, wait)?;
+    if stderr.len() > MAX_AGENT_OUTPUT {
+        bail!("SSH direct-stream diagnostics exceeded 64 KiB");
+    }
+    if !status.success() {
+        bail!(
+            "SSH direct-stream channel failed with {status}: {}",
+            String::from_utf8_lossy(&stderr).trim()
+        );
+    }
     Ok(())
 }
 
@@ -454,12 +508,15 @@ impl SshSession {
             .arg(self.destination.as_ref())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
-            .status()
-            .await;
-        if check.is_ok_and(|status| status.success()) {
+            .kill_on_drop(true)
+            .status();
+        let check = tokio::time::timeout(SSH_COMMAND_TIMEOUT, check).await;
+        let check = check.ok().and_then(Result::ok);
+        if check.is_some_and(|status| status.success()) {
             return Ok(());
         }
-        let status = Command::new("ssh")
+        let mut command = Command::new("ssh");
+        command
             .arg("-M")
             .arg("-S")
             .arg(self.control_socket.as_ref())
@@ -468,8 +525,10 @@ impl SshSession {
             .arg("-f")
             .arg("-N")
             .arg(self.destination.as_ref())
-            .status()
+            .kill_on_drop(true);
+        let status = tokio::time::timeout(SSH_COMMAND_TIMEOUT, command.status())
             .await
+            .context("starting OpenSSH control master timed out")?
             .context("starting OpenSSH control master")?;
         if !status.success() {
             self.multiplex.store(false, Ordering::Release);
@@ -512,6 +571,7 @@ impl SshSession {
             .args(remote_args)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
+            .kill_on_drop(true)
             .spawn()
             .context("starting remote SSH command")?;
         let stdout = child.stdout.take().context("SSH command omitted stdout")?;
@@ -532,7 +592,10 @@ impl SshSession {
                 .await?;
             std::io::Result::Ok(bytes)
         };
-        let (stdout, stderr, status) = tokio::try_join!(stdout_read, stderr_read, child.wait())
+        let joined = async { tokio::try_join!(stdout_read, stderr_read, child.wait()) };
+        let (stdout, stderr, status) = tokio::time::timeout(SSH_COMMAND_TIMEOUT, joined)
+            .await
+            .context("remote SSH command timed out")?
             .context("running remote SSH command")?;
         if stdout.len() > MAX_AGENT_OUTPUT || stderr.len() > MAX_AGENT_OUTPUT {
             bail!("remote agent output exceeded 64 KiB");
@@ -552,11 +615,13 @@ impl SshSession {
         if self.multiplex.load(Ordering::Acquire) {
             command.arg("-S").arg(self.control_socket.as_ref());
         }
-        let status = command
+        command
             .arg(self.destination.as_ref())
             .args(remote_args)
-            .status()
+            .kill_on_drop(true);
+        let status = tokio::time::timeout(SSH_COMMAND_TIMEOUT, command.status())
             .await
+            .context("remote SSH command timed out")?
             .context("running remote SSH command")?;
         if !status.success() {
             bail!("remote SSH command failed with {status}");
