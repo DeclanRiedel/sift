@@ -99,6 +99,11 @@ cat >"$scratch/bin/ssh" <<EOF
 if [[ \${SIFT_TEST_DISABLE_MASTER:-0} == 1 && " \$* " == *" -M "* ]]; then
   exit 1
 fi
+if [[ \${SIFT_TEST_HOLD_DAEMON_LAUNCH_CHANNEL:-0} == 1 && " \$* " == *" remote daemon "* ]]; then
+  "$ssh_bin" -F "$scratch/ssh_config" "\$@"
+  sleep 10
+  exit 0
+fi
 exec "$ssh_bin" -F "$scratch/ssh_config" "\$@"
 EOF
 cat >"$scratch/bin/scp" <<EOF
@@ -181,7 +186,9 @@ run_helper() {
   return 1
 }
 
-run_helper "$scratch/first.json"
+# Reproduce remote shells that keep the SSH session open after the detached
+# daemon has already published readiness.
+SIFT_TEST_HOLD_DAEMON_LAUNCH_CHANNEL=1 run_helper "$scratch/first.json"
 first_instance=$(jq -r .instance_id "$scratch/first.json")
 first_generation=$(jq -r .daemon_generation "$scratch/first.json")
 test -n "$first_instance"

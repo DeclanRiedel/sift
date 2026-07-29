@@ -19,6 +19,7 @@ use tokio::sync::{mpsc, Mutex};
 
 const MAX_AGENT_OUTPUT: usize = 64 * 1024;
 const SSH_COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
+const DAEMON_LAUNCH_ACK_TIMEOUT: Duration = Duration::from_secs(5);
 const REMOTE_BOOTSTRAP_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Debug)]
@@ -345,7 +346,20 @@ async fn start_daemon(options: &Options, session: &SshSession) -> anyhow::Result
         state = options.state_dir,
         binary = options.remote_binary,
     );
-    session.ssh_status(&[&command]).await
+    match tokio::time::timeout(DAEMON_LAUNCH_ACK_TIMEOUT, session.ssh_status(&[&command])).await {
+        Ok(result) => result,
+        Err(_) => {
+            // Some OpenSSH/server-shell combinations keep the session channel
+            // open for a detached child even after its standard streams were
+            // redirected. The following authenticated probe is the authority
+            // on whether launch succeeded, so an absent channel EOF is not a
+            // startup failure.
+            eprintln!(
+                "sift-remote: daemon launch channel stayed open; checking authenticated readiness"
+            );
+            Ok(())
+        }
+    }
 }
 
 async fn install_server(options: &Options, session: &SshSession) -> anyhow::Result<()> {
