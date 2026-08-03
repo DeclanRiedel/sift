@@ -49,6 +49,28 @@ impl FileSecretStore {
         })
     }
 
+    /// Re-encrypt a complete file-backed store without exposing plaintext
+    /// entries to the caller. Used only by the offline restore lifecycle.
+    pub fn reencrypt(
+        source_path: &Path,
+        source_key_file: &Path,
+        destination_path: &Path,
+        destination_key_file: &Path,
+    ) -> Result<()> {
+        let source_key = read_key(source_key_file)?;
+        let source_cipher = ChaCha20Poly1305::new(Key::from_slice(&source_key));
+        let entries = load(source_path, &source_cipher)?;
+        let destination_key = read_key(destination_key_file)?;
+        let destination_cipher = ChaCha20Poly1305::new(Key::from_slice(&destination_key));
+        persist_blocking(destination_path, &destination_cipher, &entries)
+    }
+
+    pub fn initialize_empty(store_path: &Path, key_file: &Path) -> Result<()> {
+        let key = read_key(key_file)?;
+        let cipher = ChaCha20Poly1305::new(Key::from_slice(&key));
+        persist_blocking(store_path, &cipher, &HashMap::new())
+    }
+
     /// Snapshot the map under the mutex, then perform the (blocking)
     /// encrypt + write on a dedicated blocking task so we don't stall a
     /// tokio worker thread on slow filesystems.
@@ -101,7 +123,15 @@ fn persist_blocking(
     // load-bearing on this file.
     {
         use std::io::Write as _;
-        let mut f = std::fs::File::create(&tmp)
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create(true).truncate(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut f = options
+            .open(&tmp)
             .map_err(|error| MetadataError::SecretStore(error.to_string()))?;
         f.write_all(&blob)
             .map_err(|error| MetadataError::SecretStore(error.to_string()))?;

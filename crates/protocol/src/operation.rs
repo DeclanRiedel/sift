@@ -281,6 +281,10 @@ pub enum Operation {
         room_id: i64,
         result_id: crate::RoomResultId,
     },
+    BackupState,
+    RestoreState {
+        applied: bool,
+    },
 }
 
 /// Sanitized projection of an [`Operation`] for the durable audit log. Carries
@@ -347,6 +351,8 @@ impl Operation {
             Self::DetachRoom { .. } => OperationKind::DetachRoom,
             Self::ApplyDocumentUpdate { .. } => OperationKind::ApplyDocumentUpdate,
             Self::ReadSharedResult { .. } => OperationKind::ReadSharedResult,
+            Self::BackupState => OperationKind::BackupState,
+            Self::RestoreState { .. } => OperationKind::RestoreState,
         }
     }
 
@@ -534,6 +540,16 @@ impl Operation {
             Operation::ReadSharedResult { room_id, .. } => {
                 summary("read", "room_result", Some(*room_id))
             }
+            Operation::BackupState => summary("backup", "instance_state", None),
+            Operation::RestoreState { applied } => summary(
+                if *applied {
+                    "restore"
+                } else {
+                    "validate_restore"
+                },
+                "instance_state",
+                None,
+            ),
         }
     }
 }

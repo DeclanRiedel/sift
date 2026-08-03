@@ -364,6 +364,9 @@ release. Packaging is finalized after the selected Phase K/L v1 scope lands.
       startup compatibility gate, pre-migration SQLite backup, and offline
       restore boundary (ADR-038 and
       `docs/PLANS/metadata-migration-lifecycle.md`).
+- [x] [Design] Sift-owned state backup/restore archive, secret-backend,
+      destination-identity, maintenance-lock, validation, and rescue rollback
+      contract (ADR-039 and `docs/PLANS/state-backup-restore.md`).
 - [ ] [Design] Metrics surface (`/v1/metrics` Prometheus); OpenTelemetry
       export; product backup/restore ops; query plan capture + retrieval;
       scheduler. Prometheus/OTLP export consumes Phase F's
@@ -376,6 +379,10 @@ release. Packaging is finalized after the selected Phase K/L v1 scope lands.
 - [x] [Implement] `sift-server migrate status|apply`, schema compatibility
       startup gate, personal-launcher automatic policy, and online SQLite
       pre-migration backup. A pre-release schema-boundary CI matrix remains.
+- [x] [Implement] Offline encrypted Sift-state backup inspection, creation,
+      and dry-run/apply restore with portable file secrets, destination-owned
+      identity, authentication sanitization, rescue archives, and durable
+      rollback journaling.
 - [x] [Implement] OpenAPI generation from typed schemas. `aide` extracts the
       document from the live `ApiRouter` and handler DTOs; startup finalization
       adds only cross-cutting security/protocol metadata and WebSocket
@@ -511,6 +518,7 @@ configurations without abandoning thin clients or breaking remote topology.
 | ADR-036 | room-owned connection binding + submitter-scoped authorization        | Phase G | implemented; `docs/PLANS/shared-connection-ownership.md`       |
 | ADR-037 | room-owned system session + submitter-scoped pre-authorization        | Phase G | implemented; `docs/PLANS/shared-room-connection-routing.md` |
 | ADR-038 | explicit metadata migration lifecycle owner                           | Phase J | written and implemented                                      |
+| ADR-039 | Sift-state backup/restore with destination-owned identity              | Phase J | written and implemented                                      |
 
 ## Reference: what is being stolen, and what is not
 

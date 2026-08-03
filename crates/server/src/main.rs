@@ -18,6 +18,37 @@ use sift_server::{
 async fn main() -> anyhow::Result<()> {
     let command = parse_command(std::env::args().skip(1))?;
     let cfg = match command {
+        ServerCommand::BackupCreate { output, key_file } => {
+            let config = load_config().context("loading config")?;
+            config.validate().context("validating config")?;
+            let manifest = sift_server::state_backup::create(&config, &output, &key_file)?;
+            println!("{}", serde_json::to_string_pretty(&manifest)?);
+            return Ok(());
+        }
+        ServerCommand::BackupInspect { archive, key_file } => {
+            let manifest = sift_server::state_backup::inspect(&archive, &key_file)?;
+            println!("{}", serde_json::to_string_pretty(&manifest)?);
+            return Ok(());
+        }
+        ServerCommand::BackupRestore {
+            archive,
+            key_file,
+            apply,
+            allow_external_secrets,
+        } => {
+            let config = load_config().context("loading config")?;
+            config.validate().context("validating config")?;
+            let report = sift_server::state_backup::restore(
+                &config,
+                &archive,
+                &key_file,
+                apply,
+                allow_external_secrets,
+            )
+            .await?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+            return Ok(());
+        }
         ServerCommand::MigrateStatus => {
             let config = load_config().context("loading config")?;
             config.validate().context("validating config")?;
@@ -36,6 +67,8 @@ async fn main() -> anyhow::Result<()> {
                     "--automatic is reserved for personal in-process launcher lifecycles"
                 );
             }
+            let _maintenance = sift_server::runtime::acquire_maintenance_exclusive(&config)
+                .context("acquiring offline maintenance lock")?;
             let (report, upgraded_documents) = apply_metadata_migrations(&config, automatic)?;
             println!(
                 "{}",
@@ -54,17 +87,12 @@ async fn main() -> anyhow::Result<()> {
             config
         }
         ServerCommand::RemoteDaemon { state_dir } => {
-            let config = sift_server::remote_agent::prepare_remote_config(&state_dir)?;
-            let metadata =
-                build_metadata_store(&config)?.context("remote daemon metadata is disabled")?;
-            metadata
-                .ensure_auth_system_keys()
-                .await
-                .context("provisioning remote authentication keys")?;
-            config
+            sift_server::remote_agent::prepare_remote_config(&state_dir)?
         }
         ServerCommand::RemoteMigrate { state_dir } => {
             let config = sift_server::remote_agent::prepare_remote_config(&state_dir)?;
+            let _maintenance = sift_server::runtime::acquire_maintenance_exclusive(&config)
+                .context("acquiring offline maintenance lock")?;
             let (report, upgraded_documents) = apply_metadata_migrations(&config, false)?;
             println!(
                 "{}",
@@ -185,6 +213,12 @@ async fn main() -> anyhow::Result<()> {
         metadata.clone(),
     ));
     if let Some(store) = &metadata {
+        if cfg.transport == sift_server::config::Transport::SshProxy {
+            store
+                .ensure_auth_system_keys()
+                .await
+                .context("provisioning remote authentication keys")?;
+        }
         sessions.set_audit_store(store.clone());
         sessions.set_authorization_store(store.clone());
         let package_registry = sift_plugin_host::ExtensionPackageRegistry::new(
@@ -282,6 +316,20 @@ async fn main() -> anyhow::Result<()> {
 
 #[derive(Debug, PartialEq, Eq)]
 enum ServerCommand {
+    BackupCreate {
+        output: std::path::PathBuf,
+        key_file: std::path::PathBuf,
+    },
+    BackupInspect {
+        archive: std::path::PathBuf,
+        key_file: std::path::PathBuf,
+    },
+    BackupRestore {
+        archive: std::path::PathBuf,
+        key_file: std::path::PathBuf,
+        apply: bool,
+        allow_external_secrets: bool,
+    },
     MigrateStatus,
     MigrateApply {
         automatic: bool,
@@ -324,6 +372,63 @@ fn parse_command(args: impl IntoIterator<Item = String>) -> anyhow::Result<Serve
     let Some(first) = args.next() else {
         return Ok(ServerCommand::Serve { mode: None });
     };
+    if first == "backup" {
+        let action = args
+            .next()
+            .context("backup requires one of: create, inspect, restore")?;
+        let mut output = None;
+        let mut archive = None;
+        let mut key_file = None;
+        let mut apply = false;
+        let mut allow_external_secrets = false;
+        while let Some(argument) = args.next() {
+            match argument.as_str() {
+                "--output" | "--archive" | "--key-file" => {
+                    let value = args
+                        .next()
+                        .with_context(|| format!("{argument} requires a path"))?;
+                    let slot = match argument.as_str() {
+                        "--output" => &mut output,
+                        "--archive" => &mut archive,
+                        "--key-file" => &mut key_file,
+                        _ => unreachable!(),
+                    };
+                    if slot.replace(value.into()).is_some() {
+                        anyhow::bail!("{argument} may be specified only once");
+                    }
+                }
+                "--apply" if !apply => apply = true,
+                "--allow-external-secrets" if !allow_external_secrets => {
+                    allow_external_secrets = true;
+                }
+                _ => anyhow::bail!("unknown or duplicate backup argument `{argument}`"),
+            }
+        }
+        return match action.as_str() {
+            "create" if archive.is_none() && !apply && !allow_external_secrets => {
+                Ok(ServerCommand::BackupCreate {
+                    output: output.context("backup create requires --output")?,
+                    key_file: key_file.context("backup create requires --key-file")?,
+                })
+            }
+            "inspect" if output.is_none() && !apply && !allow_external_secrets => {
+                Ok(ServerCommand::BackupInspect {
+                    archive: archive.context("backup inspect requires --archive")?,
+                    key_file: key_file.context("backup inspect requires --key-file")?,
+                })
+            }
+            "restore" if output.is_none() => Ok(ServerCommand::BackupRestore {
+                archive: archive.context("backup restore requires --archive")?,
+                key_file: key_file.context("backup restore requires --key-file")?,
+                apply,
+                allow_external_secrets,
+            }),
+            "create" | "inspect" | "restore" => {
+                anyhow::bail!("backup arguments are not valid for `{action}`")
+            }
+            _ => anyhow::bail!("unknown backup action `{action}`"),
+        };
+    }
     if first == "migrate" {
         let action = args
             .next()
@@ -568,6 +673,24 @@ mod command_tests {
             parse_command(args(&["--mode=container"])).unwrap(),
             ServerCommand::Serve {
                 mode: Some(RuntimeMode::Container)
+            }
+        );
+        assert_eq!(
+            parse_command(args(&[
+                "backup",
+                "restore",
+                "--archive",
+                "state.sift-backup",
+                "--key-file",
+                "backup.key",
+                "--apply"
+            ]))
+            .unwrap(),
+            ServerCommand::BackupRestore {
+                archive: "state.sift-backup".into(),
+                key_file: "backup.key".into(),
+                apply: true,
+                allow_external_secrets: false,
             }
         );
         assert_eq!(

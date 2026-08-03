@@ -101,7 +101,9 @@ fn unavailable_reason(
         | ManageTenantInvitation
         | ManageConnectionPolicy
         | ManageTenantLimits
-        | ManageExtension => Some("administrator context required"),
+        | ManageExtension
+        | BackupState
+        | RestoreState => Some("administrator context required"),
         RefreshAuthSession
         | Logout
         | ChangePassword

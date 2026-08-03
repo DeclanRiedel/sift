@@ -42,6 +42,7 @@ pub mod search;
 pub mod session;
 pub mod shutdown;
 pub mod sql_policy;
+pub mod state_backup;
 pub mod updater;
 
 pub use config::Config;

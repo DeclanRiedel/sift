@@ -1131,6 +1131,31 @@ activation. The complete policy, classifications, and restore boundary are in
 
 ---
 
+## ADR-039 — Backups Restore Sift State Into Destination-Owned Identity
+
+**Context.** Metadata and credential bytes live in separate durability domains,
+runtime identity is installation-local, and copied authentication sessions
+must not remain valid on a cloned host. SQLite-only copies are therefore not a
+complete or safe product backup.
+
+**Decision.** V1 creates an authenticated encrypted archive of a stopped
+installation's metadata and exportable secret state under an exclusive
+maintenance lock. File secrets are portable inside the encrypted archive and
+are re-encrypted with the destination key; keychain secrets remain external
+dependencies. Restore is a validated dry run by default, takes an encrypted
+rescue backup before apply, preserves destination identity, revokes bearer and
+one-use authentication state, rotates system authentication keys, and uses a
+durable replacement journal. Connected-database backup is a separate product
+surface.
+
+**Consequences.** Backup and restore have a coherent cross-file recovery point
+and cannot race a serving process. Archives require a separately protected key
+file, restores may require destination keychain preparation, and operators own
+retention/storage in v1. Details and the failure matrix are in
+`docs/PLANS/state-backup-restore.md`.
+
+---
+
 ## ADR-021 — Direct SSH Bootstrap, Persistent Remote Daemon
 
 **Context.** Sift's server-first shape permits a thin client to render locally

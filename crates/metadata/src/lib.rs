@@ -237,9 +237,11 @@ pub enum MetadataError {
     MigrationInProgress(PathBuf),
     #[error("metadata migration lock does not belong to this store")]
     MigrationLockMismatch,
+    #[error("operation requires a file-backed metadata store")]
+    FileBackedStoreRequired,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum MigrationKind {
     Expand,
@@ -259,7 +261,7 @@ impl std::fmt::Display for MigrationKind {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 pub struct MigrationDescriptor {
     pub version: u32,
     pub name: String,
@@ -267,7 +269,7 @@ pub struct MigrationDescriptor {
     pub automatic: bool,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 pub struct MigrationStatus {
     pub current_version: u32,
     pub latest_version: u32,
@@ -679,6 +681,117 @@ impl MetadataStore {
             return Err(error);
         }
         Ok(Some(path))
+    }
+
+    pub fn backup_database_to(&self, destination: &Path) -> Result<()> {
+        let Backend::Pool(pool) = &self.backend else {
+            return Err(MetadataError::FileBackedStoreRequired);
+        };
+        if destination.exists() {
+            return Err(MetadataError::Io(std::io::Error::new(
+                std::io::ErrorKind::AlreadyExists,
+                format!("backup destination exists: {}", destination.display()),
+            )));
+        }
+        if let Some(parent) = destination.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let source = Connection::open_with_flags(
+            &pool.path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )?;
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        drop(options.open(destination)?);
+        let result = (|| -> Result<()> {
+            let mut target = Connection::open(destination)?;
+            {
+                let backup = rusqlite::backup::Backup::new(&source, &mut target)?;
+                backup.run_to_completion(128, Duration::from_millis(10), None)?;
+            }
+            target.close().map_err(|(_, error)| error)?;
+            std::fs::File::open(destination)?.sync_all()?;
+            Ok(())
+        })();
+        if result.is_err() {
+            let _ = std::fs::remove_file(destination);
+        }
+        result
+    }
+
+    pub fn integrity_check(&self) -> Result<()> {
+        let conn = self.conn()?;
+        let result: String = conn.query_row("PRAGMA integrity_check", [], |row| row.get(0))?;
+        if result == "ok" {
+            Ok(())
+        } else {
+            Err(MetadataError::InvalidMigrationHistory(format!(
+                "SQLite integrity check failed: {result}"
+            )))
+        }
+    }
+
+    /// Make restored durable state safe under the destination installation's
+    /// identity. Durable principals and credentials remain; bearer and
+    /// one-use authentication material does not.
+    pub fn sanitize_restored_database(&self) -> Result<()> {
+        let now = now_text();
+        {
+            let mut conn = self.conn()?;
+            let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            tx.execute("DELETE FROM auth_session", [])?;
+            tx.execute("DELETE FROM oauth_login_attempt", [])?;
+            tx.execute("DELETE FROM password_reset_token", [])?;
+            tx.execute("DELETE FROM keypair_challenge", [])?;
+            tx.execute("DELETE FROM ssh_proxy_capability", [])?;
+            tx.execute(
+                "UPDATE tenant_invitation SET revoked_at = COALESCE(revoked_at, ?1)",
+                params![now],
+            )?;
+            tx.execute(
+                "UPDATE api_token SET revoked_at = COALESCE(revoked_at, ?1), updated_at = ?1",
+                params![now],
+            )?;
+            insert_operation_audit_row(
+                &tx,
+                &NewOperationAudit {
+                    actor_principal_id: None,
+                    action: "backup.restore".to_string(),
+                    target: "instance_state".to_string(),
+                    target_id: None,
+                    status: "succeeded".to_string(),
+                    result_code: None,
+                    row_count: None,
+                    error_message: None,
+                    correlation_id: None,
+                },
+            )?;
+            tx.commit()?;
+        }
+        Ok(())
+    }
+
+    pub async fn rotate_auth_system_keys(&self) -> Result<()> {
+        self.secrets
+            .delete(AUTH_SYSTEM_SECRET_NAMESPACE, AUTH_TOKEN_MAC_HANDLE)
+            .await?;
+        self.secrets
+            .delete(
+                AUTH_SYSTEM_SECRET_NAMESPACE,
+                SSH_PROXY_CAPABILITY_MAC_HANDLE,
+            )
+            .await?;
+        Ok(())
+    }
+
+    pub async fn sanitize_after_restore(&self) -> Result<()> {
+        self.sanitize_restored_database()?;
+        self.rotate_auth_system_keys().await
     }
 
     pub fn lock_migrations(&self) -> Result<MigrationLockGuard> {

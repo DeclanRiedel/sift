@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 const INSTANCE_ID_FILE: &str = "instance-id";
 const DAEMON_LOCK_FILE: &str = "daemon.lock";
 const DAEMON_DESCRIPTOR_FILE: &str = "daemon.json";
+const MAINTENANCE_LOCK_FILE: &str = "maintenance.lock";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DaemonDescriptor {
@@ -33,6 +34,7 @@ pub struct RuntimeState {
     mode: RuntimeMode,
     state_dir: PathBuf,
     _lock: Option<File>,
+    _maintenance_lock: MaintenanceGuard,
     descriptor_published: bool,
 }
 
@@ -42,6 +44,8 @@ impl RuntimeState {
         std::fs::create_dir_all(&state_dir)
             .with_context(|| format!("creating runtime state dir: {}", state_dir.display()))?;
         make_private_dir(&state_dir)?;
+
+        let maintenance_lock = MaintenanceGuard::acquire(&state_dir, false)?;
 
         let instance_id = load_or_create_instance_id(&state_dir)?;
         let daemon_generation = uuid::Uuid::new_v4().to_string();
@@ -79,6 +83,7 @@ impl RuntimeState {
             mode: config.mode,
             state_dir,
             _lock: lock,
+            _maintenance_lock: maintenance_lock,
             descriptor_published: false,
         })
     }
@@ -112,6 +117,53 @@ impl RuntimeState {
         self.descriptor_published = true;
         Ok(())
     }
+}
+
+/// Cross-mode lifecycle gate. Serving processes hold a shared lock; offline
+/// mutation commands take the exclusive side and fail instead of waiting.
+pub struct MaintenanceGuard {
+    _file: File,
+}
+
+impl MaintenanceGuard {
+    fn acquire(state_dir: &Path, exclusive: bool) -> anyhow::Result<Self> {
+        std::fs::create_dir_all(state_dir)
+            .with_context(|| format!("creating runtime state dir: {}", state_dir.display()))?;
+        make_private_dir(state_dir)?;
+        let path = state_dir.join(MAINTENANCE_LOCK_FILE);
+        let file = private_open(&path, true)?;
+        let result = if exclusive {
+            FileExt::try_lock_exclusive(&file)
+        } else {
+            FileExt::try_lock_shared(&file)
+        };
+        match result {
+            Ok(()) => Ok(Self { _file: file }),
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => bail!(
+                "sift lifecycle is active; stop the server or other maintenance command using {}",
+                state_dir.display()
+            ),
+            Err(error) => {
+                Err(error).with_context(|| format!("locking maintenance state: {}", path.display()))
+            }
+        }
+    }
+}
+
+pub fn acquire_maintenance_exclusive(config: &Config) -> anyhow::Result<MaintenanceGuard> {
+    MaintenanceGuard::acquire(&config.runtime_state_dir(), true)
+}
+
+pub fn existing_instance_id(config: &Config) -> anyhow::Result<Option<String>> {
+    let path = config.runtime_state_dir().join(INSTANCE_ID_FILE);
+    let value = match std::fs::read_to_string(&path) {
+        Ok(value) => value,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error).with_context(|| format!("reading {}", path.display())),
+    };
+    let id = uuid::Uuid::parse_str(value.trim())
+        .with_context(|| format!("invalid instance id in {}", path.display()))?;
+    Ok(Some(id.to_string()))
 }
 
 impl Drop for RuntimeState {
@@ -236,5 +288,22 @@ mod tests {
         assert_eq!(descriptor.instance_id, first.instance_id);
         drop(first);
         assert!(!dir.path().join(DAEMON_DESCRIPTOR_FILE).exists());
+    }
+
+    #[test]
+    fn maintenance_lock_excludes_offline_mutation_in_every_runtime_mode() {
+        for mode in [
+            RuntimeMode::InProcess,
+            RuntimeMode::Daemon,
+            RuntimeMode::Container,
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let mut config = daemon_config(dir.path());
+            config.mode = mode;
+            let runtime = RuntimeState::acquire(&config).unwrap();
+            assert!(acquire_maintenance_exclusive(&config).is_err());
+            drop(runtime);
+            assert!(acquire_maintenance_exclusive(&config).is_ok());
+        }
     }
 }

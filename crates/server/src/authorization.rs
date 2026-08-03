@@ -67,7 +67,12 @@ pub fn authorize(
     use OperationKind::*;
     if matches!(
         operation,
-        ManagePrincipal | ManageGithubAllowlist | ManagePrincipalKey | ManageTenantLimits
+        ManagePrincipal
+            | ManageGithubAllowlist
+            | ManagePrincipalKey
+            | ManageTenantLimits
+            | BackupState
+            | RestoreState
     ) && !scope.instance_admin
     {
         return Err(AuthorizationDenial::InstanceAdminRequired);

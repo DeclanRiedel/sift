@@ -207,6 +207,7 @@ impl ApiError {
                 | MetadataError::BinaryTooOld { .. }
                 | MetadataError::MigrationInProgress(_)
                 | MetadataError::MigrationLockMismatch
+                | MetadataError::FileBackedStoreRequired
                 | MetadataError::PasswordHash(_)
                 | MetadataError::InvalidAuthTokenKey
                 | MetadataError::SecretStore(_)
