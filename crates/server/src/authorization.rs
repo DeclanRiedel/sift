@@ -166,6 +166,11 @@ pub const fn is_connection_operation(operation: OperationKind) -> bool {
             | ExecuteQuery
             | ExportQuery
             | Complete
+            | OpenSemanticDocument
+            | UpdateSemanticDocument
+            | CloseSemanticDocument
+            | SelectStatement
+            | DiagnoseSql
             | Listen
             | CancelQuery
             | PreviewEdits

@@ -3623,6 +3623,127 @@ async fn connection_open_ping_close() {
 }
 
 #[tokio::test]
+async fn semantic_document_revision_diagnostics_selection_and_cleanup() {
+    let app = app(test_state());
+    let session: sift_protocol::SessionInfo = body_json(
+        app.clone()
+            .oneshot(post_json_str("/v1/sessions", r#"{"tag":"semantic"}"#))
+            .await
+            .unwrap()
+            .into_body(),
+    )
+    .await;
+    let connection: sift_protocol::ConnectionInfo = body_json(
+        app.clone()
+            .oneshot(post_json(
+                format!("/v1/sessions/{}/connections", session.id),
+                serde_json::json!({
+                    "provider_id": "sift/postgres",
+                    "host": "mock.invalid",
+                    "port": 5432,
+                    "database": "mock",
+                    "user": "mock",
+                    "ssl_mode": "disable"
+                }),
+            ))
+            .await
+            .unwrap()
+            .into_body(),
+    )
+    .await;
+    let base = format!(
+        "/v1/sessions/{}/connections/{}/semantic-documents",
+        session.id, connection.id
+    );
+    let sql = "select 1; select from; select 3";
+    let response = app
+        .clone()
+        .oneshot(post_json(
+            &base,
+            serde_json::json!({"text": sql, "source": {"kind": "scratch"}}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let document: sift_protocol::SemanticDocumentState = body_json(response.into_body()).await;
+    assert_eq!(document.revision, 1);
+    assert_eq!(
+        document.parse_status,
+        sift_protocol::SemanticParseStatus::Recovered
+    );
+    assert!(!document.syntax_diagnostics.is_empty());
+
+    let response = app
+        .clone()
+        .oneshot(post_json(
+            format!("{}/{}/statements/select", base, document.document_id),
+            serde_json::json!({"revision": 1, "cursor": 25}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let selection: sift_protocol::StatementSelection = body_json(response.into_body()).await;
+    assert_eq!(selection.statements.len(), 1);
+    assert_eq!(selection.statements[0].ordinal, 2);
+
+    let response = app
+        .clone()
+        .oneshot(post_json(
+            format!("{}/{}/diagnostics", base, document.document_id),
+            serde_json::json!({"revision": 1}),
+        ))
+        .await
+        .unwrap();
+    let diagnostics: sift_protocol::DiagnosticsResponse = body_json(response.into_body()).await;
+    assert!(!diagnostics.diagnostics.is_empty());
+
+    let response = app
+        .clone()
+        .oneshot(put_json(
+            format!("{}/{}", base, document.document_id),
+            serde_json::json!({"base_revision": 0, "text": "select 4"}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+
+    let response = app
+        .clone()
+        .oneshot(put_json(
+            format!("{}/{}", base, document.document_id),
+            serde_json::json!({"base_revision": 1, "text": "select 4"}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let updated: sift_protocol::SemanticDocumentState = body_json(response.into_body()).await;
+    assert_eq!(updated.revision, 2);
+    assert_eq!(
+        updated.parse_status,
+        sift_protocol::SemanticParseStatus::Valid
+    );
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::delete(format!("{}/{}", base, document.document_id))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+
+    let operations = app
+        .oneshot(Request::get("/v1/operations").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    let operations: Vec<sift_protocol::OperationAuditEntry> =
+        body_json(operations.into_body()).await;
+    assert!(!serde_json::to_string(&operations).unwrap().contains(sql));
+}
+
+#[tokio::test]
 async fn execute_returns_drained_rows_and_affected_count() {
     let app = app(test_state());
 

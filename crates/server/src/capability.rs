@@ -140,9 +140,28 @@ fn unavailable_reason(
         BulkInsert if engine != Some(Engine::SqlServer) => {
             Some("bulk insert is only supported by SQL Server")
         }
-        CloseConnection | PingConnection | RefreshSchema | GenerateDdl | ExecuteQuery
-        | ExportQuery | Complete | Listen | CancelQuery | PreviewEdits | ApplyEdits
-        | SearchSchema | SearchData | Explain | ListProcesses | KillProcess | ImportCsv
+        CloseConnection
+        | PingConnection
+        | RefreshSchema
+        | GenerateDdl
+        | ExecuteQuery
+        | ExportQuery
+        | Complete
+        | OpenSemanticDocument
+        | UpdateSemanticDocument
+        | CloseSemanticDocument
+        | SelectStatement
+        | DiagnoseSql
+        | Listen
+        | CancelQuery
+        | PreviewEdits
+        | ApplyEdits
+        | SearchSchema
+        | SearchData
+        | Explain
+        | ListProcesses
+        | KillProcess
+        | ImportCsv
         | BulkInsert
             if !has_connection =>
         {
@@ -151,9 +170,28 @@ fn unavailable_reason(
         ExecuteQuery if has_active_transaction && !selected_transaction => {
             Some("select the connection's active transaction")
         }
-        CloseConnection | PingConnection | RefreshSchema | GenerateDdl | ExecuteQuery
-        | ExportQuery | Complete | Listen | CancelQuery | PreviewEdits | ApplyEdits
-        | SearchSchema | SearchData | Explain | ListProcesses | KillProcess | ImportCsv
+        CloseConnection
+        | PingConnection
+        | RefreshSchema
+        | GenerateDdl
+        | ExecuteQuery
+        | ExportQuery
+        | Complete
+        | OpenSemanticDocument
+        | UpdateSemanticDocument
+        | CloseSemanticDocument
+        | SelectStatement
+        | DiagnoseSql
+        | Listen
+        | CancelQuery
+        | PreviewEdits
+        | ApplyEdits
+        | SearchSchema
+        | SearchData
+        | Explain
+        | ListProcesses
+        | KillProcess
+        | ImportCsv
         | BulkInsert => None,
     }
 }

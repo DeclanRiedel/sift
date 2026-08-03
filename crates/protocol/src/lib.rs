@@ -34,6 +34,7 @@ pub mod result;
 pub mod room;
 pub mod schema;
 pub mod search;
+pub mod semantic;
 pub mod session;
 pub mod transaction_panel;
 pub mod tx;
@@ -110,6 +111,7 @@ pub use search::{
     DataSearchHit, DataSearchRequest, DataSearchResponse, DataSearchScope, IndexState,
     SchemaSearchRequest, SchemaSearchResponse, SearchHit, SearchTarget,
 };
+pub use semantic::*;
 pub use session::{
     Ack, AuditEntry, BeginTransactionRequest, BulkInsertFormat, BulkInsertRequest,
     BulkInsertResponse, CancelRequest, ConnectionId, ConnectionInfo, EndTransactionRequest,

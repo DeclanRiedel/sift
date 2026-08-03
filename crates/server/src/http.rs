@@ -490,6 +490,22 @@ pub fn app(state: AppState) -> Router {
             post_with(post_completion, doc("postCompletion", "Compute ranked autocomplete candidates for a SQL text + cursor position on the connection's engine.")),
         )
         .api_route(
+            "/v1/sessions/:id/connections/:conn_id/semantic-documents",
+            post_with(open_semantic_document, doc("openSemanticDocument", "Create bounded parsed SQL document state for this connection's dialect")),
+        )
+        .api_route(
+            "/v1/sessions/:id/connections/:conn_id/semantic-documents/:document",
+            put_with(update_semantic_document, doc("updateSemanticDocument", "Replace SQL text using an optimistic semantic revision")).delete_with(close_semantic_document, doc("closeSemanticDocument", "Release process-local semantic document state")),
+        )
+        .api_route(
+            "/v1/sessions/:id/connections/:conn_id/semantic-documents/:document/statements/select",
+            post_with(select_semantic_statement, doc("selectSemanticStatement", "Select the active top-level SQL statement using UTF-8 byte offsets")),
+        )
+        .api_route(
+            "/v1/sessions/:id/connections/:conn_id/semantic-documents/:document/diagnostics",
+            post_with(semantic_diagnostics, doc("diagnoseSemanticDocument", "Read syntax diagnostics for an exact semantic document revision")),
+        )
+        .api_route(
             "/v1/sessions/:id/connections/:conn_id/export",
             post_with(export_query, doc("exportQuery", "Stream a query result as CSV / TSV / JSON Lines / JSON Array. Response is chunked; Content-Type depends on the requested format.")),
         )
@@ -5969,6 +5985,132 @@ async fn post_completion(
         |_| None,
     )?;
     Ok(Json(resp))
+}
+
+async fn open_semantic_document(
+    State(state): State<AppState>,
+    Path((session, connection)): Path<(sift_protocol::SessionId, sift_protocol::ConnectionId)>,
+    Json(request): Json<sift_protocol::CreateSemanticDocumentRequest>,
+) -> ApiResult<(StatusCode, Json<sift_protocol::SemanticDocumentState>)> {
+    let source_bytes = request.text.len() as u64;
+    let result = state
+        .sessions
+        .open_semantic_document(session, connection, request)
+        .await;
+    let document = finish_operation(
+        &state.sessions,
+        Operation::OpenSemanticDocument {
+            session,
+            connection,
+            source_bytes,
+        },
+        result,
+        |_| None,
+    )?;
+    Ok((StatusCode::CREATED, Json(document)))
+}
+
+async fn update_semantic_document(
+    State(state): State<AppState>,
+    Path((session, connection, document)): Path<(
+        sift_protocol::SessionId,
+        sift_protocol::ConnectionId,
+        sift_protocol::SemanticDocumentId,
+    )>,
+    Json(request): Json<sift_protocol::UpdateSemanticDocumentRequest>,
+) -> ApiResult<Json<sift_protocol::SemanticDocumentState>> {
+    let operation = Operation::UpdateSemanticDocument {
+        session,
+        connection,
+        document,
+        base_revision: request.base_revision,
+        source_bytes: request.text.len() as u64,
+    };
+    let result = state
+        .sessions
+        .update_semantic_document(session, connection, document, request)
+        .await;
+    Ok(Json(finish_operation(
+        &state.sessions,
+        operation,
+        result,
+        |_| None,
+    )?))
+}
+
+async fn close_semantic_document(
+    State(state): State<AppState>,
+    Path((session, connection, document)): Path<(
+        sift_protocol::SessionId,
+        sift_protocol::ConnectionId,
+        sift_protocol::SemanticDocumentId,
+    )>,
+) -> ApiResult<StatusCode> {
+    finish_operation(
+        &state.sessions,
+        Operation::CloseSemanticDocument {
+            session,
+            connection,
+            document,
+        },
+        state
+            .sessions
+            .close_semantic_document(session, connection, document),
+        |_| None,
+    )?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn select_semantic_statement(
+    State(state): State<AppState>,
+    Path((session, connection, document)): Path<(
+        sift_protocol::SessionId,
+        sift_protocol::ConnectionId,
+        sift_protocol::SemanticDocumentId,
+    )>,
+    Json(request): Json<sift_protocol::SelectStatementRequest>,
+) -> ApiResult<Json<sift_protocol::StatementSelection>> {
+    let operation = Operation::SelectStatement {
+        session,
+        connection,
+        document,
+        revision: request.revision,
+    };
+    let result = state
+        .sessions
+        .select_semantic_statement(session, connection, document, request);
+    Ok(Json(finish_operation(
+        &state.sessions,
+        operation,
+        result,
+        |selection| Some(selection.statements.len() as i64),
+    )?))
+}
+
+async fn semantic_diagnostics(
+    State(state): State<AppState>,
+    Path((session, connection, document)): Path<(
+        sift_protocol::SessionId,
+        sift_protocol::ConnectionId,
+        sift_protocol::SemanticDocumentId,
+    )>,
+    Json(request): Json<sift_protocol::SemanticRevisionRequest>,
+) -> ApiResult<Json<sift_protocol::DiagnosticsResponse>> {
+    let result =
+        state
+            .sessions
+            .semantic_diagnostics(session, connection, document, request.revision);
+    Ok(Json(finish_operation(
+        &state.sessions,
+        Operation::DiagnoseSql {
+            session,
+            connection,
+            document,
+            revision: request.revision,
+        },
+        result,
+        |diagnostics| Some(diagnostics.diagnostics.len() as i64),
+    )?))
 }
 
 async fn post_edits_preview(

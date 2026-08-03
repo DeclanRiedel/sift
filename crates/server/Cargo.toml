@@ -15,6 +15,7 @@ sift-driver-sqlserver = { workspace = true }
 sift-extension-protocol = { workspace = true }
 sift-plugin-host = { workspace = true }
 sift-doc = { workspace = true }
+sift-semantic = { workspace = true }
 sift-completion = { workspace = true }
 sift-client-sdk = { workspace = true }
 sift-metadata = { workspace = true }

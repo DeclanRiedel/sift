@@ -75,6 +75,24 @@ pub enum Code {
     #[error("result shape is not supported by this surface")]
     UnsupportedResultShape,
 
+    #[error("semantic document not found")]
+    SemanticDocumentNotFound,
+
+    #[error("semantic document revision conflict")]
+    SemanticRevisionConflict,
+
+    #[error("invalid text range")]
+    InvalidTextRange,
+
+    #[error("SQL dialect is unavailable")]
+    DialectUnavailable,
+
+    #[error("semantic resource limit exceeded")]
+    SemanticLimitExceeded,
+
+    #[error("semantic operation timed out")]
+    SemanticTimedOut,
+
     #[error("driver internal error")]
     DriverInternal,
 

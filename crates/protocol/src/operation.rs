@@ -8,8 +8,8 @@ use crate::OperationKind;
 use crate::{
     completion::CompletionRequest, BeginTransactionRequest, BulkInsertRequest, CancelRequest,
     ConnectionId, EndTransactionRequest, ExecuteRequestHttp, KillProcessRequest,
-    OpenConnectionRequest, OpenSessionRequest, SavepointRequest, SchemaScope, SessionId,
-    TransactionPreviewRequest,
+    OpenConnectionRequest, OpenSessionRequest, SavepointRequest, SchemaScope, SemanticDocumentId,
+    SessionId, TransactionPreviewRequest,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
@@ -163,6 +163,35 @@ pub enum Operation {
         session: SessionId,
         connection: ConnectionId,
         request: CompletionRequest,
+    },
+    OpenSemanticDocument {
+        session: SessionId,
+        connection: ConnectionId,
+        source_bytes: u64,
+    },
+    UpdateSemanticDocument {
+        session: SessionId,
+        connection: ConnectionId,
+        document: SemanticDocumentId,
+        base_revision: u64,
+        source_bytes: u64,
+    },
+    CloseSemanticDocument {
+        session: SessionId,
+        connection: ConnectionId,
+        document: SemanticDocumentId,
+    },
+    SelectStatement {
+        session: SessionId,
+        connection: ConnectionId,
+        document: SemanticDocumentId,
+        revision: u64,
+    },
+    DiagnoseSql {
+        session: SessionId,
+        connection: ConnectionId,
+        document: SemanticDocumentId,
+        revision: u64,
     },
     Listen {
         session: SessionId,
@@ -327,6 +356,11 @@ impl Operation {
             Self::ExecuteQuery { .. } => OperationKind::ExecuteQuery,
             Self::ExportQuery { .. } => OperationKind::ExportQuery,
             Self::Complete { .. } => OperationKind::Complete,
+            Self::OpenSemanticDocument { .. } => OperationKind::OpenSemanticDocument,
+            Self::UpdateSemanticDocument { .. } => OperationKind::UpdateSemanticDocument,
+            Self::CloseSemanticDocument { .. } => OperationKind::CloseSemanticDocument,
+            Self::SelectStatement { .. } => OperationKind::SelectStatement,
+            Self::DiagnoseSql { .. } => OperationKind::DiagnoseSql,
             Self::Listen { .. } => OperationKind::Listen,
             Self::CancelQuery { .. } => OperationKind::CancelQuery,
             Self::PreviewEdits { .. } => OperationKind::PreviewEdits,
@@ -471,6 +505,23 @@ impl Operation {
             }
             Operation::Complete { session, .. } => {
                 summary("complete", "query", Some(session.0 as i64))
+            }
+            Operation::OpenSemanticDocument { session, .. } => {
+                summary("open", "semantic_document", Some(session.0 as i64))
+            }
+            Operation::UpdateSemanticDocument { session, .. } => {
+                summary("update", "semantic_document", Some(session.0 as i64))
+            }
+            Operation::CloseSemanticDocument { session, .. } => {
+                summary("close", "semantic_document", Some(session.0 as i64))
+            }
+            Operation::SelectStatement { session, .. } => summary(
+                "select_statement",
+                "semantic_document",
+                Some(session.0 as i64),
+            ),
+            Operation::DiagnoseSql { session, .. } => {
+                summary("diagnose", "semantic_document", Some(session.0 as i64))
             }
             Operation::Listen { connection, .. } => {
                 summary("listen", "connection", Some(connection.0 as i64))

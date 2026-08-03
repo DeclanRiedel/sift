@@ -542,6 +542,11 @@ impl RuntimeDriver {
             OperationKind::ListProcesses | OperationKind::KillProcess => "driver.process-control@1",
             OperationKind::GenerateDdl
             | OperationKind::Complete
+            | OperationKind::OpenSemanticDocument
+            | OperationKind::UpdateSemanticDocument
+            | OperationKind::CloseSemanticDocument
+            | OperationKind::SelectStatement
+            | OperationKind::DiagnoseSql
             | OperationKind::PreviewEdits
             | OperationKind::ApplyEdits
             | OperationKind::SearchSchema

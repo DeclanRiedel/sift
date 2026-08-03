@@ -30,6 +30,7 @@ pub const SUPPORTED_HTTP_OPERATION_IDS: &[&str] = &[
     "changePassword",
     "clearTenantLimits",
     "closeConnection",
+    "closeSemanticDocument",
     "closeSession",
     "commitTransaction",
     "createGithubAllowlist",
@@ -45,6 +46,7 @@ pub const SUPPORTED_HTTP_OPERATION_IDS: &[&str] = &[
     "deleteMetadataRoom",
     "deleteMetadataSavedQuery",
     "deleteSpilledCursor",
+    "diagnoseSemanticDocument",
     "disconnectMetadataConnectionProfile",
     "exchangeSshProxyCapability",
     "executeQuery",
@@ -101,6 +103,7 @@ pub const SUPPORTED_HTTP_OPERATION_IDS: &[&str] = &[
     "logoutAuth",
     "openConnection",
     "openConnectionFromProfile",
+    "openSemanticDocument",
     "openapi",
     "pageMetadataHistory",
     "pageOperationAudit",
@@ -127,6 +130,7 @@ pub const SUPPORTED_HTTP_OPERATION_IDS: &[&str] = &[
     "roomWebSocket",
     "searchData",
     "searchSchema",
+    "selectSemanticStatement",
     "sessionWebSocket",
     "setMetadataConnectionCredential",
     "setTenantLimits",
@@ -138,6 +142,7 @@ pub const SUPPORTED_HTTP_OPERATION_IDS: &[&str] = &[
     "updateMetadataConnectionPolicy",
     "updateMetadataDocument",
     "updateMetadataSavedQuery",
+    "updateSemanticDocument",
     "upsertMetadataConnectionProfile",
     "validateExtension",
     "whoAmI",
@@ -1176,6 +1181,79 @@ impl Client {
         self.post(
             &format!("/v1/sessions/{session}/connections/{connection}/complete"),
             &request,
+        )
+        .await
+    }
+
+    pub async fn open_semantic_document(
+        &self,
+        session: SessionId,
+        connection: ConnectionId,
+        request: sift_protocol::CreateSemanticDocumentRequest,
+    ) -> Result<sift_protocol::SemanticDocumentState> {
+        self.post(
+            &format!("/v1/sessions/{session}/connections/{connection}/semantic-documents"),
+            &request,
+        )
+        .await
+    }
+
+    pub async fn update_semantic_document(
+        &self,
+        session: SessionId,
+        connection: ConnectionId,
+        document: sift_protocol::SemanticDocumentId,
+        request: sift_protocol::UpdateSemanticDocumentRequest,
+    ) -> Result<sift_protocol::SemanticDocumentState> {
+        self.put(
+            &format!(
+                "/v1/sessions/{session}/connections/{connection}/semantic-documents/{document}"
+            ),
+            &request,
+        )
+        .await
+    }
+
+    pub async fn close_semantic_document(
+        &self,
+        session: SessionId,
+        connection: ConnectionId,
+        document: sift_protocol::SemanticDocumentId,
+    ) -> Result<()> {
+        self.delete_empty(&format!(
+            "/v1/sessions/{session}/connections/{connection}/semantic-documents/{document}"
+        ))
+        .await
+    }
+
+    pub async fn select_semantic_statement(
+        &self,
+        session: SessionId,
+        connection: ConnectionId,
+        document: sift_protocol::SemanticDocumentId,
+        request: sift_protocol::SelectStatementRequest,
+    ) -> Result<sift_protocol::StatementSelection> {
+        self.post(
+            &format!(
+                "/v1/sessions/{session}/connections/{connection}/semantic-documents/{document}/statements/select"
+            ),
+            &request,
+        )
+        .await
+    }
+
+    pub async fn semantic_diagnostics(
+        &self,
+        session: SessionId,
+        connection: ConnectionId,
+        document: sift_protocol::SemanticDocumentId,
+        revision: u64,
+    ) -> Result<sift_protocol::DiagnosticsResponse> {
+        self.post(
+            &format!(
+                "/v1/sessions/{session}/connections/{connection}/semantic-documents/{document}/diagnostics"
+            ),
+            &sift_protocol::SemanticRevisionRequest { revision },
         )
         .await
     }
@@ -2329,6 +2407,14 @@ impl Client {
 
     async fn delete(&self, path: &str) -> Result<()> {
         let _: serde_json::Value = self.send(self.http.delete(self.url(path))).await?;
+        Ok(())
+    }
+
+    async fn delete_empty(&self, path: &str) -> Result<()> {
+        let response = self.send_response(self.http.delete(self.url(path))).await?;
+        if !response.status().is_success() {
+            return Err(server_error(response).await);
+        }
         Ok(())
     }
 

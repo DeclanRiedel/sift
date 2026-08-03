@@ -89,6 +89,20 @@ impl ApiError {
                 Code::UnsupportedResultShape => {
                     (StatusCode::UNPROCESSABLE_ENTITY, "unsupported_result_shape")
                 }
+                Code::SemanticDocumentNotFound => {
+                    (StatusCode::NOT_FOUND, "semantic_document_not_found")
+                }
+                Code::SemanticRevisionConflict => {
+                    (StatusCode::CONFLICT, "semantic_revision_conflict")
+                }
+                Code::InvalidTextRange => (StatusCode::BAD_REQUEST, "invalid_text_range"),
+                Code::DialectUnavailable => {
+                    (StatusCode::UNPROCESSABLE_ENTITY, "dialect_unavailable")
+                }
+                Code::SemanticLimitExceeded => {
+                    (StatusCode::PAYLOAD_TOO_LARGE, "semantic_limit_exceeded")
+                }
+                Code::SemanticTimedOut => (StatusCode::GATEWAY_TIMEOUT, "semantic_timed_out"),
                 Code::CursorNotFound | Code::TransactionNotFound => {
                     (StatusCode::NOT_FOUND, "not_found")
                 }

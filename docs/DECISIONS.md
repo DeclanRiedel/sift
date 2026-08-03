@@ -1161,6 +1161,41 @@ redaction behavior.
 
 ---
 
+## ADR-032 — One Server-Owned SQL Semantic Document, Dialect Packs Behind It
+
+**Context.** Completion currently tokenizes SQL and caches prefixes inside its
+own crate. Phase K adds parsing, diagnostics, formatting, statement selection,
+usages, refactoring, and quick fixes; implementing each with private syntax and
+revision state would produce inconsistent byte ranges and duplicate CPU work.
+Phase I reserves dialect-pack identity but intentionally does not let an
+extension own routes, policy, caches, or product lifecycle.
+
+**Decision.** Add a UI-free, server-orchestrated semantic service with opaque
+process-local document ids, optimistic server-issued revisions, immutable
+UTF-8 source per revision, and half-open byte ranges. One error-recovering,
+lossless parse artifact per `(document, revision, dialect, pack version)` feeds
+all semantic features. The connection's declared `DialectId` selects exactly
+one capability-negotiated pack. Core owns document/cache/resource lifecycle,
+portable contracts, catalog filtering, validation, cancellation, routes,
+OpenAPI/SDK, and redacted Operations; packs own dialect grammar and rules.
+Bundled PostgreSQL and T-SQL packs may run on a bounded blocking pool, while
+external packs use Phase I supervision. Semantic features return diagnostics,
+selections, candidates, or preconditioned text edits; they never mutate CRDT or
+future workspace text directly.
+
+**Consequences.** Completion must migrate from its private scanner to the
+shared parsed model, and raw completion SQL must be removed from audit records.
+Semantic documents are disposable accelerators recreated after eviction or
+restart; durable room/workspace text retains its existing owner. Packs and
+results require explicit bounds, deadlines, stale-result rejection, and
+tenant/policy/catalog-separated caches. ADR graduation requires the two-engine
+recovery, range, feature, isolation, cancellation, redaction, fuzz, and latency
+corpus specified in `docs/PLANS/sql-semantic-service.md`. Plan capture may key
+to the resulting statement identity but retains a separate execution/retention
+lifecycle.
+
+---
+
 ## ADR-021 — Direct SSH Bootstrap, Persistent Remote Daemon
 
 **Context.** Sift's server-first shape permits a thin client to render locally

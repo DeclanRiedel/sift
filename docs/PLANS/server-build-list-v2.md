@@ -52,6 +52,10 @@
   eager-start failures so an enabled extension cannot block server readiness.
   Driver RPC v1 package validation now rejects capability families the host
   cannot dispatch, preventing manifest/discovery overclaiming.
+- **Phase K is underway.** ADR-032 is written and its K0 vertical slice is
+  implemented: bounded revisioned semantic documents, tolerant PostgreSQL and
+  T-SQL statement parsing, syntax diagnostics, deterministic statement
+  selection, audited HTTP/OpenAPI surfaces, and reference SDK coverage.
 
 ---
 
@@ -368,14 +372,13 @@ release. Packaging is finalized after the selected Phase K/L v1 scope lands.
       destination-identity, maintenance-lock, validation, and rescue rollback
       contract (ADR-039 and `docs/PLANS/state-backup-restore.md`).
 - [ ] [Design] Metrics surface (`/v1/metrics` Prometheus); OpenTelemetry
-      export; product backup/restore ops; query plan capture + retrieval;
-      scheduler. Prometheus/OTLP export consumes Phase F's
+      export; connected-database backup/restore operations. Prometheus/OTLP
+      export consumes Phase F's
       resource counters and rate-limit events.
 - [ ] [Design] Release + packaging (musl/static Linux, macOS, Windows;
       per-channel artifacts; signature material for the Phase H updater).
-- [ ] [Implement] Prometheus metrics endpoint; OTLP trace export; product
-      backup/restore driver methods + Operations; plan capture wired into
-      `execute`; scheduler runtime.
+- [ ] [Implement] Prometheus metrics endpoint; OTLP trace export;
+      connected-database backup/restore driver methods + Operations.
 - [x] [Implement] `sift-server migrate status|apply`, schema compatibility
       startup gate, personal-launcher automatic policy, and online SQLite
       pre-migration backup, with committed V18/V19/V28 SQLite compatibility
@@ -407,9 +410,10 @@ Goal: add the semantic database-IDE layer that is absent from the runtime API,
 without moving product behavior into one privileged client. Detailed gap
 inventory: `docs/PLANS/ide-parity-and-provider-extensibility.md`.
 
-- [ ] [Design] ADR candidate: shared dialect-aware SQL syntax and semantic
+- [x] [Design] ADR-032: shared dialect-aware SQL syntax and semantic
       service powering formatting, diagnostics, completion, statement
       selection, usages, refactoring, quick fixes, and governed AI context.
+      `docs/PLANS/sql-semantic-service.md`.
 - [ ] [Design] Catalog identity and dependency graph across tables, views,
       routines, triggers, types, constraints, and referenced columns; define
       invalidation and partial-introspection behavior.
@@ -422,9 +426,21 @@ inventory: `docs/PLANS/ide-parity-and-provider-extensibility.md`.
 - [ ] [Design] Diagram projection from the catalog graph. Layout and visual
       editing remain client concerns; graph truth and mutations remain server
       operations.
-- [ ] [Implement] SQL parse/semantic services; formatter; diagnostics and
-      quick fixes; richer completion; find usages/refactoring; catalog graph;
-      diagrams API; schema diff/migration preview+apply; data/result compare.
+- [ ] [Design] Query-plan capture and retrieval keyed to semantic document,
+      revision, and selected statement identity; bounded retention and
+      redacted audit remain server-owned.
+- [x] [Implement] ADR-032 slice K0: bounded parsed-document state, PostgreSQL
+      and T-SQL recovery parsing, statement selection, syntax diagnostics,
+      cancellation/cache isolation, audited Operations, OpenAPI, and SDK.
+      `crates/semantic`, `protocol/src/semantic.rs`, and the connection-scoped
+      `/semantic-documents` routes. Tests cover recovery across malformed
+      statements, dollar quotes, T-SQL `GO`/brackets, UTF-8 ranges, optimistic
+      conflicts/idempotent retries, cancellation, cleanup, and audit redaction.
+- [ ] [Implement] Migrate existing completion onto the shared parsed document
+      and remove its independent tokenizer/context cache after corpus parity.
+- [ ] [Implement] Formatter; catalog-backed diagnostics and quick fixes; richer
+      completion; find usages/refactoring; catalog graph; diagrams API; schema
+      diff/migration preview+apply; data/result compare; plan capture/retrieval.
 - [ ] [Graduate] PostgreSQL and SQL Server semantic/diff corpora, destructive
       migration safety matrix, large-schema latency budgets, and public
       Operation/OpenAPI/SDK coverage.
@@ -445,7 +461,7 @@ configurations without abandoning thin clients or breaking remote topology.
       `SecretStore`, and collaboration conflict behavior.
 - [ ] [Design] Run configurations: ordered scripts, target connections/schemas,
       variables and secret references, transaction/error policies, pre-tasks,
-      scheduling handoff, logs, cancellation, and audited reruns.
+      durable scheduling, logs, cancellation, and audited reruns.
 - [ ] [Design] Extensible import/export recipes including HTML, Markdown,
       spreadsheet, and operator-installed formatter plugins. Untrusted
       formatters use the Phase I extension boundary rather than in-process
@@ -515,7 +531,7 @@ configurations without abandoning thin clients or breaking remote topology.
 | ADR-029 | normalized CSV import                                                 | Phase D | written                                                        |
 | ADR-030 | instance-owned closed registration + hosted identity                  | Phase E | written                                                        |
 | ADR-031 | plugin manifest, isolation, permissions, and lifecycle                | Phase I | written; declarative-first packages + core-governed operations |
-| ADR-032 | SQL semantic service and dialect-pack boundary                        | Phase K | not written                                                    |
+| ADR-032 | SQL semantic service and dialect-pack boundary                        | Phase K | written; `docs/PLANS/sql-semantic-service.md`                  |
 | ADR-033 | catalog graph, schema diff, and migration safety                      | Phase K | not written                                                    |
 | ADR-034 | server-owned or hybrid workspace and VCS topology                     | Phase L | not written                                                    |
 | ADR-035 | room lane separation + CRDT-safe lag recovery                         | Phase G | implemented; `docs/PLANS/presence-durable-separation.md`       |

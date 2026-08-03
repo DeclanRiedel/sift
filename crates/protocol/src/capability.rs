@@ -32,6 +32,11 @@ pub enum OperationKind {
     ExecuteQuery,
     ExportQuery,
     Complete,
+    OpenSemanticDocument,
+    UpdateSemanticDocument,
+    CloseSemanticDocument,
+    SelectStatement,
+    DiagnoseSql,
     Listen,
     CancelQuery,
     PreviewEdits,
@@ -59,7 +64,7 @@ pub enum OperationKind {
 }
 
 impl OperationKind {
-    pub const ALL: [Self; 51] = [
+    pub const ALL: [Self; 56] = [
         Self::Authenticate,
         Self::RefreshAuthSession,
         Self::Logout,
@@ -87,6 +92,11 @@ impl OperationKind {
         Self::ExecuteQuery,
         Self::ExportQuery,
         Self::Complete,
+        Self::OpenSemanticDocument,
+        Self::UpdateSemanticDocument,
+        Self::CloseSemanticDocument,
+        Self::SelectStatement,
+        Self::DiagnoseSql,
         Self::Listen,
         Self::CancelQuery,
         Self::PreviewEdits,

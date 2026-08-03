@@ -143,6 +143,8 @@ struct SessionStoreInner {
     /// and cached with a TTL (Phase D schema search). Keyed by connection since
     /// search scope is the active connection.
     search_indexes: DashMap<ConnectionId, (Arc<crate::search::SearchIndex>, Instant)>,
+    /// Process-local parsed SQL document state (ADR-032).
+    semantic: sift_semantic::SemanticRegistry,
 }
 
 /// A live server-owned room connection: a hidden session owned by the binder
@@ -266,6 +268,7 @@ impl SessionStore {
                 cursors: CursorRegistry::default(),
                 schema_cache: SchemaCache::default(),
                 search_indexes: DashMap::new(),
+                semantic: sift_semantic::SemanticRegistry::default(),
             }),
         };
         store.install_eviction_callback();
@@ -312,6 +315,7 @@ impl SessionStore {
                 cursors: CursorRegistry::default(),
                 schema_cache: SchemaCache::default(),
                 search_indexes: DashMap::new(),
+                semantic: sift_semantic::SemanticRegistry::default(),
             }),
         };
         store.install_eviction_callback();
@@ -963,6 +967,7 @@ impl SessionStore {
             .sessions
             .remove(&id)
             .ok_or(ApiError::SessionNotFound(id))?;
+        self.inner.semantic.close_session(id.0);
         // Drop connections. We spawn closes concurrently to not block the
         // handler on N sequential round-trips.
         for entry in session.connections.iter() {
@@ -1439,6 +1444,12 @@ impl SessionStore {
         session_id: SessionId,
         conn_id: ConnectionId,
     ) -> ApiResult<()> {
+        self.inner
+            .semantic
+            .close_scope(sift_semantic::DocumentScope {
+                session: session_id.0,
+                connection: conn_id.0,
+            });
         let (txs, entry) = self
             .with_session(&session_id, |s| {
                 let txs = drain_connection_transactions(s, conn_id);
@@ -3199,6 +3210,138 @@ impl SessionStore {
         crate::autocomplete::generate_completion(self, session_id, conn_id, engine, request).await
     }
 
+    pub async fn open_semantic_document(
+        &self,
+        session_id: SessionId,
+        conn_id: ConnectionId,
+        request: sift_protocol::CreateSemanticDocumentRequest,
+    ) -> ApiResult<sift_protocol::SemanticDocumentState> {
+        let entry = self.authorize_connection_operation(
+            session_id,
+            conn_id,
+            sift_protocol::OperationKind::OpenSemanticDocument,
+            None,
+            &[],
+        )?;
+        let dialect_id = entry.driver.descriptor().provider.dialect_id.clone();
+        let registry = self.inner.semantic.clone();
+        let scope = semantic_scope(session_id, conn_id);
+        self.run_semantic(move |canceled| {
+            registry.create(scope, dialect_id, request.text, request.source, canceled)
+        })
+        .await
+    }
+
+    pub async fn update_semantic_document(
+        &self,
+        session_id: SessionId,
+        conn_id: ConnectionId,
+        document: sift_protocol::SemanticDocumentId,
+        request: sift_protocol::UpdateSemanticDocumentRequest,
+    ) -> ApiResult<sift_protocol::SemanticDocumentState> {
+        self.authorize_connection_operation(
+            session_id,
+            conn_id,
+            sift_protocol::OperationKind::UpdateSemanticDocument,
+            None,
+            &[],
+        )?;
+        let registry = self.inner.semantic.clone();
+        let scope = semantic_scope(session_id, conn_id);
+        self.run_semantic(move |canceled| {
+            registry.update(
+                scope,
+                document,
+                request.base_revision,
+                request.text,
+                canceled,
+            )
+        })
+        .await
+    }
+
+    pub fn close_semantic_document(
+        &self,
+        session_id: SessionId,
+        conn_id: ConnectionId,
+        document: sift_protocol::SemanticDocumentId,
+    ) -> ApiResult<()> {
+        self.authorize_connection_operation(
+            session_id,
+            conn_id,
+            sift_protocol::OperationKind::CloseSemanticDocument,
+            None,
+            &[],
+        )?;
+        self.inner
+            .semantic
+            .close(semantic_scope(session_id, conn_id), document)
+            .map_err(semantic_error)
+    }
+
+    pub fn semantic_diagnostics(
+        &self,
+        session_id: SessionId,
+        conn_id: ConnectionId,
+        document: sift_protocol::SemanticDocumentId,
+        revision: u64,
+    ) -> ApiResult<sift_protocol::DiagnosticsResponse> {
+        self.authorize_connection_operation(
+            session_id,
+            conn_id,
+            sift_protocol::OperationKind::DiagnoseSql,
+            None,
+            &[],
+        )?;
+        self.inner
+            .semantic
+            .diagnostics(semantic_scope(session_id, conn_id), document, revision)
+            .map_err(semantic_error)
+    }
+
+    pub fn select_semantic_statement(
+        &self,
+        session_id: SessionId,
+        conn_id: ConnectionId,
+        document: sift_protocol::SemanticDocumentId,
+        request: sift_protocol::SelectStatementRequest,
+    ) -> ApiResult<sift_protocol::StatementSelection> {
+        self.authorize_connection_operation(
+            session_id,
+            conn_id,
+            sift_protocol::OperationKind::SelectStatement,
+            None,
+            &[],
+        )?;
+        self.inner
+            .semantic
+            .select_statement(semantic_scope(session_id, conn_id), document, request)
+            .map_err(semantic_error)
+    }
+
+    async fn run_semantic<T, F>(&self, work: F) -> ApiResult<T>
+    where
+        T: Send + 'static,
+        F: FnOnce(&AtomicBool) -> Result<T, sift_semantic::Error> + Send + 'static,
+    {
+        let canceled = Arc::new(AtomicBool::new(false));
+        let worker_cancel = Arc::clone(&canceled);
+        let task = tokio::task::spawn_blocking(move || work(&worker_cancel));
+        match tokio::time::timeout(Duration::from_millis(500), task).await {
+            Ok(Ok(result)) => result.map_err(semantic_error),
+            Ok(Err(join)) => Err(ApiError::Internal(format!(
+                "semantic worker failed: {join}"
+            ))),
+            Err(_) => {
+                canceled.store(true, Ordering::Release);
+                Err(ApiError::Driver(DriverError::new(
+                    Code::SemanticTimedOut,
+                    "semantic operation exceeded its 500ms deadline",
+                )))
+            }
+        }
+    }
+
     fn get_conn_entry(
         &self,
         session_id: SessionId,
@@ -3258,6 +3401,25 @@ impl SessionStore {
         }
         reaped
     }
+}
+
+fn semantic_scope(session: SessionId, connection: ConnectionId) -> sift_semantic::DocumentScope {
+    sift_semantic::DocumentScope {
+        session: session.0,
+        connection: connection.0,
+    }
+}
+
+fn semantic_error(error: sift_semantic::Error) -> ApiError {
+    let code = match error {
+        sift_semantic::Error::NotFound => Code::SemanticDocumentNotFound,
+        sift_semantic::Error::RevisionConflict { .. } => Code::SemanticRevisionConflict,
+        sift_semantic::Error::InvalidRange => Code::InvalidTextRange,
+        sift_semantic::Error::DialectUnavailable(_) => Code::DialectUnavailable,
+        sift_semantic::Error::LimitExceeded => Code::SemanticLimitExceeded,
+        sift_semantic::Error::Canceled => Code::QueryCanceled,
+    };
+    ApiError::Driver(DriverError::new(code, error.to_string()))
 }
 
 /// Cheap clone of a connection entry (just Arc + ConnHandle Arc).

@@ -3945,6 +3945,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "sift-semantic"
+version = "0.1.0"
+dependencies = [
+ "sha2 0.10.9",
+ "sift-protocol",
+ "sqlparser",
+ "thiserror 1.0.69",
+ "uuid",
+]
+
+[[package]]
 name = "sift-server"
 version = "0.1.0"
 dependencies = [
@@ -3988,6 +3999,7 @@ dependencies = [
  "sift-metadata",
  "sift-plugin-host",
  "sift-protocol",
+ "sift-semantic",
  "sqlparser",
  "tempfile",
  "thiserror 1.0.69",
