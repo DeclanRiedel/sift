@@ -1211,7 +1211,7 @@ struct RoomRouting {
     tenant: TenantId,
     profile_id: ConnectionProfileId,
     provider_id: sift_protocol::ProviderId,
-    engine: sift_protocol::Engine,
+    engine: Option<sift_protocol::Engine>,
     policy_revision: u64,
 }
 
@@ -3564,6 +3564,23 @@ async fn update_extension_selection(
         expected_revision: request.expected_revision,
     })?;
     state.sessions.refresh_extension_runtimes().await?;
+    let activated = metadata.extension_selection(id.as_str())?;
+    if request.enabled && activated.lifecycle == sift_protocol::ExtensionLifecycleState::Quarantined
+    {
+        metadata.update_extension_selection(sift_metadata::UpdateExtensionSelection {
+            extension_id: id.as_str(),
+            selected_archive_sha256: Some(&current.selected_archive_sha256),
+            enabled: current.enabled,
+            lifecycle: current.lifecycle,
+            isolation: current.isolation,
+            quarantine_reason: current.quarantine_reason.as_deref(),
+            expected_revision: activated.revision,
+        })?;
+        state.sessions.refresh_extension_runtimes().await?;
+        return Err(ApiError::BadRequest(
+            "extension activation failed; the previous selection was restored".into(),
+        ));
+    }
     record_extension_admin(
         &state,
         auth.principal_id,
@@ -3646,8 +3663,25 @@ async fn rollback_extension(
     let auth = require_instance_admin(&state, auth.as_ref().map(|Extension(auth)| auth))?;
     let id = extension_id(&publisher, &name)?;
     let metadata = metadata_store_cloned(&state)?;
+    let current = metadata.extension_selection(id.as_str())?;
     metadata.rollback_extension_selection(id.as_str(), request.expected_revision)?;
     state.sessions.refresh_extension_runtimes().await?;
+    let activated = metadata.extension_selection(id.as_str())?;
+    if activated.lifecycle == sift_protocol::ExtensionLifecycleState::Quarantined {
+        metadata.update_extension_selection(sift_metadata::UpdateExtensionSelection {
+            extension_id: id.as_str(),
+            selected_archive_sha256: Some(&current.selected_archive_sha256),
+            enabled: current.enabled,
+            lifecycle: current.lifecycle,
+            isolation: current.isolation,
+            quarantine_reason: current.quarantine_reason.as_deref(),
+            expected_revision: activated.revision,
+        })?;
+        state.sessions.refresh_extension_runtimes().await?;
+        return Err(ApiError::BadRequest(
+            "extension rollback candidate failed; the active selection was restored".into(),
+        ));
+    }
     record_extension_admin(
         &state,
         auth.principal_id,
@@ -4700,12 +4734,7 @@ async fn upsert_metadata_connection(
     };
     let registered = state.sessions.registry().get_provider(&req.provider_id)?;
     let descriptor = registered.provider.descriptor();
-    let semantic_engine = registered.provider.legacy_engine().ok_or_else(|| {
-        ApiError::BadRequest(format!(
-            "provider `{}` uses a dialect not supported by the Phase I SQL policy",
-            req.provider_id
-        ))
-    })?;
+    let semantic_engine = registered.provider.legacy_engine();
     let validator = jsonschema::draft202012::new(&descriptor.configuration_schema)
         .map_err(|error| ApiError::Internal(error.to_string()))?;
     if let Err(error) = validator.validate(&req.configuration) {

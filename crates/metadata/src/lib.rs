@@ -2459,7 +2459,8 @@ impl MetadataStore {
         let mut stmt = conn.prepare(
             "SELECT id, tenant_id, name, engine, spec_json, credential_mode,
                     shared_secret_handle, tags_json, created_by, created_at, updated_at,
-                    policy_json, policy_revision, provider_id, configuration_json
+                    policy_json, policy_revision, provider_id, configuration_json,
+                    semantic_engine
              FROM connection_profile
              WHERE tenant_id = ?1
              ORDER BY name",
@@ -2727,13 +2728,15 @@ impl MetadataStore {
             let write_result = tx.execute(
                 "INSERT INTO connection_profile
                  (tenant_id, name, engine, spec_json, credential_mode, shared_secret_handle,
-                  tags_json, created_by, created_at, updated_at, provider_id, configuration_json)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?9, ?10, ?4)
+                  tags_json, created_by, created_at, updated_at, provider_id, configuration_json,
+                  semantic_engine)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?9, ?10, ?4, ?11)
                  ON CONFLICT(tenant_id, name) DO UPDATE SET
                     engine = excluded.engine,
                     spec_json = excluded.spec_json,
                     provider_id = excluded.provider_id,
                     configuration_json = excluded.configuration_json,
+                    semantic_engine = excluded.semantic_engine,
                     credential_mode = excluded.credential_mode,
                     shared_secret_handle = CASE
                         WHEN excluded.credential_mode = 'shared'
@@ -2745,7 +2748,9 @@ impl MetadataStore {
                 params![
                     tenant.0,
                     input.name,
-                    input.semantic_engine.as_str(),
+                    input
+                        .semantic_engine
+                        .map_or("postgres", sift_protocol::Engine::as_str),
                     configuration_json,
                     input.credential_mode.as_str(),
                     db_shared_secret_handle.as_deref(),
@@ -2753,6 +2758,7 @@ impl MetadataStore {
                     actor.0,
                     now,
                     input.provider_id.as_str(),
+                    input.semantic_engine.map(sift_protocol::Engine::as_str),
                 ],
             );
             if let Err(error) = write_result {
@@ -4252,7 +4258,8 @@ fn connection_profile_by_id_locked(
     conn.query_row(
         "SELECT id, tenant_id, name, engine, spec_json, credential_mode,
                     shared_secret_handle, tags_json, created_by, created_at, updated_at,
-                    policy_json, policy_revision, provider_id, configuration_json
+                    policy_json, policy_revision, provider_id, configuration_json,
+                    semantic_engine
              FROM connection_profile WHERE id = ?1",
         params![id.0],
         connection_profile_from_row,
@@ -4595,9 +4602,9 @@ fn api_token_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ApiTokenRow> 
 }
 
 fn connection_profile_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ConnectionProfile> {
-    let engine: String = row.get(3)?;
     let provider_id: String = row.get(13)?;
     let configuration_json: String = row.get(14)?;
+    let semantic_engine: Option<String> = row.get(15)?;
     let credential_mode: String = row.get(5)?;
     let tags_json: String = row.get(7)?;
     let policy_json: String = row.get(11)?;
@@ -4613,7 +4620,9 @@ fn connection_profile_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Conn
         provider_id: sift_protocol::ProviderId::new(provider_id)
             .map_err(|error| sql_message_error(error.to_string()))?,
         configuration: serde_json::from_str(&configuration_json).map_err(sql_conversion_error)?,
-        semantic_engine: engine.parse().map_err(sql_message_error)?,
+        semantic_engine: semantic_engine
+            .map(|value| value.parse().map_err(sql_message_error))
+            .transpose()?,
         credential_mode: parse_credential_mode_sql(credential_mode)?,
         shared_secret_handle: row.get(6)?,
         tags: serde_json::from_str(&tags_json).map_err(sql_conversion_error)?,
@@ -6259,7 +6268,7 @@ mod tests {
                     name: "local pg".to_string(),
                     provider_id: Engine::Postgres.provider_id(),
                     configuration: serde_json::to_value(spec(None)).unwrap(),
-                    semantic_engine: Engine::Postgres,
+                    semantic_engine: Some(Engine::Postgres),
                     credentials: Some(serde_json::json!({"password": "secret"})),
                     credential_mode: CredentialMode::Shared,
                     tags: vec!["dev".to_string()],
@@ -6294,6 +6303,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn provider_neutral_profile_round_trips_without_a_legacy_engine() {
+        let store = store();
+        store.bootstrap_local("local user").unwrap();
+        let provider_id = sift_protocol::ProviderId::new("acme/database").unwrap();
+
+        let profile = store
+            .upsert_connection_profile(
+                TenantId(1),
+                PrincipalId(1),
+                NewConnectionProfile {
+                    name: "external".into(),
+                    provider_id: provider_id.clone(),
+                    configuration: serde_json::json!({"endpoint": "fixture"}),
+                    semantic_engine: None,
+                    credentials: None,
+                    credential_mode: CredentialMode::PerUser,
+                    tags: Vec::new(),
+                },
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(profile.provider_id, provider_id);
+        assert_eq!(profile.semantic_engine, None);
+        assert_eq!(
+            store
+                .get_connection_profile(TenantId(1), profile.id)
+                .unwrap()
+                .semantic_engine,
+            None
+        );
+    }
+
+    #[tokio::test]
     async fn broker_profile_is_rejected_before_persistence() {
         let store = store();
         store.bootstrap_local("local user").unwrap();
@@ -6305,7 +6348,7 @@ mod tests {
                     name: "future broker".into(),
                     provider_id: Engine::Postgres.provider_id(),
                     configuration: serde_json::to_value(spec(None)).unwrap(),
-                    semantic_engine: Engine::Postgres,
+                    semantic_engine: Some(Engine::Postgres),
                     credentials: Some(serde_json::json!({"password": "must-not-be-stored"})),
                     credential_mode: CredentialMode::Broker,
                     tags: vec![],
@@ -6330,7 +6373,7 @@ mod tests {
             name: name.into(),
             provider_id: Engine::Postgres.provider_id(),
             configuration: serde_json::to_value(spec(None)).unwrap(),
-            semantic_engine: Engine::Postgres,
+            semantic_engine: Some(Engine::Postgres),
             credentials: None,
             credential_mode: CredentialMode::PerUser,
             tags: Vec::new(),
@@ -6383,7 +6426,7 @@ mod tests {
             name: "admin only".to_string(),
             provider_id: Engine::Postgres.provider_id(),
             configuration: serde_json::to_value(spec(None)).unwrap(),
-            semantic_engine: Engine::Postgres,
+            semantic_engine: Some(Engine::Postgres),
             credentials: None,
             credential_mode: CredentialMode::PerUser,
             tags: Vec::new(),
@@ -6428,7 +6471,7 @@ mod tests {
                     name: "policy pg".to_string(),
                     provider_id: Engine::Postgres.provider_id(),
                     configuration: serde_json::to_value(spec(None)).unwrap(),
-                    semantic_engine: Engine::Postgres,
+                    semantic_engine: Some(Engine::Postgres),
                     credentials: None,
                     credential_mode: CredentialMode::Shared,
                     tags: Vec::new(),
@@ -6540,7 +6583,7 @@ mod tests {
                     name: "local pg".to_string(),
                     provider_id: Engine::Postgres.provider_id(),
                     configuration: serde_json::to_value(spec(None)).unwrap(),
-                    semantic_engine: Engine::Postgres,
+                    semantic_engine: Some(Engine::Postgres),
                     credentials: Some(serde_json::json!({"password": "first-secret"})),
                     credential_mode: CredentialMode::Shared,
                     tags: Vec::new(),
@@ -6558,7 +6601,7 @@ mod tests {
                     name: "local pg".to_string(),
                     provider_id: Engine::Postgres.provider_id(),
                     configuration: serde_json::to_value(spec(None)).unwrap(),
-                    semantic_engine: Engine::Postgres,
+                    semantic_engine: Some(Engine::Postgres),
                     credentials: Some(serde_json::json!({"password": "second-secret"})),
                     credential_mode: CredentialMode::Shared,
                     tags: Vec::new(),
@@ -6591,7 +6634,7 @@ mod tests {
                     name: "local pg".to_string(),
                     provider_id: Engine::Postgres.provider_id(),
                     configuration: serde_json::to_value(spec(None)).unwrap(),
-                    semantic_engine: Engine::Postgres,
+                    semantic_engine: Some(Engine::Postgres),
                     credentials: None,
                     credential_mode: CredentialMode::PerUser,
                     tags: Vec::new(),
@@ -6629,7 +6672,7 @@ mod tests {
                     name: "shared pg".to_string(),
                     provider_id: Engine::Postgres.provider_id(),
                     configuration: serde_json::to_value(spec(None)).unwrap(),
-                    semantic_engine: Engine::Postgres,
+                    semantic_engine: Some(Engine::Postgres),
                     credentials: None,
                     credential_mode: CredentialMode::Shared,
                     tags: Vec::new(),
@@ -6665,7 +6708,7 @@ mod tests {
                     name: "per-user pg".to_string(),
                     provider_id: Engine::Postgres.provider_id(),
                     configuration: serde_json::to_value(spec(None)).unwrap(),
-                    semantic_engine: Engine::Postgres,
+                    semantic_engine: Some(Engine::Postgres),
                     credentials: None,
                     credential_mode: CredentialMode::PerUser,
                     tags: Vec::new(),
@@ -6833,7 +6876,7 @@ mod tests {
                     name: "pg".to_string(),
                     provider_id: Engine::Postgres.provider_id(),
                     configuration: serde_json::to_value(spec(None)).unwrap(),
-                    semantic_engine: Engine::Postgres,
+                    semantic_engine: Some(Engine::Postgres),
                     credentials: None,
                     credential_mode: CredentialMode::Shared,
                     tags: Vec::new(),
@@ -6890,7 +6933,7 @@ mod tests {
                     name: "pg".to_string(),
                     provider_id: Engine::Postgres.provider_id(),
                     configuration: serde_json::to_value(spec(None)).unwrap(),
-                    semantic_engine: Engine::Postgres,
+                    semantic_engine: Some(Engine::Postgres),
                     credentials: None,
                     credential_mode: CredentialMode::Shared,
                     tags: Vec::new(),
@@ -6939,7 +6982,7 @@ mod tests {
                     name: "fp".to_string(),
                     provider_id: Engine::Postgres.provider_id(),
                     configuration: serde_json::to_value(spec(None)).unwrap(),
-                    semantic_engine: Engine::Postgres,
+                    semantic_engine: Some(Engine::Postgres),
                     credentials: None,
                     credential_mode: CredentialMode::Shared,
                     tags: Vec::new(),
@@ -7111,7 +7154,7 @@ mod tests {
                     name: "foreign pg".to_string(),
                     provider_id: Engine::Postgres.provider_id(),
                     configuration: serde_json::to_value(spec(None)).unwrap(),
-                    semantic_engine: Engine::Postgres,
+                    semantic_engine: Some(Engine::Postgres),
                     credentials: None,
                     credential_mode: CredentialMode::PerUser,
                     tags: Vec::new(),

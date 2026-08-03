@@ -35,6 +35,12 @@ Provider quality is not supplied by an extension:
 | `ide_capable` | Deep-schema and declared IDE corpus passes. |
 | `sift_certified` | Sift-maintained fixtures, release matrix, performance budget, signed provenance, and security review. |
 
+An external provider has no quality label until the corresponding host-owned
+conformance evidence exists. Installing a package or completing one process
+handshake does not by itself award `compatible`. `available` is live runtime
+state: built-ins are immediately available, while a lazy external provider
+becomes available after its first successful supervised handshake.
+
 The bundled `sift/postgres` and `sift/sql-server` providers are
 `sift_certified`. Phase I's external `acme/conformance` executable is a test
 fixture, not a supported production database provider.
@@ -73,6 +79,20 @@ credit, ordered frames, heartbeats, bounded/redacted diagnostics, restart
 backoff, and quarantine. A crash or protocol violation kills that generation,
 releases pending unary and stream consumers, and does not affect server
 readiness or unrelated providers.
+
+Hydration and eager-start failures are isolated per extension. A package with
+no artifact for the current platform, an invalid runtime descriptor, or a
+failed eager generation is unavailable without blocking server readiness or
+removing healthy providers. Static hydration failures are persisted as a
+quarantined selection and exposed through extension diagnostics.
+
+`driver.core@1` providers may use any declared dialect id for generic
+connect/ping/query/page/close behavior. SQL-semantic features remain available
+only when both their capability family and a host-supported semantic dialect
+are present. Restricted connection policies fail closed when the host cannot
+classify the provider's dialect; unrestricted profiles may use provider-native
+SQL. Contextual operation discovery uses the real provider id and the same
+capability checks as dispatch.
 
 Commands and governed tools pass through central authorization, schema
 validation, classification, timeout/result limits, one-use approvals, and

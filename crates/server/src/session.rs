@@ -162,7 +162,7 @@ pub struct RoomConnProvenance {
     pub tenant: sift_metadata::TenantId,
     pub profile_id: sift_metadata::ConnectionProfileId,
     pub provider_id: sift_protocol::ProviderId,
-    pub engine: Engine,
+    pub engine: Option<Engine>,
     pub policy_revision: u64,
 }
 
@@ -413,13 +413,36 @@ impl SessionStore {
             .unwrap()
             .clone()
             .ok_or(ApiError::MetadataUnavailable)?;
-        let runtimes = crate::extension_runtime::installed_extension_runtimes(
+        let mut runtimes = crate::extension_runtime::installed_extension_runtimes(
             &packages,
             &metadata,
             self.inner.extension_generation_limiter.clone(),
         )?;
+        let eager_failures = runtimes.start_eager().await;
+        if !eager_failures.is_empty() {
+            let mut seen = std::collections::HashSet::new();
+            for (extension_id, error) in eager_failures {
+                if !seen.insert(extension_id.clone()) {
+                    continue;
+                }
+                let current = metadata.extension_selection(extension_id.as_str())?;
+                metadata.update_extension_selection(sift_metadata::UpdateExtensionSelection {
+                    extension_id: extension_id.as_str(),
+                    selected_archive_sha256: Some(&current.selected_archive_sha256),
+                    enabled: true,
+                    lifecycle: sift_protocol::ExtensionLifecycleState::Quarantined,
+                    isolation: current.isolation,
+                    quarantine_reason: Some(&error),
+                    expected_revision: current.revision,
+                })?;
+            }
+            runtimes = crate::extension_runtime::installed_extension_runtimes(
+                &packages,
+                &metadata,
+                self.inner.extension_generation_limiter.clone(),
+            )?;
+        }
         let monitor = runtimes.monitor.clone();
-        runtimes.start_eager().await?;
         if let Some(tools) = self.tool_registry() {
             tools
                 .dispatcher()
@@ -522,6 +545,7 @@ impl SessionStore {
         objects: &[&sift_protocol::ObjectPath],
     ) -> ApiResult<ConnectionEntryClone> {
         let entry = self.get_conn_entry(session_id, conn_id)?;
+        entry.driver.require_operation(operation)?;
         let ConnectionProvenance::Managed {
             principal_id,
             tenant_id,
@@ -569,7 +593,7 @@ impl SessionStore {
             .map_err(|denial| ApiError::Forbidden(denial.public_reason().into()))?;
         crate::sql_policy::enforce(
             &profile.policy,
-            entry.driver.engine(),
+            entry.driver.semantic_engine(),
             operation,
             sql,
             objects,
@@ -1069,11 +1093,8 @@ impl SessionStore {
     ) -> ApiResult<ConnectionInfo> {
         let registered = self.inner.registry.get_provider(&provider_id)?;
         let runtime = RuntimeDriver::from_registered(registered);
-        let engine = runtime.semantic_engine().ok_or_else(|| {
-            ApiError::BadRequest(format!(
-                "provider `{provider_id}` uses a dialect not supported by the Phase I SQL policy"
-            ))
-        })?;
+        runtime.require_capability("driver.core@1")?;
+        let engine = runtime.semantic_engine();
         self.open_connection_with_provenance(
             session_id,
             engine,
@@ -1133,7 +1154,7 @@ impl SessionStore {
     async fn open_connection_with_provenance(
         &self,
         session_id: SessionId,
-        engine: Engine,
+        engine: Option<Engine>,
         configuration: serde_json::Value,
         credentials: std::collections::HashMap<String, Vec<u8>>,
         provenance: ConnectionProvenance,
@@ -1193,7 +1214,13 @@ impl SessionStore {
                 (),
             );
         }
-        tracing::info!(session_id = %session_id, conn_id = %info.id, %engine, "connection opened");
+        tracing::info!(
+            session_id = %session_id,
+            conn_id = %info.id,
+            semantic_engine = ?engine,
+            provider_id = %info.provider_id,
+            "connection opened"
+        );
         Ok(info)
     }
 
@@ -1580,13 +1607,18 @@ impl SessionStore {
             sift_protocol::SchemaDepth::Shallow => Vec::new(),
             sift_protocol::SchemaDepth::Deep { object } => vec![object],
         };
-        self.authorize_connection_operation(
+        let entry = self.authorize_connection_operation(
             session_id,
             conn_id,
             sift_protocol::OperationKind::RefreshSchema,
             None,
             &objects,
         )?;
+        let capability = match scope.depth {
+            sift_protocol::SchemaDepth::Shallow => "driver.schema.shallow@1",
+            sift_protocol::SchemaDepth::Deep { .. } => "driver.schema.deep@1",
+        };
+        entry.driver.require_capability(capability)?;
         let cached = self.schema_cached(session_id, conn_id, scope).await?;
         Ok((*cached.snapshot).clone())
     }
@@ -2115,7 +2147,7 @@ impl SessionStore {
         // path; this is idempotent.
         self.inner.cursors.remove(cursor);
         self.inner.cursor_resource_guards.remove(&cursor);
-        if entry.driver.engine() == Engine::SqlServer {
+        if entry.driver.semantic_engine() == Some(Engine::SqlServer) {
             self.with_session(&session_id, |s| s.connections.remove(&conn_id))?;
             // Also invoke driver.close so the driver-level socket/FD is
             // returned promptly instead of relying on ConnHandle::Drop.
@@ -3275,7 +3307,7 @@ impl Session {
 /// One open connection within a session.
 pub struct ConnectionEntry {
     pub id: ConnectionId,
-    pub engine: Engine,
+    pub engine: Option<Engine>,
     pub handle: RuntimeConnectionHandle,
     pub driver: RuntimeDriver,
     pub info: ConnectionInfo,

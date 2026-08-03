@@ -20,7 +20,7 @@ use sift_plugin_host::{
 };
 use sift_protocol::{
     Code, DriverError, Engine, ExecuteRequest, ExtensionOperation, GovernedToolDescriptor,
-    ProviderCapability, ProviderDescriptor, ProviderQuality, ProviderRef, SchemaScope, TxMode,
+    ProviderCapability, ProviderDescriptor, ProviderRef, SchemaScope, TxMode,
 };
 use tokio::sync::Mutex;
 
@@ -72,6 +72,7 @@ struct ExtensionProcessRuntime {
     metadata: MetadataStore,
     generation_limiter: Arc<GenerationLimiter>,
     accepting: AtomicBool,
+    ready_generations: Arc<AtomicU64>,
     processes: Mutex<HashMap<Option<i64>, TenantProcessSlotRef>>,
 }
 
@@ -104,30 +105,49 @@ pub struct InstalledExtensionRuntimes {
 #[derive(Clone, Default)]
 pub struct ExtensionRuntimeMonitor {
     runtimes: Arc<HashMap<ExtensionId, Arc<ExtensionProcessRuntime>>>,
+    hydration_failures: Arc<HashMap<ExtensionId, String>>,
 }
 
 impl InstalledExtensionRuntimes {
-    pub async fn start_eager(&self) -> Result<(), DriverError> {
+    pub async fn start_eager(&self) -> Vec<(ExtensionId, String)> {
         let mut starts = tokio::task::JoinSet::new();
+        let mut failures = Vec::new();
         for (runtime, tenant_id) in &self.eager {
             let runtime = runtime.clone();
             let tenant_id = *tenant_id;
-            starts.spawn(async move { runtime.process(Some(tenant_id)).await.map(|_| ()) });
+            starts.spawn(async move {
+                let extension_id = runtime.extension_id.clone();
+                let result = runtime.process(Some(tenant_id)).await.map(|_| ());
+                (extension_id, tenant_id, result)
+            });
         }
         while let Some(result) = starts.join_next().await {
-            result.map_err(|error| {
-                DriverError::new(
-                    Code::DriverInternal,
-                    format!("eager extension start task failed: {error}"),
-                )
-            })??;
+            match result {
+                Ok((extension_id, tenant_id, Err(error))) => {
+                    tracing::warn!(
+                        %extension_id,
+                        tenant_id,
+                        %error,
+                        "eager extension generation failed; continuing without it"
+                    );
+                    failures.push((extension_id, error.to_string()));
+                }
+                Err(error) => tracing::warn!(
+                    %error,
+                    "eager extension start task failed; continuing server startup"
+                ),
+                Ok((_, _, Ok(()))) => {}
+            }
         }
-        Ok(())
+        failures
     }
 }
 
 impl ExtensionRuntimeMonitor {
     pub async fn diagnostics(&self, extension_id: &ExtensionId) -> (Option<String>, Vec<String>) {
+        if let Some(error) = self.hydration_failures.get(extension_id) {
+            return (Some("unavailable".into()), vec![error.clone()]);
+        }
         let Some(runtime) = self.runtimes.get(extension_id) else {
             return (None, Vec::new());
         };
@@ -293,6 +313,19 @@ impl ExtensionProcessRuntime {
             process: process.clone(),
             _permit: permit,
         }));
+        self.ready_generations.fetch_add(1, Ordering::AcqRel);
+        let ready_generations = self.ready_generations.clone();
+        let observed = process.clone();
+        let poll_interval = self.limits.heartbeat_interval;
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(poll_interval).await;
+                if observed.health().await != sift_plugin_host::GenerationHealth::Ready {
+                    ready_generations.fetch_sub(1, Ordering::AcqRel);
+                    break;
+                }
+            }
+        });
         Ok(process)
     }
 }
@@ -358,6 +391,10 @@ impl TenantScopedRpcProvider {
 impl DatabaseProvider for TenantScopedRpcProvider {
     fn descriptor(&self) -> &ProviderDescriptor {
         &self.descriptor
+    }
+
+    fn available(&self) -> bool {
+        self.runtime.ready_generations.load(Ordering::Acquire) > 0
     }
 
     fn legacy_engine(&self) -> Option<Engine> {
@@ -471,167 +508,69 @@ pub fn installed_extension_runtimes(
     let mut tools = Vec::new();
     let mut eager = Vec::new();
     let mut monitored = HashMap::new();
+    let mut hydration_failures = HashMap::new();
+    let mut provider_ids = std::collections::BTreeSet::new();
     for package in metadata
         .selected_extension_packages()
         .map_err(metadata_error)?
     {
-        if !package.selection.enabled {
-            continue;
-        }
-        let manifest: ExtensionManifest =
-            serde_json::from_str(&package.manifest_json).map_err(protocol_error)?;
-        if manifest.artifacts.is_empty() {
-            continue;
-        }
-        let root = registry
-            .package_root(&package.selection.selected_archive_sha256)
-            .map_err(|error| DriverError::new(Code::DriverInternal, error.to_string()))?;
-        let target = format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH);
-        let artifact = manifest
-            .artifacts
-            .iter()
-            .find(|artifact| artifact.target == target)
-            .ok_or_else(|| {
-                DriverError::new(
-                    Code::UnsupportedForEngine,
-                    format!("extension {} has no artifact for {target}", manifest.id),
-                )
-            })?;
-        let executable = root.join(&artifact.path);
-        let expected_contributions = manifest_contribution_ids(&manifest)?;
-        let granted_capabilities = metadata
-            .extension_grants(manifest.id.as_str())
-            .map_err(metadata_error)?;
-        let limits = SupervisorLimits {
-            handshake_timeout: Duration::from_millis(u64::from(
-                manifest.lifecycle.readiness_deadline_ms,
-            )),
-            ..SupervisorLimits::default()
-        };
-        let runtime = Arc::new(ExtensionProcessRuntime {
-            extension_id: manifest.id.clone(),
-            extension_version: package.version.clone(),
-            manifest_sha256: package.manifest_sha256.clone(),
-            executable,
-            working_directory: root,
-            expected_contributions,
-            granted_capabilities,
-            limits,
-            metadata: metadata.clone(),
-            generation_limiter: generation_limiter.clone(),
-            accepting: AtomicBool::new(true),
-            processes: Mutex::new(HashMap::new()),
-        });
-        monitored.insert(manifest.id.clone(), runtime.clone());
-        for contribution in &manifest.contributions.database_provider {
-            let contribution_id = ContributionId::new(format!(
-                "{}/database_provider/{}",
-                manifest.id, contribution.id
-            ))
-            .map_err(|error| protocol_error(error.to_string()))?;
-            let configuration_schema =
-                load_schema(registry, &package, &contribution.config_schema)?;
-            let credential_schema =
-                load_schema(registry, &package, &contribution.credential_schema)?;
-            let descriptor = ProviderDescriptor {
-                provider: ProviderRef {
-                    provider_id: contribution.provider_id.clone(),
-                    dialect_id: contribution.dialect_id.clone(),
-                    provider_version: package.version.clone(),
-                },
-                display_name: manifest.name.clone(),
-                configuration_schema,
-                credential_schema,
-                configuration_schema_version: 1,
-                capabilities: contribution
-                    .capabilities
-                    .iter()
-                    .map(|id| ProviderCapability {
-                        id: id.clone(),
-                        limits: BTreeMap::new(),
-                    })
-                    .collect(),
-                quality: Some(ProviderQuality::Compatible),
-                available: true,
-            };
-            providers.push(Arc::new(TenantScopedRpcProvider {
-                descriptor,
-                contribution_id,
-                runtime: runtime.clone(),
-            }) as Arc<dyn DatabaseProvider>);
-        }
-        for (kind, contribution) in manifest
-            .contributions
-            .command
-            .iter()
-            .map(|contribution| ("command", contribution))
-            .chain(
-                manifest
-                    .contributions
-                    .governed_tool
-                    .iter()
-                    .map(|contribution| ("governed_tool", contribution)),
-            )
+        if !package.selection.enabled
+            || package.selection.lifecycle == sift_protocol::ExtensionLifecycleState::Quarantined
         {
-            let contribution_id =
-                ContributionId::new(format!("{}/{kind}/{}", manifest.id, contribution.id))
-                    .map_err(|error| protocol_error(error.to_string()))?;
-            let input_schema = load_schema(registry, &package, &contribution.input_schema)?;
-            let output_schema = load_schema(registry, &package, &contribution.output_schema)?;
-            let operation = ExtensionOperation {
-                extension_id: manifest.id.clone(),
-                contribution_id: contribution_id.clone(),
-                action: contribution.action.clone(),
-                classification: contribution.classification,
-                target_kind: target_kind(&contribution.required_context)?,
-                target_id: None,
-                sanitized_arguments: BTreeMap::new(),
-            };
-            actions.push(ActionRegistration {
-                extension_id: manifest.id.clone(),
-                contribution_id: contribution_id.clone(),
-                action: contribution.action.clone(),
-                classification: contribution.classification,
-                input_schema: input_schema.clone(),
-                output_schema: output_schema.clone(),
-                timeout: Duration::from_millis(u64::from(contribution.timeout_ms)),
-                max_result_bytes: contribution.max_result_bytes,
-                invoker: Arc::new(RuntimeActionInvoker {
-                    runtime: runtime.clone(),
-                }),
-            });
-            if kind == "governed_tool" {
-                tools.push(GovernedToolDescriptor {
-                    id: governed_tool_id(&contribution_id, &contribution.action),
-                    title: contribution.id.to_string(),
-                    description: manifest.description.clone(),
-                    operation,
-                    input_schema,
-                    output_schema,
-                    required_context: contribution.required_context.clone(),
-                    mcp_exposable: contribution.mcp_exposable,
-                    schedulable: contribution.schedulable,
-                    interactive: contribution.interactive,
-                });
-            }
+            continue;
         }
-        if manifest.lifecycle.mode == LifecycleMode::Eager {
-            for tenant_id in metadata
-                .extension_allowed_tenants(manifest.id.as_str())
-                .map_err(metadata_error)?
-            {
-                eager.push((runtime.clone(), tenant_id));
+        let extension_id = match ExtensionId::new(package.selection.extension_id.clone()) {
+            Ok(id) => id,
+            Err(error) => {
+                tracing::warn!(
+                    extension_id = %package.selection.extension_id,
+                    %error,
+                    "invalid selected extension identity; skipping extension"
+                );
+                continue;
             }
+        };
+        let parts = match build_extension_runtime(
+            registry,
+            metadata,
+            generation_limiter.clone(),
+            &package,
+        ) {
+            Ok(parts) => parts,
+            Err(error) => {
+                tracing::warn!(%extension_id, %error, "extension hydration failed; skipping extension");
+                quarantine_hydration_failure(metadata, &package, &error);
+                hydration_failures.insert(extension_id, error.to_string());
+                continue;
+            }
+        };
+        if let Some(provider_id) = parts.providers.iter().find_map(|provider| {
+            let provider_id = &provider.descriptor().provider.provider_id;
+            (provider_id.is_first_party() || provider_ids.contains(provider_id))
+                .then(|| provider_id.clone())
+        }) {
+            let error = format!("extension provider id `{provider_id}` is reserved or duplicated");
+            tracing::warn!(%extension_id, %error, "extension hydration failed; skipping extension");
+            quarantine_hydration_failure(
+                metadata,
+                &package,
+                &DriverError::new(Code::AuthFailed, error.clone()),
+            );
+            hydration_failures.insert(extension_id, error);
+            continue;
         }
-    }
-    let mut provider_ids = std::collections::BTreeSet::new();
-    for provider in &providers {
-        let provider_id = &provider.descriptor().provider.provider_id;
-        if provider_id.is_first_party() || !provider_ids.insert(provider_id.clone()) {
-            return Err(DriverError::new(
-                Code::AuthFailed,
-                format!("extension provider id `{provider_id}` is reserved or duplicated"),
-            ));
+        provider_ids.extend(
+            parts
+                .providers
+                .iter()
+                .map(|provider| provider.descriptor().provider.provider_id.clone()),
+        );
+        providers.extend(parts.providers);
+        actions.extend(parts.actions);
+        tools.extend(parts.tools);
+        eager.extend(parts.eager);
+        if let Some(runtime) = parts.runtime {
+            monitored.insert(extension_id, runtime);
         }
     }
     Ok(InstalledExtensionRuntimes {
@@ -641,7 +580,209 @@ pub fn installed_extension_runtimes(
         eager,
         monitor: ExtensionRuntimeMonitor {
             runtimes: Arc::new(monitored),
+            hydration_failures: Arc::new(hydration_failures),
         },
+    })
+}
+
+fn quarantine_hydration_failure(
+    metadata: &MetadataStore,
+    package: &SelectedExtensionPackage,
+    error: &DriverError,
+) {
+    let message = error.to_string();
+    if let Err(update_error) =
+        metadata.update_extension_selection(sift_metadata::UpdateExtensionSelection {
+            extension_id: &package.selection.extension_id,
+            selected_archive_sha256: Some(&package.selection.selected_archive_sha256),
+            enabled: true,
+            lifecycle: sift_protocol::ExtensionLifecycleState::Quarantined,
+            isolation: package.selection.isolation,
+            quarantine_reason: Some(&message),
+            expected_revision: package.selection.revision,
+        })
+    {
+        tracing::warn!(
+            extension_id = %package.selection.extension_id,
+            %update_error,
+            "failed to persist extension hydration quarantine"
+        );
+    }
+}
+
+struct ExtensionRuntimeParts {
+    providers: Vec<Arc<dyn DatabaseProvider>>,
+    actions: Vec<ActionRegistration>,
+    tools: Vec<GovernedToolDescriptor>,
+    eager: Vec<(Arc<ExtensionProcessRuntime>, i64)>,
+    runtime: Option<Arc<ExtensionProcessRuntime>>,
+}
+
+fn build_extension_runtime(
+    registry: &ExtensionPackageRegistry,
+    metadata: &MetadataStore,
+    generation_limiter: Arc<GenerationLimiter>,
+    package: &SelectedExtensionPackage,
+) -> Result<ExtensionRuntimeParts, DriverError> {
+    let mut providers = Vec::new();
+    let mut actions = Vec::new();
+    let mut tools = Vec::new();
+    let mut eager = Vec::new();
+    let manifest: ExtensionManifest =
+        serde_json::from_str(&package.manifest_json).map_err(protocol_error)?;
+    if manifest.artifacts.is_empty() {
+        return Ok(ExtensionRuntimeParts {
+            providers,
+            actions,
+            tools,
+            eager,
+            runtime: None,
+        });
+    }
+    let root = registry
+        .package_root(&package.selection.selected_archive_sha256)
+        .map_err(|error| DriverError::new(Code::DriverInternal, error.to_string()))?;
+    let target = format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH);
+    let artifact = manifest
+        .artifacts
+        .iter()
+        .find(|artifact| artifact.target == target)
+        .ok_or_else(|| {
+            DriverError::new(
+                Code::UnsupportedForEngine,
+                format!("extension {} has no artifact for {target}", manifest.id),
+            )
+        })?;
+    let executable = root.join(&artifact.path);
+    let expected_contributions = manifest_contribution_ids(&manifest)?;
+    let granted_capabilities = metadata
+        .extension_grants(manifest.id.as_str())
+        .map_err(metadata_error)?;
+    let limits = SupervisorLimits {
+        handshake_timeout: Duration::from_millis(u64::from(
+            manifest.lifecycle.readiness_deadline_ms,
+        )),
+        ..SupervisorLimits::default()
+    };
+    let runtime = Arc::new(ExtensionProcessRuntime {
+        extension_id: manifest.id.clone(),
+        extension_version: package.version.clone(),
+        manifest_sha256: package.manifest_sha256.clone(),
+        executable,
+        working_directory: root,
+        expected_contributions,
+        granted_capabilities,
+        limits,
+        metadata: metadata.clone(),
+        generation_limiter: generation_limiter.clone(),
+        accepting: AtomicBool::new(true),
+        ready_generations: Arc::new(AtomicU64::new(0)),
+        processes: Mutex::new(HashMap::new()),
+    });
+    for contribution in &manifest.contributions.database_provider {
+        let contribution_id = ContributionId::new(format!(
+            "{}/database_provider/{}",
+            manifest.id, contribution.id
+        ))
+        .map_err(|error| protocol_error(error.to_string()))?;
+        let configuration_schema = load_schema(registry, package, &contribution.config_schema)?;
+        let credential_schema = load_schema(registry, package, &contribution.credential_schema)?;
+        let descriptor = ProviderDescriptor {
+            provider: ProviderRef {
+                provider_id: contribution.provider_id.clone(),
+                dialect_id: contribution.dialect_id.clone(),
+                provider_version: package.version.clone(),
+            },
+            display_name: manifest.name.clone(),
+            configuration_schema,
+            credential_schema,
+            configuration_schema_version: 1,
+            capabilities: contribution
+                .capabilities
+                .iter()
+                .map(|id| ProviderCapability {
+                    id: id.clone(),
+                    limits: BTreeMap::new(),
+                })
+                .collect(),
+            quality: None,
+            available: false,
+        };
+        providers.push(Arc::new(TenantScopedRpcProvider {
+            descriptor,
+            contribution_id,
+            runtime: runtime.clone(),
+        }) as Arc<dyn DatabaseProvider>);
+    }
+    for (kind, contribution) in manifest
+        .contributions
+        .command
+        .iter()
+        .map(|contribution| ("command", contribution))
+        .chain(
+            manifest
+                .contributions
+                .governed_tool
+                .iter()
+                .map(|contribution| ("governed_tool", contribution)),
+        )
+    {
+        let contribution_id =
+            ContributionId::new(format!("{}/{kind}/{}", manifest.id, contribution.id))
+                .map_err(|error| protocol_error(error.to_string()))?;
+        let input_schema = load_schema(registry, package, &contribution.input_schema)?;
+        let output_schema = load_schema(registry, package, &contribution.output_schema)?;
+        let operation = ExtensionOperation {
+            extension_id: manifest.id.clone(),
+            contribution_id: contribution_id.clone(),
+            action: contribution.action.clone(),
+            classification: contribution.classification,
+            target_kind: target_kind(&contribution.required_context)?,
+            target_id: None,
+            sanitized_arguments: BTreeMap::new(),
+        };
+        actions.push(ActionRegistration {
+            extension_id: manifest.id.clone(),
+            contribution_id: contribution_id.clone(),
+            action: contribution.action.clone(),
+            classification: contribution.classification,
+            input_schema: input_schema.clone(),
+            output_schema: output_schema.clone(),
+            timeout: Duration::from_millis(u64::from(contribution.timeout_ms)),
+            max_result_bytes: contribution.max_result_bytes,
+            invoker: Arc::new(RuntimeActionInvoker {
+                runtime: runtime.clone(),
+            }),
+        });
+        if kind == "governed_tool" {
+            tools.push(GovernedToolDescriptor {
+                id: governed_tool_id(&contribution_id, &contribution.action),
+                title: contribution.id.to_string(),
+                description: manifest.description.clone(),
+                operation,
+                input_schema,
+                output_schema,
+                required_context: contribution.required_context.clone(),
+                mcp_exposable: contribution.mcp_exposable,
+                schedulable: contribution.schedulable,
+                interactive: contribution.interactive,
+            });
+        }
+    }
+    if manifest.lifecycle.mode == LifecycleMode::Eager {
+        for tenant_id in metadata
+            .extension_allowed_tenants(manifest.id.as_str())
+            .map_err(metadata_error)?
+        {
+            eager.push((runtime.clone(), tenant_id));
+        }
+    }
+    Ok(ExtensionRuntimeParts {
+        providers,
+        actions,
+        tools,
+        eager,
+        runtime: Some(runtime),
     })
 }
 
@@ -837,6 +978,70 @@ capabilities = ["driver.core@1"]
             })
             .unwrap();
 
+        let broken = directory.path().join("broken-extension");
+        std::fs::create_dir(&broken).unwrap();
+        std::fs::write(broken.join("provider"), b"not started").unwrap();
+        std::fs::write(
+            broken.join("config.json"),
+            br#"{"type":"object","additionalProperties":false}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            broken.join("credentials.json"),
+            br#"{"type":"object","additionalProperties":false}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            broken.join("sift-extension.toml"),
+            format!(
+                r#"schema_version = 1
+id = "acme/broken"
+name = "Broken"
+version = "1.0.0"
+authors = ["Acme"]
+description = "wrong platform fixture"
+license = "MIT"
+repository = "https://example.invalid/acme/broken"
+minimum_sift_version = "0.1.0"
+
+[compatibility]
+public_protocol = {{ minimum = 1, maximum = 1 }}
+extension_rpc = {{ minimum = 1, maximum = 1 }}
+driver_rpc = {{ minimum = 1, maximum = 1 }}
+
+[[artifacts]]
+target = "unsupported-platform"
+path = "provider"
+sha256 = "{}"
+byte_length = 11
+
+[[contributions.database_provider]]
+id = "fixture"
+provider_id = "acme/broken"
+dialect_id = "acme/sql"
+config_schema = "config.json"
+credential_schema = "credentials.json"
+capabilities = ["driver.core@1"]
+"#,
+                "0".repeat(64)
+            ),
+        )
+        .unwrap();
+        let broken_installed = registry
+            .register_development_override(&broken, false, false)
+            .unwrap();
+        metadata
+            .update_extension_selection(UpdateExtensionSelection {
+                extension_id: "acme/broken",
+                selected_archive_sha256: Some(&broken_installed.validated.archive_sha256),
+                enabled: true,
+                lifecycle: ExtensionLifecycleState::Ready,
+                isolation: ExtensionIsolation::ProcessOnly,
+                quarantine_reason: None,
+                expected_revision: 0,
+            })
+            .unwrap();
+
         let runtimes = installed_extension_runtimes(
             &registry,
             &metadata,
@@ -852,6 +1057,8 @@ capabilities = ["driver.core@1"]
                 .as_str(),
             "acme/conformance"
         );
+        assert_eq!(runtimes.providers[0].descriptor().quality, None);
+        assert!(!runtimes.providers[0].available());
         let result = runtimes.providers[0]
             .open(ProviderOpenRequest {
                 configuration: serde_json::json!({}),
@@ -864,5 +1071,14 @@ capabilities = ["driver.core@1"]
             Ok(_) => panic!("tenant without an allowlist entry must be rejected"),
         };
         assert_eq!(error.code, Code::AuthFailed);
+        let broken_id = ExtensionId::new("acme/broken").unwrap();
+        let (health, diagnostics) = runtimes.monitor.diagnostics(&broken_id).await;
+        assert_eq!(health.as_deref(), Some("unavailable"));
+        assert!(diagnostics[0].contains("has no artifact"));
+        let broken_selection = metadata.extension_selection("acme/broken").unwrap();
+        assert_eq!(
+            broken_selection.lifecycle,
+            ExtensionLifecycleState::Quarantined
+        );
     }
 }

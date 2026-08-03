@@ -343,9 +343,9 @@ pub struct ConnectionProfile {
     pub name: String,
     pub provider_id: ProviderId,
     pub configuration: serde_json::Value,
-    #[serde(skip, default = "default_semantic_engine")]
+    #[serde(skip, default)]
     #[schemars(skip)]
-    pub semantic_engine: Engine,
+    pub semantic_engine: Option<Engine>,
     pub credential_mode: CredentialMode,
     #[serde(skip)]
     #[schemars(skip)]
@@ -371,14 +371,10 @@ pub struct NewConnectionProfile {
     pub name: String,
     pub provider_id: ProviderId,
     pub configuration: serde_json::Value,
-    pub semantic_engine: Engine,
+    pub semantic_engine: Option<Engine>,
     pub credentials: Option<serde_json::Value>,
     pub credential_mode: CredentialMode,
     pub tags: Vec<String>,
-}
-
-fn default_semantic_engine() -> Engine {
-    Engine::Postgres
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]

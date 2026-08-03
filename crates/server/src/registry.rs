@@ -28,6 +28,9 @@ static NEXT_EXTERNAL_TX_ID: AtomicU64 = AtomicU64::new(1);
 #[async_trait::async_trait]
 pub trait DatabaseProvider: Send + Sync {
     fn descriptor(&self) -> &ProviderDescriptor;
+    fn available(&self) -> bool {
+        self.descriptor().available
+    }
     fn legacy_engine(&self) -> Option<Engine>;
     fn legacy_driver(&self) -> Option<Arc<dyn Driver>> {
         None
@@ -42,16 +45,33 @@ pub trait DatabaseProvider: Send + Sync {
     ) -> Result<ProviderServerInfo, DriverError>;
     async fn schema(
         &self,
-        connection: &ProviderConnectionHandle,
-        scope: SchemaScope,
-    ) -> Result<DriverSchemaSnapshot, DriverError>;
+        _connection: &ProviderConnectionHandle,
+        _scope: SchemaScope,
+    ) -> Result<DriverSchemaSnapshot, DriverError> {
+        Err(unsupported_provider_method(self.descriptor(), "schema"))
+    }
     async fn begin(
         &self,
-        connection: &ProviderConnectionHandle,
-        mode: TxMode,
-    ) -> Result<ProviderTransactionHandle, DriverError>;
-    async fn commit(&self, transaction: ProviderTransactionHandle) -> Result<(), DriverError>;
-    async fn rollback(&self, transaction: ProviderTransactionHandle) -> Result<(), DriverError>;
+        _connection: &ProviderConnectionHandle,
+        _mode: TxMode,
+    ) -> Result<ProviderTransactionHandle, DriverError> {
+        Err(unsupported_provider_method(
+            self.descriptor(),
+            "transactions",
+        ))
+    }
+    async fn commit(&self, _transaction: ProviderTransactionHandle) -> Result<(), DriverError> {
+        Err(unsupported_provider_method(
+            self.descriptor(),
+            "transactions",
+        ))
+    }
+    async fn rollback(&self, _transaction: ProviderTransactionHandle) -> Result<(), DriverError> {
+        Err(unsupported_provider_method(
+            self.descriptor(),
+            "transactions",
+        ))
+    }
     async fn execute(
         &self,
         connection: &ProviderConnectionHandle,
@@ -59,10 +79,23 @@ pub trait DatabaseProvider: Send + Sync {
     ) -> Result<ProviderResultStream, DriverError>;
     async fn cancel(
         &self,
-        connection: &ProviderConnectionHandle,
-        cursor: sift_protocol::CursorId,
-    ) -> Result<(), DriverError>;
+        _connection: &ProviderConnectionHandle,
+        _cursor: sift_protocol::CursorId,
+    ) -> Result<(), DriverError> {
+        Err(unsupported_provider_method(self.descriptor(), "cancel"))
+    }
     async fn close(&self, connection: ProviderConnectionHandle) -> Result<(), DriverError>;
+}
+
+fn unsupported_provider_method(descriptor: &ProviderDescriptor, method: &str) -> DriverError {
+    DriverError::new(
+        Code::UnsupportedForEngine,
+        format!(
+            "provider `{}` does not support {method}",
+            descriptor.provider.provider_id
+        ),
+    )
+    .with_provider(descriptor.provider.provider_id.clone())
 }
 
 #[derive(Clone)]
@@ -159,7 +192,9 @@ impl BuiltinProviderAdapter {
                     "driver.schema.shallow@1",
                     "driver.schema.deep@1",
                     "driver.cancel@1",
+                    "driver.bulk@1",
                     "driver.notifications@1",
+                    "driver.process-control@1",
                     "driver.explain@1",
                 ],
             ),
@@ -401,7 +436,7 @@ pub struct RegisteredProvider {
 #[derive(Clone)]
 pub enum RuntimeDriver {
     Builtin {
-        provider: ProviderRef,
+        descriptor: ProviderDescriptor,
         driver: Arc<dyn Driver>,
     },
     External(RegisteredProvider),
@@ -431,7 +466,7 @@ impl RuntimeDriver {
     pub fn from_registered(provider: RegisteredProvider) -> Self {
         if let Some(driver) = provider.provider.legacy_driver() {
             Self::Builtin {
-                provider: provider.provider.descriptor().provider.clone(),
+                descriptor: provider.provider.descriptor().clone(),
                 driver,
             }
         } else {
@@ -441,7 +476,7 @@ impl RuntimeDriver {
 
     pub fn provider(&self) -> &ProviderRef {
         match self {
-            Self::Builtin { provider, .. } => provider,
+            Self::Builtin { descriptor, .. } => &descriptor.provider,
             Self::External(provider) => &provider.provider.descriptor().provider,
         }
     }
@@ -456,6 +491,107 @@ impl RuntimeDriver {
                     _ => None,
                 }
             }
+        }
+    }
+
+    pub fn supports(&self, capability: &str) -> bool {
+        self.descriptor()
+            .capabilities
+            .iter()
+            .any(|declared| declared.id == capability)
+    }
+
+    pub fn require_capability(&self, capability: &str) -> Result<(), DriverError> {
+        if self.supports(capability) {
+            Ok(())
+        } else {
+            Err(DriverError::new(
+                Code::UnsupportedForEngine,
+                format!(
+                    "provider `{}` does not declare `{capability}`",
+                    self.provider().provider_id
+                ),
+            )
+            .with_provider(self.provider().provider_id.clone()))
+        }
+    }
+
+    pub fn supports_operation(&self, operation: sift_protocol::OperationKind) -> bool {
+        use sift_protocol::OperationKind;
+        let capability = match operation {
+            OperationKind::PingConnection
+            | OperationKind::ExecuteQuery
+            | OperationKind::ExportQuery
+            | OperationKind::CloseConnection => "driver.core@1",
+            OperationKind::RefreshSchema => {
+                return self.supports("driver.schema.shallow@1")
+                    || self.supports("driver.schema.deep@1");
+            }
+            OperationKind::BeginTransaction
+            | OperationKind::PreviewTransaction
+            | OperationKind::CommitTransaction
+            | OperationKind::RollbackTransaction => "driver.transactions@1",
+            OperationKind::Savepoint
+            | OperationKind::RollbackToSavepoint
+            | OperationKind::ReleaseSavepoint => "driver.savepoints@1",
+            OperationKind::CancelQuery => "driver.cancel@1",
+            OperationKind::BulkInsert | OperationKind::ImportCsv => "driver.bulk@1",
+            OperationKind::Listen => "driver.notifications@1",
+            OperationKind::Explain => "driver.explain@1",
+            OperationKind::ListProcesses | OperationKind::KillProcess => "driver.process-control@1",
+            OperationKind::GenerateDdl
+            | OperationKind::Complete
+            | OperationKind::PreviewEdits
+            | OperationKind::ApplyEdits
+            | OperationKind::SearchSchema
+            | OperationKind::SearchData => {
+                return self.semantic_engine().is_some()
+                    && (self.supports("driver.schema.shallow@1")
+                        || self.supports("driver.schema.deep@1"));
+            }
+            _ => return true,
+        };
+        if matches!(self, Self::External(_))
+            && matches!(
+                operation,
+                OperationKind::Savepoint
+                    | OperationKind::RollbackToSavepoint
+                    | OperationKind::ReleaseSavepoint
+                    | OperationKind::BulkInsert
+                    | OperationKind::ImportCsv
+                    | OperationKind::Listen
+                    | OperationKind::Explain
+                    | OperationKind::ListProcesses
+                    | OperationKind::KillProcess
+            )
+        {
+            return false;
+        }
+        self.supports(capability)
+    }
+
+    pub fn require_operation(
+        &self,
+        operation: sift_protocol::OperationKind,
+    ) -> Result<(), DriverError> {
+        if self.supports_operation(operation) {
+            Ok(())
+        } else {
+            Err(DriverError::new(
+                Code::UnsupportedForEngine,
+                format!(
+                    "provider `{}` does not support operation `{operation:?}`",
+                    self.provider().provider_id
+                ),
+            )
+            .with_provider(self.provider().provider_id.clone()))
+        }
+    }
+
+    pub fn descriptor(&self) -> &ProviderDescriptor {
+        match self {
+            Self::Builtin { descriptor, .. } => descriptor,
+            Self::External(provider) => provider.provider.descriptor(),
         }
     }
 
@@ -934,7 +1070,11 @@ impl ProviderRegistry {
             .load()
             .providers
             .values()
-            .map(|registered| registered.provider.descriptor().clone())
+            .map(|registered| {
+                let mut descriptor = registered.provider.descriptor().clone();
+                descriptor.available = registered.provider.available();
+                descriptor
+            })
             .collect();
         descriptors
             .sort_by(|left, right| left.provider.provider_id.cmp(&right.provider.provider_id));
@@ -1381,14 +1521,17 @@ mod tests {
                 descriptor: ProviderDescriptor {
                     provider: ProviderRef {
                         provider_id: ProviderId::new("acme/external").unwrap(),
-                        dialect_id: DialectId::new("sift/postgresql").unwrap(),
+                        dialect_id: DialectId::new("acme/sql").unwrap(),
                         provider_version: "1.0.0".into(),
                     },
                     display_name: "External fixture".into(),
                     configuration_schema: serde_json::json!({"type": "object"}),
                     credential_schema: serde_json::json!({"type": "object"}),
                     configuration_schema_version: 1,
-                    capabilities: vec![],
+                    capabilities: vec![ProviderCapability {
+                        id: "driver.core@1".into(),
+                        limits: BTreeMap::new(),
+                    }],
                     quality: Some(ProviderQuality::SiftCertified),
                     available: true,
                 },
@@ -1599,7 +1742,7 @@ mod tests {
             .unwrap();
         assert_eq!(result.rows[0].values, vec![Value::Int64(42)]);
 
-        let transaction = store
+        let transaction_error = store
             .begin_transaction(
                 session.id,
                 sift_protocol::BeginTransactionRequest {
@@ -1608,17 +1751,37 @@ mod tests {
                 },
             )
             .await
+            .unwrap_err();
+        assert!(matches!(
+            transaction_error,
+            crate::ApiError::Driver(DriverError {
+                code: Code::UnsupportedForEngine,
+                ..
+            })
+        ));
+        let capabilities = crate::capability::evaluate(
+            &store,
+            &sift_protocol::OperationCapabilityContext {
+                session: Some(session.id),
+                connection: Some(connection.id),
+                ..Default::default()
+            },
+            None,
+        )
+        .unwrap();
+        let execute = capabilities
+            .iter()
+            .find(|item| item.operation == sift_protocol::OperationKind::ExecuteQuery)
             .unwrap();
-        store
-            .commit_transaction(
-                session.id,
-                sift_protocol::EndTransactionRequest {
-                    connection: connection.id,
-                    tx_id: transaction.tx_id,
-                },
-            )
-            .await
-            .unwrap();
+        assert!(execute.available);
+        assert_eq!(execute.provider_id.as_ref(), Some(&provider_id));
+        assert!(
+            !capabilities
+                .iter()
+                .find(|item| item.operation == sift_protocol::OperationKind::BeginTransaction)
+                .unwrap()
+                .available
+        );
         store
             .close_connection(session.id, connection.id)
             .await

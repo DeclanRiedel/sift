@@ -14,7 +14,7 @@ use crate::error::{ApiError, ApiResult};
 
 pub fn enforce(
     policy: &ConnectionPolicy,
-    engine: Engine,
+    engine: Option<Engine>,
     operation: OperationKind,
     sql: Option<&str>,
     objects: &[&ObjectPath],
@@ -25,9 +25,23 @@ pub fn enforce(
         ));
     }
     if let Some(sql) = sql {
-        enforce_sql(policy, engine, operation, sql)?;
+        if !policy.read_only && policy.allowed_schemas.is_none() {
+            // An unrestricted profile does not need dialect parsing.
+        } else {
+            let engine = engine.ok_or_else(|| {
+                ApiError::Forbidden(
+                    "restricted connection requires a supported semantic dialect".into(),
+                )
+            })?;
+            enforce_sql(policy, engine, operation, sql)?;
+        }
     }
     if let Some(selectors) = &policy.allowed_schemas {
+        let engine = engine.ok_or_else(|| {
+            ApiError::Forbidden(
+                "schema-restricted operations require a supported semantic dialect".into(),
+            )
+        })?;
         for object in objects {
             enforce_object(selectors, engine, object)?;
         }
@@ -331,6 +345,26 @@ mod tests {
             Engine::SqlServer,
             OperationKind::ExecuteQuery,
             "SELECT * INTO public.copy FROM public.users"
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn unknown_dialects_allow_unrestricted_sql_and_fail_closed_when_restricted() {
+        assert!(enforce(
+            &ConnectionPolicy::default(),
+            None,
+            OperationKind::ExecuteQuery,
+            Some("provider specific query"),
+            &[],
+        )
+        .is_ok());
+        assert!(enforce(
+            &restricted(),
+            None,
+            OperationKind::ExecuteQuery,
+            Some("SELECT * FROM public.users"),
+            &[],
         )
         .is_err());
     }

@@ -26,12 +26,11 @@ pub fn evaluate(
         Some(session) => store.list_transactions(session)?,
         None => Vec::new(),
     };
-    let engine = match (context.session, context.connection) {
-        (Some(session), Some(connection)) => {
-            Some(store.conn_entry(session, connection)?.driver.engine())
-        }
+    let driver = match (context.session, context.connection) {
+        (Some(session), Some(connection)) => Some(store.conn_entry(session, connection)?.driver),
         _ => None,
     };
+    let engine = driver.as_ref().and_then(|driver| driver.semantic_engine());
     let active = active_transaction(&transactions, context.connection);
     let selected_transaction = match context.transaction {
         Some(transaction) => active.is_some_and(|state| state.transaction.tx_id == transaction),
@@ -49,6 +48,13 @@ pub fn evaluate(
                 active.is_some(),
                 selected_transaction,
             );
+            if reason.is_none()
+                && driver
+                    .as_ref()
+                    .is_some_and(|driver| !driver.supports_operation(operation))
+            {
+                reason = Some("operation is not supported by this provider");
+            }
             if reason.is_none() {
                 if let Some(scope) = authorization {
                     reason = authorize(scope, operation)
@@ -61,7 +67,9 @@ pub fn evaluate(
                 available: reason.is_none(),
                 reason: reason.map(str::to_string),
                 destructive: operation.destructive(),
-                provider_id: engine.map(Engine::provider_id),
+                provider_id: driver
+                    .as_ref()
+                    .map(|driver| driver.provider().provider_id.clone()),
             }
         })
         .collect())

@@ -46,6 +46,10 @@
   and public operational artifacts are implemented. ODBC/JDBC bridges remain
   explicitly deferred. See `docs/PLANS/phase-i-extensibility.md` and
   `docs/EXTENSIONS.md`.
+  Post-graduation hardening made the legacy semantic engine optional for
+  external core-query providers, centralized capability-gated dispatch and
+  discovery, made provider quality evidence-owned, and isolated hydration and
+  eager-start failures so an enabled extension cannot block server readiness.
 
 ---
 
