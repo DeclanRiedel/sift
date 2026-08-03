@@ -7,7 +7,7 @@ use anyhow::Context;
 use sift_server::{
     config::{load as load_config, Config, RuntimeMode},
     http::{app, AppState},
-    metadata_runtime::build_metadata_store,
+    metadata_runtime::{apply_metadata_migrations, build_metadata_store, migration_status},
     registry::DriverRegistry,
     room_runtime::RoomRuntime,
     session::SessionStore,
@@ -18,6 +18,34 @@ use sift_server::{
 async fn main() -> anyhow::Result<()> {
     let command = parse_command(std::env::args().skip(1))?;
     let cfg = match command {
+        ServerCommand::MigrateStatus => {
+            let config = load_config().context("loading config")?;
+            config.validate().context("validating config")?;
+            let status = migration_status(&config)?;
+            println!("{}", serde_json::to_string_pretty(&status)?);
+            return Ok(());
+        }
+        ServerCommand::MigrateApply { automatic } => {
+            let config = load_config().context("loading config")?;
+            config.validate().context("validating config")?;
+            if automatic
+                && (config.deployment != sift_server::config::DeploymentPolicy::Personal
+                    || config.mode != RuntimeMode::InProcess)
+            {
+                anyhow::bail!(
+                    "--automatic is reserved for personal in-process launcher lifecycles"
+                );
+            }
+            let (report, upgraded_documents) = apply_metadata_migrations(&config, automatic)?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "migration": report,
+                    "upgraded_documents": upgraded_documents,
+                }))?
+            );
+            return Ok(());
+        }
         ServerCommand::Serve { mode } => {
             let mut config = load_config().context("loading config")?;
             if let Some(mode) = mode {
@@ -34,6 +62,18 @@ async fn main() -> anyhow::Result<()> {
                 .await
                 .context("provisioning remote authentication keys")?;
             config
+        }
+        ServerCommand::RemoteMigrate { state_dir } => {
+            let config = sift_server::remote_agent::prepare_remote_config(&state_dir)?;
+            let (report, upgraded_documents) = apply_metadata_migrations(&config, false)?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "migration": report,
+                    "upgraded_documents": upgraded_documents,
+                }))?
+            );
+            return Ok(());
         }
         ServerCommand::RemoteProbe { state_dir } => {
             let response = sift_server::remote_agent::probe(&state_dir)?;
@@ -242,10 +282,17 @@ async fn main() -> anyhow::Result<()> {
 
 #[derive(Debug, PartialEq, Eq)]
 enum ServerCommand {
+    MigrateStatus,
+    MigrateApply {
+        automatic: bool,
+    },
     Serve {
         mode: Option<RuntimeMode>,
     },
     RemoteDaemon {
+        state_dir: std::path::PathBuf,
+    },
+    RemoteMigrate {
         state_dir: std::path::PathBuf,
     },
     RemoteProbe {
@@ -277,6 +324,33 @@ fn parse_command(args: impl IntoIterator<Item = String>) -> anyhow::Result<Serve
     let Some(first) = args.next() else {
         return Ok(ServerCommand::Serve { mode: None });
     };
+    if first == "migrate" {
+        let action = args
+            .next()
+            .context("migrate requires one of: status, apply")?;
+        return match action.as_str() {
+            "status" => {
+                if let Some(argument) = args.next() {
+                    anyhow::bail!("unknown migrate status argument `{argument}`");
+                }
+                Ok(ServerCommand::MigrateStatus)
+            }
+            "apply" => {
+                let mut automatic = false;
+                for argument in args {
+                    if argument != "--automatic" {
+                        anyhow::bail!("unknown migrate apply argument `{argument}`");
+                    }
+                    if automatic {
+                        anyhow::bail!("--automatic may be specified only once");
+                    }
+                    automatic = true;
+                }
+                Ok(ServerCommand::MigrateApply { automatic })
+            }
+            _ => anyhow::bail!("unknown migrate action `{action}`"),
+        };
+    }
     if first != "remote" {
         let mut mode = None;
         let mut arguments = std::iter::once(first).chain(args);
@@ -303,7 +377,7 @@ fn parse_command(args: impl IntoIterator<Item = String>) -> anyhow::Result<Serve
 
     let action = args
         .next()
-        .context("remote requires one of: daemon, probe, challenge, issue, install")?;
+        .context("remote requires one of: daemon, migrate, probe, challenge, issue, install")?;
     let mut state_dir = sift_server::remote_agent::default_remote_state_dir();
     let mut fingerprint = None;
     let mut nonce = None;
@@ -326,6 +400,7 @@ fn parse_command(args: impl IntoIterator<Item = String>) -> anyhow::Result<Serve
     }
     match action.as_str() {
         "daemon" => Ok(ServerCommand::RemoteDaemon { state_dir }),
+        "migrate" => Ok(ServerCommand::RemoteMigrate { state_dir }),
         "probe" => Ok(ServerCommand::RemoteProbe { state_dir }),
         "challenge" => Ok(ServerCommand::RemoteChallenge {
             state_dir,
@@ -516,5 +591,19 @@ mod command_tests {
             }
         );
         assert!(parse_command(args(&["remote", "issue", "--capability", "secret"])).is_err());
+        assert_eq!(
+            parse_command(args(&["migrate", "status"])).unwrap(),
+            ServerCommand::MigrateStatus
+        );
+        assert_eq!(
+            parse_command(args(&["migrate", "apply", "--automatic"])).unwrap(),
+            ServerCommand::MigrateApply { automatic: true }
+        );
+        assert_eq!(
+            parse_command(args(&["remote", "migrate", "--state-dir", "state"])).unwrap(),
+            ServerCommand::RemoteMigrate {
+                state_dir: "state".into()
+            }
+        );
     }
 }

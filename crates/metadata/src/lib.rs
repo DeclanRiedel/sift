@@ -4,11 +4,13 @@
 use std::ops::{Deref, DerefMut};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
+use std::time::Duration;
 
 use argon2::password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString};
 use argon2::Argon2;
 use base64::Engine as _;
 use chrono::{DateTime, Utc};
+use fs2::FileExt as _;
 use rand_core::OsRng;
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use sha2::{Digest, Sha256};
@@ -37,6 +39,28 @@ pub use secrets::{FileSecretStore, MemorySecretStore, SecretStore};
 
 mod migrations {
     refinery::embed_migrations!("migrations");
+}
+
+fn migration_kind(version: u32) -> Result<MigrationKind> {
+    match version {
+        6 => Ok(MigrationKind::LegacyContract),
+        19 => Ok(MigrationKind::Contract),
+        26 | 27 => Ok(MigrationKind::Data),
+        1..=5 | 7..=18 | 20..=25 | 28 => Ok(MigrationKind::Expand),
+        _ => Err(MetadataError::InvalidMigrationHistory(format!(
+            "embedded V{version} has no lifecycle classification"
+        ))),
+    }
+}
+
+fn migration_descriptor(migration: &refinery::Migration) -> Result<MigrationDescriptor> {
+    let kind = migration_kind(migration.version())?;
+    Ok(MigrationDescriptor {
+        version: migration.version(),
+        name: migration.name().to_string(),
+        kind,
+        automatic: !matches!(kind, MigrationKind::Contract),
+    })
 }
 
 const SECRET_NAMESPACE: &str = "sift.local";
@@ -197,6 +221,77 @@ pub enum MetadataError {
     Io(#[from] std::io::Error),
     #[error("blocking metadata task failed: {0}")]
     BlockingTask(String),
+    #[error("metadata schema migration required (current V{current}, latest V{latest}); run `sift-server migrate apply`")]
+    MigrationRequired { current: u32, latest: u32 },
+    #[error("metadata migration history is invalid: {0}")]
+    InvalidMigrationHistory(String),
+    #[error("automatic migration is blocked by V{version} ({name}), classified as {kind}")]
+    AutomaticMigrationBlocked {
+        version: u32,
+        name: String,
+        kind: MigrationKind,
+    },
+    #[error("metadata schema requires migration reader V{minimum}, but this binary supports through V{latest}; use a newer sift-server")]
+    BinaryTooOld { minimum: u32, latest: u32 },
+    #[error("another metadata migration process owns {0}")]
+    MigrationInProgress(PathBuf),
+    #[error("metadata migration lock does not belong to this store")]
+    MigrationLockMismatch,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum MigrationKind {
+    Expand,
+    Data,
+    Contract,
+    LegacyContract,
+}
+
+impl std::fmt::Display for MigrationKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Expand => f.write_str("expand"),
+            Self::Data => f.write_str("data"),
+            Self::Contract => f.write_str("contract"),
+            Self::LegacyContract => f.write_str("legacy-contract"),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+pub struct MigrationDescriptor {
+    pub version: u32,
+    pub name: String,
+    pub kind: MigrationKind,
+    pub automatic: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+pub struct MigrationStatus {
+    pub current_version: u32,
+    pub latest_version: u32,
+    pub minimum_compatible_version: u32,
+    pub pending: Vec<MigrationDescriptor>,
+}
+
+impl MigrationStatus {
+    pub fn is_current(&self) -> bool {
+        self.pending.is_empty() && self.minimum_compatible_version <= self.latest_version
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+pub struct MigrationReport {
+    pub from_version: u32,
+    pub to_version: u32,
+    pub applied: Vec<MigrationDescriptor>,
+    pub backup: Option<PathBuf>,
+}
+
+pub struct MigrationLockGuard {
+    _file: Option<std::fs::File>,
+    path: Option<PathBuf>,
 }
 
 /// Maximum idle connections the file-backed pool retains. Connections are
@@ -230,6 +325,9 @@ impl ConnectionPool {
         let conn = match reused {
             Some(conn) => conn,
             None => {
+                if let Some(parent) = self.path.parent() {
+                    std::fs::create_dir_all(parent)?;
+                }
                 let conn = Connection::open(&self.path)?;
                 configure_connection(&conn)?;
                 conn
@@ -247,6 +345,10 @@ impl ConnectionPool {
             idle.push(conn);
         }
         // Otherwise drop `conn`, closing it.
+    }
+
+    fn clear_idle(&self) {
+        self.idle.lock().unwrap().clear();
     }
 }
 
@@ -303,6 +405,7 @@ impl Backend {
 enum ConnHandle<'a> {
     Pooled(PooledConn),
     Memory(MutexGuard<'a, Connection>),
+    Owned(Connection),
 }
 
 impl Deref for ConnHandle<'_> {
@@ -311,6 +414,7 @@ impl Deref for ConnHandle<'_> {
         match self {
             ConnHandle::Pooled(conn) => conn,
             ConnHandle::Memory(conn) => conn,
+            ConnHandle::Owned(conn) => conn,
         }
     }
 }
@@ -320,6 +424,7 @@ impl DerefMut for ConnHandle<'_> {
         match self {
             ConnHandle::Pooled(conn) => conn,
             ConnHandle::Memory(conn) => conn,
+            ConnHandle::Owned(conn) => conn,
         }
     }
 }
@@ -334,19 +439,7 @@ pub struct MetadataStore {
 
 impl MetadataStore {
     pub fn open(path: &Path, secrets: Arc<dyn SecretStore>) -> Result<Self> {
-        if let Some(parent) = path.parent() {
-            // A failure here is the SQLite DB *parent directory* being
-            // uncreatable — an IO error, not a secret-store error. The old
-            // `SecretStore` label showed the operator "secret store error:
-            // Permission denied" while the real fault was the DB path.
-            std::fs::create_dir_all(parent).map_err(MetadataError::Io)?;
-        }
         let pool = Arc::new(ConnectionPool::new(path.to_path_buf()));
-        // Migrate once on a pooled connection; it returns to the pool after.
-        {
-            let mut conn = pool.checkout()?;
-            migrations::migrations::runner().run(&mut *conn)?;
-        }
         Ok(Self {
             backend: Backend::Pool(pool),
             secrets,
@@ -366,6 +459,270 @@ impl MetadataStore {
     /// Borrow a connection for a single operation. See [`Backend::conn`].
     fn conn(&self) -> Result<ConnHandle<'_>> {
         self.backend.conn()
+    }
+
+    pub fn migration_status(&self) -> Result<MigrationStatus> {
+        let runner = migrations::migrations::runner();
+        let mut embedded = runner.get_migrations().to_vec();
+        embedded.sort_by_key(refinery::Migration::version);
+        let latest_version = embedded.last().map_or(0, refinery::Migration::version);
+        for migration in &embedded {
+            migration_kind(migration.version())?;
+        }
+
+        if matches!(&self.backend, Backend::Pool(pool) if !pool.path.exists()) {
+            return Ok(MigrationStatus {
+                current_version: 0,
+                latest_version,
+                minimum_compatible_version: 0,
+                pending: embedded
+                    .iter()
+                    .map(migration_descriptor)
+                    .collect::<Result<Vec<_>>>()?,
+            });
+        }
+
+        let mut conn = match &self.backend {
+            Backend::Pool(pool) => ConnHandle::Owned(Connection::open_with_flags(
+                &pool.path,
+                rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY
+                    | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+            )?),
+            Backend::Memory(connection) => ConnHandle::Memory(connection.lock().unwrap()),
+        };
+        let history_exists = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'refinery_schema_history')",
+            [],
+            |row| row.get::<_, bool>(0),
+        )?;
+        let applied = if history_exists {
+            runner.get_applied_migrations(&mut *conn)?
+        } else {
+            Vec::new()
+        };
+
+        for (index, actual) in applied.iter().enumerate() {
+            let expected_version = u32::try_from(index).unwrap_or(u32::MAX) + 1;
+            if actual.version() != expected_version {
+                return Err(MetadataError::InvalidMigrationHistory(format!(
+                    "expected migration V{expected_version}, found V{}",
+                    actual.version()
+                )));
+            }
+            let Some(expected) = embedded.get(index) else {
+                continue;
+            };
+            if actual.version() != expected.version()
+                || actual.name() != expected.name()
+                || actual.checksum() != expected.checksum()
+            {
+                return Err(MetadataError::InvalidMigrationHistory(format!(
+                    "database entry V{} ({}, checksum {}) does not match embedded V{} ({}, checksum {})",
+                    actual.version(),
+                    actual.name(),
+                    actual.checksum(),
+                    expected.version(),
+                    expected.name(),
+                    expected.checksum()
+                )));
+            }
+        }
+
+        let current_version = applied.last().map_or(0, refinery::Migration::version);
+        let known_applied = applied.len().min(embedded.len());
+        let pending = embedded[known_applied..]
+            .iter()
+            .map(migration_descriptor)
+            .collect::<Result<Vec<_>>>()?;
+        let minimum_compatible_version =
+            conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+        Ok(MigrationStatus {
+            current_version,
+            latest_version,
+            minimum_compatible_version,
+            pending,
+        })
+    }
+
+    pub fn ensure_schema_current(&self) -> Result<()> {
+        let status = self.migration_status()?;
+        if status.minimum_compatible_version > status.latest_version {
+            Err(MetadataError::BinaryTooOld {
+                minimum: status.minimum_compatible_version,
+                latest: status.latest_version,
+            })
+        } else if status.is_current() {
+            Ok(())
+        } else {
+            Err(MetadataError::MigrationRequired {
+                current: status.current_version,
+                latest: status.latest_version,
+            })
+        }
+    }
+
+    pub fn apply_migrations(&self, automatic: bool) -> Result<MigrationReport> {
+        let migration_lock = self.lock_migrations()?;
+        self.apply_migrations_locked(automatic, &migration_lock)
+    }
+
+    pub fn apply_migrations_locked(
+        &self,
+        automatic: bool,
+        migration_lock: &MigrationLockGuard,
+    ) -> Result<MigrationReport> {
+        let store_path = match &self.backend {
+            Backend::Pool(pool) => Some(pool.path.clone()),
+            Backend::Memory(_) => None,
+        };
+        if migration_lock.path != store_path {
+            return Err(MetadataError::MigrationLockMismatch);
+        }
+        let status = self.migration_status()?;
+        if automatic && status.current_version != 0 {
+            if let Some(blocked) = status.pending.iter().find(|item| !item.automatic) {
+                return Err(MetadataError::AutomaticMigrationBlocked {
+                    version: blocked.version,
+                    name: blocked.name.clone(),
+                    kind: blocked.kind,
+                });
+            }
+        }
+        if status.pending.is_empty() {
+            return Ok(MigrationReport {
+                from_version: status.current_version,
+                to_version: status.current_version,
+                applied: Vec::new(),
+                backup: None,
+            });
+        }
+
+        let backup = self.create_migration_backup(status.current_version)?;
+        if let Backend::Pool(pool) = &self.backend {
+            pool.clear_idle();
+        }
+        {
+            let mut conn = self.conn()?;
+            migrations::migrations::runner().run(&mut *conn)?;
+            if status.current_version != 0 {
+                let contract_floor = status
+                    .pending
+                    .iter()
+                    .filter(|migration| migration.kind == MigrationKind::Contract)
+                    .map(|migration| migration.version)
+                    .max()
+                    .unwrap_or(status.minimum_compatible_version)
+                    .max(status.minimum_compatible_version);
+                if contract_floor > status.minimum_compatible_version {
+                    conn.pragma_update(None, "user_version", contract_floor)?;
+                }
+            }
+        }
+        if let Backend::Pool(pool) = &self.backend {
+            pool.clear_idle();
+        }
+        let after = self.migration_status()?;
+        Ok(MigrationReport {
+            from_version: status.current_version,
+            to_version: after.current_version,
+            applied: status.pending,
+            backup,
+        })
+    }
+
+    pub fn create_migration_backup(&self, version: u32) -> Result<Option<PathBuf>> {
+        let Backend::Pool(pool) = &self.backend else {
+            return Ok(None);
+        };
+        let conn = pool.checkout()?;
+        let user_table_count: u32 = conn.query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'",
+            [],
+            |row| row.get(0),
+        )?;
+        if user_table_count == 0 {
+            return Ok(None);
+        }
+
+        let parent = pool.path.parent().unwrap_or_else(|| Path::new("."));
+        let backup_dir = parent.join("backups");
+        std::fs::create_dir_all(&backup_dir)?;
+        let timestamp = Utc::now().format("%Y%m%dT%H%M%S%.3fZ");
+        let path = backup_dir.join(format!(
+            "metadata-v{version}-{timestamp}-{}.sqlite",
+            Uuid::new_v4().simple()
+        ));
+        let partial = backup_dir.join(format!(".metadata-backup-{}.partial", Uuid::new_v4()));
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        drop(options.open(&partial)?);
+        let backup_result = (|| -> Result<()> {
+            let mut destination = Connection::open(&partial)?;
+            {
+                let backup = rusqlite::backup::Backup::new(&conn, &mut destination)?;
+                backup.run_to_completion(128, Duration::from_millis(10), None)?;
+            }
+            destination.close().map_err(|(_, error)| error)?;
+            std::fs::File::open(&partial)?.sync_all()?;
+            std::fs::rename(&partial, &path)?;
+            #[cfg(unix)]
+            std::fs::File::open(&backup_dir)?.sync_all()?;
+            Ok(())
+        })();
+        if let Err(error) = backup_result {
+            let _ = std::fs::remove_file(&partial);
+            return Err(error);
+        }
+        Ok(Some(path))
+    }
+
+    pub fn lock_migrations(&self) -> Result<MigrationLockGuard> {
+        let Backend::Pool(pool) = &self.backend else {
+            return Ok(MigrationLockGuard {
+                _file: None,
+                path: None,
+            });
+        };
+        let parent = pool.path.parent().unwrap_or_else(|| Path::new("."));
+        std::fs::create_dir_all(parent)?;
+        let file_name = pool
+            .path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("metadata.sqlite");
+        let lock_path = parent.join(format!("{file_name}.migrate.lock"));
+        let mut options = std::fs::OpenOptions::new();
+        options.read(true).write(true).create(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let lock = options.open(&lock_path)?;
+        match lock.try_lock_exclusive() {
+            Ok(()) => Ok(MigrationLockGuard {
+                _file: Some(lock),
+                path: Some(pool.path.clone()),
+            }),
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                Err(MetadataError::MigrationInProgress(lock_path))
+            }
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    pub fn require_minimum_compatible_version(&self, version: u32) -> Result<()> {
+        let conn = self.conn()?;
+        let current: u32 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+        if version > current {
+            conn.pragma_update(None, "user_version", version)?;
+        }
+        Ok(())
     }
 
     pub fn default_local_path() -> PathBuf {
@@ -5152,6 +5509,97 @@ mod tests {
         MetadataStore::open_in_memory(Arc::new(MemorySecretStore::new())).unwrap()
     }
 
+    #[test]
+    fn opening_a_file_store_does_not_create_or_migrate_it() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("nested").join("metadata.sqlite");
+        let store = MetadataStore::open(&path, Arc::new(MemorySecretStore::new())).unwrap();
+
+        assert!(!path.exists());
+        let status = store.migration_status().unwrap();
+        assert_eq!(status.current_version, 0);
+        assert_eq!(status.latest_version, 28);
+        assert_eq!(status.pending.len(), 28);
+        assert!(matches!(
+            store.ensure_schema_current(),
+            Err(MetadataError::MigrationRequired {
+                current: 0,
+                latest: 28
+            })
+        ));
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn migration_apply_backs_up_an_existing_schema() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("metadata.sqlite");
+        let mut connection = Connection::open(&path).unwrap();
+        migrations::migrations::runner()
+            .set_target(refinery::Target::Version(1))
+            .run(&mut connection)
+            .unwrap();
+        drop(connection);
+
+        let store = MetadataStore::open(&path, Arc::new(MemorySecretStore::new())).unwrap();
+        let report = store.apply_migrations(false).unwrap();
+        assert_eq!(report.from_version, 1);
+        assert_eq!(report.to_version, 28);
+        let backup = report.backup.expect("existing schema is backed up");
+        assert!(backup.is_file());
+
+        let mut backup_connection = Connection::open(backup).unwrap();
+        let backup_version = migrations::migrations::runner()
+            .get_last_applied_migration(&mut backup_connection)
+            .unwrap()
+            .unwrap()
+            .version();
+        assert_eq!(backup_version, 1);
+    }
+
+    #[test]
+    fn automatic_migration_stops_at_a_contract_boundary() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("metadata.sqlite");
+        let mut connection = Connection::open(&path).unwrap();
+        migrations::migrations::runner()
+            .set_target(refinery::Target::Version(18))
+            .run(&mut connection)
+            .unwrap();
+        drop(connection);
+
+        let store = MetadataStore::open(&path, Arc::new(MemorySecretStore::new())).unwrap();
+        assert!(matches!(
+            store.apply_migrations(true),
+            Err(MetadataError::AutomaticMigrationBlocked {
+                version: 19,
+                kind: MigrationKind::Contract,
+                ..
+            })
+        ));
+        assert_eq!(store.migration_status().unwrap().current_version, 18);
+
+        store.apply_migrations(false).unwrap();
+        let status = store.migration_status().unwrap();
+        assert_eq!(status.current_version, 28);
+        assert_eq!(status.minimum_compatible_version, 19);
+    }
+
+    #[test]
+    fn concurrent_migration_process_is_rejected_before_schema_changes() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("metadata.sqlite");
+        let first = MetadataStore::open(&path, Arc::new(MemorySecretStore::new())).unwrap();
+        let second = MetadataStore::open(&path, Arc::new(MemorySecretStore::new())).unwrap();
+        let _lock = first.lock_migrations().unwrap();
+
+        assert!(matches!(
+            second.apply_migrations(false),
+            Err(MetadataError::MigrationInProgress(_))
+        ));
+        assert!(!path.exists());
+    }
+
     /// Minimal audit record for exercising the transactional-audit path
     /// (P1-meta-4) from tests.
     fn test_audit(action: &str, target: &str, id: Option<i64>) -> NewOperationAudit {
@@ -5225,9 +5673,10 @@ mod tests {
     fn every_prior_schema_boundary_upgrades_to_hosted_identity() {
         let latest = migrations::migrations::runner()
             .get_migrations()
-            .last()
-            .unwrap()
-            .version();
+            .iter()
+            .map(refinery::Migration::version)
+            .max()
+            .unwrap();
         for starting_version in 0..=latest {
             let directory = tempfile::tempdir().unwrap();
             let path = directory.path().join(format!("v{starting_version}.sqlite"));
@@ -5271,6 +5720,7 @@ mod tests {
             }
 
             let store = MetadataStore::open(&path, Arc::new(MemorySecretStore::new())).unwrap();
+            store.apply_migrations(false).unwrap();
             if starting_version == 0 {
                 store.bootstrap_local("local user").unwrap();
             }
@@ -6143,6 +6593,7 @@ mod tests {
         let path = dir.path().join("metadata.sqlite");
         let secrets = Arc::new(MemorySecretStore::new());
         let store = MetadataStore::open(&path, secrets).unwrap();
+        store.apply_migrations(false).unwrap();
         store.bootstrap_local("local user").unwrap();
         // Warm several connections so the read below is served by a different
         // one than the write (checkout drains the idle pool first).
@@ -6193,6 +6644,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("metadata.sqlite");
         let store = MetadataStore::open(&path, Arc::new(MemorySecretStore::new())).unwrap();
+        store.apply_migrations(false).unwrap();
         store.bootstrap_local("local user").unwrap();
 
         const THREADS: usize = 8;
@@ -7549,7 +8001,9 @@ mod tests {
 
         let open = || {
             let secrets = Arc::new(FileSecretStore::open(&secrets_path, &key_path).unwrap());
-            MetadataStore::open(&metadata_path, secrets).unwrap()
+            let store = MetadataStore::open(&metadata_path, secrets).unwrap();
+            store.apply_migrations(false).unwrap();
+            store
         };
         let provisioner = open();
         provisioner.ensure_auth_system_keys().await.unwrap();

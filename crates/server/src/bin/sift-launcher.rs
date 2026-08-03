@@ -1,7 +1,7 @@
 //! Lifecycle owner for restart-activated signed releases (ADR-015).
 
 use anyhow::{bail, Context};
-use sift_server::config::{Config, RuntimeMode};
+use sift_server::config::{Config, DeploymentPolicy, RuntimeMode};
 use sift_server::updater::{InstalledRelease, Updater};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -24,6 +24,7 @@ async fn main() -> anyhow::Result<()> {
 
     let bundled = sibling_server()?;
     if !config.updater.enabled {
+        apply_automatic_migrations(&bundled, &config).await?;
         return supervise(spawn_server(&bundled, &args)?).await;
     }
     if config.mode == RuntimeMode::Container {
@@ -33,14 +34,19 @@ async fn main() -> anyhow::Result<()> {
     let updater = Updater::from_config(&config)?;
     let pending = updater.pending_release()?;
     if let Some(candidate) = pending {
-        let activation = match spawn_server(&candidate.executable, &args) {
-            Ok(mut child) => match await_candidate_health(&mut child, &config, &candidate).await {
-                Ok(()) => Ok(child),
-                Err(error) => {
-                    let _ = child.kill().await;
-                    let _ = child.wait().await;
-                    Err(error)
+        let activation = match apply_automatic_migrations(&candidate.executable, &config).await {
+            Ok(()) => match spawn_server(&candidate.executable, &args) {
+                Ok(mut child) => {
+                    match await_candidate_health(&mut child, &config, &candidate).await {
+                        Ok(()) => Ok(child),
+                        Err(error) => {
+                            let _ = child.kill().await;
+                            let _ = child.wait().await;
+                            Err(error)
+                        }
+                    }
                 }
+                Err(error) => Err(error),
             },
             Err(error) => Err(error),
         };
@@ -75,7 +81,33 @@ async fn main() -> anyhow::Result<()> {
         .map(|release| release.executable)
         .filter(|path| path.is_file())
         .unwrap_or(bundled);
+    apply_automatic_migrations(&selected, &config).await?;
     supervise(spawn_server(&selected, &args)?).await
+}
+
+async fn apply_automatic_migrations(executable: &Path, config: &Config) -> anyhow::Result<()> {
+    if config.deployment != DeploymentPolicy::Personal || config.mode != RuntimeMode::InProcess {
+        return Ok(());
+    }
+    if !executable.is_file() {
+        bail!(
+            "selected sift-server executable is missing: {}",
+            executable.display()
+        );
+    }
+    let status = Command::new(executable)
+        .args(["migrate", "apply", "--automatic"])
+        .env("SIFT_MODE", "in-process")
+        .stdin(Stdio::null())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .status()
+        .await
+        .with_context(|| format!("running metadata migration with {}", executable.display()))?;
+    if !status.success() {
+        bail!("metadata migration exited with {status}");
+    }
+    Ok(())
 }
 
 fn probe_address(bind: std::net::SocketAddr) -> std::net::SocketAddr {

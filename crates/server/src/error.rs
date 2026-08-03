@@ -201,6 +201,12 @@ impl ApiError {
                 }
                 MetadataError::Sqlite(_)
                 | MetadataError::Migration(_)
+                | MetadataError::MigrationRequired { .. }
+                | MetadataError::InvalidMigrationHistory(_)
+                | MetadataError::AutomaticMigrationBlocked { .. }
+                | MetadataError::BinaryTooOld { .. }
+                | MetadataError::MigrationInProgress(_)
+                | MetadataError::MigrationLockMismatch
                 | MetadataError::PasswordHash(_)
                 | MetadataError::InvalidAuthTokenKey
                 | MetadataError::SecretStore(_)

@@ -1106,6 +1106,31 @@ manifest and mode contract is in
 
 ---
 
+## ADR-038 — Metadata Migrations Have One Explicit Lifecycle Owner
+
+**Context.** Every process that opened metadata previously ran Refinery and a
+Loro data rewrite. Server startup, administration helpers, and remote-agent
+commands could therefore race as schema writers. Candidate activation also
+migrated before readiness, although rolling the binary back cannot reverse an
+incompatible schema change.
+
+**Decision.** Opening metadata never migrates it. Normal consumers verify that
+the embedded migration history is current. `sift-server migrate status|apply`
+owns inspection and mutation; apply takes an online SQLite backup before a
+non-empty database changes, applies SQL, then runs application-data upgrades.
+Every migration is classified, and personal in-process launch may automatically
+apply only changes compatible with the previous binary. Daemon, team, remote,
+and container deployments require an explicit stopped-server migration step.
+
+**Consequences.** Helpers cannot incidentally migrate, startup failures give a
+single recovery command, and launcher rollback remains meaningful across
+automatic updates. Operators own maintenance timing outside personal mode.
+Contract migrations need an explicit release gate and cannot use automatic
+activation. The complete policy, classifications, and restore boundary are in
+`docs/PLANS/metadata-migration-lifecycle.md`.
+
+---
+
 ## ADR-021 — Direct SSH Bootstrap, Persistent Remote Daemon
 
 **Context.** Sift's server-first shape permits a thin client to render locally

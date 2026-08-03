@@ -360,18 +360,22 @@ server. The decision-complete contract is
 Goal: establish the operational and public-contract foundation for a real
 release. Packaging is finalized after the selected Phase K/L v1 scope lands.
 
+- [x] [Design] Server-side metadata migration ownership, classification,
+      startup compatibility gate, pre-migration SQLite backup, and offline
+      restore boundary (ADR-038 and
+      `docs/PLANS/metadata-migration-lifecycle.md`).
 - [ ] [Design] Metrics surface (`/v1/metrics` Prometheus); OpenTelemetry
-      export; server-side migrations policy (`sift migrate` subcommand vs
-      startup gate — today refinery runs eagerly on startup,
-      `metadata/src/lib.rs:80`); backup/restore ops; query plan capture +
-      retrieval; scheduler. Prometheus/OTLP export consumes Phase F's
+      export; product backup/restore ops; query plan capture + retrieval;
+      scheduler. Prometheus/OTLP export consumes Phase F's
       resource counters and rate-limit events.
 - [ ] [Design] Release + packaging (musl/static Linux, macOS, Windows;
       per-channel artifacts; signature material for the Phase H updater).
-- [ ] [Implement] Prometheus metrics endpoint; OTLP trace export; `sift
-    migrate` subcommand + startup gate with pre-release CI matrix;
+- [ ] [Implement] Prometheus metrics endpoint; OTLP trace export; product
       backup/restore driver methods + Operations; plan capture wired into
       `execute`; scheduler runtime.
+- [x] [Implement] `sift-server migrate status|apply`, schema compatibility
+      startup gate, personal-launcher automatic policy, and online SQLite
+      pre-migration backup. A pre-release schema-boundary CI matrix remains.
 - [x] [Implement] OpenAPI generation from typed schemas. `aide` extracts the
       document from the live `ApiRouter` and handler DTOs; startup finalization
       adds only cross-cutting security/protocol metadata and WebSocket
@@ -506,6 +510,7 @@ configurations without abandoning thin clients or breaking remote topology.
 | ADR-035 | room lane separation + CRDT-safe lag recovery                         | Phase G | implemented; `docs/PLANS/presence-durable-separation.md`       |
 | ADR-036 | room-owned connection binding + submitter-scoped authorization        | Phase G | implemented; `docs/PLANS/shared-connection-ownership.md`       |
 | ADR-037 | room-owned system session + submitter-scoped pre-authorization        | Phase G | implemented; `docs/PLANS/shared-room-connection-routing.md` |
+| ADR-038 | explicit metadata migration lifecycle owner                           | Phase J | written and implemented                                      |
 
 ## Reference: what is being stolen, and what is not
 

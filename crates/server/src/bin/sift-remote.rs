@@ -342,7 +342,7 @@ async fn wait_for_daemon(
 async fn start_daemon(options: &Options, session: &SshSession) -> anyhow::Result<()> {
     let log = format!("{}/daemon.log", options.state_dir);
     let command = format!(
-        "mkdir -p {state} && chmod 700 {state} && nohup {binary} remote daemon --state-dir {state} >{log} 2>&1 </dev/null &",
+        "mkdir -p {state} && chmod 700 {state} && {binary} remote migrate --state-dir {state} >>{log} 2>&1 && nohup {binary} remote daemon --state-dir {state} >>{log} 2>&1 </dev/null &",
         state = options.state_dir,
         binary = options.remote_binary,
     );
