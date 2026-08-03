@@ -2,7 +2,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{File, OpenOptions};
-use std::io::{Read, Seek, Write};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -375,11 +375,19 @@ fn extract_archive(
     password: &str,
     destination: &Path,
 ) -> anyhow::Result<BackupManifest> {
-    let file = File::open(archive_path)
+    let mut file = File::open(archive_path)
         .with_context(|| format!("opening backup archive: {}", archive_path.display()))?;
+    let declared_entries = declared_zip_entry_count(&mut file)?;
+    file.seek(SeekFrom::Start(0))?;
     let mut archive = ZipArchive::new(file).context("decoding backup archive")?;
-    if archive.len() > 4 {
+    if declared_entries > 4 || archive.len() > 4 {
         bail!("backup archive contains too many entries");
+    }
+    // `zip` indexes entries by name and intentionally collapses duplicates.
+    // Compare its unique view with the central-directory count so ambiguous
+    // archives cannot select one payload for validation and another for read.
+    if declared_entries != archive.len() {
+        bail!("backup archive contains duplicate entries");
     }
     let mut archive_names = BTreeSet::new();
     for index in 0..archive.len() {
@@ -424,6 +432,30 @@ fn extract_archive(
         extract_payload(&mut archive, password, destination, payload)?;
     }
     Ok(manifest)
+}
+
+fn declared_zip_entry_count(file: &mut File) -> anyhow::Result<usize> {
+    const EOCD_SIGNATURE: &[u8; 4] = b"PK\x05\x06";
+    const EOCD_FIXED_BYTES: u64 = 22;
+    const MAX_COMMENT_BYTES: u64 = u16::MAX as u64;
+
+    let file_len = file.seek(SeekFrom::End(0))?;
+    let tail_len = file_len.min(EOCD_FIXED_BYTES + MAX_COMMENT_BYTES);
+    file.seek(SeekFrom::End(-(tail_len as i64)))?;
+    let mut tail = vec![0_u8; tail_len as usize];
+    file.read_exact(&mut tail)?;
+    let offset = tail
+        .windows(EOCD_SIGNATURE.len())
+        .rposition(|window| window == EOCD_SIGNATURE)
+        .context("backup archive is missing its end-of-central-directory record")?;
+    if offset + EOCD_FIXED_BYTES as usize > tail.len() {
+        bail!("backup archive has a truncated end-of-central-directory record");
+    }
+    let comment_len = u16::from_le_bytes([tail[offset + 20], tail[offset + 21]]) as usize;
+    if offset + EOCD_FIXED_BYTES as usize + comment_len != tail.len() {
+        bail!("backup archive has an invalid end-of-central-directory record");
+    }
+    Ok(u16::from_le_bytes([tail[offset + 10], tail[offset + 11]]) as usize)
 }
 
 fn validate_manifest(
@@ -918,6 +950,16 @@ mod tests {
         config
     }
 
+    fn memory_config(root: &Path) -> Config {
+        std::fs::create_dir_all(root).unwrap();
+        let mut config = Config::default();
+        config.runtime.state_dir = Some(root.join("runtime").display().to_string());
+        config.metadata.path = Some(root.join("metadata.sqlite").display().to_string());
+        config.metadata.secret_backend = "memory".to_string();
+        config.metadata.secret_key_file = None;
+        config
+    }
+
     fn metadata_path(config: &Config) -> PathBuf {
         PathBuf::from(config.metadata.path.as_deref().unwrap())
     }
@@ -940,6 +982,97 @@ mod tests {
             .unwrap();
         store.ensure_auth_system_keys().await.unwrap();
         (api_token, secret)
+    }
+
+    fn seed_memory_state(config: &Config) -> (MetadataStore, String) {
+        let store = MetadataStore::open(&metadata_path(config), Arc::new(MemorySecretStore::new()))
+            .unwrap();
+        store.apply_migrations(false).unwrap();
+        store.bootstrap_local("memory backup tester").unwrap();
+        let (_, api_token) = store
+            .issue_api_token(PrincipalId(1), None, "restore-revokes", None)
+            .unwrap();
+        (store, api_token)
+    }
+
+    fn decrypted_entries(archive_path: &Path, password: &str) -> BTreeMap<String, Vec<u8>> {
+        let mut archive = ZipArchive::new(File::open(archive_path).unwrap()).unwrap();
+        let names = (0..archive.len())
+            .map(|index| archive.by_index_raw(index).unwrap().name().to_string())
+            .collect::<Vec<_>>();
+        names
+            .into_iter()
+            .map(|name| {
+                let mut entry = archive.by_name_decrypt(&name, password.as_bytes()).unwrap();
+                let mut bytes = Vec::new();
+                entry.read_to_end(&mut bytes).unwrap();
+                (name, bytes)
+            })
+            .collect()
+    }
+
+    fn write_test_archive(
+        path: &Path,
+        password: &str,
+        entries: impl IntoIterator<Item = (String, Vec<u8>, bool)>,
+    ) {
+        let mut writer = ZipWriter::new(private_create_new(path).unwrap());
+        for (name, bytes, encrypted) in entries {
+            if encrypted {
+                start_encrypted_entry(&mut writer, &name, password).unwrap();
+            } else {
+                writer
+                    .start_file(
+                        name,
+                        SimpleFileOptions::default()
+                            .compression_method(CompressionMethod::Deflated)
+                            .unix_permissions(0o600),
+                    )
+                    .unwrap();
+            }
+            writer.write_all(&bytes).unwrap();
+        }
+        writer.finish().unwrap().sync_all().unwrap();
+    }
+
+    fn replace_manifest(
+        entries: &mut BTreeMap<String, Vec<u8>>,
+        update: impl FnOnce(&mut BackupManifest),
+    ) {
+        let mut manifest: BackupManifest =
+            serde_json::from_slice(entries.get(MANIFEST_ENTRY).unwrap()).unwrap();
+        update(&mut manifest);
+        entries.insert(
+            MANIFEST_ENTRY.to_string(),
+            serde_json::to_vec_pretty(&manifest).unwrap(),
+        );
+    }
+
+    fn write_encrypted_entries(path: &Path, password: &str, entries: &BTreeMap<String, Vec<u8>>) {
+        write_test_archive(
+            path,
+            password,
+            entries
+                .iter()
+                .map(|(name, bytes)| (name.clone(), bytes.clone(), true)),
+        );
+    }
+
+    fn replace_equal_bytes(path: &Path, from: &[u8], to: &[u8]) {
+        assert_eq!(from.len(), to.len());
+        let mut bytes = std::fs::read(path).unwrap();
+        let mut replacements = 0;
+        for offset in 0..=bytes.len() - from.len() {
+            if &bytes[offset..offset + from.len()] == from {
+                bytes[offset..offset + to.len()].copy_from_slice(to);
+                replacements += 1;
+            }
+        }
+        assert!(
+            replacements >= 2,
+            "local and central names must both be patched"
+        );
+        std::fs::write(path, bytes).unwrap();
     }
 
     #[tokio::test]
@@ -1042,5 +1175,352 @@ mod tests {
             .await
             .is_err());
         assert!(!metadata_path(&destination).exists());
+    }
+
+    #[tokio::test]
+    async fn memory_backup_captures_live_wal_and_preserves_destination_identity() {
+        let directory = tempfile::tempdir().unwrap();
+        let source = memory_config(&directory.path().join("source"));
+        let destination = memory_config(&directory.path().join("destination"));
+        let (source_store, api_token) = seed_memory_state(&source);
+        let source_runtime = crate::runtime::RuntimeState::acquire(&source).unwrap();
+        let source_instance_id = source_runtime.instance_id.clone();
+        drop(source_runtime);
+        let destination_runtime = crate::runtime::RuntimeState::acquire(&destination).unwrap();
+        let destination_instance_id = destination_runtime.instance_id.clone();
+        drop(destination_runtime);
+        assert_ne!(source_instance_id, destination_instance_id);
+
+        let backup_key = directory.path().join("backup.key");
+        write_private_key(&backup_key, "51");
+        let archive = directory.path().join("memory.sift-backup");
+        let manifest = create(&source, &archive, &backup_key).unwrap();
+        assert_eq!(
+            manifest.secrets,
+            SecretDisposition::Memory { durable: false }
+        );
+        assert_eq!(
+            manifest.source_instance_id.as_deref(),
+            Some(source_instance_id.as_str())
+        );
+
+        // Keep the writer alive across backup creation: the principal and
+        // token are committed in WAL mode and must still be in the snapshot.
+        assert!(source_store
+            .principal_by_id(PrincipalId(1))
+            .unwrap()
+            .is_some());
+        let report = restore(&destination, &archive, &backup_key, true, false)
+            .await
+            .unwrap();
+        assert_eq!(
+            report.destination_instance_id.as_deref(),
+            Some(destination_instance_id.as_str())
+        );
+        let restored = MetadataStore::open(
+            &metadata_path(&destination),
+            Arc::new(MemorySecretStore::new()),
+        )
+        .unwrap();
+        assert!(restored.principal_by_id(PrincipalId(1)).unwrap().is_some());
+        assert!(restored.verify_api_token(&api_token).unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn keychain_restore_requires_explicit_external_secret_acknowledgement() {
+        let directory = tempfile::tempdir().unwrap();
+        let source = memory_config(&directory.path().join("source"));
+        let mut destination = memory_config(&directory.path().join("destination"));
+        destination.metadata.secret_backend = "keychain".to_string();
+        let (_store, _) = seed_memory_state(&source);
+        let backup_key = directory.path().join("backup.key");
+        write_private_key(&backup_key, "61");
+        let password = read_archive_password(&backup_key).unwrap();
+        let memory_archive = directory.path().join("memory.sift-backup");
+        let archive = directory.path().join("keychain.sift-backup");
+        create(&source, &memory_archive, &backup_key).unwrap();
+        let mut entries = decrypted_entries(&memory_archive, &password);
+        replace_manifest(&mut entries, |manifest| {
+            manifest.secrets = SecretDisposition::Keychain {
+                external_secrets_required: true,
+            };
+        });
+        write_encrypted_entries(&archive, &password, &entries);
+
+        let manifest = inspect(&archive, &backup_key).unwrap();
+        assert_eq!(
+            manifest.secrets,
+            SecretDisposition::Keychain {
+                external_secrets_required: true
+            }
+        );
+        let error = restore(&destination, &archive, &backup_key, false, false)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("--allow-external-secrets"));
+        let report = restore(&destination, &archive, &backup_key, false, true)
+            .await
+            .unwrap();
+        assert!(report.external_secrets_required);
+        assert!(!metadata_path(&destination).exists());
+    }
+
+    #[tokio::test]
+    async fn hostile_archives_are_rejected_and_failed_apply_cleans_staging() {
+        let directory = tempfile::tempdir().unwrap();
+        let source = memory_config(&directory.path().join("source"));
+        let destination = memory_config(&directory.path().join("destination"));
+        let (_store, _) = seed_memory_state(&source);
+        let backup_key = directory.path().join("backup.key");
+        write_private_key(&backup_key, "71");
+        let password = read_archive_password(&backup_key).unwrap();
+        let archive = directory.path().join("valid.sift-backup");
+        create(&source, &archive, &backup_key).unwrap();
+        let entries = decrypted_entries(&archive, &password);
+
+        let tampered = directory.path().join("tampered.sift-backup");
+        let mut tampered_entries = entries.clone();
+        tampered_entries.get_mut(METADATA_ENTRY).unwrap()[0] ^= 0x01;
+        write_encrypted_entries(&tampered, &password, &tampered_entries);
+        assert!(inspect(&tampered, &backup_key)
+            .unwrap_err()
+            .to_string()
+            .contains("integrity verification"));
+        assert!(restore(&destination, &tampered, &backup_key, true, false)
+            .await
+            .is_err());
+        assert!(!metadata_path(&destination).exists());
+        assert!(!restore_journal_path(&destination).exists());
+        assert_eq!(
+            std::fs::read_dir(metadata_path(&destination).parent().unwrap())
+                .unwrap()
+                .filter_map(Result::ok)
+                .filter(|entry| entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".sift-restore-"))
+                .count(),
+            0
+        );
+
+        let oversized = directory.path().join("oversized.sift-backup");
+        let mut oversized_entries = entries.clone();
+        replace_manifest(&mut oversized_entries, |manifest| {
+            manifest
+                .payloads
+                .iter_mut()
+                .find(|payload| payload.name == METADATA_ENTRY)
+                .unwrap()
+                .size = MAX_PAYLOAD_BYTES + 1;
+        });
+        write_encrypted_entries(&oversized, &password, &oversized_entries);
+        assert!(inspect(&oversized, &backup_key)
+            .unwrap_err()
+            .to_string()
+            .contains("16 GiB limit"));
+
+        let future = directory.path().join("future.sift-backup");
+        let mut future_entries = entries.clone();
+        replace_manifest(&mut future_entries, |manifest| {
+            manifest.format_version = FORMAT_VERSION + 1;
+        });
+        write_encrypted_entries(&future, &password, &future_entries);
+        assert!(inspect(&future, &backup_key)
+            .unwrap_err()
+            .to_string()
+            .contains("unsupported backup format version"));
+
+        let unknown = directory.path().join("traversal.sift-backup");
+        write_test_archive(
+            &unknown,
+            &password,
+            [("../metadata.sqlite".to_string(), vec![1], true)],
+        );
+        assert!(inspect(&unknown, &backup_key)
+            .unwrap_err()
+            .to_string()
+            .contains("unknown entry"));
+
+        let duplicate = directory.path().join("duplicate.sift-backup");
+        write_test_archive(
+            &duplicate,
+            &password,
+            [
+                (
+                    MANIFEST_ENTRY.to_string(),
+                    entries[MANIFEST_ENTRY].clone(),
+                    true,
+                ),
+                (
+                    METADATA_ENTRY.to_string(),
+                    entries[METADATA_ENTRY].clone(),
+                    true,
+                ),
+                (
+                    "metadata.sqlitx".to_string(),
+                    entries[METADATA_ENTRY].clone(),
+                    true,
+                ),
+            ],
+        );
+        replace_equal_bytes(&duplicate, b"metadata.sqlitx", METADATA_ENTRY.as_bytes());
+        assert!(inspect(&duplicate, &backup_key)
+            .unwrap_err()
+            .to_string()
+            .contains("duplicate"));
+
+        let unencrypted = directory.path().join("unencrypted.sift-backup");
+        write_test_archive(
+            &unencrypted,
+            &password,
+            [
+                (
+                    MANIFEST_ENTRY.to_string(),
+                    entries[MANIFEST_ENTRY].clone(),
+                    false,
+                ),
+                (
+                    METADATA_ENTRY.to_string(),
+                    entries[METADATA_ENTRY].clone(),
+                    false,
+                ),
+            ],
+        );
+        assert!(inspect(&unencrypted, &backup_key)
+            .unwrap_err()
+            .to_string()
+            .contains("is not encrypted"));
+    }
+
+    #[tokio::test]
+    async fn running_destination_blocks_restore_before_any_state_change() {
+        let directory = tempfile::tempdir().unwrap();
+        let source = memory_config(&directory.path().join("source"));
+        let destination = memory_config(&directory.path().join("destination"));
+        let (_store, _) = seed_memory_state(&source);
+        let backup_key = directory.path().join("backup.key");
+        write_private_key(&backup_key, "75");
+        let archive = directory.path().join("state.sift-backup");
+        create(&source, &archive, &backup_key).unwrap();
+
+        let runtime = crate::runtime::RuntimeState::acquire(&destination).unwrap();
+        let error = restore(&destination, &archive, &backup_key, true, false)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("offline maintenance lock"));
+        assert!(!metadata_path(&destination).exists());
+        assert!(!restore_journal_path(&destination).exists());
+        drop(runtime);
+
+        assert!(restore(&destination, &archive, &backup_key, true, false)
+            .await
+            .is_ok());
+    }
+
+    #[test]
+    fn restore_journal_recovers_each_replacement_phase() {
+        for phase in [
+            RestorePhase::Prepared,
+            RestorePhase::SecretsInstalled,
+            RestorePhase::MetadataInstalled,
+            RestorePhase::Committed,
+        ] {
+            let directory = tempfile::tempdir().unwrap();
+            let config = memory_config(directory.path());
+            let metadata = metadata_path(&config);
+            let secrets = secret_file_path(&metadata);
+            let old_metadata = directory.path().join("old-metadata");
+            let old_secrets = directory.path().join("old-secrets");
+            let staging = directory.path().join("staging");
+            std::fs::create_dir(&staging).unwrap();
+            std::fs::write(staging.join("payload"), b"staged").unwrap();
+
+            let metadata_replaced = matches!(
+                phase,
+                RestorePhase::MetadataInstalled | RestorePhase::Committed
+            );
+            let secrets_replaced = !matches!(phase, RestorePhase::Prepared);
+            std::fs::write(&metadata, if metadata_replaced { b"new" } else { b"old" }).unwrap();
+            std::fs::write(&secrets, if secrets_replaced { b"new" } else { b"old" }).unwrap();
+            if metadata_replaced {
+                std::fs::write(&old_metadata, b"old").unwrap();
+            }
+            if secrets_replaced {
+                std::fs::write(&old_secrets, b"old").unwrap();
+            }
+            write_restore_journal(
+                &config,
+                &RestoreJournal {
+                    schema_version: 1,
+                    phase,
+                    metadata_path: metadata.clone(),
+                    secrets_path: Some(secrets.clone()),
+                    old_metadata_path: old_metadata.clone(),
+                    old_secrets_path: Some(old_secrets.clone()),
+                    staging_dir: staging.clone(),
+                    had_metadata: true,
+                    had_secrets: true,
+                },
+            )
+            .unwrap();
+
+            recover_interrupted_restore(&config).unwrap();
+            let expected = if phase == RestorePhase::Committed {
+                b"new".as_slice()
+            } else {
+                b"old".as_slice()
+            };
+            assert_eq!(std::fs::read(&metadata).unwrap(), expected, "{phase:?}");
+            assert_eq!(std::fs::read(&secrets).unwrap(), expected, "{phase:?}");
+            assert!(!old_metadata.exists(), "{phase:?}");
+            assert!(!old_secrets.exists(), "{phase:?}");
+            assert!(!staging.exists(), "{phase:?}");
+            assert!(!restore_journal_path(&config).exists(), "{phase:?}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn backup_and_restored_state_are_private_and_loose_keys_are_rejected() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::tempdir().unwrap();
+        let source = file_config(&directory.path().join("source"), "81");
+        let destination = file_config(&directory.path().join("destination"), "82");
+        seed_file_state(&source).await;
+        let backup_key = directory.path().join("backup.key");
+        write_private_key(&backup_key, "83");
+        let archive = directory.path().join("state.sift-backup");
+        create(&source, &archive, &backup_key).unwrap();
+        assert_eq!(
+            std::fs::metadata(&archive).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+
+        restore(&destination, &archive, &backup_key, true, false)
+            .await
+            .unwrap();
+        assert_eq!(
+            std::fs::metadata(metadata_path(&destination))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+        assert_eq!(
+            std::fs::metadata(secret_file_path(&metadata_path(&destination)))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+
+        std::fs::set_permissions(&backup_key, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(inspect(&archive, &backup_key)
+            .unwrap_err()
+            .to_string()
+            .contains("must not be accessible"));
     }
 }
