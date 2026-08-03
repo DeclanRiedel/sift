@@ -739,7 +739,7 @@ impl MetadataStore {
     /// Make restored durable state safe under the destination installation's
     /// identity. Durable principals and credentials remain; bearer and
     /// one-use authentication material does not.
-    pub fn sanitize_restored_database(&self) -> Result<()> {
+    fn sanitize_restored_database(&self) -> Result<()> {
         let now = now_text();
         {
             let mut conn = self.conn()?;
@@ -790,6 +790,20 @@ impl MetadataStore {
     }
 
     pub async fn sanitize_after_restore(&self) -> Result<()> {
+        // OAuth PKCE verifiers are deliberately stored outside SQLite. Capture
+        // and remove their opaque handles before deleting the rows that make
+        // those secrets discoverable. If secret deletion fails, leave the
+        // database rows intact so a later restore attempt can safely retry.
+        let oauth_verifier_handles = {
+            let conn = self.conn()?;
+            let mut statement =
+                conn.prepare("SELECT pkce_verifier_handle FROM oauth_login_attempt")?;
+            let handles = rows(statement.query_map([], |row| row.get::<_, String>(0))?)?;
+            handles
+        };
+        for handle in oauth_verifier_handles {
+            self.secrets.delete(OAUTH_SECRET_NAMESPACE, &handle).await?;
+        }
         self.sanitize_restored_database()?;
         self.rotate_auth_system_keys().await
     }
@@ -6140,6 +6154,299 @@ mod tests {
             ),
             Err(MetadataError::AuthSessionNotFound(_))
         ));
+    }
+
+    #[tokio::test]
+    async fn restored_auth_sanitization_invalidates_ephemeral_state_and_preserves_identity() {
+        let (store, secrets) = store_with_memory();
+        let principal = store
+            .create_password_principal(
+                NewPasswordPrincipal {
+                    username: "restored-admin",
+                    display_name: "Restored Admin",
+                    email: Some("restored@example.test"),
+                    is_instance_admin: true,
+                },
+                b"durable-password-verifier",
+                test_audit("create", "principal", None),
+            )
+            .await
+            .unwrap();
+        let identity = store.list_auth_identities(principal.id).unwrap()[0].clone();
+        let credential_handle = identity.credential_handle.clone().unwrap();
+        let membership = store.list_principal_tenants(principal.id).unwrap()[0].clone();
+
+        let session = store
+            .issue_auth_session(
+                principal.id,
+                AuthClientKind::Native,
+                Some("restored-client"),
+                test_audit("authenticate", "auth_session", None),
+            )
+            .await
+            .unwrap();
+        let oauth = store
+            .create_github_oauth_attempt(AuthClientKind::Web)
+            .await
+            .unwrap();
+        let oauth_handle: String = store
+            .conn()
+            .unwrap()
+            .query_row(
+                "SELECT pkce_verifier_handle FROM oauth_login_attempt",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let password_reset = store
+            .issue_password_reset(
+                principal.id,
+                identity.id,
+                principal.id,
+                test_audit("issue_reset", "auth_identity", Some(identity.id.0)),
+            )
+            .await
+            .unwrap();
+        let (_, api_token) = store
+            .issue_api_token(principal.id, None, "restored-api-token", None)
+            .unwrap();
+        let invitation = store
+            .issue_tenant_invitation(
+                membership.tenant.id,
+                MembershipRole::Member,
+                principal.id,
+                None,
+                Utc::now() + chrono::Duration::days(1),
+                test_audit("invite", "tenant_invitation", None),
+            )
+            .await
+            .unwrap();
+        let principal_key = store
+            .register_principal_key(
+                principal.id,
+                &[7; 32],
+                "SHA256:restore-matrix",
+                "restore matrix",
+                test_audit("register", "principal_key", None),
+            )
+            .unwrap();
+        let challenge = store
+            .issue_key_challenge(&principal_key.fingerprint)
+            .unwrap();
+        let claims = ssh_claims("sift:restore-matrix");
+        let ssh_capability = store
+            .issue_ssh_proxy_capability(
+                &claims,
+                "restore-generation",
+                Some(principal_key.id),
+                test_audit("ssh_proxy.issue", "ssh_proxy_capability", None),
+            )
+            .await
+            .unwrap();
+
+        assert!(store
+            .verify_auth_access_token(&session.access_token)
+            .await
+            .unwrap()
+            .is_some());
+        assert!(store.verify_api_token(&api_token).unwrap().is_some());
+        let old_auth_key = secrets
+            .get(AUTH_SYSTEM_SECRET_NAMESPACE, AUTH_TOKEN_MAC_HANDLE)
+            .await
+            .unwrap()
+            .unwrap();
+        let old_ssh_key = secrets
+            .get(
+                AUTH_SYSTEM_SECRET_NAMESPACE,
+                SSH_PROXY_CAPABILITY_MAC_HANDLE,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(secrets
+            .get(OAUTH_SECRET_NAMESPACE, &oauth_handle)
+            .await
+            .unwrap()
+            .is_some());
+
+        store.sanitize_after_restore().await.unwrap();
+
+        assert_eq!(
+            secrets
+                .get(OAUTH_SECRET_NAMESPACE, &oauth_handle)
+                .await
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            secrets
+                .get(AUTH_SYSTEM_SECRET_NAMESPACE, AUTH_TOKEN_MAC_HANDLE)
+                .await
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            secrets
+                .get(
+                    AUTH_SYSTEM_SECRET_NAMESPACE,
+                    SSH_PROXY_CAPABILITY_MAC_HANDLE,
+                )
+                .await
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            secrets
+                .get(PASSWORD_SECRET_NAMESPACE, &credential_handle)
+                .await
+                .unwrap(),
+            Some(b"durable-password-verifier".to_vec())
+        );
+
+        {
+            let conn = store.conn().unwrap();
+            for table in [
+                "auth_session",
+                "auth_access_token",
+                "auth_refresh_token",
+                "oauth_login_attempt",
+                "password_reset_token",
+                "keypair_challenge",
+                "ssh_proxy_capability",
+            ] {
+                let count: i64 = conn
+                    .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                        row.get(0)
+                    })
+                    .unwrap();
+                assert_eq!(count, 0, "{table} must be empty after restore");
+            }
+            let revoked_invitations: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM tenant_invitation WHERE revoked_at IS NOT NULL",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            let revoked_api_tokens: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM api_token WHERE revoked_at IS NOT NULL",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(revoked_invitations, 1);
+            assert_eq!(revoked_api_tokens, 1);
+        }
+
+        let restored_principal = store.principal_by_id(principal.id).unwrap().unwrap();
+        assert_eq!(restored_principal.external_id, principal.external_id);
+        let restored_identities = store.list_auth_identities(principal.id).unwrap();
+        assert_eq!(restored_identities.len(), 1);
+        assert_eq!(restored_identities[0].id, identity.id);
+        assert_eq!(
+            restored_identities[0].credential_handle,
+            identity.credential_handle
+        );
+        let restored_memberships = store.list_principal_tenants(principal.id).unwrap();
+        assert_eq!(restored_memberships.len(), 1);
+        assert_eq!(restored_memberships[0].tenant.id, membership.tenant.id);
+        assert_eq!(restored_memberships[0].role, membership.role);
+        let restored_keys = store.list_principal_keys(principal.id).unwrap();
+        assert_eq!(restored_keys.len(), 1);
+        assert_eq!(restored_keys[0].id, principal_key.id);
+        assert_eq!(restored_keys[0].fingerprint, principal_key.fingerprint);
+        assert_eq!(restored_keys[0].public_key, principal_key.public_key);
+        assert!(restored_keys[0].revoked_at.is_none());
+
+        store.ensure_auth_system_keys().await.unwrap();
+        let new_auth_key = secrets
+            .get(AUTH_SYSTEM_SECRET_NAMESPACE, AUTH_TOKEN_MAC_HANDLE)
+            .await
+            .unwrap()
+            .unwrap();
+        let new_ssh_key = secrets
+            .get(
+                AUTH_SYSTEM_SECRET_NAMESPACE,
+                SSH_PROXY_CAPABILITY_MAC_HANDLE,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert_ne!(new_auth_key, old_auth_key);
+        assert_ne!(new_ssh_key, old_ssh_key);
+
+        assert!(store
+            .verify_auth_access_token(&session.access_token)
+            .await
+            .unwrap()
+            .is_none());
+        assert!(matches!(
+            store
+                .rotate_auth_refresh_token(
+                    &session.refresh_token,
+                    test_audit("refresh", "auth_session", None),
+                )
+                .await
+                .unwrap(),
+            RefreshAuthResult::Invalid
+        ));
+        assert!(store.verify_api_token(&api_token).unwrap().is_none());
+        assert!(matches!(
+            store.consume_github_oauth_attempt(&oauth.state).await,
+            Err(MetadataError::InvalidOAuthAttempt)
+        ));
+        assert!(matches!(
+            store
+                .consume_password_reset(
+                    &password_reset.token,
+                    b"replacement",
+                    test_audit("reset", "auth_identity", None),
+                )
+                .await,
+            Err(MetadataError::InvalidPasswordReset)
+        ));
+        assert!(matches!(
+            store.consume_key_challenge(&challenge.nonce),
+            Err(MetadataError::InvalidKeyChallenge)
+        ));
+        assert!(matches!(
+            store
+                .consume_ssh_proxy_capability(
+                    &ssh_capability.capability,
+                    "sift:restore-matrix",
+                    "restore-generation",
+                    test_audit("ssh_proxy.exchange", "auth_session", None),
+                )
+                .await,
+            Err(MetadataError::InvalidSshProxyCapability)
+        ));
+        assert!(matches!(
+            store
+                .accept_tenant_invitation(
+                    &invitation.token,
+                    principal.id,
+                    test_audit("accept", "tenant_invitation", None),
+                )
+                .await,
+            Err(MetadataError::InvalidTenantInvitation)
+        ));
+
+        let restore_audit = store
+            .list_operation_audit(100)
+            .unwrap()
+            .into_iter()
+            .filter(|entry| entry.action == "backup.restore")
+            .collect::<Vec<_>>();
+        assert_eq!(restore_audit.len(), 1);
+        let audit = &restore_audit[0];
+        assert_eq!(audit.actor_principal_id, None);
+        assert_eq!(audit.target, "instance_state");
+        assert_eq!(audit.target_id, None);
+        assert_eq!(audit.status, "succeeded");
+        assert_eq!(audit.result_code, None);
+        assert_eq!(audit.error_message, None);
+        assert_eq!(audit.correlation_id, None);
     }
 
     #[tokio::test]

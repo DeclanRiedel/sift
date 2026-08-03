@@ -100,11 +100,14 @@ tampering; duplicate, unknown, traversal-shaped, unencrypted, oversized, and
 future-version archive rejection; serving-process exclusion; live-WAL capture;
 destination instance/key preservation; API-token revocation; dry-run
 non-mutation; rescue archive creation; recovery/finalization across every
-journal phase; failed-staging cleanup; and Unix file/key permissions.
+journal phase; failed-staging cleanup; Unix file/key permissions; and the full
+bearer/refresh/API-token and one-use authentication sanitization matrix,
+including removal of portable out-of-band OAuth verifier secrets while durable
+identity credentials remain readable and destination keychain entries remain
+external.
 
-The remaining graduation work is the full bearer and one-use authentication
-artifact matrix, the older/newer schema compatibility-floor CI matrix, and
-CLI/remote lifecycle redaction and manifest-schema fixtures.
+The remaining graduation work is the older/newer schema compatibility-floor
+CI matrix and CLI/remote lifecycle redaction and manifest-schema fixtures.
 
 - archive round trip for file and memory backends;
 - wrong key, tampering, duplicate/unknown entry, traversal, and size-limit

@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use sift_metadata::{
     FileSecretStore, MemorySecretStore, MetadataStore, MigrationStatus, NewOperationAudit,
+    SecretStore,
 };
 use uuid::Uuid;
 use zip::write::SimpleFileOptions;
@@ -151,6 +152,7 @@ pub async fn restore(
         let staged_metadata = staging_dir.join(METADATA_ENTRY);
         validate_staged_metadata(&staged_metadata)?;
         let staged_secrets = prepare_staged_secrets(config, &manifest, &staging_dir)?;
+        let staged_secret_store = staged_secret_store(config, staged_secrets.as_deref())?;
 
         // MetadataStore uses WAL mode. Installing only the main database while
         // a sanitized store is still open can strand the revocation writes in
@@ -158,9 +160,8 @@ pub async fn restore(
         // so the file we rename is a self-contained recovery point.
         let sanitized_metadata = staging_dir.join("sanitized-metadata.sqlite");
         {
-            let staged_store =
-                MetadataStore::open(&staged_metadata, Arc::new(MemorySecretStore::new()))?;
-            staged_store.sanitize_restored_database()?;
+            let staged_store = MetadataStore::open(&staged_metadata, staged_secret_store)?;
+            staged_store.sanitize_after_restore().await?;
             staged_store.integrity_check()?;
             staged_store.backup_database_to(&sanitized_metadata)?;
         }
@@ -188,7 +189,6 @@ pub async fn restore(
         let destination = crate::metadata_runtime::open_metadata_store(config)?
             .context("restored metadata is disabled")?;
         destination.ensure_schema_current()?;
-        destination.rotate_auth_system_keys().await?;
         commit_restore_journal(config)?;
 
         Ok::<_, anyhow::Error>((manifest, rescue_archive))
@@ -602,6 +602,24 @@ fn prepare_staged_secrets(
     }
 }
 
+fn staged_secret_store(
+    config: &Config,
+    staged_secrets: Option<&Path>,
+) -> anyhow::Result<Arc<dyn SecretStore>> {
+    match config.metadata.secret_backend.as_str() {
+        "file" => {
+            let path = staged_secrets.context("file-secret restore has no staged secret store")?;
+            let key = configured_secret_key_path(config)?;
+            Ok(Arc::new(FileSecretStore::open(path, &key)?))
+        }
+        // Memory secrets are non-durable. Keychain secrets are explicitly
+        // destination-owned external dependencies, so sanitize imported DB
+        // references without mutating the destination keychain pre-install.
+        "memory" | "keychain" => Ok(Arc::new(MemorySecretStore::new())),
+        other => bail!("unsupported metadata secret backend `{other}`"),
+    }
+}
+
 fn install_staged_state(
     config: &Config,
     staging_dir: &Path,
@@ -923,7 +941,7 @@ fn sync_dir(path: &Path) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sift_metadata::{PrincipalId, SecretStore as _};
+    use sift_metadata::PrincipalId;
 
     fn write_private_key(path: &Path, byte: &str) {
         let mut options = OpenOptions::new();
