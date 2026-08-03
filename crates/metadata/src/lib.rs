@@ -581,6 +581,12 @@ impl MetadataStore {
             return Err(MetadataError::MigrationLockMismatch);
         }
         let status = self.migration_status()?;
+        if status.minimum_compatible_version > status.latest_version {
+            return Err(MetadataError::BinaryTooOld {
+                minimum: status.minimum_compatible_version,
+                latest: status.latest_version,
+            });
+        }
         if automatic && status.current_version != 0 {
             if let Some(blocked) = status.pending.iter().find(|item| !item.automatic) {
                 return Err(MetadataError::AutomaticMigrationBlocked {
@@ -5630,7 +5636,48 @@ fn should_touch_token(last_used_at: Option<&str>, now: DateTime<Utc>) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde::Deserialize;
     use sift_protocol::{Engine, TenantResourceLimits, TenantRole, UpdateConnectionPolicyRequest};
+
+    #[derive(Debug, Deserialize)]
+    #[serde(rename_all = "snake_case")]
+    enum FixtureAutomaticMigration {
+        Allowed,
+        BlockedAtV19,
+    }
+
+    #[derive(Debug, Deserialize)]
+    #[serde(rename_all = "snake_case")]
+    enum FixtureCurrentBinary {
+        Accepted,
+        MigrationRequired,
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct SchemaCompatibilityFixture {
+        name: String,
+        schema_version: u32,
+        minimum_compatible_version: u32,
+        automatic_migration: FixtureAutomaticMigration,
+        current_binary: FixtureCurrentBinary,
+    }
+
+    fn schema_compatibility_fixtures() -> Vec<SchemaCompatibilityFixture> {
+        serde_json::from_str(include_str!(
+            "../tests/fixtures/schema-compatibility-boundaries.json"
+        ))
+        .unwrap()
+    }
+
+    fn copy_schema_fixture(directory: &Path, fixture: &SchemaCompatibilityFixture) -> PathBuf {
+        let source = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures")
+            .join(format!("schema-v{}.sqlite", fixture.schema_version));
+        let destination = directory.join(format!("{}.sqlite", fixture.name));
+        std::fs::copy(&source, &destination)
+            .unwrap_or_else(|error| panic!("copying {}: {error}", source.display()));
+        destination
+    }
 
     fn store() -> MetadataStore {
         MetadataStore::open_in_memory(Arc::new(MemorySecretStore::new())).unwrap()
@@ -5710,6 +5757,157 @@ mod tests {
         let status = store.migration_status().unwrap();
         assert_eq!(status.current_version, 28);
         assert_eq!(status.minimum_compatible_version, 19);
+    }
+
+    #[test]
+    fn schema_compatibility_fixture_matrix() {
+        let fixtures = schema_compatibility_fixtures();
+        assert_eq!(
+            fixtures
+                .iter()
+                .map(|fixture| fixture.schema_version)
+                .collect::<Vec<_>>(),
+            vec![18, 19, 28],
+            "the durable matrix must retain the pre-contract, contract, and current boundaries"
+        );
+
+        for fixture in fixtures {
+            let directory = tempfile::tempdir().unwrap();
+            let path = copy_schema_fixture(directory.path(), &fixture);
+
+            let store = MetadataStore::open(&path, Arc::new(MemorySecretStore::new())).unwrap();
+            let status = store.migration_status().unwrap();
+            assert_eq!(
+                status.current_version, fixture.schema_version,
+                "{} schema version",
+                fixture.name
+            );
+            assert_eq!(
+                status.minimum_compatible_version, fixture.minimum_compatible_version,
+                "{} compatibility floor",
+                fixture.name
+            );
+
+            match fixture.current_binary {
+                FixtureCurrentBinary::Accepted => store
+                    .ensure_schema_current()
+                    .unwrap_or_else(|error| panic!("{} should be accepted: {error}", fixture.name)),
+                FixtureCurrentBinary::MigrationRequired => assert!(
+                    matches!(
+                        store.ensure_schema_current(),
+                        Err(MetadataError::MigrationRequired {
+                            current,
+                            latest: 28
+                        }) if current == fixture.schema_version
+                    ),
+                    "{} should require migration",
+                    fixture.name
+                ),
+            }
+
+            match fixture.automatic_migration {
+                FixtureAutomaticMigration::BlockedAtV19 => assert!(
+                    matches!(
+                        store.apply_migrations(true),
+                        Err(MetadataError::AutomaticMigrationBlocked {
+                            version: 19,
+                            kind: MigrationKind::Contract,
+                            ..
+                        })
+                    ),
+                    "{} must stop before the contract boundary",
+                    fixture.name
+                ),
+                FixtureAutomaticMigration::Allowed => {
+                    let report = store.apply_migrations(true).unwrap();
+                    assert_eq!(
+                        report.from_version, fixture.schema_version,
+                        "{}",
+                        fixture.name
+                    );
+                    assert_eq!(report.to_version, 28, "{}", fixture.name);
+                }
+            }
+        }
+
+        let directory = tempfile::tempdir().unwrap();
+        let current_fixture = schema_compatibility_fixtures()
+            .into_iter()
+            .find(|fixture| fixture.schema_version == 28)
+            .unwrap();
+        let path = copy_schema_fixture(directory.path(), &current_fixture);
+        let connection = Connection::open(&path).unwrap();
+        connection
+            .execute(
+                "INSERT INTO refinery_schema_history
+                 (version, name, applied_on, checksum)
+                 VALUES (29, 'future_additive_fixture', '2026-08-03T00:00:00Z', '1')",
+                [],
+            )
+            .unwrap();
+        connection.pragma_update(None, "user_version", 19).unwrap();
+        drop(connection);
+
+        let store = MetadataStore::open(&path, Arc::new(MemorySecretStore::new())).unwrap();
+        let status = store.migration_status().unwrap();
+        assert_eq!(status.current_version, 29);
+        assert_eq!(status.latest_version, 28);
+        assert!(status.pending.is_empty());
+        store
+            .ensure_schema_current()
+            .expect("an unknown additive tail remains readable at the V19 floor");
+        assert!(store.apply_migrations(false).unwrap().applied.is_empty());
+
+        let connection = Connection::open(&path).unwrap();
+        connection.pragma_update(None, "user_version", 29).unwrap();
+        drop(connection);
+        assert!(matches!(
+            store.ensure_schema_current(),
+            Err(MetadataError::BinaryTooOld {
+                minimum: 29,
+                latest: 28
+            })
+        ));
+        assert!(matches!(
+            store.apply_migrations(false),
+            Err(MetadataError::BinaryTooOld {
+                minimum: 29,
+                latest: 28
+            })
+        ));
+    }
+
+    #[test]
+    #[ignore = "maintainer-only regeneration of committed SQLite compatibility fixtures"]
+    /// Regenerate intentionally with:
+    /// `cargo test -p sift-metadata tests::regenerate_schema_compatibility_fixtures -- --ignored --exact`.
+    fn regenerate_schema_compatibility_fixtures() {
+        let fixture_directory = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+        for fixture in schema_compatibility_fixtures() {
+            let path = fixture_directory.join(format!("schema-v{}.sqlite", fixture.schema_version));
+            if path.exists() {
+                std::fs::remove_file(&path).unwrap();
+            }
+            let mut connection = Connection::open(&path).unwrap();
+            configure_connection(&connection).unwrap();
+            migrations::migrations::runner()
+                .set_target(refinery::Target::Version(fixture.schema_version))
+                .run(&mut connection)
+                .unwrap();
+            connection
+                .pragma_update(None, "user_version", fixture.minimum_compatible_version)
+                .unwrap();
+            connection
+                .execute(
+                    "UPDATE refinery_schema_history SET applied_on = '2026-08-03T00:00:00Z'",
+                    [],
+                )
+                .unwrap();
+            connection
+                .query_row("PRAGMA journal_mode = DELETE", [], |_| Ok(()))
+                .unwrap();
+            connection.execute_batch("VACUUM").unwrap();
+        }
     }
 
     #[test]

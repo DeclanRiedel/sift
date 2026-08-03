@@ -1,0 +1,23 @@
+{
+  "format_version": 1,
+  "created_at": "<timestamp>",
+  "sift_version": "<version>",
+  "source_instance_id": null,
+  "metadata": {
+    "current_version": 28,
+    "latest_version": 28,
+    "minimum_compatible_version": 0,
+    "pending": []
+  },
+  "secrets": {
+    "kind": "memory",
+    "durable": false
+  },
+  "payloads": [
+    {
+      "name": "metadata.sqlite",
+      "size": 0,
+      "sha256": "<sha256>"
+    }
+  ]
+}

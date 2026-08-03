@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "server_version": "<version>",
+  "protocol": {
+    "minimum": 1,
+    "maximum": 1
+  },
+  "target_os": "<os>",
+  "target_arch": "<arch>",
+  "install_layout_version": 1,
+  "daemon": null
+}

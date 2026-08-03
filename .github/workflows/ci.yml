@@ -18,6 +18,10 @@ jobs:
         run: nix develop . --command cargo fmt --all --check
       - name: Clippy
         run: nix develop . --command cargo clippy --workspace --all-targets -- -D warnings
+      - name: SQLite compatibility boundary fixtures
+        run: nix develop . --command cargo test -p sift-metadata schema_compatibility_fixture_matrix
+      - name: Backup and remote lifecycle fixtures
+        run: nix develop . --command cargo test -p sift-server --test lifecycle_cli_fixtures
       - name: Test
         run: nix develop . --command cargo test --workspace
       - name: Dependency policy

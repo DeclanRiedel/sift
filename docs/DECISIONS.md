@@ -1152,7 +1152,12 @@ surface.
 and cannot race a serving process. Archives require a separately protected key
 file, restores may require destination keychain preparation, and operators own
 retention/storage in v1. Details and the failure matrix are in
-`docs/PLANS/state-backup-restore.md`.
+`docs/PLANS/state-backup-restore.md`. ADR graduation is enforced in CI by
+committed SQLite databases at the V18 pre-contract, V19 contract-floor, and V28
+current boundaries, plus stable JSON fixtures for backup manifests, restore
+reports, and remote lifecycle output. The fixture suite also holds the
+forward-additive/forward-contract compatibility distinction and secret
+redaction behavior.
 
 ---
 

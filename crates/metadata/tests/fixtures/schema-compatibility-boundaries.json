@@ -1,0 +1,23 @@
+[
+  {
+    "name": "pre-contract-v18",
+    "schema_version": 18,
+    "minimum_compatible_version": 0,
+    "automatic_migration": "blocked_at_v19",
+    "current_binary": "migration_required"
+  },
+  {
+    "name": "contract-v19",
+    "schema_version": 19,
+    "minimum_compatible_version": 19,
+    "automatic_migration": "allowed",
+    "current_binary": "migration_required"
+  },
+  {
+    "name": "current-v28",
+    "schema_version": 28,
+    "minimum_compatible_version": 19,
+    "automatic_migration": "allowed",
+    "current_binary": "accepted"
+  }
+]

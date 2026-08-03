@@ -106,8 +106,13 @@ including removal of portable out-of-band OAuth verifier secrets while durable
 identity credentials remain readable and destination keychain entries remain
 external.
 
-The remaining graduation work is the older/newer schema compatibility-floor
-CI matrix and CLI/remote lifecycle redaction and manifest-schema fixtures.
+Graduation coverage completed on 2026-08-03: CI materializes the compatibility
+matrix from committed SQLite fixtures at V18, V19, and V28, and also exercises
+unknown forward additive and contract-floor tails. Process-level fixtures run
+the actual backup and remote lifecycle commands, pin the v1 manifest, restore
+report, and remote-probe JSON shapes, verify idempotent remote migration, and
+assert that archive keys, bearer tokens, remote secret keys, and state paths
+do not enter command output.
 
 - archive round trip for file and memory backends;
 - wrong key, tampering, duplicate/unknown entry, traversal, and size-limit
@@ -118,5 +123,5 @@ CI matrix and CLI/remote lifecycle redaction and manifest-schema fixtures.
 - session/API-token/one-use artifact revocation and auth-key rotation;
 - dry run makes no destination changes;
 - failed and interrupted install restores the rescue state;
-- older/newer schema compatibility-floor matrix;
-- permissions, redaction, deterministic manifest schema, and remote lifecycle.
+- [x] older/newer schema compatibility-floor matrix;
+- [x] permissions, redaction, deterministic manifest schema, and remote lifecycle.

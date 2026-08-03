@@ -378,11 +378,15 @@ release. Packaging is finalized after the selected Phase K/L v1 scope lands.
       `execute`; scheduler runtime.
 - [x] [Implement] `sift-server migrate status|apply`, schema compatibility
       startup gate, personal-launcher automatic policy, and online SQLite
-      pre-migration backup. A pre-release schema-boundary CI matrix remains.
+      pre-migration backup, with committed V18/V19/V28 SQLite compatibility
+      fixtures enforced in CI.
 - [x] [Implement] Offline encrypted Sift-state backup inspection, creation,
       and dry-run/apply restore with portable file secrets, destination-owned
       identity, authentication sanitization, rescue archives, and durable
       rollback journaling.
+- [x] [Graduate] ADR-039 archive and lifecycle contracts are pinned by
+      process-level CLI/remote JSON fixtures, manifest-schema fixtures,
+      redaction checks, and the older/newer compatibility-floor matrix.
 - [x] [Implement] OpenAPI generation from typed schemas. `aide` extracts the
       document from the live `ApiRouter` and handler DTOs; startup finalization
       adds only cross-cutting security/protocol metadata and WebSocket
