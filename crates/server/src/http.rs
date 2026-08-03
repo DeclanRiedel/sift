@@ -23,10 +23,10 @@ use aide::transform::TransformOperation;
 use sift_metadata::{
     ApiTokenId, AuthClientKind as MetadataAuthClientKind, AuthIdentityId, ConnectionProfileId,
     Document, DocumentId, GithubAllowlistId, GithubProfile, MetadataStore, NewConnectionProfile,
-    NewDocument, NewOperationAudit, NewQueryHistory, NewRoom, NewSavedQuery, PrincipalId,
-    PrincipalKeyId, QueryHistory, QueryStatus, RefreshAuthResult, Room, RoomId, RoomMember,
-    RoomRole, SavedQuery, SavedQueryFilter, SavedQueryId, SavedQueryScope, TenantId,
-    TenantInvitationId, TenantMembership, UpdateSavedQuery,
+    NewDocument, NewOperationAudit, NewQueryHistory, NewRoom, NewSavedQuery, OperationAuditId,
+    PrincipalId, PrincipalKeyId, QueryHistory, QueryHistoryId, QueryStatus, RefreshAuthResult,
+    Room, RoomId, RoomMember, RoomRole, SavedQuery, SavedQueryFilter, SavedQueryId,
+    SavedQueryScope, TenantId, TenantInvitationId, TenantMembership, UpdateSavedQuery,
 };
 use sift_protocol::{
     AcceptTenantInvitationRequest, AdminCreatePasswordPrincipalRequest,
@@ -34,18 +34,18 @@ use sift_protocol::{
     AuthIdentitySummary, AuthPrincipal, AuthSessionSummary, AuthTenantMembership,
     AuthTokensResponse, BeginTransactionRequest, BulkInsertRequest, CancelRequest,
     ChangePasswordRequest, CreateGithubAllowlistRequest, CreateTenantInvitationRequest,
-    CsvImportRequest, EndTransactionRequest, ExecuteRequest, ExecuteRequestHttp,
-    GithubNativeAuthExchangeRequest, GithubNativeAuthStartResponse, HandshakeDeployment,
-    HandshakeRequest, HandshakeResponse, HandshakeRuntimeMode, HandshakeTransport, Health,
-    InvitationRole, IssuedPasswordResetResponse, IssuedTenantInvitationResponse,
-    KeyAuthenticateRequest, KeyChallengeRequest, KeyChallengeResponse, KillProcessRequest,
-    ObjectPath, OpenConnectionRequest, OpenSessionRequest, Operation, OperationStatus,
-    PasswordLoginRequest, PasswordResetRequest, ProtocolRange, Readiness, RefreshAuthRequest,
-    RegisterPrincipalKeyRequest, RoomClientMessage, RoomQueryResult, RoomServerMessage,
-    SavepointRequest, SchemaFilter, SchemaScope, SshProxyAccessGrant,
-    SshProxyCapabilityExchangeRequest, TransactionPreviewRequest, UpdateConnectionPolicyRequest,
-    UpdateTenantLimitsRequest, WebAuthResponse, WhoAmIResponse, WsClientMessage, WsServerMessage,
-    PROTOCOL_VERSION, PROTOCOL_VERSION_NUMBER,
+    CsvImportRequest, CursorPage, EndTransactionRequest, ExecuteRequest, ExecuteRequestHttp,
+    ExpectedRevision, GithubNativeAuthExchangeRequest, GithubNativeAuthStartResponse,
+    HandshakeDeployment, HandshakeRequest, HandshakeResponse, HandshakeRuntimeMode,
+    HandshakeTransport, Health, InvitationRole, IssuedPasswordResetResponse,
+    IssuedTenantInvitationResponse, KeyAuthenticateRequest, KeyChallengeRequest,
+    KeyChallengeResponse, KillProcessRequest, ObjectPath, OpenConnectionRequest,
+    OpenSessionRequest, Operation, OperationStatus, PasswordLoginRequest, PasswordResetRequest,
+    ProtocolRange, Readiness, RefreshAuthRequest, RegisterPrincipalKeyRequest, RoomClientMessage,
+    RoomQueryResult, RoomServerMessage, SavepointRequest, SchemaFilter, SchemaScope,
+    SshProxyAccessGrant, SshProxyCapabilityExchangeRequest, TransactionPreviewRequest,
+    UpdateConnectionPolicyRequest, UpdateTenantLimitsRequest, WebAuthResponse, WhoAmIResponse,
+    WsClientMessage, WsServerMessage, PROTOCOL_VERSION, PROTOCOL_VERSION_NUMBER,
 };
 
 use crate::config::{DeploymentPolicy, RuntimeMode, Transport};
@@ -144,6 +144,10 @@ pub fn app(state: AppState) -> Router {
         .api_route(
             "/v1/operations/audit",
             get_with(list_operation_audit_log, doc("listOperationAudit", "List durable operation audit rows (actor, target, result, rows)")),
+        )
+        .api_route(
+            "/v1/operations/audit/pages",
+            get_with(list_operation_audit_pages, doc("pageOperationAudit", "Keyset-page durable operation audit rows")),
         )
         .api_route(
             "/v1/providers",
@@ -420,6 +424,10 @@ pub fn app(state: AppState) -> Router {
         .api_route(
             "/v1/metadata/history",
             get_with(list_metadata_history, doc("listMetadataHistory", "List query history by room or current principal")),
+        )
+        .api_route(
+            "/v1/metadata/history/pages",
+            get_with(page_metadata_history, doc("pageMetadataHistory", "Keyset-page query history by room or current principal")),
         )
         .api_route(
             "/v1/metadata/saved-queries",
@@ -1245,6 +1253,19 @@ struct DeleteConnectionQuery {
 #[derive(Deserialize, JsonSchema)]
 struct HistoryQuery {
     room: Option<i64>,
+    limit: Option<u32>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+struct CursorHistoryQuery {
+    room: Option<i64>,
+    cursor: Option<String>,
+    limit: Option<u32>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+struct CursorListQuery {
+    cursor: Option<String>,
     limit: Option<u32>,
 }
 
@@ -3451,6 +3472,32 @@ async fn list_operation_audit_log(
     ))
 }
 
+async fn list_operation_audit_pages(
+    State(state): State<AppState>,
+    Query(query): Query<CursorListQuery>,
+) -> ApiResult<Json<CursorPage<sift_metadata::OperationAudit>>> {
+    let metadata = metadata_store_cloned(&state)?;
+    let limit = query.limit.unwrap_or(100).clamp(1, 500);
+    let before = parse_keyset_cursor(query.cursor.as_deref())?.map(OperationAuditId);
+    let mut items = metadata_blocking(move || {
+        metadata
+            .list_operation_audit_before(limit + 1, before)
+            .map_err(Into::into)
+    })
+    .await?;
+    let has_more = items.len() > limit as usize;
+    items.truncate(limit as usize);
+    let next_cursor = has_more.then(|| {
+        items
+            .last()
+            .expect("a page with more rows is non-empty")
+            .id
+            .0
+            .to_string()
+    });
+    Ok(Json(CursorPage { items, next_cursor }))
+}
+
 async fn list_providers(
     State(state): State<AppState>,
 ) -> Json<Vec<sift_protocol::ProviderDescriptor>> {
@@ -5068,6 +5115,54 @@ async fn list_metadata_history(
     ))
 }
 
+async fn page_metadata_history(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<CursorHistoryQuery>,
+) -> ApiResult<Json<CursorPage<QueryHistory>>> {
+    let metadata = metadata_store_cloned(&state)?;
+    let auth = resolve_auth_context_blocking(state, headers).await?;
+    let limit = query.limit.unwrap_or(100).clamp(1, 500);
+    let before = parse_keyset_cursor(query.cursor.as_deref())?.map(QueryHistoryId);
+    let mut items = metadata_blocking(move || {
+        if let Some(room) = query.room {
+            let room = room_id(room)?;
+            ensure_room_permission(&metadata, &auth, room, RoomPermission::Read)?;
+            metadata
+                .list_query_history_for_room_before(room, limit + 1, before)
+                .map_err(Into::into)
+        } else {
+            metadata
+                .list_query_history_for_principal_before(auth.principal_id, limit + 1, before)
+                .map_err(Into::into)
+        }
+    })
+    .await?;
+    let has_more = items.len() > limit as usize;
+    items.truncate(limit as usize);
+    let next_cursor = has_more.then(|| {
+        items
+            .last()
+            .expect("a page with more rows is non-empty")
+            .id
+            .0
+            .to_string()
+    });
+    Ok(Json(CursorPage { items, next_cursor }))
+}
+
+fn parse_keyset_cursor(cursor: Option<&str>) -> ApiResult<Option<i64>> {
+    cursor
+        .map(|value| {
+            value
+                .parse::<i64>()
+                .ok()
+                .filter(|value| *value > 0)
+                .ok_or_else(|| ApiError::BadRequest("invalid pagination cursor".into()))
+        })
+        .transpose()
+}
+
 #[derive(Deserialize, JsonSchema)]
 struct SavedQueryListQuery {
     tenant: i64,
@@ -5235,6 +5330,7 @@ async fn update_metadata_saved_query(
                 tenant,
                 principal,
                 admin,
+                req.expected_revision,
                 update.clone(),
             ) {
                 Ok(query) => return Ok(query),
@@ -5262,6 +5358,7 @@ async fn delete_metadata_saved_query(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(id): Path<i64>,
+    Query(expected): Query<ExpectedRevision>,
 ) -> ApiResult<Json<serde_json::Value>> {
     let metadata = metadata_store_cloned(&state)?;
     let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
@@ -5274,7 +5371,13 @@ async fn delete_metadata_saved_query(
         .collect();
     metadata_blocking(move || {
         for (tenant, admin) in tenants {
-            match metadata.delete_saved_query_authorized(sq_id, tenant, principal, admin) {
+            match metadata.delete_saved_query_authorized(
+                sq_id,
+                tenant,
+                principal,
+                admin,
+                expected.expected_revision,
+            ) {
                 Ok(()) => return Ok(()),
                 Err(sift_metadata::MetadataError::SavedQueryNotFound(_)) => continue,
                 Err(error) => return Err(error.into()),

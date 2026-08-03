@@ -50,6 +50,8 @@
   external core-query providers, centralized capability-gated dispatch and
   discovery, made provider quality evidence-owned, and isolated hydration and
   eager-start failures so an enabled extension cannot block server readiness.
+  Driver RPC v1 package validation now rejects capability families the host
+  cannot dispatch, preventing manifest/discovery overclaiming.
 
 ---
 
@@ -370,15 +372,19 @@ release. Packaging is finalized after the selected Phase K/L v1 scope lands.
     migrate` subcommand + startup gate with pre-release CI matrix;
       backup/restore driver methods + Operations; plan capture wired into
       `execute`; scheduler runtime.
-- [ ] [Implement] **OpenAPI generation from typed schemas** to replace the
-      hand-authored JSON at `http.rs:655-978`. The hand-authored map already
-      drifts from routes. Single source of truth = `utoipa` annotations or
-      route-level schema extraction; add a drift test. (Can land earlier —
-      the drifting hand-authored map is a documentation-contract hazard.)
-- [ ] [Implement] Public contract closure: SDK methods for every supported
-      route, streaming export consumption, cursor-based pagination for large
-      collections, persistent room clients, reconnect discovery, mutation
-      revisions/preconditions, and automated router/OpenAPI/SDK parity checks.
+- [x] [Implement] OpenAPI generation from typed schemas. `aide` extracts the
+      document from the live `ApiRouter` and handler DTOs; startup finalization
+      adds only cross-cutting security/protocol metadata and WebSocket
+      components. Drift tests enforce stable unique operation ids, valid
+      schema refs, and exact parity with the SDK-owned operation manifest.
+- [x] [Implement] Public contract closure. The reference SDK covers every
+      published operation, consumes exports incrementally, and provides a
+      persistent room client that reconnects, re-attaches, performs
+      version-vector discovery, and catches up offline CRDT updates. Durable
+      query-history and operation-audit logs have additive keyset-paged
+      endpoints. Saved-query mutations use optimistic revisions/preconditions;
+      connection policy, extension lifecycle, document updates, and approvals
+      retain their existing revision guards.
 
 ## Phase K — SQL intelligence & database modeling
 
@@ -456,9 +462,9 @@ configurations without abandoning thin clients or breaking remote topology.
   `OperationKind` policy rather than defining parallel permissions. Its driver
   protocol and plugin manifest are prerequisites for third-party providers,
   dialect packs, exporters, and agent context extensions in K/L.
-- **Phase J's OpenAPI item can land earlier** — the hand-authored map is
-  already drifting. Its metrics exporter consumes F's in-memory resource
-  counters; F does not introduce a competing Prometheus surface.
+- **Phase J's typed OpenAPI/public-contract work landed early.** Its remaining
+  metrics exporter consumes F's in-memory resource counters; F does not
+  introduce a competing Prometheus surface.
 - **Phase K consumes C's schema cache, D's editing/search/DDL surfaces, and I's
   dialect-pack boundary.** It must expose semantic operations through the
   server rather than creating desktop-only product behavior.

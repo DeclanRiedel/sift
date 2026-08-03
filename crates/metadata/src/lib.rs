@@ -103,6 +103,8 @@ pub enum MetadataError {
     TenantMismatch(ConnectionProfileId, TenantId),
     #[error("connection profile policy revision conflict: expected {expected}, current {current}")]
     PolicyRevisionConflict { expected: u64, current: u64 },
+    #[error("saved query revision conflict: expected {expected}, current {current}")]
+    SavedQueryRevisionConflict { expected: u64, current: u64 },
     #[error(
         "extension {extension_id} version {version} already exists with a different archive digest"
     )]
@@ -3790,15 +3792,27 @@ impl MetadataStore {
     }
 
     pub fn list_operation_audit(&self, limit: u32) -> Result<Vec<OperationAudit>> {
+        self.list_operation_audit_before(limit, None)
+    }
+
+    pub fn list_operation_audit_before(
+        &self,
+        limit: u32,
+        before_id: Option<OperationAuditId>,
+    ) -> Result<Vec<OperationAudit>> {
         let conn = self.conn()?;
         let mut stmt = conn.prepare(
             "SELECT id, at, actor_principal_id, action, target, target_id, status,
                     result_code, row_count, error_message, correlation_id
              FROM operation_audit
-             ORDER BY at DESC, id DESC
-             LIMIT ?1",
+             WHERE (?1 IS NULL OR id < ?1)
+             ORDER BY id DESC
+             LIMIT ?2",
         )?;
-        let audit = rows(stmt.query_map(params![limit], operation_audit_from_row)?);
+        let audit = rows(stmt.query_map(
+            params![before_id.map(|id| id.0), limit],
+            operation_audit_from_row,
+        )?);
         audit
     }
 
@@ -3807,16 +3821,28 @@ impl MetadataStore {
         room: RoomId,
         limit: u32,
     ) -> Result<Vec<QueryHistory>> {
+        self.list_query_history_for_room_before(room, limit, None)
+    }
+
+    pub fn list_query_history_for_room_before(
+        &self,
+        room: RoomId,
+        limit: u32,
+        before_id: Option<QueryHistoryId>,
+    ) -> Result<Vec<QueryHistory>> {
         let conn = self.conn()?;
         let mut stmt = conn.prepare(
             "SELECT id, principal_id, connection_profile_id, sql_text, started_at,
                     duration_ms, row_count, status, error_code, error_message, room_id
              FROM query_history
-             WHERE room_id = ?1
-             ORDER BY started_at DESC, id DESC
-             LIMIT ?2",
+             WHERE room_id = ?1 AND (?2 IS NULL OR id < ?2)
+             ORDER BY id DESC
+             LIMIT ?3",
         )?;
-        let history = rows(stmt.query_map(params![room.0, limit], query_history_from_row)?);
+        let history = rows(stmt.query_map(
+            params![room.0, before_id.map(|id| id.0), limit],
+            query_history_from_row,
+        )?);
         history
     }
 
@@ -3825,16 +3851,28 @@ impl MetadataStore {
         principal: PrincipalId,
         limit: u32,
     ) -> Result<Vec<QueryHistory>> {
+        self.list_query_history_for_principal_before(principal, limit, None)
+    }
+
+    pub fn list_query_history_for_principal_before(
+        &self,
+        principal: PrincipalId,
+        limit: u32,
+        before_id: Option<QueryHistoryId>,
+    ) -> Result<Vec<QueryHistory>> {
         let conn = self.conn()?;
         let mut stmt = conn.prepare(
             "SELECT id, principal_id, connection_profile_id, sql_text, started_at,
                     duration_ms, row_count, status, error_code, error_message, room_id
              FROM query_history
-             WHERE principal_id = ?1
-             ORDER BY started_at DESC, id DESC
-             LIMIT ?2",
+             WHERE principal_id = ?1 AND (?2 IS NULL OR id < ?2)
+             ORDER BY id DESC
+             LIMIT ?3",
         )?;
-        let history = rows(stmt.query_map(params![principal.0, limit], query_history_from_row)?);
+        let history = rows(stmt.query_map(
+            params![principal.0, before_id.map(|id| id.0), limit],
+            query_history_from_row,
+        )?);
         history
     }
 
@@ -3892,7 +3930,7 @@ impl MetadataStore {
         let conn = self.conn()?;
         conn.query_row(
             "SELECT id, tenant_id, principal_id, name, sql_text,
-                    connection_profile_id, tags_json, created_at, updated_at
+                    connection_profile_id, tags_json, created_at, updated_at, revision
              FROM saved_query
              WHERE id = ?1 AND tenant_id = ?2
                AND (principal_id = ?3 OR principal_id IS NULL)",
@@ -3917,7 +3955,7 @@ impl MetadataStore {
         // q, and tags are optional refinements.
         let mut sql = String::from(
             "SELECT id, tenant_id, principal_id, name, sql_text,
-                    connection_profile_id, tags_json, created_at, updated_at
+                    connection_profile_id, tags_json, created_at, updated_at, revision
              FROM saved_query
              WHERE tenant_id = ?
                AND (principal_id = ? OR principal_id IS NULL)",
@@ -3997,7 +4035,7 @@ impl MetadataStore {
         tx.execute(
             "UPDATE saved_query
              SET name = ?1, sql_text = ?2, connection_profile_id = ?3,
-                 tags_json = ?4, updated_at = ?5
+                 tags_json = ?4, updated_at = ?5, revision = revision + 1
              WHERE id = ?6",
             params![
                 name,
@@ -4028,6 +4066,7 @@ impl MetadataStore {
         tenant: TenantId,
         principal: PrincipalId,
         tenant_admin: bool,
+        expected_revision: u64,
         update: UpdateSavedQuery,
     ) -> Result<SavedQuery> {
         let mut conn = self.conn()?;
@@ -4035,7 +4074,7 @@ impl MetadataStore {
         let existing = tx
             .query_row(
                 "SELECT id, tenant_id, principal_id, name, sql_text,
-                        connection_profile_id, tags_json, created_at, updated_at
+                        connection_profile_id, tags_json, created_at, updated_at, revision
                  FROM saved_query
                  WHERE id = ?1 AND tenant_id = ?2
                    AND (principal_id = ?3 OR (principal_id IS NULL AND ?4))",
@@ -4044,6 +4083,12 @@ impl MetadataStore {
             )
             .optional()?
             .ok_or(MetadataError::SavedQueryNotFound(id))?;
+        if existing.revision != expected_revision {
+            return Err(MetadataError::SavedQueryRevisionConflict {
+                expected: expected_revision,
+                current: existing.revision,
+            });
+        }
         let name = update.name.unwrap_or(existing.name);
         let sql_text = update.sql_text.unwrap_or(existing.sql_text);
         let profile = update
@@ -4062,7 +4107,7 @@ impl MetadataStore {
         let tags = update.tags.unwrap_or(existing.tags);
         tx.execute(
             "UPDATE saved_query SET name = ?1, sql_text = ?2, connection_profile_id = ?3,
-                 tags_json = ?4, updated_at = ?5 WHERE id = ?6",
+                 tags_json = ?4, updated_at = ?5, revision = revision + 1 WHERE id = ?6",
             params![
                 name,
                 sql_text,
@@ -4083,24 +4128,40 @@ impl MetadataStore {
         tenant: TenantId,
         principal: PrincipalId,
         tenant_admin: bool,
+        expected_revision: u64,
     ) -> Result<()> {
-        let conn = self.conn()?;
-        let deleted = conn.execute(
+        let mut conn = self.conn()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let current = tx
+            .query_row(
+                "SELECT revision FROM saved_query
+                 WHERE id = ?1 AND tenant_id = ?2
+                   AND (principal_id = ?3 OR (principal_id IS NULL AND ?4))",
+                params![id.0, tenant.0, principal.0, tenant_admin],
+                |row| row.get::<_, u64>(0),
+            )
+            .optional()?
+            .ok_or(MetadataError::SavedQueryNotFound(id))?;
+        if current != expected_revision {
+            return Err(MetadataError::SavedQueryRevisionConflict {
+                expected: expected_revision,
+                current,
+            });
+        }
+        tx.execute(
             "DELETE FROM saved_query
              WHERE id = ?1 AND tenant_id = ?2
                AND (principal_id = ?3 OR (principal_id IS NULL AND ?4))",
             params![id.0, tenant.0, principal.0, tenant_admin],
         )?;
-        if deleted == 0 {
-            return Err(MetadataError::SavedQueryNotFound(id));
-        }
+        tx.commit()?;
         Ok(())
     }
 
     fn saved_query_by_id_locked(&self, conn: &Connection, id: SavedQueryId) -> Result<SavedQuery> {
         conn.query_row(
             "SELECT id, tenant_id, principal_id, name, sql_text,
-                    connection_profile_id, tags_json, created_at, updated_at
+                    connection_profile_id, tags_json, created_at, updated_at, revision
              FROM saved_query WHERE id = ?1",
             params![id.0],
             saved_query_from_row,
@@ -4813,6 +4874,7 @@ fn saved_query_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SavedQuery>
         tags,
         created_at: parse_time_sql(row.get(7)?)?,
         updated_at: parse_time_sql(row.get(8)?)?,
+        revision: row.get(9)?,
     })
 }
 
@@ -6061,6 +6123,15 @@ mod tests {
         assert_eq!(rows[1].actor_principal_id, Some(PrincipalId(1)));
         assert_eq!(rows[1].row_count, Some(42));
         assert_eq!(rows[1].correlation_id.as_deref(), Some("corr-1"));
+
+        let first_page = store.list_operation_audit_before(1, None).unwrap();
+        assert_eq!(first_page.len(), 1);
+        assert_eq!(first_page[0].status, "failed");
+        let second_page = store
+            .list_operation_audit_before(1, Some(first_page[0].id))
+            .unwrap();
+        assert_eq!(second_page.len(), 1);
+        assert_eq!(second_page[0].status, "succeeded");
     }
 
     #[test]
@@ -7215,6 +7286,7 @@ mod tests {
                 TenantId(1),
                 peer.id,
                 false,
+                personal.revision,
                 UpdateSavedQuery {
                     name: Some("stolen".to_string()),
                     ..UpdateSavedQuery::default()
@@ -7228,6 +7300,7 @@ mod tests {
                 TenantId(1),
                 peer.id,
                 false,
+                shared.revision,
                 UpdateSavedQuery {
                     name: Some("denied".to_string()),
                     ..UpdateSavedQuery::default()
@@ -7350,6 +7423,28 @@ mod tests {
         assert_eq!(history.len(), 1);
         assert_eq!(history[0].sql_text, "select 1");
         assert_eq!(history[0].status, QueryStatus::Ok);
+
+        store
+            .record_query_history(NewQueryHistory {
+                principal_id: PrincipalId(1),
+                room_id: Some(room.id),
+                connection_profile_id: None,
+                sql_text: "select 2".to_string(),
+                duration_ms: None,
+                row_count: None,
+                status: QueryStatus::Ok,
+                error_code: None,
+                error_message: None,
+            })
+            .unwrap();
+        let first_page = store
+            .list_query_history_for_room_before(room.id, 1, None)
+            .unwrap();
+        assert_eq!(first_page[0].sql_text, "select 2");
+        let second_page = store
+            .list_query_history_for_room_before(room.id, 1, Some(first_page[0].id))
+            .unwrap();
+        assert_eq!(second_page[0].sql_text, "select 1");
     }
 
     fn ssh_claims(audience: &str) -> SshProxyCapabilityClaims {

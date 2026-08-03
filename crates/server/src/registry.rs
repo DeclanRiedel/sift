@@ -12,8 +12,9 @@ use std::{
 use arc_swap::ArcSwap;
 use sift_driver_api::{Driver, ResultSetStream};
 use sift_extension_protocol::{
-    DriverCatalog, DriverColumn, DriverNamespace, DriverSchemaDepth, DriverSchemaObject,
-    DriverSchemaScope, DriverSchemaSnapshot, DriverStreamPayload, DriverValue,
+    driver_rpc_v1_supports_capability, DriverCatalog, DriverColumn, DriverNamespace,
+    DriverSchemaDepth, DriverSchemaObject, DriverSchemaScope, DriverSchemaSnapshot,
+    DriverStreamPayload, DriverValue,
 };
 use sift_protocol::{
     Code, ColumnMetadata, DialectId, DriverError, DriverWarning, Engine, ExecuteRequest, Page,
@@ -551,20 +552,7 @@ impl RuntimeDriver {
             }
             _ => return true,
         };
-        if matches!(self, Self::External(_))
-            && matches!(
-                operation,
-                OperationKind::Savepoint
-                    | OperationKind::RollbackToSavepoint
-                    | OperationKind::ReleaseSavepoint
-                    | OperationKind::BulkInsert
-                    | OperationKind::ImportCsv
-                    | OperationKind::Listen
-                    | OperationKind::Explain
-                    | OperationKind::ListProcesses
-                    | OperationKind::KillProcess
-            )
-        {
+        if matches!(self, Self::External(_)) && !driver_rpc_v1_supports_capability(capability) {
             return false;
         }
         self.supports(capability)

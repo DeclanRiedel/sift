@@ -217,7 +217,14 @@ impl RoomReplica {
         &mut self,
         server_version: &[u8],
     ) -> Result<Option<RoomClientMessage>, DocError> {
-        let Some(update) = self.replica.updates_since_if_any(server_version)? else {
+        let update = self.replica.updates_since_if_any(server_version)?;
+        // A fresh version-vector exchange supersedes transport-level ack
+        // bookkeeping from the previous socket. If anything is still missing,
+        // replace the old pending set with one consolidated catch-up update;
+        // if nothing is missing, the server frontier proves those updates were
+        // already committed even when their acks were lost.
+        self.pending.clear();
+        let Some(update) = update else {
             return Ok(None);
         };
         let update_id = self.next_id("catchup");
@@ -346,6 +353,22 @@ mod tests {
             version_fingerprint: "abcd".into(),
         };
         assert_eq!(replica.ingest(&ack).unwrap(), Ingest::Acked(update_id));
+        assert_eq!(replica.pending_count(), 0);
+    }
+
+    #[test]
+    fn reconnect_discovery_clears_an_ack_lost_after_commit() {
+        let mut replica = RoomReplica::new(1, 0xD, None).unwrap();
+        replica.local_insert(0, "committed").unwrap();
+        assert_eq!(replica.pending_count(), 1);
+        let (_, sync) = replica.sync_message();
+        let RoomClientMessage::DocumentSync { known_version, .. } = sync else {
+            panic!("expected document sync");
+        };
+        assert!(replica
+            .catch_up(known_version.as_bytes())
+            .unwrap()
+            .is_none());
         assert_eq!(replica.pending_count(), 0);
     }
 

@@ -24,6 +24,7 @@ pub mod error;
 pub mod extension;
 pub mod handshake;
 pub mod operation;
+pub mod pagination;
 pub mod plan;
 pub mod policy;
 pub mod process;
@@ -82,6 +83,7 @@ pub use operation::{
     AuthenticationMethod, ExtensionAdminAction, IdentityAdminAction, Operation, OperationSummary,
     PolicyAdminAction,
 };
+pub use pagination::CursorPage;
 pub use plan::{ExplainRequest, ExplainResponse, PlanNode};
 pub use policy::{
     ApiErrorResponse, ConnectionPolicy, DisconnectManagedConnectionsResponse, RateLimitClass,

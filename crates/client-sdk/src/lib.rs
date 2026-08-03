@@ -4,6 +4,145 @@
 pub mod room_replica;
 pub use room_replica::{FollowEvent, FollowMode, Ingest, RoomReplica};
 
+/// Stable OpenAPI operation ids implemented by this SDK.
+///
+/// The server's contract test compares this SDK-owned list with the document
+/// extracted from the live router. Keeping the declaration here prevents the
+/// server from claiming SDK coverage on the SDK's behalf.
+pub const SUPPORTED_HTTP_OPERATION_IDS: &[&str] = &[
+    "acceptTenantInvitation",
+    "addMetadataRoomMember",
+    "adminCreatePasswordPrincipal",
+    "adminIssuePasswordReset",
+    "adminLinkPasswordIdentity",
+    "adminListAuthSessions",
+    "adminListPrincipalIdentities",
+    "adminRevokeAuthSession",
+    "adminSetPrincipalDisabled",
+    "adminUnlinkIdentity",
+    "applyEdits",
+    "approveOperation",
+    "authenticateKey",
+    "beginTransaction",
+    "bindMetadataRoomConnection",
+    "bulkInsert",
+    "cancelQuery",
+    "changePassword",
+    "clearTenantLimits",
+    "closeConnection",
+    "closeSession",
+    "commitTransaction",
+    "createGithubAllowlist",
+    "createOperationApproval",
+    "createMetadataDocument",
+    "createMetadataRoom",
+    "createMetadataSavedQuery",
+    "createSavepoint",
+    "createSession",
+    "createTenantInvitation",
+    "deleteMetadataConnectionProfile",
+    "deleteMetadataDocument",
+    "deleteMetadataRoom",
+    "deleteMetadataSavedQuery",
+    "deleteSpilledCursor",
+    "disconnectMetadataConnectionProfile",
+    "exchangeSshProxyCapability",
+    "executeQuery",
+    "explainQuery",
+    "exportQuery",
+    "extensionDiagnostics",
+    "getExtension",
+    "getMetadataConnectionPolicy",
+    "getMetadataSavedQuery",
+    "getObjectDdl",
+    "getRoomResult",
+    "getRoomResultPages",
+    "getSchema",
+    "getSession",
+    "getTenantUsage",
+    "githubAuthCallback",
+    "githubAuthStart",
+    "githubNativeAuthExchange",
+    "handshake",
+    "health",
+    "importCsv",
+    "installExtension",
+    "invokeExtensionAction",
+    "invokeGovernedTool",
+    "issueAuthToken",
+    "issueKeyChallenge",
+    "joinMetadataRoom",
+    "killProcess",
+    "leaveMetadataRoom",
+    "listAudit",
+    "listAuthTokens",
+    "listAvailableOperations",
+    "listConnections",
+    "listExtensions",
+    "listGithubAllowlist",
+    "listGovernedTools",
+    "listMetadataConnectionProfiles",
+    "listMetadataDocuments",
+    "listMetadataHistory",
+    "listMetadataRoomMembers",
+    "listMetadataRooms",
+    "listMetadataSavedQueries",
+    "listMetadataTenants",
+    "listOperationAudit",
+    "listOperations",
+    "listPrincipalKeys",
+    "listProcesses",
+    "listProviders",
+    "listRoomResults",
+    "listSessions",
+    "listTenantInvitations",
+    "listTransactions",
+    "logoutAllAuth",
+    "logoutAuth",
+    "openConnection",
+    "openConnectionFromProfile",
+    "openapi",
+    "pageMetadataHistory",
+    "pageOperationAudit",
+    "passwordLogin",
+    "pingConnection",
+    "postCompletion",
+    "previewEdits",
+    "previewTransaction",
+    "purgeExtension",
+    "readSpilledCursorPages",
+    "ready",
+    "refreshAuth",
+    "registerPrincipalKey",
+    "releaseSavepoint",
+    "removeMetadataRoomMember",
+    "resetPassword",
+    "revokeAuthToken",
+    "revokeGithubAllowlist",
+    "revokePrincipalKey",
+    "revokeTenantInvitation",
+    "rollbackExtension",
+    "rollbackToSavepoint",
+    "rollbackTransaction",
+    "roomWebSocket",
+    "searchData",
+    "searchSchema",
+    "sessionWebSocket",
+    "setMetadataConnectionCredential",
+    "setTenantLimits",
+    "unbindMetadataRoomConnection",
+    "uninstallExtension",
+    "updateExtensionGrants",
+    "updateExtensionSelection",
+    "updateExtensionTenant",
+    "updateMetadataConnectionPolicy",
+    "updateMetadataDocument",
+    "updateMetadataSavedQuery",
+    "upsertMetadataConnectionProfile",
+    "validateExtension",
+    "whoAmI",
+];
+
 // Request/response DTOs shared with the server. Re-export so downstream
 // consumers can build requests without depending on sift_metadata::http
 // directly.
@@ -25,11 +164,11 @@ use sift_protocol::{
     AuthTokensResponse, BeginTransactionRequest, BulkInsertRequest, BulkInsertResponse,
     CancelRequest, ChangePasswordRequest, ConnectionId, ConnectionInfo, ConnectionPolicy,
     CreateGithubAllowlistRequest, CreateTenantInvitationRequest, CsvImportRequest,
-    CsvImportResponse, CursorId, DataSearchRequest, DataSearchResponse, DatabaseProcess,
-    DisconnectManagedConnectionsResponse, EditPlan, EndTransactionRequest, ExecuteRequestHttp,
-    ExecuteResponse, ExpectedRevision, ExplainRequest, ExplainResponse, ExtensionDescriptor,
-    ExtensionDiagnostics, ExtensionGrantRequest, ExtensionPurgeResponse, ExtensionSelectionRequest,
-    ExtensionTenantSelectionRequest, GithubNativeAuthExchangeRequest,
+    CsvImportResponse, CursorId, CursorPage, DataSearchRequest, DataSearchResponse,
+    DatabaseProcess, DisconnectManagedConnectionsResponse, EditPlan, EndTransactionRequest,
+    ExecuteRequestHttp, ExecuteResponse, ExpectedRevision, ExplainRequest, ExplainResponse,
+    ExtensionDescriptor, ExtensionDiagnostics, ExtensionGrantRequest, ExtensionPurgeResponse,
+    ExtensionSelectionRequest, ExtensionTenantSelectionRequest, GithubNativeAuthExchangeRequest,
     GithubNativeAuthStartResponse, GovernedToolDescriptor, HandshakeClientKind, HandshakeRequest,
     HandshakeResponse, Health, InvokeExtensionOutcome, InvokeExtensionRequest, InvokeToolRequest,
     InvokeToolResponse, IssuedPasswordResetResponse, IssuedTenantInvitationResponse,
@@ -123,6 +262,36 @@ pub struct Client {
     handshake: std::sync::Arc<tokio::sync::OnceCell<HandshakeResponse>>,
 }
 
+/// A query export body consumed incrementally with transport backpressure.
+pub struct ExportStream {
+    content_type: Option<String>,
+    content_disposition: Option<String>,
+    body: std::pin::Pin<
+        Box<dyn futures::Stream<Item = std::result::Result<bytes::Bytes, reqwest::Error>> + Send>,
+    >,
+}
+
+impl ExportStream {
+    pub fn content_type(&self) -> Option<&str> {
+        self.content_type.as_deref()
+    }
+
+    pub fn content_disposition(&self) -> Option<&str> {
+        self.content_disposition.as_deref()
+    }
+}
+
+impl futures::Stream for ExportStream {
+    type Item = std::result::Result<bytes::Bytes, reqwest::Error>;
+
+    fn poll_next(
+        mut self: std::pin::Pin<&mut Self>,
+        context: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Self::Item>> {
+        self.body.as_mut().poll_next(context)
+    }
+}
+
 type TransportWebSocket =
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 
@@ -167,6 +336,163 @@ impl SessionWebSocket {
 
 pub struct RoomWebSocket {
     socket: TransportWebSocket,
+}
+
+/// Room transport that reconnects, re-attaches, and replays CRDT discovery
+/// before yielding further events. The replica remains caller-owned so it can
+/// be persisted independently of the socket lifecycle.
+pub struct PersistentRoomClient {
+    client: Client,
+    room: RoomId,
+    client_id: String,
+    socket: Option<RoomWebSocket>,
+    attachment_id: Option<i64>,
+    reconnect_attempt: u32,
+}
+
+impl PersistentRoomClient {
+    pub fn attachment_id(&self) -> Option<i64> {
+        self.attachment_id
+    }
+
+    pub async fn connect(&mut self, replica: &mut RoomReplica) -> Result<()> {
+        self.reconnect(replica).await
+    }
+
+    /// Receive the next meaningful replica event. Transport loss and
+    /// `ResyncRequired` are recovered internally through a fresh attach plus
+    /// version-vector sync.
+    pub async fn next(&mut self, replica: &mut RoomReplica) -> Result<Ingest> {
+        loop {
+            if self.socket.is_none() {
+                self.reconnect(replica).await?;
+            }
+            let result = self
+                .socket
+                .as_mut()
+                .expect("socket established")
+                .pump(replica)
+                .await;
+            match result {
+                Ok(Ingest::Resync) => {
+                    self.socket
+                        .as_mut()
+                        .expect("socket established")
+                        .sync_document(replica)
+                        .await?;
+                }
+                Ok(event) => {
+                    self.reconnect_attempt = 0;
+                    return Ok(event);
+                }
+                Err(error) if reconnectable_client_error(&error) => {
+                    self.socket = None;
+                    self.attachment_id = None;
+                    self.wait_before_reconnect().await;
+                }
+                Err(error) => return Err(error),
+            }
+        }
+    }
+
+    /// Submit a local CRDT update. If the connection disappears, reconnect
+    /// discovery sends the replica's pending update set, so no positional edit
+    /// needs to be reconstructed or blindly repeated.
+    pub async fn submit(
+        &mut self,
+        replica: &mut RoomReplica,
+        message: sift_protocol::RoomClientMessage,
+    ) -> Result<()> {
+        if self.socket.is_none() {
+            self.reconnect(replica).await?;
+        }
+        match self
+            .socket
+            .as_mut()
+            .expect("socket established")
+            .submit_update(replica, message)
+            .await
+        {
+            Ok(()) => {
+                self.reconnect_attempt = 0;
+                Ok(())
+            }
+            Err(error) if reconnectable_client_error(&error) => {
+                self.socket = None;
+                self.attachment_id = None;
+                self.wait_before_reconnect().await;
+                self.reconnect(replica).await
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    pub async fn heartbeat(&mut self, replica: &mut RoomReplica) -> Result<()> {
+        if self.socket.is_none() {
+            self.reconnect(replica).await?;
+        }
+        if let Err(error) = self
+            .socket
+            .as_mut()
+            .expect("socket established")
+            .heartbeat()
+            .await
+        {
+            if !reconnectable_client_error(&error) {
+                return Err(error);
+            }
+            self.socket = None;
+            self.attachment_id = None;
+            self.wait_before_reconnect().await;
+            self.reconnect(replica).await?;
+        }
+        Ok(())
+    }
+
+    async fn reconnect(&mut self, replica: &mut RoomReplica) -> Result<()> {
+        loop {
+            match self.client.connect_room_websocket(self.room).await {
+                Ok(mut socket) => {
+                    let attachment_id = match socket.attach(self.client_id.clone()).await {
+                        Ok(id) => id,
+                        Err(error) if reconnectable_client_error(&error) => {
+                            self.wait_before_reconnect().await;
+                            continue;
+                        }
+                        Err(error) => return Err(error),
+                    };
+                    match socket.sync_document(replica).await {
+                        Ok(()) => {
+                            self.attachment_id = Some(attachment_id);
+                            self.socket = Some(socket);
+                            self.reconnect_attempt = 0;
+                            return Ok(());
+                        }
+                        Err(error) if reconnectable_client_error(&error) => {
+                            self.wait_before_reconnect().await;
+                        }
+                        Err(error) => return Err(error),
+                    }
+                }
+                Err(error) if reconnectable_client_error(&error) => {
+                    self.wait_before_reconnect().await;
+                }
+                Err(error) => return Err(error),
+            }
+        }
+    }
+
+    async fn wait_before_reconnect(&mut self) {
+        let exponent = self.reconnect_attempt.min(6);
+        let delay_ms = 100_u64.saturating_mul(1_u64 << exponent).min(5_000);
+        self.reconnect_attempt = self.reconnect_attempt.saturating_add(1);
+        tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+    }
+}
+
+fn reconnectable_client_error(error: &Error) -> bool {
+    matches!(error, Error::WebSocket(_) | Error::Transport(_))
+        || matches!(error, Error::Protocol(message) if message == "websocket closed")
 }
 
 impl RoomWebSocket {
@@ -370,6 +696,21 @@ impl Client {
         self.token = None;
         self.session_tokens = Some(provider);
         self
+    }
+
+    pub fn persistent_room(
+        &self,
+        room: RoomId,
+        client_id: impl Into<String>,
+    ) -> PersistentRoomClient {
+        PersistentRoomClient {
+            client: self.clone(),
+            room,
+            client_id: client_id.into(),
+            socket: None,
+            attachment_id: None,
+            reconnect_attempt: 0,
+        }
     }
 
     pub async fn password_login(
@@ -734,10 +1075,8 @@ impl Client {
     }
 
     /// Export a query result as CSV / TSV / JSON Lines / JSON Array.
-    /// Returns the full response body as bytes; caller writes to file
-    /// or parses. For very large results, prefer calling the endpoint
-    /// directly with reqwest and streaming the body — this convenience
-    /// method buffers the whole payload.
+    /// This convenience method buffers the complete body; use
+    /// [`Client::stream_export_query`] for large exports.
     pub async fn export_query(
         &self,
         session: SessionId,
@@ -756,6 +1095,42 @@ impl Client {
             return Err(server_error(resp).await);
         }
         Ok(resp.bytes().await?.to_vec())
+    }
+
+    /// Start an export whose chunks are delivered incrementally. Dropping the
+    /// stream closes the response body and lets the server cancel/release its
+    /// cursor through the export drop guard.
+    pub async fn stream_export_query(
+        &self,
+        session: SessionId,
+        connection: ConnectionId,
+        request: sift_protocol::ExportRequest,
+    ) -> Result<ExportStream> {
+        let req = self
+            .http
+            .post(self.url(&format!(
+                "/v1/sessions/{session}/connections/{connection}/export"
+            )))
+            .json(&request);
+        let response = self.send_response(req).await?;
+        if !response.status().is_success() {
+            return Err(server_error(response).await);
+        }
+        let content_type = response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned);
+        let content_disposition = response
+            .headers()
+            .get(reqwest::header::CONTENT_DISPOSITION)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned);
+        Ok(ExportStream {
+            content_type,
+            content_disposition,
+            body: Box::pin(response.bytes_stream()),
+        })
     }
 
     /// Generate DDL for a database object. `path.name` is required;
@@ -1384,6 +1759,31 @@ impl Client {
         self.get(&format!("/v1/metadata/history{suffix}")).await
     }
 
+    pub async fn history_page(
+        &self,
+        room: Option<RoomId>,
+        cursor: Option<&str>,
+        limit: Option<u32>,
+    ) -> Result<CursorPage<QueryHistory>> {
+        let mut query = Vec::new();
+        if let Some(room) = room {
+            query.push(format!("room={}", room.0));
+        }
+        if let Some(cursor) = cursor {
+            query.push(format!("cursor={cursor}"));
+        }
+        if let Some(limit) = limit {
+            query.push(format!("limit={limit}"));
+        }
+        let suffix = if query.is_empty() {
+            String::new()
+        } else {
+            format!("?{}", query.join("&"))
+        };
+        self.get(&format!("/v1/metadata/history/pages{suffix}"))
+            .await
+    }
+
     /// List saved queries visible to the caller. `q` is a full-text
     /// search over name + sql_text; `tags` restrict to entries
     /// containing all listed tags; `scope` narrows to personal-only
@@ -1433,9 +1833,12 @@ impl Client {
             .await
     }
 
-    pub async fn delete_saved_query(&self, id: SavedQueryId) -> Result<()> {
-        self.delete(&format!("/v1/metadata/saved-queries/{}", id.0))
-            .await
+    pub async fn delete_saved_query(&self, id: SavedQueryId, expected_revision: u64) -> Result<()> {
+        self.delete(&format!(
+            "/v1/metadata/saved-queries/{}?expected_revision={expected_revision}",
+            id.0
+        ))
+        .await
     }
 
     pub async fn auth_tokens(&self) -> Result<Vec<sift_metadata::ApiTokenRow>> {
@@ -1660,6 +2063,27 @@ impl Client {
     /// sanitized failure message). Requires a configured metadata store.
     pub async fn operation_audit(&self) -> Result<Vec<sift_metadata::OperationAudit>> {
         self.get("/v1/operations/audit").await
+    }
+
+    pub async fn operation_audit_page(
+        &self,
+        cursor: Option<&str>,
+        limit: Option<u32>,
+    ) -> Result<CursorPage<sift_metadata::OperationAudit>> {
+        let mut query = Vec::new();
+        if let Some(cursor) = cursor {
+            query.push(format!("cursor={cursor}"));
+        }
+        if let Some(limit) = limit {
+            query.push(format!("limit={limit}"));
+        }
+        let suffix = if query.is_empty() {
+            String::new()
+        } else {
+            format!("?{}", query.join("&"))
+        };
+        self.get(&format!("/v1/operations/audit/pages{suffix}"))
+            .await
     }
 
     pub async fn stream_query(

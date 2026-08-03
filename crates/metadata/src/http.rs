@@ -107,6 +107,7 @@ pub struct CreateSavedQueryRequest {
 /// from "clear it" (present with null).
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Default)]
 pub struct UpdateSavedQueryRequest {
+    pub expected_revision: u64,
     #[serde(default)]
     pub name: Option<String>,
     #[serde(default)]

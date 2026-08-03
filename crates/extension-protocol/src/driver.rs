@@ -5,6 +5,25 @@ use serde::{Deserialize, Serialize};
 
 use crate::WireId;
 
+/// Provider capability families that Driver RPC v1 can actually dispatch.
+///
+/// Keep this list at the wire-contract boundary so package validation,
+/// discovery, and the host adapter cannot acquire independent ideas about
+/// which manifest claims are meaningful. Advanced families graduate with a
+/// typed Driver RPC revision; accepting their names before then would make
+/// capability discovery overstate the executable surface.
+pub const DRIVER_RPC_V1_CAPABILITIES: &[&str] = &[
+    "driver.core@1",
+    "driver.cancel@1",
+    "driver.schema.shallow@1",
+    "driver.schema.deep@1",
+    "driver.transactions@1",
+];
+
+pub fn driver_rpc_v1_supports_capability(capability: &str) -> bool {
+    DRIVER_RPC_V1_CAPABILITIES.contains(&capability)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum DriverMethod {

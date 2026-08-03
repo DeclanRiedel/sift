@@ -151,6 +151,9 @@ impl ApiError {
                 MetadataError::PolicyRevisionConflict { .. } => {
                     (StatusCode::CONFLICT, "policy_revision_conflict")
                 }
+                MetadataError::SavedQueryRevisionConflict { .. } => {
+                    (StatusCode::CONFLICT, "saved_query_revision_conflict")
+                }
                 MetadataError::ExtensionRevisionConflict { .. } => {
                     (StatusCode::CONFLICT, "extension_revision_conflict")
                 }

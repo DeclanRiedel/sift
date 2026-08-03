@@ -575,142 +575,6 @@ async fn provider_discovery_is_provider_neutral() {
     );
 }
 
-/// Explicit client-SDK coverage manifest: every HTTP operation the server
-/// publishes must be listed here, keeping the generated OpenAPI, the live
-/// router, and the client SDK in lockstep. Adding or removing a route is a
-/// deliberate edit to this list.
-const SDK_OPERATION_MANIFEST: &[&str] = &[
-    "acceptTenantInvitation",
-    "addMetadataRoomMember",
-    "adminCreatePasswordPrincipal",
-    "adminIssuePasswordReset",
-    "adminLinkPasswordIdentity",
-    "adminListAuthSessions",
-    "adminListPrincipalIdentities",
-    "adminRevokeAuthSession",
-    "adminSetPrincipalDisabled",
-    "adminUnlinkIdentity",
-    "applyEdits",
-    "approveOperation",
-    "authenticateKey",
-    "beginTransaction",
-    "bindMetadataRoomConnection",
-    "bulkInsert",
-    "cancelQuery",
-    "changePassword",
-    "clearTenantLimits",
-    "closeConnection",
-    "closeSession",
-    "commitTransaction",
-    "createGithubAllowlist",
-    "createOperationApproval",
-    "createMetadataDocument",
-    "createMetadataRoom",
-    "createMetadataSavedQuery",
-    "createSavepoint",
-    "createSession",
-    "createTenantInvitation",
-    "deleteMetadataConnectionProfile",
-    "deleteMetadataDocument",
-    "deleteMetadataRoom",
-    "deleteMetadataSavedQuery",
-    "deleteSpilledCursor",
-    "disconnectMetadataConnectionProfile",
-    "exchangeSshProxyCapability",
-    "executeQuery",
-    "explainQuery",
-    "exportQuery",
-    "getMetadataConnectionPolicy",
-    "getMetadataSavedQuery",
-    "getObjectDdl",
-    "getRoomResult",
-    "getRoomResultPages",
-    "getSchema",
-    "getSession",
-    "getTenantUsage",
-    "getExtension",
-    "githubAuthCallback",
-    "githubAuthStart",
-    "githubNativeAuthExchange",
-    "handshake",
-    "health",
-    "importCsv",
-    "installExtension",
-    "invokeExtensionAction",
-    "invokeGovernedTool",
-    "issueAuthToken",
-    "issueKeyChallenge",
-    "joinMetadataRoom",
-    "killProcess",
-    "leaveMetadataRoom",
-    "listAudit",
-    "listAuthTokens",
-    "listAvailableOperations",
-    "listConnections",
-    "listExtensions",
-    "listGithubAllowlist",
-    "listMetadataConnectionProfiles",
-    "listMetadataDocuments",
-    "listMetadataHistory",
-    "listMetadataRoomMembers",
-    "listMetadataRooms",
-    "listMetadataSavedQueries",
-    "listMetadataTenants",
-    "listOperationAudit",
-    "listOperations",
-    "listProviders",
-    "listPrincipalKeys",
-    "listProcesses",
-    "listRoomResults",
-    "listSessions",
-    "listTenantInvitations",
-    "listGovernedTools",
-    "listTransactions",
-    "logoutAllAuth",
-    "logoutAuth",
-    "openapi",
-    "openConnection",
-    "openConnectionFromProfile",
-    "passwordLogin",
-    "pingConnection",
-    "postCompletion",
-    "previewEdits",
-    "previewTransaction",
-    "purgeExtension",
-    "readSpilledCursorPages",
-    "ready",
-    "refreshAuth",
-    "registerPrincipalKey",
-    "releaseSavepoint",
-    "removeMetadataRoomMember",
-    "resetPassword",
-    "revokeAuthToken",
-    "revokeGithubAllowlist",
-    "revokePrincipalKey",
-    "revokeTenantInvitation",
-    "rollbackToSavepoint",
-    "rollbackExtension",
-    "rollbackTransaction",
-    "roomWebSocket",
-    "searchData",
-    "searchSchema",
-    "sessionWebSocket",
-    "setMetadataConnectionCredential",
-    "setTenantLimits",
-    "uninstallExtension",
-    "updateExtensionGrants",
-    "updateExtensionSelection",
-    "updateExtensionTenant",
-    "updateMetadataConnectionPolicy",
-    "updateMetadataDocument",
-    "updateMetadataSavedQuery",
-    "unbindMetadataRoomConnection",
-    "upsertMetadataConnectionProfile",
-    "validateExtension",
-    "extensionDiagnostics",
-    "whoAmI",
-];
-
 async fn fetch_openapi() -> serde_json::Value {
     let app = app(test_state());
     let res = app
@@ -753,7 +617,7 @@ async fn openapi_operation_ids_are_stable_and_unique() {
 async fn openapi_matches_client_sdk_coverage_manifest() {
     let document = fetch_openapi().await;
     let documented = documented_operation_ids(&document);
-    let manifest = SDK_OPERATION_MANIFEST
+    let manifest = sift_client_sdk::SUPPORTED_HTTP_OPERATION_IDS
         .iter()
         .map(|s| s.to_string())
         .collect::<std::collections::BTreeSet<_>>();
@@ -5196,7 +5060,10 @@ async fn saved_queries_lifecycle_personal_and_shared() {
     assert_eq!(hits.as_array().unwrap().len(), 0);
 
     // Update the personal query — rename it, keep tags.
-    let update = serde_json::json!({ "name": "my daily user count" });
+    let update = serde_json::json!({
+        "expected_revision": personal["revision"],
+        "name": "my daily user count"
+    });
     let res = app
         .clone()
         .oneshot(
@@ -5212,14 +5079,39 @@ async fn saved_queries_lifecycle_personal_and_shared() {
     assert_eq!(updated["name"], "my daily user count");
     assert_eq!(updated["tags"], serde_json::json!(["daily", "users"]));
 
-    // Delete both.
-    for id in [personal_id, shared_id] {
+    assert_eq!(updated["revision"], 1);
+
+    // A stale writer cannot overwrite the revision we just observed.
+    let stale = app
+        .clone()
+        .oneshot(
+            Request::put(format!("/v1/metadata/saved-queries/{personal_id}"))
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "expected_revision": 0,
+                        "name": "stale overwrite"
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(stale.status(), StatusCode::CONFLICT);
+    let stale: sift_protocol::ApiErrorResponse = body_json(stale.into_body()).await;
+    assert_eq!(stale.kind, "saved_query_revision_conflict");
+
+    // Delete both using the revision observed by the caller.
+    for (id, revision) in [(personal_id, 1), (shared_id, 0)] {
         let res = app
             .clone()
             .oneshot(
-                Request::delete(format!("/v1/metadata/saved-queries/{id}"))
-                    .body(Body::empty())
-                    .unwrap(),
+                Request::delete(format!(
+                    "/v1/metadata/saved-queries/{id}?expected_revision={revision}"
+                ))
+                .body(Body::empty())
+                .unwrap(),
             )
             .await
             .unwrap();

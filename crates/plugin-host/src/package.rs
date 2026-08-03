@@ -10,8 +10,8 @@ use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use semver::Version;
 use sha2::{Digest, Sha256};
 use sift_extension_protocol::{
-    ActionContribution, ExtensionManifest, GenericContribution, LockedFile, PackageLock,
-    DRIVER_RPC_VERSION, EXTENSION_RPC_VERSION,
+    driver_rpc_v1_supports_capability, ActionContribution, ExtensionManifest, GenericContribution,
+    LockedFile, PackageLock, DRIVER_RPC_VERSION, EXTENSION_RPC_VERSION,
 };
 use thiserror::Error;
 use zip::ZipArchive;
@@ -575,6 +575,33 @@ fn validate_manifest(manifest: &ExtensionManifest, lock: &PackageLock) -> Result
             )));
         }
     }
+    for provider in &manifest.contributions.database_provider {
+        if !provider
+            .capabilities
+            .iter()
+            .any(|capability| capability == "driver.core@1")
+        {
+            return Err(PackageError::InvalidManifest(format!(
+                "database provider `{}` must declare driver.core@1",
+                provider.provider_id
+            )));
+        }
+        let mut seen = BTreeSet::new();
+        for capability in &provider.capabilities {
+            if !seen.insert(capability) {
+                return Err(PackageError::InvalidManifest(format!(
+                    "database provider `{}` declares duplicate capability `{capability}`",
+                    provider.provider_id
+                )));
+            }
+            if !driver_rpc_v1_supports_capability(capability) {
+                return Err(PackageError::InvalidManifest(format!(
+                    "database provider `{}` declares `{capability}`, which Driver RPC v1 cannot dispatch",
+                    provider.provider_id
+                )));
+            }
+        }
+    }
     Ok(())
 }
 
@@ -1026,7 +1053,7 @@ driver_rpc = { minimum = 1, maximum = 1 }
         archive.finish().unwrap();
     }
 
-    fn build_provider_package(path: &Path, configuration_schema: &str) {
+    fn build_provider_package(path: &Path, configuration_schema: &str, capabilities: &str) {
         let manifest = format!(
             r#"{MANIFEST}
 [[contributions.database_provider]]
@@ -1035,6 +1062,7 @@ provider_id = "acme/example"
 dialect_id = "acme/sql"
 config_schema = "z-config.json"
 credential_schema = "z-credential.json"
+capabilities = [{capabilities}]
 "#
         );
         let credential_schema =
@@ -1211,6 +1239,7 @@ credential_schema = "z-credential.json"
         build_provider_package(
             &valid,
             r#"{"type":"object","properties":{"host":{"type":"string"}}}"#,
+            "\"driver.core@1\"",
         );
         PackageValidator::new(PackageLimits::default())
             .validate_path(&valid, SignaturePolicy::AllowUnsigned)
@@ -1220,12 +1249,43 @@ credential_schema = "z-credential.json"
         build_provider_package(
             &secret,
             r#"{"type":"object","properties":{"api_token":{"type":"string"}}}"#,
+            "\"driver.core@1\"",
         );
         assert!(matches!(
             PackageValidator::new(PackageLimits::default())
                 .validate_path(&secret, SignaturePolicy::AllowUnsigned),
             Err(PackageError::InvalidManifest(message))
                 if message.contains("secret-shaped field")
+        ));
+    }
+
+    #[test]
+    fn provider_capabilities_must_match_driver_rpc_v1_dispatch() {
+        let temp = tempfile::tempdir().unwrap();
+        let unsupported = temp.path().join("unsupported-capability.sift-extension");
+        build_provider_package(
+            &unsupported,
+            r#"{"type":"object","properties":{"host":{"type":"string"}}}"#,
+            "\"driver.core@1\", \"driver.bulk@1\"",
+        );
+        assert!(matches!(
+            PackageValidator::new(PackageLimits::default())
+                .validate_path(&unsupported, SignaturePolicy::AllowUnsigned),
+            Err(PackageError::InvalidManifest(message))
+                if message.contains("driver.bulk@1") && message.contains("cannot dispatch")
+        ));
+
+        let missing_core = temp.path().join("missing-core.sift-extension");
+        build_provider_package(
+            &missing_core,
+            r#"{"type":"object","properties":{"host":{"type":"string"}}}"#,
+            "\"driver.cancel@1\"",
+        );
+        assert!(matches!(
+            PackageValidator::new(PackageLimits::default())
+                .validate_path(&missing_core, SignaturePolicy::AllowUnsigned),
+            Err(PackageError::InvalidManifest(message))
+                if message.contains("must declare driver.core@1")
         ));
     }
 }

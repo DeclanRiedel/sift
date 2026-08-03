@@ -696,6 +696,7 @@ pub struct SavedQuery {
     pub tags: Vec<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    pub revision: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]

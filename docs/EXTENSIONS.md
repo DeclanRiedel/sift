@@ -25,6 +25,13 @@ There is no historical pre-release `Engine` codec. Protocol v1 uses
 Unknown capabilities are ignored by older clients; missing required
 capabilities fail explicitly.
 
+Package validation also rejects provider capabilities that Driver RPC v1
+cannot dispatch. A v1 provider must declare `driver.core@1`; the only accepted
+optional families are `driver.cancel@1`, `driver.schema.shallow@1`,
+`driver.schema.deep@1`, and `driver.transactions@1`. Savepoints, bulk ingest,
+notifications, explain, and process control require a future typed Driver RPC
+revision before manifests may advertise them.
+
 Provider quality is not supplied by an extension:
 
 | Quality | Meaning |
