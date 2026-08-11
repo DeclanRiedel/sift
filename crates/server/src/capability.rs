@@ -119,7 +119,24 @@ fn unavailable_reason(
         | ListPlanCaptures
         | GetPlanCapture
         | ComparePlanCaptures
-        | DeletePlanCapture => None,
+        | DeletePlanCapture
+        | ReadWorkspace
+        | ManageWorkspace
+        | ReadWorkspaceHistory
+        | RestoreWorkspace
+        | ManageWorkspaceProjection
+        | ReadVcs
+        | WriteVcs
+        | ReadDdlSource
+        | ManageDdlSource
+        | ReadRunConfiguration
+        | ManageRunConfiguration
+        | ReadRun
+        | ManageSchedule
+        | ReadSchedule
+        | ManageTransferRecipe
+        | ReadTransferRecipe
+        | ExecuteTransferRecipe => None,
         StartComparison | PageComparison | CancelComparison | PrepareComparisonPatch
             if !has_session =>
         {
@@ -193,6 +210,7 @@ fn unavailable_reason(
         {
             Some("connection context required")
         }
+        ExecuteRun if !has_connection => Some("connection context required"),
         ExecuteQuery if has_active_transaction && !selected_transaction => {
             Some("select the connection's active transaction")
         }
@@ -231,7 +249,8 @@ fn unavailable_reason(
         | ListProcesses
         | KillProcess
         | ImportCsv
-        | BulkInsert => None,
+        | BulkInsert
+        | ExecuteRun => None,
     }
 }
 

@@ -454,20 +454,24 @@ inventory: `docs/PLANS/ide-parity-and-provider-extensibility.md`.
 
 Goal: support DataGrip-class files, offline DDL sources, history, VCS, and run
 configurations without abandoning thin clients or breaking remote topology.
+Detailed implementation order and ADR-034 contract:
+`docs/PLANS/phase-l-workspaces-vcs-automation.md`.
 
-- [ ] [Design] ADR candidate: server-owned versus hybrid workspace topology.
+- [x] [Design] ADR-034: canonical server-owned virtual workspaces with optional
+      filesystem/VCS projections.
       Local conveniences may use client files, but hosted/remote product state
-      must have a server-authoritative representation.
-- [ ] [Design] Durable SQL files/documents, folders, revisions, local-history
+      must have a server-authoritative representation. Contract:
+      `docs/PLANS/phase-l-workspaces-vcs-automation.md`.
+- [x] [Design] Durable SQL files/documents, folders, revisions, local-history
       semantics, offline DDL sources, and mapping between DDL models and live
       connections.
-- [ ] [Design] VCS adapter boundary: repository binding, status/diff/commit
+- [x] [Design] VCS adapter boundary: repository binding, status/diff/commit
       operations, remote-server filesystem rules, scoped credentials through
       `SecretStore`, and collaboration conflict behavior.
-- [ ] [Design] Run configurations: ordered scripts, target connections/schemas,
+- [x] [Design] Run configurations: ordered scripts, target connections/schemas,
       variables and secret references, transaction/error policies, pre-tasks,
       durable scheduling, logs, cancellation, and audited reruns.
-- [ ] [Design] Extensible import/export recipes including HTML, Markdown,
+- [x] [Design] Extensible import/export recipes including HTML, Markdown,
       spreadsheet, and operator-installed formatter plugins. Untrusted
       formatters use the Phase I extension boundary rather than in-process
       execution.
@@ -538,7 +542,7 @@ configurations without abandoning thin clients or breaking remote topology.
 | ADR-031 | plugin manifest, isolation, permissions, and lifecycle                | Phase I | written; declarative-first packages + core-governed operations |
 | ADR-032 | SQL semantic service and dialect-pack boundary                        | Phase K | implemented and graduated; `docs/PLANS/sql-semantic-service.md`                  |
 | ADR-033 | catalog graph, schema diff, and migration safety                      | Phase K | implemented and graduated; `docs/PLANS/catalog-graph-schema-migrations.md`       |
-| ADR-034 | server-owned or hybrid workspace and VCS topology                     | Phase L | not written                                                    |
+| ADR-034 | canonical virtual workspace + optional filesystem/VCS projections     | Phase L | written; Phase L implementation contract locked                |
 | ADR-035 | room lane separation + CRDT-safe lag recovery                         | Phase G | implemented; `docs/PLANS/presence-durable-separation.md`       |
 | ADR-036 | room-owned connection binding + submitter-scoped authorization        | Phase G | implemented; `docs/PLANS/shared-connection-ownership.md`       |
 | ADR-037 | room-owned system session + submitter-scoped pre-authorization        | Phase G | implemented; `docs/PLANS/shared-room-connection-routing.md` |

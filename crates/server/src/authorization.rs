@@ -36,6 +36,7 @@ pub enum AuthorizationDenial {
     TenantAdminRequired,
     TenantMemberRequired,
     TenantRoleTooLow,
+    RoomOwnerRequired,
     RoomEditorRequired,
     OperationNotAllowed,
     OperationBlocked,
@@ -49,6 +50,7 @@ impl AuthorizationDenial {
             Self::TenantAdminRequired => "tenant administrator context required",
             Self::TenantMemberRequired => "tenant membership required",
             Self::TenantRoleTooLow => "tenant role cannot use this connection profile",
+            Self::RoomOwnerRequired => "room owner context required",
             Self::RoomEditorRequired => "room editor context required",
             Self::OperationNotAllowed => "operation is not allowed by connection policy",
             Self::OperationBlocked => "operation is blocked by connection policy",
@@ -86,8 +88,27 @@ pub fn authorize(
         return Err(AuthorizationDenial::TenantAdminRequired);
     }
 
-    if operation == ApplyDocumentUpdate
-        && matches!(scope.room_role, Some(AuthorizationRoomRole::Viewer))
+    if matches!(operation, ManageWorkspaceProjection | ManageSchedule)
+        && !matches!(scope.room_role, Some(AuthorizationRoomRole::Owner))
+        && !scope.trusted_local
+    {
+        return Err(AuthorizationDenial::RoomOwnerRequired);
+    }
+
+    if matches!(
+        operation,
+        ApplyDocumentUpdate
+            | ManageWorkspace
+            | RestoreWorkspace
+            | ManageWorkspaceProjection
+            | WriteVcs
+            | ManageDdlSource
+            | ManageRunConfiguration
+            | ExecuteRun
+            | ManageSchedule
+            | ManageTransferRecipe
+            | ExecuteTransferRecipe
+    ) && matches!(scope.room_role, Some(AuthorizationRoomRole::Viewer))
     {
         return Err(AuthorizationDenial::RoomEditorRequired);
     }
@@ -205,6 +226,7 @@ pub const fn is_connection_operation(operation: OperationKind) -> bool {
             | Savepoint
             | RollbackToSavepoint
             | ReleaseSavepoint
+            | ExecuteRun
     )
 }
 
@@ -270,6 +292,32 @@ mod tests {
             authorize(&scope, OperationKind::ExecuteQuery),
             Err(AuthorizationDenial::RoomEditorRequired)
         );
+    }
+
+    #[test]
+    fn workspace_mutations_follow_room_roles() {
+        let mut scope = AuthorizationScope {
+            authenticated: true,
+            tenant_role: Some(TenantRole::Member),
+            room_role: Some(AuthorizationRoomRole::Viewer),
+            ..AuthorizationScope::default()
+        };
+        assert!(authorize(&scope, OperationKind::ReadWorkspace).is_ok());
+        assert_eq!(
+            authorize(&scope, OperationKind::ManageWorkspace),
+            Err(AuthorizationDenial::RoomEditorRequired)
+        );
+
+        scope.room_role = Some(AuthorizationRoomRole::Editor);
+        assert!(authorize(&scope, OperationKind::ManageWorkspace).is_ok());
+        assert_eq!(
+            authorize(&scope, OperationKind::ManageWorkspaceProjection),
+            Err(AuthorizationDenial::RoomOwnerRequired)
+        );
+
+        scope.room_role = Some(AuthorizationRoomRole::Owner);
+        assert!(authorize(&scope, OperationKind::ManageWorkspaceProjection).is_ok());
+        assert!(authorize(&scope, OperationKind::ManageSchedule).is_ok());
     }
 
     #[test]

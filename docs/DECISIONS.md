@@ -1289,3 +1289,79 @@ and verified binary selection. Remote correctness depends on the ADR-016
 handshake rather than equal executable versions. Detailed state machines,
 failure gates, and implementation order are in
 `docs/PLANS/phase-h-remote-development.md`.
+
+---
+
+## ADR-034 — Canonical Virtual Workspaces With Optional Filesystem And VCS Projections
+
+**Context.** Phase L adds durable SQL files, local history, offline DDL sources,
+Git, run configurations, schedules, and transfer recipes. Making the client
+filesystem authoritative would break thin clients and make those features
+disappear over SSH or on a hosted instance. Making a checkout authoritative
+would also race collaborative Loro edits with filesystem and Git operations.
+The old V003 principal-owned workspace/session/tab schema predates ADR-007 and
+has no valid shared-room semantics.
+
+Zed's Git architecture provides useful implementation patterns: repository
+operations sit behind a trait, porcelain output becomes typed state, remote
+clients invoke Git where the worktree lives, in-flight path operations are
+explicit, and a fixed system-Git wrapper disables unsafe hooks/helpers and
+interactive behavior for untrusted repositories. Sift adopts those boundaries
+but cannot adopt a desktop editor's filesystem authority or ambient user
+credentials.
+
+**Decision.** A workspace is a server-owned, revisioned virtual tree attached
+to exactly one room; a room may contain multiple workspaces. Stable node ids,
+not mutable paths, are identity. An SQL node points one-to-one at the room's
+existing Loro document, so SQL has one durable content owner. Paths, folders,
+checkpoints, Git state, runs, logs, results, catalogs, and artifacts are never
+CRDTs. L1 supports folders and SQL documents; later recipe output may add
+immutable artifact nodes.
+
+The user-facing history is a bounded set of immutable checkpoints over a tree
+revision and document content frontiers. Automatic checkpoints occur before
+meaningful reconcile, run, VCS, and restore operations; named checkpoints are
+explicit. Restore creates a new head and an audited native Loro replacement,
+never rewrites prior history.
+
+A filesystem binding is an optional projection beneath an operator-configured
+root. Public requests contain only normalized workspace-relative paths and
+opaque binding ids. Reconciliation compares the last materialized revision and
+per-file digests, returns a deterministic typed plan, and requires an explicit
+preconditioned resolution when both sides changed. Symlink/hard-link escapes,
+special files, traversal, aliases, and case-fold collisions fail closed. V003
+legacy tables are renamed and preserved; their rows are never silently
+reinterpreted as collaborative resources.
+
+Git is a VCS adapter over one projection checkpoint. The bundled adapter uses a
+fixed system Git executable, structured arguments, bounded output and process
+lifetime, and no shell. Untrusted repositories disable hooks, credential
+helpers, external diff, fsmonitor, extension protocols, pagers, and optional
+interactive locks. Network credentials are resolved from `SecretStore` into a
+one-operation helper channel and never enter URLs, arguments, inherited
+environment, SQLite, logs, or audit. Remote clients invoke the adapter beside
+the remote server; they do not mount or mirror its checkout. Local
+status/diff/stage/commit precede authenticated fetch/push. Force-push, arbitrary
+shell commands, and automatic merge/rebase are excluded from v1.
+
+Run configurations capture immutable manifests before execution. Values use
+typed database parameters; identifier substitutions are separately validated;
+untyped textual substitution is forbidden. Schedules are owned by a normal
+principal and re-evaluate current authorization at every occurrence. Revoked
+authority disables work. Interrupted writes with uncertain outcomes are marked
+`outcome_unknown` and never replayed automatically. Pre-tasks are bounded core
+operations or Phase I tools declared schedulable, never shell strings.
+
+Core owns transfer admission, canonical row streaming, artifacts, limits, and
+stage-and-commit. Untrusted formatters run through Phase I supervision. The
+Phase L public additions are additive under ADR-016 and retain protocol v1.
+
+**Consequences.** Virtual workspaces work identically in personal, SSH-remote,
+network-hosted, and container deployments even when filesystem/Git capability
+is disabled. Checkouts become disposable/rebuildable projections, commits bind
+to explicit checkpoints, and collaborative edits arriving after
+materialization cannot leak into an in-flight commit. The server must add
+room-aware metadata instead of reviving V003, rooted filesystem traversal,
+typed VCS/run/recipe contracts, durable recovery state, capability discovery,
+and deployment/security graduation matrices. The normative implementation
+order is `docs/PLANS/phase-l-workspaces-vcs-automation.md`.

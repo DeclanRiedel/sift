@@ -85,10 +85,28 @@ pub enum OperationKind {
     DetachRoom,
     ApplyDocumentUpdate,
     ReadSharedResult,
+    ReadWorkspace,
+    ManageWorkspace,
+    ReadWorkspaceHistory,
+    RestoreWorkspace,
+    ManageWorkspaceProjection,
+    ReadVcs,
+    WriteVcs,
+    ReadDdlSource,
+    ManageDdlSource,
+    ReadRunConfiguration,
+    ManageRunConfiguration,
+    ExecuteRun,
+    ReadRun,
+    ManageSchedule,
+    ReadSchedule,
+    ManageTransferRecipe,
+    ReadTransferRecipe,
+    ExecuteTransferRecipe,
 }
 
 impl OperationKind {
-    pub const ALL: [Self; 80] = [
+    pub const ALL: [Self; 98] = [
         Self::Authenticate,
         Self::RefreshAuthSession,
         Self::Logout,
@@ -169,6 +187,24 @@ impl OperationKind {
         Self::DetachRoom,
         Self::ApplyDocumentUpdate,
         Self::ReadSharedResult,
+        Self::ReadWorkspace,
+        Self::ManageWorkspace,
+        Self::ReadWorkspaceHistory,
+        Self::RestoreWorkspace,
+        Self::ManageWorkspaceProjection,
+        Self::ReadVcs,
+        Self::WriteVcs,
+        Self::ReadDdlSource,
+        Self::ManageDdlSource,
+        Self::ReadRunConfiguration,
+        Self::ManageRunConfiguration,
+        Self::ExecuteRun,
+        Self::ReadRun,
+        Self::ManageSchedule,
+        Self::ReadSchedule,
+        Self::ManageTransferRecipe,
+        Self::ReadTransferRecipe,
+        Self::ExecuteTransferRecipe,
     ];
 
     pub fn destructive(self) -> bool {
@@ -196,6 +232,16 @@ impl OperationKind {
                 | Self::ApplyMigration
                 | Self::DeletePlanCapture
                 | Self::ApplyDocumentUpdate
+                | Self::ManageWorkspace
+                | Self::RestoreWorkspace
+                | Self::ManageWorkspaceProjection
+                | Self::WriteVcs
+                | Self::ManageDdlSource
+                | Self::ManageRunConfiguration
+                | Self::ExecuteRun
+                | Self::ManageSchedule
+                | Self::ManageTransferRecipe
+                | Self::ExecuteTransferRecipe
         )
     }
 }
@@ -214,6 +260,8 @@ pub struct OperationCapabilityContext {
     pub connection: Option<ConnectionId>,
     #[serde(default)]
     pub transaction: Option<TxId>,
+    #[serde(default)]
+    pub workspace_id: Option<crate::WorkspaceId>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]

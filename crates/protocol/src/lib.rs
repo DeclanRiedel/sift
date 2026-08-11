@@ -35,14 +35,18 @@ pub mod provider;
 pub mod remote;
 pub mod result;
 pub mod room;
+pub mod run;
 pub mod schema;
 pub mod schema_diff;
 pub mod search;
 pub mod semantic;
 pub mod session;
 pub mod transaction_panel;
+pub mod transfer;
 pub mod tx;
 pub mod value;
+pub mod vcs;
+pub mod workspace;
 
 pub use auth::{
     AcceptTenantInvitationRequest, AdminCreatePasswordPrincipalRequest,
@@ -88,8 +92,9 @@ pub use handshake::{
 };
 pub use migration::*;
 pub use operation::{
-    AuthenticationMethod, ExtensionAdminAction, IdentityAdminAction, Operation, OperationSummary,
-    PolicyAdminAction,
+    AuthenticationMethod, DdlSourceAction, ExtensionAdminAction, IdentityAdminAction, Operation,
+    OperationSummary, PolicyAdminAction, RunAction, RunConfigurationAction, ScheduleAction,
+    TransferRecipeAction, VcsAction, WorkspaceAction,
 };
 pub use pagination::CursorPage;
 pub use plan::*;
@@ -109,6 +114,7 @@ pub use room::{
     DocumentErrorCode, DocumentTransferKind, RoomClientMessage, RoomPresence, RoomQueryResult,
     RoomQueryStatus, RoomResultPage, RoomResultPages, RoomSelection, RoomServerMessage,
 };
+pub use run::*;
 pub use schema::{
     CatalogTree, ConstraintInfo, ConstraintKind, IndexInfo, IndexKind, ObjectDdl, ObjectInfo,
     ObjectKind, ObjectPath, SchemaDepth, SchemaFilter, SchemaScope, SchemaSnapshot, SchemaTree,
@@ -132,7 +138,10 @@ pub use transaction_panel::{
     SavepointInfo, SavepointState, TransactionEndAction, TransactionPreview,
     TransactionPreviewRequest, TransactionState,
 };
+pub use transfer::*;
 pub use tx::{AccessMode as TxAccessMode, IsolationLevel, TxId, TxMode};
+pub use vcs::*;
+pub use workspace::*;
 
 /// Re-export of [`ConnectionSpec`].
 pub use connection::ConnectionSpec;

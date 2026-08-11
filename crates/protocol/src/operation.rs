@@ -60,6 +60,87 @@ pub enum ExtensionAdminAction {
     Purge,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkspaceAction {
+    Read,
+    Create,
+    Update,
+    Delete,
+    CreateNode,
+    MoveNode,
+    DeleteNode,
+    CreateCheckpoint,
+    ReadHistory,
+    RestoreCheckpoint,
+    BindProjection,
+    ReconcileProjection,
+    ResolveConflict,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum VcsAction {
+    Status,
+    Diff,
+    Stage,
+    Commit,
+    Fetch,
+    Push,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum DdlSourceAction {
+    Read,
+    Create,
+    Update,
+    Delete,
+    Refresh,
+    Map,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum RunConfigurationAction {
+    Read,
+    Create,
+    Update,
+    Delete,
+    Validate,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum RunAction {
+    Start,
+    Read,
+    Cancel,
+    Rerun,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ScheduleAction {
+    Read,
+    Create,
+    Update,
+    Enable,
+    Disable,
+    Delete,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum TransferRecipeAction {
+    Read,
+    Create,
+    Update,
+    Delete,
+    Validate,
+    Execute,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum Operation {
@@ -464,6 +545,41 @@ pub enum Operation {
         room_id: i64,
         result_id: crate::RoomResultId,
     },
+    Workspace {
+        action: WorkspaceAction,
+        workspace_id: Option<crate::WorkspaceId>,
+        node_id: Option<crate::WorkspaceNodeId>,
+    },
+    Vcs {
+        action: VcsAction,
+        workspace_id: crate::WorkspaceId,
+        binding_id: crate::RepositoryBindingId,
+    },
+    DdlSource {
+        action: DdlSourceAction,
+        workspace_id: crate::WorkspaceId,
+        source_id: Option<crate::DdlSourceId>,
+    },
+    RunConfiguration {
+        action: RunConfigurationAction,
+        workspace_id: crate::WorkspaceId,
+        configuration_id: Option<crate::RunConfigurationId>,
+    },
+    Run {
+        action: RunAction,
+        workspace_id: crate::WorkspaceId,
+        run_id: Option<crate::RunId>,
+    },
+    Schedule {
+        action: ScheduleAction,
+        workspace_id: crate::WorkspaceId,
+        schedule_id: Option<crate::ScheduleId>,
+    },
+    TransferRecipe {
+        action: TransferRecipeAction,
+        workspace_id: crate::WorkspaceId,
+        recipe_id: Option<crate::TransferRecipeId>,
+    },
     BackupState,
     RestoreState {
         applied: bool,
@@ -565,6 +681,64 @@ impl Operation {
             Self::DetachRoom { .. } => OperationKind::DetachRoom,
             Self::ApplyDocumentUpdate { .. } => OperationKind::ApplyDocumentUpdate,
             Self::ReadSharedResult { .. } => OperationKind::ReadSharedResult,
+            Self::Workspace { action, .. } => match action {
+                WorkspaceAction::Read => OperationKind::ReadWorkspace,
+                WorkspaceAction::ReadHistory => OperationKind::ReadWorkspaceHistory,
+                WorkspaceAction::CreateCheckpoint => OperationKind::ManageWorkspace,
+                WorkspaceAction::RestoreCheckpoint => OperationKind::RestoreWorkspace,
+                WorkspaceAction::BindProjection
+                | WorkspaceAction::ReconcileProjection
+                | WorkspaceAction::ResolveConflict => OperationKind::ManageWorkspaceProjection,
+                WorkspaceAction::Create
+                | WorkspaceAction::Update
+                | WorkspaceAction::Delete
+                | WorkspaceAction::CreateNode
+                | WorkspaceAction::MoveNode
+                | WorkspaceAction::DeleteNode => OperationKind::ManageWorkspace,
+            },
+            Self::Vcs { action, .. } => match action {
+                VcsAction::Status | VcsAction::Diff => OperationKind::ReadVcs,
+                VcsAction::Stage | VcsAction::Commit | VcsAction::Fetch | VcsAction::Push => {
+                    OperationKind::WriteVcs
+                }
+            },
+            Self::DdlSource { action, .. } => match action {
+                DdlSourceAction::Read => OperationKind::ReadDdlSource,
+                DdlSourceAction::Create
+                | DdlSourceAction::Update
+                | DdlSourceAction::Delete
+                | DdlSourceAction::Refresh
+                | DdlSourceAction::Map => OperationKind::ManageDdlSource,
+            },
+            Self::RunConfiguration { action, .. } => match action {
+                RunConfigurationAction::Read => OperationKind::ReadRunConfiguration,
+                RunConfigurationAction::Create
+                | RunConfigurationAction::Update
+                | RunConfigurationAction::Delete
+                | RunConfigurationAction::Validate => OperationKind::ManageRunConfiguration,
+            },
+            Self::Run { action, .. } => match action {
+                RunAction::Read => OperationKind::ReadRun,
+                RunAction::Start | RunAction::Cancel | RunAction::Rerun => {
+                    OperationKind::ExecuteRun
+                }
+            },
+            Self::Schedule { action, .. } => match action {
+                ScheduleAction::Read => OperationKind::ReadSchedule,
+                ScheduleAction::Create
+                | ScheduleAction::Update
+                | ScheduleAction::Enable
+                | ScheduleAction::Disable
+                | ScheduleAction::Delete => OperationKind::ManageSchedule,
+            },
+            Self::TransferRecipe { action, .. } => match action {
+                TransferRecipeAction::Read => OperationKind::ReadTransferRecipe,
+                TransferRecipeAction::Execute => OperationKind::ExecuteTransferRecipe,
+                TransferRecipeAction::Create
+                | TransferRecipeAction::Update
+                | TransferRecipeAction::Delete
+                | TransferRecipeAction::Validate => OperationKind::ManageTransferRecipe,
+            },
             Self::BackupState => OperationKind::BackupState,
             Self::RestoreState { .. } => OperationKind::RestoreState,
         }
@@ -857,6 +1031,67 @@ impl Operation {
             Operation::ReadSharedResult { room_id, .. } => {
                 summary("read", "room_result", Some(*room_id))
             }
+            Operation::Workspace {
+                action,
+                workspace_id,
+                node_id,
+            } => summary(
+                action.audit_name(),
+                if node_id.is_some() {
+                    "workspace_node"
+                } else {
+                    "workspace"
+                },
+                node_id.map(|id| id.0).or(workspace_id.map(|id| id.0)),
+            ),
+            Operation::Vcs {
+                action, binding_id, ..
+            } => summary(action.audit_name(), "repository", Some(binding_id.0)),
+            Operation::DdlSource {
+                action,
+                workspace_id,
+                source_id,
+            } => summary(
+                action.audit_name(),
+                "ddl_source",
+                Some(source_id.map_or(workspace_id.0, |id| id.0)),
+            ),
+            Operation::RunConfiguration {
+                action,
+                workspace_id,
+                configuration_id,
+            } => summary(
+                action.audit_name(),
+                "run_configuration",
+                Some(configuration_id.map_or(workspace_id.0, |id| id.0)),
+            ),
+            Operation::Run {
+                action,
+                workspace_id,
+                run_id,
+            } => summary(
+                action.audit_name(),
+                "run",
+                Some(run_id.map_or(workspace_id.0, |id| id.0)),
+            ),
+            Operation::Schedule {
+                action,
+                workspace_id,
+                schedule_id,
+            } => summary(
+                action.audit_name(),
+                "schedule",
+                Some(schedule_id.map_or(workspace_id.0, |id| id.0)),
+            ),
+            Operation::TransferRecipe {
+                action,
+                workspace_id,
+                recipe_id,
+            } => summary(
+                action.audit_name(),
+                "transfer_recipe",
+                Some(recipe_id.map_or(workspace_id.0, |id| id.0)),
+            ),
             Operation::BackupState => summary("backup", "instance_state", None),
             Operation::RestoreState { applied } => summary(
                 if *applied {
@@ -871,6 +1106,84 @@ impl Operation {
     }
 }
 
+impl WorkspaceAction {
+    fn audit_name(self) -> &'static str {
+        match self {
+            Self::Read => "read",
+            Self::Create => "create",
+            Self::Update => "update",
+            Self::Delete => "delete",
+            Self::CreateNode => "create_node",
+            Self::MoveNode => "move_node",
+            Self::DeleteNode => "delete_node",
+            Self::CreateCheckpoint => "create_checkpoint",
+            Self::ReadHistory => "read_history",
+            Self::RestoreCheckpoint => "restore_checkpoint",
+            Self::BindProjection => "bind_projection",
+            Self::ReconcileProjection => "reconcile_projection",
+            Self::ResolveConflict => "resolve_conflict",
+        }
+    }
+}
+
+macro_rules! single_word_audit_names {
+    ($type:ty { $($variant:ident => $name:literal),+ $(,)? }) => {
+        impl $type {
+            fn audit_name(self) -> &'static str {
+                match self {
+                    $(Self::$variant => $name),+
+                }
+            }
+        }
+    };
+}
+
+single_word_audit_names!(VcsAction {
+    Status => "status",
+    Diff => "diff",
+    Stage => "stage",
+    Commit => "commit",
+    Fetch => "fetch",
+    Push => "push",
+});
+single_word_audit_names!(DdlSourceAction {
+    Read => "read",
+    Create => "create",
+    Update => "update",
+    Delete => "delete",
+    Refresh => "refresh",
+    Map => "map",
+});
+single_word_audit_names!(RunConfigurationAction {
+    Read => "read",
+    Create => "create",
+    Update => "update",
+    Delete => "delete",
+    Validate => "validate",
+});
+single_word_audit_names!(RunAction {
+    Start => "start",
+    Read => "read",
+    Cancel => "cancel",
+    Rerun => "rerun",
+});
+single_word_audit_names!(ScheduleAction {
+    Read => "read",
+    Create => "create",
+    Update => "update",
+    Enable => "enable",
+    Disable => "disable",
+    Delete => "delete",
+});
+single_word_audit_names!(TransferRecipeAction {
+    Read => "read",
+    Create => "create",
+    Update => "update",
+    Delete => "delete",
+    Validate => "validate",
+    Execute => "execute",
+});
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -883,6 +1196,28 @@ mod tests {
         .unwrap();
         assert_eq!(encoded, r#"{"op":"authenticate","method":"password"}"#);
         for forbidden in ["token", "secret", "code", "credential"] {
+            assert!(!encoded.contains(forbidden));
+        }
+    }
+
+    #[test]
+    fn phase_l_operations_are_typed_and_audit_safe() {
+        let operation = Operation::Vcs {
+            action: VcsAction::Commit,
+            workspace_id: crate::WorkspaceId(7),
+            binding_id: crate::RepositoryBindingId(9),
+        };
+        assert_eq!(operation.kind(), OperationKind::WriteVcs);
+        assert_eq!(
+            operation.audit_summary(),
+            OperationSummary {
+                action: "commit".into(),
+                target: "repository".into(),
+                target_id: Some(9),
+            }
+        );
+        let encoded = serde_json::to_string(&operation).unwrap();
+        for forbidden in ["message", "path", "url", "credential", "secret"] {
             assert!(!encoded.contains(forbidden));
         }
     }

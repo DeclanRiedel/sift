@@ -4376,6 +4376,7 @@ fn tool_authorization_scope(
         session: None,
         connection: None,
         transaction: None,
+        workspace_id: None,
     };
     capability_authorization_scope(state, Some(auth), &operation_context)?
         .ok_or(ApiError::Unauthorized)
