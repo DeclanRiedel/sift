@@ -10,20 +10,20 @@ pub use editor::{QueryDocument, QueryEditor};
 pub use results::{ResultData, ResultState, ResultsView};
 
 pub use lifecycle::{
-    create_virtual_workspace, load_instance, stream_room_presence, ConnectionPhase, DegradedReason,
-    InstanceCatalog, InstanceKind, InstanceSpec, LifecycleEvent, LifecycleProjection,
-    LoadedInstance, PresenceEvent, RoomNavEntry, RoomPresenceProjection, TenantNavEntry,
-    WorkspaceNavEntry,
+    create_virtual_workspace, load_instance, stream_room_presence, ConnectionNavEntry,
+    ConnectionPhase, DegradedReason, InstanceCatalog, InstanceKind, InstanceSpec, LifecycleEvent,
+    LifecycleProjection, LoadedInstance, PresenceEvent, RoomNavEntry, RoomPresenceProjection,
+    TenantNavEntry, WorkspaceNavEntry,
 };
 pub use presentation::{
     DockPresentation, ItemKind, ItemPresentation, PanePresentation, PresentationState,
     PresentationStore, Rect, WindowPresentation, WorkspacePresentation,
 };
 pub use shell::{
-    CloseActiveItem, CloseActivePane, CommandSpec, ConfirmCloseWithoutSaving, DismissModal, Dock,
-    ExecuteCommand, ExecutionOutcome, FocusNextPane, Modal, OpenCommandPalette, Pane, PaneEvent,
-    SaveActiveItem, SplitPane, StatusBar, Toast, ToggleBottomDock, ToggleLeftDock, ToggleRightDock,
-    Tooltip, WorkspaceShell,
+    CloseActiveItem, CloseActivePane, CommandSpec, ConfirmCloseWithoutSaving, ConnectionStatus,
+    DismissModal, Dock, ExecutorCommand, ExecutorEvent, FocusNextPane, Modal, OpenCommandPalette,
+    Pane, PaneEvent, SaveActiveItem, SplitPane, StatusBar, Toast, ToggleBottomDock, ToggleLeftDock,
+    ToggleRightDock, Tooltip, WorkspaceShell,
 };
 
 use std::{ops::Range, time::Duration};

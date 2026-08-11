@@ -30,14 +30,15 @@ surfaces, then admin/platform. Within P0, the connection experience comes first.
 ### Connections & sessions — connection picker, connected indicator, disconnect
 
 - [~] `health`, `ready` — connection/handshake indicator (M2)
-- [~] `open_session`, `open_connection_from_profile` — opened headless in the executor; **needs a real connection picker UI** (choose profile → connect) (M2/M3)
-- [~] `connection_profiles` — names shown in the Connections dock; **needs a profile chooser + "connect" action**, not just labels (M2/M3)
+- [x] `open_session`, `open_connection_from_profile` — **connection picker built**: Connections dock rows connect on click; executor opens session + connection for the chosen tenant/profile (M3)
+- [x] `connection_profiles` — profiles listed with a live status dot (disconnected / connecting / connected / failed) and connect/disconnect (M3)
+- [x] `close_session` — used by the Disconnect action and on reconnect (M3)
 - [ ] `open_session_for_tenant` — tenant-scoped session when multi-tenant (M2)
-- [ ] `list_sessions`, `close_session` — session lifecycle in the dock (M4)
+- [ ] `list_sessions` — session list panel (M4)
 - [ ] `open_connection` (explicit spec) — ad-hoc connection dialog (M4)
 - [ ] `ping_connection` — live connection health chip (M4)
-- [ ] `close_connection`, `disconnect_connection_profile` — disconnect action (M4)
-- polish: **status bar** database/transaction/execution values are hardcoded — wire them to the live session/connection/run (M3)
+- [ ] `close_connection`, `disconnect_connection_profile` — finer-grained disconnect (M4)
+- [~] **status bar** — `database` now reflects the connected connection; transaction/execution still hardcoded (M3)
 
 ### Sign-in enough to connect — sign-in modal, account state
 

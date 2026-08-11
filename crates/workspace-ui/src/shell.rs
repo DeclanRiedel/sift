@@ -16,7 +16,8 @@ use crate::presentation::{
     PresentationStore, WindowPresentation, WorkspacePresentation,
 };
 use crate::{
-    LifecycleEvent, LifecycleProjection, PresenceEvent, RoomPresenceProjection, WorkspaceNavEntry,
+    ConnectionNavEntry, LifecycleEvent, LifecycleProjection, PresenceEvent, RoomPresenceProjection,
+    WorkspaceNavEntry,
 };
 
 actions!(
@@ -105,19 +106,38 @@ pub enum PaneEvent {
     ExecuteRequested { item_id: u64, sql: String },
 }
 
-/// Shell → executor: run SQL for a query item. The executor owns the SDK
-/// client, session, and connection; the shell only reports intent.
-#[derive(Debug, Clone)]
-pub struct ExecuteCommand {
-    pub item_id: u64,
-    pub sql: String,
+/// Live state of the desktop's database connection. Owned by the shell,
+/// updated from executor events.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConnectionStatus {
+    Disconnected,
+    Connecting { profile_id: i64 },
+    Connected { profile_id: i64, name: String },
+    Failed { profile_id: i64, reason: String },
 }
 
-/// Executor → shell: the outcome for a previously requested execution.
+/// Shell → executor. The executor owns the SDK client, session, and
+/// connection; the shell only reports intent (connect / disconnect / run).
 #[derive(Debug, Clone)]
-pub struct ExecutionOutcome {
-    pub item_id: u64,
-    pub state: ResultState,
+pub enum ExecutorCommand {
+    Connect {
+        tenant_id: i64,
+        profile_id: i64,
+        name: String,
+    },
+    Disconnect,
+    Execute {
+        item_id: u64,
+        sql: String,
+    },
+}
+
+/// Executor → shell. Connection-state changes and query outcomes share one
+/// channel so ordering (connect before its run's result) is preserved.
+#[derive(Debug, Clone)]
+pub enum ExecutorEvent {
+    Connection(ConnectionStatus),
+    Execution { item_id: u64, state: ResultState },
 }
 
 /// A pane owns its ordered items and focus handle. The workspace owns panes;
@@ -392,8 +412,9 @@ pub struct WorkspaceShell {
     presence: RoomPresenceProjection,
     _lifecycle_task: Option<Task<()>>,
     _presence_task: Option<Task<()>>,
-    _result_task: Option<Task<()>>,
-    execute_sender: Option<tokio::sync::mpsc::UnboundedSender<ExecuteCommand>>,
+    _executor_task: Option<Task<()>>,
+    executor_sender: Option<tokio::sync::mpsc::UnboundedSender<ExecutorCommand>>,
+    connection_status: ConnectionStatus,
     store: Option<Arc<PresentationStore>>,
     _bounds_subscription: Subscription,
     next_id: u64,
@@ -478,8 +499,9 @@ impl WorkspaceShell {
             presence: RoomPresenceProjection::default(),
             _lifecycle_task: None,
             _presence_task: None,
-            _result_task: None,
-            execute_sender: None,
+            _executor_task: None,
+            executor_sender: None,
+            connection_status: ConnectionStatus::Disconnected,
             store,
             _bounds_subscription: bounds_subscription,
             next_id,
@@ -634,27 +656,75 @@ impl WorkspaceShell {
         }));
     }
 
-    /// Attach the query executor: `sender` carries run requests to the executor
-    /// task, `receiver` delivers outcomes back onto the UI thread.
-    pub fn attach_execution(
+    /// Attach the executor: `sender` carries connect/disconnect/run commands to
+    /// the executor task, `receiver` delivers connection-state and query
+    /// outcomes back onto the UI thread.
+    pub fn attach_executor(
         &mut self,
-        sender: tokio::sync::mpsc::UnboundedSender<ExecuteCommand>,
-        mut receiver: tokio::sync::mpsc::UnboundedReceiver<ExecutionOutcome>,
+        sender: tokio::sync::mpsc::UnboundedSender<ExecutorCommand>,
+        mut receiver: tokio::sync::mpsc::UnboundedReceiver<ExecutorEvent>,
         cx: &mut Context<Self>,
     ) {
-        self.execute_sender = Some(sender);
-        self._result_task = Some(cx.spawn(async move |shell, cx| {
-            while let Some(outcome) = receiver.recv().await {
+        self.executor_sender = Some(sender);
+        self._executor_task = Some(cx.spawn(async move |shell, cx| {
+            while let Some(event) = receiver.recv().await {
                 if shell
-                    .update(cx, |shell, cx| {
-                        shell.route_result(outcome.item_id, outcome.state, cx);
-                    })
+                    .update(cx, |shell, cx| shell.on_executor_event(event, cx))
                     .is_err()
                 {
                     break;
                 }
             }
         }));
+    }
+
+    fn on_executor_event(&mut self, event: ExecutorEvent, cx: &mut Context<Self>) {
+        match event {
+            ExecutorEvent::Connection(status) => {
+                self.status.database = match &status {
+                    ConnectionStatus::Connected { name, .. } => name.clone(),
+                    ConnectionStatus::Connecting { .. } => "Connecting…".into(),
+                    ConnectionStatus::Failed { .. } => "Connection failed".into(),
+                    ConnectionStatus::Disconnected => "No database".into(),
+                };
+                self.connection_status = status;
+                cx.notify();
+            }
+            ExecutorEvent::Execution { item_id, state } => self.route_result(item_id, state, cx),
+        }
+    }
+
+    pub fn connection_status(&self) -> &ConnectionStatus {
+        &self.connection_status
+    }
+
+    /// Ask the executor to open `entry`. Optimistically shows connecting.
+    fn connect(&mut self, entry: &ConnectionNavEntry, cx: &mut Context<Self>) {
+        let Some(sender) = &self.executor_sender else {
+            return;
+        };
+        if sender
+            .send(ExecutorCommand::Connect {
+                tenant_id: entry.tenant_id,
+                profile_id: entry.id,
+                name: entry.name.clone(),
+            })
+            .is_ok()
+        {
+            self.connection_status = ConnectionStatus::Connecting {
+                profile_id: entry.id,
+            };
+            cx.notify();
+        }
+    }
+
+    fn disconnect(&mut self, cx: &mut Context<Self>) {
+        if let Some(sender) = &self.executor_sender {
+            let _ = sender.send(ExecutorCommand::Disconnect);
+        }
+        self.connection_status = ConnectionStatus::Disconnected;
+        self.status.database = "No database".into();
+        cx.notify();
     }
 
     /// Deliver an execution outcome to whichever pane owns the query item.
@@ -809,25 +879,21 @@ impl WorkspaceShell {
                 self.active_pane = index;
                 self.close_pane_at(index, window, cx);
             }
-            PaneEvent::ExecuteRequested { item_id, sql } => {
-                match &self.execute_sender {
-                    Some(sender) => {
-                        let _ = sender.send(ExecuteCommand {
-                            item_id: *item_id,
-                            sql: sql.clone(),
-                        });
-                    }
-                    None => {
-                        // No executor attached (e.g. offline): correct the
-                        // optimistic pending state to not-connected.
-                        self.route_result(
-                            *item_id,
-                            ResultState::Unavailable("Not connected to a database.".into()),
-                            cx,
-                        );
-                    }
+            PaneEvent::ExecuteRequested { item_id, sql } => match &self.executor_sender {
+                Some(sender) => {
+                    let _ = sender.send(ExecutorCommand::Execute {
+                        item_id: *item_id,
+                        sql: sql.clone(),
+                    });
                 }
-            }
+                None => {
+                    self.route_result(
+                        *item_id,
+                        ResultState::Unavailable("Not connected to a database.".into()),
+                        cx,
+                    );
+                }
+            },
         }
     }
 
@@ -1109,8 +1175,54 @@ impl WorkspaceShell {
                             .child(tenant.name.clone())
                             .into_any_element(),
                     );
-                    for name in &tenant.connection_names {
-                        rows.push(div().pl_2().child(format!("● {name}")).into_any_element());
+                    for conn in &tenant.connections {
+                        let (dot, connected) = match &self.connection_status {
+                            ConnectionStatus::Connected { profile_id, .. }
+                                if *profile_id == conn.id =>
+                            {
+                                (colors.success, true)
+                            }
+                            ConnectionStatus::Connecting { profile_id }
+                                if *profile_id == conn.id =>
+                            {
+                                (colors.warning, false)
+                            }
+                            ConnectionStatus::Failed { profile_id, .. }
+                                if *profile_id == conn.id =>
+                            {
+                                (colors.danger, false)
+                            }
+                            _ => (colors.muted_text, false),
+                        };
+                        let mut row = div()
+                            .id(("conn", conn.id as usize))
+                            .flex()
+                            .items_center()
+                            .gap_1()
+                            .pl_2()
+                            .py_1()
+                            .rounded_sm()
+                            .when(connected, |row| row.bg(colors.selected_surface))
+                            .hover(|row| row.bg(colors.selected_surface))
+                            .child(div().text_color(dot).child("●"))
+                            .child(div().flex_1().min_w_0().truncate().child(conn.name.clone()));
+                        if connected {
+                            row = row.child(
+                                div()
+                                    .id(("disconnect", conn.id as usize))
+                                    .text_xs()
+                                    .text_color(colors.muted_text)
+                                    .hover(|d| d.text_color(colors.danger))
+                                    .on_click(cx.listener(|shell, _, _, cx| shell.disconnect(cx)))
+                                    .child("Disconnect"),
+                            );
+                        } else {
+                            let entry = conn.clone();
+                            row = row.on_click(
+                                cx.listener(move |shell, _, _, cx| shell.connect(&entry, cx)),
+                            );
+                        }
+                        rows.push(row.into_any_element());
                     }
                     for room in &tenant.rooms {
                         for workspace in &room.workspaces {
@@ -1508,6 +1620,43 @@ mod tests {
         assert_eq!(
             workspace.read_with(&cx, |workspace, _| workspace.modal().cloned()),
             Some(Modal::CommandPalette)
+        );
+    }
+
+    #[gpui::test]
+    fn executor_events_update_connection_status_and_database(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        workspace.update(&mut cx, |shell, cx| {
+            shell.on_executor_event(
+                ExecutorEvent::Connection(ConnectionStatus::Connected {
+                    profile_id: 5,
+                    name: "prod".into(),
+                }),
+                cx,
+            );
+        });
+        assert_eq!(
+            workspace.read_with(&cx, |shell, _| shell.connection_status().clone()),
+            ConnectionStatus::Connected {
+                profile_id: 5,
+                name: "prod".into()
+            }
+        );
+        assert_eq!(
+            workspace.read_with(&cx, |shell, _| shell.status.database.clone()),
+            "prod"
+        );
+        workspace.update(&mut cx, |shell, cx| {
+            shell.on_executor_event(
+                ExecutorEvent::Connection(ConnectionStatus::Disconnected),
+                cx,
+            );
+        });
+        assert_eq!(
+            workspace.read_with(&cx, |shell, _| shell.status.database.clone()),
+            "No database"
         );
     }
 

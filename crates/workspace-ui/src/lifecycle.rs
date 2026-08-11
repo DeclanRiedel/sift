@@ -96,11 +96,18 @@ pub struct RoomNavEntry {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConnectionNavEntry {
+    pub id: i64,
+    pub tenant_id: i64,
+    pub name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TenantNavEntry {
     pub id: TenantId,
     pub name: String,
     pub rooms: Vec<RoomNavEntry>,
-    pub connection_names: Vec<String>,
+    pub connections: Vec<ConnectionNavEntry>,
 }
 
 #[derive(Debug, Clone)]
@@ -275,8 +282,15 @@ pub async fn load_instance(
             Ok(rooms) => rooms,
             Err(error) => return Err(fail(&sender, &error)),
         };
-        let connection_names = match client.connection_profiles(tenant_id).await {
-            Ok(profiles) => profiles.into_iter().map(|profile| profile.name).collect(),
+        let connections = match client.connection_profiles(tenant_id).await {
+            Ok(profiles) => profiles
+                .into_iter()
+                .map(|profile| ConnectionNavEntry {
+                    id: profile.id.0,
+                    tenant_id: tenant_id.0,
+                    name: profile.name,
+                })
+                .collect(),
             Err(error) => return Err(fail(&sender, &error)),
         };
         let mut room_rows = Vec::with_capacity(rooms.len());
@@ -308,7 +322,7 @@ pub async fn load_instance(
                 id: tenant_id,
                 name: membership.tenant.name,
                 rooms: room_rows,
-                connection_names,
+                connections,
             }),
         ) {
             return Err(DegradedReason::Offline);
@@ -458,7 +472,7 @@ mod tests {
                 id: TenantId(99),
                 name: "stale".into(),
                 rooms: vec![],
-                connection_names: vec![],
+                connections: vec![],
             }],
             ..Default::default()
         };
@@ -468,7 +482,11 @@ mod tests {
             id: TenantId(1),
             name: "Personal".into(),
             rooms: vec![],
-            connection_names: vec!["Local PG".into()],
+            connections: vec![ConnectionNavEntry {
+                id: 5,
+                tenant_id: 1,
+                name: "Local PG".into(),
+            }],
         }));
         assert_eq!(projection.tenants.len(), 1);
         assert_eq!(projection.tenants[0].id, TenantId(1));
