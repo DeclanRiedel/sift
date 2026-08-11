@@ -441,6 +441,8 @@ impl WorkspaceShell {
             .unwrap_or(0)
             + 1;
         let query_input = cx.new(|cx| TextInput::new("", "Search commands…", cx));
+        // Re-render the palette as the search text changes so its list filters.
+        cx.observe(&query_input, |_, _, cx| cx.notify()).detach();
         panes[active_pane].focus_handle(cx).focus(window, cx);
         let bounds_subscription = cx.observe_window_bounds(window, |shell, window, cx| {
             shell.capture_window_bounds(window.window_bounds());
@@ -489,6 +491,8 @@ impl WorkspaceShell {
             .panes
             .get(self.active_pane)
             .is_some_and(|pane| pane.read(cx).active_item().is_some());
+        let has_extra_pane = self.panes.len() > 1;
+        let no_item = (!has_item).then_some("No active item");
         vec![
             CommandSpec {
                 id: "workspace.split-pane",
@@ -497,15 +501,45 @@ impl WorkspaceShell {
                 disabled_reason: None,
             },
             CommandSpec {
+                id: "workspace.focus-next-pane",
+                label: "Focus Next Pane",
+                shortcut: "Ctrl+K Ctrl+→",
+                disabled_reason: (!has_extra_pane).then_some("Only one pane"),
+            },
+            CommandSpec {
+                id: "workspace.close-pane",
+                label: "Close Pane",
+                shortcut: "Ctrl+Shift+W",
+                disabled_reason: (!has_extra_pane).then_some("Only one pane"),
+            },
+            CommandSpec {
+                id: "workspace.save-item",
+                label: "Save Active Item",
+                shortcut: "Ctrl+S",
+                disabled_reason: no_item,
+            },
+            CommandSpec {
                 id: "workspace.close-item",
                 label: "Close Active Item",
                 shortcut: "Ctrl+W",
-                disabled_reason: (!has_item).then_some("No active item"),
+                disabled_reason: no_item,
             },
             CommandSpec {
                 id: "workspace.toggle-left-dock",
                 label: "Toggle Connections Dock",
                 shortcut: "Ctrl+Shift+B",
+                disabled_reason: None,
+            },
+            CommandSpec {
+                id: "workspace.toggle-right-dock",
+                label: "Toggle Inspector Dock",
+                shortcut: "Ctrl+Shift+I",
+                disabled_reason: None,
+            },
+            CommandSpec {
+                id: "workspace.toggle-bottom-dock",
+                label: "Toggle Results Dock",
+                shortcut: "Ctrl+J",
                 disabled_reason: None,
             },
         ]
@@ -927,8 +961,15 @@ impl WorkspaceShell {
         self.dismiss_modal(&DismissModal, window, cx);
         match id {
             "workspace.split-pane" => self.split_pane(&SplitPane, window, cx),
+            "workspace.focus-next-pane" => self.focus_next_pane(&FocusNextPane, window, cx),
+            "workspace.close-pane" => self.close_active_pane(&CloseActivePane, window, cx),
+            "workspace.save-item" => self.save_active_item(&SaveActiveItem, window, cx),
             "workspace.close-item" => self.close_active_item(&CloseActiveItem, window, cx),
             "workspace.toggle-left-dock" => self.toggle_left_dock(&ToggleLeftDock, window, cx),
+            "workspace.toggle-right-dock" => self.toggle_right_dock(&ToggleRightDock, window, cx),
+            "workspace.toggle-bottom-dock" => {
+                self.toggle_bottom_dock(&ToggleBottomDock, window, cx)
+            }
             _ => {}
         }
     }
@@ -1037,7 +1078,7 @@ impl WorkspaceShell {
             )
     }
 
-    fn render_dock(&self, dock: &Dock) -> impl IntoElement {
+    fn render_dock(&self, dock: &Dock, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = self.theme.colors;
         div()
             .id(dock.title)
@@ -1058,17 +1099,21 @@ impl WorkspaceShell {
                     .child(dock.title.to_uppercase()),
             )
             .when(dock.title == "Connections", |dock_view| {
-                dock_view.children(self.lifecycle.tenants.iter().flat_map(|tenant| {
-                    let tenant_name = div()
-                        .mt_2()
-                        .text_color(colors.muted_text)
-                        .child(tenant.name.clone());
-                    let connections = tenant
-                        .connection_names
-                        .iter()
-                        .map(|name| div().pl_2().child(format!("● {name}")));
-                    let workspaces = tenant.rooms.iter().flat_map(|room| {
-                        room.workspaces.iter().map(move |workspace| {
+                let selected = self.selected_workspace_id;
+                let mut rows: Vec<gpui::AnyElement> = Vec::new();
+                for tenant in &self.lifecycle.tenants {
+                    rows.push(
+                        div()
+                            .mt_2()
+                            .text_color(colors.muted_text)
+                            .child(tenant.name.clone())
+                            .into_any_element(),
+                    );
+                    for name in &tenant.connection_names {
+                        rows.push(div().pl_2().child(format!("● {name}")).into_any_element());
+                    }
+                    for room in &tenant.rooms {
+                        for workspace in &room.workspaces {
                             let features =
                                 match (workspace.git_enabled, workspace.scheduling_enabled) {
                                     (true, true) => " · Git · Runs",
@@ -1076,16 +1121,28 @@ impl WorkspaceShell {
                                     (false, true) => " · Runs",
                                     (false, false) => "",
                                 };
-                            div()
-                                .pl_2()
-                                .child(format!("{} / {}{features}", room.name, workspace.name))
-                        })
-                    });
-                    std::iter::once(tenant_name)
-                        .chain(connections)
-                        .chain(workspaces)
-                        .collect::<Vec<_>>()
-                }))
+                            let is_open = selected == Some(workspace.id);
+                            let entry = workspace.clone();
+                            rows.push(
+                                div()
+                                    .id(("workspace", workspace.id as usize))
+                                    .pl_2()
+                                    .py_1()
+                                    .rounded_sm()
+                                    .when(is_open, |row| {
+                                        row.bg(colors.selected_surface).text_color(colors.text)
+                                    })
+                                    .hover(|row| row.bg(colors.selected_surface))
+                                    .on_click(cx.listener(move |shell, _, _, cx| {
+                                        shell.open_workspace(&entry, cx)
+                                    }))
+                                    .child(format!("{} / {}{features}", room.name, workspace.name))
+                                    .into_any_element(),
+                            );
+                        }
+                    }
+                }
+                dock_view.children(rows)
             })
             .when(
                 dock.title == "Connections" && self.lifecycle.tenants.is_empty(),
@@ -1110,14 +1167,31 @@ impl WorkspaceShell {
     fn render_modal(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
         let colors = self.theme.colors;
         self.modal.as_ref().map(|modal| {
-            let content =
-                match modal {
-                    Modal::CommandPalette => div()
+            let content = match modal {
+                Modal::CommandPalette => {
+                    let query = self.query_input.read(cx).text().to_lowercase();
+                    let commands: Vec<CommandSpec> = self
+                        .command_specs(cx)
+                        .into_iter()
+                        .filter(|command| {
+                            query.is_empty() || command.label.to_lowercase().contains(&query)
+                        })
+                        .collect();
+                    div()
                         .flex()
                         .flex_col()
                         .gap_1()
                         .child(self.query_input.clone())
-                        .children(self.command_specs(cx).into_iter().map(|command| {
+                        .when(commands.is_empty(), |palette| {
+                            palette.child(
+                                div()
+                                    .px_2()
+                                    .py_1()
+                                    .text_color(colors.muted_text)
+                                    .child("No matching commands"),
+                            )
+                        })
+                        .children(commands.into_iter().map(|command| {
                             let enabled = command.enabled();
                             let id = command.id;
                             let mut row =
@@ -1143,15 +1217,16 @@ impl WorkspaceShell {
                             }
                             row
                         }))
-                        .into_any_element(),
-                    Modal::ConfirmClose { title } => div()
-                        .flex()
-                        .flex_col()
-                        .gap_3()
-                        .child(format!("Save changes to {title}?"))
-                        .child("Use Save, Close Without Saving, or Escape.")
-                        .into_any_element(),
-                };
+                        .into_any_element()
+                }
+                Modal::ConfirmClose { title } => div()
+                    .flex()
+                    .flex_col()
+                    .gap_3()
+                    .child(format!("Save changes to {title}?"))
+                    .child("Use Save, Close Without Saving, or Escape.")
+                    .into_any_element(),
+            };
             div()
                 .id("modal-layer")
                 .key_context("SiftModal")
@@ -1186,6 +1261,18 @@ impl Focusable for WorkspaceShell {
 impl gpui::Render for WorkspaceShell {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = self.theme.colors;
+        // Docks are built before the element chain so each borrows `cx`
+        // sequentially rather than two `when` closures capturing it at once.
+        let left_dock = self
+            .left_dock
+            .presentation
+            .open
+            .then(|| self.render_dock(&self.left_dock, cx));
+        let right_dock = self
+            .right_dock
+            .presentation
+            .open
+            .then(|| self.render_dock(&self.right_dock, cx));
         div()
             .id("sift-shell")
             .key_context("SiftWorkspace")
@@ -1215,9 +1302,7 @@ impl gpui::Render for WorkspaceShell {
                     .flex()
                     .flex_1()
                     .min_h_0()
-                    .when(self.left_dock.presentation.open, |row| {
-                        row.child(self.render_dock(&self.left_dock))
-                    })
+                    .children(left_dock)
                     .child(
                         div()
                             .flex()
@@ -1225,9 +1310,7 @@ impl gpui::Render for WorkspaceShell {
                             .min_w_0()
                             .children(self.panes.iter().cloned()),
                     )
-                    .when(self.right_dock.presentation.open, |row| {
-                        row.child(self.render_dock(&self.right_dock))
-                    }),
+                    .children(right_dock),
             )
             .when(self.bottom_dock.presentation.open, |shell| {
                 shell.child(
@@ -1426,6 +1509,20 @@ mod tests {
             workspace.read_with(&cx, |workspace, _| workspace.modal().cloned()),
             Some(Modal::CommandPalette)
         );
+    }
+
+    #[gpui::test]
+    fn palette_command_dispatches_action_and_closes(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        assert!(workspace.read_with(&cx, |shell, _| shell.left_dock.presentation.open));
+        workspace.update_in(&mut cx, |shell, window, cx| {
+            shell.modal = Some(Modal::CommandPalette);
+            shell.run_command("workspace.toggle-left-dock", window, cx);
+        });
+        assert!(!workspace.read_with(&cx, |shell, _| shell.left_dock.presentation.open));
+        assert!(workspace.read_with(&cx, |shell, _| shell.modal().is_none()));
     }
 
     #[gpui::test]

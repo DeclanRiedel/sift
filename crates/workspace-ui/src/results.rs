@@ -7,8 +7,8 @@
 use std::ops::Range;
 
 use gpui::{
-    actions, div, prelude::*, px, uniform_list, App, ClipboardItem, Context, EventEmitter,
-    FocusHandle, Focusable, IntoElement, Role, Window,
+    actions, div, prelude::*, px, uniform_list, App, ClipboardItem, Context, FocusHandle,
+    Focusable, IntoElement, Window,
 };
 use sift_protocol::{
     ColumnMetadata, DriverWarning, ExecuteResponse, Nullability, Page, Row, TypeRef, Value,
@@ -246,13 +246,6 @@ impl ResultTab {
 
 actions!(sift_results, [CopySelectedCell]);
 
-/// Events a results surface raises to its owning query item.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ResultsEvent {
-    /// The result should become its own independent pane item.
-    PromoteRequested,
-}
-
 /// The query-owned results surface.
 pub struct ResultsView {
     focus_handle: FocusHandle,
@@ -260,10 +253,7 @@ pub struct ResultsView {
     state: ResultState,
     tab: ResultTab,
     selected: Option<(usize, usize)>,
-    pinned: bool,
 }
-
-impl EventEmitter<ResultsEvent> for ResultsView {}
 
 impl ResultsView {
     pub fn new(theme: Theme, cx: &mut Context<Self>) -> Self {
@@ -273,7 +263,6 @@ impl ResultsView {
             state: ResultState::Idle,
             tab: ResultTab::Data,
             selected: None,
-            pinned: false,
         }
     }
 
@@ -376,39 +365,10 @@ impl ResultsView {
                 div()
                     .flex()
                     .items_center()
-                    .gap_1()
                     .px_2()
                     .text_xs()
                     .text_color(colors.muted_text)
-                    .child(self.state.status_label())
-                    .child(
-                        div()
-                            .id("result-pin")
-                            .role(Role::Button)
-                            .aria_label("Pin result")
-                            .px_1()
-                            .rounded_sm()
-                            .when(self.pinned, |el| el.text_color(colors.accent))
-                            .hover(|el| el.text_color(colors.text))
-                            .on_click(cx.listener(|view, _, _, cx| {
-                                view.pinned = !view.pinned;
-                                cx.notify();
-                            }))
-                            .child("📌"),
-                    )
-                    .child(
-                        div()
-                            .id("result-promote")
-                            .role(Role::Button)
-                            .aria_label("Promote result to pane")
-                            .px_1()
-                            .rounded_sm()
-                            .hover(|el| el.text_color(colors.text))
-                            .on_click(
-                                cx.listener(|_, _, _, cx| cx.emit(ResultsEvent::PromoteRequested)),
-                            )
-                            .child("⤢"),
-                    ),
+                    .child(self.state.status_label()),
             )
     }
 
