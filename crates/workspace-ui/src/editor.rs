@@ -8,8 +8,8 @@ use std::ops::Range;
 use gpui::{
     actions, div, fill, point, prelude::*, px, size, App, Bounds, ClipboardItem, Context,
     CursorStyle, Element, ElementId, ElementInputHandler, Entity, EntityInputHandler, EventEmitter,
-    FocusHandle, Focusable, GlobalElementId, IntoElement, LayoutId, PaintQuad, Pixels, Role,
-    ShapedLine, Style, TextRun, UTF16Selection, Window,
+    FocusHandle, Focusable, GlobalElementId, IntoElement, LayoutId, MouseButton, PaintQuad, Pixels,
+    Role, ShapedLine, Style, TextRun, UTF16Selection, Window,
 };
 use sift_doc::{random_peer_id, TextReplica};
 use sift_ui::Theme;
@@ -854,6 +854,14 @@ impl gpui::Render for QueryEditor {
             .px_3()
             .py_2()
             .text_color(self.theme.colors.text)
+            // Clicking the editor focuses it directly (synchronously), so the
+            // SiftEditor key context is active and editing keys route.
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|editor, _, window, cx| {
+                    editor.focus_handle.clone().focus(window, cx);
+                }),
+            )
             .on_action(cx.listener(Self::backspace))
             .on_action(cx.listener(Self::delete_forward))
             .on_action(cx.listener(Self::newline))

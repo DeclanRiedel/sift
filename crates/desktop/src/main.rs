@@ -4,7 +4,7 @@ mod platform;
 
 use gpui::{prelude::*, px, Bounds, Menu, MenuItem, WindowBounds, WindowOptions};
 use gpui_platform::application;
-use sift_ui::{Copy, Cut, Paste, SelectAll};
+use sift_ui::{Backspace, Copy, Cut, Delete, End, Home, Left, Paste, Right, SelectAll};
 
 use crate::app::{display_rects, SiftApp, SiftWindow};
 use crate::platform::shell_key_bindings;
@@ -78,15 +78,22 @@ fn main() {
                 MenuItem::action("Results Dock", ToggleBottomDock),
             ]),
         ]);
+        let text = Some("SiftTextInput");
         cx.bind_keys([
-            gpui::KeyBinding::new("ctrl-c", Copy, Some("SiftTextInput")),
-            gpui::KeyBinding::new("ctrl-x", Cut, Some("SiftTextInput")),
-            gpui::KeyBinding::new("ctrl-v", Paste, Some("SiftTextInput")),
-            gpui::KeyBinding::new("ctrl-a", SelectAll, Some("SiftTextInput")),
-            gpui::KeyBinding::new("cmd-c", Copy, Some("SiftTextInput")),
-            gpui::KeyBinding::new("cmd-x", Cut, Some("SiftTextInput")),
-            gpui::KeyBinding::new("cmd-v", Paste, Some("SiftTextInput")),
-            gpui::KeyBinding::new("cmd-a", SelectAll, Some("SiftTextInput")),
+            gpui::KeyBinding::new("backspace", Backspace, text),
+            gpui::KeyBinding::new("delete", Delete, text),
+            gpui::KeyBinding::new("left", Left, text),
+            gpui::KeyBinding::new("right", Right, text),
+            gpui::KeyBinding::new("home", Home, text),
+            gpui::KeyBinding::new("end", End, text),
+            gpui::KeyBinding::new("ctrl-c", Copy, text),
+            gpui::KeyBinding::new("ctrl-x", Cut, text),
+            gpui::KeyBinding::new("ctrl-v", Paste, text),
+            gpui::KeyBinding::new("ctrl-a", SelectAll, text),
+            gpui::KeyBinding::new("cmd-c", Copy, text),
+            gpui::KeyBinding::new("cmd-x", Cut, text),
+            gpui::KeyBinding::new("cmd-v", Paste, text),
+            gpui::KeyBinding::new("cmd-a", SelectAll, text),
         ]);
         cx.bind_keys(editor_key_bindings());
 
