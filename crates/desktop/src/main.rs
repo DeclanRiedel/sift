@@ -9,7 +9,7 @@ use sift_ui::{Copy, Cut, Paste, SelectAll};
 use crate::app::{display_rects, SiftApp, SiftWindow};
 use crate::platform::shell_key_bindings;
 use sift_workspace_ui::{
-    CloseActiveItem, FocusNextPane, OpenCommandPalette, SaveActiveItem, SplitPane,
+    CloseActiveItem, CloseActivePane, FocusNextPane, OpenCommandPalette, SaveActiveItem, SplitPane,
     ToggleBottomDock, ToggleLeftDock, ToggleRightDock, ToggleShellTheme,
 };
 
@@ -21,6 +21,7 @@ fn main() {
             Menu::new("Workspace").items([
                 MenuItem::action("Split Pane", SplitPane),
                 MenuItem::action("Focus Next Pane", FocusNextPane),
+                MenuItem::action("Close Pane", CloseActivePane),
                 MenuItem::separator(),
                 MenuItem::action("Save Item", SaveActiveItem),
                 MenuItem::action("Close Item", CloseActiveItem),

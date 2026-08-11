@@ -15,9 +15,10 @@ pub use presentation::{
     PresentationStore, Rect, WindowPresentation, WorkspacePresentation,
 };
 pub use shell::{
-    CloseActiveItem, CommandSpec, ConfirmCloseWithoutSaving, DismissModal, Dock, FocusNextPane,
-    Modal, OpenCommandPalette, Pane, SaveActiveItem, SplitPane, StatusBar, Toast, ToggleBottomDock,
-    ToggleLeftDock, ToggleRightDock, ToggleShellTheme, Tooltip, WorkspaceShell,
+    CloseActiveItem, CloseActivePane, CommandSpec, ConfirmCloseWithoutSaving, DismissModal, Dock,
+    FocusNextPane, Modal, OpenCommandPalette, Pane, PaneEvent, SaveActiveItem, SplitPane,
+    StatusBar, Toast, ToggleBottomDock, ToggleLeftDock, ToggleRightDock, ToggleShellTheme, Tooltip,
+    WorkspaceShell,
 };
 
 use std::{ops::Range, time::Duration};

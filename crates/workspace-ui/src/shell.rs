@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
 use gpui::{
-    actions, div, prelude::*, px, App, Context, Entity, FocusHandle, Focusable, IntoElement, Role,
-    Subscription, Task, Window, WindowBounds,
+    actions, div, prelude::*, px, App, Context, Entity, EventEmitter, FocusHandle, Focusable,
+    IntoElement, MouseButton, Role, Subscription, Task, Window, WindowBounds,
 };
 use sift_api_types::RoomId;
 use sift_ui::{button, ControlState, ControlTone, TextInput, Theme};
@@ -22,6 +22,7 @@ actions!(
         DismissModal,
         SplitPane,
         FocusNextPane,
+        CloseActivePane,
         CloseActiveItem,
         SaveActiveItem,
         ConfirmCloseWithoutSaving,
@@ -89,6 +90,16 @@ impl Default for StatusBar {
     }
 }
 
+/// Events a pane emits upward to the workspace. A pane never mutates sibling
+/// panes or the workspace's pane list directly; it asks its owner instead.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PaneEvent {
+    /// The pane was interacted with and should become the active pane.
+    FocusRequested,
+    /// The pane should be removed (its close control was used, or it emptied).
+    CloseRequested,
+}
+
 /// A pane owns its ordered items and focus handle. The workspace owns panes;
 /// items never reach sideways into sibling panes.
 pub struct Pane {
@@ -133,37 +144,121 @@ impl Focusable for Pane {
     }
 }
 
+impl EventEmitter<PaneEvent> for Pane {}
+
+impl Pane {
+    fn close_item(&mut self, index: usize, cx: &mut Context<Self>) {
+        if index >= self.items.len() {
+            return;
+        }
+        self.items.remove(index);
+        if self.active_item >= self.items.len() {
+            self.active_item = self.items.len().saturating_sub(1);
+        }
+        if self.items.is_empty() {
+            cx.emit(PaneEvent::CloseRequested);
+        }
+        cx.notify();
+    }
+}
+
 impl gpui::Render for Pane {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let colors = self.theme.colors;
         let active = self.active_item().cloned();
         div()
             .id(("pane", self.id as usize))
             .key_context("SiftPane")
             .track_focus(&self.focus_handle)
+            // Clicking anywhere in the pane makes it the active pane. The
+            // workspace owns the pane list, so we ask rather than reach across.
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|_, _, _, cx| cx.emit(PaneEvent::FocusRequested)),
+            )
             .flex()
             .flex_col()
             .flex_1()
             .min_w_0()
             .child(
                 div()
-                    .h(px(34.))
+                    .h(px(32.))
                     .flex()
-                    .items_center()
-                    .gap_1()
-                    .px_2()
+                    .items_stretch()
                     .border_b_1()
-                    .children(self.items.iter().enumerate().map(|(index, item)| {
-                        let dirty = if item.dirty { " ●" } else { "" };
+                    .border_color(colors.border)
+                    .bg(colors.surface)
+                    .child(
                         div()
-                            .id(("tab", item.id as usize))
-                            .px_2()
-                            .py_1()
-                            .rounded_sm()
-                            .when(index == self.active_item, |tab| {
-                                tab.bg(self.theme.colors.selected_surface)
+                            .flex()
+                            .flex_1()
+                            .min_w_0()
+                            .items_stretch()
+                            .overflow_hidden()
+                            .children(self.items.iter().enumerate().map(|(index, item)| {
+                                let dirty = if item.dirty { " ●" } else { "" };
+                                let selected = index == self.active_item;
+                                div()
+                                    .id(("tab", item.id as usize))
+                                    .flex()
+                                    .items_center()
+                                    .h_full()
+                                    .border_r_1()
+                                    .border_color(colors.border)
+                                    .when(selected, |tab| tab.bg(colors.selected_surface))
+                                    .child(
+                                        div()
+                                            .id(("tab-label", item.id as usize))
+                                            .flex()
+                                            .items_center()
+                                            .h_full()
+                                            .px_2()
+                                            .when(!selected, |label| {
+                                                label.text_color(colors.muted_text)
+                                            })
+                                            .hover(|label| label.text_color(colors.text))
+                                            .on_click(cx.listener(move |pane, _, _, cx| {
+                                                pane.active_item = index;
+                                                cx.notify();
+                                            }))
+                                            .child(format!("{}{dirty}", item.title)),
+                                    )
+                                    .child(
+                                        div()
+                                            .id(("tab-close", item.id as usize))
+                                            .flex()
+                                            .items_center()
+                                            .justify_center()
+                                            .h_full()
+                                            .px_1()
+                                            .text_color(colors.muted_text)
+                                            .hover(|close| {
+                                                close.bg(colors.border).text_color(colors.text)
+                                            })
+                                            .on_click(cx.listener(move |pane, _, _, cx| {
+                                                pane.close_item(index, cx);
+                                            }))
+                                            .child("×"),
+                                    )
+                            })),
+                    )
+                    .child(
+                        div()
+                            .id(("pane-close", self.id as usize))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .w(px(28.))
+                            .h_full()
+                            .border_l_1()
+                            .border_color(colors.border)
+                            .text_color(colors.muted_text)
+                            .hover(|close| {
+                                close.bg(colors.selected_surface).text_color(colors.text)
                             })
-                            .child(format!("{}{dirty}", item.title))
-                    })),
+                            .on_click(cx.listener(|_, _, _, cx| cx.emit(PaneEvent::CloseRequested)))
+                            .child("⨯"),
+                    ),
             )
             .child(
                 div()
@@ -229,6 +324,9 @@ impl WorkspaceShell {
             .into_iter()
             .map(|pane| cx.new(|cx| Pane::from_presentation(pane, theme, cx)))
             .collect::<Vec<_>>();
+        for pane in &panes {
+            cx.subscribe_in(pane, window, Self::on_pane_event).detach();
+        }
         let active_pane = workspace.active_pane.min(panes.len().saturating_sub(1));
         let next_id = panes
             .iter()
@@ -313,6 +411,22 @@ impl WorkspaceShell {
 
     pub fn pane_count(&self) -> usize {
         self.panes.len()
+    }
+
+    /// Label for the workspace switcher: the open workspace's name, or a local
+    /// fallback before any server workspace is selected.
+    fn workspace_label(&self) -> String {
+        self.selected_workspace_id
+            .and_then(|selected| {
+                self.lifecycle
+                    .tenants
+                    .iter()
+                    .flat_map(|tenant| &tenant.rooms)
+                    .flat_map(|room| &room.workspaces)
+                    .find(|workspace| workspace.id == selected)
+                    .map(|workspace| workspace.name.clone())
+            })
+            .unwrap_or_else(|| "Local workspace".into())
     }
 
     pub fn active_pane(&self) -> usize {
@@ -495,6 +609,7 @@ impl WorkspaceShell {
                 cx,
             )
         });
+        cx.subscribe_in(&pane, window, Self::on_pane_event).detach();
         self.panes.push(pane);
         self.active_pane = self.panes.len() - 1;
         self.panes[self.active_pane]
@@ -502,6 +617,57 @@ impl WorkspaceShell {
             .focus(window, cx);
         self.persist(cx);
         cx.notify();
+    }
+
+    fn on_pane_event(
+        &mut self,
+        emitter: &Entity<Pane>,
+        event: &PaneEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(index) = self.panes.iter().position(|pane| pane == emitter) else {
+            return;
+        };
+        match event {
+            PaneEvent::FocusRequested => {
+                if self.active_pane != index {
+                    self.active_pane = index;
+                    self.panes[index].focus_handle(cx).focus(window, cx);
+                    cx.notify();
+                }
+            }
+            PaneEvent::CloseRequested => {
+                self.active_pane = index;
+                self.close_pane_at(index, window, cx);
+            }
+        }
+    }
+
+    /// Remove a pane and keep the workspace non-empty. The final pane is never
+    /// destroyed; it degrades to an empty pane the user can reuse.
+    fn close_pane_at(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        if self.panes.len() <= 1 || index >= self.panes.len() {
+            self.persist(cx);
+            cx.notify();
+            return;
+        }
+        self.panes.remove(index);
+        self.active_pane = self.active_pane.min(self.panes.len() - 1);
+        self.panes[self.active_pane]
+            .focus_handle(cx)
+            .focus(window, cx);
+        self.persist(cx);
+        cx.notify();
+    }
+
+    fn close_active_pane(
+        &mut self,
+        _: &CloseActivePane,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.close_pane_at(self.active_pane, window, cx);
     }
 
     fn focus_next_pane(&mut self, _: &FocusNextPane, window: &mut Window, cx: &mut Context<Self>) {
@@ -512,7 +678,12 @@ impl WorkspaceShell {
         cx.notify();
     }
 
-    fn close_active_item(&mut self, _: &CloseActiveItem, _: &mut Window, cx: &mut Context<Self>) {
+    fn close_active_item(
+        &mut self,
+        _: &CloseActiveItem,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(pane) = self.panes.get(self.active_pane) else {
             return;
         };
@@ -525,10 +696,10 @@ impl WorkspaceShell {
                 return;
             }
         }
-        self.remove_active_item(cx);
+        self.remove_active_item(window, cx);
     }
 
-    fn remove_active_item(&mut self, cx: &mut Context<Self>) {
+    fn remove_active_item(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(pane) = self.panes.get(self.active_pane) {
             pane.update(cx, |pane, _| {
                 if !pane.items.is_empty() {
@@ -538,18 +709,33 @@ impl WorkspaceShell {
             });
         }
         self.modal = None;
-        self.persist(cx);
-        cx.notify();
+        // A pane emptied by its last close collapses so panes never accumulate
+        // as un-closeable ghosts. The final pane always survives.
+        let emptied = self
+            .panes
+            .get(self.active_pane)
+            .is_some_and(|pane| pane.read(cx).items.is_empty());
+        if emptied && self.panes.len() > 1 {
+            self.close_pane_at(self.active_pane, window, cx);
+        } else {
+            self.persist(cx);
+            cx.notify();
+        }
     }
 
-    fn save_active_item(&mut self, _: &SaveActiveItem, _: &mut Window, cx: &mut Context<Self>) {
+    fn save_active_item(
+        &mut self,
+        _: &SaveActiveItem,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let close_after_save = matches!(self.modal, Some(Modal::ConfirmClose { .. }));
         self.mark_active_item_dirty(false, cx);
         self.toasts.push(Toast {
             message: "Presentation saved".into(),
         });
         if close_after_save {
-            self.remove_active_item(cx);
+            self.remove_active_item(window, cx);
         } else {
             self.modal = None;
             self.persist(cx);
@@ -560,10 +746,10 @@ impl WorkspaceShell {
     fn confirm_close_without_saving(
         &mut self,
         _: &ConfirmCloseWithoutSaving,
-        _: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.remove_active_item(cx);
+        self.remove_active_item(window, cx);
     }
 
     fn open_command_palette(
@@ -612,6 +798,161 @@ impl WorkspaceShell {
         }
         self.persist(cx);
         cx.notify();
+    }
+
+    /// Compact, blocky top toolbar in the Zed idiom: a hamburger that opens the
+    /// command menu, brand, workspace switcher, and a right-side cluster of
+    /// status affordances (sync/update, git identity, theme). Indicators are
+    /// driven by real lifecycle state rather than decorative chrome.
+    fn render_toolbar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let colors = self.theme.colors;
+        let workspace_label = self.workspace_label();
+
+        // Update / sync indicator reflects the connection lifecycle.
+        let (update_glyph, update_label, update_color) = match &self.lifecycle.phase {
+            crate::ConnectionPhase::Ready => ("✓", "Up to date".to_string(), colors.success),
+            crate::ConnectionPhase::Degraded(_) => {
+                ("!", self.lifecycle.status_label(), colors.warning)
+            }
+            crate::ConnectionPhase::Offline => ("⟳", "Offline".to_string(), colors.muted_text),
+            crate::ConnectionPhase::Reconnecting { .. } => {
+                ("⟳", self.lifecycle.status_label(), colors.warning)
+            }
+            _ => ("⟳", self.lifecycle.status_label(), colors.accent),
+        };
+
+        // Git / account identity, sourced from the authenticated whoami.
+        let (git_glyph, git_label, git_color) = match self.lifecycle.identity.as_ref() {
+            Some(identity) => ("●", identity.principal.display_name.clone(), colors.accent),
+            None => ("○", "Sign in".to_string(), colors.muted_text),
+        };
+        let theme_glyph = if self.dark_theme { "◐" } else { "◑" };
+
+        // Square blocky icon slot: transparent at rest, surface on hover.
+        let icon_slot = move |id: (&'static str, usize)| {
+            div()
+                .id(id)
+                .role(Role::Button)
+                .w(px(28.))
+                .h(px(28.))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded_sm()
+                .text_color(colors.muted_text)
+                .hover(|slot| slot.bg(colors.selected_surface).text_color(colors.text))
+        };
+
+        div()
+            .id("integrated-titlebar")
+            .key_context("SiftWindow")
+            .h(px(34.))
+            .flex()
+            .items_center()
+            .justify_between()
+            .pl_1()
+            .pr_2()
+            .gap_2()
+            .border_b_1()
+            .border_color(colors.border)
+            .bg(colors.surface)
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .min_w_0()
+                    // Left hamburger: opens the command menu.
+                    .child(
+                        icon_slot(("toolbar-menu", 0))
+                            .aria_label("Open menu")
+                            .on_click(cx.listener(|shell, _, window, cx| {
+                                shell.open_command_palette(&OpenCommandPalette, window, cx)
+                            }))
+                            .child("☰"),
+                    )
+                    .child(
+                        div()
+                            .px_1()
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .child("sift"),
+                    )
+                    // Workspace switcher chip.
+                    .child(
+                        div()
+                            .id("workspace-switcher")
+                            .role(Role::Button)
+                            .aria_label("Switch workspace")
+                            .flex()
+                            .items_center()
+                            .gap_1()
+                            .h(px(24.))
+                            .px_2()
+                            .min_w_0()
+                            .rounded_sm()
+                            .border_1()
+                            .border_color(colors.border)
+                            .bg(colors.elevated_surface)
+                            .text_sm()
+                            .hover(|chip| chip.border_color(colors.accent))
+                            .on_click(cx.listener(|shell, _, window, cx| {
+                                shell.open_command_palette(&OpenCommandPalette, window, cx)
+                            }))
+                            .child(div().min_w_0().truncate().child(workspace_label))
+                            .child(div().text_color(colors.muted_text).child("▾")),
+                    ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    // Update / sync indicator.
+                    .child(
+                        div()
+                            .id("toolbar-update")
+                            .aria_label(update_label.clone())
+                            .flex()
+                            .items_center()
+                            .gap_1()
+                            .h(px(24.))
+                            .px_2()
+                            .rounded_sm()
+                            .text_xs()
+                            .text_color(colors.muted_text)
+                            .child(div().text_color(update_color).child(update_glyph))
+                            .child(update_label),
+                    )
+                    // Git / account sign-in.
+                    .child(
+                        div()
+                            .id("toolbar-git")
+                            .role(Role::Button)
+                            .aria_label(git_label.clone())
+                            .flex()
+                            .items_center()
+                            .gap_1()
+                            .h(px(24.))
+                            .px_2()
+                            .rounded_sm()
+                            .text_xs()
+                            .hover(|git| git.bg(colors.selected_surface))
+                            .on_click(cx.listener(|shell, _, window, cx| {
+                                shell.open_command_palette(&OpenCommandPalette, window, cx)
+                            }))
+                            .child(div().text_color(git_color).child(git_glyph))
+                            .child(git_label),
+                    )
+                    // Theme toggle.
+                    .child(
+                        icon_slot(("toolbar-theme", 0))
+                            .aria_label("Toggle theme")
+                            .on_click(cx.listener(|shell, _, window, cx| {
+                                shell.toggle_theme(&ToggleShellTheme, window, cx)
+                            }))
+                            .child(theme_glyph),
+                    ),
+            )
     }
 
     fn render_dock(&self, dock: &Dock) -> impl IntoElement {
@@ -765,6 +1106,7 @@ impl gpui::Render for WorkspaceShell {
             .on_action(cx.listener(Self::dismiss_modal))
             .on_action(cx.listener(Self::split_pane))
             .on_action(cx.listener(Self::focus_next_pane))
+            .on_action(cx.listener(Self::close_active_pane))
             .on_action(cx.listener(Self::close_active_item))
             .on_action(cx.listener(Self::save_active_item))
             .on_action(cx.listener(Self::confirm_close_without_saving))
@@ -778,21 +1120,7 @@ impl gpui::Render for WorkspaceShell {
             .size_full()
             .bg(colors.background)
             .text_color(colors.text)
-            .child(
-                div()
-                    .id("integrated-titlebar")
-                    .key_context("SiftWindow")
-                    .h(px(38.))
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .px_3()
-                    .border_b_1()
-                    .border_color(colors.border)
-                    .bg(colors.surface)
-                    .child(div().font_weight(gpui::FontWeight::SEMIBOLD).child("sift"))
-                    .child("Local workspace · Ctrl+Shift+P"),
-            )
+            .child(self.render_toolbar(cx))
             .child(
                 div()
                     .flex()
@@ -915,6 +1243,55 @@ mod tests {
         );
         let focus = workspace.read_with(&cx, |shell, cx| shell.focus_handle(cx));
         cx.update(|window, cx| focus.dispatch_action(&FocusNextPane, window, cx));
+        assert_eq!(
+            workspace.read_with(&cx, |workspace, _| workspace.active_pane()),
+            0
+        );
+    }
+
+    #[gpui::test]
+    fn closing_the_last_item_collapses_an_extra_pane(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        let focus = workspace.read_with(&cx, |shell, cx| shell.focus_handle(cx));
+        cx.update(|window, cx| focus.dispatch_action(&SplitPane, window, cx));
+        assert_eq!(
+            workspace.read_with(&cx, |workspace, _| workspace.pane_count()),
+            2
+        );
+        // The new pane is active with a single clean item; closing it must
+        // remove the whole pane rather than leave an un-closeable ghost.
+        cx.update(|window, cx| focus.dispatch_action(&CloseActiveItem, window, cx));
+        assert_eq!(
+            workspace.read_with(&cx, |workspace, _| workspace.pane_count()),
+            1
+        );
+        assert_eq!(
+            workspace.read_with(&cx, |workspace, _| workspace.active_pane()),
+            0
+        );
+    }
+
+    #[gpui::test]
+    fn close_active_pane_never_removes_the_final_pane(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        let focus = workspace.read_with(&cx, |shell, cx| shell.focus_handle(cx));
+        cx.update(|window, cx| focus.dispatch_action(&SplitPane, window, cx));
+        cx.update(|window, cx| focus.dispatch_action(&SplitPane, window, cx));
+        assert_eq!(
+            workspace.read_with(&cx, |workspace, _| workspace.pane_count()),
+            3
+        );
+        for _ in 0..5 {
+            cx.update(|window, cx| focus.dispatch_action(&CloseActivePane, window, cx));
+        }
+        assert_eq!(
+            workspace.read_with(&cx, |workspace, _| workspace.pane_count()),
+            1
+        );
         assert_eq!(
             workspace.read_with(&cx, |workspace, _| workspace.active_pane()),
             0
