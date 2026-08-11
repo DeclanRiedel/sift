@@ -1,5 +1,18 @@
 //! GPUI-owned projection of one server-authoritative Sift workspace.
 
+mod presentation;
+mod shell;
+
+pub use presentation::{
+    DockPresentation, ItemKind, ItemPresentation, PanePresentation, PresentationState,
+    PresentationStore, Rect, WindowPresentation, WorkspacePresentation,
+};
+pub use shell::{
+    CloseActiveItem, CommandSpec, ConfirmCloseWithoutSaving, DismissModal, Dock, FocusNextPane,
+    Modal, OpenCommandPalette, Pane, SaveActiveItem, SplitPane, StatusBar, Toast, ToggleBottomDock,
+    ToggleLeftDock, ToggleRightDock, ToggleShellTheme, Tooltip, WorkspaceShell,
+};
+
 use std::{ops::Range, time::Duration};
 
 use gpui::{

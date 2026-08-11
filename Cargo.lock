@@ -7418,8 +7418,11 @@ name = "sift-workspace-ui"
 version = "0.1.0"
 dependencies = [
  "gpui",
+ "serde",
+ "serde_json",
  "sift-client-sdk",
  "sift-ui",
+ "tempfile",
 ]
 
 [[package]]

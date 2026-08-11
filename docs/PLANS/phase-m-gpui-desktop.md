@@ -1,6 +1,6 @@
 # Phase M — GPUI Desktop Client
 
-Status: **design locked on 2026-08-11; M0 complete, M1 pending.** ADR-040 is
+Status: **design locked on 2026-08-11; M0–M1 complete, M2 pending.** ADR-040 is
 normative. Every milestone below ends in a separately reviewable commit with
 the workspace quality gates green.
 
@@ -339,14 +339,14 @@ ADR amendment instead of burying a second UI toolkit behind an abstraction.
 
 ### M1 — native application shell
 
-- [ ] Implement `SiftApp`, window, workspace, pane, item, dock, modal, toast,
+- [x] Implement `SiftApp`, window, workspace, pane, item, dock, modal, toast,
       tooltip, and status-bar ownership.
-- [ ] Build the initial Sift component set and light/dark themes.
-- [ ] Implement typed actions, key contexts, command palette, menus, and
+- [x] Build the initial Sift component set and light/dark themes.
+- [x] Implement typed actions, key contexts, command palette, menus, and
       capability-aware disabled reasons.
-- [ ] Persist and restore window/pane/dock/item presentation state before I/O.
-- [ ] Add the platform boundary and Linux/macOS/Windows compile lanes.
-- [ ] Test focus transfer, pane splitting, close/save prompts, command routing,
+- [x] Persist and restore window/pane/dock/item presentation state before I/O.
+- [x] Add the platform boundary and Linux/macOS/Windows compile lanes.
+- [x] Test focus transfer, pane splitting, close/save prompts, command routing,
       scale factors, and off-screen window recovery.
 
 ### M2 — connection and workspace lifecycle

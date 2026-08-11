@@ -29,6 +29,19 @@ jobs:
       - name: Dependency policy
         run: nix develop . --command cargo deny check
 
+  client-platforms:
+    name: Desktop compile (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Compile native desktop boundary
+        run: cargo check --locked -p sift-desktop --all-targets
+
   # Two-impl validation gate (ADR-017). The live driver tests exercise
   # real Postgres + SQL Server; without them, PgExt/MssqlExt correctness
   # is unverified. Runs against service containers on every push.
