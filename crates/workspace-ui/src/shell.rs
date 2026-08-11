@@ -2,13 +2,17 @@ use std::sync::Arc;
 
 use gpui::{
     actions, div, prelude::*, px, App, Context, Entity, FocusHandle, Focusable, IntoElement, Role,
-    Subscription, Window, WindowBounds,
+    Subscription, Task, Window, WindowBounds,
 };
+use sift_api_types::RoomId;
 use sift_ui::{button, ControlState, ControlTone, TextInput, Theme};
 
 use crate::presentation::{
     DockPresentation, ItemKind, ItemPresentation, PanePresentation, PresentationState,
     PresentationStore, WindowPresentation, WorkspacePresentation,
+};
+use crate::{
+    LifecycleEvent, LifecycleProjection, PresenceEvent, RoomPresenceProjection, WorkspaceNavEntry,
 };
 
 actions!(
@@ -182,6 +186,8 @@ pub struct WorkspaceShell {
     window_presentation: WindowPresentation,
     panes: Vec<Entity<Pane>>,
     active_pane: usize,
+    selected_workspace_id: Option<i64>,
+    selected_instance_id: Option<String>,
     left_dock: Dock,
     right_dock: Dock,
     bottom_dock: Dock,
@@ -189,6 +195,10 @@ pub struct WorkspaceShell {
     toasts: Vec<Toast>,
     tooltip: Option<Tooltip>,
     status: StatusBar,
+    lifecycle: LifecycleProjection,
+    presence: RoomPresenceProjection,
+    _lifecycle_task: Option<Task<()>>,
+    _presence_task: Option<Task<()>>,
     store: Option<Arc<PresentationStore>>,
     _bounds_subscription: Subscription,
     next_id: u64,
@@ -212,6 +222,8 @@ impl WorkspaceShell {
         } else {
             state.workspace
         };
+        let selected_workspace_id = workspace.workspace_id;
+        let selected_instance_id = workspace.instance_id.clone();
         let panes = workspace
             .panes
             .into_iter()
@@ -244,6 +256,8 @@ impl WorkspaceShell {
             window_presentation,
             panes,
             active_pane,
+            selected_workspace_id,
+            selected_instance_id,
             left_dock: Dock {
                 title: "Connections",
                 presentation: workspace.left_dock,
@@ -260,6 +274,10 @@ impl WorkspaceShell {
             toasts: Vec::new(),
             tooltip: None,
             status: StatusBar::default(),
+            lifecycle: LifecycleProjection::default(),
+            presence: RoomPresenceProjection::default(),
+            _lifecycle_task: None,
+            _presence_task: None,
             store,
             _bounds_subscription: bounds_subscription,
             next_id,
@@ -317,6 +335,93 @@ impl WorkspaceShell {
             .map_or(0, |pane| pane.read(cx).items.len())
     }
 
+    pub fn lifecycle(&self) -> &LifecycleProjection {
+        &self.lifecycle
+    }
+
+    pub fn attach_lifecycle(
+        &mut self,
+        mut receiver: tokio::sync::mpsc::UnboundedReceiver<LifecycleEvent>,
+        cx: &mut Context<Self>,
+    ) {
+        self._lifecycle_task = Some(cx.spawn(async move |shell, cx| {
+            while let Some(event) = receiver.recv().await {
+                if shell
+                    .update(cx, |shell, cx| {
+                        if let LifecycleEvent::Selected(instance) = &event {
+                            shell.selected_instance_id = Some(instance.id.clone());
+                        }
+                        shell.lifecycle.apply(event);
+                        shell.status.connection = shell.lifecycle.status_label();
+                        shell.reconcile_restored_workspace(cx);
+                        cx.notify();
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        }));
+    }
+
+    pub fn attach_presence(
+        &mut self,
+        mut receiver: tokio::sync::mpsc::UnboundedReceiver<PresenceEvent>,
+        cx: &mut Context<Self>,
+    ) {
+        self._presence_task = Some(cx.spawn(async move |shell, cx| {
+            while let Some(event) = receiver.recv().await {
+                if shell
+                    .update(cx, |shell, cx| {
+                        shell.presence.apply(event);
+                        cx.notify();
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        }));
+    }
+
+    pub fn open_workspace(&mut self, workspace: &WorkspaceNavEntry, cx: &mut Context<Self>) {
+        self.selected_workspace_id = Some(workspace.id);
+        self.presence.join(RoomId(workspace.room_id));
+        self.persist(cx);
+        cx.notify();
+    }
+
+    pub fn follow_participant(&mut self, attachment_id: i64, cx: &mut Context<Self>) -> bool {
+        let followed = self.presence.follow(attachment_id);
+        if followed {
+            cx.notify();
+        }
+        followed
+    }
+
+    fn reconcile_restored_workspace(&mut self, cx: &mut Context<Self>) {
+        if self.lifecycle.phase != crate::ConnectionPhase::Ready {
+            return;
+        }
+        let Some(selected) = self.selected_workspace_id else {
+            return;
+        };
+        let exists = self
+            .lifecycle
+            .tenants
+            .iter()
+            .flat_map(|tenant| &tenant.rooms)
+            .flat_map(|room| &room.workspaces)
+            .any(|workspace| workspace.id == selected);
+        if !exists {
+            self.selected_workspace_id = None;
+            self.toasts.push(Toast {
+                message: "Restored workspace is no longer available".into(),
+            });
+            self.persist(cx);
+        }
+    }
+
     pub fn mark_active_item_dirty(&mut self, dirty: bool, cx: &mut Context<Self>) {
         if let Some(pane) = self.panes.get(self.active_pane) {
             pane.update(cx, |pane, _| {
@@ -341,6 +446,8 @@ impl WorkspaceShell {
                     .map(|pane| pane.read(cx).snapshot())
                     .collect(),
                 active_pane: self.active_pane,
+                workspace_id: self.selected_workspace_id,
+                instance_id: self.selected_instance_id.clone(),
             },
             ..PresentationState::default()
         }
@@ -527,7 +634,54 @@ impl WorkspaceShell {
                     .text_color(colors.muted_text)
                     .child(dock.title.to_uppercase()),
             )
-            .child("Local workspace")
+            .when(dock.title == "Connections", |dock_view| {
+                dock_view.children(self.lifecycle.tenants.iter().flat_map(|tenant| {
+                    let tenant_name = div()
+                        .mt_2()
+                        .text_color(colors.muted_text)
+                        .child(tenant.name.clone());
+                    let connections = tenant
+                        .connection_names
+                        .iter()
+                        .map(|name| div().pl_2().child(format!("● {name}")));
+                    let workspaces = tenant.rooms.iter().flat_map(|room| {
+                        room.workspaces.iter().map(move |workspace| {
+                            let features =
+                                match (workspace.git_enabled, workspace.scheduling_enabled) {
+                                    (true, true) => " · Git · Runs",
+                                    (true, false) => " · Git",
+                                    (false, true) => " · Runs",
+                                    (false, false) => "",
+                                };
+                            div()
+                                .pl_2()
+                                .child(format!("{} / {}{features}", room.name, workspace.name))
+                        })
+                    });
+                    std::iter::once(tenant_name)
+                        .chain(connections)
+                        .chain(workspaces)
+                        .collect::<Vec<_>>()
+                }))
+            })
+            .when(
+                dock.title == "Connections" && self.lifecycle.tenants.is_empty(),
+                |dock_view| {
+                    dock_view.child(
+                        div()
+                            .text_color(colors.muted_text)
+                            .child(self.lifecycle.status_label()),
+                    )
+                },
+            )
+            .when(dock.title == "Inspector", |dock_view| {
+                dock_view
+                    .child(format!("{} participants", self.presence.participants.len()))
+                    .child(match self.presence.followed_attachment {
+                        Some(attachment) => format!("Following attachment {attachment}"),
+                        None => "Follow mode off".into(),
+                    })
+            })
     }
 
     fn render_modal(&self, cx: &App) -> Option<impl IntoElement> {
@@ -732,6 +886,18 @@ mod tests {
         })
     }
 
+    fn shell_with_state(
+        state: PresentationState,
+        cx: &mut TestAppContext,
+    ) -> gpui::WindowHandle<WorkspaceShell> {
+        cx.update(|cx| {
+            cx.open_window(Default::default(), |window, cx| {
+                cx.new(|cx| WorkspaceShell::new(state, None, window, cx))
+            })
+            .unwrap()
+        })
+    }
+
     #[gpui::test]
     fn split_and_focus_actions_route_to_the_workspace(cx: &mut TestAppContext) {
         let window = shell(cx);
@@ -791,6 +957,77 @@ mod tests {
         assert_eq!(
             workspace.read_with(&cx, |workspace, _| workspace.modal().cloned()),
             Some(Modal::CommandPalette)
+        );
+    }
+
+    #[gpui::test]
+    fn stale_restored_workspace_is_cleared_after_authoritative_load(cx: &mut TestAppContext) {
+        let mut state = PresentationState::default();
+        state.workspace.workspace_id = Some(404);
+        let window = shell_with_state(state, cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        workspace.update(&mut cx, |workspace, cx| {
+            workspace
+                .lifecycle
+                .apply(LifecycleEvent::Phase(crate::ConnectionPhase::Ready));
+            workspace.reconcile_restored_workspace(cx);
+        });
+        assert_eq!(
+            workspace.read_with(&cx, |workspace, cx| workspace
+                .snapshot(cx)
+                .workspace
+                .workspace_id),
+            None
+        );
+        assert_eq!(
+            workspace.read_with(&cx, |workspace, _| workspace.toasts.last().cloned()),
+            Some(Toast {
+                message: "Restored workspace is no longer available".into()
+            })
+        );
+    }
+
+    #[gpui::test]
+    fn opening_workspace_persists_reference_and_follow_validates_presence(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        workspace.update(&mut cx, |shell, cx| {
+            shell.open_workspace(
+                &WorkspaceNavEntry {
+                    id: 12,
+                    room_id: 7,
+                    name: "Reporting".into(),
+                    git_enabled: true,
+                    scheduling_enabled: false,
+                },
+                cx,
+            );
+            shell.presence.apply(PresenceEvent::Joined {
+                room_id: RoomId(7),
+                attachment_id: 40,
+                presence: vec![sift_protocol::RoomPresence {
+                    attachment_id: 41,
+                    principal_id: 3,
+                    client_id: "peer".into(),
+                    active_document_id: None,
+                    selection: None,
+                }],
+            });
+            assert!(shell.follow_participant(41, cx));
+            assert!(!shell.follow_participant(999, cx));
+        });
+        assert_eq!(
+            workspace.read_with(&cx, |workspace, cx| workspace
+                .snapshot(cx)
+                .workspace
+                .workspace_id),
+            Some(12)
+        );
+        assert_eq!(
+            workspace.read_with(&cx, |workspace, _| workspace.presence.followed_attachment),
+            Some(41)
         );
     }
 }

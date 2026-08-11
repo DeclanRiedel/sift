@@ -669,14 +669,28 @@ impl RoomWebSocket {
 
     /// Attach to the room, returning once the server acknowledges.
     pub async fn attach(&mut self, client_id: impl Into<String>) -> Result<i64> {
+        self.attach_with_presence(client_id)
+            .await
+            .map(|(attachment_id, _)| attachment_id)
+    }
+
+    /// Attach to the room and preserve the initial ephemeral presence snapshot.
+    pub async fn attach_with_presence(
+        &mut self,
+        client_id: impl Into<String>,
+    ) -> Result<(i64, Vec<sift_protocol::RoomPresence>)> {
         self.send(sift_protocol::RoomClientMessage::Attach {
             client_id: client_id.into(),
         })
         .await?;
         loop {
             match self.next().await? {
-                sift_protocol::RoomServerMessage::Attached { attachment_id, .. } => {
-                    return Ok(attachment_id)
+                sift_protocol::RoomServerMessage::Attached {
+                    attachment_id,
+                    presence,
+                    ..
+                } => {
+                    return Ok((attachment_id, presence));
                 }
                 sift_protocol::RoomServerMessage::Error { message } => {
                     return Err(Error::Protocol(message))

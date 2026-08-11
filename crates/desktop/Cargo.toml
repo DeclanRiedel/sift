@@ -8,5 +8,8 @@ repository.workspace = true
 [dependencies]
 gpui = { workspace = true }
 gpui_platform = { workspace = true }
+sift-api-types = { workspace = true }
+sift-client-sdk = { workspace = true }
 sift-ui = { workspace = true }
 sift-workspace-ui = { workspace = true }
+tokio = { workspace = true }

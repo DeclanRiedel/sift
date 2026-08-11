@@ -9,8 +9,11 @@ repository.workspace = true
 gpui = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+sift-api-types = { workspace = true }
 sift-client-sdk = { workspace = true }
+sift-protocol = { workspace = true }
 sift-ui = { workspace = true }
+tokio = { workspace = true }
 
 [dev-dependencies]
 gpui = { workspace = true, features = ["test-support"] }

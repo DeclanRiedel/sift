@@ -1,4 +1,5 @@
 mod app;
+mod local_server;
 mod platform;
 
 use gpui::{prelude::*, px, Bounds, Menu, MenuItem, WindowBounds, WindowOptions};
@@ -56,6 +57,8 @@ fn main() {
             WindowBounds::Windowed(bounds)
         };
         let store = app.presentation_store.clone();
+        let runtime = app.runtime.clone();
+        let local_server = app.local_server.clone();
         let platform = format!("{:?}", app.platform);
         cx.open_window(
             WindowOptions {
@@ -66,7 +69,9 @@ fn main() {
                 }),
                 ..Default::default()
             },
-            |window, cx| cx.new(|cx| SiftWindow::new(state, store, window, cx)),
+            |window, cx| {
+                cx.new(|cx| SiftWindow::new(state, store, runtime, local_server, window, cx))
+            },
         )
         .expect("failed to open the Sift desktop window");
         cx.activate(true);

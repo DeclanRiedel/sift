@@ -1,8 +1,15 @@
 //! GPUI-owned projection of one server-authoritative Sift workspace.
 
+mod lifecycle;
 mod presentation;
 mod shell;
 
+pub use lifecycle::{
+    create_virtual_workspace, load_instance, stream_room_presence, ConnectionPhase, DegradedReason,
+    InstanceCatalog, InstanceKind, InstanceSpec, LifecycleEvent, LifecycleProjection,
+    LoadedInstance, PresenceEvent, RoomNavEntry, RoomPresenceProjection, TenantNavEntry,
+    WorkspaceNavEntry,
+};
 pub use presentation::{
     DockPresentation, ItemKind, ItemPresentation, PanePresentation, PresentationState,
     PresentationStore, Rect, WindowPresentation, WorkspacePresentation,

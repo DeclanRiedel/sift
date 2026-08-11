@@ -74,6 +74,10 @@ pub struct WorkspacePresentation {
     pub bottom_dock: DockPresentation,
     pub panes: Vec<PanePresentation>,
     pub active_pane: usize,
+    #[serde(default)]
+    pub workspace_id: Option<i64>,
+    #[serde(default)]
+    pub instance_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -122,6 +126,8 @@ impl Default for PresentationState {
                     active_item: 0,
                 }],
                 active_pane: 0,
+                workspace_id: None,
+                instance_id: Some("local".into()),
             },
         }
     }

@@ -1,6 +1,6 @@
 # Phase M — GPUI Desktop Client
 
-Status: **design locked on 2026-08-11; M0–M1 complete, M2 pending.** ADR-040 is
+Status: **design locked on 2026-08-11; M0–M2 complete, M3 pending.** ADR-040 is
 normative. Every milestone below ends in a separately reviewable commit with
 the workspace quality gates green.
 
@@ -351,16 +351,16 @@ ADR amendment instead of burying a second UI toolkit behind an abstraction.
 
 ### M2 — connection and workspace lifecycle
 
-- [ ] Supervise/attach to a local server and reuse the same SDK path for local,
+- [x] Supervise/attach to a local server and reuse the same SDK path for local,
       SSH, and hosted instances.
-- [ ] Implement instance selection, authentication, reconnect, version
+- [x] Implement instance selection, authentication, reconnect, version
       negotiation, and capability/degraded states.
-- [ ] Browse/open/create virtual workspaces and restore one workspace per
+- [x] Browse/open/create virtual workspaces and restore one workspace per
       window.
-- [ ] Render connection, workspace, Git, and run navigation docks progressively.
-- [ ] Join rooms, project presence, and expose follow controls without making
+- [x] Render connection, workspace, Git, and run navigation docks progressively.
+- [x] Join rooms, project presence, and expose follow controls without making
       presence durable.
-- [ ] Exercise server restart, expired auth, revoked membership, offline start,
+- [x] Exercise server restart, expired auth, revoked membership, offline start,
       stale restored references, and multi-window local-server leases.
 
 ### M3 — daily-driver SQL vertical slice
