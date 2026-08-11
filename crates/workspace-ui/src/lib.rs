@@ -21,9 +21,9 @@ pub use presentation::{
 };
 pub use shell::{
     CloseActiveItem, CloseActivePane, CommandSpec, ConfirmCloseWithoutSaving, DismissModal, Dock,
-    FocusNextPane, Modal, OpenCommandPalette, Pane, PaneEvent, SaveActiveItem, SplitPane,
-    StatusBar, Toast, ToggleBottomDock, ToggleLeftDock, ToggleRightDock, ToggleShellTheme, Tooltip,
-    WorkspaceShell,
+    ExecuteCommand, ExecutionOutcome, FocusNextPane, Modal, OpenCommandPalette, Pane, PaneEvent,
+    SaveActiveItem, SplitPane, StatusBar, Toast, ToggleBottomDock, ToggleLeftDock, ToggleRightDock,
+    ToggleShellTheme, Tooltip, WorkspaceShell,
 };
 
 use std::{ops::Range, time::Duration};

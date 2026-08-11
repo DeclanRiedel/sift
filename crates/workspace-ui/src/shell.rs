@@ -96,12 +96,29 @@ impl Default for StatusBar {
 
 /// Events a pane emits upward to the workspace. A pane never mutates sibling
 /// panes or the workspace's pane list directly; it asks its owner instead.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PaneEvent {
     /// The pane was interacted with and should become the active pane.
     FocusRequested,
     /// The pane should be removed (its close control was used, or it emptied).
     CloseRequested,
+    /// A query item asked to run SQL; the workspace dispatches it to execution.
+    ExecuteRequested { item_id: u64, sql: String },
+}
+
+/// Shell → executor: run SQL for a query item. The executor owns the SDK
+/// client, session, and connection; the shell only reports intent.
+#[derive(Debug, Clone)]
+pub struct ExecuteCommand {
+    pub item_id: u64,
+    pub sql: String,
+}
+
+/// Executor → shell: the outcome for a previously requested execution.
+#[derive(Debug, Clone)]
+pub struct ExecutionOutcome {
+    pub item_id: u64,
+    pub state: ResultState,
 }
 
 /// A pane owns its ordered items and focus handle. The workspace owns panes;
@@ -152,23 +169,29 @@ impl Pane {
 
     fn on_editor_event(&mut self, item_id: u64, event: &EditorEvent, cx: &mut Context<Self>) {
         match event {
-            EditorEvent::Execute { .. } => {
-                let Some(result) = self.results.get(&item_id) else {
-                    return;
-                };
-                // Execution transport (session/connection → SDK execute/stream)
-                // lands in the next M3 slice; until a connection is attached the
-                // surface reports the honest not-connected state rather than
-                // faking rows.
-                result.update(cx, |result, cx| {
-                    result.set_state(
-                        ResultState::Unavailable(
-                            "Attach a database connection to run this query.".into(),
-                        ),
-                        cx,
-                    );
+            EditorEvent::Execute { sql } => {
+                // Show the pending state immediately, then ask the workspace to
+                // dispatch the run. The workspace owns the executor channel.
+                if let Some(result) = self.results.get(&item_id) {
+                    result.update(cx, |result, cx| result.set_pending(cx));
+                }
+                cx.emit(PaneEvent::ExecuteRequested {
+                    item_id,
+                    sql: sql.clone(),
                 });
             }
+        }
+    }
+
+    /// Apply an execution outcome to the query item's results surface.
+    /// Returns whether this pane owns the item.
+    fn set_result(&mut self, item_id: u64, state: ResultState, cx: &mut Context<Self>) -> bool {
+        match self.results.get(&item_id) {
+            Some(result) => {
+                result.update(cx, |result, cx| result.set_state(state, cx));
+                true
+            }
+            None => false,
         }
     }
 
@@ -381,6 +404,8 @@ pub struct WorkspaceShell {
     presence: RoomPresenceProjection,
     _lifecycle_task: Option<Task<()>>,
     _presence_task: Option<Task<()>>,
+    _result_task: Option<Task<()>>,
+    execute_sender: Option<tokio::sync::mpsc::UnboundedSender<ExecuteCommand>>,
     store: Option<Arc<PresentationStore>>,
     _bounds_subscription: Subscription,
     next_id: u64,
@@ -463,6 +488,8 @@ impl WorkspaceShell {
             presence: RoomPresenceProjection::default(),
             _lifecycle_task: None,
             _presence_task: None,
+            _result_task: None,
+            execute_sender: None,
             store,
             _bounds_subscription: bounds_subscription,
             next_id,
@@ -583,6 +610,38 @@ impl WorkspaceShell {
                 }
             }
         }));
+    }
+
+    /// Attach the query executor: `sender` carries run requests to the executor
+    /// task, `receiver` delivers outcomes back onto the UI thread.
+    pub fn attach_execution(
+        &mut self,
+        sender: tokio::sync::mpsc::UnboundedSender<ExecuteCommand>,
+        mut receiver: tokio::sync::mpsc::UnboundedReceiver<ExecutionOutcome>,
+        cx: &mut Context<Self>,
+    ) {
+        self.execute_sender = Some(sender);
+        self._result_task = Some(cx.spawn(async move |shell, cx| {
+            while let Some(outcome) = receiver.recv().await {
+                if shell
+                    .update(cx, |shell, cx| {
+                        shell.route_result(outcome.item_id, outcome.state, cx);
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        }));
+    }
+
+    /// Deliver an execution outcome to whichever pane owns the query item.
+    fn route_result(&mut self, item_id: u64, state: ResultState, cx: &mut Context<Self>) {
+        for pane in &self.panes {
+            if pane.update(cx, |pane, cx| pane.set_result(item_id, state.clone(), cx)) {
+                break;
+            }
+        }
     }
 
     pub fn open_workspace(&mut self, workspace: &WorkspaceNavEntry, cx: &mut Context<Self>) {
@@ -727,6 +786,25 @@ impl WorkspaceShell {
             PaneEvent::CloseRequested => {
                 self.active_pane = index;
                 self.close_pane_at(index, window, cx);
+            }
+            PaneEvent::ExecuteRequested { item_id, sql } => {
+                match &self.execute_sender {
+                    Some(sender) => {
+                        let _ = sender.send(ExecuteCommand {
+                            item_id: *item_id,
+                            sql: sql.clone(),
+                        });
+                    }
+                    None => {
+                        // No executor attached (e.g. offline): correct the
+                        // optimistic pending state to not-connected.
+                        self.route_result(
+                            *item_id,
+                            ResultState::Unavailable("Not connected to a database.".into()),
+                            cx,
+                        );
+                    }
+                }
             }
         }
     }

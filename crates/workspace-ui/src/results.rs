@@ -144,6 +144,24 @@ impl ResultState {
         ResultState::Ready(data)
     }
 
+    /// Classify a failed execution into a distinct state. `transport` marks a
+    /// request that never received a definite server answer, so its outcome is
+    /// indeterminate and must never be reported as success or auto-retried.
+    pub fn from_execution_error(transport: bool, message: impl Into<String>) -> Self {
+        if transport {
+            return ResultState::OutcomeUnknown;
+        }
+        let message = message.into();
+        let lower = message.to_lowercase();
+        if lower.contains("cancel") {
+            ResultState::Cancelled
+        } else if lower.contains("timed out") || lower.contains("timeout") {
+            ResultState::TimedOut
+        } else {
+            ResultState::Failed(message)
+        }
+    }
+
     /// Short label for the status strip.
     pub fn status_label(&self) -> String {
         match self {
@@ -717,6 +735,26 @@ mod tests {
             view.select_cell(0, 0, cx);
             assert_eq!(view.selected_cell_text().as_deref(), Some("neo"));
         });
+    }
+
+    #[test]
+    fn execution_errors_map_to_distinct_states() {
+        assert!(matches!(
+            ResultState::from_execution_error(true, "connection lost"),
+            ResultState::OutcomeUnknown
+        ));
+        assert!(matches!(
+            ResultState::from_execution_error(false, "query was canceled"),
+            ResultState::Cancelled
+        ));
+        assert!(matches!(
+            ResultState::from_execution_error(false, "statement timed out"),
+            ResultState::TimedOut
+        ));
+        assert!(matches!(
+            ResultState::from_execution_error(false, "syntax error at or near \"slect\""),
+            ResultState::Failed(_)
+        ));
     }
 
     #[test]

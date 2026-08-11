@@ -1,7 +1,13 @@
 use std::sync::Arc;
 
 use gpui::{prelude::*, App, Context, Entity, IntoElement, Window};
-use sift_workspace_ui::{PresentationState, PresentationStore, Rect, WorkspaceShell};
+use sift_api_types::TenantId;
+use sift_client_sdk::{Client, OpenConnectionFromProfileRequest};
+use sift_protocol::{ConnectionId, SessionId};
+use sift_workspace_ui::{
+    ExecuteCommand, ExecutionOutcome, PresentationState, PresentationStore, Rect, ResultState,
+    WorkspaceShell,
+};
 
 use crate::local_server::{LocalServerLease, LocalServerManager};
 use crate::platform::{current_platform, presentation_state_path, PlatformKind};
@@ -59,20 +65,135 @@ impl SiftWindow {
         let lease = local_server.acquire();
         let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
         let (presence_sender, presence_receiver) = tokio::sync::mpsc::unbounded_channel();
+        let (execute_sender, execute_receiver) = tokio::sync::mpsc::unbounded_channel();
+        let (outcome_sender, outcome_receiver) = tokio::sync::mpsc::unbounded_channel();
         workspace.update(cx, |workspace, cx| {
             workspace.attach_lifecycle(receiver, cx);
             workspace.attach_presence(presence_receiver, cx);
+            workspace.attach_execution(execute_sender, outcome_receiver, cx);
         });
         std::mem::drop(runtime.spawn(supervise_local_instance(
-            local_server,
+            local_server.clone(),
             restored_workspace_id,
             sender,
             presence_sender,
+        )));
+        std::mem::drop(runtime.spawn(run_query_executor(
+            local_server,
+            execute_receiver,
+            outcome_sender,
         )));
         Self {
             workspace,
             _local_server_lease: lease,
         }
+    }
+}
+
+/// An opened, reusable execution target: one client, session, and connection.
+struct QueryContext {
+    client: Client,
+    session: SessionId,
+    connection: ConnectionId,
+}
+
+/// Owns the SDK client, session, and connection and runs one query at a time.
+/// The UI thread only sends SQL and renders the outcome the executor returns.
+async fn run_query_executor(
+    local_server: LocalServerManager,
+    mut commands: tokio::sync::mpsc::UnboundedReceiver<ExecuteCommand>,
+    outcomes: tokio::sync::mpsc::UnboundedSender<ExecutionOutcome>,
+) {
+    let mut context: Option<QueryContext> = None;
+    while let Some(command) = commands.recv().await {
+        let state = execute_one(&mut context, &local_server, &command.sql).await;
+        if outcomes
+            .send(ExecutionOutcome {
+                item_id: command.item_id,
+                state,
+            })
+            .is_err()
+        {
+            return;
+        }
+    }
+}
+
+async fn execute_one(
+    context: &mut Option<QueryContext>,
+    local_server: &LocalServerManager,
+    sql: &str,
+) -> ResultState {
+    if context.is_none() {
+        match open_query_context(local_server).await {
+            Ok(opened) => *context = Some(opened),
+            Err(reason) => return ResultState::Unavailable(reason),
+        }
+    }
+    let opened = context.as_ref().expect("context opened above");
+    match opened
+        .client
+        .execute(opened.session, opened.connection, sql)
+        .await
+    {
+        Ok(response) => ResultState::from_execute(response),
+        Err(error) => {
+            // Rebuild session/connection on the next run in case they went stale.
+            *context = None;
+            classify_execution_error(error)
+        }
+    }
+}
+
+async fn open_query_context(local_server: &LocalServerManager) -> Result<QueryContext, String> {
+    let client = local_server.ensure_ready().await?;
+    let identity = client
+        .whoami()
+        .await
+        .map_err(|error| format!("identity check failed: {error}"))?;
+    let tenant_id = identity
+        .memberships
+        .first()
+        .map(|membership| membership.tenant_id)
+        .ok_or_else(|| "No tenant membership is available.".to_string())?;
+    let profiles = client
+        .connection_profiles(TenantId(tenant_id))
+        .await
+        .map_err(|error| format!("loading connections failed: {error}"))?;
+    let profile = profiles
+        .into_iter()
+        .next()
+        .ok_or_else(|| "No connection profile is configured.".to_string())?;
+    let session = client
+        .open_session(None)
+        .await
+        .map_err(|error| format!("opening a session failed: {error}"))?
+        .id;
+    let connection = client
+        .open_connection_from_profile(
+            session,
+            OpenConnectionFromProfileRequest {
+                tenant_id,
+                profile_id: profile.id.0,
+            },
+        )
+        .await
+        .map_err(|error| format!("opening a connection failed: {error}"))?
+        .id;
+    Ok(QueryContext {
+        client,
+        session,
+        connection,
+    })
+}
+
+fn classify_execution_error(error: sift_client_sdk::Error) -> ResultState {
+    use sift_client_sdk::Error;
+    match error {
+        // Transport loss leaves the write outcome indeterminate.
+        Error::Transport(_) | Error::WebSocket(_) => ResultState::from_execution_error(true, ""),
+        Error::Server { error, .. } => ResultState::from_execution_error(false, error.message),
+        other => ResultState::from_execution_error(false, other.to_string()),
     }
 }
 

@@ -7186,6 +7186,7 @@ dependencies = [
  "gpui_platform",
  "sift-api-types",
  "sift-client-sdk",
+ "sift-protocol",
  "sift-ui",
  "sift-workspace-ui",
  "tokio",

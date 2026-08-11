@@ -378,12 +378,15 @@ ADR amendment instead of burying a second UI toolkit behind an abstraction.
 - [~] Execute selection/document, stream status, cancel, and distinguish
       rejected, failed, cancelled, timed-out, and outcome-unknown operations.
       **Landed:** editor `ExecuteStatement`/`ExecuteDocument` actions
-      (Ctrl/Cmd+Enter) emit an `EditorEvent::Execute`; the `ResultState` model
-      has the distinct Idle/Pending/Ready/Unavailable/Failed/Cancelled/
-      TimedOut/OutcomeUnknown states with `from_execute`/`from_pages` mappers.
-      **Remaining:** the SDK transport (session/connection → `execute`/
-      `stream_query`/cancel) driving these states — today Execute reports the
-      not-connected state because no session is attached yet.
+      (Ctrl/Cmd+Enter) emit `EditorEvent::Execute`; the pane raises
+      `PaneEvent::ExecuteRequested` and shows Pending; the workspace forwards it
+      over an `ExecuteCommand` channel to a background executor in `sift-desktop`
+      that owns the SDK client, opens a session + connection-from-profile, calls
+      HTTP `execute`, and returns an `ExecutionOutcome` mapped through
+      `ResultState::from_execute`/`from_execution_error` into the distinct
+      Ready/Unavailable/Failed/Cancelled/TimedOut/OutcomeUnknown states.
+      **Remaining:** the streaming/cursor path (`stream_query`, paged status,
+      cancel) — today runs use the bounded HTTP first page.
 - [~] Implement virtualized results with typed cells, null/error states, column
       resizing/reordering, selection, copy, paging, resume, and bounded prefetch.
       **Landed:** `uniform_list`-virtualized grid, typed cell rendering
