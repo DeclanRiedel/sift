@@ -6,7 +6,7 @@ use gpui::{
     IntoElement, MouseButton, Role, Subscription, Task, Window, WindowBounds,
 };
 use sift_api_types::RoomId;
-use sift_ui::{button, ControlState, ControlTone, TextInput, Theme};
+use sift_ui::{TextInput, Theme};
 
 use crate::editor::{EditorEvent, QueryDocument, QueryEditor};
 use crate::results::{ResultState, ResultsView};
@@ -32,8 +32,7 @@ actions!(
         ConfirmCloseWithoutSaving,
         ToggleLeftDock,
         ToggleRightDock,
-        ToggleBottomDock,
-        ToggleShellTheme
+        ToggleBottomDock
     ]
 );
 
@@ -193,17 +192,6 @@ impl Pane {
             }
             None => false,
         }
-    }
-
-    fn set_theme(&mut self, theme: Theme, cx: &mut Context<Self>) {
-        self.theme = theme;
-        for editor in self.editors.values() {
-            editor.update(cx, |editor, cx| editor.set_theme(theme, cx));
-        }
-        for result in self.results.values() {
-            result.update(cx, |result, cx| result.set_theme(theme, cx));
-        }
-        cx.notify();
     }
 
     fn snapshot(&self) -> PanePresentation {
@@ -933,6 +921,18 @@ impl WorkspaceShell {
         cx.notify();
     }
 
+    /// Run a command palette entry by its stable id: dismiss the palette, then
+    /// dispatch the matching workspace action. Ids come from `command_specs`.
+    fn run_command(&mut self, id: &'static str, window: &mut Window, cx: &mut Context<Self>) {
+        self.dismiss_modal(&DismissModal, window, cx);
+        match id {
+            "workspace.split-pane" => self.split_pane(&SplitPane, window, cx),
+            "workspace.close-item" => self.close_active_item(&CloseActiveItem, window, cx),
+            "workspace.toggle-left-dock" => self.toggle_left_dock(&ToggleLeftDock, window, cx),
+            _ => {}
+        }
+    }
+
     fn toggle_left_dock(&mut self, _: &ToggleLeftDock, _: &mut Window, cx: &mut Context<Self>) {
         self.left_dock.presentation.open = !self.left_dock.presentation.open;
         self.persist(cx);
@@ -951,62 +951,25 @@ impl WorkspaceShell {
         cx.notify();
     }
 
-    fn toggle_theme(&mut self, _: &ToggleShellTheme, _: &mut Window, cx: &mut Context<Self>) {
-        self.dark_theme = !self.dark_theme;
-        self.theme = if self.dark_theme {
-            Theme::dark()
-        } else {
-            Theme::light()
-        };
-        let theme = self.theme;
-        for pane in &self.panes {
-            pane.update(cx, |pane, cx| pane.set_theme(theme, cx));
-        }
-        self.persist(cx);
-        cx.notify();
-    }
-
-    /// Compact, blocky top toolbar in the Zed idiom: a hamburger that opens the
-    /// command menu, brand, workspace switcher, and a right-side cluster of
-    /// status affordances (sync/update, git identity, theme). Indicators are
-    /// driven by real lifecycle state rather than decorative chrome.
+    /// Compact, blocky top toolbar in the Zed idiom. The only interactive
+    /// control is the hamburger, which opens the command palette; the brand,
+    /// workspace label, and connection indicator are read-only. Controls whose
+    /// behavior is not built yet are omitted rather than shown as dead buttons.
     fn render_toolbar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = self.theme.colors;
         let workspace_label = self.workspace_label();
 
-        // Update / sync indicator reflects the connection lifecycle.
+        // Read-only connection/sync indicator driven by the lifecycle phase.
         let (update_glyph, update_label, update_color) = match &self.lifecycle.phase {
-            crate::ConnectionPhase::Ready => ("✓", "Up to date".to_string(), colors.success),
+            crate::ConnectionPhase::Ready => ("●", "Connected".to_string(), colors.success),
             crate::ConnectionPhase::Degraded(_) => {
                 ("!", self.lifecycle.status_label(), colors.warning)
             }
-            crate::ConnectionPhase::Offline => ("⟳", "Offline".to_string(), colors.muted_text),
+            crate::ConnectionPhase::Offline => ("○", "Offline".to_string(), colors.muted_text),
             crate::ConnectionPhase::Reconnecting { .. } => {
                 ("⟳", self.lifecycle.status_label(), colors.warning)
             }
             _ => ("⟳", self.lifecycle.status_label(), colors.accent),
-        };
-
-        // Git / account identity, sourced from the authenticated whoami.
-        let (git_glyph, git_label, git_color) = match self.lifecycle.identity.as_ref() {
-            Some(identity) => ("●", identity.principal.display_name.clone(), colors.accent),
-            None => ("○", "Sign in".to_string(), colors.muted_text),
-        };
-        let theme_glyph = if self.dark_theme { "◐" } else { "◑" };
-
-        // Square blocky icon slot: transparent at rest, surface on hover.
-        let icon_slot = move |id: (&'static str, usize)| {
-            div()
-                .id(id)
-                .role(Role::Button)
-                .w(px(28.))
-                .h(px(28.))
-                .flex()
-                .items_center()
-                .justify_center()
-                .rounded_sm()
-                .text_color(colors.muted_text)
-                .hover(|slot| slot.bg(colors.selected_surface).text_color(colors.text))
         };
 
         div()
@@ -1026,98 +989,51 @@ impl WorkspaceShell {
                 div()
                     .flex()
                     .items_center()
-                    .gap_1()
+                    .gap_2()
                     .min_w_0()
-                    // Left hamburger: opens the command menu.
+                    // The only interactive control: opens the command palette.
                     .child(
-                        icon_slot(("toolbar-menu", 0))
-                            .aria_label("Open menu")
+                        div()
+                            .id("toolbar-menu")
+                            .role(Role::Button)
+                            .aria_label("Open command palette")
+                            .w(px(28.))
+                            .h(px(28.))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded_sm()
+                            .text_color(colors.muted_text)
+                            .hover(|slot| slot.bg(colors.selected_surface).text_color(colors.text))
                             .on_click(cx.listener(|shell, _, window, cx| {
                                 shell.open_command_palette(&OpenCommandPalette, window, cx)
                             }))
                             .child("☰"),
                     )
+                    .child(div().font_weight(gpui::FontWeight::SEMIBOLD).child("sift"))
+                    // Current workspace — a static label, not a switcher yet.
                     .child(
                         div()
-                            .px_1()
-                            .font_weight(gpui::FontWeight::SEMIBOLD)
-                            .child("sift"),
-                    )
-                    // Workspace switcher chip.
-                    .child(
-                        div()
-                            .id("workspace-switcher")
-                            .role(Role::Button)
-                            .aria_label("Switch workspace")
-                            .flex()
-                            .items_center()
-                            .gap_1()
-                            .h(px(24.))
-                            .px_2()
                             .min_w_0()
-                            .rounded_sm()
-                            .border_1()
-                            .border_color(colors.border)
-                            .bg(colors.elevated_surface)
                             .text_sm()
-                            .hover(|chip| chip.border_color(colors.accent))
-                            .on_click(cx.listener(|shell, _, window, cx| {
-                                shell.open_command_palette(&OpenCommandPalette, window, cx)
-                            }))
-                            .child(div().min_w_0().truncate().child(workspace_label))
-                            .child(div().text_color(colors.muted_text).child("▾")),
+                            .text_color(colors.muted_text)
+                            .truncate()
+                            .child(workspace_label),
                     ),
             )
             .child(
                 div()
+                    .id("toolbar-status")
+                    .aria_label(update_label.clone())
                     .flex()
                     .items_center()
                     .gap_1()
-                    // Update / sync indicator.
-                    .child(
-                        div()
-                            .id("toolbar-update")
-                            .aria_label(update_label.clone())
-                            .flex()
-                            .items_center()
-                            .gap_1()
-                            .h(px(24.))
-                            .px_2()
-                            .rounded_sm()
-                            .text_xs()
-                            .text_color(colors.muted_text)
-                            .child(div().text_color(update_color).child(update_glyph))
-                            .child(update_label),
-                    )
-                    // Git / account sign-in.
-                    .child(
-                        div()
-                            .id("toolbar-git")
-                            .role(Role::Button)
-                            .aria_label(git_label.clone())
-                            .flex()
-                            .items_center()
-                            .gap_1()
-                            .h(px(24.))
-                            .px_2()
-                            .rounded_sm()
-                            .text_xs()
-                            .hover(|git| git.bg(colors.selected_surface))
-                            .on_click(cx.listener(|shell, _, window, cx| {
-                                shell.open_command_palette(&OpenCommandPalette, window, cx)
-                            }))
-                            .child(div().text_color(git_color).child(git_glyph))
-                            .child(git_label),
-                    )
-                    // Theme toggle.
-                    .child(
-                        icon_slot(("toolbar-theme", 0))
-                            .aria_label("Toggle theme")
-                            .on_click(cx.listener(|shell, _, window, cx| {
-                                shell.toggle_theme(&ToggleShellTheme, window, cx)
-                            }))
-                            .child(theme_glyph),
-                    ),
+                    .h(px(24.))
+                    .px_2()
+                    .text_xs()
+                    .text_color(colors.muted_text)
+                    .child(div().text_color(update_color).child(update_glyph))
+                    .child(update_label),
             )
     }
 
@@ -1191,43 +1107,51 @@ impl WorkspaceShell {
             })
     }
 
-    fn render_modal(&self, cx: &App) -> Option<impl IntoElement> {
+    fn render_modal(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
         let colors = self.theme.colors;
         self.modal.as_ref().map(|modal| {
-            let content = match modal {
-                Modal::CommandPalette => div()
-                    .flex()
-                    .flex_col()
-                    .gap_2()
-                    .child(self.query_input.clone())
-                    .children(self.command_specs(cx).into_iter().map(|command| {
-                        let state = if command.enabled() {
-                            ControlState::Rest
-                        } else {
-                            ControlState::Disabled
-                        };
-                        div()
-                            .flex()
-                            .items_center()
-                            .justify_between()
-                            .child(button(
-                                command.id,
-                                command.label,
-                                self.theme,
-                                ControlTone::Neutral,
-                                state,
-                            ))
-                            .child(command.disabled_reason.unwrap_or(command.shortcut))
-                    }))
-                    .into_any_element(),
-                Modal::ConfirmClose { title } => div()
-                    .flex()
-                    .flex_col()
-                    .gap_3()
-                    .child(format!("Save changes to {title}?"))
-                    .child("Use Save, Close Without Saving, or Escape.")
-                    .into_any_element(),
-            };
+            let content =
+                match modal {
+                    Modal::CommandPalette => div()
+                        .flex()
+                        .flex_col()
+                        .gap_1()
+                        .child(self.query_input.clone())
+                        .children(self.command_specs(cx).into_iter().map(|command| {
+                            let enabled = command.enabled();
+                            let id = command.id;
+                            let mut row =
+                                div()
+                                    .id(id)
+                                    .flex()
+                                    .items_center()
+                                    .justify_between()
+                                    .px_2()
+                                    .py_1()
+                                    .rounded_sm()
+                                    .when(!enabled, |row| row.text_color(colors.muted_text))
+                                    .child(command.label)
+                                    .child(div().text_xs().text_color(colors.muted_text).child(
+                                        command.disabled_reason.unwrap_or(command.shortcut),
+                                    ));
+                            if enabled {
+                                row = row.hover(|row| row.bg(colors.selected_surface)).on_click(
+                                    cx.listener(move |shell, _, window, cx| {
+                                        shell.run_command(id, window, cx)
+                                    }),
+                                );
+                            }
+                            row
+                        }))
+                        .into_any_element(),
+                    Modal::ConfirmClose { title } => div()
+                        .flex()
+                        .flex_col()
+                        .gap_3()
+                        .child(format!("Save changes to {title}?"))
+                        .child("Use Save, Close Without Saving, or Escape.")
+                        .into_any_element(),
+                };
             div()
                 .id("modal-layer")
                 .key_context("SiftModal")
@@ -1279,7 +1203,6 @@ impl gpui::Render for WorkspaceShell {
             .on_action(cx.listener(Self::toggle_left_dock))
             .on_action(cx.listener(Self::toggle_right_dock))
             .on_action(cx.listener(Self::toggle_bottom_dock))
-            .on_action(cx.listener(Self::toggle_theme))
             .relative()
             .flex()
             .flex_col()
@@ -1315,7 +1238,9 @@ impl gpui::Render for WorkspaceShell {
                         .border_t_1()
                         .border_color(colors.border)
                         .bg(colors.surface)
-                        .child("Data   Messages   Explain   History"),
+                        .text_sm()
+                        .text_color(colors.muted_text)
+                        .child("Query output opens with each query, beside its editor."),
                 )
             })
             .child(

@@ -11,7 +11,7 @@ use crate::platform::shell_key_bindings;
 use sift_workspace_ui::{
     editor as ed, results as res, CloseActiveItem, CloseActivePane, FocusNextPane,
     OpenCommandPalette, SaveActiveItem, SplitPane, ToggleBottomDock, ToggleLeftDock,
-    ToggleRightDock, ToggleShellTheme,
+    ToggleRightDock,
 };
 
 /// Keymap for the SQL editor. Bound under the `SiftEditor` focus context so
@@ -76,8 +76,6 @@ fn main() {
                 MenuItem::action("Connections Dock", ToggleLeftDock),
                 MenuItem::action("Inspector Dock", ToggleRightDock),
                 MenuItem::action("Results Dock", ToggleBottomDock),
-                MenuItem::separator(),
-                MenuItem::action("Toggle Theme", ToggleShellTheme),
             ]),
         ]);
         cx.bind_keys([
