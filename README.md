@@ -49,6 +49,11 @@ graduated. Its deployment, conflict, recovery, security, compatibility, and
 measured budget evidence is recorded in
 `docs/PLANS/phase-l-graduation-matrix.md`.
 
+Phase M is the active product-client phase. ADR-040 selects an exactly pinned
+GPUI foundation and a Zed-inspired entity/action/workspace architecture while
+preserving the public API as the only product boundary. The normative desktop
+plan and milestone gates are in `docs/PLANS/phase-m-gpui-desktop.md`.
+
 ## The five goals this product wishes to achieve
 
 1. **The server is the product.** All product behavior lives in `sift-server`;

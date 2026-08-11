@@ -1372,3 +1372,44 @@ order is `docs/PLANS/phase-l-workspaces-vcs-automation.md`.
 collaboration, conflict, recovery, transfer, security, compatibility, backup,
 and measured budget evidence is recorded in
 `docs/PLANS/phase-l-graduation-matrix.md`.
+
+---
+
+## ADR-040 — GPUI Desktop Client With A Server-Only Product Boundary
+
+**Context.** ADR-010 deferred the product UI until the headless server,
+protocol, room, metadata, semantic, workspace, and automation contracts were
+stable enough to consume. Phases A through L now provide that foundation. Sift
+needs a first-party desktop client with Zed-class responsiveness without
+turning local mode into a separate product architecture or leaking UI types
+into shared crates. Zed is the interaction and GPUI architecture reference,
+but its application crates encode a local worktree/editor product and are not
+an appropriate dependency for a server-authoritative database IDE.
+
+**Decision.** Phase M builds a native desktop client directly on an exactly
+pinned GPUI revision. Linux is the primary development platform; Linux,
+macOS, and Windows are architectural and graduation targets. Sift owns its
+component library, themes, icons, workspace entities, panes, items, actions,
+focus contexts, state restoration, and virtualized database views. It adopts
+Zed's entity ownership, emitted-event, action, pane, restore-before-I/O, and
+background-task patterns without importing Zed's `ui`, `editor`, `workspace`,
+or `project` crates.
+
+The desktop remains a thin client. A separately supervised local server uses
+the same public HTTP/WebSocket path as SSH and hosted servers; feature views
+cannot call server, driver, or metadata internals. One window presents one
+virtual workspace with multiple connections and split panes. Query items own
+their Data, Messages, Explain, and History results, while pinned results may be
+promoted to independent items. Client persistence contains presentation state
+only. Results, schema, connections, operations, workspaces, and policy remain
+server-authoritative; only query text uses the existing Loro replica.
+
+**Consequences.** ADR-010's deferral condition is satisfied and product UI
+work may begin. GPUI remains isolated to desktop/UI crates and may be upgraded
+only deliberately because it is pre-1.0. M0 must first remove the public SDK's
+server-internal metadata dependency and prove GPUI text input, accessibility,
+focus, async cancellation, virtualization, and testability. Platform-specific
+window, input, dialog, credential, and packaging behavior lives behind one
+narrow native boundary. The complete milestone order, visual language,
+ownership model, performance rules, recovery requirements, and graduation
+gates are in `docs/PLANS/phase-m-gpui-desktop.md`.

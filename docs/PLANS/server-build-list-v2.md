@@ -62,6 +62,10 @@
   transfer recipes are implemented across protocol, server, OpenAPI, and SDK.
   Graduation evidence and budgets are in
   `docs/PLANS/phase-l-graduation-matrix.md`.
+- **Phase M design is locked.** ADR-040 selects an exactly pinned GPUI desktop,
+  a Zed-inspired entity/action/workspace model, Linux-first cross-platform
+  delivery, a supervised local server, and a strict public-SDK boundary. See
+  `docs/PLANS/phase-m-gpui-desktop.md`.
 
 ---
 
@@ -536,6 +540,9 @@ Detailed implementation order and ADR-034 contract:
 - **The release-packaging portion of Phase J is finalized after K/L.** Contract
   generation and observability may land earlier, but a feature-complete release
   artifact includes the later IDE/workspace surfaces selected for v1.
+- **Phase M consumes the completed headless surfaces through the SDK only.** M0
+  removes the SDK's metadata-internal DTO dependency before GPUI feature work;
+  later milestones may not reach around the public protocol for convenience.
 
 ## ADR candidates this list implies
 
@@ -570,6 +577,7 @@ Detailed implementation order and ADR-034 contract:
 | ADR-037 | room-owned system session + submitter-scoped pre-authorization        | Phase G | implemented; `docs/PLANS/shared-room-connection-routing.md` |
 | ADR-038 | explicit metadata migration lifecycle owner                           | Phase J | written and implemented                                      |
 | ADR-039 | Sift-state backup/restore with destination-owned identity              | Phase J | written and implemented                                      |
+| ADR-040 | GPUI desktop with a server-only product boundary                       | Phase M | written; implementation ordered in `phase-m-gpui-desktop.md` |
 
 ## Reference: what is being stolen, and what is not
 

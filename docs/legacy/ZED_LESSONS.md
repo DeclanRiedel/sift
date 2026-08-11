@@ -152,7 +152,7 @@ is a CRDT because every byte is editable; in sift, almost nothing is.
 
 | # | Zed idea | sift adaptation | Priority |
 | --- | --- | --- | --- |
-| 1 | Retained-mode GPU UI (GPUI) | Not adopted — sift is server-first; the UI stack is a deferred product-client decision (ADR-010), not GPUI. | Dropped |
+| 1 | Hybrid immediate/retained GPU UI (GPUI) | Adopted for the Phase M first-party desktop after ADR-010's deferral condition was satisfied. Sift owns its UI system and consumes only the public server API (ADR-040). | High |
 | 2 | Out-of-process workers for heavy/untrusted work | Run each DB driver (and maybe each long query) in a side process or task sandbox; a wedged tiberius connection cannot freeze the server. | High |
 | 3 | State snapshot on disk; restore before any I/O | Persist tabs, query text, layout, column widths, recent queries; paint window before reconnecting. | High |
 | 4 | Background updater; apply on next launch | Same idea works verbatim for sift. Background-fetch the new server binary; swap on restart prompt. | Medium |
