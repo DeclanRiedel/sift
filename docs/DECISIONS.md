@@ -1194,6 +1194,55 @@ corpus specified in `docs/PLANS/sql-semantic-service.md`. Plan capture may key
 to the resulting statement identity but retains a separate execution/retention
 lifecycle.
 
+**Graduation.** Implemented and graduated on 2026-08-10. The two-engine
+feature, isolation, redaction, public-surface, and latency evidence is recorded
+in `docs/PLANS/phase-k-graduation-matrix.md`.
+
+---
+
+## ADR-033 — One Revisioned Catalog Graph Drives Diff And Safe Migrations
+
+**Context.** The progressive shallow/deep schema tree is sufficient for a
+browser and completion, but it has no stable object identity, dependency graph,
+coverage contract, durable snapshot, or safe path from a structural difference
+to executable DDL. Building diagrams, binding, diff, and migrations as separate
+client features would duplicate engine inference and make partial
+introspection look authoritative.
+
+**Decision.** Add a server-owned, provider-neutral catalog graph with opaque
+object ids, optional non-authoritative engine-native ids, monotonic content
+revisions, deterministic digests, typed dependency edges, and explicit
+complete/partial/stale coverage. Fetch it through an additive
+`SchemaDepth::Graph`/`driver.schema.graph@1` capability so the locked Rust
+`Driver` trait signature remains unchanged. Cache canonical graph truth per
+database identity and derive policy-filtered projections for consumers;
+invalidation advances an epoch shared by schema, search, semantic, and diagram
+views. Durable tenant-scoped snapshots are immutable and secret-free.
+
+Diff is a normalized, dependency-ordered comparison of two live or durable
+catalog sources. It suppresses definitive destructive conclusions when
+coverage is incomplete, treats heuristic renames only as suggestions, and
+classifies every change by risk and reversibility. Migration preview generates
+engine-aware transactional groups bound to exact catalog/policy revisions and
+an opaque plan digest. Apply rechecks every precondition, requires explicit
+destructive acknowledgements, executes through bounded isolated driver work,
+records partial outcomes honestly, and invalidates catalog state after every
+attempt.
+
+**Consequences.** Graph-capable providers need bulk introspection and hostile
+result validation, while providers without the capability retain existing
+shallow/deep behavior. Native ids can aid live rename correlation but never
+authorize access or promise portability. Clients own diagram layout, not graph
+truth or DDL generation. The full contract and graduation matrices are in
+`docs/PLANS/catalog-graph-schema-migrations.md`; comparison, diagram projection,
+and semantic plan retention are locked separately in
+`docs/PLANS/phase-k-modeling-operations.md`.
+
+**Graduation.** Implemented and graduated on 2026-08-10. The live-engine,
+migration lifecycle, policy isolation, hostile-provider, public-surface, and
+resource-budget evidence is recorded in
+`docs/PLANS/phase-k-graduation-matrix.md`.
+
 ---
 
 ## ADR-021 — Direct SSH Bootstrap, Persistent Remote Daemon

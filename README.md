@@ -38,6 +38,11 @@ Phase I extensibility is implemented and graduated. The normative contract is
 operator guide is `docs/EXTENSIONS.md`. ODBC/JDBC compatibility bridges remain
 deliberately deferred.
 
+Phase K SQL intelligence and database modeling is implemented and graduated.
+Its catalog, diff, migration, comparison, diagram, semantic-plan, safety, and
+performance evidence is recorded in
+`docs/PLANS/phase-k-graduation-matrix.md`.
+
 ## The five goals this product wishes to achieve
 
 1. **The server is the product.** All product behavior lives in `sift-server`;

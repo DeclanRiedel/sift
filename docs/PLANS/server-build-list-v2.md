@@ -52,10 +52,11 @@
   eager-start failures so an enabled extension cannot block server readiness.
   Driver RPC v1 package validation now rejects capability families the host
   cannot dispatch, preventing manifest/discovery overclaiming.
-- **Phase K is underway.** ADR-032 is written and its K0 vertical slice is
-  implemented: bounded revisioned semantic documents, tolerant PostgreSQL and
-  T-SQL statement parsing, syntax diagnostics, deterministic statement
-  selection, audited HTTP/OpenAPI surfaces, and reference SDK coverage.
+- **Phase K is complete.** Shared PostgreSQL/T-SQL semantics, catalog graph,
+  snapshots, diff and safe migrations, comparison, diagrams and mutation
+  preview, and semantic plan retention are implemented across protocol,
+  server, OpenAPI, and SDK. Safety matrices and measured budgets are in
+  `docs/PLANS/phase-k-graduation-matrix.md`.
 
 ---
 
@@ -414,21 +415,24 @@ inventory: `docs/PLANS/ide-parity-and-provider-extensibility.md`.
       service powering formatting, diagnostics, completion, statement
       selection, usages, refactoring, quick fixes, and governed AI context.
       `docs/PLANS/sql-semantic-service.md`.
-- [ ] [Design] Catalog identity and dependency graph across tables, views,
+- [x] [Design] Catalog identity and dependency graph across tables, views,
       routines, triggers, types, constraints, and referenced columns; define
-      invalidation and partial-introspection behavior.
-- [ ] [Design] Schema diff/migration contract: durable snapshots, normalized
+      invalidation and partial-introspection behavior. ADR-033 and
+      `docs/PLANS/catalog-graph-schema-migrations.md`.
+- [x] [Design] Schema diff/migration contract: durable snapshots, normalized
       changes, dependency ordering, engine-aware generated SQL, preview,
       destructive warnings, transactional limits, and audited apply.
-- [ ] [Design] Table/result comparison: key selection, duplicate handling,
+      ADR-033 and `docs/PLANS/catalog-graph-schema-migrations.md`.
+- [x] [Design] Table/result comparison: key selection, duplicate handling,
       type-aware tolerances, bounded paging, cancellation, and optional patch
-      generation.
-- [ ] [Design] Diagram projection from the catalog graph. Layout and visual
+      generation. `docs/PLANS/phase-k-modeling-operations.md`.
+- [x] [Design] Diagram projection from the catalog graph. Layout and visual
       editing remain client concerns; graph truth and mutations remain server
-      operations.
-- [ ] [Design] Query-plan capture and retrieval keyed to semantic document,
+      operations. `docs/PLANS/phase-k-modeling-operations.md`.
+- [x] [Design] Query-plan capture and retrieval keyed to semantic document,
       revision, and selected statement identity; bounded retention and
       redacted audit remain server-owned.
+      `docs/PLANS/phase-k-modeling-operations.md`.
 - [x] [Implement] ADR-032 slice K0: bounded parsed-document state, PostgreSQL
       and T-SQL recovery parsing, statement selection, syntax diagnostics,
       cancellation/cache isolation, audited Operations, OpenAPI, and SDK.
@@ -436,14 +440,15 @@ inventory: `docs/PLANS/ide-parity-and-provider-extensibility.md`.
       `/semantic-documents` routes. Tests cover recovery across malformed
       statements, dollar quotes, T-SQL `GO`/brackets, UTF-8 ranges, optimistic
       conflicts/idempotent retries, cancellation, cleanup, and audit redaction.
-- [ ] [Implement] Migrate existing completion onto the shared parsed document
+- [x] [Implement] Migrate existing completion onto the shared parsed document
       and remove its independent tokenizer/context cache after corpus parity.
-- [ ] [Implement] Formatter; catalog-backed diagnostics and quick fixes; richer
+- [x] [Implement] Formatter; catalog-backed diagnostics and quick fixes; richer
       completion; find usages/refactoring; catalog graph; diagrams API; schema
       diff/migration preview+apply; data/result compare; plan capture/retrieval.
-- [ ] [Graduate] PostgreSQL and SQL Server semantic/diff corpora, destructive
+- [x] [Graduate] PostgreSQL and SQL Server semantic/diff corpora, destructive
       migration safety matrix, large-schema latency budgets, and public
-      Operation/OpenAPI/SDK coverage.
+      Operation/OpenAPI/SDK coverage. Evidence and hard ceilings:
+      `docs/PLANS/phase-k-graduation-matrix.md`.
 
 ## Phase L — Workspaces, VCS & execution automation
 
@@ -531,8 +536,8 @@ configurations without abandoning thin clients or breaking remote topology.
 | ADR-029 | normalized CSV import                                                 | Phase D | written                                                        |
 | ADR-030 | instance-owned closed registration + hosted identity                  | Phase E | written                                                        |
 | ADR-031 | plugin manifest, isolation, permissions, and lifecycle                | Phase I | written; declarative-first packages + core-governed operations |
-| ADR-032 | SQL semantic service and dialect-pack boundary                        | Phase K | written; `docs/PLANS/sql-semantic-service.md`                  |
-| ADR-033 | catalog graph, schema diff, and migration safety                      | Phase K | not written                                                    |
+| ADR-032 | SQL semantic service and dialect-pack boundary                        | Phase K | implemented and graduated; `docs/PLANS/sql-semantic-service.md`                  |
+| ADR-033 | catalog graph, schema diff, and migration safety                      | Phase K | implemented and graduated; `docs/PLANS/catalog-graph-schema-migrations.md`       |
 | ADR-034 | server-owned or hybrid workspace and VCS topology                     | Phase L | not written                                                    |
 | ADR-035 | room lane separation + CRDT-safe lag recovery                         | Phase G | implemented; `docs/PLANS/presence-durable-separation.md`       |
 | ADR-036 | room-owned connection binding + submitter-scoped authorization        | Phase G | implemented; `docs/PLANS/shared-connection-ownership.md`       |

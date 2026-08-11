@@ -1,6 +1,6 @@
 # Shared Dialect-Aware SQL Semantic Service
 
-Status: **accepted for implementation (ADR-032).** This document is the
+Status: **implemented and graduated on 2026-08-10 (ADR-032).** This document is the
 normative Phase K contract for SQL parsing and semantic features. It does not
 select a particular parser library or reopen the Phase I extension trust
 model.
