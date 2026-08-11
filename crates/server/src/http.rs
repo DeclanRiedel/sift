@@ -12,6 +12,7 @@ use futures::{SinkExt, StreamExt};
 use schemars::{schema_for, JsonSchema};
 use serde::Deserialize;
 use serde_json::json;
+use sha2::{Digest as _, Sha256};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -23,12 +24,12 @@ use aide::transform::TransformOperation;
 use sift_metadata::{
     ApiTokenId, AuthClientKind as MetadataAuthClientKind, AuthIdentityId, ConnectionProfileId,
     Document, DocumentId, GithubAllowlistId, GithubProfile, MetadataStore, NewConnectionProfile,
-    NewDocument, NewOperationAudit, NewQueryHistory, NewRoom, NewSavedQuery,
-    NewWorkspaceCheckpoint, NewWorkspaceNode, OperationAuditId, PrincipalId, PrincipalKeyId,
-    QueryHistory, QueryHistoryId, QueryStatus, RefreshAuthResult, Room, RoomId, RoomMember,
-    RoomRole, SavedQuery, SavedQueryFilter, SavedQueryId, SavedQueryScope, TenantId,
-    TenantInvitationId, TenantMembership, UpdateSavedQuery, WorkspaceBatchMutation,
-    WorkspaceCheckpointCapture,
+    NewDdlSource, NewDocument, NewOperationAudit, NewProjectionBinding, NewQueryHistory, NewRoom,
+    NewSavedQuery, NewWorkspaceCheckpoint, NewWorkspaceNode, OperationAuditId, PrincipalId,
+    PrincipalKeyId, ProjectionFileState, QueryHistory, QueryHistoryId, QueryStatus,
+    RefreshAuthResult, Room, RoomId, RoomMember, RoomRole, SavedQuery, SavedQueryFilter,
+    SavedQueryId, SavedQueryScope, TenantId, TenantInvitationId, TenantMembership,
+    UpdateSavedQuery, WorkspaceBatchMutation, WorkspaceCheckpointCapture,
 };
 use sift_protocol::{
     AcceptTenantInvitationRequest, AdminCreatePasswordPrincipalRequest,
@@ -37,15 +38,17 @@ use sift_protocol::{
     AuthTokensResponse, BeginTransactionRequest, BulkInsertRequest, CancelRequest, CatalogSnapshot,
     CatalogSnapshotId, CatalogSnapshotSummary, ChangePasswordRequest, CreateCatalogSnapshotRequest,
     CreateGithubAllowlistRequest, CreateTenantInvitationRequest, CsvImportRequest, CursorPage,
+    DdlSource, DdlSourceAction, DdlSourceCoverage, DdlSourceId, DdlSourceModel,
     EndTransactionRequest, ExecuteRequest, ExecuteRequestHttp, ExpectedRevision,
     GithubNativeAuthExchangeRequest, GithubNativeAuthStartResponse, HandshakeDeployment,
     HandshakeRequest, HandshakeResponse, HandshakeRuntimeMode, HandshakeTransport, Health,
     InvitationRole, IssuedPasswordResetResponse, IssuedTenantInvitationResponse,
     KeyAuthenticateRequest, KeyChallengeRequest, KeyChallengeResponse, KillProcessRequest,
     ObjectPath, OpenConnectionRequest, OpenSessionRequest, Operation, OperationStatus,
-    PasswordLoginRequest, PasswordResetRequest, ProtocolRange, Readiness, RefreshAuthRequest,
-    RegisterPrincipalKeyRequest, RoomClientMessage, RoomQueryResult, RoomServerMessage,
-    SavepointRequest, SchemaFilter, SchemaScope, SshProxyAccessGrant,
+    PasswordLoginRequest, PasswordResetRequest, ProjectionBinding, ProjectionHealth,
+    ProjectionMode, ProtocolRange, Readiness, ReconcilePlan, ReconcileResolution,
+    RefreshAuthRequest, RegisterPrincipalKeyRequest, RoomClientMessage, RoomQueryResult,
+    RoomServerMessage, SavepointRequest, SchemaFilter, SchemaScope, SshProxyAccessGrant,
     SshProxyCapabilityExchangeRequest, TransactionPreviewRequest, UpdateConnectionPolicyRequest,
     UpdateTenantLimitsRequest, WebAuthResponse, WhoAmIResponse, Workspace, WorkspaceAction,
     WorkspaceCheckpoint, WorkspaceCheckpointId, WorkspaceId, WorkspaceNodeId, WorkspaceNodeKind,
@@ -424,6 +427,30 @@ pub fn app(state: AppState) -> Router {
         .api_route(
             "/v1/metadata/workspace-checkpoints/:id/restore",
             post_with(restore_workspace_checkpoint, doc("restoreWorkspaceCheckpoint", "Restore a checkpoint as a new workspace head revision")),
+        )
+        .api_route(
+            "/v1/metadata/workspaces/:id/projection",
+            get_with(get_workspace_projection, doc("getWorkspaceProjection", "Get the optional filesystem projection binding")).post_with(bind_workspace_projection, doc("bindWorkspaceProjection", "Bind an operator-configured filesystem root")),
+        )
+        .api_route(
+            "/v1/metadata/workspace-projections/:id",
+            delete_with(delete_workspace_projection, doc("deleteWorkspaceProjection", "Remove a filesystem projection binding")),
+        )
+        .api_route(
+            "/v1/metadata/workspace-projections/:id/reconcile",
+            get_with(plan_workspace_projection, doc("planWorkspaceProjection", "Read-only deterministic workspace projection plan")).post_with(apply_workspace_projection, doc("applyWorkspaceProjection", "Apply explicit projection conflict resolutions")),
+        )
+        .api_route(
+            "/v1/metadata/workspaces/:id/ddl-sources",
+            get_with(list_ddl_sources, doc("listDdlSources", "List offline DDL sources")).post_with(create_ddl_source, doc("createDdlSource", "Create an offline DDL source over workspace roots")),
+        )
+        .api_route(
+            "/v1/metadata/ddl-sources/:id",
+            get_with(get_ddl_source, doc("getDdlSource", "Get an offline DDL model and mappings")).put_with(update_ddl_source, doc("updateDdlSource", "Update DDL roots and live mappings")).delete_with(delete_ddl_source, doc("deleteDdlSource", "Delete an offline DDL source")),
+        )
+        .api_route(
+            "/v1/metadata/ddl-sources/:id/refresh",
+            post_with(refresh_ddl_source, doc("refreshDdlSource", "Rebuild the deterministic offline catalog graph")),
         )
         .api_route(
             "/v1/metadata/connections",
@@ -1441,14 +1468,16 @@ struct CursorListQuery {
 }
 
 use sift_metadata::http::{
-    AddRoomMemberRequest, BindRoomConnectionRequest, CreateDocumentRequest, CreateRoomRequest,
-    CreateSavedQueryRequest, CreateWorkspaceCheckpointRequest, CreateWorkspaceNodeRequest,
-    CreateWorkspaceRequest, ExpectedWorkspaceRevisionRequest, IssueTokenRequest,
+    AddRoomMemberRequest, ApplyWorkspaceProjectionRequest, BindRoomConnectionRequest,
+    BindWorkspaceProjectionRequest, CreateDdlSourceRequest, CreateDocumentRequest,
+    CreateRoomRequest, CreateSavedQueryRequest, CreateWorkspaceCheckpointRequest,
+    CreateWorkspaceNodeRequest, CreateWorkspaceRequest, ExpectedDdlSourceRevisionRequest,
+    ExpectedProjectionRevisionRequest, ExpectedWorkspaceRevisionRequest, IssueTokenRequest,
     IssueTokenResponse, MoveWorkspaceNodeRequest, OpenConnectionFromProfileRequest,
-    RestoreWorkspaceCheckpointRequest, SetCredentialRequest, UpdateDocumentSnapshotRequest,
-    UpdateSavedQueryRequest, UpdateWorkspaceRequest, UpsertConnectionProfileRequest,
-    WorkspaceBatchMutationItem, WorkspaceBatchMutationRequest, WorkspaceCheckpointPageQuery,
-    WorkspaceTreeResponse,
+    RestoreWorkspaceCheckpointRequest, SetCredentialRequest, UpdateDdlSourceRequest,
+    UpdateDocumentSnapshotRequest, UpdateSavedQueryRequest, UpdateWorkspaceRequest,
+    UpsertConnectionProfileRequest, WorkspaceBatchMutationItem, WorkspaceBatchMutationRequest,
+    WorkspaceCheckpointPageQuery, WorkspaceTreeResponse,
 };
 
 fn metadata_store(state: &AppState) -> ApiResult<&MetadataStore> {
@@ -3280,6 +3309,52 @@ fn authorize_workspace_operation(
         .map_err(|denial| ApiError::Forbidden(denial.public_reason().into()))
 }
 
+fn authorize_ddl_source_operation(
+    state: &AppState,
+    auth: &AuthContext,
+    workspace_id: WorkspaceId,
+    source_id: Option<DdlSourceId>,
+    action: DdlSourceAction,
+) -> ApiResult<()> {
+    let context = sift_protocol::OperationCapabilityContext {
+        workspace_id: Some(workspace_id),
+        ..Default::default()
+    };
+    let scope = capability_authorization_scope(state, Some(auth), &context)?
+        .ok_or(ApiError::Unauthorized)?;
+    crate::authorization::authorize(
+        &scope,
+        Operation::DdlSource {
+            action,
+            workspace_id,
+            source_id,
+        }
+        .kind(),
+    )
+    .map_err(|denial| ApiError::Forbidden(denial.public_reason().into()))
+}
+
+fn push_ddl_source_operation(
+    state: &AppState,
+    actor: PrincipalId,
+    action: DdlSourceAction,
+    workspace_id: WorkspaceId,
+    source_id: Option<DdlSourceId>,
+) {
+    state.sessions.push_operation_full(
+        Operation::DdlSource {
+            action,
+            workspace_id,
+            source_id,
+        },
+        OperationStatus::Succeeded,
+        Some(actor.0),
+        None,
+        None,
+        None,
+    );
+}
+
 fn publish_workspace_changed(state: &AppState, workspace: &Workspace, checkpoints_changed: bool) {
     state.rooms.publish_presence(
         workspace.room_id,
@@ -3289,6 +3364,13 @@ fn publish_workspace_changed(state: &AppState, workspace: &Workspace, checkpoint
             checkpoints_changed,
         },
     );
+}
+
+fn public_workspace_record(
+    record: sift_metadata::WorkspaceRecord,
+    filesystem_projection: bool,
+) -> Workspace {
+    sift_metadata::public_workspace_with_projection(record, filesystem_projection)
 }
 
 fn workspace_actor_error(error: crate::document_actor::ApplyError) -> ApiError {
@@ -5050,6 +5132,7 @@ async fn list_room_workspaces(
     let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
     let room = room_id(id)?;
     let actor = auth.principal_id;
+    let projection_enabled = state.rooms.workspace_adapter().is_some();
     authorize_workspace_operation(&state, &auth, Some(room), None, WorkspaceAction::Read)?;
     let workspaces = metadata_blocking(move || {
         metadata
@@ -5057,7 +5140,7 @@ async fn list_room_workspaces(
             .map(|items| {
                 items
                     .into_iter()
-                    .map(sift_metadata::public_workspace)
+                    .map(|record| public_workspace_record(record, projection_enabled))
                     .collect::<Vec<Workspace>>()
             })
             .map_err(Into::into)
@@ -5085,11 +5168,12 @@ async fn create_room_workspace(
     let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
     let room = room_id(id)?;
     let actor = auth.principal_id;
+    let projection_enabled = state.rooms.workspace_adapter().is_some();
     authorize_workspace_operation(&state, &auth, Some(room), None, WorkspaceAction::Create)?;
     let workspace = metadata_blocking(move || {
         metadata
             .create_workspace(room, actor, &req.name)
-            .map(sift_metadata::public_workspace)
+            .map(|record| public_workspace_record(record, projection_enabled))
             .map_err(Into::into)
     })
     .await?;
@@ -5113,6 +5197,7 @@ async fn get_workspace(
     let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
     let workspace_id = workspace_id(id)?;
     let actor = auth.principal_id;
+    let projection_enabled = state.rooms.workspace_adapter().is_some();
     authorize_workspace_operation(
         &state,
         &auth,
@@ -5123,7 +5208,7 @@ async fn get_workspace(
     let workspace = metadata_blocking(move || {
         metadata
             .get_workspace_for_principal(workspace_id, actor, false)
-            .map(sift_metadata::public_workspace)
+            .map(|record| public_workspace_record(record, projection_enabled))
             .map_err(Into::into)
     })
     .await?;
@@ -5147,6 +5232,7 @@ async fn update_workspace(
     let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
     let workspace_id = workspace_id(id)?;
     let actor = auth.principal_id;
+    let projection_enabled = state.rooms.workspace_adapter().is_some();
     authorize_workspace_operation(
         &state,
         &auth,
@@ -5159,7 +5245,7 @@ async fn update_workspace(
     let workspace = metadata_blocking(move || {
         metadata
             .update_workspace(workspace_id, actor, req.expected_revision, &req.name)
-            .map(sift_metadata::public_workspace)
+            .map(|record| public_workspace_record(record, projection_enabled))
             .map_err(Into::into)
     })
     .await?;
@@ -5234,6 +5320,7 @@ async fn list_workspace_nodes(
     let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
     let workspace_id = workspace_id(id)?;
     let actor = auth.principal_id;
+    let projection_enabled = state.rooms.workspace_adapter().is_some();
     authorize_workspace_operation(
         &state,
         &auth,
@@ -5244,7 +5331,7 @@ async fn list_workspace_nodes(
     let response = metadata_blocking(move || {
         let workspace = metadata
             .get_workspace_for_principal(workspace_id, actor, false)
-            .map(sift_metadata::public_workspace)?;
+            .map(|record| public_workspace_record(record, projection_enabled))?;
         let nodes = metadata.list_workspace_nodes_for_principal(workspace_id, actor)?;
         Ok::<_, ApiError>(WorkspaceTreeResponse { workspace, nodes })
     })
@@ -5269,6 +5356,7 @@ async fn create_workspace_node(
     let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
     let workspace_id = workspace_id(id)?;
     let actor = auth.principal_id;
+    let projection_enabled = state.rooms.workspace_adapter().is_some();
     authorize_workspace_operation(
         &state,
         &auth,
@@ -5317,7 +5405,7 @@ async fn create_workspace_node(
             },
         )?;
         Ok::<_, ApiError>(WorkspaceTreeResponse {
-            workspace: sift_metadata::public_workspace(workspace),
+            workspace: public_workspace_record(workspace, projection_enabled),
             nodes: vec![node],
         })
     })
@@ -5344,6 +5432,7 @@ async fn mutate_workspace_batch(
     let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
     let workspace_id = workspace_id(id)?;
     let actor = auth.principal_id;
+    let projection_enabled = state.rooms.workspace_adapter().is_some();
     authorize_workspace_operation(
         &state,
         &auth,
@@ -5421,7 +5510,7 @@ async fn mutate_workspace_batch(
         )?;
         Ok::<_, ApiError>((
             WorkspaceTreeResponse {
-                workspace: sift_metadata::public_workspace(workspace),
+                workspace: public_workspace_record(workspace, projection_enabled),
                 nodes,
             },
             removed_documents,
@@ -5464,6 +5553,7 @@ async fn move_workspace_node(
     })
     .await?;
     let workspace_id = current.id;
+    let projection_enabled = state.rooms.workspace_adapter().is_some();
     authorize_workspace_operation(
         &state,
         &auth,
@@ -5482,7 +5572,7 @@ async fn move_workspace_node(
             req.path,
         )?;
         Ok::<_, ApiError>(WorkspaceTreeResponse {
-            workspace: sift_metadata::public_workspace(workspace),
+            workspace: public_workspace_record(workspace, projection_enabled),
             nodes,
         })
     })
@@ -5518,6 +5608,7 @@ async fn delete_workspace_node(
     })
     .await?;
     let workspace_id = current.id;
+    let projection_enabled = state.rooms.workspace_adapter().is_some();
     authorize_workspace_operation(
         &state,
         &auth,
@@ -5531,7 +5622,7 @@ async fn delete_workspace_node(
         let removed_documents = metadata.workspace_subtree_document_ids(node_id, actor)?;
         let workspace = metadata.delete_workspace_node(node_id, actor, req.expected_revision)?;
         Ok::<_, ApiError>((
-            sift_metadata::public_workspace(workspace),
+            public_workspace_record(workspace, projection_enabled),
             removed_documents,
         ))
     })
@@ -5598,6 +5689,7 @@ async fn create_workspace_checkpoint(
     let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
     let workspace_id = workspace_id(id)?;
     let actor = auth.principal_id;
+    let projection_enabled = state.rooms.workspace_adapter().is_some();
     authorize_workspace_operation(
         &state,
         &auth,
@@ -5650,7 +5742,10 @@ async fn create_workspace_checkpoint(
                 captures,
             },
         )?;
-        Ok::<_, ApiError>((checkpoint, sift_metadata::public_workspace(workspace)))
+        Ok::<_, ApiError>((
+            checkpoint,
+            public_workspace_record(workspace, projection_enabled),
+        ))
     })
     .await?;
     push_workspace_operation(
@@ -5684,6 +5779,7 @@ async fn restore_workspace_checkpoint(
     })
     .await?;
     let workspace_id = plan.workspace_id;
+    let projection_enabled = state.rooms.workspace_adapter().is_some();
     authorize_workspace_operation(
         &state,
         &auth,
@@ -5768,7 +5864,7 @@ async fn restore_workspace_checkpoint(
         )?;
         Ok::<_, ApiError>((
             WorkspaceTreeResponse {
-                workspace: sift_metadata::public_workspace(workspace),
+                workspace: public_workspace_record(workspace, projection_enabled),
                 nodes,
             },
             broadcasts,
@@ -5813,6 +5909,1160 @@ async fn restore_workspace_checkpoint(
     );
     publish_workspace_changed(&state, &response.workspace, true);
     Ok(Json(response))
+}
+
+fn projection_binding_id(id: i64) -> ApiResult<sift_protocol::ProjectionBindingId> {
+    if id > 0 {
+        Ok(sift_protocol::ProjectionBindingId(id))
+    } else {
+        Err(ApiError::BadRequest(
+            "workspace projection id must be positive".into(),
+        ))
+    }
+}
+
+fn workspace_adapter_error(error: crate::workspace_adapter::WorkspaceAdapterError) -> ApiError {
+    use crate::workspace_adapter::WorkspaceAdapterError;
+    match error {
+        WorkspaceAdapterError::Disabled | WorkspaceAdapterError::RootUnavailable => {
+            ApiError::BadRequest(error.to_string())
+        }
+        WorkspaceAdapterError::ReadOnly => ApiError::Forbidden(error.to_string()),
+        WorkspaceAdapterError::InvalidPath | WorkspaceAdapterError::UnsafeFile => {
+            ApiError::BadRequest(error.to_string())
+        }
+        WorkspaceAdapterError::LimitExceeded => ApiError::BadRequest(error.to_string()),
+        WorkspaceAdapterError::Io(_) => {
+            ApiError::Internal("workspace projection I/O failed".into())
+        }
+    }
+}
+
+async fn get_workspace_projection(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+) -> ApiResult<Json<Option<ProjectionBinding>>> {
+    let metadata = metadata_store_cloned(&state)?;
+    let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
+    let workspace_id = workspace_id(id)?;
+    authorize_workspace_operation(
+        &state,
+        &auth,
+        None,
+        Some(workspace_id),
+        WorkspaceAction::Read,
+    )?;
+    let actor = auth.principal_id;
+    let binding = metadata_blocking(move || {
+        metadata
+            .projection_binding_for_workspace(workspace_id, actor)
+            .map(|binding| binding.map(|record| record.binding))
+            .map_err(Into::into)
+    })
+    .await?;
+    push_workspace_operation(
+        &state,
+        actor,
+        WorkspaceAction::Read,
+        Some(workspace_id),
+        None,
+    );
+    Ok(Json(binding))
+}
+
+async fn bind_workspace_projection(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+    Json(req): Json<BindWorkspaceProjectionRequest>,
+) -> ApiResult<Json<ProjectionBinding>> {
+    let metadata = metadata_store_cloned(&state)?;
+    let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
+    let workspace_id = workspace_id(id)?;
+    authorize_workspace_operation(
+        &state,
+        &auth,
+        None,
+        Some(workspace_id),
+        WorkspaceAction::BindProjection,
+    )?;
+    let adapter = state.rooms.workspace_adapter().ok_or_else(|| {
+        ApiError::BadRequest("workspace filesystem projections are disabled".into())
+    })?;
+    adapter
+        .validate_binding(&req.root_handle, req.mode == ProjectionMode::ReadWrite)
+        .map_err(workspace_adapter_error)?;
+    let actor = auth.principal_id;
+    let generation = crate::workspace_adapter::WorkspaceAdapter::generation(adapter.as_ref());
+    let binding = metadata_blocking(move || {
+        metadata
+            .create_projection_binding(
+                workspace_id,
+                actor,
+                NewProjectionBinding {
+                    root_handle: req.root_handle,
+                    mode: req.mode,
+                    adapter_generation: generation.into(),
+                    health: match req.mode {
+                        ProjectionMode::ReadOnly => ProjectionHealth::ReadOnly,
+                        ProjectionMode::ReadWrite => ProjectionHealth::Ready,
+                    },
+                },
+            )
+            .map(|record| record.binding)
+            .map_err(Into::into)
+    })
+    .await?;
+    push_workspace_operation(
+        &state,
+        actor,
+        WorkspaceAction::BindProjection,
+        Some(workspace_id),
+        None,
+    );
+    Ok(Json(binding))
+}
+
+async fn delete_workspace_projection(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+    Json(req): Json<ExpectedProjectionRevisionRequest>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let metadata = metadata_store_cloned(&state)?;
+    let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
+    let binding_id = projection_binding_id(id)?;
+    let actor = auth.principal_id;
+    let binding = metadata_blocking({
+        let metadata = metadata.clone();
+        move || {
+            metadata
+                .projection_binding_for_principal(binding_id, actor, false)
+                .map_err(Into::into)
+        }
+    })
+    .await?;
+    authorize_workspace_operation(
+        &state,
+        &auth,
+        None,
+        Some(binding.binding.workspace_id),
+        WorkspaceAction::BindProjection,
+    )?;
+    metadata_blocking(move || {
+        metadata
+            .delete_projection_binding(binding_id, actor, req.expected_revision)
+            .map_err(Into::into)
+    })
+    .await?;
+    push_workspace_operation(
+        &state,
+        actor,
+        WorkspaceAction::BindProjection,
+        Some(binding.binding.workspace_id),
+        None,
+    );
+    Ok(Json(json!({"ok": true})))
+}
+
+struct ProjectionInputs {
+    binding: sift_metadata::ProjectionBindingRecord,
+    workspace: sift_metadata::WorkspaceRecord,
+    files: Vec<crate::workspace_projection::WorkspaceProjectionFile>,
+    projection: crate::workspace_adapter::ProjectionSnapshot,
+    baseline: Vec<ProjectionFileState>,
+}
+
+type WorkspaceDocumentBroadcast = (DocumentId, u64, String, i64, Vec<u8>, Vec<u8>);
+
+fn load_projection_inputs(
+    metadata: &MetadataStore,
+    rooms: &RoomRuntime,
+    adapter: &crate::workspace_adapter::RootedFilesystemAdapter,
+    binding_id: sift_protocol::ProjectionBindingId,
+    actor: PrincipalId,
+    writable: bool,
+) -> ApiResult<ProjectionInputs> {
+    use crate::workspace_adapter::WorkspaceAdapter as _;
+    let binding = metadata.projection_binding_for_principal(binding_id, actor, writable)?;
+    if binding.binding.adapter_generation != adapter.generation() {
+        return Err(ApiError::BadRequest(
+            "workspace projection adapter generation changed; rebind it".into(),
+        ));
+    }
+    let workspace =
+        metadata.get_workspace_for_principal(binding.binding.workspace_id, actor, writable)?;
+    let nodes = metadata.list_workspace_nodes_for_principal(workspace.id, actor)?;
+    let mut files = Vec::new();
+    for node in nodes
+        .into_iter()
+        .filter(|node| node.kind == WorkspaceNodeKind::SqlDocument)
+    {
+        let document = DocumentId(
+            node.document_id
+                .ok_or(sift_metadata::MetadataError::InvalidWorkspaceNode)?,
+        );
+        let document_actor = rooms
+            .documents()
+            .get_or_load(metadata, document)
+            .map_err(workspace_actor_error)?;
+        let guard = document_actor
+            .lock()
+            .map_err(|_| ApiError::Internal("document actor mutex poisoned".into()))?;
+        let bytes = guard.text().into_bytes();
+        files.push(crate::workspace_projection::WorkspaceProjectionFile {
+            node_id: node.id,
+            path: node.path,
+            digest: format!("{:x}", Sha256::digest(&bytes)),
+            bytes,
+        });
+    }
+    files.sort_by(|left, right| left.path.0.cmp(&right.path.0));
+    let projection = adapter
+        .scan(&binding.root_handle)
+        .map_err(workspace_adapter_error)?;
+    let baseline = metadata.projection_file_state_for_principal(binding_id, actor)?;
+    Ok(ProjectionInputs {
+        binding,
+        workspace,
+        files,
+        projection,
+        baseline,
+    })
+}
+
+async fn plan_workspace_projection(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+) -> ApiResult<Json<ReconcilePlan>> {
+    let metadata = metadata_store_cloned(&state)?;
+    let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
+    let binding_id = projection_binding_id(id)?;
+    let actor = auth.principal_id;
+    let binding = metadata_blocking({
+        let metadata = metadata.clone();
+        move || {
+            metadata
+                .projection_binding_for_principal(binding_id, actor, false)
+                .map_err(Into::into)
+        }
+    })
+    .await?;
+    authorize_workspace_operation(
+        &state,
+        &auth,
+        None,
+        Some(binding.binding.workspace_id),
+        WorkspaceAction::ReconcileProjection,
+    )?;
+    let adapter = state.rooms.workspace_adapter().ok_or_else(|| {
+        ApiError::BadRequest("workspace filesystem projections are disabled".into())
+    })?;
+    let rooms = state.rooms.clone();
+    let inputs = metadata_blocking(move || {
+        load_projection_inputs(&metadata, &rooms, &adapter, binding_id, actor, false)
+    })
+    .await?;
+    let plan = crate::workspace_projection::reconcile_plan(
+        &inputs.binding.binding,
+        inputs.workspace.revision,
+        &inputs.baseline,
+        &inputs.files,
+        &inputs.projection,
+    );
+    push_workspace_operation(
+        &state,
+        actor,
+        WorkspaceAction::ReconcileProjection,
+        Some(inputs.workspace.id),
+        None,
+    );
+    Ok(Json(plan))
+}
+
+async fn apply_workspace_projection(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+    Json(req): Json<ApplyWorkspaceProjectionRequest>,
+) -> ApiResult<Json<ReconcilePlan>> {
+    use crate::workspace_adapter::WorkspaceAdapter as _;
+    let metadata = metadata_store_cloned(&state)?;
+    let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
+    let binding_id = projection_binding_id(id)?;
+    let actor = auth.principal_id;
+    let binding = metadata_blocking({
+        let metadata = metadata.clone();
+        move || {
+            metadata
+                .projection_binding_for_principal(binding_id, actor, true)
+                .map_err(Into::into)
+        }
+    })
+    .await?;
+    let workspace_id = binding.binding.workspace_id;
+    authorize_workspace_operation(
+        &state,
+        &auth,
+        None,
+        Some(workspace_id),
+        WorkspaceAction::ResolveConflict,
+    )?;
+    let adapter = state.rooms.workspace_adapter().ok_or_else(|| {
+        ApiError::BadRequest("workspace filesystem projections are disabled".into())
+    })?;
+    if binding.binding.mode == ProjectionMode::ReadOnly
+        && req.resolutions.iter().any(|resolution| {
+            matches!(
+                resolution.resolution,
+                ReconcileResolution::MaterializeWorkspace
+            )
+        })
+    {
+        return Err(ApiError::Forbidden(
+            "read-only projection cannot materialize workspace files".into(),
+        ));
+    }
+    let lock = state.rooms.workspace_lock(workspace_id.0);
+    let _guard = lock.lock().await;
+    let rooms = state.rooms.clone();
+    let state_for_blocking = state.clone();
+    let (next, checkpoint_changed, broadcasts) = metadata_blocking(move || {
+        let current = load_projection_inputs(&metadata, &rooms, &adapter, binding_id, actor, true)?;
+        if current.binding.binding.revision != req.binding_revision {
+            return Err(sift_metadata::MetadataError::ProjectionRevisionConflict {
+                expected: req.binding_revision,
+                current: current.binding.binding.revision,
+            }
+            .into());
+        }
+        if current.workspace.revision != req.workspace_revision {
+            return Err(sift_metadata::MetadataError::WorkspaceRevisionConflict {
+                expected: req.workspace_revision.0,
+                current: current.workspace.revision.0,
+            }
+            .into());
+        }
+        let plan = crate::workspace_projection::reconcile_plan(
+            &current.binding.binding,
+            current.workspace.revision,
+            &current.baseline,
+            &current.files,
+            &current.projection,
+        );
+        let changed = plan
+            .entries
+            .iter()
+            .filter(|entry| entry.state != sift_protocol::ReconcileState::Unchanged)
+            .collect::<Vec<_>>();
+        if changed.len() != req.resolutions.len()
+            || changed.iter().any(|entry| {
+                req.resolutions
+                    .iter()
+                    .filter(|resolution| **entry == resolution.observed)
+                    .count()
+                    != 1
+            })
+        {
+            return Err(ApiError::BadRequest(
+                "resolutions must cover the exact current reconcile plan".into(),
+            ));
+        }
+        if req
+            .resolutions
+            .iter()
+            .any(|resolution| resolution.resolution == ReconcileResolution::Abandon)
+        {
+            if req.resolutions.len() != 1 {
+                return Err(ApiError::BadRequest(
+                    "abandon must be the only reconcile resolution".into(),
+                ));
+            }
+            return Ok((plan, false, Vec::new()));
+        }
+        if req.resolutions.iter().any(|resolution| {
+            resolution.resolution == ReconcileResolution::KeepBoth
+                && (resolution.observed.workspace_digest.is_none()
+                    || resolution.observed.projection_digest.is_none())
+        }) {
+            return Err(ApiError::BadRequest(
+                "keep_both requires content on both reconcile sides".into(),
+            ));
+        }
+
+        let mut captures = Vec::new();
+        for node in metadata
+            .list_workspace_nodes_for_principal(workspace_id, actor)?
+            .iter()
+            .filter(|node| node.kind == WorkspaceNodeKind::SqlDocument)
+        {
+            let document = DocumentId(
+                node.document_id
+                    .ok_or(sift_metadata::MetadataError::InvalidWorkspaceNode)?,
+            );
+            let document_actor = rooms
+                .documents()
+                .get_or_load(&metadata, document)
+                .map_err(workspace_actor_error)?;
+            let guard = document_actor
+                .lock()
+                .map_err(|_| ApiError::Internal("document actor mutex poisoned".into()))?;
+            captures.push(WorkspaceCheckpointCapture {
+                node_id: node.id,
+                snapshot_bytes: guard.snapshot().map_err(workspace_actor_error)?,
+                snapshot_version: guard.version_vector(),
+            });
+        }
+        metadata.create_workspace_checkpoint(
+            workspace_id,
+            actor,
+            NewWorkspaceCheckpoint {
+                expected_revision: current.workspace.revision,
+                reason: sift_protocol::WorkspaceCheckpointReason::BeforeReconcile,
+                name: None,
+                captures,
+            },
+        )?;
+
+        let workspace_by_path = current
+            .files
+            .iter()
+            .map(|file| (file.path.0.as_str(), file))
+            .collect::<std::collections::HashMap<_, _>>();
+        let projection_by_path = current
+            .projection
+            .files
+            .iter()
+            .map(|file| (file.path.0.as_str(), file))
+            .collect::<std::collections::HashMap<_, _>>();
+        let mut writes = Vec::new();
+        let mut removes = Vec::new();
+        let mut broadcasts = Vec::new();
+        for resolution in &req.resolutions {
+            match resolution.resolution {
+                ReconcileResolution::MaterializeWorkspace => {
+                    if let Some(file) = workspace_by_path.get(resolution.observed.path.0.as_str()) {
+                        writes.push(crate::workspace_adapter::MaterializeFile {
+                            path: file.path.clone(),
+                            bytes: file.bytes.clone(),
+                        });
+                        if let Some(previous) = &resolution.observed.previous_path {
+                            removes.push(previous.clone());
+                        }
+                    } else {
+                        removes.push(resolution.observed.path.clone());
+                    }
+                }
+                ReconcileResolution::ImportProjection | ReconcileResolution::KeepBoth => {}
+                ReconcileResolution::Abandon => unreachable!("handled above"),
+            }
+        }
+        if !writes.is_empty() {
+            adapter
+                .materialize(&current.binding.root_handle, &writes)
+                .map_err(workspace_adapter_error)?;
+        }
+        if !removes.is_empty() {
+            adapter
+                .remove(&current.binding.root_handle, &removes)
+                .map_err(workspace_adapter_error)?;
+        }
+        for resolution in &req.resolutions {
+            if !matches!(
+                resolution.resolution,
+                ReconcileResolution::ImportProjection | ReconcileResolution::KeepBoth
+            ) {
+                continue;
+            }
+            let projection_path = resolution
+                .observed
+                .previous_path
+                .as_ref()
+                .unwrap_or(&resolution.observed.path);
+            let projected = projection_by_path.get(projection_path.0.as_str());
+            if let Some(broadcast) = import_projection_resolution(
+                &metadata,
+                &rooms,
+                actor,
+                workspace_id,
+                &resolution.observed,
+                projected.copied(),
+                resolution.resolution == ReconcileResolution::KeepBoth,
+            )? {
+                broadcasts.push(broadcast);
+            }
+        }
+
+        let observed =
+            load_projection_inputs(&metadata, &rooms, &adapter, binding_id, actor, true)?;
+        let baseline = observed
+            .files
+            .iter()
+            .map(|file| ProjectionFileState {
+                node_id: Some(file.node_id),
+                path: file.path.clone(),
+                workspace_digest: Some(file.digest.clone()),
+                projection_digest: observed
+                    .projection
+                    .files
+                    .iter()
+                    .find(|projected| projected.path == file.path)
+                    .map(|projected| projected.digest.clone()),
+            })
+            .chain(
+                observed
+                    .projection
+                    .files
+                    .iter()
+                    .filter(|projected| {
+                        projected
+                            .path
+                            .0
+                            .rsplit_once('.')
+                            .is_some_and(|(_, extension)| extension.eq_ignore_ascii_case("sql"))
+                    })
+                    .filter(|projected| {
+                        !observed
+                            .files
+                            .iter()
+                            .any(|file| file.path == projected.path)
+                    })
+                    .map(|projected| ProjectionFileState {
+                        node_id: None,
+                        path: projected.path.clone(),
+                        workspace_digest: None,
+                        projection_digest: Some(projected.digest.clone()),
+                    }),
+            )
+            .collect::<Vec<_>>();
+        let binding = metadata.commit_projection_observation(
+            binding_id,
+            actor,
+            req.binding_revision,
+            observed.workspace.revision,
+            match observed.binding.binding.mode {
+                ProjectionMode::ReadOnly => ProjectionHealth::ReadOnly,
+                ProjectionMode::ReadWrite => ProjectionHealth::Ready,
+            },
+            &baseline,
+        )?;
+        let plan = crate::workspace_projection::reconcile_plan(
+            &binding.binding,
+            observed.workspace.revision,
+            &baseline,
+            &observed.files,
+            &observed.projection,
+        );
+        Ok((plan, true, broadcasts))
+    })
+    .await?;
+    if !broadcasts.is_empty() {
+        let room_id = metadata_blocking({
+            let metadata = metadata_store_cloned(&state_for_blocking)?;
+            move || {
+                metadata
+                    .get_workspace_for_principal(workspace_id, actor, false)
+                    .map(|workspace| workspace.room_id)
+                    .map_err(Into::into)
+            }
+        })
+        .await?;
+        for (document, replica_id, update_id, server_seq, update, version) in broadcasts {
+            state_for_blocking.rooms.publish_doc(
+                room_id.0,
+                RoomServerMessage::DocumentUpdateCommitted {
+                    document_id: document.0,
+                    replica_id: sift_protocol::ReplicaId(replica_id),
+                    server_seq,
+                    update: sift_protocol::CrdtUpdate::new(update),
+                    server_version: sift_protocol::DocumentVersion::new(version),
+                },
+            );
+            state_for_blocking.sessions.push_operation_full(
+                Operation::ApplyDocumentUpdate {
+                    room_id: room_id.0,
+                    document_id: document.0,
+                    update_id,
+                    server_seq,
+                },
+                OperationStatus::Succeeded,
+                Some(actor.0),
+                None,
+                None,
+                None,
+            );
+        }
+    }
+    push_workspace_operation(
+        &state_for_blocking,
+        actor,
+        WorkspaceAction::ResolveConflict,
+        Some(workspace_id),
+        None,
+    );
+    if checkpoint_changed {
+        let projection_enabled = state_for_blocking.rooms.workspace_adapter().is_some();
+        let workspace = metadata_blocking({
+            let metadata = metadata_store_cloned(&state_for_blocking)?;
+            move || {
+                metadata
+                    .get_workspace_for_principal(workspace_id, actor, false)
+                    .map(|record| public_workspace_record(record, projection_enabled))
+                    .map_err(Into::into)
+            }
+        })
+        .await?;
+        publish_workspace_changed(&state_for_blocking, &workspace, true);
+    }
+    Ok(Json(next))
+}
+
+fn import_projection_resolution(
+    metadata: &MetadataStore,
+    rooms: &RoomRuntime,
+    actor: PrincipalId,
+    workspace_id: WorkspaceId,
+    observed: &sift_protocol::ReconcileEntry,
+    projected: Option<&crate::workspace_adapter::ProjectionFile>,
+    keep_both: bool,
+) -> ApiResult<Option<WorkspaceDocumentBroadcast>> {
+    let workspace = metadata.get_workspace_for_principal(workspace_id, actor, true)?;
+    let nodes = metadata.list_workspace_nodes_for_principal(workspace_id, actor)?;
+    if keep_both && projected.is_none() {
+        return Err(ApiError::BadRequest(
+            "keep_both requires content on both reconcile sides".into(),
+        ));
+    }
+    if let Some(projected) = projected {
+        if !projected
+            .path
+            .0
+            .rsplit_once('.')
+            .is_some_and(|(_, extension)| extension.eq_ignore_ascii_case("sql"))
+        {
+            return Err(ApiError::BadRequest(
+                "only .sql projection files can be imported".into(),
+            ));
+        }
+        let text = std::str::from_utf8(&projected.bytes)
+            .map_err(|_| ApiError::BadRequest("projected SQL file is not UTF-8".into()))?;
+        if let Some(node_id) = observed.node_id.filter(|_| !keep_both) {
+            let node = nodes
+                .iter()
+                .find(|node| node.id == node_id)
+                .ok_or(sift_metadata::MetadataError::WorkspaceNodeNotFound(node_id))?;
+            if node.kind != WorkspaceNodeKind::SqlDocument {
+                return Err(ApiError::BadRequest(
+                    "only SQL files can be imported".into(),
+                ));
+            }
+            if observed.previous_path.is_some() && node.path != projected.path {
+                metadata.move_workspace_node(
+                    node.id,
+                    actor,
+                    workspace.revision,
+                    node.parent_id,
+                    projected.path.clone(),
+                )?;
+            }
+            let document = DocumentId(
+                node.document_id
+                    .ok_or(sift_metadata::MetadataError::InvalidWorkspaceNode)?,
+            );
+            let document_actor = rooms
+                .documents()
+                .get_or_load(metadata, document)
+                .map_err(workspace_actor_error)?;
+            let mut guard = document_actor
+                .lock()
+                .map_err(|_| ApiError::Internal("document actor mutex poisoned".into()))?;
+            let update_id = uuid::Uuid::new_v4().to_string();
+            let authored = guard
+                .author_replacement(metadata, actor, "sift-projection-import", &update_id, text)
+                .map_err(workspace_actor_error)?;
+            if let Some(authored) = authored {
+                if let crate::document_actor::ApplyOutcome::Applied { server_seq, .. } =
+                    authored.outcome
+                {
+                    return Ok(Some((
+                        document,
+                        authored.replica_id,
+                        update_id,
+                        server_seq,
+                        authored.update_bytes,
+                        authored.server_version,
+                    )));
+                }
+            }
+        } else {
+            let path = if keep_both {
+                projection_sibling_path(&projected.path, &nodes)?
+            } else {
+                projected.path.clone()
+            };
+            let parent_id = path.0.rsplit_once('/').and_then(|(parent, _)| {
+                nodes
+                    .iter()
+                    .find(|node| node.kind == WorkspaceNodeKind::Folder && node.path.0 == parent)
+                    .map(|node| node.id)
+            });
+            if path.0.contains('/') && parent_id.is_none() {
+                return Err(ApiError::BadRequest(
+                    "projected file parent folder is absent from the workspace".into(),
+                ));
+            }
+            let replica = sift_doc::TextReplica::new(sift_doc::random_peer_id())
+                .map_err(|error| ApiError::Internal(error.to_string()))?;
+            if !text.is_empty() {
+                replica
+                    .insert(0, text)
+                    .map_err(|error| ApiError::BadRequest(error.to_string()))?;
+            }
+            metadata.create_workspace_node(
+                workspace_id,
+                actor,
+                workspace.revision,
+                NewWorkspaceNode {
+                    parent_id,
+                    path,
+                    kind: WorkspaceNodeKind::SqlDocument,
+                    initial_snapshot: Some(
+                        replica
+                            .export_snapshot()
+                            .map_err(|error| ApiError::Internal(error.to_string()))?,
+                    ),
+                    initial_snapshot_version: Some(replica.version_vector()),
+                },
+            )?;
+        }
+    } else if let Some(node_id) = observed.node_id {
+        metadata.delete_workspace_node(node_id, actor, workspace.revision)?;
+    }
+    Ok(None)
+}
+
+fn projection_sibling_path(
+    path: &sift_protocol::WorkspacePath,
+    nodes: &[sift_protocol::WorkspaceNode],
+) -> ApiResult<sift_protocol::WorkspacePath> {
+    let (stem, extension) = path
+        .0
+        .rsplit_once('.')
+        .map_or((path.0.as_str(), ""), |(stem, extension)| (stem, extension));
+    for suffix in 1..=1000 {
+        let candidate = if extension.is_empty() {
+            format!("{stem}.projection-{suffix}")
+        } else {
+            format!("{stem}.projection-{suffix}.{extension}")
+        };
+        if !nodes.iter().any(|node| node.path.0 == candidate) {
+            return sift_protocol::WorkspacePath::new(candidate)
+                .map_err(|error| ApiError::BadRequest(error.into()));
+        }
+    }
+    Err(ApiError::BadRequest(
+        "no projection conflict sibling name is available".into(),
+    ))
+}
+
+fn ddl_source_id(id: i64) -> ApiResult<DdlSourceId> {
+    if id > 0 {
+        Ok(DdlSourceId(id))
+    } else {
+        Err(ApiError::BadRequest(
+            "DDL source id must be positive".into(),
+        ))
+    }
+}
+
+async fn list_ddl_sources(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+) -> ApiResult<Json<Vec<DdlSource>>> {
+    let metadata = metadata_store_cloned(&state)?;
+    let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
+    let workspace_id = workspace_id(id)?;
+    authorize_ddl_source_operation(&state, &auth, workspace_id, None, DdlSourceAction::Read)?;
+    let actor = auth.principal_id;
+    let sources = metadata_blocking(move || {
+        let workspace = metadata.get_workspace_for_principal(workspace_id, actor, false)?;
+        let mut sources = metadata.list_ddl_sources_for_principal(workspace_id, actor)?;
+        for source in &mut sources {
+            let record = metadata.ddl_source_for_principal(source.id, actor, false)?;
+            if record.workspace_revision != workspace.revision {
+                source.coverage = DdlSourceCoverage::Stale;
+            }
+        }
+        Ok::<_, ApiError>(sources)
+    })
+    .await?;
+    for source in &sources {
+        push_ddl_source_operation(
+            &state,
+            actor,
+            DdlSourceAction::Read,
+            workspace_id,
+            Some(source.id),
+        );
+    }
+    Ok(Json(sources))
+}
+
+async fn create_ddl_source(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+    Json(req): Json<CreateDdlSourceRequest>,
+) -> ApiResult<Json<DdlSource>> {
+    let metadata = metadata_store_cloned(&state)?;
+    let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
+    let workspace_id = workspace_id(id)?;
+    authorize_ddl_source_operation(&state, &auth, workspace_id, None, DdlSourceAction::Create)?;
+    let actor = auth.principal_id;
+    let source = metadata_blocking(move || {
+        metadata
+            .create_ddl_source(
+                workspace_id,
+                actor,
+                NewDdlSource {
+                    name: req.name,
+                    dialect_id: req.dialect_id,
+                    roots: req.roots,
+                },
+            )
+            .map(|record| record.source)
+            .map_err(Into::into)
+    })
+    .await?;
+    push_ddl_source_operation(
+        &state,
+        actor,
+        DdlSourceAction::Create,
+        workspace_id,
+        Some(source.id),
+    );
+    publish_ddl_source_changed(&state, actor, &source).await?;
+    Ok(Json(source))
+}
+
+async fn get_ddl_source(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+) -> ApiResult<Json<DdlSourceModel>> {
+    let metadata = metadata_store_cloned(&state)?;
+    let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
+    let source_id = ddl_source_id(id)?;
+    let actor = auth.principal_id;
+    let record = metadata_blocking(move || {
+        metadata
+            .ddl_source_for_principal(source_id, actor, false)
+            .map_err(Into::into)
+    })
+    .await?;
+    authorize_ddl_source_operation(
+        &state,
+        &auth,
+        record.source.workspace_id,
+        Some(source_id),
+        DdlSourceAction::Read,
+    )?;
+    let mut source = record.source;
+    let workspace = metadata_blocking({
+        let metadata = metadata_store_cloned(&state)?;
+        move || {
+            metadata
+                .get_workspace_for_principal(source.workspace_id, actor, false)
+                .map_err(Into::into)
+        }
+    })
+    .await?;
+    if workspace.revision != record.workspace_revision {
+        source.coverage = DdlSourceCoverage::Stale;
+    }
+    let graph = record
+        .model_json
+        .as_deref()
+        .map(serde_json::from_str)
+        .transpose()
+        .map_err(|_| ApiError::Internal("stored DDL model is invalid".into()))?;
+    push_ddl_source_operation(
+        &state,
+        actor,
+        DdlSourceAction::Read,
+        source.workspace_id,
+        Some(source_id),
+    );
+    Ok(Json(DdlSourceModel {
+        source,
+        workspace_revision: record.workspace_revision,
+        graph,
+        diagnostics: record.diagnostics,
+        mappings: record.mappings,
+    }))
+}
+
+async fn update_ddl_source(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+    Json(req): Json<UpdateDdlSourceRequest>,
+) -> ApiResult<Json<DdlSource>> {
+    let metadata = metadata_store_cloned(&state)?;
+    let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
+    let source_id = ddl_source_id(id)?;
+    let actor = auth.principal_id;
+    let existing = metadata_blocking({
+        let metadata = metadata.clone();
+        move || {
+            metadata
+                .ddl_source_for_principal(source_id, actor, true)
+                .map_err(Into::into)
+        }
+    })
+    .await?;
+    authorize_ddl_source_operation(
+        &state,
+        &auth,
+        existing.source.workspace_id,
+        Some(source_id),
+        DdlSourceAction::Update,
+    )?;
+    let action = if req.mappings != existing.mappings {
+        DdlSourceAction::Map
+    } else {
+        DdlSourceAction::Update
+    };
+    let source = metadata_blocking(move || {
+        metadata
+            .update_ddl_source(
+                source_id,
+                actor,
+                req.expected_revision,
+                NewDdlSource {
+                    name: req.name,
+                    dialect_id: req.dialect_id,
+                    roots: req.roots,
+                },
+                &req.mappings,
+            )
+            .map(|record| record.source)
+            .map_err(Into::into)
+    })
+    .await?;
+    push_ddl_source_operation(&state, actor, action, source.workspace_id, Some(source_id));
+    publish_ddl_source_changed(&state, actor, &source).await?;
+    Ok(Json(source))
+}
+
+async fn delete_ddl_source(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+    Json(req): Json<ExpectedDdlSourceRevisionRequest>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let metadata = metadata_store_cloned(&state)?;
+    let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
+    let source_id = ddl_source_id(id)?;
+    let actor = auth.principal_id;
+    let existing = metadata_blocking({
+        let metadata = metadata.clone();
+        move || {
+            metadata
+                .ddl_source_for_principal(source_id, actor, true)
+                .map_err(Into::into)
+        }
+    })
+    .await?;
+    authorize_ddl_source_operation(
+        &state,
+        &auth,
+        existing.source.workspace_id,
+        Some(source_id),
+        DdlSourceAction::Delete,
+    )?;
+    metadata_blocking(move || {
+        metadata
+            .delete_ddl_source(source_id, actor, req.expected_revision)
+            .map_err(Into::into)
+    })
+    .await?;
+    push_ddl_source_operation(
+        &state,
+        actor,
+        DdlSourceAction::Delete,
+        existing.source.workspace_id,
+        Some(source_id),
+    );
+    let workspace = metadata_blocking({
+        let metadata = metadata_store_cloned(&state)?;
+        let workspace_id = existing.source.workspace_id;
+        move || {
+            metadata
+                .get_workspace_for_principal(workspace_id, actor, false)
+                .map_err(Into::into)
+        }
+    })
+    .await?;
+    state.rooms.publish_presence(
+        workspace.room_id.0,
+        RoomServerMessage::DdlSourceChanged {
+            workspace_id: existing.source.workspace_id.0,
+            source_id: source_id.0,
+            revision: 0,
+        },
+    );
+    Ok(Json(json!({"ok": true})))
+}
+
+async fn refresh_ddl_source(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+    Json(req): Json<ExpectedDdlSourceRevisionRequest>,
+) -> ApiResult<Json<DdlSourceModel>> {
+    let metadata = metadata_store_cloned(&state)?;
+    let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
+    let source_id = ddl_source_id(id)?;
+    let actor = auth.principal_id;
+    let source = metadata_blocking({
+        let metadata = metadata.clone();
+        move || {
+            metadata
+                .ddl_source_for_principal(source_id, actor, true)
+                .map_err(Into::into)
+        }
+    })
+    .await?;
+    authorize_ddl_source_operation(
+        &state,
+        &auth,
+        source.source.workspace_id,
+        Some(source_id),
+        DdlSourceAction::Refresh,
+    )?;
+    let workspace_id = source.source.workspace_id;
+    let lock = state.rooms.workspace_lock(workspace_id.0);
+    let _guard = lock.lock().await;
+    let rooms = state.rooms.clone();
+    let record = metadata_blocking(move || {
+        let source = metadata.ddl_source_for_principal(source_id, actor, true)?;
+        if source.source.revision != req.expected_revision {
+            return Err(sift_metadata::MetadataError::DdlSourceRevisionConflict {
+                expected: req.expected_revision,
+                current: source.source.revision,
+            }
+            .into());
+        }
+        let workspace = metadata.get_workspace_for_principal(workspace_id, actor, true)?;
+        let nodes = metadata.list_workspace_nodes_for_principal(workspace_id, actor)?;
+        let roots = source
+            .source
+            .roots
+            .iter()
+            .filter_map(|root| nodes.iter().find(|node| node.id == *root))
+            .collect::<Vec<_>>();
+        let selected = nodes
+            .iter()
+            .filter(|node| {
+                node.kind == WorkspaceNodeKind::SqlDocument
+                    && roots.iter().any(|root| {
+                        root.id == node.id
+                            || (root.kind == WorkspaceNodeKind::Folder
+                                && node.path.0.starts_with(&format!("{}/", root.path.0)))
+                    })
+            })
+            .collect::<Vec<_>>();
+        let mut inputs = Vec::with_capacity(selected.len());
+        for node in selected {
+            let document = DocumentId(
+                node.document_id
+                    .ok_or(sift_metadata::MetadataError::InvalidWorkspaceNode)?,
+            );
+            let document_actor = rooms
+                .documents()
+                .get_or_load(&metadata, document)
+                .map_err(workspace_actor_error)?;
+            let guard = document_actor
+                .lock()
+                .map_err(|_| ApiError::Internal("document actor mutex poisoned".into()))?;
+            inputs.push(crate::ddl_source::DdlInput {
+                path: node.path.clone(),
+                text: guard.text(),
+            });
+        }
+        inputs.sort_by(|left, right| left.path.0.cmp(&right.path.0));
+        let build = crate::ddl_source::build_model(
+            &source.source.dialect_id,
+            source.source.model_revision + 1,
+            &inputs,
+        );
+        let model_json = build
+            .graph
+            .as_ref()
+            .map(serde_json::to_string)
+            .transpose()
+            .map_err(|_| ApiError::Internal("DDL model serialization failed".into()))?;
+        Ok(metadata.store_ddl_source_model(
+            source_id,
+            actor,
+            sift_metadata::DdlSourceModelUpdate {
+                expected_revision: req.expected_revision,
+                expected_workspace_revision: workspace.revision,
+                coverage: build.coverage,
+                model_json,
+                diagnostics: build.diagnostics,
+            },
+        )?)
+    })
+    .await?;
+    push_ddl_source_operation(
+        &state,
+        actor,
+        DdlSourceAction::Refresh,
+        workspace_id,
+        Some(source_id),
+    );
+    publish_ddl_source_changed(&state, actor, &record.source).await?;
+    Ok(Json(DdlSourceModel {
+        graph: record
+            .model_json
+            .as_deref()
+            .map(serde_json::from_str)
+            .transpose()
+            .map_err(|_| ApiError::Internal("stored DDL model is invalid".into()))?,
+        source: record.source,
+        workspace_revision: record.workspace_revision,
+        diagnostics: record.diagnostics,
+        mappings: record.mappings,
+    }))
+}
+
+async fn publish_ddl_source_changed(
+    state: &AppState,
+    actor: PrincipalId,
+    source: &DdlSource,
+) -> ApiResult<()> {
+    let metadata = metadata_store_cloned(state)?;
+    let workspace_id = source.workspace_id;
+    let workspace = metadata_blocking(move || {
+        metadata
+            .get_workspace_for_principal(workspace_id, actor, false)
+            .map_err(Into::into)
+    })
+    .await?;
+    state.rooms.publish_presence(
+        workspace.room_id.0,
+        RoomServerMessage::DdlSourceChanged {
+            workspace_id: source.workspace_id.0,
+            source_id: source.id.0,
+            revision: source.revision,
+        },
+    );
+    Ok(())
 }
 
 async fn list_metadata_connections(

@@ -3,7 +3,8 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use sift_protocol::{ConnectionPolicy, Engine, ProviderId, TenantResourceLimits, TenantRole};
 use sift_protocol::{
-    WorkspaceCheckpointId, WorkspaceCheckpointReason, WorkspaceId, WorkspaceNodeId,
+    DdlDiagnostic, DdlSource, DdlSourceMapping, ProjectionBinding, ProjectionHealth,
+    ProjectionMode, WorkspaceCheckpointId, WorkspaceCheckpointReason, WorkspaceId, WorkspaceNodeId,
     WorkspaceNodeKind, WorkspacePath, WorkspaceRevision,
 };
 
@@ -536,6 +537,55 @@ pub struct WorkspaceRestorePlan {
     pub checkpoint_revision: WorkspaceRevision,
     pub current_revision: WorkspaceRevision,
     pub nodes: Vec<WorkspaceCheckpointNode>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ProjectionBindingRecord {
+    pub binding: ProjectionBinding,
+    pub root_handle: String,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone)]
+pub struct NewProjectionBinding {
+    pub root_handle: String,
+    pub mode: ProjectionMode,
+    pub adapter_generation: String,
+    pub health: ProjectionHealth,
+}
+
+#[derive(Debug, Clone)]
+pub struct ProjectionFileState {
+    pub node_id: Option<WorkspaceNodeId>,
+    pub path: WorkspacePath,
+    pub workspace_digest: Option<String>,
+    pub projection_digest: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct DdlSourceRecord {
+    pub source: DdlSource,
+    pub workspace_revision: WorkspaceRevision,
+    pub model_json: Option<String>,
+    pub diagnostics: Vec<DdlDiagnostic>,
+    pub mappings: Vec<DdlSourceMapping>,
+}
+
+#[derive(Debug, Clone)]
+pub struct NewDdlSource {
+    pub name: String,
+    pub dialect_id: String,
+    pub roots: Vec<WorkspaceNodeId>,
+}
+
+#[derive(Debug, Clone)]
+pub struct DdlSourceModelUpdate {
+    pub expected_revision: u64,
+    pub expected_workspace_revision: WorkspaceRevision,
+    pub coverage: sift_protocol::DdlSourceCoverage,
+    pub model_json: Option<String>,
+    pub diagnostics: Vec<DdlDiagnostic>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]

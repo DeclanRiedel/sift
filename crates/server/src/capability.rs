@@ -124,6 +124,7 @@ fn unavailable_reason(
         | ManageWorkspace
         | ReadWorkspaceHistory
         | RestoreWorkspace
+        | BindWorkspaceProjection
         | ManageWorkspaceProjection
         | ReadVcs
         | WriteVcs

@@ -150,6 +150,8 @@ impl ApiError {
                 | MetadataError::WorkspaceNotFound(_)
                 | MetadataError::WorkspaceNodeNotFound(_)
                 | MetadataError::WorkspaceCheckpointNotFound(_)
+                | MetadataError::ProjectionBindingNotFound(_)
+                | MetadataError::DdlSourceNotFound(_)
                 | MetadataError::CatalogSnapshotNotFound
                 | MetadataError::MigrationRunNotFound
                 | MetadataError::PlanCaptureNotFound
@@ -180,6 +182,12 @@ impl ApiError {
                 }
                 MetadataError::WorkspaceRevisionConflict { .. } => {
                     (StatusCode::CONFLICT, "workspace_revision_conflict")
+                }
+                MetadataError::ProjectionRevisionConflict { .. } => {
+                    (StatusCode::CONFLICT, "projection_revision_conflict")
+                }
+                MetadataError::DdlSourceRevisionConflict { .. } => {
+                    (StatusCode::CONFLICT, "ddl_source_revision_conflict")
                 }
                 MetadataError::WorkspacePathConflict => {
                     (StatusCode::CONFLICT, "workspace_path_conflict")
@@ -247,6 +255,8 @@ impl ApiError {
                 | MetadataError::InvalidWorkspaceNode
                 | MetadataError::InvalidWorkspaceCheckpoint
                 | MetadataError::InvalidWorkspaceBatch
+                | MetadataError::InvalidProjectionBinding
+                | MetadataError::InvalidDdlSource
                 | MetadataError::Json(_) => (StatusCode::BAD_REQUEST, "bad_request"),
                 MetadataError::ExtensionStorageValueTooLarge { .. }
                 | MetadataError::CatalogSnapshotTooLarge { .. }

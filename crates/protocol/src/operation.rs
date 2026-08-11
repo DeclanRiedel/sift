@@ -687,9 +687,10 @@ impl Operation {
                 WorkspaceAction::ReadHistory => OperationKind::ReadWorkspaceHistory,
                 WorkspaceAction::CreateCheckpoint => OperationKind::ManageWorkspace,
                 WorkspaceAction::RestoreCheckpoint => OperationKind::RestoreWorkspace,
-                WorkspaceAction::BindProjection
-                | WorkspaceAction::ReconcileProjection
-                | WorkspaceAction::ResolveConflict => OperationKind::ManageWorkspaceProjection,
+                WorkspaceAction::BindProjection => OperationKind::BindWorkspaceProjection,
+                WorkspaceAction::ReconcileProjection | WorkspaceAction::ResolveConflict => {
+                    OperationKind::ManageWorkspaceProjection
+                }
                 WorkspaceAction::Create
                 | WorkspaceAction::Update
                 | WorkspaceAction::Delete

@@ -475,8 +475,12 @@ Detailed implementation order and ADR-034 contract:
       spreadsheet, and operator-installed formatter plugins. Untrusted
       formatters use the Phase I extension boundary rather than in-process
       execution.
-- [ ] [Implement] Workspace/history API; DDL-source model; VCS adapter and Git
-      implementation; run-configuration executor; recipe-based import/export;
+- [x] [Implement] Room-owned virtual workspace/history API, confined optional
+      filesystem projection/reconcile, and deterministic offline DDL sources
+      with explicit live mappings; SDK/OpenAPI and local/remote-topology graph
+      parity are covered through Phase L2.
+- [ ] [Implement] VCS adapter and Git implementation; run-configuration
+      executor; durable scheduler; recipe-based import/export; remaining
       SDK/OpenAPI and remote integration.
 - [ ] [Graduate] Local, SSH-remote, and network-hosted workspace matrices;
       repository credential redaction; concurrent edit/VCS conflict tests;

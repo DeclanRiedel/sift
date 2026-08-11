@@ -860,6 +860,13 @@ impl MetadataStore {
 }
 
 pub fn public_workspace(record: WorkspaceRecord) -> Workspace {
+    public_workspace_with_projection(record, false)
+}
+
+pub fn public_workspace_with_projection(
+    record: WorkspaceRecord,
+    filesystem_projection: bool,
+) -> Workspace {
     Workspace {
         id: record.id,
         room_id: record.room_id.0,
@@ -867,7 +874,7 @@ pub fn public_workspace(record: WorkspaceRecord) -> Workspace {
         revision: record.revision,
         capabilities: WorkspaceCapabilities {
             virtual_tree: true,
-            filesystem_projection: false,
+            filesystem_projection,
             git: false,
             git_network: false,
             scheduling: false,
@@ -931,7 +938,7 @@ fn validate_checkpoint_input(input: &NewWorkspaceCheckpoint) -> Result<()> {
     }
 }
 
-fn ensure_room_access(
+pub(crate) fn ensure_room_access(
     conn: &Connection,
     room: RoomId,
     principal: PrincipalId,
@@ -952,6 +959,28 @@ fn ensure_room_access(
         Ok(())
     } else {
         Err(MetadataError::RoomNotFound(room))
+    }
+}
+
+pub(crate) fn ensure_room_owner(
+    conn: &Connection,
+    room: RoomId,
+    principal: PrincipalId,
+) -> Result<()> {
+    let allowed: bool = conn.query_row(
+        "SELECT EXISTS(
+             SELECT 1 FROM room_member m
+             JOIN principal p ON p.id = m.principal_id
+             WHERE m.room_id = ?1 AND m.principal_id = ?2
+               AND p.disabled_at IS NULL AND m.role = 'owner'
+         )",
+        params![room.0, principal.0],
+        |row| row.get(0),
+    )?;
+    if allowed {
+        Ok(())
+    } else {
+        Err(MetadataError::RoomOwnerRequired { room, principal })
     }
 }
 
@@ -1031,7 +1060,7 @@ fn ensure_path_available(
     }
 }
 
-fn workspace_path_key(path: &WorkspacePath) -> Result<String> {
+pub(crate) fn workspace_path_key(path: &WorkspacePath) -> Result<String> {
     if !path.is_valid() || path.0.nfc().collect::<String>() != path.0 {
         return Err(MetadataError::InvalidWorkspacePath);
     }
@@ -1054,7 +1083,10 @@ fn bump_workspace_locked(conn: &Connection, workspace: WorkspaceId, now: &str) -
     }
 }
 
-fn workspace_by_id_locked(conn: &Connection, id: WorkspaceId) -> Result<WorkspaceRecord> {
+pub(crate) fn workspace_by_id_locked(
+    conn: &Connection,
+    id: WorkspaceId,
+) -> Result<WorkspaceRecord> {
     conn.query_row(
         "SELECT id, room_id, name, revision, created_at, updated_at
          FROM workspace WHERE id = ?1",

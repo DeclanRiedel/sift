@@ -26,6 +26,7 @@ pub const SUPPORTED_HTTP_OPERATION_IDS: &[&str] = &[
     "authenticateKey",
     "beginTransaction",
     "bindMetadataRoomConnection",
+    "bindWorkspaceProjection",
     "bulkInsert",
     "cancelComparison",
     "cancelQuery",
@@ -47,6 +48,7 @@ pub const SUPPORTED_HTTP_OPERATION_IDS: &[&str] = &[
     "createMetadataSavedQuery",
     "createRoomWorkspace",
     "createCatalogSnapshot",
+    "createDdlSource",
     "createSavepoint",
     "createSession",
     "createTenantInvitation",
@@ -60,6 +62,8 @@ pub const SUPPORTED_HTTP_OPERATION_IDS: &[&str] = &[
     "deleteWorkspaceNode",
     "deletePlanCapture",
     "deleteCatalogSnapshot",
+    "deleteDdlSource",
+    "deleteWorkspaceProjection",
     "deleteSpilledCursor",
     "diagnoseSemanticDocument",
     "disconnectMetadataConnectionProfile",
@@ -81,6 +85,8 @@ pub const SUPPORTED_HTTP_OPERATION_IDS: &[&str] = &[
     "getPlanCapture",
     "getObjectDdl",
     "getWorkspace",
+    "getWorkspaceProjection",
+    "getDdlSource",
     "getRoomResult",
     "getRoomResultPages",
     "getSchema",
@@ -128,6 +134,7 @@ pub const SUPPORTED_HTTP_OPERATION_IDS: &[&str] = &[
     "listTransactions",
     "listWorkspaceCheckpoints",
     "listWorkspaceNodes",
+    "listDdlSources",
     "logoutAllAuth",
     "logoutAuth",
     "openConnection",
@@ -139,6 +146,7 @@ pub const SUPPORTED_HTTP_OPERATION_IDS: &[&str] = &[
     "pageOperationAudit",
     "passwordLogin",
     "pingConnection",
+    "planWorkspaceProjection",
     "postCompletion",
     "prepareComparisonPatch",
     "prepareSemanticQuickFix",
@@ -152,6 +160,7 @@ pub const SUPPORTED_HTTP_OPERATION_IDS: &[&str] = &[
     "readSpilledCursorPages",
     "ready",
     "refreshAuth",
+    "refreshDdlSource",
     "registerPrincipalKey",
     "releaseSavepoint",
     "removeMetadataRoomMember",
@@ -181,6 +190,8 @@ pub const SUPPORTED_HTTP_OPERATION_IDS: &[&str] = &[
     "updateMetadataDocument",
     "updateMetadataSavedQuery",
     "updateWorkspace",
+    "updateDdlSource",
+    "applyWorkspaceProjection",
     "moveWorkspaceNode",
     "mutateWorkspaceBatch",
     "updateSemanticDocument",
@@ -193,13 +204,16 @@ pub const SUPPORTED_HTTP_OPERATION_IDS: &[&str] = &[
 // consumers can build requests without depending on sift_metadata::http
 // directly.
 pub use sift_metadata::http::{
-    AddRoomMemberRequest, BindRoomConnectionRequest, CreateDocumentRequest, CreateRoomRequest,
-    CreateSavedQueryRequest, CreateWorkspaceCheckpointRequest, CreateWorkspaceNodeRequest,
-    CreateWorkspaceRequest, ExpectedWorkspaceRevisionRequest, IssueTokenRequest,
+    AddRoomMemberRequest, ApplyWorkspaceProjectionRequest, BindRoomConnectionRequest,
+    BindWorkspaceProjectionRequest, CreateDdlSourceRequest, CreateDocumentRequest,
+    CreateRoomRequest, CreateSavedQueryRequest, CreateWorkspaceCheckpointRequest,
+    CreateWorkspaceNodeRequest, CreateWorkspaceRequest, ExpectedDdlSourceRevisionRequest,
+    ExpectedProjectionRevisionRequest, ExpectedWorkspaceRevisionRequest, IssueTokenRequest,
     IssueTokenResponse, MoveWorkspaceNodeRequest, OpenConnectionFromProfileRequest,
-    RestoreWorkspaceCheckpointRequest, SetCredentialRequest, UpdateDocumentSnapshotRequest,
-    UpdateSavedQueryRequest, UpdateWorkspaceRequest, UpsertConnectionProfileRequest,
-    WorkspaceBatchMutationItem, WorkspaceBatchMutationRequest, WorkspaceTreeResponse,
+    ProjectionResolutionRequest, RestoreWorkspaceCheckpointRequest, SetCredentialRequest,
+    UpdateDdlSourceRequest, UpdateDocumentSnapshotRequest, UpdateSavedQueryRequest,
+    UpdateWorkspaceRequest, UpsertConnectionProfileRequest, WorkspaceBatchMutationItem,
+    WorkspaceBatchMutationRequest, WorkspaceTreeResponse,
 };
 use sift_metadata::{
     ApiTokenId, ConnectionProfile, ConnectionProfileId, Document, DocumentId, GithubAllowlistEntry,
@@ -214,26 +228,27 @@ use sift_protocol::{
     CancelRequest, ChangePasswordRequest, ConnectionId, ConnectionInfo, ConnectionPolicy,
     CreateGithubAllowlistRequest, CreateTenantInvitationRequest, CsvImportRequest,
     CsvImportResponse, CursorId, CursorPage, DataSearchRequest, DataSearchResponse,
-    DatabaseProcess, DisconnectManagedConnectionsResponse, EditPlan, EndTransactionRequest,
-    ExecuteRequestHttp, ExecuteResponse, ExpectedRevision, ExplainRequest, ExplainResponse,
-    ExtensionDescriptor, ExtensionDiagnostics, ExtensionGrantRequest, ExtensionPurgeResponse,
-    ExtensionSelectionRequest, ExtensionTenantSelectionRequest, GithubNativeAuthExchangeRequest,
+    DatabaseProcess, DdlSource, DdlSourceId, DdlSourceModel, DisconnectManagedConnectionsResponse,
+    EditPlan, EndTransactionRequest, ExecuteRequestHttp, ExecuteResponse, ExpectedRevision,
+    ExplainRequest, ExplainResponse, ExtensionDescriptor, ExtensionDiagnostics,
+    ExtensionGrantRequest, ExtensionPurgeResponse, ExtensionSelectionRequest,
+    ExtensionTenantSelectionRequest, GithubNativeAuthExchangeRequest,
     GithubNativeAuthStartResponse, GovernedToolDescriptor, HandshakeClientKind, HandshakeRequest,
     HandshakeResponse, Health, InvokeExtensionOutcome, InvokeExtensionRequest, InvokeToolRequest,
     InvokeToolResponse, IssuedPasswordResetResponse, IssuedTenantInvitationResponse,
     KeyAuthenticateRequest, KeyChallengeRequest, KeyChallengeResponse, KillProcessRequest,
     KillProcessResponse, OpenConnectionRequest, OpenSessionRequest, OperationApproval,
     OperationCapability, OperationCapabilityContext, Page, PasswordLoginRequest,
-    PasswordResetRequest, PreviewEditsRequest, ProtocolRange, ProviderDescriptor, Readiness,
-    RefreshAuthRequest, RegisterPrincipalKeyRequest, RoomQueryResult, RoomResultId,
-    RoomResultPages, RoomSelection, SavepointRequest, SchemaSearchRequest, SchemaSearchResponse,
-    SchemaSnapshot, ServerInfo, SessionId, SessionInfo, SshProxyAccessGrant,
-    SshProxyCapabilityExchangeRequest, TenantResourceLimits, TenantUsageSnapshot, ToolContext,
-    TransactionEndAction, TransactionInfo, TransactionPreview, TransactionPreviewRequest,
-    TransactionState, TxHandleRef, TxId, TxMode, UpdateConnectionPolicyRequest,
-    UpdateTenantLimitsRequest, ValidatedExtensionPackage, Value, WebAuthResponse, WhoAmIResponse,
-    Workspace, WorkspaceCheckpoint, WorkspaceCheckpointId, WorkspaceId, WorkspaceNodeId,
-    WsClientMessage, WsServerMessage, PROTOCOL_VERSION_NUMBER,
+    PasswordResetRequest, PreviewEditsRequest, ProjectionBinding, ProjectionBindingId,
+    ProtocolRange, ProviderDescriptor, Readiness, ReconcilePlan, RefreshAuthRequest,
+    RegisterPrincipalKeyRequest, RoomQueryResult, RoomResultId, RoomResultPages, RoomSelection,
+    SavepointRequest, SchemaSearchRequest, SchemaSearchResponse, SchemaSnapshot, ServerInfo,
+    SessionId, SessionInfo, SshProxyAccessGrant, SshProxyCapabilityExchangeRequest,
+    TenantResourceLimits, TenantUsageSnapshot, ToolContext, TransactionEndAction, TransactionInfo,
+    TransactionPreview, TransactionPreviewRequest, TransactionState, TxHandleRef, TxId, TxMode,
+    UpdateConnectionPolicyRequest, UpdateTenantLimitsRequest, ValidatedExtensionPackage, Value,
+    WebAuthResponse, WhoAmIResponse, Workspace, WorkspaceCheckpoint, WorkspaceCheckpointId,
+    WorkspaceId, WorkspaceNodeId, WsClientMessage, WsServerMessage, PROTOCOL_VERSION_NUMBER,
 };
 
 #[derive(Clone)]
@@ -2298,6 +2313,119 @@ impl Client {
                 "/v1/metadata/workspace-checkpoints/{}/restore",
                 checkpoint.0
             ),
+            &request,
+        )
+        .await
+    }
+
+    pub async fn workspace_projection(
+        &self,
+        workspace: WorkspaceId,
+    ) -> Result<Option<ProjectionBinding>> {
+        self.get(&format!(
+            "/v1/metadata/workspaces/{}/projection",
+            workspace.0
+        ))
+        .await
+    }
+
+    pub async fn bind_workspace_projection(
+        &self,
+        workspace: WorkspaceId,
+        request: BindWorkspaceProjectionRequest,
+    ) -> Result<ProjectionBinding> {
+        self.post(
+            &format!("/v1/metadata/workspaces/{}/projection", workspace.0),
+            &request,
+        )
+        .await
+    }
+
+    pub async fn delete_workspace_projection(
+        &self,
+        binding: ProjectionBindingId,
+        request: ExpectedProjectionRevisionRequest,
+    ) -> Result<()> {
+        self.delete_body(
+            &format!("/v1/metadata/workspace-projections/{}", binding.0),
+            &request,
+        )
+        .await
+    }
+
+    pub async fn plan_workspace_projection(
+        &self,
+        binding: ProjectionBindingId,
+    ) -> Result<ReconcilePlan> {
+        self.get(&format!(
+            "/v1/metadata/workspace-projections/{}/reconcile",
+            binding.0
+        ))
+        .await
+    }
+
+    pub async fn apply_workspace_projection(
+        &self,
+        binding: ProjectionBindingId,
+        request: ApplyWorkspaceProjectionRequest,
+    ) -> Result<ReconcilePlan> {
+        self.post(
+            &format!("/v1/metadata/workspace-projections/{}/reconcile", binding.0),
+            &request,
+        )
+        .await
+    }
+
+    pub async fn ddl_sources(&self, workspace: WorkspaceId) -> Result<Vec<DdlSource>> {
+        self.get(&format!(
+            "/v1/metadata/workspaces/{}/ddl-sources",
+            workspace.0
+        ))
+        .await
+    }
+
+    pub async fn create_ddl_source(
+        &self,
+        workspace: WorkspaceId,
+        request: CreateDdlSourceRequest,
+    ) -> Result<DdlSource> {
+        self.post(
+            &format!("/v1/metadata/workspaces/{}/ddl-sources", workspace.0),
+            &request,
+        )
+        .await
+    }
+
+    pub async fn ddl_source(&self, source: DdlSourceId) -> Result<DdlSourceModel> {
+        self.get(&format!("/v1/metadata/ddl-sources/{}", source.0))
+            .await
+    }
+
+    pub async fn update_ddl_source(
+        &self,
+        source: DdlSourceId,
+        request: UpdateDdlSourceRequest,
+    ) -> Result<DdlSource> {
+        self.put(&format!("/v1/metadata/ddl-sources/{}", source.0), &request)
+            .await
+    }
+
+    pub async fn delete_ddl_source(
+        &self,
+        source: DdlSourceId,
+        request: ExpectedDdlSourceRevisionRequest,
+    ) -> Result<()> {
+        self.delete_body(&format!("/v1/metadata/ddl-sources/{}", source.0), &request)
+            .await
+    }
+
+    pub async fn refresh_ddl_source(
+        &self,
+        source: DdlSourceId,
+        request: ExpectedDdlSourceRevisionRequest,
+    ) -> Result<DdlSourceModel> {
+        self.post(
+            &format!("/v1/metadata/ddl-sources/{}/refresh", source.0),
             &request,
         )
         .await

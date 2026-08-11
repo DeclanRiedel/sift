@@ -3,7 +3,11 @@ use std::sync::Arc;
 use axum::body::{to_bytes, Body};
 use axum::http::{Method, Request, StatusCode};
 use sift_metadata::{MemorySecretStore, MetadataStore, NewRoom, PrincipalId, RoomKind, TenantId};
-use sift_protocol::{Workspace, WorkspaceCheckpoint, WorkspaceNodeKind};
+use sift_protocol::{
+    DdlSource, DdlSourceModel, ProjectionBinding, ReconcilePlan, ReconcileResolution, Workspace,
+    WorkspaceCheckpoint, WorkspaceNodeKind,
+};
+use sift_server::config::{WorkspaceProjectionConfig, WorkspaceRootConfig};
 use sift_server::http::{app, AppState, AuthState};
 use sift_server::registry::DriverRegistry;
 use sift_server::room_runtime::RoomRuntime;
@@ -168,4 +172,197 @@ async fn concurrent_clients_checkpoint_and_restore_one_collaborative_document() 
     assert_eq!(restored.nodes[0].id, query.id);
     assert_eq!(restored.nodes[0].path.0, "query.sql");
     assert_eq!(actor.lock().unwrap().text(), "select 1");
+}
+
+#[tokio::test]
+async fn projection_conflicts_and_offline_ddl_are_explicit_and_deterministic() {
+    let metadata = MetadataStore::open_in_memory(Arc::new(MemorySecretStore::new())).unwrap();
+    metadata.bootstrap_local("local user").unwrap();
+    let room = metadata
+        .create_room(
+            TenantId(1),
+            PrincipalId(1),
+            NewRoom {
+                name: "projection room".into(),
+                kind: RoomKind::Shared,
+            },
+        )
+        .unwrap();
+    let checkout = tempfile::tempdir().unwrap();
+    let rooms = RoomRuntime::with_workspace_config(&WorkspaceProjectionConfig {
+        enabled: true,
+        roots: vec![WorkspaceRootConfig {
+            handle: "checkout".into(),
+            path: checkout.path().display().to_string(),
+            read_only: false,
+        }],
+    })
+    .unwrap();
+    let router = app(AppState {
+        sessions: SessionStore::new(DriverRegistry::builder().build()),
+        rooms: rooms.clone(),
+        auth: AuthState::default(),
+        metadata: Some(metadata),
+        shutdown: Shutdown::default(),
+    });
+
+    let response = router
+        .clone()
+        .oneshot(json_request(
+            Method::POST,
+            &format!("/v1/metadata/rooms/{}/workspaces", room.id.0),
+            serde_json::json!({"name": "database"}),
+        ))
+        .await
+        .unwrap();
+    let workspace: Workspace = json(response.into_body()).await;
+    assert!(workspace.capabilities.filesystem_projection);
+    let response = router
+        .clone()
+        .oneshot(json_request(
+            Method::POST,
+            &format!("/v1/metadata/workspaces/{}/nodes", workspace.id.0),
+            serde_json::json!({
+                "expected_workspace_revision": 1,
+                "parent_id": null,
+                "path": "schema.sql",
+                "kind": "sql_document",
+                "initial_text": "CREATE TABLE public.users (id bigint primary key);"
+            }),
+        ))
+        .await
+        .unwrap();
+    let tree: sift_metadata::http::WorkspaceTreeResponse = json(response.into_body()).await;
+    let node = tree.nodes[0].clone();
+
+    let response = router
+        .clone()
+        .oneshot(json_request(
+            Method::POST,
+            &format!("/v1/metadata/workspaces/{}/projection", workspace.id.0),
+            serde_json::json!({"root_handle": "checkout", "mode": "read_write"}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let binding: ProjectionBinding = json(response.into_body()).await;
+    let response = router
+        .clone()
+        .oneshot(json_request(
+            Method::GET,
+            &format!(
+                "/v1/metadata/workspace-projections/{}/reconcile",
+                binding.id.0
+            ),
+            serde_json::json!({}),
+        ))
+        .await
+        .unwrap();
+    let plan: ReconcilePlan = json(response.into_body()).await;
+    assert_eq!(plan.entries.len(), 1);
+    let response = router
+        .clone()
+        .oneshot(json_request(
+            Method::POST,
+            &format!(
+                "/v1/metadata/workspace-projections/{}/reconcile",
+                binding.id.0
+            ),
+            serde_json::json!({
+                "binding_revision": plan.binding_revision,
+                "workspace_revision": plan.workspace_revision,
+                "resolutions": [{
+                    "observed": plan.entries[0],
+                    "resolution": ReconcileResolution::MaterializeWorkspace
+                }]
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(checkout.path().join("schema.sql").is_file());
+
+    std::fs::write(
+        checkout.path().join("schema.sql"),
+        "CREATE TABLE public.accounts (id bigint primary key);",
+    )
+    .unwrap();
+    let response = router
+        .clone()
+        .oneshot(json_request(
+            Method::GET,
+            &format!(
+                "/v1/metadata/workspace-projections/{}/reconcile",
+                binding.id.0
+            ),
+            serde_json::json!({}),
+        ))
+        .await
+        .unwrap();
+    let plan: ReconcilePlan = json(response.into_body()).await;
+    let response = router
+        .clone()
+        .oneshot(json_request(
+            Method::POST,
+            &format!(
+                "/v1/metadata/workspace-projections/{}/reconcile",
+                binding.id.0
+            ),
+            serde_json::json!({
+                "binding_revision": plan.binding_revision,
+                "workspace_revision": plan.workspace_revision,
+                "resolutions": [{
+                    "observed": plan.entries[0],
+                    "resolution": ReconcileResolution::ImportProjection
+                }]
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let response = router
+        .clone()
+        .oneshot(json_request(
+            Method::POST,
+            &format!("/v1/metadata/workspaces/{}/ddl-sources", workspace.id.0),
+            serde_json::json!({
+                "name": "desired",
+                "dialect_id": "sift/postgres",
+                "roots": [node.id]
+            }),
+        ))
+        .await
+        .unwrap();
+    let source: DdlSource = json(response.into_body()).await;
+    let response = router
+        .clone()
+        .oneshot(json_request(
+            Method::POST,
+            &format!("/v1/metadata/ddl-sources/{}/refresh", source.id.0),
+            serde_json::json!({"expected_revision": source.revision}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let model: DdlSourceModel = json(response.into_body()).await;
+    let graph = model.graph.unwrap();
+    assert!(graph
+        .data
+        .nodes
+        .iter()
+        .any(|catalog_node| catalog_node.name == "accounts"));
+    let rebuilt = sift_server::ddl_source::build_model(
+        "sift/postgres",
+        graph.revision.0,
+        &[sift_server::ddl_source::DdlInput {
+            path: sift_protocol::WorkspacePath("schema.sql".into()),
+            text: "CREATE TABLE public.accounts (id bigint primary key);".into(),
+        }],
+    );
+    assert_eq!(
+        graph.content_digest,
+        rebuilt.graph.unwrap().content_digest,
+        "local and remote-topology builders share the same canonical graph"
+    );
 }

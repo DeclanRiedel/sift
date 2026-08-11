@@ -88,7 +88,7 @@ pub fn authorize(
         return Err(AuthorizationDenial::TenantAdminRequired);
     }
 
-    if matches!(operation, ManageWorkspaceProjection | ManageSchedule)
+    if matches!(operation, BindWorkspaceProjection | ManageSchedule)
         && !matches!(scope.room_role, Some(AuthorizationRoomRole::Owner))
         && !scope.trusted_local
     {
@@ -100,6 +100,7 @@ pub fn authorize(
         ApplyDocumentUpdate
             | ManageWorkspace
             | RestoreWorkspace
+            | BindWorkspaceProjection
             | ManageWorkspaceProjection
             | WriteVcs
             | ManageDdlSource
@@ -310,12 +311,14 @@ mod tests {
 
         scope.room_role = Some(AuthorizationRoomRole::Editor);
         assert!(authorize(&scope, OperationKind::ManageWorkspace).is_ok());
+        assert!(authorize(&scope, OperationKind::ManageWorkspaceProjection).is_ok());
         assert_eq!(
-            authorize(&scope, OperationKind::ManageWorkspaceProjection),
+            authorize(&scope, OperationKind::BindWorkspaceProjection),
             Err(AuthorizationDenial::RoomOwnerRequired)
         );
 
         scope.room_role = Some(AuthorizationRoomRole::Owner);
+        assert!(authorize(&scope, OperationKind::BindWorkspaceProjection).is_ok());
         assert!(authorize(&scope, OperationKind::ManageWorkspaceProjection).is_ok());
         assert!(authorize(&scope, OperationKind::ManageSchedule).is_ok());
     }

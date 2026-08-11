@@ -16,6 +16,7 @@ pub mod correlation;
 pub mod csv_import;
 pub mod cursors;
 pub mod ddl;
+pub mod ddl_source;
 pub mod document_actor;
 pub mod document_registry;
 pub mod edit;
@@ -46,6 +47,8 @@ pub mod shutdown;
 pub mod sql_policy;
 pub mod state_backup;
 pub mod updater;
+pub mod workspace_adapter;
+pub mod workspace_projection;
 
 pub use config::Config;
 pub use error::ApiError;

@@ -9,8 +9,9 @@ use chrono::{DateTime, Utc};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use sift_protocol::{
-    ProviderId, Workspace, WorkspaceCheckpointId, WorkspaceCheckpointReason, WorkspaceNode,
-    WorkspaceNodeId, WorkspaceNodeKind, WorkspacePath, WorkspaceRevision,
+    DdlSourceMapping, ProjectionMode, ProviderId, ReconcileEntry, ReconcileResolution, Workspace,
+    WorkspaceCheckpointId, WorkspaceCheckpointReason, WorkspaceNode, WorkspaceNodeId,
+    WorkspaceNodeKind, WorkspacePath, WorkspaceRevision,
 };
 
 use crate::{ApiTokenRow, CredentialMode, RoomKind, RoomRole};
@@ -132,6 +133,52 @@ fn default_workspace_checkpoint_page_limit() -> u32 {
 pub struct WorkspaceTreeResponse {
     pub workspace: Workspace,
     pub nodes: Vec<WorkspaceNode>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct BindWorkspaceProjectionRequest {
+    pub root_handle: String,
+    pub mode: ProjectionMode,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct ExpectedProjectionRevisionRequest {
+    pub expected_revision: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct ApplyWorkspaceProjectionRequest {
+    pub binding_revision: u64,
+    pub workspace_revision: WorkspaceRevision,
+    pub resolutions: Vec<ProjectionResolutionRequest>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct ProjectionResolutionRequest {
+    pub observed: ReconcileEntry,
+    pub resolution: ReconcileResolution,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct CreateDdlSourceRequest {
+    pub name: String,
+    pub dialect_id: String,
+    pub roots: Vec<WorkspaceNodeId>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct UpdateDdlSourceRequest {
+    pub expected_revision: u64,
+    pub name: String,
+    pub dialect_id: String,
+    pub roots: Vec<WorkspaceNodeId>,
+    #[serde(default)]
+    pub mappings: Vec<DdlSourceMapping>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct ExpectedDdlSourceRevisionRequest {
+    pub expected_revision: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]

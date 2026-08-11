@@ -144,6 +144,11 @@ pub enum RoomServerMessage {
         revision: u64,
         checkpoints_changed: bool,
     },
+    DdlSourceChanged {
+        workspace_id: i64,
+        source_id: i64,
+        revision: u64,
+    },
     QueryResult {
         result: RoomQueryResult,
     },

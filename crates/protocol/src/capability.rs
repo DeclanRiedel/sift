@@ -89,6 +89,7 @@ pub enum OperationKind {
     ManageWorkspace,
     ReadWorkspaceHistory,
     RestoreWorkspace,
+    BindWorkspaceProjection,
     ManageWorkspaceProjection,
     ReadVcs,
     WriteVcs,
@@ -106,7 +107,7 @@ pub enum OperationKind {
 }
 
 impl OperationKind {
-    pub const ALL: [Self; 98] = [
+    pub const ALL: [Self; 99] = [
         Self::Authenticate,
         Self::RefreshAuthSession,
         Self::Logout,
@@ -191,6 +192,7 @@ impl OperationKind {
         Self::ManageWorkspace,
         Self::ReadWorkspaceHistory,
         Self::RestoreWorkspace,
+        Self::BindWorkspaceProjection,
         Self::ManageWorkspaceProjection,
         Self::ReadVcs,
         Self::WriteVcs,
@@ -234,6 +236,7 @@ impl OperationKind {
                 | Self::ApplyDocumentUpdate
                 | Self::ManageWorkspace
                 | Self::RestoreWorkspace
+                | Self::BindWorkspaceProjection
                 | Self::ManageWorkspaceProjection
                 | Self::WriteVcs
                 | Self::ManageDdlSource

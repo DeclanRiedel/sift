@@ -1,5 +1,5 @@
 use std::sync::atomic::{AtomicI64, AtomicUsize, Ordering};
-use std::sync::{Arc, Weak};
+use std::sync::{Arc, RwLock, Weak};
 use std::time::{Duration, Instant};
 
 use dashmap::DashMap;
@@ -20,6 +20,7 @@ struct RoomRuntimeInner {
     documents: DocumentRegistry,
     results: crate::room_results::RoomResultRegistry,
     workspace_locks: DashMap<i64, Arc<tokio::sync::Mutex<()>>>,
+    workspace_adapter: RwLock<Option<Arc<crate::workspace_adapter::RootedFilesystemAdapter>>>,
 }
 
 struct RoomRuntimeRoom {
@@ -63,6 +64,30 @@ pub struct RoomAttachment {
 }
 
 impl RoomRuntime {
+    pub fn with_workspace_config(
+        config: &crate::config::WorkspaceProjectionConfig,
+    ) -> Result<Self, crate::workspace_adapter::WorkspaceAdapterError> {
+        let runtime = Self::default();
+        let adapter =
+            crate::workspace_adapter::RootedFilesystemAdapter::from_config(config)?.map(Arc::new);
+        *runtime
+            .inner
+            .workspace_adapter
+            .write()
+            .expect("workspace adapter lock poisoned") = adapter;
+        Ok(runtime)
+    }
+
+    pub fn workspace_adapter(
+        &self,
+    ) -> Option<Arc<crate::workspace_adapter::RootedFilesystemAdapter>> {
+        self.inner
+            .workspace_adapter
+            .read()
+            .expect("workspace adapter lock poisoned")
+            .clone()
+    }
+
     pub fn attach(
         &self,
         room_id: i64,

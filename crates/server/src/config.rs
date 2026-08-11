@@ -85,6 +85,24 @@ pub struct Config {
     pub rate_limits: RateLimitsConfig,
     /// Default and operator-maximum per-tenant resource limits.
     pub tenant_limits: TenantLimitsConfig,
+    /// Optional server-side workspace filesystem projections. Virtual
+    /// workspaces remain available when this is disabled or empty.
+    pub workspaces: WorkspaceProjectionConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct WorkspaceProjectionConfig {
+    pub enabled: bool,
+    /// Operator-owned roots addressed by opaque handles in public APIs.
+    pub roots: Vec<WorkspaceRootConfig>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkspaceRootConfig {
+    pub handle: String,
+    pub path: String,
+    pub read_only: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -303,6 +321,7 @@ impl Default for Config {
             limits: LimitsConfig::default(),
             rate_limits: RateLimitsConfig::default(),
             tenant_limits: TenantLimitsConfig::default(),
+            workspaces: WorkspaceProjectionConfig::default(),
         }
     }
 }
@@ -426,6 +445,46 @@ impl Config {
             }
             if self.auth.public_base_url.is_none() {
                 bail!("deployment=team requires auth.public_base_url");
+            }
+        }
+
+        if self.workspaces.enabled && self.workspaces.roots.is_empty() {
+            bail!("workspaces.enabled=true requires at least one configured root");
+        }
+        let mut root_handles = std::collections::HashSet::new();
+        let mut canonical_roots = std::collections::HashSet::new();
+        for root in self
+            .workspaces
+            .roots
+            .iter()
+            .filter(|_| self.workspaces.enabled)
+        {
+            if root.handle.is_empty()
+                || root.handle.len() > 64
+                || !root
+                    .handle
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+                || !root_handles.insert(root.handle.clone())
+            {
+                bail!("workspace root handles must be unique safe names of at most 64 bytes");
+            }
+            let path = std::path::Path::new(&root.path);
+            if !path.is_absolute() {
+                bail!("workspace root `{}` must be an absolute path", root.handle);
+            }
+            let metadata = std::fs::symlink_metadata(path)
+                .with_context(|| format!("workspace root `{}` is unavailable", root.handle))?;
+            if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                bail!(
+                    "workspace root `{}` must be a real directory, not a symlink",
+                    root.handle
+                );
+            }
+            let canonical = std::fs::canonicalize(path)
+                .with_context(|| format!("workspace root `{}` is unavailable", root.handle))?;
+            if !canonical_roots.insert(canonical) {
+                bail!("workspace roots must not alias the same directory");
             }
         }
 

@@ -172,7 +172,9 @@ pub struct ReconcileEntry {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct ReconcilePlan {
     pub binding_id: ProjectionBindingId,
+    pub binding_revision: u64,
     pub workspace_revision: WorkspaceRevision,
+    pub adapter_generation: String,
     pub entries: Vec<ReconcileEntry>,
     pub truncated: bool,
 }
@@ -208,6 +210,29 @@ pub struct DdlSource {
     pub revision: u64,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct DdlSourceMapping {
+    pub connection_profile_id: i64,
+    pub catalog: Option<String>,
+    pub schema: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct DdlDiagnostic {
+    pub path: WorkspacePath,
+    pub message: String,
+    pub error: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct DdlSourceModel {
+    pub source: DdlSource,
+    pub workspace_revision: WorkspaceRevision,
+    pub graph: Option<crate::CatalogGraph>,
+    pub diagnostics: Vec<DdlDiagnostic>,
+    pub mappings: Vec<DdlSourceMapping>,
 }
 
 #[cfg(test)]
