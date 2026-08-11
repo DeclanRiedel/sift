@@ -42,6 +42,7 @@ pub mod room_service;
 mod rpc_provider;
 pub mod run_executor;
 pub mod runtime;
+pub mod scheduler;
 pub mod schema_cache;
 pub mod search;
 pub mod session;

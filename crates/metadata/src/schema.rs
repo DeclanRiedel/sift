@@ -647,6 +647,16 @@ pub struct RunExecutionRecord {
     pub cancellation_requested: bool,
 }
 
+#[derive(Debug, Clone)]
+pub struct NewRunSchedule {
+    pub cron: String,
+    pub timezone: String,
+    pub misfire_policy: sift_protocol::ScheduleMisfirePolicy,
+    pub concurrency_policy: sift_protocol::ScheduleConcurrencyPolicy,
+    pub enabled: bool,
+    pub next_fire_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct RoomAttachment {
     pub id: RoomAttachmentId,

@@ -487,8 +487,12 @@ Detailed implementation order and ADR-034 contract:
       foreground executor over managed session/query paths with explicit
       profile/schema resolution, transaction/error policies, bounded logs,
       cancellation, room events, query history, audit, SDK, and OpenAPI.
-- [ ] [Implement] Durable scheduler; recipe-based import/export; remaining
-      SDK/OpenAPI and remote integration.
+- [x] [Implement] Durable owner-bound scheduler with unique occurrences,
+      generation leases, cron/timezone evaluation, misfire/concurrency policy,
+      per-occurrence reauthorization, conservative restart recovery, operator
+      inspection/resume, audit, SDK, and OpenAPI.
+- [ ] [Implement] Recipe-based import/export; remaining SDK/OpenAPI and remote
+      integration.
 - [ ] [Graduate] Local, SSH-remote, and network-hosted workspace matrices;
       repository credential redaction; concurrent edit/VCS conflict tests;
       deterministic multi-script execution and recovery tests.

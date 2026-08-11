@@ -133,6 +133,7 @@ pub enum ScheduleAction {
     Update,
     Enable,
     Disable,
+    Resume,
     Delete,
 }
 
@@ -742,6 +743,7 @@ impl Operation {
                 | ScheduleAction::Update
                 | ScheduleAction::Enable
                 | ScheduleAction::Disable
+                | ScheduleAction::Resume
                 | ScheduleAction::Delete => OperationKind::ManageSchedule,
             },
             Self::TransferRecipe { action, .. } => match action {
@@ -1192,6 +1194,7 @@ single_word_audit_names!(ScheduleAction {
     Update => "update",
     Enable => "enable",
     Disable => "disable",
+    Resume => "resume",
     Delete => "delete",
 });
 single_word_audit_names!(TransferRecipeAction {

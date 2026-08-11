@@ -489,7 +489,7 @@ fn validate_configuration_targets(
     Ok(())
 }
 
-fn run_configuration_by_id_locked(
+pub(crate) fn run_configuration_by_id_locked(
     conn: &Connection,
     id: RunConfigurationId,
 ) -> Result<RunConfiguration> {
@@ -525,7 +525,10 @@ fn run_configuration_by_id_locked(
     .ok_or(MetadataError::RunConfigurationNotFound(id))
 }
 
-fn run_execution_by_id_locked(conn: &Connection, id: RunId) -> Result<RunExecutionRecord> {
+pub(crate) fn run_execution_by_id_locked(
+    conn: &Connection,
+    id: RunId,
+) -> Result<RunExecutionRecord> {
     conn.query_row(
         "SELECT id, configuration_id, trigger_kind, actor_principal_id, state, manifest_json,
                 resolved_scripts_json, previous_run_id, cancellation_requested, revision,
@@ -695,6 +698,7 @@ mod tests {
 
     use sift_protocol::{
         ConnectionSpec, Engine, RunManifest, RunManifestScript, RunScriptStep,
+        ScheduleConcurrencyPolicy, ScheduleMisfirePolicy, ScheduleOccurrenceState,
         ScriptRevisionPolicy, WorkspaceNodeKind, WorkspacePath,
     };
 
@@ -822,7 +826,7 @@ mod tests {
                 NewRunExecution {
                     configuration_id: configuration.id,
                     trigger: RunTrigger::Interactive,
-                    manifest,
+                    manifest: manifest.clone(),
                     resolved_scripts_json: "{}".into(),
                     previous_run_id: None,
                 },
@@ -859,5 +863,93 @@ mod tests {
             .unwrap();
         assert_eq!(terminal.run.state, RunState::Succeeded);
         assert!(terminal.run.finished_at.is_some());
+
+        let first_fire = "2026-08-11T12:00:00Z".parse().unwrap();
+        let second_fire = "2026-08-11T12:01:00Z".parse().unwrap();
+        let schedule = store
+            .create_run_schedule(
+                configuration.id,
+                actor,
+                crate::NewRunSchedule {
+                    cron: "* * * * *".into(),
+                    timezone: "UTC".into(),
+                    misfire_policy: ScheduleMisfirePolicy::RunOnce,
+                    concurrency_policy: ScheduleConcurrencyPolicy::QueueOne,
+                    enabled: true,
+                    next_fire_at: Some(first_fire),
+                },
+            )
+            .unwrap();
+        let occurrence = store
+            .advance_and_enqueue_schedule(schedule.id, first_fire, second_fire, true)
+            .unwrap()
+            .unwrap();
+        assert!(store
+            .advance_and_enqueue_schedule(schedule.id, first_fire, second_fire, true)
+            .unwrap()
+            .is_none());
+        let claimed = store
+            .claim_queued_occurrences(first_fire, "generation:test", 10)
+            .unwrap();
+        assert_eq!(claimed.len(), 1);
+        store
+            .finish_schedule_occurrence(
+                occurrence.id,
+                ScheduleOccurrenceState::Blocked,
+                Some("test_block"),
+            )
+            .unwrap();
+        let resumed = store
+            .resume_schedule_occurrence(occurrence.id, actor)
+            .unwrap();
+        assert_eq!(resumed.state, ScheduleOccurrenceState::Queued);
+
+        let third_fire = "2026-08-11T12:02:00Z".parse().unwrap();
+        assert!(store
+            .advance_and_enqueue_schedule(schedule.id, second_fire, third_fire, true)
+            .unwrap()
+            .is_none());
+        let claimed = store
+            .claim_queued_occurrences(second_fire, "generation:test", 10)
+            .unwrap();
+        let run = store
+            .create_run_execution(
+                actor,
+                NewRunExecution {
+                    configuration_id: configuration.id,
+                    trigger: RunTrigger::Schedule,
+                    manifest,
+                    resolved_scripts_json: "{}".into(),
+                    previous_run_id: None,
+                },
+            )
+            .unwrap()
+            .run;
+        for (from, to) in [
+            (RunState::Queued, RunState::Admitted),
+            (RunState::Admitted, RunState::Preparing),
+            (RunState::Preparing, RunState::Running),
+        ] {
+            store.transition_run(run.id, actor, &[from], to).unwrap();
+        }
+        store
+            .attach_occurrence_run(claimed[0].1.id, run.id)
+            .unwrap();
+        store.recover_interrupted_runs(third_fire).unwrap();
+        assert_eq!(
+            store
+                .run_execution_for_principal(run.id, actor, false)
+                .unwrap()
+                .run
+                .state,
+            RunState::OutcomeUnknown
+        );
+        assert_eq!(
+            store
+                .schedule_occurrence_for_principal(claimed[0].1.id, actor, false)
+                .unwrap()
+                .state,
+            ScheduleOccurrenceState::OutcomeUnknown
+        );
     }
 }

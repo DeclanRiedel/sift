@@ -51,13 +51,13 @@ use sift_protocol::{
     RefreshAuthRequest, RegisterPrincipalKeyRequest, RepositoryBinding, RepositoryBindingId,
     RoomClientMessage, RoomQueryResult, RoomServerMessage, Run, RunAction, RunConfiguration,
     RunConfigurationAction, RunConfigurationId, RunId, RunLogEntry, RunManifest, RunManifestScript,
-    RunState, RunStepResult, RunTrigger, SavepointRequest, SchemaFilter, SchemaScope,
-    SshProxyAccessGrant, SshProxyCapabilityExchangeRequest, TransactionPreviewRequest,
-    UpdateConnectionPolicyRequest, UpdateTenantLimitsRequest, VcsAction, VcsBranch,
-    VcsCommitResult, VcsDiff, VcsPendingOperation, VcsRemoteResult, VcsStatus, WebAuthResponse,
-    WhoAmIResponse, Workspace, WorkspaceAction, WorkspaceCheckpoint, WorkspaceCheckpointId,
-    WorkspaceId, WorkspaceNodeId, WorkspaceNodeKind, WsClientMessage, WsServerMessage,
-    PROTOCOL_VERSION, PROTOCOL_VERSION_NUMBER,
+    RunSchedule, RunState, RunStepResult, RunTrigger, SavepointRequest, ScheduleAction, ScheduleId,
+    ScheduleOccurrence, ScheduleOccurrenceId, SchemaFilter, SchemaScope, SshProxyAccessGrant,
+    SshProxyCapabilityExchangeRequest, TransactionPreviewRequest, UpdateConnectionPolicyRequest,
+    UpdateTenantLimitsRequest, VcsAction, VcsBranch, VcsCommitResult, VcsDiff, VcsPendingOperation,
+    VcsRemoteResult, VcsStatus, WebAuthResponse, WhoAmIResponse, Workspace, WorkspaceAction,
+    WorkspaceCheckpoint, WorkspaceCheckpointId, WorkspaceId, WorkspaceNodeId, WorkspaceNodeKind,
+    WsClientMessage, WsServerMessage, PROTOCOL_VERSION, PROTOCOL_VERSION_NUMBER,
 };
 
 use crate::config::{DeploymentPolicy, RuntimeMode, Transport};
@@ -117,6 +117,9 @@ impl Default for AuthState {
 pub fn app(state: AppState) -> Router {
     if let Some(metadata) = &state.metadata {
         state.sessions.set_authorization_store(metadata.clone());
+        if tokio::runtime::Handle::try_current().is_ok() {
+            crate::scheduler::Scheduler::start(state.clone(), metadata.clone());
+        }
     }
     let router = ApiRouter::new()
         .api_route(
@@ -516,6 +519,30 @@ pub fn app(state: AppState) -> Router {
         .api_route(
             "/v1/metadata/run-configurations/:id/runs",
             post_with(start_run, doc("startRun", "Capture and start an immutable foreground run")),
+        )
+        .api_route(
+            "/v1/metadata/run-configurations/:id/schedules",
+            get_with(list_run_schedules, doc("listRunSchedules", "List durable schedules for a run configuration")).post_with(create_run_schedule, doc("createRunSchedule", "Create an owner-bound durable run schedule")),
+        )
+        .api_route(
+            "/v1/metadata/schedules/:id",
+            get_with(get_run_schedule, doc("getRunSchedule", "Get a durable run schedule")).put_with(update_run_schedule, doc("updateRunSchedule", "Update a run schedule by revision")).delete_with(delete_run_schedule, doc("deleteRunSchedule", "Delete a run schedule by revision")),
+        )
+        .api_route(
+            "/v1/metadata/schedules/:id/enable",
+            post_with(enable_run_schedule, doc("enableRunSchedule", "Enable a run schedule by revision")),
+        )
+        .api_route(
+            "/v1/metadata/schedules/:id/disable",
+            post_with(disable_run_schedule, doc("disableRunSchedule", "Disable a run schedule by revision")),
+        )
+        .api_route(
+            "/v1/metadata/schedules/:id/occurrences",
+            get_with(list_schedule_occurrences, doc("listScheduleOccurrences", "Inspect durable schedule occurrences")),
+        )
+        .api_route(
+            "/v1/metadata/schedule-occurrences/:id/resume",
+            post_with(resume_schedule_occurrence, doc("resumeScheduleOccurrence", "Requeue a blocked occurrence after reauthorization")),
         )
         .api_route(
             "/v1/metadata/runs/:id",
@@ -1556,13 +1583,14 @@ use sift_metadata::http::{
     AddRoomMemberRequest, ApplyWorkspaceProjectionRequest, BindRepositoryRequest,
     BindRoomConnectionRequest, BindWorkspaceProjectionRequest, CreateDdlSourceRequest,
     CreateDocumentRequest, CreateRoomRequest, CreateRunConfigurationRequest,
-    CreateSavedQueryRequest, CreateWorkspaceCheckpointRequest, CreateWorkspaceNodeRequest,
-    CreateWorkspaceRequest, ExpectedDdlSourceRevisionRequest, ExpectedProjectionRevisionRequest,
-    ExpectedRepositoryRevisionRequest, ExpectedRunConfigurationRevisionRequest,
-    ExpectedWorkspaceRevisionRequest, IssueTokenRequest, IssueTokenResponse,
-    MoveWorkspaceNodeRequest, OpenConnectionFromProfileRequest, RestoreWorkspaceCheckpointRequest,
-    RunLogQuery, SetCredentialRequest, SetVcsCredentialRequest, StartRunRequest,
-    UpdateDdlSourceRequest, UpdateDocumentSnapshotRequest, UpdateRunConfigurationRequest,
+    CreateRunScheduleRequest, CreateSavedQueryRequest, CreateWorkspaceCheckpointRequest,
+    CreateWorkspaceNodeRequest, CreateWorkspaceRequest, ExpectedDdlSourceRevisionRequest,
+    ExpectedProjectionRevisionRequest, ExpectedRepositoryRevisionRequest,
+    ExpectedRunConfigurationRevisionRequest, ExpectedWorkspaceRevisionRequest, IssueTokenRequest,
+    IssueTokenResponse, MoveWorkspaceNodeRequest, OpenConnectionFromProfileRequest,
+    RestoreWorkspaceCheckpointRequest, RunLogQuery, ScheduleOccurrenceQuery, SetCredentialRequest,
+    SetVcsCredentialRequest, StartRunRequest, UpdateDdlSourceRequest,
+    UpdateDocumentSnapshotRequest, UpdateRunConfigurationRequest, UpdateRunScheduleRequest,
     UpdateSavedQueryRequest, UpdateWorkspaceRequest, UpsertConnectionProfileRequest,
     VcsCommitRequest, VcsDiffQuery, VcsPathsRequest, VcsRemoteRequest, WorkspaceBatchMutationItem,
     WorkspaceBatchMutationRequest, WorkspaceCheckpointPageQuery, WorkspaceTreeResponse,
@@ -7623,6 +7651,24 @@ fn run_id(id: i64) -> ApiResult<RunId> {
     }
 }
 
+fn schedule_id(id: i64) -> ApiResult<ScheduleId> {
+    if id > 0 {
+        Ok(ScheduleId(id))
+    } else {
+        Err(ApiError::BadRequest("schedule id must be positive".into()))
+    }
+}
+
+fn schedule_occurrence_id(id: i64) -> ApiResult<ScheduleOccurrenceId> {
+    if id > 0 {
+        Ok(ScheduleOccurrenceId(id))
+    } else {
+        Err(ApiError::BadRequest(
+            "schedule occurrence id must be positive".into(),
+        ))
+    }
+}
+
 fn authorize_run_configuration_operation(
     state: &AppState,
     auth: &AuthContext,
@@ -7706,6 +7752,52 @@ fn push_run_operation(
             action,
             workspace_id,
             run_id,
+        },
+        OperationStatus::Succeeded,
+        Some(actor.0),
+        None,
+        None,
+        None,
+    );
+}
+
+fn authorize_schedule_operation(
+    state: &AppState,
+    auth: &AuthContext,
+    workspace_id: WorkspaceId,
+    schedule_id: Option<ScheduleId>,
+    action: ScheduleAction,
+) -> ApiResult<()> {
+    let context = sift_protocol::OperationCapabilityContext {
+        workspace_id: Some(workspace_id),
+        ..Default::default()
+    };
+    let scope = capability_authorization_scope(state, Some(auth), &context)?
+        .ok_or(ApiError::Unauthorized)?;
+    crate::authorization::authorize(
+        &scope,
+        Operation::Schedule {
+            action,
+            workspace_id,
+            schedule_id,
+        }
+        .kind(),
+    )
+    .map_err(|denial| ApiError::Forbidden(denial.public_reason().into()))
+}
+
+fn push_schedule_operation(
+    state: &AppState,
+    actor: PrincipalId,
+    workspace_id: WorkspaceId,
+    schedule_id: Option<ScheduleId>,
+    action: ScheduleAction,
+) {
+    state.sessions.push_operation_full(
+        Operation::Schedule {
+            action,
+            workspace_id,
+            schedule_id,
         },
         OperationStatus::Succeeded,
         Some(actor.0),
@@ -7915,7 +8007,7 @@ async fn delete_run_configuration(
     Ok(Json(json!({"ok": true})))
 }
 
-fn capture_run_payload(
+pub(crate) fn capture_run_payload(
     metadata: &MetadataStore,
     rooms: &RoomRuntime,
     actor: PrincipalId,
@@ -8338,6 +8430,363 @@ async fn rerun(
         RunAction::Rerun,
     );
     Ok(Json(record.run))
+}
+
+fn new_run_schedule(request: CreateRunScheduleRequest) -> ApiResult<sift_metadata::NewRunSchedule> {
+    let next_fire_at = request
+        .enabled
+        .then(|| {
+            crate::scheduler::next_cron_fire(&request.cron, &request.timezone, chrono::Utc::now())
+        })
+        .transpose()?;
+    if !request.enabled {
+        crate::scheduler::next_cron_fire(&request.cron, &request.timezone, chrono::Utc::now())?;
+    }
+    Ok(sift_metadata::NewRunSchedule {
+        cron: request.cron,
+        timezone: request.timezone,
+        misfire_policy: request.misfire_policy,
+        concurrency_policy: request.concurrency_policy,
+        enabled: request.enabled,
+        next_fire_at,
+    })
+}
+
+async fn list_run_schedules(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+) -> ApiResult<Json<Vec<RunSchedule>>> {
+    let metadata = metadata_store_cloned(&state)?;
+    let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
+    let configuration_id = run_configuration_id(id)?;
+    let actor = auth.principal_id;
+    let configuration = metadata_blocking({
+        let metadata = metadata.clone();
+        move || {
+            metadata
+                .run_configuration_for_principal(configuration_id, actor, false)
+                .map_err(Into::into)
+        }
+    })
+    .await?;
+    authorize_schedule_operation(
+        &state,
+        &auth,
+        configuration.workspace_id,
+        None,
+        ScheduleAction::Read,
+    )?;
+    let schedules = metadata_blocking(move || {
+        metadata
+            .list_run_schedules_for_principal(configuration_id, actor)
+            .map_err(Into::into)
+    })
+    .await?;
+    push_schedule_operation(
+        &state,
+        actor,
+        configuration.workspace_id,
+        None,
+        ScheduleAction::Read,
+    );
+    Ok(Json(schedules))
+}
+
+async fn create_run_schedule(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+    Json(request): Json<CreateRunScheduleRequest>,
+) -> ApiResult<Json<RunSchedule>> {
+    let metadata = metadata_store_cloned(&state)?;
+    let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
+    let configuration_id = run_configuration_id(id)?;
+    let actor = auth.principal_id;
+    let configuration = metadata_blocking({
+        let metadata = metadata.clone();
+        move || {
+            metadata
+                .run_configuration_for_principal(configuration_id, actor, true)
+                .map_err(Into::into)
+        }
+    })
+    .await?;
+    authorize_schedule_operation(
+        &state,
+        &auth,
+        configuration.workspace_id,
+        None,
+        ScheduleAction::Create,
+    )?;
+    if configuration
+        .variables
+        .iter()
+        .any(|variable| variable.required)
+    {
+        return Err(ApiError::BadRequest(
+            "scheduled runs require stored variable bindings".into(),
+        ));
+    }
+    let input = new_run_schedule(request)?;
+    let schedule = metadata_blocking(move || {
+        metadata
+            .create_run_schedule(configuration_id, actor, input)
+            .map_err(Into::into)
+    })
+    .await?;
+    push_schedule_operation(
+        &state,
+        actor,
+        configuration.workspace_id,
+        Some(schedule.id),
+        ScheduleAction::Create,
+    );
+    Ok(Json(schedule))
+}
+
+async fn schedule_and_workspace(
+    metadata: MetadataStore,
+    schedule_id: ScheduleId,
+    actor: PrincipalId,
+    writable: bool,
+) -> ApiResult<(RunSchedule, WorkspaceId)> {
+    metadata_blocking(move || {
+        let schedule = metadata.run_schedule_for_principal(schedule_id, actor, writable)?;
+        let configuration =
+            metadata.run_configuration_for_principal(schedule.configuration_id, actor, writable)?;
+        Ok::<_, ApiError>((schedule, configuration.workspace_id))
+    })
+    .await
+}
+
+async fn get_run_schedule(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+) -> ApiResult<Json<RunSchedule>> {
+    let metadata = metadata_store_cloned(&state)?;
+    let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
+    let id = schedule_id(id)?;
+    let (schedule, workspace_id) =
+        schedule_and_workspace(metadata, id, auth.principal_id, false).await?;
+    authorize_schedule_operation(&state, &auth, workspace_id, Some(id), ScheduleAction::Read)?;
+    push_schedule_operation(
+        &state,
+        auth.principal_id,
+        workspace_id,
+        Some(id),
+        ScheduleAction::Read,
+    );
+    Ok(Json(schedule))
+}
+
+async fn update_run_schedule(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+    Json(request): Json<UpdateRunScheduleRequest>,
+) -> ApiResult<Json<RunSchedule>> {
+    let metadata = metadata_store_cloned(&state)?;
+    let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
+    let id = schedule_id(id)?;
+    let (_, workspace_id) =
+        schedule_and_workspace(metadata.clone(), id, auth.principal_id, true).await?;
+    authorize_schedule_operation(
+        &state,
+        &auth,
+        workspace_id,
+        Some(id),
+        ScheduleAction::Update,
+    )?;
+    let input = new_run_schedule(request.schedule)?;
+    let actor = auth.principal_id;
+    let schedule = metadata_blocking(move || {
+        metadata
+            .update_run_schedule(id, actor, request.expected_revision, input)
+            .map_err(Into::into)
+    })
+    .await?;
+    push_schedule_operation(
+        &state,
+        actor,
+        workspace_id,
+        Some(id),
+        ScheduleAction::Update,
+    );
+    Ok(Json(schedule))
+}
+
+async fn set_run_schedule_enabled(
+    state: AppState,
+    headers: HeaderMap,
+    id: i64,
+    request: ExpectedRunConfigurationRevisionRequest,
+    enabled: bool,
+) -> ApiResult<Json<RunSchedule>> {
+    let metadata = metadata_store_cloned(&state)?;
+    let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
+    let id = schedule_id(id)?;
+    let (current, workspace_id) =
+        schedule_and_workspace(metadata.clone(), id, auth.principal_id, true).await?;
+    let action = if enabled {
+        ScheduleAction::Enable
+    } else {
+        ScheduleAction::Disable
+    };
+    authorize_schedule_operation(&state, &auth, workspace_id, Some(id), action)?;
+    let next_fire_at = enabled
+        .then(|| {
+            crate::scheduler::next_cron_fire(&current.cron, &current.timezone, chrono::Utc::now())
+        })
+        .transpose()?;
+    let actor = auth.principal_id;
+    let updated = metadata_blocking(move || {
+        metadata
+            .update_run_schedule(
+                id,
+                actor,
+                request.expected_revision,
+                sift_metadata::NewRunSchedule {
+                    cron: current.cron,
+                    timezone: current.timezone,
+                    misfire_policy: current.misfire_policy,
+                    concurrency_policy: current.concurrency_policy,
+                    enabled,
+                    next_fire_at,
+                },
+            )
+            .map_err(Into::into)
+    })
+    .await?;
+    push_schedule_operation(&state, actor, workspace_id, Some(id), action);
+    Ok(Json(updated))
+}
+
+async fn enable_run_schedule(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+    Json(request): Json<ExpectedRunConfigurationRevisionRequest>,
+) -> ApiResult<Json<RunSchedule>> {
+    set_run_schedule_enabled(state, headers, id, request, true).await
+}
+
+async fn disable_run_schedule(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+    Json(request): Json<ExpectedRunConfigurationRevisionRequest>,
+) -> ApiResult<Json<RunSchedule>> {
+    set_run_schedule_enabled(state, headers, id, request, false).await
+}
+
+async fn delete_run_schedule(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+    Json(request): Json<ExpectedRunConfigurationRevisionRequest>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let metadata = metadata_store_cloned(&state)?;
+    let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
+    let id = schedule_id(id)?;
+    let (_, workspace_id) =
+        schedule_and_workspace(metadata.clone(), id, auth.principal_id, true).await?;
+    authorize_schedule_operation(
+        &state,
+        &auth,
+        workspace_id,
+        Some(id),
+        ScheduleAction::Delete,
+    )?;
+    let actor = auth.principal_id;
+    metadata_blocking(move || {
+        metadata
+            .delete_run_schedule(id, actor, request.expected_revision)
+            .map_err(Into::into)
+    })
+    .await?;
+    push_schedule_operation(
+        &state,
+        actor,
+        workspace_id,
+        Some(id),
+        ScheduleAction::Delete,
+    );
+    Ok(Json(json!({"ok": true})))
+}
+
+async fn list_schedule_occurrences(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+    Query(query): Query<ScheduleOccurrenceQuery>,
+) -> ApiResult<Json<Vec<ScheduleOccurrence>>> {
+    let metadata = metadata_store_cloned(&state)?;
+    let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
+    let id = schedule_id(id)?;
+    let (_, workspace_id) =
+        schedule_and_workspace(metadata.clone(), id, auth.principal_id, false).await?;
+    authorize_schedule_operation(&state, &auth, workspace_id, Some(id), ScheduleAction::Read)?;
+    let actor = auth.principal_id;
+    let occurrences = metadata_blocking(move || {
+        metadata
+            .list_schedule_occurrences_for_principal(id, actor, query.limit)
+            .map_err(Into::into)
+    })
+    .await?;
+    push_schedule_operation(&state, actor, workspace_id, Some(id), ScheduleAction::Read);
+    Ok(Json(occurrences))
+}
+
+async fn resume_schedule_occurrence(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+) -> ApiResult<Json<ScheduleOccurrence>> {
+    let metadata = metadata_store_cloned(&state)?;
+    let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
+    let occurrence_id = schedule_occurrence_id(id)?;
+    let actor = auth.principal_id;
+    let (occurrence, schedule, configuration) = metadata_blocking({
+        let metadata = metadata.clone();
+        move || {
+            let occurrence =
+                metadata.schedule_occurrence_for_principal(occurrence_id, actor, true)?;
+            let schedule =
+                metadata.run_schedule_for_principal(occurrence.schedule_id, actor, true)?;
+            let configuration =
+                metadata.run_configuration_for_principal(schedule.configuration_id, actor, true)?;
+            Ok::<_, ApiError>((occurrence, schedule, configuration))
+        }
+    })
+    .await?;
+    authorize_schedule_operation(
+        &state,
+        &auth,
+        configuration.workspace_id,
+        Some(schedule.id),
+        ScheduleAction::Resume,
+    )?;
+    if occurrence.run_id.is_some() {
+        return Err(ApiError::BadRequest(
+            "an occurrence with a run must use audited rerun".into(),
+        ));
+    }
+    let resumed = metadata_blocking(move || {
+        metadata
+            .resume_schedule_occurrence(occurrence_id, actor)
+            .map_err(Into::into)
+    })
+    .await?;
+    push_schedule_operation(
+        &state,
+        actor,
+        configuration.workspace_id,
+        Some(schedule.id),
+        ScheduleAction::Resume,
+    );
+    Ok(Json(resumed))
 }
 
 async fn list_ddl_sources(

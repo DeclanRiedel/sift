@@ -4,8 +4,8 @@ Status: accepted implementation contract; ADR-034 is graduated. Implementation
 is in progress.
 
 Milestones: L0 contract lock, L1 virtual workspaces/history, L2 projections and
-offline DDL sources, L3 bundled Git, and L4 foreground runs are complete;
-L5–L7 remain.
+offline DDL sources, L3 bundled Git, L4 foreground runs, and L5 durable
+scheduling are complete; L6–L7 remain.
 
 This plan expands Phase L in `server-build-list-v2.md`. It is intentionally
 ordered design-first: slice L0 locks the topology before any public workspace
@@ -467,6 +467,17 @@ Exit: an ordered multi-script run is deterministic from its manifest, cancel
 does not wedge the server, and restart never auto-replays an uncertain write.
 
 ### L5 — Durable scheduler and recovery
+
+Status: complete. V036 persists owner-bound schedules and uniquely keyed
+occurrences. A process-generation lease claims occurrences atomically;
+five-field cron is evaluated with IANA timezone data and bounded catch-up,
+while `forbid`, `queue_one`, and bounded parallel policies are enforced before
+admission. Every occurrence re-resolves its active owner, room access,
+configuration, profile, schema, credentials, policy, and executor quotas.
+Unavailable authority or dependencies block/reject and disable the schedule;
+an audited resume requeues only occurrences that never acquired a run. Startup
+marks interrupted database work `outcome_unknown` and pre-execution work
+`blocked`, never replaying either automatically.
 
 1. Add schedules, occurrences, scheduler leases, misfire/concurrency policies,
    retention, and clock abstraction.

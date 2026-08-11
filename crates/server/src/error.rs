@@ -155,6 +155,7 @@ impl ApiError {
                 | MetadataError::RepositoryBindingNotFound(_)
                 | MetadataError::RunConfigurationNotFound(_)
                 | MetadataError::RunNotFound(_)
+                | MetadataError::RunScheduleNotFound(_)
                 | MetadataError::CatalogSnapshotNotFound
                 | MetadataError::MigrationRunNotFound
                 | MetadataError::PlanCaptureNotFound
@@ -197,6 +198,9 @@ impl ApiError {
                 }
                 MetadataError::RunConfigurationRevisionConflict { .. } => {
                     (StatusCode::CONFLICT, "run_configuration_revision_conflict")
+                }
+                MetadataError::RunScheduleRevisionConflict { .. } => {
+                    (StatusCode::CONFLICT, "run_schedule_revision_conflict")
                 }
                 MetadataError::InvalidRunTransition => {
                     (StatusCode::CONFLICT, "invalid_run_transition")
@@ -271,6 +275,7 @@ impl ApiError {
                 | MetadataError::InvalidDdlSource
                 | MetadataError::InvalidRepositoryBinding
                 | MetadataError::InvalidRunConfiguration
+                | MetadataError::InvalidRunSchedule
                 | MetadataError::Json(_) => (StatusCode::BAD_REQUEST, "bad_request"),
                 MetadataError::ExtensionStorageValueTooLarge { .. }
                 | MetadataError::CatalogSnapshotTooLarge { .. }

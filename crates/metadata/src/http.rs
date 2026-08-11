@@ -304,6 +304,37 @@ pub struct RunLogQuery {
     pub limit: u32,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct CreateRunScheduleRequest {
+    pub cron: String,
+    pub timezone: String,
+    pub misfire_policy: sift_protocol::ScheduleMisfirePolicy,
+    pub concurrency_policy: sift_protocol::ScheduleConcurrencyPolicy,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct UpdateRunScheduleRequest {
+    pub expected_revision: u64,
+    #[serde(flatten)]
+    pub schedule: CreateRunScheduleRequest,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct ScheduleOccurrenceQuery {
+    #[serde(default = "default_schedule_occurrence_limit")]
+    pub limit: u32,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_schedule_occurrence_limit() -> u32 {
+    100
+}
+
 fn default_run_log_limit() -> u32 {
     200
 }

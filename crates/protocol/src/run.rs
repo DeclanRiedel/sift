@@ -14,6 +14,7 @@ macro_rules! integer_id {
 integer_id!(RunConfigurationId);
 integer_id!(RunId);
 integer_id!(ScheduleId);
+integer_id!(ScheduleOccurrenceId);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
@@ -202,4 +203,29 @@ pub struct RunSchedule {
     pub enabled: bool,
     pub next_fire_at: Option<DateTime<Utc>>,
     pub revision: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ScheduleOccurrenceState {
+    Queued,
+    Leased,
+    Running,
+    Succeeded,
+    Failed,
+    Blocked,
+    Rejected,
+    OutcomeUnknown,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ScheduleOccurrence {
+    pub id: ScheduleOccurrenceId,
+    pub schedule_id: ScheduleId,
+    pub scheduled_for: DateTime<Utc>,
+    pub state: ScheduleOccurrenceState,
+    pub run_id: Option<RunId>,
+    pub error_code: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub finished_at: Option<DateTime<Utc>>,
 }

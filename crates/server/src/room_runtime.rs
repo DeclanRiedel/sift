@@ -1,4 +1,4 @@
-use std::sync::atomic::{AtomicI64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicUsize, Ordering};
 use std::sync::{Arc, RwLock, Weak};
 use std::time::{Duration, Instant};
 
@@ -24,6 +24,7 @@ struct RoomRuntimeInner {
     git_adapter: RwLock<Option<Arc<crate::git_adapter::GitAdapter>>>,
     vcs_pending: DashMap<(i64, String), sift_protocol::VcsPendingOperation>,
     run_cancellations: DashMap<i64, tokio_util::sync::CancellationToken>,
+    scheduler_started: AtomicBool,
 }
 
 struct RoomRuntimeRoom {
@@ -75,6 +76,9 @@ pub struct RoomAttachment {
 }
 
 impl RoomRuntime {
+    pub fn start_scheduler_once(&self) -> bool {
+        !self.inner.scheduler_started.swap(true, Ordering::AcqRel)
+    }
     pub fn with_workspace_config(
         config: &crate::config::WorkspaceProjectionConfig,
     ) -> Result<Self, crate::workspace_adapter::WorkspaceAdapterError> {

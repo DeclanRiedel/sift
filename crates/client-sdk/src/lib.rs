@@ -211,15 +211,24 @@ pub const SUPPORTED_HTTP_OPERATION_IDS: &[&str] = &[
     "validateExtension",
     "cancelRun",
     "createRunConfiguration",
+    "createRunSchedule",
     "deleteRunConfiguration",
+    "deleteRunSchedule",
+    "disableRunSchedule",
+    "enableRunSchedule",
     "getRun",
     "getRunConfiguration",
     "getRunLogs",
     "getRunSteps",
+    "getRunSchedule",
     "listRunConfigurations",
+    "listRunSchedules",
+    "listScheduleOccurrences",
     "rerun",
+    "resumeScheduleOccurrence",
     "startRun",
     "updateRunConfiguration",
+    "updateRunSchedule",
     "validateRunConfiguration",
     "whoAmI",
 ];
@@ -231,14 +240,15 @@ pub use sift_metadata::http::{
     AddRoomMemberRequest, ApplyWorkspaceProjectionRequest, BindRepositoryRequest,
     BindRoomConnectionRequest, BindWorkspaceProjectionRequest, CreateDdlSourceRequest,
     CreateDocumentRequest, CreateRoomRequest, CreateRunConfigurationRequest,
-    CreateSavedQueryRequest, CreateWorkspaceCheckpointRequest, CreateWorkspaceNodeRequest,
-    CreateWorkspaceRequest, ExpectedDdlSourceRevisionRequest, ExpectedProjectionRevisionRequest,
-    ExpectedRepositoryRevisionRequest, ExpectedRunConfigurationRevisionRequest,
-    ExpectedWorkspaceRevisionRequest, IssueTokenRequest, IssueTokenResponse,
-    MoveWorkspaceNodeRequest, OpenConnectionFromProfileRequest, ProjectionResolutionRequest,
-    RestoreWorkspaceCheckpointRequest, RunLogQuery, SetCredentialRequest, SetVcsCredentialRequest,
-    StartRunRequest, UpdateDdlSourceRequest, UpdateDocumentSnapshotRequest,
-    UpdateRunConfigurationRequest, UpdateSavedQueryRequest, UpdateWorkspaceRequest,
+    CreateRunScheduleRequest, CreateSavedQueryRequest, CreateWorkspaceCheckpointRequest,
+    CreateWorkspaceNodeRequest, CreateWorkspaceRequest, ExpectedDdlSourceRevisionRequest,
+    ExpectedProjectionRevisionRequest, ExpectedRepositoryRevisionRequest,
+    ExpectedRunConfigurationRevisionRequest, ExpectedWorkspaceRevisionRequest, IssueTokenRequest,
+    IssueTokenResponse, MoveWorkspaceNodeRequest, OpenConnectionFromProfileRequest,
+    ProjectionResolutionRequest, RestoreWorkspaceCheckpointRequest, RunLogQuery,
+    ScheduleOccurrenceQuery, SetCredentialRequest, SetVcsCredentialRequest, StartRunRequest,
+    UpdateDdlSourceRequest, UpdateDocumentSnapshotRequest, UpdateRunConfigurationRequest,
+    UpdateRunScheduleRequest, UpdateSavedQueryRequest, UpdateWorkspaceRequest,
     UpsertConnectionProfileRequest, VcsCommitRequest, VcsDiffQuery, VcsPathsRequest,
     VcsRemoteRequest, WorkspaceBatchMutationItem, WorkspaceBatchMutationRequest,
     WorkspaceTreeResponse,
@@ -271,8 +281,9 @@ use sift_protocol::{
     ProtocolRange, ProviderDescriptor, Readiness, ReconcilePlan, RefreshAuthRequest,
     RegisterPrincipalKeyRequest, RepositoryBinding, RepositoryBindingId, RoomQueryResult,
     RoomResultId, RoomResultPages, RoomSelection, Run, RunConfiguration, RunConfigurationId, RunId,
-    RunLogEntry, RunManifest, RunStepResult, SavepointRequest, SchemaSearchRequest,
-    SchemaSearchResponse, SchemaSnapshot, ServerInfo, SessionId, SessionInfo, SshProxyAccessGrant,
+    RunLogEntry, RunManifest, RunSchedule, RunStepResult, SavepointRequest, ScheduleId,
+    ScheduleOccurrence, ScheduleOccurrenceId, SchemaSearchRequest, SchemaSearchResponse,
+    SchemaSnapshot, ServerInfo, SessionId, SessionInfo, SshProxyAccessGrant,
     SshProxyCapabilityExchangeRequest, TenantResourceLimits, TenantUsageSnapshot, ToolContext,
     TransactionEndAction, TransactionInfo, TransactionPreview, TransactionPreviewRequest,
     TransactionState, TxHandleRef, TxId, TxMode, UpdateConnectionPolicyRequest,
@@ -2651,6 +2662,102 @@ impl Client {
     pub async fn rerun(&self, run: RunId, request: StartRunRequest) -> Result<Run> {
         self.post(&format!("/v1/metadata/runs/{}/rerun", run.0), &request)
             .await
+    }
+
+    pub async fn run_schedules(
+        &self,
+        configuration: RunConfigurationId,
+    ) -> Result<Vec<RunSchedule>> {
+        self.get(&format!(
+            "/v1/metadata/run-configurations/{}/schedules",
+            configuration.0
+        ))
+        .await
+    }
+
+    pub async fn create_run_schedule(
+        &self,
+        configuration: RunConfigurationId,
+        request: CreateRunScheduleRequest,
+    ) -> Result<RunSchedule> {
+        self.post(
+            &format!(
+                "/v1/metadata/run-configurations/{}/schedules",
+                configuration.0
+            ),
+            &request,
+        )
+        .await
+    }
+
+    pub async fn run_schedule(&self, schedule: ScheduleId) -> Result<RunSchedule> {
+        self.get(&format!("/v1/metadata/schedules/{}", schedule.0))
+            .await
+    }
+
+    pub async fn update_run_schedule(
+        &self,
+        schedule: ScheduleId,
+        request: UpdateRunScheduleRequest,
+    ) -> Result<RunSchedule> {
+        self.put(&format!("/v1/metadata/schedules/{}", schedule.0), &request)
+            .await
+    }
+
+    pub async fn delete_run_schedule(
+        &self,
+        schedule: ScheduleId,
+        request: ExpectedRunConfigurationRevisionRequest,
+    ) -> Result<()> {
+        self.delete_body(&format!("/v1/metadata/schedules/{}", schedule.0), &request)
+            .await
+    }
+
+    pub async fn enable_run_schedule(
+        &self,
+        schedule: ScheduleId,
+        request: ExpectedRunConfigurationRevisionRequest,
+    ) -> Result<RunSchedule> {
+        self.post(
+            &format!("/v1/metadata/schedules/{}/enable", schedule.0),
+            &request,
+        )
+        .await
+    }
+
+    pub async fn disable_run_schedule(
+        &self,
+        schedule: ScheduleId,
+        request: ExpectedRunConfigurationRevisionRequest,
+    ) -> Result<RunSchedule> {
+        self.post(
+            &format!("/v1/metadata/schedules/{}/disable", schedule.0),
+            &request,
+        )
+        .await
+    }
+
+    pub async fn schedule_occurrences(
+        &self,
+        schedule: ScheduleId,
+        query: ScheduleOccurrenceQuery,
+    ) -> Result<Vec<ScheduleOccurrence>> {
+        self.get(&format!(
+            "/v1/metadata/schedules/{}/occurrences?limit={}",
+            schedule.0, query.limit
+        ))
+        .await
+    }
+
+    pub async fn resume_schedule_occurrence(
+        &self,
+        occurrence: ScheduleOccurrenceId,
+    ) -> Result<ScheduleOccurrence> {
+        self.post_empty(&format!(
+            "/v1/metadata/schedule-occurrences/{}/resume",
+            occurrence.0
+        ))
+        .await
     }
 
     pub async fn ddl_sources(&self, workspace: WorkspaceId) -> Result<Vec<DdlSource>> {
