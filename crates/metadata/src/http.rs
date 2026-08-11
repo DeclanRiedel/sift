@@ -9,9 +9,10 @@ use chrono::{DateTime, Utc};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use sift_protocol::{
-    DdlSourceMapping, ProjectionMode, ProviderId, ReconcileEntry, ReconcileResolution, Workspace,
-    WorkspaceCheckpointId, WorkspaceCheckpointReason, WorkspaceNode, WorkspaceNodeId,
-    WorkspaceNodeKind, WorkspacePath, WorkspaceRevision,
+    DdlSourceMapping, ProjectionBindingId, ProjectionMode, ProviderId, ReconcileEntry,
+    ReconcileResolution, RedactedString, VcsDiffSide, Workspace, WorkspaceCheckpointId,
+    WorkspaceCheckpointReason, WorkspaceNode, WorkspaceNodeId, WorkspaceNodeKind, WorkspacePath,
+    WorkspaceRevision,
 };
 
 use crate::{ApiTokenRow, CredentialMode, RoomKind, RoomRole};
@@ -179,6 +180,75 @@ pub struct UpdateDdlSourceRequest {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct ExpectedDdlSourceRevisionRequest {
     pub expected_revision: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct BindRepositoryRequest {
+    pub projection_id: ProjectionBindingId,
+    #[serde(default)]
+    pub initialize: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct ExpectedRepositoryRevisionRequest {
+    pub expected_revision: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct VcsDiffQuery {
+    #[serde(default = "default_vcs_diff_side")]
+    pub side: VcsDiffSide,
+    #[serde(default)]
+    pub path: Option<WorkspacePath>,
+}
+
+fn default_vcs_diff_side() -> VcsDiffSide {
+    VcsDiffSide::IndexToWorktree
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct VcsPathsRequest {
+    pub expected_revision: u64,
+    pub paths: Vec<WorkspacePath>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct VcsCommitRequest {
+    pub expected_revision: u64,
+    pub message: String,
+    pub author_name: String,
+    pub author_email: String,
+}
+
+#[derive(Clone, Serialize, Deserialize, JsonSchema)]
+pub struct SetVcsCredentialRequest {
+    pub expected_revision: u64,
+    pub username: RedactedString,
+    pub password: RedactedString,
+}
+
+impl std::fmt::Debug for SetVcsCredentialRequest {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("SetVcsCredentialRequest")
+            .field("expected_revision", &self.expected_revision)
+            .field("username", &"[REDACTED]")
+            .field("password", &"[REDACTED]")
+            .finish()
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct VcsRemoteRequest {
+    pub expected_revision: u64,
+    #[serde(default = "default_git_remote")]
+    pub remote: String,
+    #[serde(default)]
+    pub branch: Option<String>,
+}
+
+fn default_git_remote() -> String {
+    "origin".into()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]

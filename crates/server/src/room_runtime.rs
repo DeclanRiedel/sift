@@ -21,6 +21,8 @@ struct RoomRuntimeInner {
     results: crate::room_results::RoomResultRegistry,
     workspace_locks: DashMap<i64, Arc<tokio::sync::Mutex<()>>>,
     workspace_adapter: RwLock<Option<Arc<crate::workspace_adapter::RootedFilesystemAdapter>>>,
+    git_adapter: RwLock<Option<Arc<crate::git_adapter::GitAdapter>>>,
+    vcs_pending: DashMap<(i64, String), sift_protocol::VcsPendingOperation>,
 }
 
 struct RoomRuntimeRoom {
@@ -55,6 +57,14 @@ pub struct RoomSubscription {
     doc_rx: broadcast::Receiver<RoomServerMessage>,
 }
 
+#[derive(Debug, thiserror::Error)]
+pub enum IntegrationError {
+    #[error(transparent)]
+    Workspace(#[from] crate::workspace_adapter::WorkspaceAdapterError),
+    #[error(transparent)]
+    Git(#[from] crate::git_adapter::GitAdapterError),
+}
+
 #[must_use = "dropping the attachment detaches it from room presence"]
 pub struct RoomAttachment {
     runtime: RoomRuntime,
@@ -78,6 +88,22 @@ impl RoomRuntime {
         Ok(runtime)
     }
 
+    pub async fn with_integrations(
+        workspaces: &crate::config::WorkspaceProjectionConfig,
+        vcs: &crate::config::VcsConfig,
+    ) -> Result<Self, IntegrationError> {
+        let runtime = Self::with_workspace_config(workspaces)?;
+        let git = crate::git_adapter::GitAdapter::from_config(vcs)
+            .await?
+            .map(Arc::new);
+        *runtime
+            .inner
+            .git_adapter
+            .write()
+            .expect("Git adapter lock poisoned") = git;
+        Ok(runtime)
+    }
+
     pub fn workspace_adapter(
         &self,
     ) -> Option<Arc<crate::workspace_adapter::RootedFilesystemAdapter>> {
@@ -86,6 +112,45 @@ impl RoomRuntime {
             .read()
             .expect("workspace adapter lock poisoned")
             .clone()
+    }
+
+    pub fn git_adapter(&self) -> Option<Arc<crate::git_adapter::GitAdapter>> {
+        self.inner
+            .git_adapter
+            .read()
+            .expect("Git adapter lock poisoned")
+            .clone()
+    }
+
+    pub fn set_vcs_pending(
+        &self,
+        binding_id: i64,
+        paths: &[sift_protocol::WorkspacePath],
+        operation: sift_protocol::VcsPendingOperation,
+    ) {
+        for path in paths {
+            self.inner
+                .vcs_pending
+                .insert((binding_id, path.0.clone()), operation);
+        }
+    }
+
+    pub fn clear_vcs_pending(&self, binding_id: i64, paths: &[sift_protocol::WorkspacePath]) {
+        for path in paths {
+            self.inner.vcs_pending.remove(&(binding_id, path.0.clone()));
+        }
+    }
+
+    pub fn vcs_pending(
+        &self,
+        binding_id: i64,
+    ) -> std::collections::HashMap<String, sift_protocol::VcsPendingOperation> {
+        self.inner
+            .vcs_pending
+            .iter()
+            .filter(|entry| entry.key().0 == binding_id)
+            .map(|entry| (entry.key().1.clone(), *entry.value()))
+            .collect()
     }
 
     pub fn attach(

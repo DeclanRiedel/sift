@@ -4,8 +4,8 @@ use serde::{Deserialize, Serialize};
 use sift_protocol::{ConnectionPolicy, Engine, ProviderId, TenantResourceLimits, TenantRole};
 use sift_protocol::{
     DdlDiagnostic, DdlSource, DdlSourceMapping, ProjectionBinding, ProjectionHealth,
-    ProjectionMode, WorkspaceCheckpointId, WorkspaceCheckpointReason, WorkspaceId, WorkspaceNodeId,
-    WorkspaceNodeKind, WorkspacePath, WorkspaceRevision,
+    ProjectionMode, RepositoryBinding, WorkspaceCheckpointId, WorkspaceCheckpointReason,
+    WorkspaceId, WorkspaceNodeId, WorkspaceNodeKind, WorkspacePath, WorkspaceRevision,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
@@ -586,6 +586,37 @@ pub struct DdlSourceModelUpdate {
     pub coverage: sift_protocol::DdlSourceCoverage,
     pub model_json: Option<String>,
     pub diagnostics: Vec<DdlDiagnostic>,
+}
+
+#[derive(Debug, Clone)]
+pub struct RepositoryBindingRecord {
+    pub binding: RepositoryBinding,
+    pub credential_handle: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct NewRepositoryBinding {
+    pub projection_id: sift_protocol::ProjectionBindingId,
+    pub repository_identity: String,
+    pub adapter_generation: String,
+    pub executable_version: String,
+    pub network_enabled: bool,
+    pub branch: Option<String>,
+    pub head: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct RepositoryObservation {
+    pub expected_revision: u64,
+    pub branch: Option<String>,
+    pub head: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct NewRepositoryCommit {
+    pub commit_oid: String,
+    pub checkpoint_id: WorkspaceCheckpointId,
+    pub workspace_revision: WorkspaceRevision,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]

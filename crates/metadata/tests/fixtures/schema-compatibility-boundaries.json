@@ -49,8 +49,8 @@
     "current_binary": "migration_required"
   },
   {
-    "name": "current-v33",
-    "schema_version": 33,
+    "name": "current-v34",
+    "schema_version": 34,
     "minimum_compatible_version": 19,
     "automatic_migration": "allowed",
     "current_binary": "accepted"

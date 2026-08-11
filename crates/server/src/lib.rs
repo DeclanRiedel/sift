@@ -25,6 +25,7 @@ pub mod export;
 pub mod extension_dispatch;
 pub mod extension_runtime;
 pub mod fingerprint;
+pub mod git_adapter;
 pub mod http;
 pub mod identity;
 pub mod metadata_runtime;

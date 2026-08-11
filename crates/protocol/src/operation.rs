@@ -82,10 +82,15 @@ pub enum WorkspaceAction {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum VcsAction {
+    Bind,
+    Unbind,
     Status,
     Diff,
+    Branches,
     Stage,
+    Unstage,
     Commit,
+    SetCredential,
     Fetch,
     Push,
 }
@@ -700,10 +705,15 @@ impl Operation {
                 | WorkspaceAction::BatchMutate => OperationKind::ManageWorkspace,
             },
             Self::Vcs { action, .. } => match action {
-                VcsAction::Status | VcsAction::Diff => OperationKind::ReadVcs,
-                VcsAction::Stage | VcsAction::Commit | VcsAction::Fetch | VcsAction::Push => {
-                    OperationKind::WriteVcs
-                }
+                VcsAction::Status | VcsAction::Diff | VcsAction::Branches => OperationKind::ReadVcs,
+                VcsAction::Bind
+                | VcsAction::Unbind
+                | VcsAction::Stage
+                | VcsAction::Unstage
+                | VcsAction::Commit
+                | VcsAction::SetCredential
+                | VcsAction::Fetch
+                | VcsAction::Push => OperationKind::WriteVcs,
             },
             Self::DdlSource { action, .. } => match action {
                 DdlSourceAction::Read => OperationKind::ReadDdlSource,
@@ -1143,10 +1153,15 @@ macro_rules! single_word_audit_names {
 }
 
 single_word_audit_names!(VcsAction {
+    Bind => "bind",
+    Unbind => "unbind",
     Status => "status",
     Diff => "diff",
+    Branches => "branches",
     Stage => "stage",
+    Unstage => "unstage",
     Commit => "commit",
+    SetCredential => "set_credential",
     Fetch => "fetch",
     Push => "push",
 });

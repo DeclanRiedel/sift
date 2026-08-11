@@ -248,7 +248,7 @@ async fn main() -> anyhow::Result<()> {
     let shutdown = Shutdown::default();
     let state = AppState {
         sessions,
-        rooms: RoomRuntime::with_workspace_config(&cfg.workspaces)?,
+        rooms: RoomRuntime::with_integrations(&cfg.workspaces, &cfg.vcs).await?,
         auth: sift_server::http::AuthState {
             bearer_token: cfg.auth.bearer_token.clone(),
             loopback_bypass: cfg.auth.loopback_bypass,

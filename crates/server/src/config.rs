@@ -88,6 +88,9 @@ pub struct Config {
     /// Optional server-side workspace filesystem projections. Virtual
     /// workspaces remain available when this is disabled or empty.
     pub workspaces: WorkspaceProjectionConfig,
+    /// Bundled Git adapter. Disabled unless both this and workspace projections
+    /// are explicitly enabled by the operator.
+    pub vcs: VcsConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -103,6 +106,30 @@ pub struct WorkspaceRootConfig {
     pub handle: String,
     pub path: String,
     pub read_only: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct VcsConfig {
+    pub enabled: bool,
+    pub network_enabled: bool,
+    /// Absolute fixed Git executable. If absent, the enabled adapter resolves
+    /// `git` once at startup and records the canonical executable observation.
+    pub executable: Option<String>,
+    pub local_timeout_secs: u64,
+    pub network_timeout_secs: u64,
+}
+
+impl Default for VcsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            network_enabled: false,
+            executable: None,
+            local_timeout_secs: 30,
+            network_timeout_secs: 120,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -322,6 +349,7 @@ impl Default for Config {
             rate_limits: RateLimitsConfig::default(),
             tenant_limits: TenantLimitsConfig::default(),
             workspaces: WorkspaceProjectionConfig::default(),
+            vcs: VcsConfig::default(),
         }
     }
 }
@@ -450,6 +478,28 @@ impl Config {
 
         if self.workspaces.enabled && self.workspaces.roots.is_empty() {
             bail!("workspaces.enabled=true requires at least one configured root");
+        }
+        if self.vcs.enabled && !self.workspaces.enabled {
+            bail!("vcs.enabled=true requires workspaces.enabled=true");
+        }
+        if self.vcs.network_enabled && !self.vcs.enabled {
+            bail!("vcs.network_enabled=true requires vcs.enabled=true");
+        }
+        if !(1..=300).contains(&self.vcs.local_timeout_secs)
+            || !(1..=900).contains(&self.vcs.network_timeout_secs)
+        {
+            bail!("VCS timeouts must be positive and within their built-in ceilings");
+        }
+        if let Some(executable) = &self.vcs.executable {
+            let path = std::path::Path::new(executable);
+            if !path.is_absolute() {
+                bail!("vcs.executable must be an absolute path");
+            }
+            let metadata =
+                std::fs::symlink_metadata(path).with_context(|| "vcs.executable is unavailable")?;
+            if metadata.file_type().is_symlink() || !metadata.is_file() {
+                bail!("vcs.executable must be a real file, not a symlink");
+            }
         }
         let mut root_handles = std::collections::HashSet::new();
         let mut canonical_roots = std::collections::HashSet::new();

@@ -867,6 +867,15 @@ pub fn public_workspace_with_projection(
     record: WorkspaceRecord,
     filesystem_projection: bool,
 ) -> Workspace {
+    public_workspace_with_integrations(record, filesystem_projection, false, false)
+}
+
+pub fn public_workspace_with_integrations(
+    record: WorkspaceRecord,
+    filesystem_projection: bool,
+    git: bool,
+    git_network: bool,
+) -> Workspace {
     Workspace {
         id: record.id,
         room_id: record.room_id.0,
@@ -875,8 +884,8 @@ pub fn public_workspace_with_projection(
         capabilities: WorkspaceCapabilities {
             virtual_tree: true,
             filesystem_projection,
-            git: false,
-            git_network: false,
+            git,
+            git_network,
             scheduling: false,
             transfer_recipes: false,
         },

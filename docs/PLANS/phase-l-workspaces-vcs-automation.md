@@ -3,8 +3,8 @@
 Status: accepted implementation contract; ADR-034 is graduated. Implementation
 is in progress.
 
-Milestones: L0 contract lock, L1 virtual workspaces/history, and L2 projections
-and offline DDL sources are complete; L3–L7 remain.
+Milestones: L0 contract lock, L1 virtual workspaces/history, L2 projections and
+offline DDL sources, and L3 bundled Git are complete; L4–L7 remain.
 
 This plan expands Phase L in `server-build-list-v2.md`. It is intentionally
 ordered design-first: slice L0 locks the topology before any public workspace

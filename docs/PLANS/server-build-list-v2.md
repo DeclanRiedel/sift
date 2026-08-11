@@ -479,9 +479,12 @@ Detailed implementation order and ADR-034 contract:
       filesystem projection/reconcile, and deterministic offline DDL sources
       with explicit live mappings; SDK/OpenAPI and local/remote-topology graph
       parity are covered through Phase L2.
-- [ ] [Implement] VCS adapter and Git implementation; run-configuration
-      executor; durable scheduler; recipe-based import/export; remaining
-      SDK/OpenAPI and remote integration.
+- [x] [Implement] Hardened VCS adapter and bundled Git implementation with
+      typed status/diff/branches, path pending state, checkpoint-bound commits,
+      opaque one-operation credentials, SDK/OpenAPI, and concurrent virtual
+      edit coverage.
+- [ ] [Implement] Run-configuration executor; durable scheduler; recipe-based
+      import/export; remaining SDK/OpenAPI and remote integration.
 - [ ] [Graduate] Local, SSH-remote, and network-hosted workspace matrices;
       repository credential redaction; concurrent edit/VCS conflict tests;
       deterministic multi-script execution and recovery tests.

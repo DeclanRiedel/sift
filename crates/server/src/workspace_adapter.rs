@@ -118,6 +118,10 @@ impl RootedFilesystemAdapter {
     pub fn validate_binding(&self, handle: &str, writable: bool) -> Result<()> {
         self.root(handle, writable).map(|_| ())
     }
+
+    pub(crate) fn canonical_root_path(&self, handle: &str) -> Result<PathBuf> {
+        Ok(self.root(handle, false)?.canonical_path.clone())
+    }
 }
 
 impl WorkspaceAdapter for RootedFilesystemAdapter {

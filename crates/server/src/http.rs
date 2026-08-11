@@ -24,12 +24,12 @@ use aide::transform::TransformOperation;
 use sift_metadata::{
     ApiTokenId, AuthClientKind as MetadataAuthClientKind, AuthIdentityId, ConnectionProfileId,
     Document, DocumentId, GithubAllowlistId, GithubProfile, MetadataStore, NewConnectionProfile,
-    NewDdlSource, NewDocument, NewOperationAudit, NewProjectionBinding, NewQueryHistory, NewRoom,
-    NewSavedQuery, NewWorkspaceCheckpoint, NewWorkspaceNode, OperationAuditId, PrincipalId,
-    PrincipalKeyId, ProjectionFileState, QueryHistory, QueryHistoryId, QueryStatus,
-    RefreshAuthResult, Room, RoomId, RoomMember, RoomRole, SavedQuery, SavedQueryFilter,
-    SavedQueryId, SavedQueryScope, TenantId, TenantInvitationId, TenantMembership,
-    UpdateSavedQuery, WorkspaceBatchMutation, WorkspaceCheckpointCapture,
+    NewDdlSource, NewDocument, NewOperationAudit, NewProjectionBinding, NewQueryHistory,
+    NewRepositoryBinding, NewRoom, NewSavedQuery, NewWorkspaceCheckpoint, NewWorkspaceNode,
+    OperationAuditId, PrincipalId, PrincipalKeyId, ProjectionFileState, QueryHistory,
+    QueryHistoryId, QueryStatus, RefreshAuthResult, Room, RoomId, RoomMember, RoomRole, SavedQuery,
+    SavedQueryFilter, SavedQueryId, SavedQueryScope, TenantId, TenantInvitationId,
+    TenantMembership, UpdateSavedQuery, WorkspaceBatchMutation, WorkspaceCheckpointCapture,
 };
 use sift_protocol::{
     AcceptTenantInvitationRequest, AdminCreatePasswordPrincipalRequest,
@@ -47,12 +47,14 @@ use sift_protocol::{
     ObjectPath, OpenConnectionRequest, OpenSessionRequest, Operation, OperationStatus,
     PasswordLoginRequest, PasswordResetRequest, ProjectionBinding, ProjectionHealth,
     ProjectionMode, ProtocolRange, Readiness, ReconcilePlan, ReconcileResolution,
-    RefreshAuthRequest, RegisterPrincipalKeyRequest, RoomClientMessage, RoomQueryResult,
-    RoomServerMessage, SavepointRequest, SchemaFilter, SchemaScope, SshProxyAccessGrant,
-    SshProxyCapabilityExchangeRequest, TransactionPreviewRequest, UpdateConnectionPolicyRequest,
-    UpdateTenantLimitsRequest, WebAuthResponse, WhoAmIResponse, Workspace, WorkspaceAction,
-    WorkspaceCheckpoint, WorkspaceCheckpointId, WorkspaceId, WorkspaceNodeId, WorkspaceNodeKind,
-    WsClientMessage, WsServerMessage, PROTOCOL_VERSION, PROTOCOL_VERSION_NUMBER,
+    RefreshAuthRequest, RegisterPrincipalKeyRequest, RepositoryBinding, RepositoryBindingId,
+    RoomClientMessage, RoomQueryResult, RoomServerMessage, SavepointRequest, SchemaFilter,
+    SchemaScope, SshProxyAccessGrant, SshProxyCapabilityExchangeRequest, TransactionPreviewRequest,
+    UpdateConnectionPolicyRequest, UpdateTenantLimitsRequest, VcsAction, VcsBranch,
+    VcsCommitResult, VcsDiff, VcsPendingOperation, VcsRemoteResult, VcsStatus, WebAuthResponse,
+    WhoAmIResponse, Workspace, WorkspaceAction, WorkspaceCheckpoint, WorkspaceCheckpointId,
+    WorkspaceId, WorkspaceNodeId, WorkspaceNodeKind, WsClientMessage, WsServerMessage,
+    PROTOCOL_VERSION, PROTOCOL_VERSION_NUMBER,
 };
 
 use crate::config::{DeploymentPolicy, RuntimeMode, Transport};
@@ -439,6 +441,50 @@ pub fn app(state: AppState) -> Router {
         .api_route(
             "/v1/metadata/workspace-projections/:id/reconcile",
             get_with(plan_workspace_projection, doc("planWorkspaceProjection", "Read-only deterministic workspace projection plan")).post_with(apply_workspace_projection, doc("applyWorkspaceProjection", "Apply explicit projection conflict resolutions")),
+        )
+        .api_route(
+            "/v1/metadata/workspaces/:id/repository",
+            get_with(get_workspace_repository, doc("getWorkspaceRepository", "Get the optional repository binding")).post_with(bind_workspace_repository, doc("bindWorkspaceRepository", "Bind or initialize Git for a filesystem projection")),
+        )
+        .api_route(
+            "/v1/metadata/repositories/:id",
+            delete_with(delete_workspace_repository, doc("deleteWorkspaceRepository", "Remove a repository binding")),
+        )
+        .api_route(
+            "/v1/metadata/repositories/:id/status",
+            get_with(get_repository_status, doc("getRepositoryStatus", "Read bounded typed repository status")),
+        )
+        .api_route(
+            "/v1/metadata/repositories/:id/diff",
+            get_with(get_repository_diff, doc("getRepositoryDiff", "Read bounded typed repository diff statistics")),
+        )
+        .api_route(
+            "/v1/metadata/repositories/:id/branches",
+            get_with(list_repository_branches, doc("listRepositoryBranches", "List typed local and remote branches")),
+        )
+        .api_route(
+            "/v1/metadata/repositories/:id/stage",
+            post_with(stage_repository_paths, doc("stageRepositoryPaths", "Stage root-confined workspace paths")),
+        )
+        .api_route(
+            "/v1/metadata/repositories/:id/unstage",
+            post_with(unstage_repository_paths, doc("unstageRepositoryPaths", "Unstage root-confined workspace paths")),
+        )
+        .api_route(
+            "/v1/metadata/repositories/:id/commit",
+            post_with(commit_repository, doc("commitRepository", "Commit one immutable workspace checkpoint")),
+        )
+        .api_route(
+            "/v1/metadata/repositories/:id/credential",
+            post_with(set_repository_credential, doc("setRepositoryCredential", "Set an opaque one-operation repository credential")),
+        )
+        .api_route(
+            "/v1/metadata/repositories/:id/fetch",
+            post_with(fetch_repository, doc("fetchRepository", "Fetch with the bound one-operation credential helper")),
+        )
+        .api_route(
+            "/v1/metadata/repositories/:id/push",
+            post_with(push_repository, doc("pushRepository", "Push with the bound one-operation credential helper")),
         )
         .api_route(
             "/v1/metadata/workspaces/:id/ddl-sources",
@@ -1468,15 +1514,17 @@ struct CursorListQuery {
 }
 
 use sift_metadata::http::{
-    AddRoomMemberRequest, ApplyWorkspaceProjectionRequest, BindRoomConnectionRequest,
-    BindWorkspaceProjectionRequest, CreateDdlSourceRequest, CreateDocumentRequest,
-    CreateRoomRequest, CreateSavedQueryRequest, CreateWorkspaceCheckpointRequest,
-    CreateWorkspaceNodeRequest, CreateWorkspaceRequest, ExpectedDdlSourceRevisionRequest,
-    ExpectedProjectionRevisionRequest, ExpectedWorkspaceRevisionRequest, IssueTokenRequest,
+    AddRoomMemberRequest, ApplyWorkspaceProjectionRequest, BindRepositoryRequest,
+    BindRoomConnectionRequest, BindWorkspaceProjectionRequest, CreateDdlSourceRequest,
+    CreateDocumentRequest, CreateRoomRequest, CreateSavedQueryRequest,
+    CreateWorkspaceCheckpointRequest, CreateWorkspaceNodeRequest, CreateWorkspaceRequest,
+    ExpectedDdlSourceRevisionRequest, ExpectedProjectionRevisionRequest,
+    ExpectedRepositoryRevisionRequest, ExpectedWorkspaceRevisionRequest, IssueTokenRequest,
     IssueTokenResponse, MoveWorkspaceNodeRequest, OpenConnectionFromProfileRequest,
-    RestoreWorkspaceCheckpointRequest, SetCredentialRequest, UpdateDdlSourceRequest,
-    UpdateDocumentSnapshotRequest, UpdateSavedQueryRequest, UpdateWorkspaceRequest,
-    UpsertConnectionProfileRequest, WorkspaceBatchMutationItem, WorkspaceBatchMutationRequest,
+    RestoreWorkspaceCheckpointRequest, SetCredentialRequest, SetVcsCredentialRequest,
+    UpdateDdlSourceRequest, UpdateDocumentSnapshotRequest, UpdateSavedQueryRequest,
+    UpdateWorkspaceRequest, UpsertConnectionProfileRequest, VcsCommitRequest, VcsDiffQuery,
+    VcsPathsRequest, VcsRemoteRequest, WorkspaceBatchMutationItem, WorkspaceBatchMutationRequest,
     WorkspaceCheckpointPageQuery, WorkspaceTreeResponse,
 };
 
@@ -3368,9 +3416,26 @@ fn publish_workspace_changed(state: &AppState, workspace: &Workspace, checkpoint
 
 fn public_workspace_record(
     record: sift_metadata::WorkspaceRecord,
-    filesystem_projection: bool,
+    capabilities: (bool, bool, bool),
 ) -> Workspace {
-    sift_metadata::public_workspace_with_projection(record, filesystem_projection)
+    sift_metadata::public_workspace_with_integrations(
+        record,
+        capabilities.0,
+        capabilities.1,
+        capabilities.2,
+    )
+}
+
+fn workspace_runtime_capabilities(state: &AppState) -> (bool, bool, bool) {
+    let filesystem = state.rooms.workspace_adapter().is_some();
+    let git = state.rooms.git_adapter();
+    (
+        filesystem,
+        git.is_some(),
+        git.is_some_and(|adapter| {
+            crate::git_adapter::VcsRepository::network_enabled(adapter.as_ref())
+        }),
+    )
 }
 
 fn workspace_actor_error(error: crate::document_actor::ApplyError) -> ApiError {
@@ -5132,7 +5197,7 @@ async fn list_room_workspaces(
     let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
     let room = room_id(id)?;
     let actor = auth.principal_id;
-    let projection_enabled = state.rooms.workspace_adapter().is_some();
+    let workspace_capabilities = workspace_runtime_capabilities(&state);
     authorize_workspace_operation(&state, &auth, Some(room), None, WorkspaceAction::Read)?;
     let workspaces = metadata_blocking(move || {
         metadata
@@ -5140,7 +5205,7 @@ async fn list_room_workspaces(
             .map(|items| {
                 items
                     .into_iter()
-                    .map(|record| public_workspace_record(record, projection_enabled))
+                    .map(|record| public_workspace_record(record, workspace_capabilities))
                     .collect::<Vec<Workspace>>()
             })
             .map_err(Into::into)
@@ -5168,12 +5233,12 @@ async fn create_room_workspace(
     let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
     let room = room_id(id)?;
     let actor = auth.principal_id;
-    let projection_enabled = state.rooms.workspace_adapter().is_some();
+    let workspace_capabilities = workspace_runtime_capabilities(&state);
     authorize_workspace_operation(&state, &auth, Some(room), None, WorkspaceAction::Create)?;
     let workspace = metadata_blocking(move || {
         metadata
             .create_workspace(room, actor, &req.name)
-            .map(|record| public_workspace_record(record, projection_enabled))
+            .map(|record| public_workspace_record(record, workspace_capabilities))
             .map_err(Into::into)
     })
     .await?;
@@ -5197,7 +5262,7 @@ async fn get_workspace(
     let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
     let workspace_id = workspace_id(id)?;
     let actor = auth.principal_id;
-    let projection_enabled = state.rooms.workspace_adapter().is_some();
+    let workspace_capabilities = workspace_runtime_capabilities(&state);
     authorize_workspace_operation(
         &state,
         &auth,
@@ -5208,7 +5273,7 @@ async fn get_workspace(
     let workspace = metadata_blocking(move || {
         metadata
             .get_workspace_for_principal(workspace_id, actor, false)
-            .map(|record| public_workspace_record(record, projection_enabled))
+            .map(|record| public_workspace_record(record, workspace_capabilities))
             .map_err(Into::into)
     })
     .await?;
@@ -5232,7 +5297,7 @@ async fn update_workspace(
     let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
     let workspace_id = workspace_id(id)?;
     let actor = auth.principal_id;
-    let projection_enabled = state.rooms.workspace_adapter().is_some();
+    let workspace_capabilities = workspace_runtime_capabilities(&state);
     authorize_workspace_operation(
         &state,
         &auth,
@@ -5245,7 +5310,7 @@ async fn update_workspace(
     let workspace = metadata_blocking(move || {
         metadata
             .update_workspace(workspace_id, actor, req.expected_revision, &req.name)
-            .map(|record| public_workspace_record(record, projection_enabled))
+            .map(|record| public_workspace_record(record, workspace_capabilities))
             .map_err(Into::into)
     })
     .await?;
@@ -5320,7 +5385,7 @@ async fn list_workspace_nodes(
     let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
     let workspace_id = workspace_id(id)?;
     let actor = auth.principal_id;
-    let projection_enabled = state.rooms.workspace_adapter().is_some();
+    let workspace_capabilities = workspace_runtime_capabilities(&state);
     authorize_workspace_operation(
         &state,
         &auth,
@@ -5331,7 +5396,7 @@ async fn list_workspace_nodes(
     let response = metadata_blocking(move || {
         let workspace = metadata
             .get_workspace_for_principal(workspace_id, actor, false)
-            .map(|record| public_workspace_record(record, projection_enabled))?;
+            .map(|record| public_workspace_record(record, workspace_capabilities))?;
         let nodes = metadata.list_workspace_nodes_for_principal(workspace_id, actor)?;
         Ok::<_, ApiError>(WorkspaceTreeResponse { workspace, nodes })
     })
@@ -5356,7 +5421,7 @@ async fn create_workspace_node(
     let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
     let workspace_id = workspace_id(id)?;
     let actor = auth.principal_id;
-    let projection_enabled = state.rooms.workspace_adapter().is_some();
+    let workspace_capabilities = workspace_runtime_capabilities(&state);
     authorize_workspace_operation(
         &state,
         &auth,
@@ -5405,7 +5470,7 @@ async fn create_workspace_node(
             },
         )?;
         Ok::<_, ApiError>(WorkspaceTreeResponse {
-            workspace: public_workspace_record(workspace, projection_enabled),
+            workspace: public_workspace_record(workspace, workspace_capabilities),
             nodes: vec![node],
         })
     })
@@ -5432,7 +5497,7 @@ async fn mutate_workspace_batch(
     let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
     let workspace_id = workspace_id(id)?;
     let actor = auth.principal_id;
-    let projection_enabled = state.rooms.workspace_adapter().is_some();
+    let workspace_capabilities = workspace_runtime_capabilities(&state);
     authorize_workspace_operation(
         &state,
         &auth,
@@ -5510,7 +5575,7 @@ async fn mutate_workspace_batch(
         )?;
         Ok::<_, ApiError>((
             WorkspaceTreeResponse {
-                workspace: public_workspace_record(workspace, projection_enabled),
+                workspace: public_workspace_record(workspace, workspace_capabilities),
                 nodes,
             },
             removed_documents,
@@ -5553,7 +5618,7 @@ async fn move_workspace_node(
     })
     .await?;
     let workspace_id = current.id;
-    let projection_enabled = state.rooms.workspace_adapter().is_some();
+    let workspace_capabilities = workspace_runtime_capabilities(&state);
     authorize_workspace_operation(
         &state,
         &auth,
@@ -5572,7 +5637,7 @@ async fn move_workspace_node(
             req.path,
         )?;
         Ok::<_, ApiError>(WorkspaceTreeResponse {
-            workspace: public_workspace_record(workspace, projection_enabled),
+            workspace: public_workspace_record(workspace, workspace_capabilities),
             nodes,
         })
     })
@@ -5608,7 +5673,7 @@ async fn delete_workspace_node(
     })
     .await?;
     let workspace_id = current.id;
-    let projection_enabled = state.rooms.workspace_adapter().is_some();
+    let workspace_capabilities = workspace_runtime_capabilities(&state);
     authorize_workspace_operation(
         &state,
         &auth,
@@ -5622,7 +5687,7 @@ async fn delete_workspace_node(
         let removed_documents = metadata.workspace_subtree_document_ids(node_id, actor)?;
         let workspace = metadata.delete_workspace_node(node_id, actor, req.expected_revision)?;
         Ok::<_, ApiError>((
-            public_workspace_record(workspace, projection_enabled),
+            public_workspace_record(workspace, workspace_capabilities),
             removed_documents,
         ))
     })
@@ -5689,7 +5754,7 @@ async fn create_workspace_checkpoint(
     let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
     let workspace_id = workspace_id(id)?;
     let actor = auth.principal_id;
-    let projection_enabled = state.rooms.workspace_adapter().is_some();
+    let workspace_capabilities = workspace_runtime_capabilities(&state);
     authorize_workspace_operation(
         &state,
         &auth,
@@ -5744,7 +5809,7 @@ async fn create_workspace_checkpoint(
         )?;
         Ok::<_, ApiError>((
             checkpoint,
-            public_workspace_record(workspace, projection_enabled),
+            public_workspace_record(workspace, workspace_capabilities),
         ))
     })
     .await?;
@@ -5779,7 +5844,7 @@ async fn restore_workspace_checkpoint(
     })
     .await?;
     let workspace_id = plan.workspace_id;
-    let projection_enabled = state.rooms.workspace_adapter().is_some();
+    let workspace_capabilities = workspace_runtime_capabilities(&state);
     authorize_workspace_operation(
         &state,
         &auth,
@@ -5864,7 +5929,7 @@ async fn restore_workspace_checkpoint(
         )?;
         Ok::<_, ApiError>((
             WorkspaceTreeResponse {
-                workspace: public_workspace_record(workspace, projection_enabled),
+                workspace: public_workspace_record(workspace, workspace_capabilities),
                 nodes,
             },
             broadcasts,
@@ -5919,6 +5984,137 @@ fn projection_binding_id(id: i64) -> ApiResult<sift_protocol::ProjectionBindingI
             "workspace projection id must be positive".into(),
         ))
     }
+}
+
+fn repository_binding_id(id: i64) -> ApiResult<RepositoryBindingId> {
+    if id > 0 {
+        Ok(RepositoryBindingId(id))
+    } else {
+        Err(ApiError::BadRequest(
+            "repository binding id must be positive".into(),
+        ))
+    }
+}
+
+fn git_adapter_error(error: crate::git_adapter::GitAdapterError) -> ApiError {
+    use crate::git_adapter::GitAdapterError;
+    match error {
+        GitAdapterError::Disabled
+        | GitAdapterError::ExecutableUnavailable
+        | GitAdapterError::NotRepository
+        | GitAdapterError::InvalidData
+        | GitAdapterError::OutputLimit
+        | GitAdapterError::NetworkDisabled
+        | GitAdapterError::CredentialHelperUnavailable => ApiError::BadRequest(error.to_string()),
+        GitAdapterError::TimedOut => ApiError::BadRequest(error.to_string()),
+        GitAdapterError::CommandFailed(_) => ApiError::BadRequest(error.to_string()),
+        GitAdapterError::Io(_) => ApiError::Internal("Git process I/O failed".into()),
+    }
+}
+
+fn authorize_vcs_operation(
+    state: &AppState,
+    auth: &AuthContext,
+    workspace_id: WorkspaceId,
+    binding_id: RepositoryBindingId,
+    action: VcsAction,
+) -> ApiResult<()> {
+    let context = sift_protocol::OperationCapabilityContext {
+        workspace_id: Some(workspace_id),
+        ..Default::default()
+    };
+    let scope = capability_authorization_scope(state, Some(auth), &context)?
+        .ok_or(ApiError::Unauthorized)?;
+    crate::authorization::authorize(
+        &scope,
+        Operation::Vcs {
+            action,
+            workspace_id,
+            binding_id,
+        }
+        .kind(),
+    )
+    .map_err(|denial| ApiError::Forbidden(denial.public_reason().into()))
+}
+
+fn push_vcs_operation(
+    state: &AppState,
+    actor: PrincipalId,
+    action: VcsAction,
+    workspace_id: WorkspaceId,
+    binding_id: RepositoryBindingId,
+) {
+    state.sessions.push_operation_full(
+        Operation::Vcs {
+            action,
+            workspace_id,
+            binding_id,
+        },
+        OperationStatus::Succeeded,
+        Some(actor.0),
+        None,
+        None,
+        None,
+    );
+}
+
+struct RepositoryContext {
+    record: sift_metadata::RepositoryBindingRecord,
+    workspace: sift_metadata::WorkspaceRecord,
+    worktree: std::path::PathBuf,
+    adapter: Arc<crate::git_adapter::GitAdapter>,
+}
+
+async fn load_repository_context(
+    state: &AppState,
+    metadata: MetadataStore,
+    actor: PrincipalId,
+    binding_id: RepositoryBindingId,
+    writable: bool,
+) -> ApiResult<RepositoryContext> {
+    let (record, projection, workspace) = metadata_blocking(move || {
+        let record = metadata.repository_binding_for_principal(binding_id, actor, writable)?;
+        let projection = metadata.projection_binding_for_principal(
+            record.binding.projection_id,
+            actor,
+            writable,
+        )?;
+        let workspace =
+            metadata.get_workspace_for_principal(record.binding.workspace_id, actor, writable)?;
+        Ok::<_, ApiError>((record, projection, workspace))
+    })
+    .await?;
+    let filesystem = state.rooms.workspace_adapter().ok_or_else(|| {
+        ApiError::BadRequest("workspace filesystem projections are disabled".into())
+    })?;
+    if projection.binding.adapter_generation
+        != crate::workspace_adapter::WorkspaceAdapter::generation(filesystem.as_ref())
+    {
+        return Err(ApiError::BadRequest(
+            "workspace projection adapter changed; rebind it".into(),
+        ));
+    }
+    let adapter = state
+        .rooms
+        .git_adapter()
+        .ok_or_else(|| ApiError::BadRequest("Git integration is disabled".into()))?;
+    use crate::git_adapter::VcsRepository as _;
+    if record.binding.adapter_generation != adapter.generation()
+        || record.binding.executable_version != adapter.executable_version()
+    {
+        return Err(ApiError::BadRequest(
+            "Git adapter observation changed; rebind the repository".into(),
+        ));
+    }
+    let worktree = filesystem
+        .canonical_root_path(&projection.root_handle)
+        .map_err(workspace_adapter_error)?;
+    Ok(RepositoryContext {
+        record,
+        workspace,
+        worktree,
+        adapter,
+    })
 }
 
 fn workspace_adapter_error(error: crate::workspace_adapter::WorkspaceAdapterError) -> ApiError {
@@ -6066,12 +6262,697 @@ async fn delete_workspace_projection(
     Ok(Json(json!({"ok": true})))
 }
 
+async fn get_workspace_repository(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+) -> ApiResult<Json<Option<RepositoryBinding>>> {
+    let metadata = metadata_store_cloned(&state)?;
+    let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
+    let workspace_id = workspace_id(id)?;
+    authorize_workspace_operation(
+        &state,
+        &auth,
+        None,
+        Some(workspace_id),
+        WorkspaceAction::Read,
+    )?;
+    let actor = auth.principal_id;
+    let binding = metadata_blocking(move || {
+        metadata
+            .repository_binding_for_workspace(workspace_id, actor)
+            .map(|record| record.map(|record| record.binding))
+            .map_err(Into::into)
+    })
+    .await?;
+    if let Some(binding) = &binding {
+        push_vcs_operation(&state, actor, VcsAction::Status, workspace_id, binding.id);
+    } else {
+        push_workspace_operation(
+            &state,
+            actor,
+            WorkspaceAction::Read,
+            Some(workspace_id),
+            None,
+        );
+    }
+    Ok(Json(binding))
+}
+
+async fn bind_workspace_repository(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+    Json(req): Json<BindRepositoryRequest>,
+) -> ApiResult<Json<RepositoryBinding>> {
+    use crate::git_adapter::VcsRepository as _;
+    let metadata = metadata_store_cloned(&state)?;
+    let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
+    let workspace_id = workspace_id(id)?;
+    authorize_workspace_operation(
+        &state,
+        &auth,
+        None,
+        Some(workspace_id),
+        WorkspaceAction::BindProjection,
+    )?;
+    let actor = auth.principal_id;
+    let projection = metadata_blocking({
+        let metadata = metadata.clone();
+        move || {
+            let projection =
+                metadata.projection_binding_for_principal(req.projection_id, actor, true)?;
+            if projection.binding.workspace_id != workspace_id {
+                return Err(ApiError::BadRequest(
+                    "repository projection belongs to another workspace".into(),
+                ));
+            }
+            Ok::<_, ApiError>(projection)
+        }
+    })
+    .await?;
+    let filesystem = state.rooms.workspace_adapter().ok_or_else(|| {
+        ApiError::BadRequest("workspace filesystem projections are disabled".into())
+    })?;
+    let worktree = filesystem
+        .canonical_root_path(&projection.root_handle)
+        .map_err(workspace_adapter_error)?;
+    let adapter = state
+        .rooms
+        .git_adapter()
+        .ok_or_else(|| ApiError::BadRequest("Git integration is disabled".into()))?;
+    let observation = if req.initialize {
+        adapter.initialize(&worktree).await
+    } else {
+        adapter.discover(&worktree).await
+    }
+    .map_err(git_adapter_error)?;
+    let input = NewRepositoryBinding {
+        projection_id: req.projection_id,
+        repository_identity: observation.identity,
+        adapter_generation: adapter.generation().into(),
+        executable_version: adapter.executable_version().into(),
+        network_enabled: adapter.network_enabled(),
+        branch: observation.branch,
+        head: observation.head,
+    };
+    let binding = metadata_blocking(move || {
+        metadata
+            .create_repository_binding(workspace_id, actor, input)
+            .map(|record| record.binding)
+            .map_err(Into::into)
+    })
+    .await?;
+    push_vcs_operation(&state, actor, VcsAction::Bind, workspace_id, binding.id);
+    Ok(Json(binding))
+}
+
+async fn delete_workspace_repository(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+    Json(req): Json<ExpectedRepositoryRevisionRequest>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let metadata = metadata_store_cloned(&state)?;
+    let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
+    let binding_id = repository_binding_id(id)?;
+    let actor = auth.principal_id;
+    let binding = metadata_blocking({
+        let metadata = metadata.clone();
+        move || {
+            metadata
+                .repository_binding_for_principal(binding_id, actor, false)
+                .map(|record| record.binding)
+                .map_err(Into::into)
+        }
+    })
+    .await?;
+    authorize_vcs_operation(
+        &state,
+        &auth,
+        binding.workspace_id,
+        binding_id,
+        VcsAction::Unbind,
+    )?;
+    metadata
+        .delete_repository_binding(binding_id, actor, req.expected_revision)
+        .await?;
+    push_vcs_operation(
+        &state,
+        actor,
+        VcsAction::Unbind,
+        binding.workspace_id,
+        binding_id,
+    );
+    Ok(Json(json!({"ok": true})))
+}
+
+async fn get_repository_status(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+) -> ApiResult<Json<VcsStatus>> {
+    use crate::git_adapter::VcsRepository as _;
+    let metadata = metadata_store_cloned(&state)?;
+    let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
+    let binding_id = repository_binding_id(id)?;
+    let actor = auth.principal_id;
+    let context = load_repository_context(&state, metadata, actor, binding_id, false).await?;
+    authorize_vcs_operation(
+        &state,
+        &auth,
+        context.record.binding.workspace_id,
+        binding_id,
+        VcsAction::Status,
+    )?;
+    let mut status = context
+        .adapter
+        .status(
+            &context.worktree,
+            binding_id,
+            context.record.binding.revision,
+            context.workspace.revision,
+        )
+        .await
+        .map_err(git_adapter_error)?;
+    let pending = state.rooms.vcs_pending(binding_id.0);
+    for entry in &mut status.entries {
+        entry.pending = pending.get(&entry.path.0).copied();
+    }
+    push_vcs_operation(
+        &state,
+        actor,
+        VcsAction::Status,
+        context.record.binding.workspace_id,
+        binding_id,
+    );
+    Ok(Json(status))
+}
+
+async fn get_repository_diff(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+    Query(query): Query<VcsDiffQuery>,
+) -> ApiResult<Json<VcsDiff>> {
+    use crate::git_adapter::VcsRepository as _;
+    let metadata = metadata_store_cloned(&state)?;
+    let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
+    let binding_id = repository_binding_id(id)?;
+    let actor = auth.principal_id;
+    let context = load_repository_context(&state, metadata, actor, binding_id, false).await?;
+    authorize_vcs_operation(
+        &state,
+        &auth,
+        context.record.binding.workspace_id,
+        binding_id,
+        VcsAction::Diff,
+    )?;
+    let diff = context
+        .adapter
+        .diff(
+            &context.worktree,
+            binding_id,
+            query.side,
+            query.path.as_ref(),
+        )
+        .await
+        .map_err(git_adapter_error)?;
+    push_vcs_operation(
+        &state,
+        actor,
+        VcsAction::Diff,
+        context.record.binding.workspace_id,
+        binding_id,
+    );
+    Ok(Json(diff))
+}
+
+async fn list_repository_branches(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+) -> ApiResult<Json<Vec<VcsBranch>>> {
+    use crate::git_adapter::VcsRepository as _;
+    let metadata = metadata_store_cloned(&state)?;
+    let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
+    let binding_id = repository_binding_id(id)?;
+    let actor = auth.principal_id;
+    let context = load_repository_context(&state, metadata, actor, binding_id, false).await?;
+    authorize_vcs_operation(
+        &state,
+        &auth,
+        context.record.binding.workspace_id,
+        binding_id,
+        VcsAction::Branches,
+    )?;
+    let branches = context
+        .adapter
+        .branches(&context.worktree)
+        .await
+        .map_err(git_adapter_error)?;
+    push_vcs_operation(
+        &state,
+        actor,
+        VcsAction::Branches,
+        context.record.binding.workspace_id,
+        binding_id,
+    );
+    Ok(Json(branches))
+}
+
+async fn stage_repository_paths(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+    Json(req): Json<VcsPathsRequest>,
+) -> ApiResult<Json<RepositoryBinding>> {
+    mutate_repository_paths(state, headers, id, req, true).await
+}
+
+async fn unstage_repository_paths(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+    Json(req): Json<VcsPathsRequest>,
+) -> ApiResult<Json<RepositoryBinding>> {
+    mutate_repository_paths(state, headers, id, req, false).await
+}
+
+async fn mutate_repository_paths(
+    state: AppState,
+    headers: HeaderMap,
+    id: i64,
+    req: VcsPathsRequest,
+    stage: bool,
+) -> ApiResult<Json<RepositoryBinding>> {
+    use crate::git_adapter::VcsRepository as _;
+    let metadata = metadata_store_cloned(&state)?;
+    let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
+    let binding_id = repository_binding_id(id)?;
+    let actor = auth.principal_id;
+    let context =
+        load_repository_context(&state, metadata.clone(), actor, binding_id, true).await?;
+    let action = if stage {
+        VcsAction::Stage
+    } else {
+        VcsAction::Unstage
+    };
+    authorize_vcs_operation(
+        &state,
+        &auth,
+        context.record.binding.workspace_id,
+        binding_id,
+        action,
+    )?;
+    if context.record.binding.revision != req.expected_revision {
+        return Err(sift_metadata::MetadataError::RepositoryRevisionConflict {
+            expected: req.expected_revision,
+            current: context.record.binding.revision,
+        }
+        .into());
+    }
+    let pending = if stage {
+        VcsPendingOperation::Stage
+    } else {
+        VcsPendingOperation::Unstage
+    };
+    state
+        .rooms
+        .set_vcs_pending(binding_id.0, &req.paths, pending);
+    let operation = if stage {
+        context.adapter.stage(&context.worktree, &req.paths).await
+    } else {
+        context.adapter.unstage(&context.worktree, &req.paths).await
+    };
+    state.rooms.clear_vcs_pending(binding_id.0, &req.paths);
+    operation.map_err(git_adapter_error)?;
+    let observation = context
+        .adapter
+        .discover(&context.worktree)
+        .await
+        .map_err(git_adapter_error)?;
+    let updated = metadata_blocking(move || {
+        metadata
+            .observe_repository(
+                binding_id,
+                actor,
+                sift_metadata::RepositoryObservation {
+                    expected_revision: req.expected_revision,
+                    branch: observation.branch,
+                    head: observation.head,
+                },
+            )
+            .map(|record| record.binding)
+            .map_err(Into::into)
+    })
+    .await?;
+    push_vcs_operation(&state, actor, action, updated.workspace_id, binding_id);
+    Ok(Json(updated))
+}
+
+async fn commit_repository(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+    Json(req): Json<VcsCommitRequest>,
+) -> ApiResult<Json<VcsCommitResult>> {
+    use crate::git_adapter::VcsRepository as _;
+    use crate::workspace_adapter::WorkspaceAdapter as _;
+    let metadata = metadata_store_cloned(&state)?;
+    let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
+    let binding_id = repository_binding_id(id)?;
+    let actor = auth.principal_id;
+    let context =
+        load_repository_context(&state, metadata.clone(), actor, binding_id, true).await?;
+    authorize_vcs_operation(
+        &state,
+        &auth,
+        context.record.binding.workspace_id,
+        binding_id,
+        VcsAction::Commit,
+    )?;
+    if context.record.binding.revision != req.expected_revision {
+        return Err(sift_metadata::MetadataError::RepositoryRevisionConflict {
+            expected: req.expected_revision,
+            current: context.record.binding.revision,
+        }
+        .into());
+    }
+    let workspace_id = context.record.binding.workspace_id;
+    let lock = state.rooms.workspace_lock(workspace_id.0);
+    let _guard = lock.lock().await;
+    let filesystem = state.rooms.workspace_adapter().ok_or_else(|| {
+        ApiError::BadRequest("workspace filesystem projections are disabled".into())
+    })?;
+    let rooms = state.rooms.clone();
+    let projection_id = context.record.binding.projection_id;
+    let inputs = metadata_blocking({
+        let metadata = metadata.clone();
+        let filesystem = filesystem.clone();
+        move || load_projection_inputs(&metadata, &rooms, &filesystem, projection_id, actor, true)
+    })
+    .await?;
+    let plan = crate::workspace_projection::reconcile_plan(
+        &inputs.binding.binding,
+        inputs.workspace.revision,
+        &inputs.baseline,
+        &inputs.files,
+        &inputs.projection,
+    );
+    if plan
+        .entries
+        .iter()
+        .any(|entry| entry.state != sift_protocol::ReconcileState::Unchanged)
+    {
+        return Err(ApiError::BadRequest(
+            "workspace projection must be fully reconciled before commit".into(),
+        ));
+    }
+    let allowed = inputs
+        .files
+        .iter()
+        .map(|file| file.path.0.clone())
+        .chain(inputs.baseline.iter().map(|file| file.path.0.clone()))
+        .collect::<std::collections::BTreeSet<_>>();
+    if allowed.is_empty() {
+        return Err(ApiError::BadRequest(
+            "workspace has no SQL paths to commit".into(),
+        ));
+    }
+    let status = context
+        .adapter
+        .status(
+            &context.worktree,
+            binding_id,
+            req.expected_revision,
+            inputs.workspace.revision,
+        )
+        .await
+        .map_err(git_adapter_error)?;
+    if status.entries.iter().any(|entry| {
+        entry.stage != sift_protocol::VcsStageState::Unstaged && !allowed.contains(&entry.path.0)
+    }) {
+        return Err(ApiError::BadRequest(
+            "Git index contains staged paths outside the workspace SQL tree".into(),
+        ));
+    }
+    filesystem
+        .materialize(
+            &inputs.binding.root_handle,
+            &inputs
+                .files
+                .iter()
+                .map(|file| crate::workspace_adapter::MaterializeFile {
+                    path: file.path.clone(),
+                    bytes: file.bytes.clone(),
+                })
+                .collect::<Vec<_>>(),
+        )
+        .map_err(workspace_adapter_error)?;
+    let checkpoint = metadata_blocking({
+        let metadata = metadata.clone();
+        let revision = inputs.workspace.revision;
+        let captures = inputs.captures;
+        move || {
+            metadata
+                .create_workspace_checkpoint(
+                    workspace_id,
+                    actor,
+                    NewWorkspaceCheckpoint {
+                        expected_revision: revision,
+                        reason: sift_protocol::WorkspaceCheckpointReason::BeforeVcs,
+                        name: None,
+                        captures,
+                    },
+                )
+                .map_err(Into::into)
+        }
+    })
+    .await?;
+    let paths = allowed
+        .into_iter()
+        .map(sift_protocol::WorkspacePath)
+        .collect::<Vec<_>>();
+    context
+        .adapter
+        .stage(&context.worktree, &paths)
+        .await
+        .map_err(git_adapter_error)?;
+    let observation = context
+        .adapter
+        .commit(
+            &context.worktree,
+            &req.message,
+            &req.author_name,
+            &req.author_email,
+        )
+        .await
+        .map_err(git_adapter_error)?;
+    let commit = observation
+        .head
+        .clone()
+        .ok_or_else(|| ApiError::Internal("Git commit did not produce a head".into()))?;
+    let branch = observation.branch.clone();
+    let commit_for_metadata = commit.clone();
+    metadata_blocking(move || {
+        metadata
+            .record_repository_commit(
+                binding_id,
+                actor,
+                sift_metadata::RepositoryObservation {
+                    expected_revision: req.expected_revision,
+                    branch: observation.branch,
+                    head: observation.head,
+                },
+                sift_metadata::NewRepositoryCommit {
+                    commit_oid: commit_for_metadata,
+                    checkpoint_id: checkpoint.id,
+                    workspace_revision: checkpoint.workspace_revision,
+                },
+            )
+            .map_err(Into::into)
+    })
+    .await?;
+    push_vcs_operation(&state, actor, VcsAction::Commit, workspace_id, binding_id);
+    Ok(Json(VcsCommitResult {
+        binding_id,
+        checkpoint_id: checkpoint.id,
+        workspace_revision: checkpoint.workspace_revision,
+        commit,
+        branch,
+    }))
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct StoredGitCredential {
+    username: String,
+    password: String,
+}
+
+async fn set_repository_credential(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+    Json(req): Json<SetVcsCredentialRequest>,
+) -> ApiResult<Json<RepositoryBinding>> {
+    let metadata = metadata_store_cloned(&state)?;
+    let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
+    let binding_id = repository_binding_id(id)?;
+    let actor = auth.principal_id;
+    let binding = metadata_blocking({
+        let metadata = metadata.clone();
+        move || {
+            metadata
+                .repository_binding_for_principal(binding_id, actor, true)
+                .map(|record| record.binding)
+                .map_err(Into::into)
+        }
+    })
+    .await?;
+    authorize_vcs_operation(
+        &state,
+        &auth,
+        binding.workspace_id,
+        binding_id,
+        VcsAction::SetCredential,
+    )?;
+    let mut secret = serde_json::to_vec(&StoredGitCredential {
+        username: req.username.0,
+        password: req.password.0,
+    })
+    .map_err(|_| ApiError::BadRequest("invalid repository credential".into()))?;
+    let result = metadata
+        .set_repository_credential(binding_id, actor, req.expected_revision, &secret)
+        .await;
+    secret.fill(0);
+    let updated = result?.binding;
+    push_vcs_operation(
+        &state,
+        actor,
+        VcsAction::SetCredential,
+        updated.workspace_id,
+        binding_id,
+    );
+    Ok(Json(updated))
+}
+
+async fn fetch_repository(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+    Json(req): Json<VcsRemoteRequest>,
+) -> ApiResult<Json<VcsRemoteResult>> {
+    remote_repository_operation(state, headers, id, req, false).await
+}
+
+async fn push_repository(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+    Json(req): Json<VcsRemoteRequest>,
+) -> ApiResult<Json<VcsRemoteResult>> {
+    remote_repository_operation(state, headers, id, req, true).await
+}
+
+async fn remote_repository_operation(
+    state: AppState,
+    headers: HeaderMap,
+    id: i64,
+    req: VcsRemoteRequest,
+    push: bool,
+) -> ApiResult<Json<VcsRemoteResult>> {
+    use crate::git_adapter::VcsRepository as _;
+    let metadata = metadata_store_cloned(&state)?;
+    let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
+    let binding_id = repository_binding_id(id)?;
+    let actor = auth.principal_id;
+    let context =
+        load_repository_context(&state, metadata.clone(), actor, binding_id, true).await?;
+    let action = if push {
+        VcsAction::Push
+    } else {
+        VcsAction::Fetch
+    };
+    authorize_vcs_operation(
+        &state,
+        &auth,
+        context.record.binding.workspace_id,
+        binding_id,
+        action,
+    )?;
+    if context.record.binding.revision != req.expected_revision {
+        return Err(sift_metadata::MetadataError::RepositoryRevisionConflict {
+            expected: req.expected_revision,
+            current: context.record.binding.revision,
+        }
+        .into());
+    }
+    let mut secret = metadata
+        .repository_credential(binding_id, actor)
+        .await?
+        .ok_or_else(|| ApiError::BadRequest("repository credential is not configured".into()))?;
+    let stored: StoredGitCredential = serde_json::from_slice(&secret)
+        .map_err(|_| ApiError::Internal("stored repository credential is invalid".into()))?;
+    secret.fill(0);
+    let credential = crate::git_adapter::GitCredential {
+        username: stored.username,
+        password: stored.password,
+    };
+    let observation = if push {
+        context
+            .adapter
+            .push(
+                &context.worktree,
+                &req.remote,
+                req.branch.as_deref(),
+                credential,
+            )
+            .await
+    } else {
+        context
+            .adapter
+            .fetch(&context.worktree, &req.remote, credential)
+            .await
+    }
+    .map_err(git_adapter_error)?;
+    let head = observation.head.clone();
+    metadata_blocking(move || {
+        metadata
+            .observe_repository(
+                binding_id,
+                actor,
+                sift_metadata::RepositoryObservation {
+                    expected_revision: req.expected_revision,
+                    branch: observation.branch,
+                    head: observation.head,
+                },
+            )
+            .map_err(Into::into)
+    })
+    .await?;
+    push_vcs_operation(
+        &state,
+        actor,
+        action,
+        context.record.binding.workspace_id,
+        binding_id,
+    );
+    Ok(Json(VcsRemoteResult {
+        binding_id,
+        operation: if push { "push" } else { "fetch" }.into(),
+        head,
+        updated_refs: Vec::new(),
+    }))
+}
+
 struct ProjectionInputs {
     binding: sift_metadata::ProjectionBindingRecord,
     workspace: sift_metadata::WorkspaceRecord,
     files: Vec<crate::workspace_projection::WorkspaceProjectionFile>,
     projection: crate::workspace_adapter::ProjectionSnapshot,
     baseline: Vec<ProjectionFileState>,
+    captures: Vec<WorkspaceCheckpointCapture>,
 }
 
 type WorkspaceDocumentBroadcast = (DocumentId, u64, String, i64, Vec<u8>, Vec<u8>);
@@ -6095,6 +6976,7 @@ fn load_projection_inputs(
         metadata.get_workspace_for_principal(binding.binding.workspace_id, actor, writable)?;
     let nodes = metadata.list_workspace_nodes_for_principal(workspace.id, actor)?;
     let mut files = Vec::new();
+    let mut captures = Vec::new();
     for node in nodes
         .into_iter()
         .filter(|node| node.kind == WorkspaceNodeKind::SqlDocument)
@@ -6111,6 +6993,11 @@ fn load_projection_inputs(
             .lock()
             .map_err(|_| ApiError::Internal("document actor mutex poisoned".into()))?;
         let bytes = guard.text().into_bytes();
+        captures.push(WorkspaceCheckpointCapture {
+            node_id: node.id,
+            snapshot_bytes: guard.snapshot().map_err(workspace_actor_error)?,
+            snapshot_version: guard.version_vector(),
+        });
         files.push(crate::workspace_projection::WorkspaceProjectionFile {
             node_id: node.id,
             path: node.path,
@@ -6129,6 +7016,7 @@ fn load_projection_inputs(
         files,
         projection,
         baseline,
+        captures,
     })
 }
 
@@ -6503,13 +7391,13 @@ async fn apply_workspace_projection(
         None,
     );
     if checkpoint_changed {
-        let projection_enabled = state_for_blocking.rooms.workspace_adapter().is_some();
+        let workspace_capabilities = workspace_runtime_capabilities(&state_for_blocking);
         let workspace = metadata_blocking({
             let metadata = metadata_store_cloned(&state_for_blocking)?;
             move || {
                 metadata
                     .get_workspace_for_principal(workspace_id, actor, false)
-                    .map(|record| public_workspace_record(record, projection_enabled))
+                    .map(|record| public_workspace_record(record, workspace_capabilities))
                     .map_err(Into::into)
             }
         })

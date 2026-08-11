@@ -33,6 +33,30 @@ pub struct VcsStatusEntry {
     pub previous_path: Option<WorkspacePath>,
     pub state: VcsFileState,
     pub stage: VcsStageState,
+    #[serde(default)]
+    pub conflict: Option<VcsConflictKind>,
+    #[serde(default)]
+    pub pending: Option<VcsPendingOperation>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum VcsConflictKind {
+    BothAdded,
+    BothDeleted,
+    BothModified,
+    AddedByUs,
+    AddedByThem,
+    DeletedByUs,
+    DeletedByThem,
+    Unknown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum VcsPendingOperation {
+    Stage,
+    Unstage,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -49,6 +73,12 @@ pub struct RepositoryBinding {
     pub workspace_id: WorkspaceId,
     pub projection_id: crate::ProjectionBindingId,
     pub adapter_id: String,
+    pub repository_identity: String,
+    pub adapter_generation: String,
+    pub executable_version: String,
+    pub network_enabled: bool,
+    pub branch: Option<String>,
+    pub head: Option<String>,
     pub credential_handle_present: bool,
     pub revision: u64,
     pub created_at: DateTime<Utc>,
@@ -59,6 +89,7 @@ pub struct RepositoryBinding {
 pub struct VcsStatus {
     pub binding_id: RepositoryBindingId,
     pub workspace_revision: WorkspaceRevision,
+    pub binding_revision: u64,
     pub head_oid: Option<String>,
     pub branch: Option<String>,
     pub upstream: Option<VcsUpstreamStatus>,
@@ -93,4 +124,32 @@ pub struct VcsDiff {
     pub side: VcsDiffSide,
     pub files: Vec<VcsDiffFile>,
     pub truncated: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct VcsBranch {
+    pub name: String,
+    pub head: Option<String>,
+    pub current: bool,
+    pub remote: bool,
+    pub upstream: Option<String>,
+    pub ahead: u32,
+    pub behind: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct VcsCommitResult {
+    pub binding_id: RepositoryBindingId,
+    pub checkpoint_id: crate::WorkspaceCheckpointId,
+    pub workspace_revision: WorkspaceRevision,
+    pub commit: String,
+    pub branch: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct VcsRemoteResult {
+    pub binding_id: RepositoryBindingId,
+    pub operation: String,
+    pub head: Option<String>,
+    pub updated_refs: Vec<String>,
 }

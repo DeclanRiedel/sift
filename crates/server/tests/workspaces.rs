@@ -7,7 +7,7 @@ use sift_protocol::{
     DdlSource, DdlSourceModel, ProjectionBinding, ReconcilePlan, ReconcileResolution, Workspace,
     WorkspaceCheckpoint, WorkspaceNodeKind,
 };
-use sift_server::config::{WorkspaceProjectionConfig, WorkspaceRootConfig};
+use sift_server::config::{VcsConfig, WorkspaceProjectionConfig, WorkspaceRootConfig};
 use sift_server::http::{app, AppState, AuthState};
 use sift_server::registry::DriverRegistry;
 use sift_server::room_runtime::RoomRuntime;
@@ -364,5 +364,176 @@ async fn projection_conflicts_and_offline_ddl_are_explicit_and_deterministic() {
         graph.content_digest,
         rebuilt.graph.unwrap().content_digest,
         "local and remote-topology builders share the same canonical graph"
+    );
+}
+
+#[tokio::test]
+async fn git_commit_is_tied_to_a_checkpoint_and_later_virtual_edits_stay_uncommitted() {
+    let metadata = MetadataStore::open_in_memory(Arc::new(MemorySecretStore::new())).unwrap();
+    metadata.bootstrap_local("local user").unwrap();
+    let room = metadata
+        .create_room(
+            TenantId(1),
+            PrincipalId(1),
+            NewRoom {
+                name: "Git room".into(),
+                kind: RoomKind::Shared,
+            },
+        )
+        .unwrap();
+    let checkout = tempfile::tempdir().unwrap();
+    let rooms = RoomRuntime::with_integrations(
+        &WorkspaceProjectionConfig {
+            enabled: true,
+            roots: vec![WorkspaceRootConfig {
+                handle: "checkout".into(),
+                path: checkout.path().display().to_string(),
+                read_only: false,
+            }],
+        },
+        &VcsConfig {
+            enabled: true,
+            network_enabled: false,
+            ..VcsConfig::default()
+        },
+    )
+    .await
+    .unwrap();
+    let router = app(AppState {
+        sessions: SessionStore::new(DriverRegistry::builder().build()),
+        rooms: rooms.clone(),
+        auth: AuthState::default(),
+        metadata: Some(metadata.clone()),
+        shutdown: Shutdown::default(),
+    });
+
+    let response = router
+        .clone()
+        .oneshot(json_request(
+            Method::POST,
+            &format!("/v1/metadata/rooms/{}/workspaces", room.id.0),
+            serde_json::json!({"name": "database"}),
+        ))
+        .await
+        .unwrap();
+    let workspace: Workspace = json(response.into_body()).await;
+    assert!(workspace.capabilities.git);
+    assert!(!workspace.capabilities.git_network);
+    let response = router
+        .clone()
+        .oneshot(json_request(
+            Method::POST,
+            &format!("/v1/metadata/workspaces/{}/nodes", workspace.id.0),
+            serde_json::json!({
+                "expected_workspace_revision": 1,
+                "parent_id": null,
+                "path": "query.sql",
+                "kind": "sql_document",
+                "initial_text": "select 1;\n"
+            }),
+        ))
+        .await
+        .unwrap();
+    let tree: sift_metadata::http::WorkspaceTreeResponse = json(response.into_body()).await;
+    let node = tree.nodes[0].clone();
+    let response = router
+        .clone()
+        .oneshot(json_request(
+            Method::POST,
+            &format!("/v1/metadata/workspaces/{}/projection", workspace.id.0),
+            serde_json::json!({"root_handle": "checkout", "mode": "read_write"}),
+        ))
+        .await
+        .unwrap();
+    let projection: ProjectionBinding = json(response.into_body()).await;
+    let response = router
+        .clone()
+        .oneshot(json_request(
+            Method::GET,
+            &format!(
+                "/v1/metadata/workspace-projections/{}/reconcile",
+                projection.id.0
+            ),
+            serde_json::json!({}),
+        ))
+        .await
+        .unwrap();
+    let plan: ReconcilePlan = json(response.into_body()).await;
+    let response = router
+        .clone()
+        .oneshot(json_request(
+            Method::POST,
+            &format!(
+                "/v1/metadata/workspace-projections/{}/reconcile",
+                projection.id.0
+            ),
+            serde_json::json!({
+                "binding_revision": plan.binding_revision,
+                "workspace_revision": plan.workspace_revision,
+                "resolutions": [{
+                    "observed": plan.entries[0],
+                    "resolution": "materialize_workspace"
+                }]
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let response = router
+        .clone()
+        .oneshot(json_request(
+            Method::POST,
+            &format!("/v1/metadata/workspaces/{}/repository", workspace.id.0),
+            serde_json::json!({"projection_id": projection.id, "initialize": true}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let binding: sift_protocol::RepositoryBinding = json(response.into_body()).await;
+    let response = router
+        .clone()
+        .oneshot(json_request(
+            Method::POST,
+            &format!("/v1/metadata/repositories/{}/commit", binding.id.0),
+            serde_json::json!({
+                "expected_revision": binding.revision,
+                "message": "checkpoint",
+                "author_name": "Sift Test",
+                "author_email": "sift@example.invalid"
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let committed: sift_protocol::VcsCommitResult = json(response.into_body()).await;
+    assert_eq!(committed.workspace_revision.0, 2);
+
+    let document = sift_metadata::DocumentId(node.document_id.unwrap());
+    let actor = rooms.documents().get_or_load(&metadata, document).unwrap();
+    actor
+        .lock()
+        .unwrap()
+        .author_replacement(
+            &metadata,
+            PrincipalId(1),
+            "other-client",
+            "after-git-capture",
+            "select 2;\n",
+        )
+        .unwrap();
+    let response = router
+        .oneshot(json_request(
+            Method::GET,
+            &format!("/v1/metadata/repositories/{}/status", binding.id.0),
+            serde_json::json!({}),
+        ))
+        .await
+        .unwrap();
+    let status: sift_protocol::VcsStatus = json(response.into_body()).await;
+    assert!(status.entries.is_empty());
+    assert_eq!(
+        std::fs::read_to_string(checkout.path().join("query.sql")).unwrap(),
+        "select 1;\n"
     );
 }

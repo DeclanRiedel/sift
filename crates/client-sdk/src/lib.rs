@@ -26,6 +26,7 @@ pub const SUPPORTED_HTTP_OPERATION_IDS: &[&str] = &[
     "authenticateKey",
     "beginTransaction",
     "bindMetadataRoomConnection",
+    "bindWorkspaceRepository",
     "bindWorkspaceProjection",
     "bulkInsert",
     "cancelComparison",
@@ -64,6 +65,7 @@ pub const SUPPORTED_HTTP_OPERATION_IDS: &[&str] = &[
     "deleteCatalogSnapshot",
     "deleteDdlSource",
     "deleteWorkspaceProjection",
+    "deleteWorkspaceRepository",
     "deleteSpilledCursor",
     "diagnoseSemanticDocument",
     "disconnectMetadataConnectionProfile",
@@ -86,6 +88,9 @@ pub const SUPPORTED_HTTP_OPERATION_IDS: &[&str] = &[
     "getObjectDdl",
     "getWorkspace",
     "getWorkspaceProjection",
+    "getWorkspaceRepository",
+    "getRepositoryStatus",
+    "getRepositoryDiff",
     "getDdlSource",
     "getRoomResult",
     "getRoomResultPages",
@@ -179,6 +184,13 @@ pub const SUPPORTED_HTTP_OPERATION_IDS: &[&str] = &[
     "selectSemanticStatement",
     "sessionWebSocket",
     "setMetadataConnectionCredential",
+    "setRepositoryCredential",
+    "stageRepositoryPaths",
+    "unstageRepositoryPaths",
+    "commitRepository",
+    "fetchRepository",
+    "pushRepository",
+    "listRepositoryBranches",
     "setTenantLimits",
     "startComparison",
     "unbindMetadataRoomConnection",
@@ -204,15 +216,17 @@ pub const SUPPORTED_HTTP_OPERATION_IDS: &[&str] = &[
 // consumers can build requests without depending on sift_metadata::http
 // directly.
 pub use sift_metadata::http::{
-    AddRoomMemberRequest, ApplyWorkspaceProjectionRequest, BindRoomConnectionRequest,
-    BindWorkspaceProjectionRequest, CreateDdlSourceRequest, CreateDocumentRequest,
-    CreateRoomRequest, CreateSavedQueryRequest, CreateWorkspaceCheckpointRequest,
-    CreateWorkspaceNodeRequest, CreateWorkspaceRequest, ExpectedDdlSourceRevisionRequest,
-    ExpectedProjectionRevisionRequest, ExpectedWorkspaceRevisionRequest, IssueTokenRequest,
+    AddRoomMemberRequest, ApplyWorkspaceProjectionRequest, BindRepositoryRequest,
+    BindRoomConnectionRequest, BindWorkspaceProjectionRequest, CreateDdlSourceRequest,
+    CreateDocumentRequest, CreateRoomRequest, CreateSavedQueryRequest,
+    CreateWorkspaceCheckpointRequest, CreateWorkspaceNodeRequest, CreateWorkspaceRequest,
+    ExpectedDdlSourceRevisionRequest, ExpectedProjectionRevisionRequest,
+    ExpectedRepositoryRevisionRequest, ExpectedWorkspaceRevisionRequest, IssueTokenRequest,
     IssueTokenResponse, MoveWorkspaceNodeRequest, OpenConnectionFromProfileRequest,
     ProjectionResolutionRequest, RestoreWorkspaceCheckpointRequest, SetCredentialRequest,
-    UpdateDdlSourceRequest, UpdateDocumentSnapshotRequest, UpdateSavedQueryRequest,
-    UpdateWorkspaceRequest, UpsertConnectionProfileRequest, WorkspaceBatchMutationItem,
+    SetVcsCredentialRequest, UpdateDdlSourceRequest, UpdateDocumentSnapshotRequest,
+    UpdateSavedQueryRequest, UpdateWorkspaceRequest, UpsertConnectionProfileRequest,
+    VcsCommitRequest, VcsDiffQuery, VcsPathsRequest, VcsRemoteRequest, WorkspaceBatchMutationItem,
     WorkspaceBatchMutationRequest, WorkspaceTreeResponse,
 };
 use sift_metadata::{
@@ -241,14 +255,16 @@ use sift_protocol::{
     OperationCapability, OperationCapabilityContext, Page, PasswordLoginRequest,
     PasswordResetRequest, PreviewEditsRequest, ProjectionBinding, ProjectionBindingId,
     ProtocolRange, ProviderDescriptor, Readiness, ReconcilePlan, RefreshAuthRequest,
-    RegisterPrincipalKeyRequest, RoomQueryResult, RoomResultId, RoomResultPages, RoomSelection,
-    SavepointRequest, SchemaSearchRequest, SchemaSearchResponse, SchemaSnapshot, ServerInfo,
-    SessionId, SessionInfo, SshProxyAccessGrant, SshProxyCapabilityExchangeRequest,
-    TenantResourceLimits, TenantUsageSnapshot, ToolContext, TransactionEndAction, TransactionInfo,
-    TransactionPreview, TransactionPreviewRequest, TransactionState, TxHandleRef, TxId, TxMode,
-    UpdateConnectionPolicyRequest, UpdateTenantLimitsRequest, ValidatedExtensionPackage, Value,
-    WebAuthResponse, WhoAmIResponse, Workspace, WorkspaceCheckpoint, WorkspaceCheckpointId,
-    WorkspaceId, WorkspaceNodeId, WsClientMessage, WsServerMessage, PROTOCOL_VERSION_NUMBER,
+    RegisterPrincipalKeyRequest, RepositoryBinding, RepositoryBindingId, RoomQueryResult,
+    RoomResultId, RoomResultPages, RoomSelection, SavepointRequest, SchemaSearchRequest,
+    SchemaSearchResponse, SchemaSnapshot, ServerInfo, SessionId, SessionInfo, SshProxyAccessGrant,
+    SshProxyCapabilityExchangeRequest, TenantResourceLimits, TenantUsageSnapshot, ToolContext,
+    TransactionEndAction, TransactionInfo, TransactionPreview, TransactionPreviewRequest,
+    TransactionState, TxHandleRef, TxId, TxMode, UpdateConnectionPolicyRequest,
+    UpdateTenantLimitsRequest, ValidatedExtensionPackage, Value, VcsBranch, VcsCommitResult,
+    VcsDiff, VcsDiffSide, VcsRemoteResult, VcsStatus, WebAuthResponse, WhoAmIResponse, Workspace,
+    WorkspaceCheckpoint, WorkspaceCheckpointId, WorkspaceId, WorkspaceNodeId, WsClientMessage,
+    WsServerMessage, PROTOCOL_VERSION_NUMBER,
 };
 
 #[derive(Clone)]
@@ -2371,6 +2387,144 @@ impl Client {
     ) -> Result<ReconcilePlan> {
         self.post(
             &format!("/v1/metadata/workspace-projections/{}/reconcile", binding.0),
+            &request,
+        )
+        .await
+    }
+
+    pub async fn workspace_repository(
+        &self,
+        workspace: WorkspaceId,
+    ) -> Result<Option<RepositoryBinding>> {
+        self.get(&format!(
+            "/v1/metadata/workspaces/{}/repository",
+            workspace.0
+        ))
+        .await
+    }
+
+    pub async fn bind_workspace_repository(
+        &self,
+        workspace: WorkspaceId,
+        request: BindRepositoryRequest,
+    ) -> Result<RepositoryBinding> {
+        self.post(
+            &format!("/v1/metadata/workspaces/{}/repository", workspace.0),
+            &request,
+        )
+        .await
+    }
+
+    pub async fn delete_workspace_repository(
+        &self,
+        binding: RepositoryBindingId,
+        request: ExpectedRepositoryRevisionRequest,
+    ) -> Result<()> {
+        self.delete_body(
+            &format!("/v1/metadata/repositories/{}", binding.0),
+            &request,
+        )
+        .await
+    }
+
+    pub async fn repository_status(&self, binding: RepositoryBindingId) -> Result<VcsStatus> {
+        self.get(&format!("/v1/metadata/repositories/{}/status", binding.0))
+            .await
+    }
+
+    pub async fn repository_diff(
+        &self,
+        binding: RepositoryBindingId,
+        query: VcsDiffQuery,
+    ) -> Result<VcsDiff> {
+        let side = match query.side {
+            VcsDiffSide::HeadToIndex => "head_to_index",
+            VcsDiffSide::IndexToWorktree => "index_to_worktree",
+            VcsDiffSide::HeadToWorktree => "head_to_worktree",
+        };
+        let mut path = format!("/v1/metadata/repositories/{}/diff?side={side}", binding.0);
+        if let Some(filter) = query.path {
+            path.push_str("&path=");
+            path.push_str(&urlencoding_replace(&filter.0));
+        }
+        self.get(&path).await
+    }
+
+    pub async fn repository_branches(
+        &self,
+        binding: RepositoryBindingId,
+    ) -> Result<Vec<VcsBranch>> {
+        self.get(&format!("/v1/metadata/repositories/{}/branches", binding.0))
+            .await
+    }
+
+    pub async fn stage_repository_paths(
+        &self,
+        binding: RepositoryBindingId,
+        request: VcsPathsRequest,
+    ) -> Result<RepositoryBinding> {
+        self.post(
+            &format!("/v1/metadata/repositories/{}/stage", binding.0),
+            &request,
+        )
+        .await
+    }
+
+    pub async fn unstage_repository_paths(
+        &self,
+        binding: RepositoryBindingId,
+        request: VcsPathsRequest,
+    ) -> Result<RepositoryBinding> {
+        self.post(
+            &format!("/v1/metadata/repositories/{}/unstage", binding.0),
+            &request,
+        )
+        .await
+    }
+
+    pub async fn commit_repository(
+        &self,
+        binding: RepositoryBindingId,
+        request: VcsCommitRequest,
+    ) -> Result<VcsCommitResult> {
+        self.post(
+            &format!("/v1/metadata/repositories/{}/commit", binding.0),
+            &request,
+        )
+        .await
+    }
+
+    pub async fn set_repository_credential(
+        &self,
+        binding: RepositoryBindingId,
+        request: SetVcsCredentialRequest,
+    ) -> Result<RepositoryBinding> {
+        self.post(
+            &format!("/v1/metadata/repositories/{}/credential", binding.0),
+            &request,
+        )
+        .await
+    }
+
+    pub async fn fetch_repository(
+        &self,
+        binding: RepositoryBindingId,
+        request: VcsRemoteRequest,
+    ) -> Result<VcsRemoteResult> {
+        self.post(
+            &format!("/v1/metadata/repositories/{}/fetch", binding.0),
+            &request,
+        )
+        .await
+    }
+
+    pub async fn push_repository(
+        &self,
+        binding: RepositoryBindingId,
+        request: VcsRemoteRequest,
+    ) -> Result<VcsRemoteResult> {
+        self.post(
+            &format!("/v1/metadata/repositories/{}/push", binding.0),
             &request,
         )
         .await
