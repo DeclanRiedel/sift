@@ -8,7 +8,7 @@ repository.workspace = true
 
 [dependencies]
 sift-protocol = { workspace = true }
-sqlparser = { workspace = true }
+sift-semantic = { workspace = true }
 
 [dev-dependencies]
 chrono = { workspace = true }

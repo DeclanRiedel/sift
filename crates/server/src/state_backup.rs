@@ -1106,7 +1106,10 @@ mod tests {
         let archive = directory.path().join("state.sift-backup");
 
         let created = create(&source, &archive, &backup_key).unwrap();
-        assert_eq!(created.metadata.current_version, 28);
+        assert_eq!(
+            created.metadata.current_version, created.metadata.latest_version,
+            "a backup created from current state must record the latest embedded schema"
+        );
         assert!(archive.is_file());
         assert_eq!(inspect(&archive, &backup_key).unwrap(), created);
 
@@ -1166,12 +1169,10 @@ mod tests {
             .rescue_archive
             .expect("existing state gets a rescue archive");
         assert!(rescue.is_file());
+        let rescue_report = inspect(&rescue, &backup_key).unwrap();
         assert_eq!(
-            inspect(&rescue, &backup_key)
-                .unwrap()
-                .metadata
-                .current_version,
-            28
+            rescue_report.metadata.current_version, rescue_report.metadata.latest_version,
+            "the rescue archive must capture the current destination schema"
         );
     }
 

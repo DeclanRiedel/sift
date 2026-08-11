@@ -13,7 +13,9 @@ pub const PROTOCOL_VERSION: &str = "1";
 pub mod auth;
 pub mod automation;
 pub mod capability;
+pub mod catalog;
 pub mod column;
+pub mod comparison;
 pub mod completion;
 pub mod connection;
 pub mod crdt;
@@ -23,6 +25,7 @@ pub mod engine;
 pub mod error;
 pub mod extension;
 pub mod handshake;
+pub mod migration;
 pub mod operation;
 pub mod pagination;
 pub mod plan;
@@ -33,6 +36,7 @@ pub mod remote;
 pub mod result;
 pub mod room;
 pub mod schema;
+pub mod schema_diff;
 pub mod search;
 pub mod semantic;
 pub mod session;
@@ -54,10 +58,12 @@ pub use auth::{
 };
 pub use automation::*;
 pub use capability::{OperationCapability, OperationCapabilityContext, OperationKind};
+pub use catalog::*;
 pub use column::{
     EngineColumnFacets, MssqlColumnFacets, Nullability, PgColumnFacets, PrimitiveType,
     TypeCategory, TypeRef,
 };
+pub use comparison::*;
 pub use connection::{
     AccessMode as ConnAccessMode, EngineConnectionSpec, MssqlConnectionSpec, PgConnectionSpec,
     ServerInfo, SslMode,
@@ -80,12 +86,13 @@ pub use handshake::{
     HandshakeClientKind, HandshakeDeployment, HandshakeRequest, HandshakeResponse,
     HandshakeRuntimeMode, HandshakeTransport, ProtocolRange,
 };
+pub use migration::*;
 pub use operation::{
     AuthenticationMethod, ExtensionAdminAction, IdentityAdminAction, Operation, OperationSummary,
     PolicyAdminAction,
 };
 pub use pagination::CursorPage;
-pub use plan::{ExplainRequest, ExplainResponse, PlanNode};
+pub use plan::*;
 pub use policy::{
     ApiErrorResponse, ConnectionPolicy, DisconnectManagedConnectionsResponse, RateLimitClass,
     SchemaSelector, TenantResource, TenantResourceLimits, TenantResourceUsage, TenantRole,
@@ -107,6 +114,7 @@ pub use schema::{
     ObjectKind, ObjectPath, SchemaDepth, SchemaFilter, SchemaScope, SchemaSnapshot, SchemaTree,
     TriggerEvent, TriggerInfo, TriggerTiming,
 };
+pub use schema_diff::*;
 pub use search::{
     DataSearchHit, DataSearchRequest, DataSearchResponse, DataSearchScope, IndexState,
     SchemaSearchRequest, SchemaSearchResponse, SearchHit, SearchTarget,

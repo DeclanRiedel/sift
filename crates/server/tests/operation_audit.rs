@@ -10,8 +10,8 @@ use axum::http::{Request, StatusCode};
 use sift_driver_api::mock::MockDriver;
 use sift_metadata::{MemorySecretStore, MetadataStore, OperationAudit};
 use sift_protocol::{
-    Code, ColumnMetadata, DriverError, Engine, Nullability, Page, PrimitiveType, Row, SessionInfo,
-    TypeRef, Value,
+    Code, ColumnMetadata, DriverError, Engine, Nullability, Page, PrimitiveType, Row, SchemaScope,
+    SchemaSnapshot, SessionInfo, TypeRef, Value,
 };
 use sift_server::http::{app, AppState, AuthState};
 use sift_server::registry::DriverRegistry;
@@ -324,6 +324,34 @@ async fn operation_trail_is_fingerprinted_and_secret_free() {
     // Belt and suspenders: the secret appears nowhere in the trail.
     let whole = serde_json::to_string(&ops).unwrap();
     assert!(!whole.contains(secret), "operation trail leaked a secret");
+}
+
+#[tokio::test]
+async fn legacy_completion_sql_is_fingerprinted_before_operation_replay() {
+    let secret = "completion-secret-literal";
+    let driver = MockDriver::builder()
+        .engine(Engine::Postgres)
+        .schema_ok(SchemaSnapshot::empty(SchemaScope::shallow()))
+        .build();
+    let state = audited_state(driver);
+    let sessions = state.sessions.clone();
+    let app = app(state);
+    let (session_id, conn_id) = open_session_and_connection(&app).await;
+    let response = app
+        .oneshot(post(
+            &format!("/v1/sessions/{session_id}/connections/{conn_id}/complete"),
+            serde_json::json!({
+                "sql": format!("select '{secret}'"),
+                "cursor": 7,
+                "limit": 10
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let replay = serde_json::to_string(&sessions.list_operations()).unwrap();
+    assert!(!replay.contains(secret));
+    assert!(replay.contains("sqlfp:"));
 }
 
 #[tokio::test]

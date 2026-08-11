@@ -6,13 +6,16 @@ use std::sync::{Arc, Mutex};
 
 use sha2::{Digest, Sha256};
 use sift_protocol::{
-    DiagnosticSeverity, DiagnosticsResponse, SelectStatementRequest, SemanticDiagnostic,
-    SemanticDocumentId, SemanticDocumentState, SemanticParseStatus, SemanticSource,
-    SemanticStatement, StatementKind, StatementSelection, TextRange,
+    completion::CompletionContext, DiagnosticSeverity, DiagnosticsResponse, DocumentEdit,
+    FindSqlUsagesRequest, FormatSqlRequest, KeywordCase, PrepareSqlRefactorRequest,
+    SelectStatementRequest, SemanticDiagnostic, SemanticDocumentId, SemanticDocumentState,
+    SemanticParseStatus, SemanticSource, SemanticStatement, SqlRefactor, SqlSymbolTarget, SqlUsage,
+    SqlUsageKind, SqlUsagePage, StatementKind, StatementSelection, TextEdit, TextRange,
+    WorkspaceEdit,
 };
 use sqlparser::dialect::{Dialect, MsSqlDialect, PostgreSqlDialect};
 use sqlparser::parser::Parser;
-use sqlparser::tokenizer::Tokenizer;
+use sqlparser::tokenizer::{Token, Tokenizer, Whitespace, Word};
 use uuid::Uuid;
 
 pub const MAX_SOURCE_BYTES: usize = 2 * 1024 * 1024;
@@ -26,6 +29,46 @@ pub const PACK_VERSION: &str = env!("CARGO_PKG_VERSION");
 pub struct DocumentScope {
     pub session: u64,
     pub connection: u64,
+}
+
+/// Revision-bound completion input derived by the shared semantic service.
+#[derive(Debug, Clone)]
+pub struct CompletionAnalysis {
+    pub context: CompletionContext,
+    pub cursor: usize,
+    pub prefix_start: usize,
+    pub prefix: String,
+    pub prefix_lower: String,
+    pub relations: Vec<CompletionRelation>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompletionRelation {
+    pub name: String,
+    pub target: Option<String>,
+    pub is_alias: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct StatementSource {
+    pub source_digest: String,
+    pub statement: SemanticStatement,
+    pub sql: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct CatalogBindingView {
+    pub revision: sift_protocol::CatalogRevision,
+    pub complete: bool,
+    pub objects: Vec<CatalogBindingObject>,
+}
+
+#[derive(Debug, Clone)]
+pub struct CatalogBindingObject {
+    pub id: sift_protocol::CatalogObjectId,
+    pub schema: String,
+    pub name: String,
+    pub columns: Vec<String>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -42,6 +85,8 @@ pub enum Error {
     LimitExceeded,
     #[error("semantic work canceled")]
     Canceled,
+    #[error("invalid semantic feature request")]
+    InvalidRequest,
 }
 
 #[derive(Clone, Default)]
@@ -229,7 +274,378 @@ impl SemanticRegistry {
             revision,
             diagnostics: document.diagnostics.clone(),
             incomplete: false,
+            catalog_revision: None,
         })
+    }
+
+    pub fn diagnostics_with_catalog(
+        &self,
+        scope: DocumentScope,
+        id: SemanticDocumentId,
+        revision: u64,
+        catalog: &CatalogBindingView,
+    ) -> Result<DiagnosticsResponse, Error> {
+        let (source, mut diagnostics) = {
+            let registry = self.inner.lock().unwrap();
+            let document = registry.documents.get(&id).ok_or(Error::NotFound)?;
+            ensure_scope(document, scope)?;
+            ensure_revision(document, revision)?;
+            (Arc::clone(&document.source), document.diagnostics.clone())
+        };
+        let mut binder = bind_catalog_references(&source, revision, catalog);
+        let incomplete = !catalog.complete;
+        diagnostics.append(&mut binder);
+        diagnostics.truncate(MAX_DIAGNOSTICS);
+        Ok(DiagnosticsResponse {
+            document_id: id,
+            revision,
+            diagnostics,
+            incomplete,
+            catalog_revision: Some(catalog.revision),
+        })
+    }
+
+    pub fn format(
+        &self,
+        scope: DocumentScope,
+        id: SemanticDocumentId,
+        request: FormatSqlRequest,
+        canceled: &AtomicBool,
+    ) -> Result<WorkspaceEdit, Error> {
+        let (source, source_digest, dialect_id, statements) = {
+            let registry = self.inner.lock().unwrap();
+            let document = registry.documents.get(&id).ok_or(Error::NotFound)?;
+            ensure_scope(document, scope)?;
+            ensure_revision(document, request.revision)?;
+            (
+                Arc::clone(&document.source),
+                document.source_digest.clone(),
+                document.dialect_id.clone(),
+                document.statements.clone(),
+            )
+        };
+        let requested = request.range.unwrap_or(TextRange {
+            start: 0,
+            end: source.len() as u32,
+        });
+        validate_range(&source, requested)?;
+        let intersecting = statements
+            .iter()
+            .filter(|statement| ranges_intersect(statement.full_range, requested))
+            .collect::<Vec<_>>();
+        let actual_range = if request.range.is_some() && !intersecting.is_empty() {
+            TextRange {
+                start: intersecting
+                    .iter()
+                    .map(|statement| statement.full_range.start)
+                    .min()
+                    .unwrap_or(requested.start),
+                end: intersecting
+                    .iter()
+                    .map(|statement| statement.full_range.end)
+                    .max()
+                    .unwrap_or(requested.end),
+            }
+        } else {
+            requested
+        };
+        let protected = statements
+            .iter()
+            .filter(|statement| statement.recovered)
+            .map(|statement| statement.full_range)
+            .collect::<Vec<_>>();
+        let flavor = dialect_flavor(&dialect_id)?;
+        let edits = keyword_case_edits(
+            &source,
+            actual_range,
+            &protected,
+            flavor,
+            request.options.keyword_case,
+            canceled,
+        )?;
+        Ok(WorkspaceEdit {
+            documents: vec![DocumentEdit {
+                document_id: id,
+                expected_revision: request.revision,
+                source_digest,
+                edits,
+            }],
+            warnings: (!protected.is_empty())
+                .then(|| "recovered statements were preserved verbatim".to_string())
+                .into_iter()
+                .collect(),
+            is_complete: protected.is_empty(),
+            actual_range: Some(actual_range),
+        })
+    }
+
+    pub fn prepare_quick_fix(
+        &self,
+        scope: DocumentScope,
+        id: SemanticDocumentId,
+        revision: u64,
+        fix_id: &str,
+        catalog: &CatalogBindingView,
+    ) -> Result<WorkspaceEdit, Error> {
+        let (source, source_digest, dialect_id) = {
+            let registry = self.inner.lock().unwrap();
+            let document = registry.documents.get(&id).ok_or(Error::NotFound)?;
+            ensure_scope(document, scope)?;
+            ensure_revision(document, revision)?;
+            (
+                Arc::clone(&document.source),
+                document.source_digest.clone(),
+                document.dialect_id.clone(),
+            )
+        };
+        let mut parts = fix_id.splitn(4, ':');
+        if parts.next() != Some("qualify") {
+            return Err(Error::InvalidRequest);
+        }
+        let start = parts
+            .next()
+            .and_then(|value| value.parse::<u32>().ok())
+            .ok_or(Error::InvalidRequest)?;
+        let end = parts
+            .next()
+            .and_then(|value| value.parse::<u32>().ok())
+            .ok_or(Error::InvalidRequest)?;
+        let object_id = parts.next().ok_or(Error::InvalidRequest)?;
+        let range = TextRange { start, end };
+        validate_range(&source, range)?;
+        let object = catalog
+            .objects
+            .iter()
+            .find(|object| object.id.0 == object_id)
+            .ok_or(Error::InvalidRequest)?;
+        let existing = &source[start as usize..end as usize];
+        if !existing.eq_ignore_ascii_case(&object.name) {
+            return Err(Error::InvalidRequest);
+        }
+        let replacement = match dialect_flavor(&dialect_id)? {
+            Flavor::Postgres => format!(
+                "\"{}\".\"{}\"",
+                object.schema.replace('"', "\"\""),
+                object.name.replace('"', "\"\"")
+            ),
+            Flavor::Tsql => format!(
+                "[{}].[{}]",
+                object.schema.replace(']', "]]"),
+                object.name.replace(']', "]]"),
+            ),
+        };
+        Ok(WorkspaceEdit {
+            documents: vec![DocumentEdit {
+                document_id: id,
+                expected_revision: revision,
+                source_digest,
+                edits: vec![TextEdit {
+                    range,
+                    new_text: replacement,
+                }],
+            }],
+            warnings: Vec::new(),
+            is_complete: true,
+            actual_range: None,
+        })
+    }
+
+    pub fn find_usages(
+        &self,
+        scope: DocumentScope,
+        id: SemanticDocumentId,
+        request: FindSqlUsagesRequest,
+        catalog: Option<&CatalogBindingView>,
+    ) -> Result<SqlUsagePage, Error> {
+        let source = {
+            let registry = self.inner.lock().unwrap();
+            let document = registry.documents.get(&id).ok_or(Error::NotFound)?;
+            ensure_scope(document, scope)?;
+            ensure_revision(document, request.revision)?;
+            Arc::clone(&document.source)
+        };
+        let tokens = binding_tokens(&source);
+        let (target_name, target_quoted, catalog_object_id) = match &request.target {
+            SqlSymbolTarget::AtPosition { position } => {
+                validate_offset(&source, *position)?;
+                let token = tokens
+                    .iter()
+                    .find(|token| {
+                        !token.dot && token.range.start <= *position && *position <= token.range.end
+                    })
+                    .ok_or(Error::InvalidRequest)?;
+                if is_format_keyword(&token.text) {
+                    return Err(Error::InvalidRequest);
+                }
+                let matches = catalog
+                    .into_iter()
+                    .flat_map(|catalog| catalog.objects.iter())
+                    .filter(|object| identifier_matches(&object.name, &token.text, token.quoted))
+                    .collect::<Vec<_>>();
+                (
+                    token.text.clone(),
+                    token.quoted,
+                    (matches.len() == 1).then(|| matches[0].id.clone()),
+                )
+            }
+            SqlSymbolTarget::CatalogObject { object_id } => {
+                let object = catalog
+                    .and_then(|catalog| {
+                        catalog
+                            .objects
+                            .iter()
+                            .find(|object| object.id == *object_id)
+                    })
+                    .ok_or(Error::InvalidRequest)?;
+                (object.name.clone(), false, Some(object.id.clone()))
+            }
+        };
+        let all = tokens
+            .iter()
+            .filter(|token| {
+                !token.dot && identifier_matches(&target_name, &token.text, target_quoted)
+            })
+            .map(|token| SqlUsage {
+                range: token.range,
+                kind: classify_usage(&source, token.range),
+                catalog_object_id: catalog_object_id.clone(),
+            })
+            .collect::<Vec<_>>();
+        let offset = parse_usage_cursor(request.cursor.as_deref(), request.revision)?;
+        if offset > all.len() {
+            return Err(Error::InvalidRequest);
+        }
+        let limit = request.limit.unwrap_or(100);
+        if limit == 0 || limit > 500 {
+            return Err(Error::LimitExceeded);
+        }
+        let end = usize::min(offset.saturating_add(limit as usize), all.len());
+        Ok(SqlUsagePage {
+            document_id: id,
+            revision: request.revision,
+            catalog_revision: catalog.map(|catalog| catalog.revision),
+            usages: all[offset..end].to_vec(),
+            next_cursor: (end < all.len()).then(|| format!("usage:{}:{end}", request.revision)),
+            is_complete: true,
+            search_scope: "current_document_and_visible_catalog".into(),
+        })
+    }
+
+    pub fn prepare_refactor(
+        &self,
+        scope: DocumentScope,
+        id: SemanticDocumentId,
+        request: PrepareSqlRefactorRequest,
+        catalog: Option<&CatalogBindingView>,
+    ) -> Result<WorkspaceEdit, Error> {
+        let (source, source_digest, dialect_id) = {
+            let registry = self.inner.lock().unwrap();
+            let document = registry.documents.get(&id).ok_or(Error::NotFound)?;
+            ensure_scope(document, scope)?;
+            ensure_revision(document, request.revision)?;
+            (
+                Arc::clone(&document.source),
+                document.source_digest.clone(),
+                document.dialect_id.clone(),
+            )
+        };
+        let tokens = binding_tokens(&source);
+        let (edits, warnings, complete) = match request.refactor {
+            SqlRefactor::RenameSymbol { position, new_name } => {
+                validate_offset(&source, position)?;
+                if new_name.is_empty()
+                    || new_name.len() > 256
+                    || new_name.chars().any(char::is_control)
+                {
+                    return Err(Error::InvalidRequest);
+                }
+                let target = tokens
+                    .iter()
+                    .find(|token| {
+                        !token.dot && token.range.start <= position && position <= token.range.end
+                    })
+                    .ok_or(Error::InvalidRequest)?;
+                if is_format_keyword(&target.text) {
+                    return Err(Error::InvalidRequest);
+                }
+                let replacement = render_identifier(&new_name, dialect_flavor(&dialect_id)?);
+                let edits = tokens
+                    .iter()
+                    .filter(|token| {
+                        !token.dot && identifier_matches(&target.text, &token.text, target.quoted)
+                    })
+                    .map(|token| TextEdit {
+                        range: token.range,
+                        new_text: replacement.clone(),
+                    })
+                    .collect();
+                (
+                    edits,
+                    vec!["rename is limited to the current semantic document".into()],
+                    false,
+                )
+            }
+            SqlRefactor::QualifyName { position } => {
+                validate_offset(&source, position)?;
+                let target = tokens
+                    .iter()
+                    .find(|token| {
+                        !token.dot && token.range.start <= position && position <= token.range.end
+                    })
+                    .ok_or(Error::InvalidRequest)?;
+                let matches = catalog
+                    .into_iter()
+                    .flat_map(|catalog| catalog.objects.iter())
+                    .filter(|object| identifier_matches(&object.name, &target.text, target.quoted))
+                    .collect::<Vec<_>>();
+                if matches.len() != 1 {
+                    return Err(Error::InvalidRequest);
+                }
+                let flavor = dialect_flavor(&dialect_id)?;
+                let replacement = format!(
+                    "{}.{}",
+                    render_identifier(&matches[0].schema, flavor),
+                    render_identifier(&matches[0].name, flavor)
+                );
+                (
+                    vec![TextEdit {
+                        range: target.range,
+                        new_text: replacement,
+                    }],
+                    Vec::new(),
+                    true,
+                )
+            }
+        };
+        Ok(WorkspaceEdit {
+            documents: vec![DocumentEdit {
+                document_id: id,
+                expected_revision: request.revision,
+                source_digest,
+                edits,
+            }],
+            warnings,
+            is_complete: complete,
+            actual_range: None,
+        })
+    }
+
+    pub fn completion_analysis(
+        &self,
+        scope: DocumentScope,
+        id: SemanticDocumentId,
+        revision: u64,
+        cursor: u32,
+    ) -> Result<CompletionAnalysis, Error> {
+        let (source, dialect_id) = {
+            let registry = self.inner.lock().unwrap();
+            let document = registry.documents.get(&id).ok_or(Error::NotFound)?;
+            ensure_scope(document, scope)?;
+            ensure_revision(document, revision)?;
+            validate_offset(&document.source, cursor)?;
+            (Arc::clone(&document.source), document.dialect_id.clone())
+        };
+        detect_completion_context(&source, cursor as usize, &dialect_id)
     }
 
     pub fn select_statement(
@@ -282,6 +698,32 @@ impl SemanticRegistry {
             revision: request.revision,
             selection: chosen.as_ref().map(|statement| statement.executable_range),
             statements: chosen.into_iter().collect(),
+        })
+    }
+
+    pub fn statement_source(
+        &self,
+        scope: DocumentScope,
+        id: SemanticDocumentId,
+        revision: u64,
+        statement_id: &str,
+    ) -> Result<StatementSource, Error> {
+        let registry = self.inner.lock().unwrap();
+        let document = registry.documents.get(&id).ok_or(Error::NotFound)?;
+        ensure_scope(document, scope)?;
+        ensure_revision(document, revision)?;
+        let statement = document
+            .statements
+            .iter()
+            .find(|statement| statement.statement_id == statement_id)
+            .cloned()
+            .ok_or(Error::InvalidRequest)?;
+        let range = statement.executable_range;
+        validate_range(&document.source, range)?;
+        Ok(StatementSource {
+            source_digest: document.source_digest.clone(),
+            sql: document.source[range.start as usize..range.end as usize].to_string(),
+            statement,
         })
     }
 
@@ -443,6 +885,507 @@ fn source_digest(source: &str) -> String {
 enum Flavor {
     Postgres,
     Tsql,
+}
+
+fn dialect_flavor(dialect_id: &sift_protocol::DialectId) -> Result<Flavor, Error> {
+    match dialect_id.as_str() {
+        "sift/postgresql" => Ok(Flavor::Postgres),
+        "sift/tsql" => Ok(Flavor::Tsql),
+        other => Err(Error::DialectUnavailable(other.to_string())),
+    }
+}
+
+fn keyword_case_edits(
+    source: &str,
+    target: TextRange,
+    protected: &[TextRange],
+    flavor: Flavor,
+    keyword_case: KeywordCase,
+    canceled: &AtomicBool,
+) -> Result<Vec<TextEdit>, Error> {
+    if keyword_case == KeywordCase::Preserve {
+        return Ok(Vec::new());
+    }
+    let bytes = source.as_bytes();
+    let mut edits = Vec::new();
+    let mut index = 0usize;
+    let mut quote = None;
+    let mut bracket = false;
+    let mut line_comment = false;
+    let mut block_depth = 0u32;
+    let mut dollar_tag: Option<Vec<u8>> = None;
+    while index < bytes.len() {
+        if index % 4096 == 0 && canceled.load(Ordering::Relaxed) {
+            return Err(Error::Canceled);
+        }
+        if line_comment {
+            line_comment = bytes[index] != b'\n';
+            index += 1;
+            continue;
+        }
+        if block_depth > 0 {
+            if bytes[index..].starts_with(b"/*") {
+                block_depth += 1;
+                index += 2;
+            } else if bytes[index..].starts_with(b"*/") {
+                block_depth -= 1;
+                index += 2;
+            } else {
+                index += 1;
+            }
+            continue;
+        }
+        if let Some(tag) = &dollar_tag {
+            if bytes[index..].starts_with(tag) {
+                index += tag.len();
+                dollar_tag = None;
+            } else {
+                index += 1;
+            }
+            continue;
+        }
+        if bracket {
+            if bytes[index] == b']' {
+                if bytes.get(index + 1) == Some(&b']') {
+                    index += 2;
+                } else {
+                    bracket = false;
+                    index += 1;
+                }
+            } else {
+                index += 1;
+            }
+            continue;
+        }
+        if let Some(active) = quote {
+            if bytes[index] == active {
+                if bytes.get(index + 1) == Some(&active) {
+                    index += 2;
+                } else {
+                    quote = None;
+                    index += 1;
+                }
+            } else {
+                index += 1;
+            }
+            continue;
+        }
+        if bytes[index..].starts_with(b"--") {
+            line_comment = true;
+            index += 2;
+        } else if bytes[index..].starts_with(b"/*") {
+            block_depth = 1;
+            index += 2;
+        } else if matches!(bytes[index], b'\'' | b'"') {
+            quote = Some(bytes[index]);
+            index += 1;
+        } else if flavor == Flavor::Tsql && bytes[index] == b'[' {
+            bracket = true;
+            index += 1;
+        } else if flavor == Flavor::Postgres && bytes[index] == b'$' {
+            if let Some(tag) = dollar_quote_tag(&bytes[index..]) {
+                index += tag.len();
+                dollar_tag = Some(tag);
+            } else {
+                index += 1;
+            }
+        } else if bytes[index].is_ascii_alphabetic() || bytes[index] == b'_' {
+            let start = index;
+            index += 1;
+            while index < bytes.len()
+                && (bytes[index].is_ascii_alphanumeric() || bytes[index] == b'_')
+            {
+                index += 1;
+            }
+            let range = TextRange {
+                start: start as u32,
+                end: index as u32,
+            };
+            if range.start < target.start
+                || range.end > target.end
+                || protected
+                    .iter()
+                    .any(|protected| ranges_intersect(*protected, range))
+            {
+                continue;
+            }
+            let word = &source[start..index];
+            if !is_format_keyword(word) {
+                continue;
+            }
+            let replacement = match keyword_case {
+                KeywordCase::Preserve => unreachable!(),
+                KeywordCase::Upper => word.to_ascii_uppercase(),
+                KeywordCase::Lower => word.to_ascii_lowercase(),
+            };
+            if replacement != word {
+                edits.push(TextEdit {
+                    range,
+                    new_text: replacement,
+                });
+                if edits.len() > 10_000 {
+                    return Err(Error::LimitExceeded);
+                }
+            }
+        } else {
+            index += 1;
+        }
+    }
+    Ok(edits)
+}
+
+fn is_format_keyword(word: &str) -> bool {
+    matches_ci(
+        word,
+        &[
+            "ADD",
+            "ALL",
+            "ALTER",
+            "AND",
+            "AS",
+            "ASC",
+            "BEGIN",
+            "BETWEEN",
+            "BY",
+            "CALL",
+            "CASE",
+            "CHECK",
+            "COLUMN",
+            "COMMIT",
+            "CONSTRAINT",
+            "CREATE",
+            "CROSS",
+            "DELETE",
+            "DESC",
+            "DISTINCT",
+            "DO",
+            "DROP",
+            "ELSE",
+            "END",
+            "EXCEPT",
+            "EXEC",
+            "EXECUTE",
+            "EXISTS",
+            "FALSE",
+            "FETCH",
+            "FOREIGN",
+            "FROM",
+            "FULL",
+            "FUNCTION",
+            "GROUP",
+            "HAVING",
+            "IF",
+            "IN",
+            "INDEX",
+            "INNER",
+            "INSERT",
+            "INTERSECT",
+            "INTO",
+            "IS",
+            "JOIN",
+            "KEY",
+            "LEFT",
+            "LIKE",
+            "LIMIT",
+            "MERGE",
+            "NOT",
+            "NULL",
+            "OFFSET",
+            "ON",
+            "OR",
+            "ORDER",
+            "OUTER",
+            "OUTPUT",
+            "PRIMARY",
+            "PROCEDURE",
+            "REFERENCES",
+            "RETURNING",
+            "RIGHT",
+            "ROLLBACK",
+            "SAVEPOINT",
+            "SELECT",
+            "SET",
+            "TABLE",
+            "THEN",
+            "TOP",
+            "TRANSACTION",
+            "TRIGGER",
+            "TRUE",
+            "TRUNCATE",
+            "UNION",
+            "UNIQUE",
+            "UPDATE",
+            "USING",
+            "VALUES",
+            "VIEW",
+            "WHEN",
+            "WHERE",
+            "WITH",
+        ],
+    )
+}
+
+#[derive(Debug)]
+struct BindingToken {
+    text: String,
+    range: TextRange,
+    quoted: bool,
+    dot: bool,
+}
+
+fn bind_catalog_references(
+    source: &str,
+    revision: u64,
+    catalog: &CatalogBindingView,
+) -> Vec<SemanticDiagnostic> {
+    let tokens = binding_tokens(source);
+    let mut diagnostics = Vec::new();
+    let mut index = 0usize;
+    while index < tokens.len() {
+        if tokens[index].dot
+            || !matches_ci(&tokens[index].text, &["FROM", "JOIN", "UPDATE", "INTO"])
+        {
+            index += 1;
+            continue;
+        }
+        let Some(first) = tokens.get(index + 1).filter(|token| !token.dot) else {
+            index += 1;
+            continue;
+        };
+        let (schema, object, range, qualified) =
+            if tokens.get(index + 2).is_some_and(|token| token.dot) {
+                let Some(second) = tokens.get(index + 3).filter(|token| !token.dot) else {
+                    index += 1;
+                    continue;
+                };
+                (
+                    Some((first.text.as_str(), first.quoted)),
+                    (second.text.as_str(), second.quoted),
+                    TextRange {
+                        start: first.range.start,
+                        end: second.range.end,
+                    },
+                    true,
+                )
+            } else {
+                (
+                    None,
+                    (first.text.as_str(), first.quoted),
+                    first.range,
+                    false,
+                )
+            };
+        let matches = catalog
+            .objects
+            .iter()
+            .filter(|candidate| {
+                identifier_matches(&candidate.name, object.0, object.1)
+                    && schema.map_or(true, |(schema, quoted)| {
+                        identifier_matches(&candidate.schema, schema, quoted)
+                    })
+            })
+            .collect::<Vec<_>>();
+        let ordinal = diagnostics.len();
+        if matches.is_empty() {
+            if catalog.complete {
+                diagnostics.push(SemanticDiagnostic {
+                    id: format!("{revision}:binder:{ordinal}"),
+                    severity: DiagnosticSeverity::Error,
+                    code: "undefined_object".into(),
+                    message: format!("catalog object `{}` was not found", object.0),
+                    range,
+                    related_ranges: Vec::new(),
+                    source: "binder".into(),
+                    quick_fix_ids: Vec::new(),
+                });
+            }
+        } else if !qualified && matches.len() == 1 {
+            let candidate = matches[0];
+            diagnostics.push(SemanticDiagnostic {
+                id: format!("{revision}:binder:{ordinal}"),
+                severity: DiagnosticSeverity::Hint,
+                code: "unqualified_object".into(),
+                message: format!(
+                    "object resolves uniquely to `{}.{}`",
+                    candidate.schema, candidate.name
+                ),
+                range,
+                related_ranges: Vec::new(),
+                source: "binder".into(),
+                quick_fix_ids: vec![format!(
+                    "qualify:{}:{}:{}",
+                    range.start, range.end, candidate.id.0
+                )],
+            });
+        }
+        index += if qualified { 4 } else { 2 };
+    }
+    diagnostics
+}
+
+fn identifier_matches(catalog: &str, source: &str, quoted: bool) -> bool {
+    if quoted {
+        catalog == source
+    } else {
+        catalog.eq_ignore_ascii_case(source)
+    }
+}
+
+fn parse_usage_cursor(cursor: Option<&str>, revision: u64) -> Result<usize, Error> {
+    let Some(cursor) = cursor else {
+        return Ok(0);
+    };
+    let mut parts = cursor.split(':');
+    if parts.next() != Some("usage")
+        || parts.next().and_then(|value| value.parse::<u64>().ok()) != Some(revision)
+    {
+        return Err(Error::InvalidRequest);
+    }
+    let offset = parts
+        .next()
+        .and_then(|value| value.parse::<usize>().ok())
+        .ok_or(Error::InvalidRequest)?;
+    if parts.next().is_some() {
+        return Err(Error::InvalidRequest);
+    }
+    Ok(offset)
+}
+
+fn classify_usage(source: &str, range: TextRange) -> SqlUsageKind {
+    let prefix = &source[..range.start as usize];
+    let statement = prefix.rsplit_once(';').map_or(prefix, |(_, tail)| tail);
+    let first = statement.split_whitespace().next().unwrap_or_default();
+    if matches_ci(first, &["CREATE", "ALTER", "DROP"]) {
+        SqlUsageKind::Definition
+    } else if matches_ci(first, &["INSERT", "UPDATE", "DELETE", "MERGE"]) {
+        SqlUsageKind::Write
+    } else if matches_ci(first, &["CALL", "EXEC", "EXECUTE"]) {
+        SqlUsageKind::Call
+    } else {
+        SqlUsageKind::Read
+    }
+}
+
+fn render_identifier(identifier: &str, flavor: Flavor) -> String {
+    match flavor {
+        Flavor::Postgres => format!("\"{}\"", identifier.replace('"', "\"\"")),
+        Flavor::Tsql => format!("[{}]", identifier.replace(']', "]]")),
+    }
+}
+
+fn binding_tokens(source: &str) -> Vec<BindingToken> {
+    let bytes = source.as_bytes();
+    let mut tokens = Vec::new();
+    let mut index = 0usize;
+    while index < bytes.len() {
+        if bytes[index..].starts_with(b"--") {
+            index = source[index..]
+                .find('\n')
+                .map_or(bytes.len(), |offset| index + offset + 1);
+        } else if bytes[index..].starts_with(b"/*") {
+            index = source[index + 2..]
+                .find("*/")
+                .map_or(bytes.len(), |offset| index + offset + 4);
+        } else if bytes[index] == b'$' {
+            if let Some(tag) = dollar_quote_tag(&bytes[index..]) {
+                index += tag.len();
+                index = source.as_bytes()[index..]
+                    .windows(tag.len())
+                    .position(|window| window == tag)
+                    .map_or(bytes.len(), |offset| index + offset + tag.len());
+            } else {
+                index += 1;
+            }
+        } else if bytes[index] == b'\'' {
+            index += 1;
+            while index < bytes.len() {
+                if bytes[index] == b'\'' {
+                    index += 1;
+                    if bytes.get(index) == Some(&b'\'') {
+                        index += 1;
+                    } else {
+                        break;
+                    }
+                } else {
+                    index += 1;
+                }
+            }
+        } else if bytes[index] == b'"' || bytes[index] == b'[' {
+            let start = index;
+            let (closing, escaped) = if bytes[index] == b'"' {
+                (b'"', b'"')
+            } else {
+                (b']', b']')
+            };
+            index += 1;
+            let content_start = index;
+            let mut text = String::new();
+            while index < bytes.len() {
+                if bytes[index] == closing {
+                    if bytes.get(index + 1) == Some(&escaped) {
+                        text.push(closing as char);
+                        index += 2;
+                    } else {
+                        index += 1;
+                        break;
+                    }
+                } else {
+                    let character = source[index..].chars().next().unwrap();
+                    text.push(character);
+                    index += character.len_utf8();
+                }
+            }
+            if text.is_empty() && content_start < index.saturating_sub(1) {
+                text = source[content_start..index - 1].to_string();
+            }
+            tokens.push(BindingToken {
+                text,
+                range: TextRange {
+                    start: start as u32,
+                    end: index as u32,
+                },
+                quoted: true,
+                dot: false,
+            });
+        } else if bytes[index].is_ascii_alphabetic() || bytes[index] == b'_' {
+            let start = index;
+            index += 1;
+            while index < bytes.len()
+                && (bytes[index].is_ascii_alphanumeric()
+                    || bytes[index] == b'_'
+                    || bytes[index] >= 0x80)
+            {
+                if bytes[index] >= 0x80 {
+                    index += source[index..].chars().next().unwrap().len_utf8();
+                } else {
+                    index += 1;
+                }
+            }
+            tokens.push(BindingToken {
+                text: source[start..index].to_string(),
+                range: TextRange {
+                    start: start as u32,
+                    end: index as u32,
+                },
+                quoted: false,
+                dot: false,
+            });
+        } else if bytes[index] == b'.' {
+            tokens.push(BindingToken {
+                text: ".".into(),
+                range: TextRange {
+                    start: index as u32,
+                    end: index as u32 + 1,
+                },
+                quoted: false,
+                dot: true,
+            });
+            index += 1;
+        } else {
+            index += 1;
+        }
+    }
+    tokens
 }
 
 fn split_statements(
@@ -652,6 +1595,267 @@ fn statement_kind(sql: &str) -> StatementKind {
         "EXEC" | "EXECUTE" | "CALL" | "DO" => StatementKind::Procedure,
         _ => StatementKind::Unknown,
     }
+}
+
+/// Detect a completion slot from tolerant tokenization of shared semantic
+/// source. Stateful callers validate the exact revision before reaching here.
+pub fn detect_completion_context(
+    sql: &str,
+    cursor: usize,
+    dialect_id: &sift_protocol::DialectId,
+) -> Result<CompletionAnalysis, Error> {
+    if cursor > sql.len() || !sql.is_char_boundary(cursor) {
+        return Err(Error::InvalidRange);
+    }
+    let flavor = match dialect_id.as_str() {
+        "sift/postgresql" => Flavor::Postgres,
+        "sift/tsql" => Flavor::Tsql,
+        other => return Err(Error::DialectUnavailable(other.to_string())),
+    };
+    let (prefix_start, prefix) = extract_prefix(sql, cursor);
+    let dialect: Box<dyn Dialect> = match flavor {
+        Flavor::Postgres => Box::new(PostgreSqlDialect {}),
+        Flavor::Tsql => Box::new(MsSqlDialect {}),
+    };
+    let tokens = semantic_tokens(&*dialect, &sql[..prefix_start]);
+    // Bindings can be declared after the cursor (`SELECT u.| FROM users u`),
+    // so relation discovery consumes the whole revision while slot
+    // classification consumes only the text preceding the replacement range.
+    let relations = semantic_tokens(&*dialect, sql);
+    Ok(CompletionAnalysis {
+        context: classify_completion(&tokens),
+        cursor,
+        prefix_start,
+        prefix_lower: prefix.to_ascii_lowercase(),
+        prefix,
+        relations: completion_relations(&relations),
+    })
+}
+
+fn semantic_tokens(dialect: &dyn Dialect, source: &str) -> Vec<Token> {
+    Tokenizer::new(dialect, source)
+        .tokenize()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|token| !is_ignorable(token))
+        .collect()
+}
+
+fn completion_relations(tokens: &[Token]) -> Vec<CompletionRelation> {
+    let mut relations = Vec::new();
+    let mut index = 0usize;
+    while index < tokens.len() {
+        let Some(word) = word_value(&tokens[index]) else {
+            index += 1;
+            continue;
+        };
+        if word.eq_ignore_ascii_case("WITH") {
+            if let Some(name) = tokens.get(index + 1).and_then(word_value) {
+                push_relation(&mut relations, name, None, false);
+            }
+        }
+        if word.eq_ignore_ascii_case("CREATE") {
+            let mut table = index + 1;
+            if tokens.get(table).and_then(word_value).is_some_and(|value| {
+                value.eq_ignore_ascii_case("TEMP") || value.eq_ignore_ascii_case("TEMPORARY")
+            }) {
+                table += 1;
+            }
+            if tokens
+                .get(table)
+                .and_then(word_value)
+                .is_some_and(|value| value.eq_ignore_ascii_case("TABLE"))
+            {
+                if let Some(name) = tokens.get(table + 1).and_then(word_value) {
+                    push_relation(&mut relations, name, None, false);
+                }
+            }
+        }
+        if is_from_or_join(word) {
+            let Some(mut object_index) = next_word_index(tokens, index + 1) else {
+                index += 1;
+                continue;
+            };
+            let mut object = word_value(&tokens[object_index]).unwrap_or_default();
+            while matches!(tokens.get(object_index + 1), Some(Token::Period)) {
+                let Some(next) = tokens.get(object_index + 2).and_then(word_value) else {
+                    break;
+                };
+                object = next;
+                object_index += 2;
+            }
+            let mut alias_index = next_word_index(tokens, object_index + 1);
+            if alias_index.is_some_and(|candidate| {
+                word_value(&tokens[candidate]).is_some_and(|value| value.eq_ignore_ascii_case("AS"))
+            }) {
+                alias_index =
+                    alias_index.and_then(|candidate| next_word_index(tokens, candidate + 1));
+            }
+            if let Some(alias) = alias_index.and_then(|candidate| word_value(&tokens[candidate])) {
+                if !is_alias_stop(alias) {
+                    push_relation(&mut relations, alias, Some(object), true);
+                }
+            }
+        }
+        index += 1;
+    }
+    relations
+}
+
+fn push_relation(
+    relations: &mut Vec<CompletionRelation>,
+    name: &str,
+    target: Option<&str>,
+    is_alias: bool,
+) {
+    if !relations
+        .iter()
+        .any(|relation| relation.name.eq_ignore_ascii_case(name))
+    {
+        relations.push(CompletionRelation {
+            name: name.to_string(),
+            target: target.map(str::to_string),
+            is_alias,
+        });
+    }
+}
+
+fn next_word_index(tokens: &[Token], start: usize) -> Option<usize> {
+    (start..tokens.len()).find(|index| word_value(&tokens[*index]).is_some())
+}
+
+fn is_from_or_join(word: &str) -> bool {
+    matches_ci(word, &["FROM", "JOIN"])
+}
+
+fn is_alias_stop(word: &str) -> bool {
+    matches_ci(
+        word,
+        &[
+            "WHERE",
+            "JOIN",
+            "LEFT",
+            "RIGHT",
+            "FULL",
+            "INNER",
+            "OUTER",
+            "CROSS",
+            "ON",
+            "GROUP",
+            "ORDER",
+            "HAVING",
+            "LIMIT",
+            "OFFSET",
+            "UNION",
+            "EXCEPT",
+            "INTERSECT",
+            "SELECT",
+            "FROM",
+            "SET",
+            "RETURNING",
+            "OUTPUT",
+            "INSERT",
+            "UPDATE",
+            "DELETE",
+            "CREATE",
+            "ALTER",
+            "DROP",
+        ],
+    )
+}
+
+fn classify_completion(tokens: &[Token]) -> CompletionContext {
+    // Completion context never crosses a statement delimiter. In particular,
+    // `SELECT 1; SEL|` is a statement-leading slot, not a continuation of the
+    // preceding SELECT list.
+    let tokens = tokens
+        .iter()
+        .rposition(|token| matches!(token, Token::SemiColon))
+        .map_or(tokens, |delimiter| &tokens[delimiter + 1..]);
+    if let Some(Token::Period) = tokens.last() {
+        let qualifier = tokens
+            .get(tokens.len().wrapping_sub(2))
+            .and_then(word_value);
+        if let Some(qualifier) = qualifier {
+            let preceding = tokens
+                .get(tokens.len().wrapping_sub(3))
+                .and_then(word_value)
+                .unwrap_or_default();
+            if is_table_slot_lead(preceding) {
+                return CompletionContext::ExpectingObjectInSchema {
+                    schema: qualifier.to_string(),
+                };
+            }
+            return CompletionContext::ExpectingColumn {
+                qualifier: Some(qualifier.to_string()),
+            };
+        }
+    }
+    for token in tokens.iter().rev() {
+        let Some(word) = word_value(token) else {
+            continue;
+        };
+        if is_table_slot_lead(word) {
+            return CompletionContext::ExpectingTable;
+        }
+        if matches_ci(
+            word,
+            &[
+                "SELECT", "WHERE", "SET", "BY", "ON", "HAVING", "AND", "OR", "NOT", "IS", "IN",
+                "LIKE", "BETWEEN",
+            ],
+        ) {
+            return CompletionContext::ExpectingColumn { qualifier: None };
+        }
+    }
+    if tokens.is_empty() {
+        CompletionContext::Statement
+    } else {
+        CompletionContext::Unknown
+    }
+}
+
+fn extract_prefix(sql: &str, cursor: usize) -> (usize, String) {
+    let bytes = sql.as_bytes();
+    let mut start = cursor;
+    while start > 0 {
+        let byte = bytes[start - 1];
+        if byte.is_ascii_alphanumeric() || byte == b'_' || byte >= 0x80 {
+            start -= 1;
+        } else {
+            break;
+        }
+    }
+    if start > 0 && matches!(bytes[start - 1], b'"' | b'[') {
+        start -= 1;
+    }
+    (start, sql[start..cursor].to_string())
+}
+
+fn is_ignorable(token: &Token) -> bool {
+    matches!(
+        token,
+        Token::Whitespace(Whitespace::Space)
+            | Token::Whitespace(Whitespace::Tab)
+            | Token::Whitespace(Whitespace::Newline)
+            | Token::Whitespace(Whitespace::SingleLineComment { .. })
+            | Token::Whitespace(Whitespace::MultiLineComment(_))
+    )
+}
+
+fn word_value(token: &Token) -> Option<&str> {
+    match token {
+        Token::Word(Word { value, .. }) => Some(value),
+        _ => None,
+    }
+}
+
+fn is_table_slot_lead(word: &str) -> bool {
+    matches_ci(word, &["FROM", "JOIN", "INTO", "UPDATE", "TABLE"])
+}
+
+fn matches_ci(word: &str, values: &[&str]) -> bool {
+    values.iter().any(|value| word.eq_ignore_ascii_case(value))
 }
 
 fn validate_offset(source: &str, offset: u32) -> Result<(), Error> {
@@ -884,6 +2088,185 @@ mod tests {
     }
 
     #[test]
+    fn formatter_is_revision_bound_comment_safe_and_idempotent() {
+        let registry = SemanticRegistry::default();
+        let scope = DocumentScope {
+            session: 1,
+            connection: 1,
+        };
+        let source = "select 'from' as value -- where\nfrom users where id is not null;";
+        let state = registry
+            .create(
+                scope,
+                dialect("sift/postgresql"),
+                source.into(),
+                None,
+                &AtomicBool::new(false),
+            )
+            .unwrap();
+        let result = registry
+            .format(
+                scope,
+                state.document_id,
+                FormatSqlRequest {
+                    revision: 1,
+                    range: None,
+                    options: sift_protocol::FormatOptions::default(),
+                },
+                &AtomicBool::new(false),
+            )
+            .unwrap();
+        let edits = &result.documents[0].edits;
+        assert!(edits.iter().any(|edit| edit.new_text == "SELECT"));
+        assert!(!edits.iter().any(|edit| {
+            &source[edit.range.start as usize..edit.range.end as usize] == "where"
+                && edit.range.start < source.find('\n').unwrap() as u32
+        }));
+        let mut formatted = source.to_string();
+        for edit in edits.iter().rev() {
+            formatted.replace_range(
+                edit.range.start as usize..edit.range.end as usize,
+                &edit.new_text,
+            );
+        }
+        let updated = registry
+            .update(
+                scope,
+                state.document_id,
+                1,
+                formatted,
+                &AtomicBool::new(false),
+            )
+            .unwrap();
+        let second = registry
+            .format(
+                scope,
+                state.document_id,
+                FormatSqlRequest {
+                    revision: updated.revision,
+                    range: None,
+                    options: sift_protocol::FormatOptions::default(),
+                },
+                &AtomicBool::new(false),
+            )
+            .unwrap();
+        assert!(second.documents[0].edits.is_empty());
+    }
+
+    #[test]
+    fn catalog_binding_is_conservative_and_offers_qualification() {
+        let catalog = CatalogBindingView {
+            revision: sift_protocol::CatalogRevision(7),
+            complete: true,
+            objects: vec![CatalogBindingObject {
+                id: sift_protocol::CatalogObjectId("users-id".into()),
+                schema: "public".into(),
+                name: "users".into(),
+                columns: vec!["id".into()],
+            }],
+        };
+        let diagnostics = bind_catalog_references(
+            "select * from users; select * from missing; -- from ignored\nselect $$from hidden$$",
+            1,
+            &catalog,
+        );
+        assert!(diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "unqualified_object" && !diagnostic.quick_fix_ids.is_empty()
+        }));
+        assert_eq!(
+            diagnostics
+                .iter()
+                .filter(|diagnostic| diagnostic.code == "undefined_object")
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn partial_catalog_does_not_claim_an_object_is_missing() {
+        let diagnostics = bind_catalog_references(
+            "select * from maybe_hidden",
+            1,
+            &CatalogBindingView {
+                revision: sift_protocol::CatalogRevision(1),
+                complete: false,
+                objects: Vec::new(),
+            },
+        );
+        assert!(diagnostics.is_empty());
+    }
+
+    #[test]
+    fn usages_page_and_refactor_only_touch_semantic_identifiers() {
+        let registry = SemanticRegistry::default();
+        let scope = DocumentScope {
+            session: 1,
+            connection: 1,
+        };
+        let source = "select users.id from users; -- users\nselect 'users'";
+        let state = registry
+            .create(
+                scope,
+                dialect("sift/postgresql"),
+                source.into(),
+                None,
+                &AtomicBool::new(false),
+            )
+            .unwrap();
+        let first = registry
+            .find_usages(
+                scope,
+                state.document_id,
+                FindSqlUsagesRequest {
+                    revision: 1,
+                    catalog_revision: None,
+                    target: SqlSymbolTarget::AtPosition { position: 8 },
+                    cursor: None,
+                    limit: Some(1),
+                },
+                None,
+            )
+            .unwrap();
+        assert_eq!(first.usages.len(), 1);
+        assert!(first.next_cursor.is_some());
+        let second = registry
+            .find_usages(
+                scope,
+                state.document_id,
+                FindSqlUsagesRequest {
+                    revision: 1,
+                    catalog_revision: None,
+                    target: SqlSymbolTarget::AtPosition { position: 8 },
+                    cursor: first.next_cursor,
+                    limit: Some(10),
+                },
+                None,
+            )
+            .unwrap();
+        assert_eq!(second.usages.len(), 1);
+        let rename = registry
+            .prepare_refactor(
+                scope,
+                state.document_id,
+                PrepareSqlRefactorRequest {
+                    revision: 1,
+                    catalog_revision: None,
+                    refactor: SqlRefactor::RenameSymbol {
+                        position: 8,
+                        new_name: "accounts".into(),
+                    },
+                },
+                None,
+            )
+            .unwrap();
+        assert_eq!(rename.documents[0].edits.len(), 2);
+        assert!(rename.documents[0]
+            .edits
+            .iter()
+            .all(|edit| edit.new_text == "\"accounts\""));
+    }
+
+    #[test]
     fn rejects_mid_codepoint_offsets() {
         let registry = SemanticRegistry::default();
         let scope = DocumentScope {
@@ -911,5 +2294,30 @@ mod tests {
             ),
             Err(Error::InvalidRange)
         ));
+    }
+
+    #[test]
+    fn completion_context_does_not_cross_statement_boundaries() {
+        let source = "select * from users; SEL";
+        let analysis =
+            detect_completion_context(source, source.len(), &dialect("sift/postgresql")).unwrap();
+        assert!(matches!(analysis.context, CompletionContext::Statement));
+        assert_eq!(analysis.prefix, "SEL");
+    }
+
+    #[test]
+    fn completion_resolves_table_aliases() {
+        let source = "select u. from public.users as u";
+        let cursor = source.find("u.").unwrap() + 2;
+        let analysis =
+            detect_completion_context(source, cursor, &dialect("sift/postgresql")).unwrap();
+        assert!(matches!(
+            analysis.context,
+            CompletionContext::ExpectingColumn { ref qualifier }
+                if qualifier.as_deref() == Some("u")
+        ));
+        assert!(analysis.relations.iter().any(|relation| {
+            relation.name == "u" && relation.target.as_deref() == Some("users") && relation.is_alias
+        }));
     }
 }

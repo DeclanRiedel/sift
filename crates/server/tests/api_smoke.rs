@@ -3699,6 +3699,26 @@ async fn semantic_document_revision_diagnostics_selection_and_cleanup() {
 
     let response = app
         .clone()
+        .oneshot(post_json(
+            format!("{}/{}/format", base, document.document_id),
+            serde_json::json!({"revision": 1, "options": {"keyword_case": "upper"}}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let formatting: sift_protocol::WorkspaceEdit = body_json(response.into_body()).await;
+    assert!(!formatting.is_complete, "recovered statement is preserved");
+    assert!(formatting.documents[0]
+        .edits
+        .iter()
+        .any(|edit| edit.range.start == 0 && edit.new_text == "SELECT"));
+    assert!(formatting.documents[0]
+        .edits
+        .iter()
+        .all(|edit| edit.range.end <= 9 || edit.range.start >= 22));
+
+    let response = app
+        .clone()
         .oneshot(put_json(
             format!("{}/{}", base, document.document_id),
             serde_json::json!({"base_revision": 0, "text": "select 4"}),

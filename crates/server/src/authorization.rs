@@ -162,6 +162,17 @@ pub const fn is_connection_operation(operation: OperationKind) -> bool {
             | CloseConnection
             | PingConnection
             | RefreshSchema
+            | ReadCatalogGraph
+            | ProjectCatalogDiagram
+            | CreateCatalogSnapshot
+            | CompareCatalogSchemas
+            | PreviewMigration
+            | ApplyMigration
+            | CancelMigration
+            | GetMigrationRun
+            | StartComparison
+            | PrepareComparisonPatch
+            | CaptureSemanticPlan
             | GenerateDdl
             | ExecuteQuery
             | ExportQuery
@@ -171,6 +182,10 @@ pub const fn is_connection_operation(operation: OperationKind) -> bool {
             | CloseSemanticDocument
             | SelectStatement
             | DiagnoseSql
+            | FormatSql
+            | SqlQuickFix
+            | FindSqlUsages
+            | PrepareSqlRefactor
             | Listen
             | CancelQuery
             | PreviewEdits

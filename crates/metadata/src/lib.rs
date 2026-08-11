@@ -23,15 +23,19 @@ use sift_protocol::{
 use uuid::Uuid;
 
 mod approval;
+mod catalog_snapshot;
 mod extension;
 mod extension_storage;
 pub mod http;
+mod migration_run;
+mod plan_capture;
 pub mod schema;
 pub mod secrets;
 
 pub use approval::*;
 pub use extension::*;
 pub use extension_storage::*;
+pub use plan_capture::PlanCaptureRetention;
 pub use schema::*;
 #[cfg(feature = "os-keychain")]
 pub use secrets::OsKeychainSecretStore;
@@ -46,7 +50,7 @@ fn migration_kind(version: u32) -> Result<MigrationKind> {
         6 => Ok(MigrationKind::LegacyContract),
         19 => Ok(MigrationKind::Contract),
         26 | 27 => Ok(MigrationKind::Data),
-        1..=5 | 7..=18 | 20..=25 | 28 => Ok(MigrationKind::Expand),
+        1..=5 | 7..=18 | 20..=25 | 28..=31 => Ok(MigrationKind::Expand),
         _ => Err(MetadataError::InvalidMigrationHistory(format!(
             "embedded V{version} has no lifecycle classification"
         ))),
@@ -129,6 +133,30 @@ pub enum MetadataError {
     PolicyRevisionConflict { expected: u64, current: u64 },
     #[error("saved query revision conflict: expected {expected}, current {current}")]
     SavedQueryRevisionConflict { expected: u64, current: u64 },
+    #[error("catalog snapshot not found")]
+    CatalogSnapshotNotFound,
+    #[error("catalog snapshot revision conflict: expected {expected}, current {current}")]
+    CatalogSnapshotRevisionConflict { expected: u64, current: u64 },
+    #[error("catalog snapshot tenant limit reached")]
+    CatalogSnapshotLimitReached,
+    #[error("catalog snapshot payload exceeds the {limit}-byte limit")]
+    CatalogSnapshotTooLarge { limit: usize },
+    #[error("catalog snapshot description is invalid")]
+    InvalidCatalogSnapshotDescription,
+    #[error("migration run not found")]
+    MigrationRunNotFound,
+    #[error("migration run is already terminal")]
+    MigrationRunTerminal,
+    #[error("plan capture not found")]
+    PlanCaptureNotFound,
+    #[error("plan capture revision conflict: expected {expected}, current {current}")]
+    PlanCaptureRevisionConflict { expected: u64, current: u64 },
+    #[error("plan capture retention limit reached")]
+    PlanCaptureLimitReached,
+    #[error("plan capture payload exceeds the {limit}-byte limit")]
+    PlanCaptureTooLarge { limit: usize },
+    #[error("plan capture retention must be positive and may only lower the built-in ceilings")]
+    InvalidPlanCaptureRetention,
     #[error(
         "extension {extension_id} version {version} already exists with a different archive digest"
     )]
@@ -437,6 +465,7 @@ impl DerefMut for ConnHandle<'_> {
 pub struct MetadataStore {
     backend: Backend,
     secrets: Arc<dyn SecretStore>,
+    plan_capture_retention: Arc<std::sync::RwLock<PlanCaptureRetention>>,
 }
 
 impl MetadataStore {
@@ -445,6 +474,9 @@ impl MetadataStore {
         Ok(Self {
             backend: Backend::Pool(pool),
             secrets,
+            plan_capture_retention: Arc::new(std::sync::RwLock::new(
+                PlanCaptureRetention::default(),
+            )),
         })
     }
 
@@ -455,6 +487,9 @@ impl MetadataStore {
         Ok(Self {
             backend: Backend::Memory(Arc::new(Mutex::new(conn))),
             secrets,
+            plan_capture_retention: Arc::new(std::sync::RwLock::new(
+                PlanCaptureRetention::default(),
+            )),
         })
     }
 
@@ -5692,13 +5727,13 @@ mod tests {
         assert!(!path.exists());
         let status = store.migration_status().unwrap();
         assert_eq!(status.current_version, 0);
-        assert_eq!(status.latest_version, 28);
-        assert_eq!(status.pending.len(), 28);
+        assert_eq!(status.latest_version, 31);
+        assert_eq!(status.pending.len(), 31);
         assert!(matches!(
             store.ensure_schema_current(),
             Err(MetadataError::MigrationRequired {
                 current: 0,
-                latest: 28
+                latest: 31
             })
         ));
         assert!(!path.exists());
@@ -5718,7 +5753,7 @@ mod tests {
         let store = MetadataStore::open(&path, Arc::new(MemorySecretStore::new())).unwrap();
         let report = store.apply_migrations(false).unwrap();
         assert_eq!(report.from_version, 1);
-        assert_eq!(report.to_version, 28);
+        assert_eq!(report.to_version, 31);
         let backup = report.backup.expect("existing schema is backed up");
         assert!(backup.is_file());
 
@@ -5755,7 +5790,7 @@ mod tests {
 
         store.apply_migrations(false).unwrap();
         let status = store.migration_status().unwrap();
-        assert_eq!(status.current_version, 28);
+        assert_eq!(status.current_version, 31);
         assert_eq!(status.minimum_compatible_version, 19);
     }
 
@@ -5767,7 +5802,7 @@ mod tests {
                 .iter()
                 .map(|fixture| fixture.schema_version)
                 .collect::<Vec<_>>(),
-            vec![18, 19, 28],
+            vec![18, 19, 28, 29, 30, 31],
             "the durable matrix must retain the pre-contract, contract, and current boundaries"
         );
 
@@ -5797,7 +5832,7 @@ mod tests {
                         store.ensure_schema_current(),
                         Err(MetadataError::MigrationRequired {
                             current,
-                            latest: 28
+                            latest: 31
                         }) if current == fixture.schema_version
                     ),
                     "{} should require migration",
@@ -5825,7 +5860,7 @@ mod tests {
                         "{}",
                         fixture.name
                     );
-                    assert_eq!(report.to_version, 28, "{}", fixture.name);
+                    assert_eq!(report.to_version, 31, "{}", fixture.name);
                 }
             }
         }
@@ -5833,7 +5868,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let current_fixture = schema_compatibility_fixtures()
             .into_iter()
-            .find(|fixture| fixture.schema_version == 28)
+            .find(|fixture| fixture.schema_version == 31)
             .unwrap();
         let path = copy_schema_fixture(directory.path(), &current_fixture);
         let connection = Connection::open(&path).unwrap();
@@ -5841,7 +5876,7 @@ mod tests {
             .execute(
                 "INSERT INTO refinery_schema_history
                  (version, name, applied_on, checksum)
-                 VALUES (29, 'future_additive_fixture', '2026-08-03T00:00:00Z', '1')",
+                 VALUES (32, 'future_additive_fixture', '2026-08-03T00:00:00Z', '1')",
                 [],
             )
             .unwrap();
@@ -5850,8 +5885,8 @@ mod tests {
 
         let store = MetadataStore::open(&path, Arc::new(MemorySecretStore::new())).unwrap();
         let status = store.migration_status().unwrap();
-        assert_eq!(status.current_version, 29);
-        assert_eq!(status.latest_version, 28);
+        assert_eq!(status.current_version, 32);
+        assert_eq!(status.latest_version, 31);
         assert!(status.pending.is_empty());
         store
             .ensure_schema_current()
@@ -5859,20 +5894,20 @@ mod tests {
         assert!(store.apply_migrations(false).unwrap().applied.is_empty());
 
         let connection = Connection::open(&path).unwrap();
-        connection.pragma_update(None, "user_version", 29).unwrap();
+        connection.pragma_update(None, "user_version", 32).unwrap();
         drop(connection);
         assert!(matches!(
             store.ensure_schema_current(),
             Err(MetadataError::BinaryTooOld {
-                minimum: 29,
-                latest: 28
+                minimum: 32,
+                latest: 31
             })
         ));
         assert!(matches!(
             store.apply_migrations(false),
             Err(MetadataError::BinaryTooOld {
-                minimum: 29,
-                latest: 28
+                minimum: 32,
+                latest: 31
             })
         ));
     }
@@ -7422,7 +7457,7 @@ mod tests {
         assert!(profile
             .configuration
             .get("password")
-            .is_none_or(|value| value.is_null()));
+            .map_or(true, |value| value.is_null()));
         assert!(profile.shared_secret_handle.is_some());
 
         let listed = store.list_connection_profiles(TenantId(1)).unwrap();
@@ -7431,7 +7466,7 @@ mod tests {
         assert!(listed[0]
             .configuration
             .get("password")
-            .is_none_or(|value| value.is_null()));
+            .map_or(true, |value| value.is_null()));
 
         let (_, credentials) = store
             .resolve_provider_connection(TenantId(1), PrincipalId(1), profile.id)

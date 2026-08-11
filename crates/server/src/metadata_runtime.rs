@@ -32,6 +32,14 @@ pub fn open_metadata_store(cfg: &Config) -> anyhow::Result<Option<MetadataStore>
     let secrets = build_secret_store(cfg, &path)?;
     let store = MetadataStore::open(&path, secrets)
         .with_context(|| format!("opening metadata store: {}", path.display()))?;
+    store
+        .set_plan_capture_retention(sift_metadata::PlanCaptureRetention {
+            max_capture_bytes: cfg.limits.plan_capture_max_bytes,
+            max_per_tenant: cfg.limits.plan_capture_max_per_tenant,
+            max_per_source: cfg.limits.plan_capture_max_per_source,
+            max_age_days: cfg.limits.plan_capture_max_age_days,
+        })
+        .context("validating plan-capture retention limits")?;
     Ok(Some(store))
 }
 

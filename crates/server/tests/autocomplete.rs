@@ -55,6 +55,7 @@ fn snapshot() -> SchemaSnapshot {
         fetched_at: chrono::Utc::now(),
         scope: SchemaScope::shallow(),
         incomplete: false,
+        graph: None,
     }
 }
 
@@ -72,6 +73,7 @@ fn shallow_snapshot() -> SchemaSnapshot {
         fetched_at: chrono::Utc::now(),
         scope: SchemaScope::shallow(),
         incomplete: false,
+        graph: None,
     }
 }
 
@@ -236,6 +238,107 @@ async fn complete_dotted_returns_columns() {
 }
 
 #[tokio::test]
+async fn completion_hydrates_columns_through_an_alias() {
+    let driver = MockDriver::builder()
+        .engine(Engine::Postgres)
+        .ping_ok(ServerInfo {
+            provider: Engine::Postgres.provider_ref("test"),
+            server_version: "MockDB 0.1".into(),
+            current_database: "mock".into(),
+            current_user: "mock".into(),
+            pool_warm_slots: None,
+        })
+        .schema_ok(shallow_snapshot())
+        .schema_ok(snapshot())
+        .build();
+    let registry = DriverRegistry::builder().register(driver).build();
+    let (router, sid, cid) = setup_with_state(state_with_registry(registry)).await;
+    let sql = "SELECT u. FROM public.users AS u";
+    let response = router
+        .oneshot(post_json(
+            format!("/v1/sessions/{sid}/connections/{cid}/complete"),
+            CompletionRequest {
+                sql: sql.into(),
+                cursor: 9,
+                limit: Some(10),
+            },
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let response: CompletionResponse = body_json(response.into_body()).await;
+    let labels: Vec<&str> = response
+        .candidates
+        .iter()
+        .map(|candidate| candidate.label.as_ref())
+        .collect();
+    assert!(labels.contains(&"id"), "id absent in {labels:?}");
+    assert!(labels.contains(&"email"), "email absent in {labels:?}");
+}
+
+#[tokio::test]
+async fn stateful_and_legacy_completion_have_corpus_parity() {
+    let (router, sid, cid) = setup().await;
+    let sql = "SELECT * FROM us";
+    let legacy: CompletionResponse = body_json(
+        router
+            .clone()
+            .oneshot(post_json(
+                format!("/v1/sessions/{sid}/connections/{cid}/complete"),
+                CompletionRequest {
+                    sql: sql.into(),
+                    cursor: 16,
+                    limit: Some(10),
+                },
+            ))
+            .await
+            .unwrap()
+            .into_body(),
+    )
+    .await;
+
+    let opened = router
+        .clone()
+        .oneshot(post_json(
+            format!("/v1/sessions/{sid}/connections/{cid}/semantic-documents"),
+            serde_json::json!({"text": sql, "source": {"kind": "scratch"}}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(opened.status(), StatusCode::CREATED);
+    let document: sift_protocol::SemanticDocumentState = body_json(opened.into_body()).await;
+    let stateful = router
+        .clone()
+        .oneshot(post_json(
+            format!(
+                "/v1/sessions/{sid}/connections/{cid}/semantic-documents/{}/complete",
+                document.document_id
+            ),
+            serde_json::json!({"revision": 1, "cursor": 16, "limit": 10}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(stateful.status(), StatusCode::OK);
+    let stateful: CompletionResponse = body_json(stateful.into_body()).await;
+    assert_eq!(
+        serde_json::to_value(&legacy).unwrap(),
+        serde_json::to_value(&stateful).unwrap()
+    );
+
+    let stale = router
+        .oneshot(post_json(
+            format!(
+                "/v1/sessions/{sid}/connections/{cid}/semantic-documents/{}/complete",
+                document.document_id
+            ),
+            serde_json::json!({"revision": 2, "cursor": 16}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(stale.status(), StatusCode::CONFLICT);
+}
+
+#[tokio::test]
 async fn complete_openapi_registers_completion_schemas() {
     let router = app(state());
     let res = router
@@ -249,7 +352,11 @@ async fn complete_openapi_registers_completion_schemas() {
     assert_eq!(res.status(), StatusCode::OK);
     let doc: serde_json::Value = body_json(res.into_body()).await;
     assert!(doc["paths"]["/v1/sessions/{id}/connections/{conn_id}/complete"].is_object());
+    assert!(doc["paths"]
+        ["/v1/sessions/{id}/connections/{conn_id}/semantic-documents/{document}/complete"]
+        .is_object());
     assert!(doc["components"]["schemas"]["CompletionRequest"].is_object());
     assert!(doc["components"]["schemas"]["CompletionResponse"].is_object());
     assert!(doc["components"]["schemas"]["CompletionCandidate"].is_object());
+    assert!(doc["components"]["schemas"]["SemanticCompletionRequest"].is_object());
 }

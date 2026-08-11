@@ -147,6 +147,122 @@ pub enum Operation {
         connection: ConnectionId,
         scope: SchemaScope,
     },
+    ReadCatalogGraph {
+        session: SessionId,
+        connection: ConnectionId,
+        refresh: bool,
+        requested_schema_count: u32,
+        requested_kind_count: u32,
+        include_definitions: bool,
+        max_nodes: Option<u32>,
+    },
+    ProjectCatalogDiagram {
+        session: SessionId,
+        connection: ConnectionId,
+        catalog_revision: crate::CatalogRevision,
+        requested_object_count: u32,
+        neighborhood_depth: u8,
+        include_columns: bool,
+        max_nodes: Option<u32>,
+    },
+    CreateCatalogSnapshot {
+        session: SessionId,
+        connection: ConnectionId,
+        catalog_revision: crate::CatalogRevision,
+        accept_partial: bool,
+    },
+    ListCatalogSnapshots {
+        tenant_id: i64,
+    },
+    GetCatalogSnapshot {
+        tenant_id: i64,
+        snapshot: crate::CatalogSnapshotId,
+    },
+    DeleteCatalogSnapshot {
+        tenant_id: i64,
+        snapshot: crate::CatalogSnapshotId,
+        expected_revision: u64,
+    },
+    CompareCatalogSchemas {
+        session: SessionId,
+        connection: ConnectionId,
+        accepted_rename_count: u32,
+        max_changes: Option<u32>,
+    },
+    PreviewMigration {
+        session: SessionId,
+        connection: ConnectionId,
+        selected_change_count: u32,
+        expected_live_revision: crate::CatalogRevision,
+    },
+    ApplyMigration {
+        session: SessionId,
+        connection: ConnectionId,
+        plan_id: crate::MigrationPlanId,
+    },
+    CancelMigration {
+        session: SessionId,
+        connection: ConnectionId,
+        run_id: crate::MigrationRunId,
+    },
+    GetMigrationRun {
+        session: SessionId,
+        connection: ConnectionId,
+        run_id: crate::MigrationRunId,
+    },
+    GetDurableMigrationRun {
+        tenant_id: i64,
+        run_id: crate::MigrationRunId,
+    },
+    StartComparison {
+        session: SessionId,
+        left_source: String,
+        right_source: String,
+        mapped_column_count: u32,
+        key_column_count: u32,
+    },
+    PageComparison {
+        session: SessionId,
+        comparison_id: crate::ComparisonId,
+        limit: u32,
+    },
+    CancelComparison {
+        session: SessionId,
+        comparison_id: crate::ComparisonId,
+    },
+    PrepareComparisonPatch {
+        session: SessionId,
+        comparison_id: crate::ComparisonId,
+        catalog_revision: crate::CatalogRevision,
+        max_statements: Option<u32>,
+    },
+    CaptureSemanticPlan {
+        session: SessionId,
+        connection: ConnectionId,
+        document: SemanticDocumentId,
+        revision: u64,
+        catalog_revision: crate::CatalogRevision,
+        analyze: bool,
+    },
+    ListPlanCaptures {
+        tenant_id: i64,
+        source_bound: bool,
+        limit: u32,
+    },
+    GetPlanCapture {
+        tenant_id: i64,
+        capture_id: crate::PlanCaptureId,
+    },
+    ComparePlanCaptures {
+        tenant_id: i64,
+        left: crate::PlanCaptureId,
+        right: crate::PlanCaptureId,
+    },
+    DeletePlanCapture {
+        tenant_id: i64,
+        capture_id: crate::PlanCaptureId,
+        expected_revision: u64,
+    },
     GenerateDdl {
         session: SessionId,
         connection: ConnectionId,
@@ -163,6 +279,14 @@ pub enum Operation {
         session: SessionId,
         connection: ConnectionId,
         request: CompletionRequest,
+    },
+    CompleteSemanticDocument {
+        session: SessionId,
+        connection: ConnectionId,
+        document: SemanticDocumentId,
+        revision: u64,
+        cursor: u32,
+        limit: Option<u32>,
     },
     OpenSemanticDocument {
         session: SessionId,
@@ -192,6 +316,36 @@ pub enum Operation {
         connection: ConnectionId,
         document: SemanticDocumentId,
         revision: u64,
+    },
+    FormatSql {
+        session: SessionId,
+        connection: ConnectionId,
+        document: SemanticDocumentId,
+        revision: u64,
+        range_requested: bool,
+    },
+    SqlQuickFix {
+        session: SessionId,
+        connection: ConnectionId,
+        document: SemanticDocumentId,
+        revision: u64,
+        catalog_revision: crate::CatalogRevision,
+    },
+    FindSqlUsages {
+        session: SessionId,
+        connection: ConnectionId,
+        document: SemanticDocumentId,
+        revision: u64,
+        catalog_bound: bool,
+        limit: Option<u32>,
+    },
+    PrepareSqlRefactor {
+        session: SessionId,
+        connection: ConnectionId,
+        document: SemanticDocumentId,
+        revision: u64,
+        catalog_bound: bool,
+        rename: bool,
     },
     Listen {
         session: SessionId,
@@ -352,15 +506,41 @@ impl Operation {
             Self::CloseConnection { .. } => OperationKind::CloseConnection,
             Self::PingConnection { .. } => OperationKind::PingConnection,
             Self::RefreshSchema { .. } => OperationKind::RefreshSchema,
+            Self::ReadCatalogGraph { .. } => OperationKind::ReadCatalogGraph,
+            Self::ProjectCatalogDiagram { .. } => OperationKind::ProjectCatalogDiagram,
+            Self::CreateCatalogSnapshot { .. } => OperationKind::CreateCatalogSnapshot,
+            Self::ListCatalogSnapshots { .. } => OperationKind::ListCatalogSnapshots,
+            Self::GetCatalogSnapshot { .. } => OperationKind::GetCatalogSnapshot,
+            Self::DeleteCatalogSnapshot { .. } => OperationKind::DeleteCatalogSnapshot,
+            Self::CompareCatalogSchemas { .. } => OperationKind::CompareCatalogSchemas,
+            Self::PreviewMigration { .. } => OperationKind::PreviewMigration,
+            Self::ApplyMigration { .. } => OperationKind::ApplyMigration,
+            Self::CancelMigration { .. } => OperationKind::CancelMigration,
+            Self::GetMigrationRun { .. } => OperationKind::GetMigrationRun,
+            Self::GetDurableMigrationRun { .. } => OperationKind::GetMigrationRun,
+            Self::StartComparison { .. } => OperationKind::StartComparison,
+            Self::PageComparison { .. } => OperationKind::PageComparison,
+            Self::CancelComparison { .. } => OperationKind::CancelComparison,
+            Self::PrepareComparisonPatch { .. } => OperationKind::PrepareComparisonPatch,
+            Self::CaptureSemanticPlan { .. } => OperationKind::CaptureSemanticPlan,
+            Self::ListPlanCaptures { .. } => OperationKind::ListPlanCaptures,
+            Self::GetPlanCapture { .. } => OperationKind::GetPlanCapture,
+            Self::ComparePlanCaptures { .. } => OperationKind::ComparePlanCaptures,
+            Self::DeletePlanCapture { .. } => OperationKind::DeletePlanCapture,
             Self::GenerateDdl { .. } => OperationKind::GenerateDdl,
             Self::ExecuteQuery { .. } => OperationKind::ExecuteQuery,
             Self::ExportQuery { .. } => OperationKind::ExportQuery,
             Self::Complete { .. } => OperationKind::Complete,
+            Self::CompleteSemanticDocument { .. } => OperationKind::Complete,
             Self::OpenSemanticDocument { .. } => OperationKind::OpenSemanticDocument,
             Self::UpdateSemanticDocument { .. } => OperationKind::UpdateSemanticDocument,
             Self::CloseSemanticDocument { .. } => OperationKind::CloseSemanticDocument,
             Self::SelectStatement { .. } => OperationKind::SelectStatement,
             Self::DiagnoseSql { .. } => OperationKind::DiagnoseSql,
+            Self::FormatSql { .. } => OperationKind::FormatSql,
+            Self::SqlQuickFix { .. } => OperationKind::SqlQuickFix,
+            Self::FindSqlUsages { .. } => OperationKind::FindSqlUsages,
+            Self::PrepareSqlRefactor { .. } => OperationKind::PrepareSqlRefactor,
             Self::Listen { .. } => OperationKind::Listen,
             Self::CancelQuery { .. } => OperationKind::CancelQuery,
             Self::PreviewEdits { .. } => OperationKind::PreviewEdits,
@@ -494,6 +674,75 @@ impl Operation {
             Operation::RefreshSchema { connection, .. } => {
                 summary("refresh", "schema", Some(connection.0 as i64))
             }
+            Operation::ReadCatalogGraph {
+                connection,
+                refresh,
+                ..
+            } => summary(
+                if *refresh { "refresh" } else { "read" },
+                "catalog_graph",
+                Some(connection.0 as i64),
+            ),
+            Operation::ProjectCatalogDiagram { connection, .. } => {
+                summary("project", "catalog_diagram", Some(connection.0 as i64))
+            }
+            Operation::CreateCatalogSnapshot { connection, .. } => {
+                summary("create", "catalog_snapshot", Some(connection.0 as i64))
+            }
+            Operation::ListCatalogSnapshots { tenant_id } => {
+                summary("list", "catalog_snapshot", Some(*tenant_id))
+            }
+            Operation::GetCatalogSnapshot { tenant_id, .. } => {
+                summary("get", "catalog_snapshot", Some(*tenant_id))
+            }
+            Operation::DeleteCatalogSnapshot { tenant_id, .. } => {
+                summary("delete", "catalog_snapshot", Some(*tenant_id))
+            }
+            Operation::CompareCatalogSchemas { connection, .. } => {
+                summary("compare", "schema", Some(connection.0 as i64))
+            }
+            Operation::PreviewMigration { connection, .. } => {
+                summary("preview", "migration", Some(connection.0 as i64))
+            }
+            Operation::ApplyMigration { connection, .. } => {
+                summary("apply", "migration", Some(connection.0 as i64))
+            }
+            Operation::CancelMigration { connection, .. } => {
+                summary("cancel", "migration", Some(connection.0 as i64))
+            }
+            Operation::GetMigrationRun { connection, .. } => {
+                summary("get", "migration_run", Some(connection.0 as i64))
+            }
+            Operation::GetDurableMigrationRun { tenant_id, .. } => {
+                summary("get", "migration_run", Some(*tenant_id))
+            }
+            Operation::StartComparison { session, .. } => {
+                summary("start", "comparison", Some(session.0 as i64))
+            }
+            Operation::PageComparison { session, .. } => {
+                summary("page", "comparison", Some(session.0 as i64))
+            }
+            Operation::CancelComparison { session, .. } => {
+                summary("cancel", "comparison", Some(session.0 as i64))
+            }
+            Operation::PrepareComparisonPatch { session, .. } => {
+                summary("prepare_patch", "comparison", Some(session.0 as i64))
+            }
+            Operation::CaptureSemanticPlan { connection, .. } => {
+                summary("capture", "query_plan", Some(connection.0 as i64))
+            }
+            Operation::ListPlanCaptures { tenant_id, .. } => {
+                summary("list", "plan_capture", Some(*tenant_id))
+            }
+            Operation::GetPlanCapture { tenant_id, .. } => {
+                summary("get", "plan_capture", Some(*tenant_id))
+            }
+            Operation::ComparePlanCaptures { tenant_id, .. } => {
+                summary("compare", "plan_capture", Some(*tenant_id))
+            }
+            Operation::DeletePlanCapture { tenant_id, .. } => {
+                summary("delete", "plan_capture", Some(*tenant_id))
+            }
             Operation::GenerateDdl { connection, .. } => {
                 summary("generate", "ddl", Some(connection.0 as i64))
             }
@@ -505,6 +754,9 @@ impl Operation {
             }
             Operation::Complete { session, .. } => {
                 summary("complete", "query", Some(session.0 as i64))
+            }
+            Operation::CompleteSemanticDocument { session, .. } => {
+                summary("complete", "semantic_document", Some(session.0 as i64))
             }
             Operation::OpenSemanticDocument { session, .. } => {
                 summary("open", "semantic_document", Some(session.0 as i64))
@@ -523,6 +775,20 @@ impl Operation {
             Operation::DiagnoseSql { session, .. } => {
                 summary("diagnose", "semantic_document", Some(session.0 as i64))
             }
+            Operation::FormatSql { session, .. } => {
+                summary("format", "semantic_document", Some(session.0 as i64))
+            }
+            Operation::SqlQuickFix { session, .. } => {
+                summary("quick_fix", "semantic_document", Some(session.0 as i64))
+            }
+            Operation::FindSqlUsages { session, .. } => {
+                summary("find_usages", "semantic_document", Some(session.0 as i64))
+            }
+            Operation::PrepareSqlRefactor { session, .. } => summary(
+                "prepare_refactor",
+                "semantic_document",
+                Some(session.0 as i64),
+            ),
             Operation::Listen { connection, .. } => {
                 summary("listen", "connection", Some(connection.0 as i64))
             }

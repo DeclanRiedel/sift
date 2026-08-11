@@ -8,6 +8,7 @@
 
 use std::collections::VecDeque;
 use std::sync::Mutex;
+use std::time::Duration;
 
 use async_trait::async_trait;
 
@@ -31,10 +32,12 @@ struct Queues {
     open: VecDeque<Boxed<Result<ServerInfo, DriverError>>>,
     ping: VecDeque<Boxed<Result<ServerInfo, DriverError>>>,
     schema: VecDeque<Boxed<Result<SchemaSnapshot, DriverError>>>,
+    schema_delays: VecDeque<Duration>,
     begin: VecDeque<Boxed<Result<TxHandle, DriverError>>>,
     commit: VecDeque<Boxed<Result<(), DriverError>>>,
     rollback: VecDeque<Boxed<Result<(), DriverError>>>,
     execute: VecDeque<Boxed<Result<Vec<sift_protocol::Page>, DriverError>>>,
+    execute_delays: VecDeque<Duration>,
     listen: VecDeque<Boxed<Result<Vec<PgNotification>, DriverError>>>,
     bulk_insert: VecDeque<Boxed<Result<BulkResult, DriverError>>>,
     cancel: VecDeque<Boxed<Result<(), DriverError>>>,
@@ -188,11 +191,23 @@ impl MockDriverBuilder {
 
     pub fn schema_ok(mut self, snap: SchemaSnapshot) -> Self {
         self.state.schema.push_back(Box::new(move || Ok(snap)));
+        self.state.schema_delays.push_back(Duration::ZERO);
         self
     }
 
     pub fn schema_err(mut self, err: DriverError) -> Self {
         self.state.schema.push_back(Box::new(move || Err(err)));
+        self.state.schema_delays.push_back(Duration::ZERO);
+        self
+    }
+
+    /// Delay the most recently queued schema result.
+    pub fn schema_delay(mut self, delay: Duration) -> Self {
+        *self
+            .state
+            .schema_delays
+            .back_mut()
+            .expect("schema_delay requires a queued schema result") = delay;
         self
     }
 
@@ -203,6 +218,13 @@ impl MockDriverBuilder {
 
     pub fn execute_err(mut self, err: DriverError) -> Self {
         self.state.execute.push_back(Box::new(move || Err(err)));
+        self
+    }
+
+    /// Delay the next execute call before returning its queued result. Delays
+    /// are FIFO and are useful for deterministic cancellation-boundary tests.
+    pub fn execute_delay(mut self, delay: Duration) -> Self {
+        self.state.execute_delays.push_back(delay);
         self
     }
 
@@ -290,6 +312,10 @@ impl Driver for MockDriver {
         if self.schema_pending {
             std::future::pending::<()>().await;
         }
+        let delay = self.state.lock().unwrap().schema_delays.pop_front();
+        if let Some(delay) = delay {
+            tokio::time::sleep(delay).await;
+        }
         MockDriver::pop(&mut self.state.lock().unwrap().schema, "schema")
     }
 
@@ -324,6 +350,10 @@ impl Driver for MockDriver {
         self.record("execute");
         if self.execute_pending {
             std::future::pending::<()>().await;
+        }
+        let delay = self.state.lock().unwrap().execute_delays.pop_front();
+        if let Some(delay) = delay {
+            tokio::time::sleep(delay).await;
         }
         let cursor_id = CursorId::new(self.cursor_id.next());
         if self.execute_hang {

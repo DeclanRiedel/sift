@@ -21,23 +21,31 @@ pub const SUPPORTED_HTTP_OPERATION_IDS: &[&str] = &[
     "adminSetPrincipalDisabled",
     "adminUnlinkIdentity",
     "applyEdits",
+    "applyMigration",
     "approveOperation",
     "authenticateKey",
     "beginTransaction",
     "bindMetadataRoomConnection",
     "bulkInsert",
+    "cancelComparison",
     "cancelQuery",
+    "cancelMigration",
+    "captureSemanticPlan",
     "changePassword",
     "clearTenantLimits",
     "closeConnection",
     "closeSemanticDocument",
     "closeSession",
     "commitTransaction",
+    "compareCatalogSchemas",
+    "comparePlanCaptures",
+    "completeSemanticDocument",
     "createGithubAllowlist",
     "createOperationApproval",
     "createMetadataDocument",
     "createMetadataRoom",
     "createMetadataSavedQuery",
+    "createCatalogSnapshot",
     "createSavepoint",
     "createSession",
     "createTenantInvitation",
@@ -45,6 +53,8 @@ pub const SUPPORTED_HTTP_OPERATION_IDS: &[&str] = &[
     "deleteMetadataDocument",
     "deleteMetadataRoom",
     "deleteMetadataSavedQuery",
+    "deletePlanCapture",
+    "deleteCatalogSnapshot",
     "deleteSpilledCursor",
     "diagnoseSemanticDocument",
     "disconnectMetadataConnectionProfile",
@@ -53,9 +63,17 @@ pub const SUPPORTED_HTTP_OPERATION_IDS: &[&str] = &[
     "explainQuery",
     "exportQuery",
     "extensionDiagnostics",
+    "findSemanticUsages",
+    "formatSemanticDocument",
+    "getCatalogGraph",
+    "getCatalogSnapshot",
+    "getComparison",
+    "getDurableMigrationRun",
     "getExtension",
     "getMetadataConnectionPolicy",
     "getMetadataSavedQuery",
+    "getMigrationRun",
+    "getPlanCapture",
     "getObjectDdl",
     "getRoomResult",
     "getRoomResultPages",
@@ -89,9 +107,11 @@ pub const SUPPORTED_HTTP_OPERATION_IDS: &[&str] = &[
     "listMetadataRoomMembers",
     "listMetadataRooms",
     "listMetadataSavedQueries",
+    "listCatalogSnapshots",
     "listMetadataTenants",
     "listOperationAudit",
     "listOperations",
+    "listPlanCaptures",
     "listPrincipalKeys",
     "listProcesses",
     "listProviders",
@@ -105,13 +125,20 @@ pub const SUPPORTED_HTTP_OPERATION_IDS: &[&str] = &[
     "openConnectionFromProfile",
     "openSemanticDocument",
     "openapi",
+    "pageComparison",
     "pageMetadataHistory",
     "pageOperationAudit",
     "passwordLogin",
     "pingConnection",
     "postCompletion",
+    "prepareComparisonPatch",
+    "prepareSemanticQuickFix",
+    "prepareSemanticRefactor",
     "previewEdits",
+    "previewMigration",
     "previewTransaction",
+    "projectCatalogDiagram",
+    "previewCatalogDiagramMutation",
     "purgeExtension",
     "readSpilledCursorPages",
     "ready",
@@ -134,6 +161,7 @@ pub const SUPPORTED_HTTP_OPERATION_IDS: &[&str] = &[
     "sessionWebSocket",
     "setMetadataConnectionCredential",
     "setTenantLimits",
+    "startComparison",
     "unbindMetadataRoomConnection",
     "uninstallExtension",
     "updateExtensionGrants",
@@ -1079,6 +1107,366 @@ impl Client {
         .await
     }
 
+    pub async fn catalog_graph(
+        &self,
+        session: SessionId,
+        connection: ConnectionId,
+        request: sift_protocol::CatalogGraphRequest,
+    ) -> Result<sift_protocol::CatalogGraph> {
+        self.post(
+            &format!("/v1/sessions/{session}/connections/{connection}/catalog/graph"),
+            &request,
+        )
+        .await
+    }
+
+    pub async fn catalog_diagram(
+        &self,
+        session: SessionId,
+        connection: ConnectionId,
+        request: sift_protocol::CatalogDiagramRequest,
+    ) -> Result<sift_protocol::CatalogDiagram> {
+        self.post(
+            &format!("/v1/sessions/{session}/connections/{connection}/catalog/diagram"),
+            &request,
+        )
+        .await
+    }
+
+    pub async fn preview_catalog_diagram_mutation(
+        &self,
+        session: SessionId,
+        connection: ConnectionId,
+        request: sift_protocol::PreviewCatalogDiagramMutationRequest,
+    ) -> Result<sift_protocol::MigrationPlan> {
+        self.post(
+            &format!(
+                "/v1/sessions/{session}/connections/{connection}/catalog/diagram/mutations/preview"
+            ),
+            &request,
+        )
+        .await
+    }
+
+    pub async fn create_catalog_snapshot(
+        &self,
+        session: SessionId,
+        connection: ConnectionId,
+        request: sift_protocol::CreateCatalogSnapshotRequest,
+    ) -> Result<sift_protocol::CatalogSnapshot> {
+        self.post(
+            &format!("/v1/sessions/{session}/connections/{connection}/catalog/snapshots"),
+            &request,
+        )
+        .await
+    }
+
+    pub async fn compare_catalog_schemas(
+        &self,
+        session: SessionId,
+        connection: ConnectionId,
+        request: sift_protocol::SchemaDiffRequest,
+    ) -> Result<sift_protocol::SchemaDiff> {
+        self.post(
+            &format!("/v1/sessions/{session}/connections/{connection}/catalog/diffs"),
+            &request,
+        )
+        .await
+    }
+
+    pub async fn preview_migration(
+        &self,
+        session: SessionId,
+        connection: ConnectionId,
+        request: sift_protocol::PreviewMigrationRequest,
+    ) -> Result<sift_protocol::MigrationPlan> {
+        self.post(
+            &format!("/v1/sessions/{session}/connections/{connection}/catalog/migrations/preview"),
+            &request,
+        )
+        .await
+    }
+
+    pub async fn apply_migration(
+        &self,
+        session: SessionId,
+        connection: ConnectionId,
+        request: sift_protocol::ApplyMigrationRequest,
+    ) -> Result<sift_protocol::MigrationRun> {
+        self.post(
+            &format!("/v1/sessions/{session}/connections/{connection}/catalog/migrations/apply"),
+            &request,
+        )
+        .await
+    }
+
+    pub async fn migration_run(
+        &self,
+        session: SessionId,
+        connection: ConnectionId,
+        run: sift_protocol::MigrationRunId,
+    ) -> Result<sift_protocol::MigrationRun> {
+        self.get(&format!(
+            "/v1/sessions/{session}/connections/{connection}/catalog/migrations/runs/{run}"
+        ))
+        .await
+    }
+
+    pub async fn durable_migration_run(
+        &self,
+        tenant: TenantId,
+        run: sift_protocol::MigrationRunId,
+    ) -> Result<sift_protocol::MigrationRun> {
+        self.get(&format!(
+            "/v1/metadata/tenants/{}/migration-runs/{run}",
+            tenant.0
+        ))
+        .await
+    }
+
+    pub async fn cancel_migration(
+        &self,
+        session: SessionId,
+        connection: ConnectionId,
+        run: sift_protocol::MigrationRunId,
+    ) -> Result<()> {
+        self.post_empty_body(
+            &format!(
+                "/v1/sessions/{session}/connections/{connection}/catalog/migrations/runs/{run}/cancel"
+            ),
+            &serde_json::json!({}),
+        )
+        .await
+    }
+
+    pub async fn capture_semantic_plan(
+        &self,
+        session: SessionId,
+        connection: ConnectionId,
+        request: sift_protocol::CaptureSemanticPlanRequest,
+    ) -> Result<sift_protocol::PlanCapture> {
+        self.post(
+            &format!("/v1/sessions/{session}/connections/{connection}/plan-captures"),
+            &request,
+        )
+        .await
+    }
+
+    pub async fn start_comparison(
+        &self,
+        session: SessionId,
+        request: sift_protocol::StartComparisonRequest,
+    ) -> Result<sift_protocol::ComparisonSummary> {
+        self.post(&format!("/v1/sessions/{session}/comparisons"), &request)
+            .await
+    }
+
+    pub async fn comparison(
+        &self,
+        session: SessionId,
+        comparison: sift_protocol::ComparisonId,
+    ) -> Result<sift_protocol::ComparisonSummary> {
+        self.get(&format!("/v1/sessions/{session}/comparisons/{comparison}"))
+            .await
+    }
+
+    pub async fn comparison_page(
+        &self,
+        session: SessionId,
+        comparison: sift_protocol::ComparisonId,
+        request: sift_protocol::ComparisonPageRequest,
+    ) -> Result<sift_protocol::ComparisonPage> {
+        self.post(
+            &format!("/v1/sessions/{session}/comparisons/{comparison}/pages"),
+            &request,
+        )
+        .await
+    }
+
+    pub async fn cancel_comparison(
+        &self,
+        session: SessionId,
+        comparison: sift_protocol::ComparisonId,
+    ) -> Result<sift_protocol::CancelComparisonResponse> {
+        self.post(
+            &format!("/v1/sessions/{session}/comparisons/{comparison}/cancel"),
+            &serde_json::json!({}),
+        )
+        .await
+    }
+
+    pub async fn prepare_comparison_patch(
+        &self,
+        session: SessionId,
+        comparison: sift_protocol::ComparisonId,
+        request: sift_protocol::PrepareComparisonPatchRequest,
+    ) -> Result<sift_protocol::ComparisonPatchPreparation> {
+        self.post(
+            &format!("/v1/sessions/{session}/comparisons/{comparison}/patch"),
+            &request,
+        )
+        .await
+    }
+
+    pub async fn plan_capture(
+        &self,
+        tenant: TenantId,
+        capture: sift_protocol::PlanCaptureId,
+    ) -> Result<sift_protocol::PlanCapture> {
+        self.get(&format!(
+            "/v1/metadata/tenants/{}/plan-captures/{capture}",
+            tenant.0
+        ))
+        .await
+    }
+
+    pub async fn plan_captures(
+        &self,
+        tenant: TenantId,
+        request: sift_protocol::ListPlanCapturesRequest,
+    ) -> Result<CursorPage<sift_protocol::PlanCaptureSummary>> {
+        let mut query = vec![format!("limit={}", request.limit.unwrap_or(50))];
+        if let Some(source) = request.source_digest {
+            query.push(format!("source_digest={}", urlencoding_replace(&source)));
+        }
+        if let Some(cursor) = request.cursor {
+            query.push(format!("cursor={cursor}"));
+        }
+        self.get(&format!(
+            "/v1/metadata/tenants/{}/plan-captures?{}",
+            tenant.0,
+            query.join("&")
+        ))
+        .await
+    }
+
+    pub async fn compare_plan_captures(
+        &self,
+        tenant: TenantId,
+        request: sift_protocol::ComparePlanCapturesRequest,
+    ) -> Result<sift_protocol::PlanCaptureComparison> {
+        self.post(
+            &format!("/v1/metadata/tenants/{}/plan-captures/compare", tenant.0),
+            &request,
+        )
+        .await
+    }
+
+    pub async fn delete_plan_capture(
+        &self,
+        tenant: TenantId,
+        capture: sift_protocol::PlanCaptureId,
+        expected_revision: u64,
+    ) -> Result<()> {
+        self.delete(&format!(
+            "/v1/metadata/tenants/{}/plan-captures/{capture}?expected_revision={expected_revision}",
+            tenant.0
+        ))
+        .await
+    }
+
+    pub async fn catalog_snapshots(
+        &self,
+        tenant: TenantId,
+        limit: u32,
+    ) -> Result<Vec<sift_protocol::CatalogSnapshotSummary>> {
+        self.get(&format!(
+            "/v1/metadata/tenants/{}/catalog-snapshots?limit={limit}",
+            tenant.0
+        ))
+        .await
+    }
+
+    pub async fn catalog_snapshot(
+        &self,
+        tenant: TenantId,
+        snapshot: sift_protocol::CatalogSnapshotId,
+    ) -> Result<sift_protocol::CatalogSnapshot> {
+        self.get(&format!(
+            "/v1/metadata/tenants/{}/catalog-snapshots/{snapshot}",
+            tenant.0
+        ))
+        .await
+    }
+
+    pub async fn delete_catalog_snapshot(
+        &self,
+        tenant: TenantId,
+        snapshot: sift_protocol::CatalogSnapshotId,
+        expected_revision: u64,
+    ) -> Result<()> {
+        self.delete(&format!(
+            "/v1/metadata/tenants/{}/catalog-snapshots/{snapshot}?expected_revision={expected_revision}",
+            tenant.0
+        ))
+        .await
+    }
+
+    pub async fn format_semantic_document(
+        &self,
+        session: SessionId,
+        connection: ConnectionId,
+        document: sift_protocol::SemanticDocumentId,
+        request: sift_protocol::FormatSqlRequest,
+    ) -> Result<sift_protocol::WorkspaceEdit> {
+        self.post(
+            &format!(
+                "/v1/sessions/{session}/connections/{connection}/semantic-documents/{document}/format"
+            ),
+            &request,
+        )
+        .await
+    }
+
+    pub async fn prepare_semantic_quick_fix(
+        &self,
+        session: SessionId,
+        connection: ConnectionId,
+        document: sift_protocol::SemanticDocumentId,
+        fix_id: &str,
+        request: sift_protocol::SqlQuickFixRequest,
+    ) -> Result<sift_protocol::WorkspaceEdit> {
+        self.post(
+            &format!(
+                "/v1/sessions/{session}/connections/{connection}/semantic-documents/{document}/quick-fixes/{fix_id}"
+            ),
+            &request,
+        )
+        .await
+    }
+
+    pub async fn find_semantic_usages(
+        &self,
+        session: SessionId,
+        connection: ConnectionId,
+        document: sift_protocol::SemanticDocumentId,
+        request: sift_protocol::FindSqlUsagesRequest,
+    ) -> Result<sift_protocol::SqlUsagePage> {
+        self.post(
+            &format!(
+                "/v1/sessions/{session}/connections/{connection}/semantic-documents/{document}/usages"
+            ),
+            &request,
+        )
+        .await
+    }
+
+    pub async fn prepare_semantic_refactor(
+        &self,
+        session: SessionId,
+        connection: ConnectionId,
+        document: sift_protocol::SemanticDocumentId,
+        request: sift_protocol::PrepareSqlRefactorRequest,
+    ) -> Result<sift_protocol::WorkspaceEdit> {
+        self.post(
+            &format!(
+                "/v1/sessions/{session}/connections/{connection}/semantic-documents/{document}/refactors/prepare"
+            ),
+            &request,
+        )
+        .await
+    }
+
     /// Export a query result as CSV / TSV / JSON Lines / JSON Array.
     /// This convenience method buffers the complete body; use
     /// [`Client::stream_export_query`] for large exports.
@@ -1253,7 +1641,46 @@ impl Client {
             &format!(
                 "/v1/sessions/{session}/connections/{connection}/semantic-documents/{document}/diagnostics"
             ),
-            &sift_protocol::SemanticRevisionRequest { revision },
+            &sift_protocol::SemanticRevisionRequest {
+                revision,
+                catalog_revision: None,
+            },
+        )
+        .await
+    }
+
+    pub async fn semantic_diagnostics_with_catalog(
+        &self,
+        session: SessionId,
+        connection: ConnectionId,
+        document: sift_protocol::SemanticDocumentId,
+        revision: u64,
+        catalog_revision: sift_protocol::CatalogRevision,
+    ) -> Result<sift_protocol::DiagnosticsResponse> {
+        self.post(
+            &format!(
+                "/v1/sessions/{session}/connections/{connection}/semantic-documents/{document}/diagnostics"
+            ),
+            &sift_protocol::SemanticRevisionRequest {
+                revision,
+                catalog_revision: Some(catalog_revision),
+            },
+        )
+        .await
+    }
+
+    pub async fn complete_semantic_document(
+        &self,
+        session: SessionId,
+        connection: ConnectionId,
+        document: sift_protocol::SemanticDocumentId,
+        request: sift_protocol::SemanticCompletionRequest,
+    ) -> Result<sift_protocol::completion::CompletionResponse> {
+        self.post(
+            &format!(
+                "/v1/sessions/{session}/connections/{connection}/semantic-documents/{document}/complete"
+            ),
+            &request,
         )
         .await
     }

@@ -52,6 +52,7 @@ fn deep_snapshot(with_pk: bool) -> SchemaSnapshot {
         fetched_at: chrono::Utc::now(),
         scope: SchemaScope::shallow(),
         incomplete: false,
+        graph: None,
     }
 }
 

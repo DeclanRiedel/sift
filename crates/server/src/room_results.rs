@@ -82,6 +82,13 @@ impl RoomResultRegistry {
         } = result;
         self.reap_expired();
         self.enforce_room_cap(room_id);
+        let schema_digests = pages
+            .iter()
+            .filter_map(|page| match page {
+                Page::NextResult { columns } => Some(crate::comparison::schema_digest(columns)),
+                _ => None,
+            })
+            .collect();
         let mut memory_bytes = 0usize;
         let pages = pages
             .into_iter()
@@ -113,6 +120,7 @@ impl RoomResultRegistry {
             connection_profile_id,
             row_count,
             page_count,
+            schema_digests,
             status: if spill_error.is_some() {
                 RoomQueryStatus::Error
             } else {
@@ -186,6 +194,60 @@ impl RoomResultRegistry {
                 pages,
                 next_seq: end as u64,
                 done: end == entry.pages.len(),
+            })
+        })?
+    }
+
+    /// Materialize one immutable result set for a bounded comparison. The
+    /// underlying pages remain retained and independently readable.
+    pub fn comparison_dataset(
+        &self,
+        room_id: i64,
+        result_id: RoomResultId,
+        result_set: u32,
+        expected_schema_digest: &str,
+    ) -> ApiResult<sift_core::comparison::ComparisonDataset> {
+        self.reap_expired();
+        self.with_entry(room_id, result_id, |entry| {
+            if entry.reference.status != RoomQueryStatus::Ok {
+                return Err(ApiError::BadRequest(format!(
+                    "room result {result_id} did not complete successfully"
+                )));
+            }
+            let mut current_result: Option<u32> = None;
+            let mut columns = None;
+            let mut rows = Vec::new();
+            for page in &entry.pages {
+                match self.read_page(page)? {
+                    Page::NextResult {
+                        columns: next_columns,
+                    } => {
+                        current_result = Some(current_result.map_or(0u32, |value| value + 1));
+                        if current_result == Some(result_set) {
+                            columns = Some(next_columns);
+                        }
+                    }
+                    Page::Rows { rows: next_rows } if current_result == Some(result_set) => {
+                        rows.extend(next_rows);
+                    }
+                    Page::Error { error } => return Err(ApiError::Driver(error)),
+                    Page::Rows { .. } | Page::Done { .. } => {}
+                }
+            }
+            let columns = columns.ok_or_else(|| {
+                ApiError::BadRequest(format!(
+                    "room result {result_id} has no result_set={result_set}"
+                ))
+            })?;
+            if crate::comparison::schema_digest(&columns) != expected_schema_digest {
+                return Err(ApiError::BadRequest(format!(
+                    "stale room-result schema digest for result {result_id}"
+                )));
+            }
+            Ok(sift_core::comparison::ComparisonDataset {
+                columns,
+                rows,
+                immutable_order: true,
             })
         })?
     }

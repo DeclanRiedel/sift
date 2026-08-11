@@ -112,7 +112,20 @@ fn unavailable_reason(
         | ListAvailableOperations
         | InvokeExtension
         | ApproveOperation
-        | Metadata => None,
+        | Metadata
+        | ListCatalogSnapshots
+        | GetCatalogSnapshot
+        | DeleteCatalogSnapshot
+        | ListPlanCaptures
+        | GetPlanCapture
+        | ComparePlanCaptures
+        | DeletePlanCapture => None,
+        StartComparison | PageComparison | CancelComparison | PrepareComparisonPatch
+            if !has_session =>
+        {
+            Some("session context required")
+        }
+        StartComparison | PageComparison | CancelComparison | PrepareComparisonPatch => None,
         CloseSession | OpenConnection | ListTransactions if !has_session => {
             Some("session context required")
         }
@@ -143,6 +156,15 @@ fn unavailable_reason(
         CloseConnection
         | PingConnection
         | RefreshSchema
+        | ReadCatalogGraph
+        | ProjectCatalogDiagram
+        | CreateCatalogSnapshot
+        | CompareCatalogSchemas
+        | PreviewMigration
+        | ApplyMigration
+        | CancelMigration
+        | GetMigrationRun
+        | CaptureSemanticPlan
         | GenerateDdl
         | ExecuteQuery
         | ExportQuery
@@ -152,6 +174,10 @@ fn unavailable_reason(
         | CloseSemanticDocument
         | SelectStatement
         | DiagnoseSql
+        | FormatSql
+        | SqlQuickFix
+        | FindSqlUsages
+        | PrepareSqlRefactor
         | Listen
         | CancelQuery
         | PreviewEdits
@@ -173,6 +199,15 @@ fn unavailable_reason(
         CloseConnection
         | PingConnection
         | RefreshSchema
+        | ReadCatalogGraph
+        | ProjectCatalogDiagram
+        | CreateCatalogSnapshot
+        | CompareCatalogSchemas
+        | PreviewMigration
+        | ApplyMigration
+        | CancelMigration
+        | GetMigrationRun
+        | CaptureSemanticPlan
         | GenerateDdl
         | ExecuteQuery
         | ExportQuery
@@ -182,6 +217,10 @@ fn unavailable_reason(
         | CloseSemanticDocument
         | SelectStatement
         | DiagnoseSql
+        | FormatSql
+        | SqlQuickFix
+        | FindSqlUsages
+        | PrepareSqlRefactor
         | Listen
         | CancelQuery
         | PreviewEdits

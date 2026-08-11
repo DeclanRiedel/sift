@@ -56,6 +56,7 @@ fn state() -> AppState {
                 routine_args: None,
             }),
             incomplete: false,
+            graph: None,
         })
         .execute_ok(inserted)
         .execute_ok(skipped)

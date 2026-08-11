@@ -18,6 +18,13 @@ ignore = [
   # server targets and the advisory reports no vulnerability or safe upgrade.
   # Remove when Loro's postcard chain moves to heapless >= 0.8.
   "RUSTSEC-2023-0089",
+  # Transitive through the latest Loro 1.13.9 -> loro-internal -> im. These
+  # advisories report maintenance status, not a vulnerability, and no Loro
+  # release has moved to the maintained imbl fork yet. Keep the exception
+  # limited to the three exact packages and remove it with that upstream move.
+  "RUSTSEC-2026-0247", # bitmaps
+  "RUSTSEC-2026-0248", # im
+  "RUSTSEC-2026-0251", # sized-chunks
 ]
 
 [licenses]

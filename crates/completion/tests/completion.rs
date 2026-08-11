@@ -45,6 +45,7 @@ fn snapshot() -> SchemaSnapshot {
         fetched_at: chrono::Utc::now(),
         scope: SchemaScope::shallow(),
         incomplete: false,
+        graph: None,
     }
 }
 
@@ -68,7 +69,6 @@ fn after_from_returns_tables_first() {
 
 #[test]
 fn dotted_qualifier_returns_columns_of_resolved_table() {
-    // Alias resolution isn't implemented yet; use the bare table name.
     let sql = "SELECT users. FROM users";
     let cursor = 13; // right after "users."
     let req = CompletionRequest {
@@ -84,6 +84,28 @@ fn dotted_qualifier_returns_columns_of_resolved_table() {
         other => panic!("expected ExpectingColumn, got {other:?}"),
     }
     let labels: Vec<&str> = resp.candidates.iter().map(|c| c.label.as_ref()).collect();
+    assert!(labels.contains(&"id"));
+    assert!(labels.contains(&"email"));
+}
+
+#[test]
+fn dotted_alias_returns_columns_of_bound_table() {
+    let sql = "SELECT u. FROM public.users AS u";
+    let cursor = 9; // right after `u.`
+    let response = complete(
+        &CompletionRequest {
+            sql: sql.into(),
+            cursor,
+            limit: None,
+        },
+        &snapshot(),
+        Engine::Postgres,
+    );
+    let labels: Vec<&str> = response
+        .candidates
+        .iter()
+        .map(|candidate| candidate.label.as_ref())
+        .collect();
     assert!(labels.contains(&"id"));
     assert!(labels.contains(&"email"));
 }

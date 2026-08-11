@@ -62,11 +62,19 @@ pub struct SchemaCache {
 struct Inner {
     config: std::sync::RwLock<SchemaCacheConfig>,
     entries: DashMap<CacheKey, CachedEntry>,
+    /// Last valid payloads displaced by TTL/invalidation. These are never
+    /// fresh cache hits; callers may use them only as explicitly stale
+    /// fallback after a provider build fails.
+    stale_entries: DashMap<CacheKey, CachedSchema>,
     entries_by_spec: DashMap<String, Vec<CacheKey>>,
     in_flight: DashMap<CacheKey, Arc<tokio::sync::Mutex<()>>>,
     /// `spec_hash → invalidator task`. Tasks are spawned lazily on
     /// first `insert` for a spec; kept alive for the process lifetime.
     invalidators: DashMap<String, InvalidatorHandle>,
+    /// Monotonic per-spec generation advanced whenever cached schema state is
+    /// invalidated. Catalog revisions use this to reject in-flight work that
+    /// started before an invalidation.
+    epochs: DashMap<String, u64>,
     /// Metrics — atomic counters exposed for tests.
     hits: std::sync::atomic::AtomicU64,
     misses: std::sync::atomic::AtomicU64,
@@ -168,7 +176,11 @@ impl SchemaCache {
         };
         let Some(snap) = snap else {
             if expired {
+                if let Some(entry) = self.inner.entries.get(&key) {
+                    self.stash_stale(key.clone(), entry.schema.clone());
+                }
                 self.remove_entry(&key);
+                self.bump_epoch(&key.spec_hash);
             }
             self.inner
                 .misses
@@ -181,6 +193,20 @@ impl SchemaCache {
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
         Some(snap)
+    }
+
+    /// Return the most recently displaced payload without treating it as a
+    /// cache hit. The caller must mark coverage stale before publication.
+    pub fn get_stale_cached(
+        &self,
+        spec: &ConnectionSpec,
+        scope: &SchemaScope,
+    ) -> Option<CachedSchema> {
+        let key = self.key_for(spec, scope).ok()?;
+        self.inner
+            .stale_entries
+            .get(&key)
+            .map(|entry| entry.clone())
     }
 
     /// Insert a fresh snapshot. Spawns an invalidator task for the
@@ -197,6 +223,7 @@ impl SchemaCache {
             Err(_) => return None, // serialization failure — skip caching
         };
         let schema = CachedSchema::new_uncached(snapshot);
+        self.inner.epochs.entry(spec_hash.clone()).or_insert(1);
         self.inner.entries.insert(
             key.clone(),
             CachedEntry {
@@ -204,6 +231,7 @@ impl SchemaCache {
                 inserted_at: Instant::now(),
             },
         );
+        self.inner.stale_entries.remove(&key);
         self.index_entry(spec_hash.clone(), key);
         self.enforce_entry_bound();
         // Ensure invalidator is running for this spec.
@@ -248,8 +276,8 @@ impl SchemaCache {
     }
 
     fn invalidate_spec_by_hash(&self, spec_hash: &str) {
-        let victims = if let Some((_, victims)) = self.inner.entries_by_spec.remove(spec_hash) {
-            victims
+        let victims = if let Some(victims) = self.inner.entries_by_spec.get(spec_hash) {
+            victims.clone()
         } else {
             self.inner
                 .entries
@@ -259,11 +287,32 @@ impl SchemaCache {
                 .collect()
         };
         for key in victims {
-            self.inner.entries.remove(&key);
+            if let Some((_, entry)) = self.inner.entries.remove(&key) {
+                self.stash_stale(key.clone(), entry.schema);
+            }
         }
+        self.inner.entries_by_spec.remove(spec_hash);
         self.inner
             .invalidations
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.bump_epoch(spec_hash);
+    }
+
+    /// Current invalidation generation for a canonical connection spec.
+    pub fn invalidation_epoch(&self, spec: &ConnectionSpec) -> u64 {
+        let Ok(spec_hash) = self.spec_hash(spec) else {
+            return 0;
+        };
+        self.inner
+            .epochs
+            .get(&spec_hash)
+            .map(|epoch| *epoch)
+            .unwrap_or(0)
+    }
+
+    fn bump_epoch(&self, spec_hash: &str) {
+        let mut epoch = self.inner.epochs.entry(spec_hash.to_string()).or_insert(0);
+        *epoch = epoch.checked_add(1).unwrap_or(1);
     }
 
     pub fn cache_hits(&self) -> u64 {
@@ -404,6 +453,23 @@ impl SchemaCache {
         }
     }
 
+    fn stash_stale(&self, key: CacheKey, schema: CachedSchema) {
+        self.inner.stale_entries.insert(key, schema);
+        let max_entries = self.config().max_entries;
+        while self.inner.stale_entries.len() > max_entries {
+            let Some(victim) = self
+                .inner
+                .stale_entries
+                .iter()
+                .next()
+                .map(|entry| entry.key().clone())
+            else {
+                break;
+            };
+            self.inner.stale_entries.remove(&victim);
+        }
+    }
+
     fn enforce_entry_bound(&self) {
         let max_entries = self.config().max_entries;
         if max_entries == 0 {
@@ -411,7 +477,26 @@ impl SchemaCache {
             for key in keys {
                 self.remove_entry(&key);
             }
+            self.inner.stale_entries.clear();
             return;
+        }
+        while self
+            .inner
+            .entries
+            .len()
+            .saturating_add(self.inner.stale_entries.len())
+            > max_entries
+            && !self.inner.stale_entries.is_empty()
+        {
+            let victim = self
+                .inner
+                .stale_entries
+                .iter()
+                .next()
+                .map(|entry| entry.key().clone());
+            if let Some(victim) = victim {
+                self.inner.stale_entries.remove(&victim);
+            }
         }
         while self.inner.entries.len() > max_entries {
             let Some(oldest) = self

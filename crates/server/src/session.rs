@@ -15,6 +15,7 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use dashmap::DashMap;
+use sha2::{Digest, Sha256};
 use sift_driver_api::{BulkOp, MssqlSavepoint, NotificationStream, PgSavepoint, ResultSetStream};
 use sift_protocol::{
     AuditEntry, BeginTransactionRequest, BulkInsertFormat, BulkInsertRequest, BulkInsertResponse,
@@ -145,6 +146,62 @@ struct SessionStoreInner {
     search_indexes: DashMap<ConnectionId, (Arc<crate::search::SearchIndex>, Instant)>,
     /// Process-local parsed SQL document state (ADR-032).
     semantic: sift_semantic::SemanticRegistry,
+    /// Revision state for normalized catalog graphs. The graph payload itself
+    /// lives in `SchemaCache`; this map makes equal content retain a stable
+    /// revision and advances revisions only on normalized change (ADR-033).
+    catalog_revisions: DashMap<String, CatalogRevisionState>,
+    migration_plans: DashMap<sift_protocol::MigrationPlanId, StoredMigrationPlan>,
+    migration_runs: DashMap<sift_protocol::MigrationRunId, sift_protocol::MigrationRun>,
+    migration_cancellations:
+        DashMap<sift_protocol::MigrationRunId, Arc<std::sync::atomic::AtomicBool>>,
+    migration_locks: DashMap<(SessionId, ConnectionId), Arc<tokio::sync::Mutex<()>>>,
+    retained_query_results: crate::comparison::RetainedQueryRegistry,
+    comparisons: crate::comparison::ComparisonRegistry,
+}
+
+struct CatalogRevisionState {
+    digest: String,
+    revision: u64,
+    invalidation_epoch: u64,
+}
+
+#[derive(Clone)]
+struct StoredMigrationPlan {
+    plan: sift_protocol::MigrationPlan,
+    session: SessionId,
+    connection: ConnectionId,
+    principal: PrincipalId,
+    tenant: sift_metadata::TenantId,
+    profile: sift_metadata::ConnectionProfileId,
+    policy_revision: u64,
+    live_options: sift_protocol::CatalogGraphOptions,
+}
+
+pub(crate) struct MigrationPlanScope {
+    pub session: SessionId,
+    pub connection: ConnectionId,
+    pub principal: PrincipalId,
+    pub tenant: sift_metadata::TenantId,
+    pub profile: sift_metadata::ConnectionProfileId,
+    pub policy_revision: u64,
+    pub live_options: sift_protocol::CatalogGraphOptions,
+}
+
+#[derive(Clone)]
+struct LoadedComparisonSource {
+    dataset: sift_core::comparison::ComparisonDataset,
+    table: Option<LoadedComparisonTable>,
+    connection: Option<ConnectionId>,
+    truncated: bool,
+}
+
+#[derive(Clone)]
+struct LoadedComparisonTable {
+    connection: ConnectionId,
+    revision: sift_protocol::CatalogRevision,
+    path: sift_protocol::ObjectPath,
+    object: sift_protocol::ObjectInfo,
+    identity: Option<(Vec<String>, sift_protocol::CatalogObjectId)>,
 }
 
 /// A live server-owned room connection: a hidden session owned by the binder
@@ -269,6 +326,13 @@ impl SessionStore {
                 schema_cache: SchemaCache::default(),
                 search_indexes: DashMap::new(),
                 semantic: sift_semantic::SemanticRegistry::default(),
+                catalog_revisions: DashMap::new(),
+                migration_plans: DashMap::new(),
+                migration_runs: DashMap::new(),
+                migration_cancellations: DashMap::new(),
+                migration_locks: DashMap::new(),
+                retained_query_results: Default::default(),
+                comparisons: Default::default(),
             }),
         };
         store.install_eviction_callback();
@@ -316,6 +380,13 @@ impl SessionStore {
                 schema_cache: SchemaCache::default(),
                 search_indexes: DashMap::new(),
                 semantic: sift_semantic::SemanticRegistry::default(),
+                catalog_revisions: DashMap::new(),
+                migration_plans: DashMap::new(),
+                migration_runs: DashMap::new(),
+                migration_cancellations: DashMap::new(),
+                migration_locks: DashMap::new(),
+                retained_query_results: Default::default(),
+                comparisons: Default::default(),
             }),
         };
         store.install_eviction_callback();
@@ -613,6 +684,7 @@ impl SessionStore {
                     }
                 }
             })?;
+            return self.get_conn_entry(session_id, conn_id);
         }
         Ok(entry)
     }
@@ -1617,6 +1689,7 @@ impl SessionStore {
         let objects: Vec<_> = match &scope.depth {
             sift_protocol::SchemaDepth::Shallow => Vec::new(),
             sift_protocol::SchemaDepth::Deep { object } => vec![object],
+            sift_protocol::SchemaDepth::Graph { .. } => Vec::new(),
         };
         let entry = self.authorize_connection_operation(
             session_id,
@@ -1628,10 +1701,814 @@ impl SessionStore {
         let capability = match scope.depth {
             sift_protocol::SchemaDepth::Shallow => "driver.schema.shallow@1",
             sift_protocol::SchemaDepth::Deep { .. } => "driver.schema.deep@1",
+            sift_protocol::SchemaDepth::Graph { .. } => "driver.schema.graph@1",
         };
         entry.driver.require_capability(capability)?;
         let cached = self.schema_cached(session_id, conn_id, scope).await?;
         Ok((*cached.snapshot).clone())
+    }
+
+    pub async fn catalog_graph(
+        &self,
+        session_id: SessionId,
+        conn_id: ConnectionId,
+        request: sift_protocol::CatalogGraphRequest,
+    ) -> ApiResult<sift_protocol::CatalogGraph> {
+        self.catalog_graph_for_operation(
+            session_id,
+            conn_id,
+            request,
+            sift_protocol::OperationKind::ReadCatalogGraph,
+        )
+        .await
+    }
+
+    async fn catalog_graph_for_operation(
+        &self,
+        session_id: SessionId,
+        conn_id: ConnectionId,
+        request: sift_protocol::CatalogGraphRequest,
+        operation: sift_protocol::OperationKind,
+    ) -> ApiResult<sift_protocol::CatalogGraph> {
+        const MAX_GRAPH_NODES: usize = 100_000;
+        const MAX_GRAPH_EDGES: usize = 500_000;
+
+        if request.options.max_nodes == Some(0)
+            || request
+                .options
+                .max_nodes
+                .is_some_and(|limit| limit as usize > MAX_GRAPH_NODES)
+        {
+            return Err(ApiError::BadRequest(format!(
+                "catalog max_nodes must be between 1 and {MAX_GRAPH_NODES}"
+            )));
+        }
+        if request.options.schemas.as_ref().is_some_and(|schemas| {
+            schemas.is_empty()
+                || schemas.len() > 256
+                || schemas
+                    .iter()
+                    .any(|schema| schema.is_empty() || schema.len() > 256)
+        }) {
+            return Err(ApiError::BadRequest(
+                "catalog schema filters must contain between 1 and 256 bounded names".into(),
+            ));
+        }
+        if request
+            .options
+            .kinds
+            .as_ref()
+            .is_some_and(|kinds| kinds.is_empty() || kinds.len() > 32)
+        {
+            return Err(ApiError::BadRequest(
+                "catalog kinds must contain between 1 and 32 entries".into(),
+            ));
+        }
+
+        let authorized =
+            self.authorize_connection_operation(session_id, conn_id, operation, None, &[])?;
+        authorized
+            .driver
+            .require_capability("driver.schema.graph@1")?;
+        if request.refresh {
+            if let Some(spec) = self.spec_for_conn(session_id, conn_id)? {
+                self.inner.schema_cache.invalidate_spec(&spec);
+            }
+        }
+        let mut options = request.options;
+        if let Some(kinds) = &mut options.kinds {
+            kinds.sort_unstable();
+            kinds.dedup();
+        }
+        if let Some(schemas) = &mut options.schemas {
+            schemas.sort();
+            schemas.dedup();
+        }
+        let scope = SchemaScope {
+            depth: sift_protocol::SchemaDepth::Graph { options },
+            filter: None,
+        };
+        let cached = self
+            .schema_cached_unfiltered(session_id, conn_id, scope.clone())
+            .await?;
+        let mut canonical_snapshot = (*cached.snapshot).clone();
+        let canonical_data = canonical_snapshot.graph.as_mut().ok_or_else(|| {
+            ApiError::Driver(DriverError::new(
+                Code::DriverInternal,
+                "graph-capable provider returned no catalog graph",
+            ))
+        })?;
+        sift_core::catalog::normalize_graph(canonical_data);
+        sift_core::catalog::validate_graph(canonical_data, MAX_GRAPH_NODES, MAX_GRAPH_EDGES)
+            .map_err(|error| {
+                ApiError::Driver(DriverError::new(
+                    Code::DriverInternal,
+                    format!("invalid provider catalog graph: {error}"),
+                ))
+            })?;
+        let serialized = serde_json::to_vec(canonical_data)
+            .map_err(|error| ApiError::Internal(format!("serialize catalog graph: {error}")))?;
+        let canonical_digest = digest_bytes("catfp:", &serialized);
+        let entry = self.get_conn_entry(session_id, conn_id)?;
+        let provider = entry.driver.provider().clone();
+        let database_identity = digest_bytes(
+            "dbfp:",
+            &serde_json::to_vec(&(provider.clone(), &entry.configuration)).map_err(|error| {
+                ApiError::Internal(format!("serialize database identity: {error}"))
+            })?,
+        );
+        let revision_key = digest_bytes(
+            "catrev:",
+            &serde_json::to_vec(&(&database_identity, &scope)).map_err(|error| {
+                ApiError::Internal(format!("serialize catalog revision identity: {error}"))
+            })?,
+        );
+        let observed_epoch = self
+            .spec_for_conn(session_id, conn_id)?
+            .as_ref()
+            .map(|spec| self.inner.schema_cache.invalidation_epoch(spec))
+            .unwrap_or(1)
+            .max(1);
+        let (revision, invalidation_epoch) = match self.inner.catalog_revisions.entry(revision_key)
+        {
+            dashmap::mapref::entry::Entry::Occupied(mut occupied) => {
+                let state = occupied.get_mut();
+                if state.digest != canonical_digest {
+                    state.digest.clone_from(&canonical_digest);
+                    state.revision = state.revision.checked_add(1).unwrap_or(1);
+                }
+                state.invalidation_epoch = state.invalidation_epoch.max(observed_epoch);
+                (state.revision, state.invalidation_epoch)
+            }
+            dashmap::mapref::entry::Entry::Vacant(vacant) => {
+                vacant.insert(CatalogRevisionState {
+                    digest: canonical_digest,
+                    revision: 1,
+                    invalidation_epoch: observed_epoch,
+                });
+                (1, observed_epoch)
+            }
+        };
+        let mut visible_snapshot = canonical_snapshot;
+        if let Some(policy) = self.current_connection_policy(session_id, conn_id)? {
+            if policy.allowed_schemas.is_some() {
+                crate::sql_policy::filter_snapshot(&policy, &mut visible_snapshot);
+            }
+        }
+        let data = visible_snapshot.graph.ok_or_else(|| {
+            ApiError::Internal("catalog graph disappeared during policy projection".into())
+        })?;
+        sift_core::catalog::validate_graph(&data, MAX_GRAPH_NODES, MAX_GRAPH_EDGES).map_err(
+            |error| ApiError::Internal(format!("invalid policy-filtered catalog graph: {error}")),
+        )?;
+        let content_digest = digest_bytes(
+            "catfp:",
+            &serde_json::to_vec(&data).map_err(|error| {
+                ApiError::Internal(format!("serialize visible catalog graph: {error}"))
+            })?,
+        );
+        Ok(sift_protocol::CatalogGraph {
+            revision: sift_protocol::CatalogRevision(revision),
+            content_digest,
+            invalidation_epoch,
+            captured_at: visible_snapshot.fetched_at,
+            provider,
+            database_identity,
+            data,
+        })
+    }
+
+    pub async fn catalog_diagram(
+        &self,
+        session_id: SessionId,
+        conn_id: ConnectionId,
+        request: sift_protocol::CatalogDiagramRequest,
+    ) -> ApiResult<sift_protocol::CatalogDiagram> {
+        const MAX_DIAGRAM_NODES: usize = 20_000;
+        if request.schemas.len() > 256
+            || request
+                .schemas
+                .iter()
+                .any(|schema| schema.is_empty() || schema.len() > 256)
+            || request.object_ids.len() > 10_000
+            || request.edge_kinds.len() > 32
+            || request.neighborhood_depth > 8
+        {
+            return Err(ApiError::BadRequest(
+                "catalog diagram selection exceeds request limits".into(),
+            ));
+        }
+        let catalog = self
+            .catalog_graph_for_operation(
+                session_id,
+                conn_id,
+                sift_protocol::CatalogGraphRequest {
+                    options: sift_protocol::CatalogGraphOptions {
+                        schemas: (!request.schemas.is_empty()).then(|| request.schemas.clone()),
+                        ..sift_protocol::CatalogGraphOptions::default()
+                    },
+                    refresh: false,
+                },
+                sift_protocol::OperationKind::ProjectCatalogDiagram,
+            )
+            .await?;
+        if catalog.revision != request.expected_revision {
+            return Err(ApiError::BadRequest(format!(
+                "stale catalog revision: expected {}, current {}",
+                request.expected_revision.0, catalog.revision.0
+            )));
+        }
+        sift_core::catalog::project_diagram(&catalog, &request, MAX_DIAGRAM_NODES).map_err(
+            |error| ApiError::BadRequest(format!("invalid catalog diagram request: {error}")),
+        )
+    }
+
+    pub async fn catalog_snapshot_source(
+        &self,
+        session_id: SessionId,
+        conn_id: ConnectionId,
+        request: &sift_protocol::CreateCatalogSnapshotRequest,
+    ) -> ApiResult<(
+        sift_protocol::CatalogGraph,
+        PrincipalId,
+        sift_metadata::TenantId,
+        sift_metadata::ConnectionProfileId,
+    )> {
+        let catalog = self
+            .catalog_graph_for_operation(
+                session_id,
+                conn_id,
+                sift_protocol::CatalogGraphRequest {
+                    options: request.options.clone(),
+                    refresh: false,
+                },
+                sift_protocol::OperationKind::CreateCatalogSnapshot,
+            )
+            .await?;
+        if catalog.revision != request.expected_catalog_revision {
+            return Err(ApiError::BadRequest(format!(
+                "stale catalog revision: expected {}, current {}",
+                request.expected_catalog_revision.0, catalog.revision.0
+            )));
+        }
+        if !request.accept_partial
+            && catalog.data.coverage.state != sift_protocol::CatalogCoverageState::Complete
+        {
+            return Err(ApiError::BadRequest(
+                "catalog snapshot requires complete coverage unless accept_partial is true".into(),
+            ));
+        }
+        let provenance = self.get_conn_entry(session_id, conn_id)?.provenance;
+        let ConnectionProvenance::Managed {
+            principal_id,
+            tenant_id,
+            profile_id,
+            ..
+        } = provenance
+        else {
+            return Err(ApiError::Forbidden(
+                "durable catalog snapshots require a managed connection profile".into(),
+            ));
+        };
+        Ok((catalog, principal_id, tenant_id, profile_id))
+    }
+
+    pub fn managed_catalog_scope(
+        &self,
+        session_id: SessionId,
+        conn_id: ConnectionId,
+        operation: sift_protocol::OperationKind,
+    ) -> ApiResult<(
+        PrincipalId,
+        sift_metadata::TenantId,
+        sift_metadata::ConnectionProfileId,
+        u64,
+    )> {
+        let entry =
+            self.authorize_connection_operation(session_id, conn_id, operation, None, &[])?;
+        let ConnectionProvenance::Managed {
+            principal_id,
+            tenant_id,
+            profile_id,
+            policy_revision,
+            ..
+        } = entry.provenance
+        else {
+            return Err(ApiError::Forbidden(
+                "this catalog operation requires a managed connection profile".into(),
+            ));
+        };
+        Ok((principal_id, tenant_id, profile_id, policy_revision))
+    }
+
+    pub async fn catalog_graph_for_schema_diff(
+        &self,
+        session_id: SessionId,
+        conn_id: ConnectionId,
+        expected_revision: sift_protocol::CatalogRevision,
+        options: sift_protocol::CatalogGraphOptions,
+    ) -> ApiResult<sift_protocol::CatalogGraph> {
+        self.catalog_graph_at_revision(
+            session_id,
+            conn_id,
+            expected_revision,
+            options,
+            sift_protocol::OperationKind::CompareCatalogSchemas,
+        )
+        .await
+    }
+
+    async fn catalog_graph_at_revision(
+        &self,
+        session_id: SessionId,
+        conn_id: ConnectionId,
+        expected_revision: sift_protocol::CatalogRevision,
+        options: sift_protocol::CatalogGraphOptions,
+        operation: sift_protocol::OperationKind,
+    ) -> ApiResult<sift_protocol::CatalogGraph> {
+        let graph = self
+            .catalog_graph_for_operation(
+                session_id,
+                conn_id,
+                sift_protocol::CatalogGraphRequest {
+                    options,
+                    refresh: false,
+                },
+                operation,
+            )
+            .await?;
+        if graph.revision != expected_revision {
+            return Err(ApiError::BadRequest(format!(
+                "stale catalog revision: expected {}, current {}",
+                expected_revision.0, graph.revision.0
+            )));
+        }
+        Ok(graph)
+    }
+
+    pub(crate) fn store_migration_plan(
+        &self,
+        plan: sift_protocol::MigrationPlan,
+        scope: MigrationPlanScope,
+    ) -> ApiResult<sift_protocol::MigrationPlan> {
+        let now = chrono::Utc::now();
+        self.inner
+            .migration_plans
+            .retain(|_, stored| stored.plan.expires_at > now);
+        if self.inner.migration_plans.len() >= 1_024 {
+            return Err(ApiError::BadRequest(
+                "migration plan retention limit reached".into(),
+            ));
+        }
+        self.inner.migration_plans.insert(
+            plan.id,
+            StoredMigrationPlan {
+                plan: plan.clone(),
+                session: scope.session,
+                connection: scope.connection,
+                principal: scope.principal,
+                tenant: scope.tenant,
+                profile: scope.profile,
+                policy_revision: scope.policy_revision,
+                live_options: scope.live_options,
+            },
+        );
+        Ok(plan)
+    }
+
+    pub async fn apply_migration(
+        &self,
+        session: SessionId,
+        connection: ConnectionId,
+        principal: PrincipalId,
+        request: sift_protocol::ApplyMigrationRequest,
+    ) -> ApiResult<sift_protocol::MigrationRun> {
+        use sift_protocol::{
+            MigrationRun, MigrationRunState, MigrationStatementOutcome, MigrationStatementStatus,
+        };
+
+        let (current_principal, tenant, profile, policy_revision) = self.managed_catalog_scope(
+            session,
+            connection,
+            sift_protocol::OperationKind::ApplyMigration,
+        )?;
+        if current_principal != principal {
+            return Err(ApiError::Forbidden(
+                "migration caller must own the managed session".into(),
+            ));
+        }
+        let stored = self
+            .inner
+            .migration_plans
+            .get(&request.plan_id)
+            .map(|entry| entry.clone())
+            .ok_or_else(|| {
+                ApiError::BadRequest("migration plan not found or already used".into())
+            })?;
+        if stored.session != session
+            || stored.connection != connection
+            || stored.principal != principal
+            || stored.tenant != tenant
+            || stored.profile != profile
+            || stored.policy_revision != policy_revision
+            || stored.plan.digest != request.plan_digest
+            || stored.plan.expires_at <= chrono::Utc::now()
+        {
+            return Err(ApiError::BadRequest(
+                "migration plan is expired, tampered, or bound to another scope".into(),
+            ));
+        }
+        let acknowledgements = request
+            .acknowledgements
+            .into_iter()
+            .collect::<std::collections::HashSet<_>>();
+        if stored
+            .plan
+            .required_acknowledgements
+            .iter()
+            .any(|risk| !acknowledgements.contains(risk))
+        {
+            return Err(ApiError::BadRequest(
+                "migration requires acknowledgement of every destructive or unknown risk".into(),
+            ));
+        }
+        // Consume only after every caller-controlled precondition succeeds.
+        // Removal remains the atomic one-use gate when two applies race.
+        let (_, stored) = self
+            .inner
+            .migration_plans
+            .remove(&request.plan_id)
+            .ok_or_else(|| {
+                ApiError::BadRequest("migration plan not found or already used".into())
+            })?;
+
+        let cancel = Arc::new(AtomicBool::new(false));
+        self.inner
+            .migration_cancellations
+            .insert(stored.plan.run_id, cancel.clone());
+        let started_at = chrono::Utc::now();
+        let mut run = MigrationRun {
+            id: stored.plan.run_id,
+            plan_id: stored.plan.id,
+            session,
+            connection,
+            plan_digest: stored.plan.digest.clone(),
+            state: MigrationRunState::Running,
+            started_at,
+            finished_at: None,
+            outcomes: Vec::new(),
+            resulting_catalog_revision: None,
+        };
+        self.inner.migration_runs.insert(run.id, run.clone());
+        let lock = self
+            .inner
+            .migration_locks
+            .entry((session, connection))
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+            .clone();
+        let _guard = lock.lock().await;
+
+        // The revision check happens under the per-connection migration lock,
+        // immediately before the first statement.
+        if let Err(error) = self
+            .catalog_graph_at_revision(
+                session,
+                connection,
+                stored.plan.expected_live_revision,
+                stored.live_options.clone(),
+                sift_protocol::OperationKind::ApplyMigration,
+            )
+            .await
+        {
+            self.inner.migration_cancellations.remove(&run.id);
+            self.inner.migration_runs.remove(&run.id);
+            return Err(error);
+        }
+        if let Err(error) = self
+            .persist_migration_run(tenant, profile, principal, &run)
+            .await
+        {
+            self.inner.migration_cancellations.remove(&run.id);
+            self.inner.migration_runs.remove(&run.id);
+            return Err(error);
+        }
+
+        let mut attempted_ddl = false;
+        let mut committed_work = false;
+        'groups: for group in &stored.plan.groups {
+            if cancel.load(Ordering::Acquire) {
+                run.state = if committed_work {
+                    MigrationRunState::Partial
+                } else {
+                    MigrationRunState::Canceled
+                };
+                break;
+            }
+            let tx = if group.transactional {
+                match self
+                    .begin_transaction_as(
+                        session,
+                        sift_protocol::BeginTransactionRequest {
+                            connection,
+                            mode: sift_protocol::TxMode::default(),
+                        },
+                        sift_protocol::OperationKind::ApplyMigration,
+                    )
+                    .await
+                {
+                    Ok(info) => Some(sift_protocol::TxHandleRef {
+                        tx_id: info.tx_id,
+                        connection: info.connection,
+                        mode: info.mode,
+                    }),
+                    Err(_) => {
+                        run.state = if committed_work {
+                            MigrationRunState::Partial
+                        } else {
+                            MigrationRunState::Failed
+                        };
+                        break;
+                    }
+                }
+            } else {
+                None
+            };
+            let group_outcome_start = run.outcomes.len();
+            for statement in &group.statements {
+                if cancel.load(Ordering::Acquire) {
+                    if let Some(tx) = &tx {
+                        if self
+                            .rollback_migration_tx(session, connection, tx.tx_id)
+                            .await
+                        {
+                            mark_rolled_back(&mut run.outcomes[group_outcome_start..]);
+                        } else {
+                            run.state = MigrationRunState::Partial;
+                        }
+                    }
+                    if run.state != MigrationRunState::Partial {
+                        run.state = if committed_work {
+                            MigrationRunState::Partial
+                        } else {
+                            MigrationRunState::Canceled
+                        };
+                    }
+                    break 'groups;
+                }
+                attempted_ddl = true;
+                let response = self
+                    .execute_http_as(
+                        session,
+                        ExecuteRequestHttp {
+                            connection,
+                            sql: statement.sql.clone(),
+                            params: Vec::new(),
+                            tx: tx.clone(),
+                            room_id: None,
+                            connection_profile_id: Some(profile.0),
+                        },
+                        sift_protocol::OperationKind::ApplyMigration,
+                    )
+                    .await;
+                match response {
+                    Ok(response) => {
+                        run.outcomes.push(MigrationStatementOutcome {
+                            group_ordinal: group.ordinal,
+                            statement_ordinal: statement.ordinal,
+                            fingerprint: statement.fingerprint.clone(),
+                            status: MigrationStatementStatus::Applied,
+                            affected_rows: response.affected_rows,
+                            result_code: None,
+                        });
+                        if tx.is_none() {
+                            committed_work = true;
+                        }
+                    }
+                    Err(error) => {
+                        run.outcomes.push(MigrationStatementOutcome {
+                            group_ordinal: group.ordinal,
+                            statement_ordinal: statement.ordinal,
+                            fingerprint: statement.fingerprint.clone(),
+                            status: MigrationStatementStatus::Failed,
+                            affected_rows: None,
+                            result_code: migration_result_code(&error),
+                        });
+                        if let Some(tx) = &tx {
+                            if self
+                                .rollback_migration_tx(session, connection, tx.tx_id)
+                                .await
+                            {
+                                mark_rolled_back(&mut run.outcomes[group_outcome_start..]);
+                                run.state = if committed_work {
+                                    MigrationRunState::Partial
+                                } else {
+                                    MigrationRunState::RolledBack
+                                };
+                            } else {
+                                run.state = MigrationRunState::Partial;
+                            }
+                        } else {
+                            run.state = if committed_work {
+                                MigrationRunState::Partial
+                            } else {
+                                MigrationRunState::Failed
+                            };
+                        }
+                        break 'groups;
+                    }
+                }
+            }
+            if let Some(tx) = tx {
+                if let Err(error) = self
+                    .commit_transaction_as(
+                        session,
+                        sift_protocol::EndTransactionRequest {
+                            connection,
+                            tx_id: tx.tx_id,
+                        },
+                        sift_protocol::OperationKind::ApplyMigration,
+                    )
+                    .await
+                {
+                    if let Some(last) = run.outcomes.last_mut() {
+                        last.result_code = migration_result_code(&error);
+                    }
+                    if self
+                        .rollback_migration_tx(session, connection, tx.tx_id)
+                        .await
+                    {
+                        mark_rolled_back(&mut run.outcomes[group_outcome_start..]);
+                        run.state = if committed_work {
+                            MigrationRunState::Partial
+                        } else {
+                            MigrationRunState::RolledBack
+                        };
+                    } else {
+                        run.state = MigrationRunState::Partial;
+                    }
+                    break;
+                }
+                if run.outcomes[group_outcome_start..]
+                    .iter()
+                    .any(|outcome| outcome.status == MigrationStatementStatus::Applied)
+                {
+                    committed_work = true;
+                }
+            }
+        }
+        if run.state == MigrationRunState::Running {
+            run.state = MigrationRunState::Applied;
+        }
+        let recorded = run
+            .outcomes
+            .iter()
+            .map(|outcome| (outcome.group_ordinal, outcome.statement_ordinal))
+            .collect::<std::collections::HashSet<_>>();
+        for group in &stored.plan.groups {
+            for statement in &group.statements {
+                if !recorded.contains(&(group.ordinal, statement.ordinal)) {
+                    run.outcomes.push(MigrationStatementOutcome {
+                        group_ordinal: group.ordinal,
+                        statement_ordinal: statement.ordinal,
+                        fingerprint: statement.fingerprint.clone(),
+                        status: MigrationStatementStatus::Skipped,
+                        affected_rows: None,
+                        result_code: None,
+                    });
+                }
+            }
+        }
+        run.outcomes
+            .sort_by_key(|outcome| (outcome.group_ordinal, outcome.statement_ordinal));
+        if attempted_ddl {
+            if let Some(spec) = self.spec_for_conn(session, connection)? {
+                self.inner.schema_cache.invalidate_spec(&spec);
+            }
+            if let Ok(graph) = self
+                .catalog_graph_for_operation(
+                    session,
+                    connection,
+                    sift_protocol::CatalogGraphRequest {
+                        options: stored.live_options,
+                        refresh: false,
+                    },
+                    sift_protocol::OperationKind::ApplyMigration,
+                )
+                .await
+            {
+                run.resulting_catalog_revision = Some(graph.revision);
+            }
+        }
+        run.finished_at = Some(chrono::Utc::now());
+        self.inner.migration_runs.insert(run.id, run.clone());
+        self.persist_migration_run(tenant, profile, principal, &run)
+            .await?;
+        self.inner.migration_cancellations.remove(&run.id);
+        Ok(run)
+    }
+
+    async fn persist_migration_run(
+        &self,
+        tenant: sift_metadata::TenantId,
+        profile: sift_metadata::ConnectionProfileId,
+        principal: PrincipalId,
+        run: &sift_protocol::MigrationRun,
+    ) -> ApiResult<()> {
+        let metadata = self
+            .inner
+            .authorization_store
+            .read()
+            .unwrap()
+            .clone()
+            .ok_or(ApiError::MetadataUnavailable)?;
+        let run = run.clone();
+        tokio::task::spawn_blocking(move || {
+            metadata.put_migration_run(tenant, profile, principal, &run)
+        })
+        .await
+        .map_err(|error| {
+            ApiError::Internal(format!("migration run persistence task: {error}"))
+        })??;
+        Ok(())
+    }
+
+    async fn rollback_migration_tx(
+        &self,
+        session: SessionId,
+        connection: ConnectionId,
+        tx_id: TxId,
+    ) -> bool {
+        match self
+            .rollback_transaction_as(
+                session,
+                sift_protocol::EndTransactionRequest { connection, tx_id },
+                sift_protocol::OperationKind::ApplyMigration,
+            )
+            .await
+        {
+            Ok(()) => true,
+            Err(error) => {
+                tracing::error!(%session, %connection, %error, "migration rollback failed");
+                false
+            }
+        }
+    }
+
+    pub fn migration_run(
+        &self,
+        session: SessionId,
+        connection: ConnectionId,
+        principal: PrincipalId,
+        run_id: sift_protocol::MigrationRunId,
+    ) -> ApiResult<sift_protocol::MigrationRun> {
+        let (owner, _, _, _) = self.managed_catalog_scope(
+            session,
+            connection,
+            sift_protocol::OperationKind::GetMigrationRun,
+        )?;
+        if owner != principal {
+            return Err(ApiError::Forbidden(
+                "migration run caller must own the managed session".into(),
+            ));
+        }
+        self.inner
+            .migration_runs
+            .get(&run_id)
+            .filter(|run| run.session == session && run.connection == connection)
+            .map(|run| run.clone())
+            .ok_or_else(|| ApiError::BadRequest("migration run not found".into()))
+    }
+
+    pub fn cancel_migration(
+        &self,
+        session: SessionId,
+        connection: ConnectionId,
+        principal: PrincipalId,
+        run_id: sift_protocol::MigrationRunId,
+    ) -> ApiResult<()> {
+        let (owner, _, _, _) = self.managed_catalog_scope(
+            session,
+            connection,
+            sift_protocol::OperationKind::CancelMigration,
+        )?;
+        if owner != principal {
+            return Err(ApiError::Forbidden(
+                "migration caller must own the managed session".into(),
+            ));
+        }
+        let cancellation = self
+            .inner
+            .migration_cancellations
+            .get(&run_id)
+            .filter(|_| {
+                self.inner
+                    .migration_runs
+                    .get(&run_id)
+                    .is_some_and(|run| run.session == session && run.connection == connection)
+            })
+            .ok_or_else(|| ApiError::BadRequest("migration run is not active".into()))?;
+        cancellation.store(true, Ordering::Release);
+        Ok(())
     }
 
     pub async fn schema_cached(
@@ -1681,6 +2558,12 @@ impl SessionStore {
                 return Ok(cached);
             }
         }
+        let stale = cache_spec
+            .as_ref()
+            .and_then(|spec| self.inner.schema_cache.get_stale_cached(spec, &scope));
+        let starting_epoch = cache_spec
+            .as_ref()
+            .map(|spec| self.inner.schema_cache.invalidation_epoch(spec));
         let driver = entry.driver.clone();
         let handle = entry.handle.clone();
         let first = {
@@ -1702,6 +2585,20 @@ impl SessionStore {
             }
             other => other,
         };
+        let invalidated_during_fetch =
+            cache_spec
+                .as_ref()
+                .zip(starting_epoch)
+                .is_some_and(|(spec, starting)| {
+                    self.inner.schema_cache.invalidation_epoch(spec) != starting
+                });
+        let result = if invalidated_during_fetch {
+            Err(ApiError::BadRequest(
+                "schema invalidated while provider build was in flight; retry".into(),
+            ))
+        } else {
+            result
+        };
         if let (Ok(snapshot), Some(legacy), Some(spec)) =
             (&result, driver.legacy_driver(), cache_spec.as_ref())
         {
@@ -1719,7 +2616,11 @@ impl SessionStore {
         if let Some(gate) = &fetch_gate {
             self.inner.schema_cache.clear_fetch_gate(gate);
         }
-        result.map(CachedSchema::new_uncached)
+        match (result, stale) {
+            (Ok(snapshot), _) => Ok(CachedSchema::new_uncached(snapshot)),
+            (Err(_), Some(stale)) => Ok(stale_schema(stale.snapshot.as_ref())),
+            (Err(error), None) => Err(error),
+        }
     }
 
     fn spec_for_conn(
@@ -1862,39 +2763,49 @@ impl SessionStore {
             result
         });
 
-        if dur.is_zero() {
-            return match (&mut task).await {
+        let result = if dur.is_zero() {
+            match (&mut task).await {
                 Ok(res) => res.map_err(ApiError::Driver),
                 Err(join) => Err(ApiError::Internal(format!("execute task failed: {join}"))),
-            };
-        }
-
-        match tokio::time::timeout(dur, &mut task).await {
-            Ok(Ok(res)) => res.map_err(ApiError::Driver),
-            Ok(Err(join)) => Err(ApiError::Internal(format!("execute task failed: {join}"))),
-            Err(_) => {
-                let cursor = *cursor_slot.lock().unwrap();
-                if let Some(cursor) = cursor {
-                    // Cursor exists: driver returned the stream and the task
-                    // is draining rows. Cancel through the cursor so the
-                    // driver's abort+discard rules run.
-                    self.cancel_after_timeout(session_id, conn_id, cursor).await;
-                } else {
-                    // Task is hung inside driver.execute before any cursor
-                    // was produced. There is nothing to cancel through the
-                    // driver; abort the task itself so it doesn't outlive
-                    // the handler and hold the ConnHandle busy indefinitely
-                    // (which would also block Shutdown::await_drain).
-                    task.abort();
-                    tracing::warn!(
-                        session_id = %session_id,
-                        conn_id = %conn_id,
-                        "aborted execute task after pre-cursor timeout"
-                    );
-                }
-                Err(timeout_error("execute"))
             }
+        } else {
+            match tokio::time::timeout(dur, &mut task).await {
+                Ok(Ok(res)) => res.map_err(ApiError::Driver),
+                Ok(Err(join)) => Err(ApiError::Internal(format!("execute task failed: {join}"))),
+                Err(_) => {
+                    let cursor = *cursor_slot.lock().unwrap();
+                    if let Some(cursor) = cursor {
+                        // Cursor exists: driver returned the stream and the task
+                        // is draining rows. Cancel through the cursor so the
+                        // driver's abort+discard rules run.
+                        self.cancel_after_timeout(session_id, conn_id, cursor).await;
+                    } else {
+                        // Task is hung inside driver.execute before any cursor
+                        // was produced. There is nothing to cancel through the
+                        // driver; abort the task itself so it doesn't outlive
+                        // the handler and hold the ConnHandle busy indefinitely
+                        // (which would also block Shutdown::await_drain).
+                        task.abort();
+                        tracing::warn!(
+                            session_id = %session_id,
+                            conn_id = %conn_id,
+                            "aborted execute task after pre-cursor timeout"
+                        );
+                    }
+                    Err(timeout_error("execute"))
+                }
+            }
+        };
+        if let Ok(response) = &result {
+            self.inner.retained_query_results.insert(
+                session_id,
+                conn_id,
+                response.cursor_id,
+                response.columns.clone(),
+                response.rows.clone(),
+            );
         }
+        result
     }
 
     /// Best-effort cancel of a cursor whose HTTP execute exceeded the request
@@ -3199,6 +4110,47 @@ impl SessionStore {
         conn_id: ConnectionId,
         request: sift_protocol::completion::CompletionRequest,
     ) -> ApiResult<sift_protocol::completion::CompletionResponse> {
+        let cursor = floor_char_boundary(
+            &request.sql,
+            usize::min(request.cursor as usize, request.sql.len()),
+        ) as u32;
+        let limit = request.limit;
+        let state = self
+            .open_semantic_document(
+                session_id,
+                conn_id,
+                sift_protocol::CreateSemanticDocumentRequest {
+                    text: request.sql,
+                    source: Some(sift_protocol::SemanticSource::Scratch),
+                },
+            )
+            .await?;
+        let result = self
+            .complete_semantic_document(
+                session_id,
+                conn_id,
+                state.document_id,
+                sift_protocol::SemanticCompletionRequest {
+                    revision: state.revision,
+                    cursor,
+                    limit,
+                },
+            )
+            .await;
+        let _ = self
+            .inner
+            .semantic
+            .close(semantic_scope(session_id, conn_id), state.document_id);
+        result
+    }
+
+    pub async fn complete_semantic_document(
+        &self,
+        session_id: SessionId,
+        conn_id: ConnectionId,
+        document: sift_protocol::SemanticDocumentId,
+        request: sift_protocol::SemanticCompletionRequest,
+    ) -> ApiResult<sift_protocol::completion::CompletionResponse> {
         let entry = self.authorize_connection_operation(
             session_id,
             conn_id,
@@ -3207,7 +4159,22 @@ impl SessionStore {
             &[],
         )?;
         let engine = entry.driver.engine();
-        crate::autocomplete::generate_completion(self, session_id, conn_id, engine, request).await
+        let registry = self.inner.semantic.clone();
+        let scope = semantic_scope(session_id, conn_id);
+        let revision = request.revision;
+        let cursor = request.cursor;
+        let analysis = self
+            .run_semantic(move |_| registry.completion_analysis(scope, document, revision, cursor))
+            .await?;
+        crate::autocomplete::generate_completion_from_semantic(
+            self,
+            session_id,
+            conn_id,
+            engine,
+            request.limit,
+            analysis,
+        )
+        .await
     }
 
     pub async fn open_semantic_document(
@@ -3279,12 +4246,12 @@ impl SessionStore {
             .map_err(semantic_error)
     }
 
-    pub fn semantic_diagnostics(
+    pub async fn semantic_diagnostics(
         &self,
         session_id: SessionId,
         conn_id: ConnectionId,
         document: sift_protocol::SemanticDocumentId,
-        revision: u64,
+        request: sift_protocol::SemanticRevisionRequest,
     ) -> ApiResult<sift_protocol::DiagnosticsResponse> {
         self.authorize_connection_operation(
             session_id,
@@ -3293,10 +4260,171 @@ impl SessionStore {
             None,
             &[],
         )?;
-        self.inner
-            .semantic
-            .diagnostics(semantic_scope(session_id, conn_id), document, revision)
-            .map_err(semantic_error)
+        let registry = self.inner.semantic.clone();
+        let scope = semantic_scope(session_id, conn_id);
+        let revision = request.revision;
+        let Some(expected_catalog_revision) = request.catalog_revision else {
+            return self
+                .run_semantic(move |_| registry.diagnostics(scope, document, revision))
+                .await;
+        };
+        let graph = self
+            .catalog_graph_for_operation(
+                session_id,
+                conn_id,
+                sift_protocol::CatalogGraphRequest::default(),
+                sift_protocol::OperationKind::DiagnoseSql,
+            )
+            .await?;
+        if graph.revision != expected_catalog_revision {
+            return Err(ApiError::BadRequest(format!(
+                "stale catalog revision: expected {}, current {}",
+                expected_catalog_revision.0, graph.revision.0
+            )));
+        }
+        let catalog = catalog_binding_view(&graph);
+        self.run_semantic(move |_| {
+            registry.diagnostics_with_catalog(scope, document, revision, &catalog)
+        })
+        .await
+    }
+
+    pub async fn format_semantic_document(
+        &self,
+        session_id: SessionId,
+        conn_id: ConnectionId,
+        document: sift_protocol::SemanticDocumentId,
+        request: sift_protocol::FormatSqlRequest,
+    ) -> ApiResult<sift_protocol::WorkspaceEdit> {
+        self.authorize_connection_operation(
+            session_id,
+            conn_id,
+            sift_protocol::OperationKind::FormatSql,
+            None,
+            &[],
+        )?;
+        let registry = self.inner.semantic.clone();
+        let scope = semantic_scope(session_id, conn_id);
+        self.run_semantic(move |canceled| registry.format(scope, document, request, canceled))
+            .await
+    }
+
+    pub async fn prepare_semantic_quick_fix(
+        &self,
+        session_id: SessionId,
+        conn_id: ConnectionId,
+        document: sift_protocol::SemanticDocumentId,
+        fix_id: String,
+        request: sift_protocol::SqlQuickFixRequest,
+    ) -> ApiResult<sift_protocol::WorkspaceEdit> {
+        self.authorize_connection_operation(
+            session_id,
+            conn_id,
+            sift_protocol::OperationKind::SqlQuickFix,
+            None,
+            &[],
+        )?;
+        let graph = self
+            .catalog_graph_for_operation(
+                session_id,
+                conn_id,
+                sift_protocol::CatalogGraphRequest::default(),
+                sift_protocol::OperationKind::SqlQuickFix,
+            )
+            .await?;
+        if graph.revision != request.catalog_revision {
+            return Err(ApiError::BadRequest(format!(
+                "stale catalog revision: expected {}, current {}",
+                request.catalog_revision.0, graph.revision.0
+            )));
+        }
+        let catalog = catalog_binding_view(&graph);
+        let registry = self.inner.semantic.clone();
+        let scope = semantic_scope(session_id, conn_id);
+        self.run_semantic(move |_| {
+            registry.prepare_quick_fix(scope, document, request.revision, &fix_id, &catalog)
+        })
+        .await
+    }
+
+    pub async fn find_semantic_usages(
+        &self,
+        session_id: SessionId,
+        conn_id: ConnectionId,
+        document: sift_protocol::SemanticDocumentId,
+        request: sift_protocol::FindSqlUsagesRequest,
+    ) -> ApiResult<sift_protocol::SqlUsagePage> {
+        self.authorize_connection_operation(
+            session_id,
+            conn_id,
+            sift_protocol::OperationKind::FindSqlUsages,
+            None,
+            &[],
+        )?;
+        let catalog = if let Some(expected) = request.catalog_revision {
+            let graph = self
+                .catalog_graph_for_operation(
+                    session_id,
+                    conn_id,
+                    sift_protocol::CatalogGraphRequest::default(),
+                    sift_protocol::OperationKind::FindSqlUsages,
+                )
+                .await?;
+            if graph.revision != expected {
+                return Err(ApiError::BadRequest(format!(
+                    "stale catalog revision: expected {}, current {}",
+                    expected.0, graph.revision.0
+                )));
+            }
+            Some(catalog_binding_view(&graph))
+        } else {
+            None
+        };
+        let registry = self.inner.semantic.clone();
+        let scope = semantic_scope(session_id, conn_id);
+        self.run_semantic(move |_| registry.find_usages(scope, document, request, catalog.as_ref()))
+            .await
+    }
+
+    pub async fn prepare_semantic_refactor(
+        &self,
+        session_id: SessionId,
+        conn_id: ConnectionId,
+        document: sift_protocol::SemanticDocumentId,
+        request: sift_protocol::PrepareSqlRefactorRequest,
+    ) -> ApiResult<sift_protocol::WorkspaceEdit> {
+        self.authorize_connection_operation(
+            session_id,
+            conn_id,
+            sift_protocol::OperationKind::PrepareSqlRefactor,
+            None,
+            &[],
+        )?;
+        let catalog = if let Some(expected) = request.catalog_revision {
+            let graph = self
+                .catalog_graph_for_operation(
+                    session_id,
+                    conn_id,
+                    sift_protocol::CatalogGraphRequest::default(),
+                    sift_protocol::OperationKind::PrepareSqlRefactor,
+                )
+                .await?;
+            if graph.revision != expected {
+                return Err(ApiError::BadRequest(format!(
+                    "stale catalog revision: expected {}, current {}",
+                    expected.0, graph.revision.0
+                )));
+            }
+            Some(catalog_binding_view(&graph))
+        } else {
+            None
+        };
+        let registry = self.inner.semantic.clone();
+        let scope = semantic_scope(session_id, conn_id);
+        self.run_semantic(move |_| {
+            registry.prepare_refactor(scope, document, request, catalog.as_ref())
+        })
+        .await
     }
 
     pub fn select_semantic_statement(
@@ -3317,6 +4445,617 @@ impl SessionStore {
             .semantic
             .select_statement(semantic_scope(session_id, conn_id), document, request)
             .map_err(semantic_error)
+    }
+
+    pub fn start_comparison(
+        &self,
+        session_id: SessionId,
+        request: sift_protocol::StartComparisonRequest,
+        room_results: crate::room_results::RoomResultRegistry,
+    ) -> ApiResult<sift_protocol::ComparisonSummary> {
+        const MAX_SOURCE_ROWS: u32 = 50_000;
+        const MAX_DIFF_ROWS: u32 = 20_000;
+        const MAX_COLUMNS: usize = 512;
+        const MAX_KEY_COLUMNS: usize = 16;
+        const MAX_TIMEOUT_MS: u64 = 120_000;
+
+        self.with_session(&session_id, |_| ())?;
+        let max_source_rows = request.max_source_rows.unwrap_or(4_999);
+        let max_diff_rows = request.max_diff_rows.unwrap_or(10_000);
+        let timeout_ms = request.timeout_ms.unwrap_or(30_000);
+        let key_columns = match &request.key {
+            sift_protocol::CompareKey::Explicit { columns } => columns.len(),
+            sift_protocol::CompareKey::Infer | sift_protocol::CompareKey::RowOrdinal => 0,
+        };
+        if max_source_rows == 0
+            || max_source_rows > MAX_SOURCE_ROWS
+            || max_diff_rows == 0
+            || max_diff_rows > MAX_DIFF_ROWS
+            || timeout_ms == 0
+            || timeout_ms > MAX_TIMEOUT_MS
+            || request.column_mappings.len() > MAX_COLUMNS
+            || request.tolerances.len() > MAX_COLUMNS
+            || key_columns > MAX_KEY_COLUMNS
+        {
+            return Err(ApiError::BadRequest(
+                "comparison request exceeds source, diff, column, key, or timeout limits".into(),
+            ));
+        }
+        validate_compare_source(&request.left)?;
+        validate_compare_source(&request.right)?;
+
+        let id = sift_protocol::ComparisonId(uuid::Uuid::new_v4());
+        let expires_at = chrono::Utc::now() + chrono::Duration::seconds(600);
+        let initial_key = match &request.key {
+            sift_protocol::CompareKey::Explicit { columns } => sift_protocol::ResolvedCompareKey {
+                columns: columns.clone(),
+                inferred_constraint: None,
+                row_ordinal: false,
+            },
+            sift_protocol::CompareKey::RowOrdinal => sift_protocol::ResolvedCompareKey {
+                columns: Vec::new(),
+                inferred_constraint: None,
+                row_ordinal: true,
+            },
+            sift_protocol::CompareKey::Infer => sift_protocol::ResolvedCompareKey {
+                columns: Vec::new(),
+                inferred_constraint: None,
+                row_ordinal: false,
+            },
+        };
+        let summary = sift_protocol::ComparisonSummary {
+            comparison_id: id,
+            status: sift_protocol::ComparisonStatus::Running,
+            result_digest: String::new(),
+            left_rows: 0,
+            right_rows: 0,
+            equal_rows: 0,
+            changed_rows: 0,
+            added_rows: 0,
+            removed_rows: 0,
+            incomparable_rows: 0,
+            duplicate_key_groups: 0,
+            retained_diff_rows: 0,
+            columns: Vec::new(),
+            key: initial_key,
+            tolerances: request.tolerances.clone(),
+            patch_eligible: false,
+            patch_refusal_reasons: vec!["comparison is still running".into()],
+            failure_code: None,
+            expires_at,
+        };
+        let entry = self.inner.comparisons.create(session_id, summary.clone());
+        let store = self.clone();
+        tokio::spawn(async move {
+            let run = store.run_comparison(
+                session_id,
+                request,
+                room_results,
+                max_source_rows as usize,
+                max_diff_rows as usize,
+                entry.clone(),
+            );
+            match tokio::time::timeout(Duration::from_millis(timeout_ms), run).await {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => entry.fail(comparison_failure_code(&error)),
+                Err(_) => entry.fail("comparison_timeout"),
+            }
+        });
+        Ok(summary)
+    }
+
+    async fn run_comparison(
+        &self,
+        session_id: SessionId,
+        request: sift_protocol::StartComparisonRequest,
+        room_results: crate::room_results::RoomResultRegistry,
+        max_source_rows: usize,
+        max_diff_rows: usize,
+        entry: Arc<crate::comparison::ComparisonEntry>,
+    ) -> ApiResult<()> {
+        let left = self
+            .load_comparison_source(session_id, &request.left, &room_results, max_source_rows)
+            .await?;
+        ensure_comparison_source_bytes("left", &left.dataset)?;
+        if entry.canceled() {
+            return Ok(());
+        }
+        let right = self
+            .load_comparison_source(session_id, &request.right, &room_results, max_source_rows)
+            .await?;
+        ensure_comparison_source_bytes("right", &right.dataset)?;
+        if entry.canceled() {
+            return Ok(());
+        }
+        if left.dataset.columns.len() > 512 || right.dataset.columns.len() > 512 {
+            return Err(ApiError::BadRequest(
+                "comparison source exceeds the 512-column limit".into(),
+            ));
+        }
+        let key = resolve_comparison_key(&request, &left, &right)?;
+        let left_rows = left.dataset.rows.len() as u64;
+        let right_rows = right.dataset.rows.len() as u64;
+        let LoadedComparisonSource {
+            dataset: left_dataset,
+            table: left_table,
+            connection: left_connection,
+            truncated: left_truncated,
+        } = left;
+        let LoadedComparisonSource {
+            dataset: right_dataset,
+            table: right_table,
+            connection: right_connection,
+            truncated: right_truncated,
+        } = right;
+        let core_request = sift_core::comparison::ComparisonInput {
+            left: left_dataset,
+            right: right_dataset,
+            mappings: request.column_mappings.clone(),
+            key: key.clone(),
+            tolerances: request.tolerances.clone(),
+            max_diff_rows,
+            max_duplicate_group: 1_024,
+            cancel: Some(entry.cancel_flag()),
+        };
+        let output =
+            tokio::task::spawn_blocking(move || sift_core::comparison::compare(core_request))
+                .await
+                .map_err(|error| ApiError::Internal(format!("comparison task failed: {error}")))?
+                .map_err(|error| ApiError::BadRequest(error.to_string()))?;
+        if entry.canceled() {
+            return Ok(());
+        }
+
+        let source_truncated = left_truncated || right_truncated;
+        let incompatible_columns = output
+            .columns
+            .iter()
+            .any(|column| column.status != sift_protocol::CompareColumnStatus::Mapped);
+        let exactly_one_table = left_table.is_some() ^ right_table.is_some();
+        let table = left_table.as_ref().or(right_table.as_ref());
+        let other_connection = if left_table.is_some() {
+            right_connection
+        } else {
+            left_connection
+        };
+        let same_connection = table
+            .zip(other_connection)
+            .is_some_and(|(table, other)| table.connection == other);
+        let mut refusal = Vec::new();
+        if !exactly_one_table {
+            refusal.push("patches require exactly one live-table source".into());
+        }
+        if !same_connection {
+            refusal.push("patches require a retained result from the target connection".into());
+        }
+        if key.inferred_constraint.is_none() {
+            refusal.push("patches require a proven primary or non-null unique key".into());
+        }
+        if source_truncated || output.truncated {
+            refusal.push("truncated comparisons cannot prepare patches".into());
+        }
+        if output.duplicate_key_groups > 0 {
+            refusal.push("duplicate-key comparisons cannot prepare patches".into());
+        }
+        if !request.tolerances.is_empty() {
+            refusal.push("tolerant comparisons cannot prepare patches".into());
+        }
+        if incompatible_columns || output.incomparable_rows > 0 {
+            refusal.push("incomplete or incomparable columns cannot prepare patches".into());
+        }
+        let patch_eligible = refusal.is_empty();
+        let status = if source_truncated || output.truncated {
+            sift_protocol::ComparisonStatus::Truncated
+        } else {
+            sift_protocol::ComparisonStatus::Complete
+        };
+        let summary = sift_protocol::ComparisonSummary {
+            comparison_id: entry.summary().comparison_id,
+            status,
+            result_digest: output.digest,
+            left_rows,
+            right_rows,
+            equal_rows: output.equal_rows,
+            changed_rows: output.changed_rows,
+            added_rows: output.added_rows,
+            removed_rows: output.removed_rows,
+            incomparable_rows: output.incomparable_rows,
+            duplicate_key_groups: output.duplicate_key_groups,
+            retained_diff_rows: output.rows.len() as u32,
+            columns: output.columns,
+            key: key.clone(),
+            tolerances: request.tolerances,
+            patch_eligible,
+            patch_refusal_reasons: refusal,
+            failure_code: None,
+            expires_at: entry.summary().expires_at,
+        };
+        if patch_eligible {
+            let table = table.expect("eligible comparison has one table");
+            entry.set_patch_context(crate::comparison::PatchContext {
+                connection: table.connection,
+                catalog_revision: table.revision,
+                table: table.path.clone(),
+                object: table.object.clone(),
+                target_is_left: left_table.is_some(),
+                key,
+            });
+        }
+        entry.complete(summary, output.rows)?;
+        Ok(())
+    }
+
+    async fn load_comparison_source(
+        &self,
+        session_id: SessionId,
+        source: &sift_protocol::CompareSource,
+        room_results: &crate::room_results::RoomResultRegistry,
+        max_rows: usize,
+    ) -> ApiResult<LoadedComparisonSource> {
+        match source {
+            sift_protocol::CompareSource::QueryResult {
+                cursor_id,
+                result_set,
+                schema_digest,
+            } => {
+                let retained = self.inner.retained_query_results.get(
+                    session_id,
+                    *cursor_id,
+                    *result_set,
+                    schema_digest,
+                )?;
+                // Re-authorize the source on every use so a changed connection
+                // policy cannot be bypassed through retained pages.
+                self.authorize_connection_operation(
+                    session_id,
+                    retained.connection,
+                    sift_protocol::OperationKind::StartComparison,
+                    None,
+                    &[],
+                )?;
+                let (dataset, truncated) = truncate_dataset(retained.dataset, max_rows);
+                Ok(LoadedComparisonSource {
+                    dataset,
+                    table: None,
+                    connection: Some(retained.connection),
+                    truncated,
+                })
+            }
+            sift_protocol::CompareSource::RoomResult {
+                room_id,
+                result_id,
+                result_set,
+                schema_digest,
+            } => {
+                let registry = room_results.clone();
+                let room_id = *room_id;
+                let result_id = *result_id;
+                let result_set = *result_set;
+                let schema_digest = schema_digest.clone();
+                let dataset = tokio::task::spawn_blocking(move || {
+                    registry.comparison_dataset(room_id, result_id, result_set, &schema_digest)
+                })
+                .await
+                .map_err(|error| {
+                    ApiError::Internal(format!("room comparison source task failed: {error}"))
+                })??;
+                let (dataset, truncated) = truncate_dataset(dataset, max_rows);
+                Ok(LoadedComparisonSource {
+                    dataset,
+                    table: None,
+                    connection: None,
+                    truncated,
+                })
+            }
+            sift_protocol::CompareSource::Table {
+                connection,
+                catalog_revision,
+                object_id,
+                filter,
+            } => {
+                let graph = self
+                    .catalog_graph_at_revision(
+                        session_id,
+                        *connection,
+                        *catalog_revision,
+                        sift_protocol::CatalogGraphOptions::default(),
+                        sift_protocol::OperationKind::StartComparison,
+                    )
+                    .await?;
+                let entry = self.get_conn_entry(session_id, *connection)?;
+                let engine = entry.driver.semantic_engine().ok_or_else(|| {
+                    ApiError::BadRequest("table comparison requires a SQL provider".into())
+                })?;
+                let table = comparison_table_from_graph(&graph, *connection, object_id)?;
+                let configured_max = self
+                    .inner
+                    .max_result_rows
+                    .load(Ordering::Relaxed)
+                    .saturating_sub(1);
+                if configured_max == 0 {
+                    return Err(ApiError::BadRequest(
+                        "configured result-row limit is too small for table comparison".into(),
+                    ));
+                }
+                let row_cap = max_rows.min(configured_max);
+                let select_columns = table
+                    .object
+                    .columns
+                    .iter()
+                    .map(|column| crate::ddl::quote_ident(&column.name, engine))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let table_sql = crate::ddl::qualified_name(&table.path, engine);
+                let column_names = table
+                    .object
+                    .columns
+                    .iter()
+                    .map(|column| column.name.clone())
+                    .collect::<std::collections::HashSet<_>>();
+                let rendered_filter = filter
+                    .as_ref()
+                    .map(|filter| crate::comparison::render_filter(filter, &column_names, engine))
+                    .transpose()?;
+                let where_sql = rendered_filter
+                    .as_ref()
+                    .map(|filter| format!(" WHERE {}", filter.sql))
+                    .unwrap_or_default();
+                let fetch = row_cap + 1;
+                let sql = match engine {
+                    Engine::Postgres => {
+                        format!("SELECT {select_columns} FROM {table_sql}{where_sql} LIMIT {fetch}")
+                    }
+                    Engine::SqlServer => {
+                        format!("SELECT TOP ({fetch}) {select_columns} FROM {table_sql}{where_sql}")
+                    }
+                };
+                let response = self
+                    .execute_http_as(
+                        session_id,
+                        ExecuteRequestHttp {
+                            connection: *connection,
+                            sql,
+                            params: rendered_filter
+                                .map(|filter| filter.params)
+                                .unwrap_or_default(),
+                            tx: None,
+                            room_id: None,
+                            connection_profile_id: None,
+                        },
+                        sift_protocol::OperationKind::StartComparison,
+                    )
+                    .await?;
+                let mut dataset = sift_core::comparison::ComparisonDataset {
+                    columns: response.columns,
+                    rows: response.rows,
+                    immutable_order: false,
+                };
+                let truncated = dataset.rows.len() > row_cap;
+                dataset.rows.truncate(row_cap);
+                Ok(LoadedComparisonSource {
+                    dataset,
+                    table: Some(table),
+                    connection: Some(*connection),
+                    truncated,
+                })
+            }
+        }
+    }
+
+    pub fn comparison_summary(
+        &self,
+        session_id: SessionId,
+        id: sift_protocol::ComparisonId,
+    ) -> ApiResult<sift_protocol::ComparisonSummary> {
+        Ok(self.inner.comparisons.get(session_id, id)?.summary())
+    }
+
+    pub fn comparison_page(
+        &self,
+        session_id: SessionId,
+        id: sift_protocol::ComparisonId,
+        request: sift_protocol::ComparisonPageRequest,
+    ) -> ApiResult<sift_protocol::ComparisonPage> {
+        self.inner.comparisons.page(session_id, id, request)
+    }
+
+    pub fn cancel_comparison(
+        &self,
+        session_id: SessionId,
+        id: sift_protocol::ComparisonId,
+    ) -> ApiResult<sift_protocol::CancelComparisonResponse> {
+        Ok(sift_protocol::CancelComparisonResponse {
+            comparison_id: id,
+            status: self.inner.comparisons.cancel(session_id, id)?,
+        })
+    }
+
+    pub async fn prepare_comparison_patch(
+        &self,
+        session_id: SessionId,
+        id: sift_protocol::ComparisonId,
+        request: sift_protocol::PrepareComparisonPatchRequest,
+    ) -> ApiResult<sift_protocol::ComparisonPatchPreparation> {
+        let entry = self.inner.comparisons.get(session_id, id)?;
+        let summary = entry.summary();
+        if !summary.patch_eligible {
+            return Ok(sift_protocol::ComparisonPatchPreparation {
+                comparison_id: id,
+                eligible: false,
+                refusal_reasons: summary.patch_refusal_reasons,
+                edit_plan: None,
+                edit_set: None,
+            });
+        }
+        let context = entry
+            .patch_context()
+            .ok_or_else(|| ApiError::Internal("eligible comparison has no patch context".into()))?;
+        if request.expected_catalog_revision != context.catalog_revision {
+            return Err(ApiError::BadRequest(
+                "comparison patch catalog revision does not match its target".into(),
+            ));
+        }
+        self.catalog_graph_at_revision(
+            session_id,
+            context.connection,
+            request.expected_catalog_revision,
+            sift_protocol::CatalogGraphOptions::default(),
+            sift_protocol::OperationKind::PrepareComparisonPatch,
+        )
+        .await?;
+        let rows = self.inner.comparisons.page(
+            session_id,
+            id,
+            sift_protocol::ComparisonPageRequest {
+                after: None,
+                limit: Some(summary.retained_diff_rows.clamp(1, 500)),
+            },
+        )?;
+        if summary.retained_diff_rows > 500 {
+            return Ok(sift_protocol::ComparisonPatchPreparation {
+                comparison_id: id,
+                eligible: false,
+                refusal_reasons: vec!["patch preparation is limited to 500 row changes".into()],
+                edit_plan: None,
+                edit_set: None,
+            });
+        }
+        let max_statements = request.max_statements.unwrap_or(500);
+        if max_statements == 0 || max_statements > 500 || rows.rows.len() > max_statements as usize
+        {
+            return Err(ApiError::BadRequest(
+                "comparison patch statement limit must cover the retained diff and be at most 500"
+                    .into(),
+            ));
+        }
+        let edit_set = comparison_edit_set(&context, &rows.rows)?;
+        let plan = crate::edit::plan_from_object(
+            self.get_conn_entry(session_id, context.connection)?
+                .driver
+                .semantic_engine()
+                .ok_or_else(|| ApiError::BadRequest("patch target is not a SQL provider".into()))?,
+            &context.object,
+            &edit_set,
+        )
+        .map_err(ApiError::Driver)?;
+        Ok(sift_protocol::ComparisonPatchPreparation {
+            comparison_id: id,
+            eligible: true,
+            refusal_reasons: Vec::new(),
+            edit_plan: Some(plan),
+            edit_set: Some(edit_set),
+        })
+    }
+
+    pub async fn capture_semantic_plan(
+        &self,
+        session_id: SessionId,
+        conn_id: ConnectionId,
+        request: sift_protocol::CaptureSemanticPlanRequest,
+    ) -> ApiResult<sift_protocol::PlanCapture> {
+        let (principal, tenant, profile, _) = self.managed_catalog_scope(
+            session_id,
+            conn_id,
+            sift_protocol::OperationKind::CaptureSemanticPlan,
+        )?;
+        let graph = self
+            .catalog_graph_at_revision(
+                session_id,
+                conn_id,
+                request.catalog_revision,
+                sift_protocol::CatalogGraphOptions::default(),
+                sift_protocol::OperationKind::CaptureSemanticPlan,
+            )
+            .await?;
+        let statement = self
+            .inner
+            .semantic
+            .statement_source(
+                semantic_scope(session_id, conn_id),
+                request.document_id,
+                request.revision,
+                &request.statement_id,
+            )
+            .map_err(semantic_error)?;
+        if request.analyze && statement.statement.kind != sift_protocol::StatementKind::Query {
+            self.authorize_connection_operation(
+                session_id,
+                conn_id,
+                sift_protocol::OperationKind::ExecuteQuery,
+                Some(&statement.sql),
+                &[],
+            )?;
+        }
+        let started = std::time::Instant::now();
+        let explain = crate::plan::explain_as(
+            self,
+            session_id,
+            conn_id,
+            &sift_protocol::ExplainRequest {
+                connection: conn_id,
+                sql: statement.sql.clone(),
+                params: request.params,
+                analyze: request.analyze,
+            },
+            sift_protocol::OperationKind::CaptureSemanticPlan,
+        )
+        .await?;
+        let entry = self.get_conn_entry(session_id, conn_id)?;
+        let server = self
+            .run_bounded("plan capture server identity", {
+                let driver = entry.driver.clone();
+                let handle = entry.handle.clone();
+                async move { driver.ping(handle).await }
+            })
+            .await?;
+        let raw_response = request.include_raw_response.then_some(explain.raw);
+        let mut root = explain.root;
+        sanitize_plan_node(&mut root)?;
+        let warnings = explain
+            .warnings
+            .into_iter()
+            .map(|warning| sift_protocol::DriverWarning {
+                message: "plan warning details redacted".into(),
+                code: warning.code,
+            })
+            .collect();
+        let mut capture = sift_protocol::PlanCapture {
+            id: sift_protocol::PlanCaptureId(uuid::Uuid::new_v4()),
+            tenant_id: tenant.0,
+            connection_profile_id: profile.0,
+            creator_principal_id: principal.0,
+            provider: graph.provider,
+            server_version: server.server_version,
+            engine: explain.engine,
+            source_digest: statement.source_digest,
+            document_revision: request.revision,
+            statement_id: statement.statement.statement_id,
+            statement_fingerprint: crate::fingerprint::sql(&statement.sql),
+            catalog_revision: request.catalog_revision,
+            analyzed: explain.analyzed,
+            captured_at: chrono::Utc::now(),
+            duration_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+            root,
+            warnings,
+            complete: true,
+            revision: 0,
+            raw_response: None,
+        };
+        let metadata = self
+            .inner
+            .authorization_store
+            .read()
+            .unwrap()
+            .clone()
+            .ok_or(ApiError::MetadataUnavailable)?;
+        let durable = capture.clone();
+        tokio::task::spawn_blocking(move || metadata.create_plan_capture(&durable))
+            .await
+            .map_err(|error| {
+                ApiError::Internal(format!("plan capture persistence task: {error}"))
+            })??;
+        capture.raw_response = raw_response;
+        Ok(capture)
     }
 
     async fn run_semantic<T, F>(&self, work: F) -> ApiResult<T>
@@ -3363,6 +5102,7 @@ impl SessionStore {
             driver: entry.driver.clone(),
             handle: entry.handle.clone(),
             provenance: entry.provenance.clone(),
+            configuration: entry.configuration.clone(),
         })
     }
 
@@ -3403,10 +5143,506 @@ impl SessionStore {
     }
 }
 
+fn digest_bytes(prefix: &str, bytes: &[u8]) -> String {
+    use std::fmt::Write as _;
+
+    let digest = Sha256::digest(bytes);
+    let mut output = String::with_capacity(prefix.len() + digest.len() * 2);
+    output.push_str(prefix);
+    for byte in digest {
+        let _ = write!(output, "{byte:02x}");
+    }
+    output
+}
+
 fn semantic_scope(session: SessionId, connection: ConnectionId) -> sift_semantic::DocumentScope {
     sift_semantic::DocumentScope {
         session: session.0,
         connection: connection.0,
+    }
+}
+
+fn floor_char_boundary(value: &str, mut index: usize) -> usize {
+    while index > 0 && !value.is_char_boundary(index) {
+        index -= 1;
+    }
+    index
+}
+
+fn ensure_comparison_source_bytes(
+    side: &str,
+    dataset: &sift_core::comparison::ComparisonDataset,
+) -> ApiResult<()> {
+    const MAX_SOURCE_BYTES: usize = 64 * 1024 * 1024;
+    let bytes = serde_json::to_vec(&(&dataset.columns, &dataset.rows))
+        .map_err(|error| ApiError::Internal(format!("measuring comparison source: {error}")))?
+        .len();
+    if bytes > MAX_SOURCE_BYTES {
+        return Err(ApiError::BadRequest(format!(
+            "{side} comparison source exceeds the {MAX_SOURCE_BYTES}-byte limit"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_compare_source(source: &sift_protocol::CompareSource) -> ApiResult<()> {
+    let digest = match source {
+        sift_protocol::CompareSource::QueryResult {
+            result_set,
+            schema_digest,
+            ..
+        }
+        | sift_protocol::CompareSource::RoomResult {
+            result_set,
+            schema_digest,
+            ..
+        } => {
+            if *result_set > 1_024 {
+                return Err(ApiError::BadRequest(
+                    "comparison result_set must be at most 1024".into(),
+                ));
+            }
+            Some(schema_digest)
+        }
+        sift_protocol::CompareSource::Table { .. } => None,
+    };
+    if digest.is_some_and(|digest| {
+        digest.len() != 73
+            || !digest.starts_with("schemafp:")
+            || !digest[9..].bytes().all(|byte| byte.is_ascii_hexdigit())
+    }) {
+        return Err(ApiError::BadRequest(
+            "comparison schema digest must be a schemafp SHA-256 digest".into(),
+        ));
+    }
+    if let sift_protocol::CompareSource::RoomResult { room_id, .. } = source {
+        if *room_id <= 0 {
+            return Err(ApiError::BadRequest(
+                "comparison room_id must be positive".into(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn truncate_dataset(
+    mut dataset: sift_core::comparison::ComparisonDataset,
+    max_rows: usize,
+) -> (sift_core::comparison::ComparisonDataset, bool) {
+    let truncated = dataset.rows.len() > max_rows;
+    dataset.rows.truncate(max_rows);
+    (dataset, truncated)
+}
+
+fn comparison_failure_code(error: &ApiError) -> &'static str {
+    match error {
+        ApiError::BadRequest(_) => "invalid_comparison",
+        ApiError::Forbidden(_) => "comparison_forbidden",
+        ApiError::Driver(driver) if driver.code == Code::ResultTooLarge => {
+            "comparison_source_too_large"
+        }
+        ApiError::Driver(_) => "comparison_source_failed",
+        _ => "comparison_internal",
+    }
+}
+
+fn comparison_table_from_graph(
+    graph: &sift_protocol::CatalogGraph,
+    connection: ConnectionId,
+    object_id: &sift_protocol::CatalogObjectId,
+) -> ApiResult<LoadedComparisonTable> {
+    use sift_protocol::{CatalogNodeDetails, CatalogNodeKind, ConstraintKind, Nullability};
+
+    let node = graph
+        .data
+        .nodes
+        .iter()
+        .find(|node| &node.id == object_id)
+        .ok_or_else(|| {
+            ApiError::BadRequest(format!(
+                "catalog object {:?} is absent or inaccessible",
+                object_id.0
+            ))
+        })?;
+    let kind = match node.kind {
+        CatalogNodeKind::Table => sift_protocol::ObjectKind::Table,
+        CatalogNodeKind::ForeignTable => sift_protocol::ObjectKind::ForeignTable,
+        CatalogNodeKind::PartitionedTable => sift_protocol::ObjectKind::PartitionedTable,
+        _ => {
+            return Err(ApiError::BadRequest(
+                "table comparison source must name a table, foreign table, or partitioned table"
+                    .into(),
+            ));
+        }
+    };
+    if node.completeness != sift_protocol::CatalogCompleteness::Complete {
+        return Err(ApiError::BadRequest(
+            "table comparison requires complete metadata for the selected object".into(),
+        ));
+    }
+    let schema = node.parent_id.as_ref().and_then(|parent| {
+        graph
+            .data
+            .nodes
+            .iter()
+            .find(|candidate| &candidate.id == parent && candidate.kind == CatalogNodeKind::Schema)
+            .map(|schema| schema.name.clone())
+    });
+    let path = sift_protocol::ObjectPath {
+        catalog: None,
+        schema,
+        name: node.name.clone(),
+        kind: Some(kind),
+        routine_args: None,
+    };
+    let mut child_nodes: Vec<_> = graph
+        .data
+        .nodes
+        .iter()
+        .filter(|candidate| candidate.parent_id.as_ref() == Some(object_id))
+        .collect();
+    child_nodes.sort_by_key(|child| (child.ordinal.unwrap_or(u32::MAX), child.name.clone()));
+    let columns = child_nodes
+        .iter()
+        .filter_map(|child| match &child.details {
+            CatalogNodeDetails::Column { column } => Some(column.clone()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    if columns.is_empty() || columns.len() > 512 {
+        return Err(ApiError::BadRequest(
+            "table comparison requires between 1 and 512 visible columns".into(),
+        ));
+    }
+    let indexes = child_nodes
+        .iter()
+        .filter_map(|child| match &child.details {
+            CatalogNodeDetails::Index { index } => Some(index.clone()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let constraints_with_ids = child_nodes
+        .iter()
+        .filter_map(|child| match &child.details {
+            CatalogNodeDetails::Constraint { constraint } => {
+                Some((child.id.clone(), constraint.clone()))
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let constraints = constraints_with_ids
+        .iter()
+        .map(|(_, constraint)| constraint.clone())
+        .collect::<Vec<_>>();
+    let triggers = child_nodes
+        .iter()
+        .filter_map(|child| match &child.details {
+            CatalogNodeDetails::Trigger { trigger } => Some(trigger.clone()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let non_null = columns
+        .iter()
+        .filter(|column| column.nullable == Nullability::NotNullable)
+        .map(|column| column.name.as_str())
+        .collect::<std::collections::HashSet<_>>();
+    let identity = constraints_with_ids
+        .iter()
+        .find(|(_, constraint)| {
+            constraint.kind == ConstraintKind::PrimaryKey && !constraint.columns.is_empty()
+        })
+        .or_else(|| {
+            constraints_with_ids.iter().find(|(_, constraint)| {
+                constraint.kind == ConstraintKind::Unique
+                    && !constraint.columns.is_empty()
+                    && constraint
+                        .columns
+                        .iter()
+                        .all(|column| non_null.contains(column.as_str()))
+            })
+        })
+        .map(|(id, constraint)| (constraint.columns.clone(), id.clone()));
+    Ok(LoadedComparisonTable {
+        connection,
+        revision: graph.revision,
+        path,
+        object: sift_protocol::ObjectInfo {
+            name: node.name.clone(),
+            kind,
+            routine_args: None,
+            columns,
+            indexes,
+            constraints,
+            triggers,
+        },
+        identity,
+    })
+}
+
+fn resolve_comparison_key(
+    request: &sift_protocol::StartComparisonRequest,
+    left: &LoadedComparisonSource,
+    right: &LoadedComparisonSource,
+) -> ApiResult<sift_protocol::ResolvedCompareKey> {
+    use sift_protocol::{CompareColumnPair, CompareKey, ResolvedCompareKey};
+
+    match &request.key {
+        CompareKey::Explicit { columns } => {
+            if columns.is_empty() {
+                return Err(ApiError::BadRequest(
+                    "explicit comparison key must contain at least one column".into(),
+                ));
+            }
+            Ok(ResolvedCompareKey {
+                columns: columns.clone(),
+                inferred_constraint: None,
+                row_ordinal: false,
+            })
+        }
+        CompareKey::RowOrdinal => {
+            if left.table.is_some() || right.table.is_some() {
+                return Err(ApiError::BadRequest(
+                    "row-ordinal comparison keys are forbidden for live tables".into(),
+                ));
+            }
+            Ok(ResolvedCompareKey {
+                columns: Vec::new(),
+                inferred_constraint: None,
+                row_ordinal: true,
+            })
+        }
+        CompareKey::Infer => {
+            let explicit_right = |left_name: &str| {
+                request
+                    .column_mappings
+                    .iter()
+                    .find(|mapping| mapping.left == left_name)
+                    .map(|mapping| mapping.right.clone())
+                    .unwrap_or_else(|| left_name.to_owned())
+            };
+            let explicit_left = |right_name: &str| {
+                request
+                    .column_mappings
+                    .iter()
+                    .find(|mapping| mapping.right == right_name)
+                    .map(|mapping| mapping.left.clone())
+                    .unwrap_or_else(|| right_name.to_owned())
+            };
+            if let Some(left_table) = &left.table {
+                let (left_columns, constraint) = left_table.identity.clone().ok_or_else(|| {
+                    ApiError::BadRequest(
+                        "left table has no primary or non-null unique comparison key".into(),
+                    )
+                })?;
+                let columns = left_columns
+                    .iter()
+                    .map(|left| CompareColumnPair {
+                        left: left.clone(),
+                        right: explicit_right(left),
+                    })
+                    .collect::<Vec<_>>();
+                if let Some(right_table) = &right.table {
+                    let (right_columns, _) = right_table.identity.as_ref().ok_or_else(|| {
+                        ApiError::BadRequest(
+                            "right table has no primary or non-null unique comparison key".into(),
+                        )
+                    })?;
+                    if columns
+                        .iter()
+                        .map(|column| &column.right)
+                        .ne(right_columns.iter())
+                    {
+                        return Err(ApiError::BadRequest(
+                            "table comparison keys do not map to the same proven identity".into(),
+                        ));
+                    }
+                }
+                Ok(ResolvedCompareKey {
+                    columns,
+                    inferred_constraint: Some(constraint),
+                    row_ordinal: false,
+                })
+            } else if let Some(right_table) = &right.table {
+                let (right_columns, constraint) =
+                    right_table.identity.clone().ok_or_else(|| {
+                        ApiError::BadRequest(
+                            "right table has no primary or non-null unique comparison key".into(),
+                        )
+                    })?;
+                Ok(ResolvedCompareKey {
+                    columns: right_columns
+                        .iter()
+                        .map(|right| CompareColumnPair {
+                            left: explicit_left(right),
+                            right: right.clone(),
+                        })
+                        .collect(),
+                    inferred_constraint: Some(constraint),
+                    row_ordinal: false,
+                })
+            } else {
+                Err(ApiError::BadRequest(
+                    "key inference requires at least one live-table source; retained results must provide an explicit or ordinal key"
+                        .into(),
+                ))
+            }
+        }
+    }
+}
+
+fn comparison_edit_set(
+    context: &crate::comparison::PatchContext,
+    rows: &[sift_protocol::RowDiff],
+) -> ApiResult<sift_protocol::EditSet> {
+    use sift_protocol::{CellComparisonStatus, CellEdit, RowDiffKind, RowEdit, RowKey};
+
+    let key_names = context
+        .key
+        .columns
+        .iter()
+        .map(|pair| {
+            if context.target_is_left {
+                pair.left.clone()
+            } else {
+                pair.right.clone()
+            }
+        })
+        .collect::<Vec<_>>();
+    let mut edits = Vec::with_capacity(rows.len());
+    for row in rows {
+        let target_values = |desired: bool| -> ApiResult<Vec<CellEdit>> {
+            row.cells
+                .iter()
+                .map(|cell| {
+                    let target_left = context.target_is_left;
+                    let use_left = if desired { !target_left } else { target_left };
+                    let value = if use_left { &cell.left } else { &cell.right };
+                    let value = value.clone().ok_or_else(|| {
+                        ApiError::Internal("patchable comparison omitted a row value".into())
+                    })?;
+                    Ok(CellEdit {
+                        column: if target_left {
+                            cell.column.left.clone()
+                        } else {
+                            cell.column.right.clone()
+                        },
+                        value,
+                    })
+                })
+                .collect()
+        };
+        let target_has_row = match row.kind {
+            RowDiffKind::Added => !context.target_is_left,
+            RowDiffKind::Removed => context.target_is_left,
+            RowDiffKind::Changed => true,
+            RowDiffKind::Incomparable => {
+                return Err(ApiError::Internal(
+                    "incomparable row reached patch preparation".into(),
+                ));
+            }
+        };
+        let desired_has_row = match row.kind {
+            RowDiffKind::Added => context.target_is_left,
+            RowDiffKind::Removed => !context.target_is_left,
+            RowDiffKind::Changed => true,
+            RowDiffKind::Incomparable => false,
+        };
+        let edit = match (target_has_row, desired_has_row) {
+            (false, true) => RowEdit::Insert {
+                values: target_values(true)?,
+            },
+            (true, false) | (true, true) => {
+                let current = target_values(false)?;
+                let key = RowKey {
+                    columns: key_names
+                        .iter()
+                        .map(|name| {
+                            current
+                                .iter()
+                                .find(|cell| &cell.column == name)
+                                .cloned()
+                                .ok_or_else(|| {
+                                    ApiError::Internal(format!(
+                                        "patchable comparison omitted key column {name:?}"
+                                    ))
+                                })
+                        })
+                        .collect::<ApiResult<Vec<_>>>()?,
+                };
+                let expected = current
+                    .iter()
+                    .filter(|cell| !key_names.contains(&cell.column))
+                    .cloned()
+                    .collect::<Vec<_>>();
+                if desired_has_row {
+                    let desired = target_values(true)?;
+                    RowEdit::Update {
+                        key,
+                        changes: row
+                            .cells
+                            .iter()
+                            .zip(desired)
+                            .filter(|(cell, _)| cell.status == CellComparisonStatus::Unequal)
+                            .map(|(_, value)| value)
+                            .collect(),
+                        expected,
+                    }
+                } else {
+                    RowEdit::Delete { key, expected }
+                }
+            }
+            (false, false) => {
+                return Err(ApiError::Internal(
+                    "comparison patch row has no target or desired row".into(),
+                ));
+            }
+        };
+        edits.push(edit);
+    }
+    Ok(sift_protocol::EditSet {
+        table: context.table.clone(),
+        edits,
+    })
+}
+
+fn catalog_binding_view(graph: &sift_protocol::CatalogGraph) -> sift_semantic::CatalogBindingView {
+    let schemas = graph
+        .data
+        .nodes
+        .iter()
+        .filter(|node| node.kind == sift_protocol::CatalogNodeKind::Schema)
+        .map(|node| (node.id.clone(), node.name.clone()))
+        .collect::<std::collections::HashMap<_, _>>();
+    let columns = graph
+        .data
+        .nodes
+        .iter()
+        .filter(|node| node.kind == sift_protocol::CatalogNodeKind::Column)
+        .filter_map(|node| Some((node.parent_id.clone()?, node.name.clone())))
+        .fold(
+            std::collections::HashMap::<_, Vec<_>>::new(),
+            |mut columns, (parent, name)| {
+                columns.entry(parent).or_default().push(name);
+                columns
+            },
+        );
+    sift_semantic::CatalogBindingView {
+        revision: graph.revision,
+        complete: graph.data.coverage.state == sift_protocol::CatalogCoverageState::Complete,
+        objects: graph
+            .data
+            .nodes
+            .iter()
+            .filter_map(|node| {
+                let schema = schemas.get(node.parent_id.as_ref()?)?;
+                Some(sift_semantic::CatalogBindingObject {
+                    id: node.id.clone(),
+                    schema: schema.clone(),
+                    name: node.name.clone(),
+                    columns: columns.get(&node.id).cloned().unwrap_or_default(),
+                })
+            })
+            .collect(),
     }
 }
 
@@ -3418,8 +5654,76 @@ fn semantic_error(error: sift_semantic::Error) -> ApiError {
         sift_semantic::Error::DialectUnavailable(_) => Code::DialectUnavailable,
         sift_semantic::Error::LimitExceeded => Code::SemanticLimitExceeded,
         sift_semantic::Error::Canceled => Code::QueryCanceled,
+        sift_semantic::Error::InvalidRequest => Code::InvalidParameterValue,
     };
     ApiError::Driver(DriverError::new(code, error.to_string()))
+}
+
+fn stale_schema(snapshot: &sift_protocol::SchemaSnapshot) -> CachedSchema {
+    let mut snapshot = snapshot.clone();
+    snapshot.incomplete = true;
+    if let Some(graph) = snapshot.graph.as_mut() {
+        graph.coverage.state = sift_protocol::CatalogCoverageState::Stale;
+        graph
+            .coverage
+            .failures
+            .push(sift_protocol::CatalogCoverageFailure {
+                stage: "refresh".into(),
+                schema: None,
+                code: "provider_unavailable_using_stale_catalog".into(),
+            });
+        sift_core::catalog::normalize_graph(graph);
+    }
+    CachedSchema::new_uncached(snapshot)
+}
+
+fn mark_rolled_back(outcomes: &mut [sift_protocol::MigrationStatementOutcome]) {
+    for outcome in outcomes {
+        if outcome.status == sift_protocol::MigrationStatementStatus::Applied {
+            outcome.status = sift_protocol::MigrationStatementStatus::RolledBack;
+        }
+    }
+}
+
+fn migration_result_code(error: &ApiError) -> Option<String> {
+    match error {
+        ApiError::Driver(error) => Some(error.code.to_string()),
+        _ => Some("migration_failed".into()),
+    }
+}
+
+fn sanitize_plan_node(root: &mut sift_protocol::PlanNode) -> ApiResult<()> {
+    fn visit(node: &mut sift_protocol::PlanNode, depth: usize, count: &mut usize) -> ApiResult<()> {
+        *count += 1;
+        if depth > 128
+            || *count > 100_000
+            || node.op.is_empty()
+            || node.op.len() > 1_024
+            || node
+                .relation
+                .as_ref()
+                .is_some_and(|relation| relation.len() > 1_024)
+        {
+            return Err(ApiError::BadRequest(
+                "normalized plan exceeds durable capture limits".into(),
+            ));
+        }
+        if node
+            .relation
+            .as_ref()
+            .is_some_and(|relation| relation.starts_with('#') || relation.starts_with("pg_temp"))
+        {
+            node.relation = None;
+        }
+        // Raw engine extras include predicates and literal-bearing fragments.
+        // The durable form keeps only the typed, engine-neutral fields.
+        node.extra.clear();
+        for child in &mut node.children {
+            visit(child, depth + 1, count)?;
+        }
+        Ok(())
+    }
+    visit(root, 0, &mut 0)
 }
 
 /// Cheap clone of a connection entry (just Arc + ConnHandle Arc).
@@ -3427,6 +5731,7 @@ pub struct ConnectionEntryClone {
     pub driver: RuntimeDriver,
     pub handle: RuntimeConnectionHandle,
     pub provenance: ConnectionProvenance,
+    pub configuration: serde_json::Value,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -3502,6 +5807,19 @@ fn sanitize_operation(operation: Operation) -> Operation {
             };
             Operation::ExecuteQuery { session, request }
         }
+        Operation::Complete {
+            session,
+            connection,
+            request,
+        } => Operation::Complete {
+            session,
+            connection,
+            request: sift_protocol::completion::CompletionRequest {
+                sql: crate::fingerprint::sql(&request.sql),
+                cursor: request.cursor,
+                limit: request.limit,
+            },
+        },
         Operation::OpenConnection {
             session,
             mut request,
@@ -3761,6 +6079,7 @@ async fn drain_room_stream(
     Ok(RoomQueryExecution {
         response: ExecuteResponse {
             cursor_id,
+            schema_digest: crate::comparison::schema_digest(&columns),
             columns,
             rows,
             affected_rows,
@@ -3859,6 +6178,7 @@ async fn drain_stream_inner(
 
     Ok(ExecuteResponse {
         cursor_id,
+        schema_digest: crate::comparison::schema_digest(&columns),
         columns,
         rows,
         affected_rows,

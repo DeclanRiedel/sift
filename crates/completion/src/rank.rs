@@ -19,9 +19,9 @@ use std::borrow::Cow;
 use sift_protocol::completion::{CompletionCandidate, CompletionContext, CompletionKind};
 use sift_protocol::{Engine, ObjectKind};
 
-use crate::context::ContextResult;
 use crate::dictionary::{ColumnEntry, Dictionary, ObjectEntry};
 use crate::keywords::{functions_for, keyword_groups_for};
+use crate::ContextResult;
 
 pub fn rank(
     ctx: &ContextResult,
@@ -39,17 +39,20 @@ pub fn rank(
         }
         CompletionContext::ExpectingTable => {
             push_tables_and_views(&mut out, dict, prefix, engine, /*bonus=*/ 60);
+            push_local_relations(&mut out, ctx, prefix, /*bonus=*/ 70);
             push_schemas(&mut out, dict, prefix, /*bonus=*/ 30);
             push_keywords(&mut out, engine, prefix, /*bonus=*/ 5);
         }
         CompletionContext::ExpectingColumn { qualifier } => {
             match qualifier {
                 Some(q) => {
-                    // Resolve the qualifier against declared aliases /
-                    // direct table names. Alias tracking is a future
-                    // extension; today `resolve_by_name` catches the
-                    // "select from a table without an alias" common case.
-                    if let Some(obj) = dict.resolve_by_name(q) {
+                    let target = ctx
+                        .relations
+                        .iter()
+                        .find(|relation| relation.name.eq_ignore_ascii_case(q))
+                        .and_then(|relation| relation.target.as_deref())
+                        .unwrap_or(q);
+                    if let Some(obj) = dict.resolve_by_name(target) {
                         push_columns(&mut out, obj, prefix, /*bonus=*/ 80);
                     }
                 }
@@ -85,6 +88,27 @@ pub fn rank(
     out.sort_by(|a, b| b.score.cmp(&a.score).then_with(|| a.label.cmp(&b.label)));
     out.truncate(limit);
     out
+}
+
+fn push_local_relations(
+    out: &mut Vec<CompletionCandidate>,
+    ctx: &ContextResult,
+    prefix: &str,
+    bonus: i32,
+) {
+    for relation in ctx.relations.iter().filter(|relation| !relation.is_alias) {
+        let Some(match_score) = score_match(&relation.name, prefix) else {
+            continue;
+        };
+        out.push(CompletionCandidate {
+            label: relation.name.clone().into(),
+            insert: relation.name.clone().into(),
+            kind: CompletionKind::Table,
+            detail: Some("document-local relation".into()),
+            qualified_name: None,
+            score: match_score + bonus,
+        });
+    }
 }
 
 // ----------------------------------------------------------------------------

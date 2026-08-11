@@ -398,6 +398,7 @@ mod tests {
             connection_profile_id: Some(9),
             row_count: Some(1),
             page_count: 2,
+            schema_digests: Vec::new(),
             status: sift_protocol::RoomQueryStatus::Ok,
             error_message: None,
             created_at: chrono::Utc::now(),

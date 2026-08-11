@@ -37,6 +37,9 @@ pub struct RoomQueryResult {
     pub connection_profile_id: Option<i64>,
     pub row_count: Option<i64>,
     pub page_count: u64,
+    /// One digest per retained result set, in `NextResult` order.
+    #[serde(default)]
+    pub schema_digests: Vec<String>,
     pub status: RoomQueryStatus,
     pub error_message: Option<String>,
     pub created_at: chrono::DateTime<chrono::Utc>,

@@ -651,7 +651,12 @@ SELECT s.name AS schema_name, o.name AS object_name, o.type AS object_type
 FROM sys.objects o
 JOIN sys.schemas s ON s.schema_id = o.schema_id
 WHERE o.type IN ('U','V','P','IF','FN','TF','SN','SO')
-ORDER BY s.name, o.name
+UNION ALL
+SELECT s.name, t.name, 'UT'
+FROM sys.types t
+JOIN sys.schemas s ON s.schema_id = t.schema_id
+WHERE t.is_user_defined = 1 AND t.is_table_type = 0
+ORDER BY schema_name, object_name
 "#,
                     &[],
                 )
@@ -718,8 +723,718 @@ ORDER BY s.name, o.name
                 }],
             });
         }
+        SchemaDepth::Graph { options } => {
+            let kinds = options.kinds.as_ref().and_then(|kinds| {
+                let object_kinds = kinds
+                    .iter()
+                    .filter_map(|kind| catalog_object_kind(*kind))
+                    .collect::<Vec<_>>();
+                (object_kinds.len() == kinds.len()).then_some(object_kinds)
+            });
+            let shallow_scope = SchemaScope {
+                depth: SchemaDepth::Shallow,
+                filter: Some(sift_protocol::SchemaFilter {
+                    catalogs: None,
+                    schemas: options.schemas.clone(),
+                    kinds,
+                    name_pattern: None,
+                }),
+            };
+            let mut graph_snapshot = Box::pin(mssql_schema(conn, shallow_scope)).await?;
+            if let Some(tree) = graph_snapshot.trees.first_mut() {
+                mssql_bulk_enrich(conn, tree, options.include_definitions).await?;
+            }
+            graph_snapshot.scope = scope.clone();
+            let mut graph = sift_core::catalog::graph_from_trees(
+                &graph_snapshot.trees,
+                sift_protocol::CatalogCoverage::complete(),
+                &format!(
+                    "sqlserver:{}",
+                    graph_snapshot
+                        .trees
+                        .first()
+                        .map(|tree| tree.name.as_str())
+                        .unwrap_or("default")
+                ),
+            );
+            mssql_enrich_graph_identity_and_foreign_keys(conn, &mut graph).await?;
+            sift_core::catalog::project_graph(&mut graph, options);
+            graph_snapshot.graph = Some(graph);
+            return Ok(graph_snapshot);
+        }
     }
     Ok(snapshot)
+}
+
+fn catalog_object_kind(kind: sift_protocol::CatalogNodeKind) -> Option<ObjectKind> {
+    Some(match kind {
+        sift_protocol::CatalogNodeKind::Table => ObjectKind::Table,
+        sift_protocol::CatalogNodeKind::View => ObjectKind::View,
+        sift_protocol::CatalogNodeKind::MaterializedView => ObjectKind::MaterializedView,
+        sift_protocol::CatalogNodeKind::ForeignTable => ObjectKind::ForeignTable,
+        sift_protocol::CatalogNodeKind::PartitionedTable => ObjectKind::PartitionedTable,
+        sift_protocol::CatalogNodeKind::TableValuedFunction => ObjectKind::TableValuedFunction,
+        sift_protocol::CatalogNodeKind::ScalarFunction => ObjectKind::ScalarFunction,
+        sift_protocol::CatalogNodeKind::Procedure => ObjectKind::Procedure,
+        sift_protocol::CatalogNodeKind::Synonym => ObjectKind::Synonym,
+        sift_protocol::CatalogNodeKind::Sequence => ObjectKind::Sequence,
+        sift_protocol::CatalogNodeKind::Trigger => ObjectKind::Trigger,
+        sift_protocol::CatalogNodeKind::Type => ObjectKind::Type,
+        sift_protocol::CatalogNodeKind::Extension => ObjectKind::Extension,
+        sift_protocol::CatalogNodeKind::Catalog
+        | sift_protocol::CatalogNodeKind::Schema
+        | sift_protocol::CatalogNodeKind::Column
+        | sift_protocol::CatalogNodeKind::Index
+        | sift_protocol::CatalogNodeKind::Constraint => return None,
+    })
+}
+
+async fn mssql_bulk_enrich(
+    conn: &mut MssqlConn,
+    tree: &mut sift_protocol::CatalogTree,
+    include_definitions: bool,
+) -> Result<(), DriverError> {
+    let positions = mssql_graph_positions(tree);
+    if positions.is_empty() {
+        return Ok(());
+    }
+
+    let rows = conn
+        .query(
+            r#"
+SELECT c.TABLE_SCHEMA, c.TABLE_NAME, c.COLUMN_NAME, c.DATA_TYPE,
+       c.IS_NULLABLE,
+       COLUMNPROPERTY(OBJECT_ID(QUOTENAME(c.TABLE_SCHEMA) + '.' + QUOTENAME(c.TABLE_NAME)), c.COLUMN_NAME, 'IsIdentity'),
+       CASE WHEN pk.COLUMN_NAME IS NULL THEN CAST(0 AS bit) ELSE CAST(1 AS bit) END,
+       c.CHARACTER_MAXIMUM_LENGTH, c.COLLATION_NAME,
+       CASE WHEN @P1 = 1 THEN dc.definition END
+FROM INFORMATION_SCHEMA.COLUMNS c
+LEFT JOIN sys.columns sc
+  ON sc.object_id = OBJECT_ID(QUOTENAME(c.TABLE_SCHEMA) + '.' + QUOTENAME(c.TABLE_NAME))
+ AND sc.name = c.COLUMN_NAME
+LEFT JOIN sys.default_constraints dc ON dc.object_id = sc.default_object_id
+LEFT JOIN (
+  SELECT ku.TABLE_SCHEMA, ku.TABLE_NAME, ku.COLUMN_NAME
+  FROM INFORMATION_SCHEMA.TABLE_CONSTRAINTS tc
+  JOIN INFORMATION_SCHEMA.KEY_COLUMN_USAGE ku
+    ON ku.CONSTRAINT_SCHEMA = tc.CONSTRAINT_SCHEMA
+   AND ku.CONSTRAINT_NAME = tc.CONSTRAINT_NAME
+  WHERE tc.CONSTRAINT_TYPE = 'PRIMARY KEY'
+) pk ON pk.TABLE_SCHEMA = c.TABLE_SCHEMA
+    AND pk.TABLE_NAME = c.TABLE_NAME AND pk.COLUMN_NAME = c.COLUMN_NAME
+ORDER BY c.TABLE_SCHEMA, c.TABLE_NAME, c.ORDINAL_POSITION
+"#,
+            &[&include_definitions],
+        )
+        .await
+        .map_err(ms_err)?
+        .into_first_result()
+        .await
+        .map_err(ms_err)?;
+    for row in rows {
+        let schema = mssql_string(&row, 0)?;
+        let object = mssql_string(&row, 1)?;
+        let Some(info) = mssql_positioned_object_mut(tree, &positions, &schema, &object) else {
+            continue;
+        };
+        let type_name = row
+            .try_get::<&str, _>(3)
+            .map_err(ms_err)?
+            .unwrap_or_default();
+        let nullable = match row.try_get::<&str, _>(4).map_err(ms_err)?.unwrap_or("YES") {
+            "NO" => Nullability::NotNullable,
+            "YES" => Nullability::Nullable,
+            _ => Nullability::Unknown,
+        };
+        info.columns.push(ColumnMetadata {
+            name: mssql_string(&row, 2)?,
+            type_ref: mssql_type_name_ref(type_name),
+            nullable,
+            auto_increment: row.try_get::<i32, _>(5).map_err(ms_err)?.unwrap_or(0) == 1,
+            primary_key: row.try_get::<bool, _>(6).map_err(ms_err)?.unwrap_or(false),
+            facets: sift_protocol::EngineColumnFacets {
+                postgres: None,
+                sql_server: Some(sift_protocol::MssqlColumnFacets {
+                    tds_type: Some(type_name.to_string()),
+                    max_length: row
+                        .try_get::<i32, _>(7)
+                        .map_err(ms_err)?
+                        .and_then(|value| u32::try_from(value).ok()),
+                    collation: row
+                        .try_get::<&str, _>(8)
+                        .map_err(ms_err)?
+                        .map(str::to_string),
+                    default_expr: row
+                        .try_get::<&str, _>(9)
+                        .map_err(ms_err)?
+                        .map(str::to_string),
+                }),
+            },
+        });
+    }
+
+    let rows = conn
+        .query(
+            r#"
+SELECT s.name, o.name, i.name, i.is_unique, i.is_primary_key, c.name,
+       CAST(i.type AS int), CASE WHEN @P1 = 1 THEN i.filter_definition END
+FROM sys.indexes i
+JOIN sys.objects o ON o.object_id = i.object_id
+JOIN sys.schemas s ON s.schema_id = o.schema_id
+JOIN sys.index_columns ic ON ic.object_id = i.object_id AND ic.index_id = i.index_id
+JOIN sys.columns c ON c.object_id = i.object_id AND c.column_id = ic.column_id
+WHERE i.name IS NOT NULL AND i.is_hypothetical = 0
+ORDER BY s.name, o.name, i.index_id, ic.key_ordinal
+"#,
+            &[&include_definitions],
+        )
+        .await
+        .map_err(ms_err)?
+        .into_first_result()
+        .await
+        .map_err(ms_err)?;
+    for row in rows {
+        let schema = mssql_string(&row, 0)?;
+        let object = mssql_string(&row, 1)?;
+        let Some(info) = mssql_positioned_object_mut(tree, &positions, &schema, &object) else {
+            continue;
+        };
+        let name = mssql_string(&row, 2)?;
+        let column = mssql_string(&row, 5)?;
+        if let Some(index) = info.indexes.iter_mut().find(|index| index.name == name) {
+            index.columns.push(column);
+        } else {
+            let sys_type = row.try_get::<i32, _>(6).map_err(ms_err)?.unwrap_or(0);
+            info.indexes.push(IndexInfo {
+                name,
+                columns: vec![column],
+                unique: row.try_get::<bool, _>(3).map_err(ms_err)?.unwrap_or(false),
+                primary_key: row.try_get::<bool, _>(4).map_err(ms_err)?.unwrap_or(false),
+                kind: mssql_index_kind_from_sys(sys_type),
+                partial_predicate: row
+                    .try_get::<&str, _>(7)
+                    .map_err(ms_err)?
+                    .map(str::to_string),
+            });
+        }
+    }
+
+    let rows = conn
+        .query(
+            r#"
+SELECT tc.TABLE_SCHEMA, tc.TABLE_NAME, tc.CONSTRAINT_NAME,
+       tc.CONSTRAINT_TYPE, ku.COLUMN_NAME, referenced_schema.name, referenced_object.name,
+       CASE WHEN @P1 = 1 THEN cc.definition END
+FROM INFORMATION_SCHEMA.TABLE_CONSTRAINTS tc
+LEFT JOIN INFORMATION_SCHEMA.KEY_COLUMN_USAGE ku
+  ON ku.CONSTRAINT_SCHEMA = tc.CONSTRAINT_SCHEMA
+ AND ku.CONSTRAINT_NAME = tc.CONSTRAINT_NAME
+LEFT JOIN sys.foreign_keys fk
+  ON fk.parent_object_id = OBJECT_ID(QUOTENAME(tc.TABLE_SCHEMA) + '.' + QUOTENAME(tc.TABLE_NAME))
+ AND fk.name = tc.CONSTRAINT_NAME
+LEFT JOIN sys.objects referenced_object
+  ON referenced_object.object_id = fk.referenced_object_id
+LEFT JOIN sys.schemas referenced_schema
+  ON referenced_schema.schema_id = referenced_object.schema_id
+LEFT JOIN sys.check_constraints cc
+  ON cc.parent_object_id = OBJECT_ID(QUOTENAME(tc.TABLE_SCHEMA) + '.' + QUOTENAME(tc.TABLE_NAME))
+ AND cc.name = tc.CONSTRAINT_NAME
+ORDER BY tc.TABLE_SCHEMA, tc.TABLE_NAME, tc.CONSTRAINT_NAME, ku.ORDINAL_POSITION
+"#,
+            &[&include_definitions],
+        )
+        .await
+        .map_err(ms_err)?
+        .into_first_result()
+        .await
+        .map_err(ms_err)?;
+    for row in rows {
+        let schema = mssql_string(&row, 0)?;
+        let object = mssql_string(&row, 1)?;
+        let Some(info) = mssql_positioned_object_mut(tree, &positions, &schema, &object) else {
+            continue;
+        };
+        let name = mssql_string(&row, 2)?;
+        let column = row
+            .try_get::<&str, _>(4)
+            .map_err(ms_err)?
+            .map(str::to_string);
+        if let Some(constraint) = info
+            .constraints
+            .iter_mut()
+            .find(|constraint| constraint.name == name)
+        {
+            if let Some(column) = column {
+                constraint.columns.push(column);
+            }
+        } else {
+            let kind = match row
+                .try_get::<&str, _>(3)
+                .map_err(ms_err)?
+                .unwrap_or_default()
+            {
+                "PRIMARY KEY" => ConstraintKind::PrimaryKey,
+                "FOREIGN KEY" => ConstraintKind::ForeignKey,
+                "UNIQUE" => ConstraintKind::Unique,
+                "CHECK" => ConstraintKind::Check,
+                _ => ConstraintKind::Other,
+            };
+            let target_schema = row
+                .try_get::<&str, _>(5)
+                .map_err(ms_err)?
+                .map(str::to_string);
+            let target_object = row
+                .try_get::<&str, _>(6)
+                .map_err(ms_err)?
+                .map(str::to_string);
+            info.constraints.push(ConstraintInfo {
+                name,
+                kind,
+                columns: column.into_iter().collect(),
+                definition: row
+                    .try_get::<&str, _>(7)
+                    .map_err(ms_err)?
+                    .map(str::to_string),
+                references: target_schema
+                    .zip(target_object)
+                    .map(|(schema, object)| format!("{schema}.{object}")),
+            });
+        }
+    }
+
+    let rows = conn
+        .query(
+            r#"
+SELECT s.name, o.name, t.name, t.is_instead_of_trigger, te.type_desc,
+       CASE WHEN @P1 = 1 THEN OBJECT_DEFINITION(t.object_id) END
+FROM sys.triggers t
+JOIN sys.trigger_events te ON te.object_id = t.object_id
+JOIN sys.objects o ON o.object_id = t.parent_id
+JOIN sys.schemas s ON s.schema_id = o.schema_id
+WHERE t.parent_class = 1
+ORDER BY s.name, o.name, t.name, te.type
+"#,
+            &[&include_definitions],
+        )
+        .await
+        .map_err(ms_err)?
+        .into_first_result()
+        .await
+        .map_err(ms_err)?;
+    use sift_protocol::{TriggerEvent, TriggerInfo, TriggerTiming};
+    for row in rows {
+        let schema = mssql_string(&row, 0)?;
+        let object = mssql_string(&row, 1)?;
+        let Some(info) = mssql_positioned_object_mut(tree, &positions, &schema, &object) else {
+            continue;
+        };
+        let name = mssql_string(&row, 2)?;
+        let event = match row
+            .try_get::<&str, _>(4)
+            .map_err(ms_err)?
+            .unwrap_or_default()
+        {
+            "INSERT" => Some(TriggerEvent::Insert),
+            "UPDATE" => Some(TriggerEvent::Update),
+            "DELETE" => Some(TriggerEvent::Delete),
+            _ => None,
+        };
+        let trigger = if let Some(trigger) = info
+            .triggers
+            .iter_mut()
+            .find(|trigger| trigger.name == name)
+        {
+            trigger
+        } else {
+            info.triggers.push(TriggerInfo {
+                name,
+                timing: if row.try_get::<bool, _>(3).map_err(ms_err)?.unwrap_or(false) {
+                    TriggerTiming::InsteadOf
+                } else {
+                    TriggerTiming::After
+                },
+                events: Vec::new(),
+                columns: Vec::new(),
+                definition: row
+                    .try_get::<&str, _>(5)
+                    .map_err(ms_err)?
+                    .map(str::to_string),
+            });
+            info.triggers.last_mut().expect("trigger was just inserted")
+        };
+        if let Some(event) = event {
+            if !trigger.events.contains(&event) {
+                trigger.events.push(event);
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn mssql_graph_positions(
+    tree: &sift_protocol::CatalogTree,
+) -> HashMap<(String, String), (usize, usize)> {
+    tree.schemas
+        .iter()
+        .enumerate()
+        .flat_map(|(schema_index, schema)| {
+            schema
+                .objects
+                .iter()
+                .enumerate()
+                .filter(|(_, object)| {
+                    matches!(
+                        object.kind,
+                        ObjectKind::Table
+                            | ObjectKind::View
+                            | ObjectKind::MaterializedView
+                            | ObjectKind::ForeignTable
+                            | ObjectKind::PartitionedTable
+                    )
+                })
+                .map(move |(object_index, object)| {
+                    (
+                        (schema.name.clone(), object.name.clone()),
+                        (schema_index, object_index),
+                    )
+                })
+        })
+        .collect()
+}
+
+fn mssql_positioned_object_mut<'a>(
+    tree: &'a mut sift_protocol::CatalogTree,
+    positions: &HashMap<(String, String), (usize, usize)>,
+    schema: &str,
+    object: &str,
+) -> Option<&'a mut ObjectInfo> {
+    let (schema_index, object_index) = positions.get(&(schema.to_string(), object.to_string()))?;
+    tree.schemas
+        .get_mut(*schema_index)?
+        .objects
+        .get_mut(*object_index)
+}
+
+fn mssql_string(row: &tiberius::Row, index: usize) -> Result<String, DriverError> {
+    Ok(row
+        .try_get::<&str, _>(index)
+        .map_err(ms_err)?
+        .unwrap_or_default()
+        .to_string())
+}
+
+async fn mssql_enrich_graph_identity_and_foreign_keys(
+    conn: &mut MssqlConn,
+    graph: &mut sift_protocol::CatalogGraphData,
+) -> Result<(), DriverError> {
+    use sift_protocol::{
+        CatalogColumnPair, CatalogEdgeCertainty, CatalogEdgeKind, CatalogNodeKind,
+    };
+
+    let schema_names = graph
+        .nodes
+        .iter()
+        .filter(|node| node.kind == CatalogNodeKind::Schema)
+        .map(|node| (node.id.clone(), node.name.clone()))
+        .collect::<HashMap<_, _>>();
+    let object_nodes = graph
+        .nodes
+        .iter()
+        .filter_map(|node| {
+            let schema = schema_names.get(node.parent_id.as_ref()?)?;
+            Some(((schema.clone(), node.name.clone()), node.id.clone()))
+        })
+        .collect::<HashMap<_, _>>();
+    let object_identity = object_nodes
+        .iter()
+        .map(|((schema, object), id)| (id.clone(), (schema.clone(), object.clone())))
+        .collect::<HashMap<_, _>>();
+    let subordinate_nodes = graph
+        .nodes
+        .iter()
+        .filter_map(|node| {
+            let (schema, object) = object_identity.get(node.parent_id.as_ref()?)?;
+            Some((
+                (node.kind, schema.clone(), object.clone(), node.name.clone()),
+                node.id.clone(),
+            ))
+        })
+        .collect::<HashMap<_, _>>();
+    let node_indexes = graph
+        .nodes
+        .iter()
+        .enumerate()
+        .map(|(index, node)| (node.id.clone(), index))
+        .collect::<HashMap<_, _>>();
+
+    let rows = conn
+        .query(
+            r#"
+SELECT 'object', s.name, o.name, CAST(NULL AS nvarchar(128)),
+       CONVERT(nvarchar(32), o.object_id)
+FROM sys.objects o JOIN sys.schemas s ON s.schema_id = o.schema_id
+WHERE o.type IN ('U','V','P','IF','FN','TF','SN','SO')
+UNION ALL
+SELECT 'column', s.name, o.name, c.name,
+       CONVERT(nvarchar(32), o.object_id) + ':column:' + CONVERT(nvarchar(32), c.column_id)
+FROM sys.columns c
+JOIN sys.objects o ON o.object_id = c.object_id
+JOIN sys.schemas s ON s.schema_id = o.schema_id
+UNION ALL
+SELECT 'index', s.name, o.name, i.name,
+       CONVERT(nvarchar(32), o.object_id) + ':index:' + CONVERT(nvarchar(32), i.index_id)
+FROM sys.indexes i
+JOIN sys.objects o ON o.object_id = i.object_id
+JOIN sys.schemas s ON s.schema_id = o.schema_id
+WHERE i.name IS NOT NULL
+UNION ALL
+SELECT 'constraint', s.name, parent.name, child.name,
+       CONVERT(nvarchar(32), child.object_id)
+FROM sys.objects child
+JOIN sys.objects parent ON parent.object_id = child.parent_object_id
+JOIN sys.schemas s ON s.schema_id = parent.schema_id
+WHERE child.type IN ('C','D','F','PK','UQ')
+UNION ALL
+SELECT 'trigger', s.name, parent.name, trigger_object.name,
+       CONVERT(nvarchar(32), trigger_object.object_id)
+FROM sys.triggers trigger_object
+JOIN sys.objects parent ON parent.object_id = trigger_object.parent_id
+JOIN sys.schemas s ON s.schema_id = parent.schema_id
+WHERE trigger_object.parent_class = 1
+UNION ALL
+SELECT 'type', s.name, t.name, CAST(NULL AS nvarchar(128)),
+       CONVERT(nvarchar(32), t.user_type_id)
+FROM sys.types t JOIN sys.schemas s ON s.schema_id = t.schema_id
+WHERE t.is_user_defined = 1 AND t.is_table_type = 0
+"#,
+            &[],
+        )
+        .await
+        .map_err(ms_err)?
+        .into_first_result()
+        .await
+        .map_err(ms_err)?;
+    for row in rows {
+        let tag = mssql_string(&row, 0)?;
+        let schema = mssql_string(&row, 1)?;
+        let object = mssql_string(&row, 2)?;
+        let child = row
+            .try_get::<&str, _>(3)
+            .map_err(ms_err)?
+            .map(str::to_string);
+        let native = mssql_string(&row, 4)?;
+        let id = match tag.as_str() {
+            "object" => object_nodes.get(&(schema, object)),
+            "column" => child.as_ref().and_then(|name| {
+                subordinate_nodes.get(&(CatalogNodeKind::Column, schema, object, name.clone()))
+            }),
+            "index" => child.as_ref().and_then(|name| {
+                subordinate_nodes.get(&(CatalogNodeKind::Index, schema, object, name.clone()))
+            }),
+            "constraint" => child.as_ref().and_then(|name| {
+                subordinate_nodes.get(&(CatalogNodeKind::Constraint, schema, object, name.clone()))
+            }),
+            "trigger" => child.as_ref().and_then(|name| {
+                subordinate_nodes.get(&(CatalogNodeKind::Trigger, schema, object, name.clone()))
+            }),
+            "type" => object_nodes.get(&(schema, object)),
+            _ => None,
+        };
+        if let Some(index) = id.and_then(|id| node_indexes.get(id)) {
+            graph.nodes[*index].native_id = Some(format!("mssql:{tag}:{native}"));
+        }
+    }
+
+    let rows = conn
+        .query(
+            r#"
+SELECT source_schema.name, source_table.name, fk.name,
+       target_schema.name, target_table.name,
+       source_column.name, target_column.name
+FROM sys.foreign_keys fk
+JOIN sys.foreign_key_columns fkc ON fkc.constraint_object_id = fk.object_id
+JOIN sys.tables source_table ON source_table.object_id = fkc.parent_object_id
+JOIN sys.schemas source_schema ON source_schema.schema_id = source_table.schema_id
+JOIN sys.columns source_column
+  ON source_column.object_id = fkc.parent_object_id
+ AND source_column.column_id = fkc.parent_column_id
+JOIN sys.tables target_table ON target_table.object_id = fkc.referenced_object_id
+JOIN sys.schemas target_schema ON target_schema.schema_id = target_table.schema_id
+JOIN sys.columns target_column
+  ON target_column.object_id = fkc.referenced_object_id
+ AND target_column.column_id = fkc.referenced_column_id
+ORDER BY source_schema.name, source_table.name, fk.name, fkc.constraint_column_id
+"#,
+            &[],
+        )
+        .await
+        .map_err(ms_err)?
+        .into_first_result()
+        .await
+        .map_err(ms_err)?;
+    for row in rows {
+        let source_schema = mssql_string(&row, 0)?;
+        let source_object = mssql_string(&row, 1)?;
+        let constraint_name = mssql_string(&row, 2)?;
+        let target_schema = mssql_string(&row, 3)?;
+        let target_object = mssql_string(&row, 4)?;
+        let source_column = mssql_string(&row, 5)?;
+        let target_column = mssql_string(&row, 6)?;
+        let Some(constraint_id) = subordinate_nodes.get(&(
+            CatalogNodeKind::Constraint,
+            source_schema.clone(),
+            source_object.clone(),
+            constraint_name,
+        )) else {
+            continue;
+        };
+        let Some(target_id) = object_nodes.get(&(target_schema.clone(), target_object.clone()))
+        else {
+            continue;
+        };
+        let pair = subordinate_nodes
+            .get(&(
+                CatalogNodeKind::Column,
+                source_schema,
+                source_object,
+                source_column,
+            ))
+            .zip(subordinate_nodes.get(&(
+                CatalogNodeKind::Column,
+                target_schema,
+                target_object,
+                target_column,
+            )))
+            .map(|(from, to)| CatalogColumnPair {
+                from: from.clone(),
+                to: to.clone(),
+            });
+        if let Some(edge) = graph
+            .edges
+            .iter_mut()
+            .find(|edge| edge.kind == CatalogEdgeKind::ForeignKey && edge.from == *constraint_id)
+        {
+            edge.to = Some(target_id.clone());
+            edge.certainty = CatalogEdgeCertainty::CatalogProven;
+            edge.referenced_path = None;
+            if let Some(pair) = pair {
+                edge.column_pairs.push(pair);
+            }
+        }
+    }
+    mssql_enrich_dependencies(conn, graph).await?;
+    Ok(())
+}
+
+async fn mssql_enrich_dependencies(
+    conn: &mut MssqlConn,
+    graph: &mut sift_protocol::CatalogGraphData,
+) -> Result<(), DriverError> {
+    use sift_protocol::{CatalogEdgeCertainty, CatalogEdgeKind, CatalogNodeKind};
+
+    let native_nodes = graph
+        .nodes
+        .iter()
+        .filter_map(|node| {
+            node.native_id
+                .as_ref()
+                .map(|native| (native.clone(), node.id.clone()))
+        })
+        .collect::<HashMap<_, _>>();
+    let rows = conn
+        .query(
+            r#"
+SELECT 'dependency',
+       CASE WHEN trigger_object.object_id IS NULL THEN 'mssql:object:' ELSE 'mssql:trigger:' END
+         + CONVERT(nvarchar(32), dependency.referencing_id),
+       'mssql:object:' + CONVERT(nvarchar(32), dependency.referenced_id)
+FROM sys.sql_expression_dependencies dependency
+LEFT JOIN sys.triggers trigger_object
+  ON trigger_object.object_id = dependency.referencing_id
+WHERE dependency.referencing_id IS NOT NULL AND dependency.referenced_id IS NOT NULL
+UNION
+SELECT 'uses_type',
+       'mssql:column:' + CONVERT(nvarchar(32), column_info.object_id)
+         + ':column:' + CONVERT(nvarchar(32), column_info.column_id),
+       'mssql:type:' + CONVERT(nvarchar(32), column_info.user_type_id)
+FROM sys.columns column_info
+JOIN sys.types type_info ON type_info.user_type_id = column_info.user_type_id
+WHERE type_info.is_user_defined = 1
+UNION
+SELECT 'owns_sequence',
+       'mssql:column:' + CONVERT(nvarchar(32), default_info.parent_object_id)
+         + ':column:' + CONVERT(nvarchar(32), default_info.parent_column_id),
+       'mssql:object:' + CONVERT(nvarchar(32), dependency.referenced_id)
+FROM sys.default_constraints default_info
+JOIN sys.sql_expression_dependencies dependency
+  ON dependency.referencing_id = default_info.object_id
+JOIN sys.sequences sequence_info ON sequence_info.object_id = dependency.referenced_id
+"#,
+            &[],
+        )
+        .await
+        .map_err(ms_err)?
+        .into_first_result()
+        .await
+        .map_err(ms_err)?;
+    let nodes_by_id = graph
+        .nodes
+        .iter()
+        .map(|node| (node.id.clone(), node))
+        .collect::<HashMap<_, _>>();
+    let mut additions = Vec::new();
+    for row in rows {
+        let tag = mssql_string(&row, 0)?;
+        let from_native = mssql_string(&row, 1)?;
+        let to_native = mssql_string(&row, 2)?;
+        let Some((from, to)) = native_nodes
+            .get(&from_native)
+            .zip(native_nodes.get(&to_native))
+        else {
+            continue;
+        };
+        let kind = match tag.as_str() {
+            "uses_type" => CatalogEdgeKind::UsesType,
+            "owns_sequence" => CatalogEdgeKind::OwnsSequence,
+            "dependency" => match nodes_by_id.get(from).map(|node| node.kind) {
+                Some(CatalogNodeKind::View | CatalogNodeKind::MaterializedView) => {
+                    CatalogEdgeKind::ReadsFrom
+                }
+                Some(
+                    CatalogNodeKind::TableValuedFunction
+                    | CatalogNodeKind::ScalarFunction
+                    | CatalogNodeKind::Procedure,
+                ) if nodes_by_id.get(to).is_some_and(|node| {
+                    matches!(
+                        node.kind,
+                        CatalogNodeKind::TableValuedFunction
+                            | CatalogNodeKind::ScalarFunction
+                            | CatalogNodeKind::Procedure
+                    )
+                }) =>
+                {
+                    CatalogEdgeKind::Calls
+                }
+                _ => CatalogEdgeKind::DependsOn,
+            },
+            _ => continue,
+        };
+        additions.push(sift_protocol::CatalogEdge {
+            from: from.clone(),
+            to: Some(to.clone()),
+            kind,
+            certainty: CatalogEdgeCertainty::CatalogProven,
+            referenced_path: None,
+            column_pairs: Vec::new(),
+        });
+    }
+    for edge in additions {
+        if !graph.edges.contains(&edge) {
+            graph.edges.push(edge);
+        }
+    }
+    Ok(())
 }
 
 async fn mssql_columns(
@@ -1440,6 +2155,7 @@ fn mssql_object_kind_from_sys(sys_type: &str) -> ObjectKind {
         "TF" => ObjectKind::TableValuedFunction,
         "SN" => ObjectKind::Synonym,
         "SO" => ObjectKind::Sequence,
+        "UT" => ObjectKind::Type,
         _ => ObjectKind::Table,
     }
 }

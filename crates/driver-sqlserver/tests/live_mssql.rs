@@ -13,8 +13,9 @@
 use sift_driver_api::{BulkOp, Driver, MssqlExt};
 use sift_driver_sqlserver::MssqlDriver;
 use sift_protocol::{
-    ConnectionSpec, Engine, EngineConnectionSpec, ExecuteRequest, MssqlConnectionSpec, ObjectPath,
-    Page, PrimitiveType, SchemaScope, SslMode, TxMode, TypeRef, Value,
+    CatalogEdgeKind, CatalogGraphOptions, CatalogNodeKind, ConnectionSpec, Engine,
+    EngineConnectionSpec, ExecuteRequest, MssqlConnectionSpec, ObjectPath, Page, PrimitiveType,
+    SchemaDepth, SchemaScope, SslMode, TxMode, TypeRef, Value,
 };
 
 fn spec() -> ConnectionSpec {
@@ -352,6 +353,238 @@ async fn schema_deep_and_transactions() {
             )
             .await
             .expect("drop table"),
+    )
+    .await;
+    driver.close(conn).await.expect("close succeeds");
+}
+
+#[tokio::test]
+async fn schema_graph_preserves_native_composite_foreign_key_identity() {
+    let driver = MssqlDriver::new();
+    let conn = driver.open(&spec()).await.expect("open succeeds");
+    let suffix = uuid::Uuid::new_v4().simple().to_string();
+    let parent = format!("sift_graph_parent_{}", &suffix[..8]);
+    let child = format!("sift_graph_child_{}", &suffix[..8]);
+    let user_type = format!("sift_graph_type_{}", &suffix[..8]);
+    let sequence = format!("sift_graph_sequence_{}", &suffix[..8]);
+    let view = format!("sift_graph_view_{}", &suffix[..8]);
+    let function = format!("sift_graph_function_{}", &suffix[..8]);
+    let procedure = format!("sift_graph_procedure_{}", &suffix[..8]);
+    let synonym = format!("sift_graph_synonym_{}", &suffix[..8]);
+    let explicit_index = format!("idx_{child}_ab");
+    let quoted_table = format!("sift graph ü {}", &suffix[..8]);
+    let quoted_trigger = format!("trg ü {}", &suffix[..8]);
+    for sql in [
+        format!("CREATE TYPE dbo.[{user_type}] FROM int"),
+        format!("CREATE SEQUENCE dbo.[{sequence}] AS bigint START WITH 1"),
+        format!("CREATE TABLE dbo.[{parent}] (a int NOT NULL, b int NOT NULL, CONSTRAINT [pk_{parent}] PRIMARY KEY (a,b))"),
+        format!("CREATE TABLE dbo.[{child}] (a int NOT NULL, b int NOT NULL, typed_value dbo.[{user_type}] NULL, sequence_value bigint DEFAULT NEXT VALUE FOR dbo.[{sequence}], CONSTRAINT [fk_{child}] FOREIGN KEY (a,b) REFERENCES dbo.[{parent}] (a,b))"),
+        format!("CREATE INDEX [{explicit_index}] ON dbo.[{child}] (a,b)"),
+        format!("CREATE TABLE dbo.[{quoted_table}] ([clé] int NOT NULL PRIMARY KEY)"),
+        format!("EXEC(N'CREATE TRIGGER dbo.[{quoted_trigger}] ON dbo.[{quoted_table}] AFTER INSERT AS BEGIN SET NOCOUNT ON; END')"),
+        format!("EXEC(N'CREATE FUNCTION dbo.[{function}](@value int) RETURNS int AS BEGIN RETURN @value END')"),
+        format!("EXEC(N'CREATE PROCEDURE dbo.[{procedure}] AS SELECT dbo.[{function}](a) FROM dbo.[{parent}]')"),
+        format!("CREATE SYNONYM dbo.[{synonym}] FOR dbo.[{parent}]"),
+        format!("EXEC(N'CREATE VIEW dbo.[{view}] AS SELECT a,b FROM dbo.[{parent}]')"),
+    ] {
+        let pages = drain(
+            driver
+                .execute(conn.clone(), ExecuteRequest::new(sql))
+                .await
+                .expect("create graph fixture"),
+        )
+        .await;
+        assert!(
+            pages.iter().all(|page| !matches!(page, Page::Error { .. })),
+            "graph fixture DDL failed: {pages:?}"
+        );
+    }
+
+    let snapshot = driver
+        .schema(
+            conn.clone(),
+            SchemaScope {
+                depth: SchemaDepth::Graph {
+                    options: CatalogGraphOptions {
+                        schemas: Some(vec!["dbo".into()]),
+                        ..Default::default()
+                    },
+                },
+                filter: None,
+            },
+        )
+        .await
+        .expect("graph schema");
+    let graph = snapshot.graph.expect("graph payload");
+    let parent_node = graph
+        .nodes
+        .iter()
+        .find(|node| node.kind == CatalogNodeKind::Table && node.name == parent)
+        .expect("parent table node");
+    let child_node = graph
+        .nodes
+        .iter()
+        .find(|node| node.kind == CatalogNodeKind::Table && node.name == child)
+        .expect("child table node");
+    assert!(parent_node
+        .native_id
+        .as_deref()
+        .is_some_and(|id| id.starts_with("mssql:object:")));
+    let fk = graph
+        .edges
+        .iter()
+        .find(|edge| {
+            edge.kind == CatalogEdgeKind::ForeignKey
+                && graph
+                    .nodes
+                    .iter()
+                    .find(|node| node.id == edge.from)
+                    .is_some_and(|node| node.name == format!("fk_{child}"))
+        })
+        .expect("foreign-key edge");
+    assert_eq!(fk.to.as_ref(), Some(&parent_node.id));
+    assert_eq!(fk.column_pairs.len(), 2);
+    let type_node = graph
+        .nodes
+        .iter()
+        .find(|node| node.kind == CatalogNodeKind::Type && node.name == user_type)
+        .expect("user-defined type node");
+    assert!(type_node
+        .native_id
+        .as_deref()
+        .is_some_and(|id| id.starts_with("mssql:type:")));
+    let view_node = graph
+        .nodes
+        .iter()
+        .find(|node| node.kind == CatalogNodeKind::View && node.name == view)
+        .expect("view node");
+    assert!(graph.edges.iter().any(|edge| {
+        edge.from == view_node.id
+            && edge.to.as_ref() == Some(&parent_node.id)
+            && edge.kind == CatalogEdgeKind::ReadsFrom
+    }));
+    let typed_column = graph
+        .nodes
+        .iter()
+        .find(|node| {
+            node.kind == CatalogNodeKind::Column
+                && node.name == "typed_value"
+                && node.parent_id.as_ref() == Some(&child_node.id)
+        })
+        .expect("typed column node");
+    assert!(
+        graph.edges.iter().any(|edge| {
+            edge.from == typed_column.id
+                && edge.to.as_ref() == Some(&type_node.id)
+                && edge.kind == CatalogEdgeKind::UsesType
+        }),
+        "typed column id={:?} native={:?}, type id={:?} native={:?}, relevant edges={:?}, edge targets={:?}",
+        typed_column.id,
+        typed_column.native_id,
+        type_node.id,
+        type_node.native_id,
+        graph
+            .edges
+            .iter()
+            .filter(|edge| edge.from == typed_column.id)
+            .collect::<Vec<_>>(),
+        graph
+            .edges
+            .iter()
+            .filter(|edge| edge.from == typed_column.id)
+            .filter_map(|edge| edge.to.as_ref())
+            .filter_map(|id| graph.nodes.iter().find(|node| &node.id == id))
+            .map(|node| (&node.id, &node.name, &node.native_id))
+            .collect::<Vec<_>>()
+    );
+    let sequence_node = graph
+        .nodes
+        .iter()
+        .find(|node| node.kind == CatalogNodeKind::Sequence && node.name == sequence)
+        .expect("sequence node");
+    let sequence_column = graph
+        .nodes
+        .iter()
+        .find(|node| {
+            node.kind == CatalogNodeKind::Column
+                && node.name == "sequence_value"
+                && node.parent_id.as_ref() == Some(&child_node.id)
+        })
+        .expect("sequence-backed column node");
+    assert!(graph.edges.iter().any(|edge| {
+        edge.from == sequence_column.id
+            && edge.to.as_ref() == Some(&sequence_node.id)
+            && edge.kind == CatalogEdgeKind::OwnsSequence
+    }));
+    let explicit_index_node = graph
+        .nodes
+        .iter()
+        .find(|node| node.kind == CatalogNodeKind::Index && node.name == explicit_index)
+        .expect("explicit composite index node");
+    assert!(graph.edges.iter().any(|edge| {
+        edge.from == explicit_index_node.id
+            && edge.to.as_ref() == Some(&child_node.id)
+            && edge.kind == CatalogEdgeKind::Indexes
+    }));
+    let quoted_table_node = graph
+        .nodes
+        .iter()
+        .find(|node| node.kind == CatalogNodeKind::Table && node.name == quoted_table)
+        .expect("quoted UTF-8 table node");
+    assert!(graph.nodes.iter().any(|node| {
+        node.kind == CatalogNodeKind::Column
+            && node.name == "clé"
+            && node.parent_id.as_ref() == Some(&quoted_table_node.id)
+    }));
+    let trigger_node = graph
+        .nodes
+        .iter()
+        .find(|node| node.kind == CatalogNodeKind::Trigger && node.name == quoted_trigger)
+        .expect("quoted UTF-8 trigger node");
+    assert!(graph.edges.iter().any(|edge| {
+        edge.from == trigger_node.id
+            && edge.to.as_ref() == Some(&quoted_table_node.id)
+            && edge.kind == CatalogEdgeKind::TriggerOn
+    }));
+    let function_node = graph
+        .nodes
+        .iter()
+        .find(|node| node.kind == CatalogNodeKind::ScalarFunction && node.name == function)
+        .expect("scalar function node");
+    assert!(function_node
+        .native_id
+        .as_deref()
+        .is_some_and(|id| id.starts_with("mssql:object:")));
+    let procedure_node = graph
+        .nodes
+        .iter()
+        .find(|node| node.kind == CatalogNodeKind::Procedure && node.name == procedure)
+        .expect("procedure node");
+    assert!(graph.edges.iter().any(|edge| {
+        edge.from == procedure_node.id
+            && edge.to.as_ref() == Some(&function_node.id)
+            && edge.kind == CatalogEdgeKind::Calls
+    }));
+    assert!(graph.edges.iter().any(|edge| {
+        edge.from == procedure_node.id
+            && edge.to.as_ref() == Some(&parent_node.id)
+            && edge.kind == CatalogEdgeKind::DependsOn
+    }));
+    assert!(graph
+        .nodes
+        .iter()
+        .any(|node| node.kind == CatalogNodeKind::Synonym && node.name == synonym));
+
+    drain(
+        driver
+            .execute(
+                conn.clone(),
+                ExecuteRequest::new(format!(
+                    "DROP VIEW dbo.[{view}]; DROP SYNONYM dbo.[{synonym}]; DROP PROCEDURE dbo.[{procedure}]; DROP FUNCTION dbo.[{function}]; DROP TABLE dbo.[{quoted_table}]; DROP TABLE dbo.[{child}]; DROP TABLE dbo.[{parent}]; DROP SEQUENCE dbo.[{sequence}]; DROP TYPE dbo.[{user_type}];"
+                )),
+            )
+            .await
+            .expect("drop graph fixture"),
     )
     .await;
     driver.close(conn).await.expect("close succeeds");

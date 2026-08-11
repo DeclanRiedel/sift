@@ -147,6 +147,9 @@ impl ApiError {
                 | MetadataError::DocumentNotFound(_)
                 | MetadataError::RoomAttachmentNotFound(_)
                 | MetadataError::SavedQueryNotFound(_)
+                | MetadataError::CatalogSnapshotNotFound
+                | MetadataError::MigrationRunNotFound
+                | MetadataError::PlanCaptureNotFound
                 | MetadataError::PrincipalNotFound(_)
                 | MetadataError::AuthIdentityNotFound(_)
                 | MetadataError::AuthSessionNotFound(_)
@@ -159,6 +162,10 @@ impl ApiError {
                 MetadataError::ConnectionProfileLimitReached(_) => {
                     (StatusCode::CONFLICT, "tenant_resource_exhausted")
                 }
+                MetadataError::CatalogSnapshotLimitReached
+                | MetadataError::PlanCaptureLimitReached => {
+                    (StatusCode::CONFLICT, "tenant_resource_exhausted")
+                }
                 MetadataError::FinalInstanceAdmin
                 | MetadataError::FinalAuthIdentity
                 | MetadataError::FinalRoomOwner(_) => (StatusCode::CONFLICT, "conflict"),
@@ -167,6 +174,15 @@ impl ApiError {
                 }
                 MetadataError::SavedQueryRevisionConflict { .. } => {
                     (StatusCode::CONFLICT, "saved_query_revision_conflict")
+                }
+                MetadataError::CatalogSnapshotRevisionConflict { .. } => {
+                    (StatusCode::CONFLICT, "catalog_snapshot_revision_conflict")
+                }
+                MetadataError::PlanCaptureRevisionConflict { .. } => {
+                    (StatusCode::CONFLICT, "plan_capture_revision_conflict")
+                }
+                MetadataError::MigrationRunTerminal => {
+                    (StatusCode::CONFLICT, "migration_run_terminal")
                 }
                 MetadataError::ExtensionRevisionConflict { .. } => {
                     (StatusCode::CONFLICT, "extension_revision_conflict")
@@ -200,6 +216,7 @@ impl ApiError {
                     (StatusCode::UNPROCESSABLE_ENTITY, "credential_mode_mismatch")
                 }
                 MetadataError::InvalidEnum { .. }
+                | MetadataError::InvalidPlanCaptureRetention
                 | MetadataError::InvalidCredentialObject
                 | MetadataError::InlineCredentialsRequireSharedMode
                 | MetadataError::InvalidTimestamp { .. }
@@ -209,8 +226,11 @@ impl ApiError {
                 | MetadataError::InvalidSshProxyCapability
                 | MetadataError::InvalidPasswordReset
                 | MetadataError::ExtensionStorageInvalidKey
+                | MetadataError::InvalidCatalogSnapshotDescription
                 | MetadataError::Json(_) => (StatusCode::BAD_REQUEST, "bad_request"),
-                MetadataError::ExtensionStorageValueTooLarge { .. } => {
+                MetadataError::ExtensionStorageValueTooLarge { .. }
+                | MetadataError::CatalogSnapshotTooLarge { .. }
+                | MetadataError::PlanCaptureTooLarge { .. } => {
                     (StatusCode::PAYLOAD_TOO_LARGE, "payload_too_large")
                 }
                 MetadataError::Sqlite(_)

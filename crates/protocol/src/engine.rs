@@ -28,15 +28,18 @@ impl Engine {
         .expect("bundled provider ids are valid")
     }
 
-    pub fn provider_ref(self, provider_version: impl Into<String>) -> crate::ProviderRef {
-        let dialect_id = crate::DialectId::new(match self {
+    pub fn dialect_id(self) -> crate::DialectId {
+        crate::DialectId::new(match self {
             Engine::Postgres => "sift/postgresql",
             Engine::SqlServer => "sift/tsql",
         })
-        .expect("bundled dialect ids are valid");
+        .expect("bundled dialect ids are valid")
+    }
+
+    pub fn provider_ref(self, provider_version: impl Into<String>) -> crate::ProviderRef {
         crate::ProviderRef {
             provider_id: self.provider_id(),
-            dialect_id,
+            dialect_id: self.dialect_id(),
             provider_version: provider_version.into(),
         }
     }

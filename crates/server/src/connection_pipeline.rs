@@ -572,6 +572,10 @@ mod tests {
                     catalog: None,
                     namespace: None,
                     object: None,
+                    namespaces: Vec::new(),
+                    kinds: Vec::new(),
+                    include_definitions: false,
+                    max_nodes: None,
                 },
                 incomplete: false,
             })

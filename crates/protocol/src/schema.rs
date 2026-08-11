@@ -2,7 +2,7 @@
 //! only (used at session-open); `Deep` returns one object's columns, types,
 //! indexes (used on tree-expand). Matches Zed lesson §2.2.
 
-use crate::ColumnMetadata;
+use crate::{CatalogGraphData, CatalogGraphOptions, ColumnMetadata};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
@@ -35,6 +35,12 @@ pub enum SchemaDepth {
     Shallow,
     /// One object fully described: columns, indexes, constraints.
     Deep { object: ObjectPath },
+    /// Full normalized catalog/dependency graph (ADR-033). Providers advertise
+    /// this independently from shallow/deep introspection.
+    Graph {
+        #[serde(default)]
+        options: CatalogGraphOptions,
+    },
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
@@ -196,6 +202,10 @@ pub struct SchemaSnapshot {
     /// True if the snapshot was truncated by `filter` or timed out mid-fetch.
     #[serde(default)]
     pub incomplete: bool,
+    /// Present only for [`SchemaDepth::Graph`]. Kept separate from the
+    /// progressive tree so existing shallow/deep consumers remain cheap.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub graph: Option<CatalogGraphData>,
 }
 
 impl SchemaSnapshot {
@@ -205,6 +215,7 @@ impl SchemaSnapshot {
             fetched_at: chrono::Utc::now(),
             scope,
             incomplete: false,
+            graph: None,
         }
     }
 }

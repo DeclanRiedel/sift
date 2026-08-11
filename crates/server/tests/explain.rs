@@ -4,13 +4,19 @@
 use axum::body::{to_bytes, Body};
 use axum::http::{Request, StatusCode};
 use sift_driver_api::mock::MockDriver;
+use sift_metadata::{
+    CredentialMode, MemorySecretStore, MetadataStore, NewConnectionProfile, PrincipalId, TenantId,
+};
 use sift_protocol::{
-    ColumnMetadata, Engine, ExplainResponse, Page, PrimitiveType, Row, ServerInfo, TypeRef, Value,
+    CatalogCoverage, CatalogGraph, CatalogGraphOptions, CatalogTree, ColumnMetadata, Engine,
+    ExplainResponse, ObjectInfo, ObjectKind, Page, PrimitiveType, Row, SchemaDepth, SchemaScope,
+    SchemaSnapshot, SchemaTree, ServerInfo, TypeRef, Value,
 };
 use sift_server::http::{app, AppState, AuthState};
 use sift_server::registry::DriverRegistry;
 use sift_server::room_runtime::RoomRuntime;
 use sift_server::session::SessionStore;
+use std::sync::Arc;
 use tower::ServiceExt;
 
 fn base_builder(engine: Engine) -> sift_driver_api::mock::MockDriverBuilder {
@@ -115,6 +121,32 @@ fn pg_plan_pages() -> Vec<Page> {
             warnings: vec![],
         },
     ]
+}
+
+fn graph_snapshot() -> SchemaSnapshot {
+    let trees = vec![CatalogTree {
+        name: "mock".into(),
+        schemas: vec![SchemaTree {
+            name: "public".into(),
+            objects: vec![ObjectInfo::new("users", ObjectKind::Table)],
+        }],
+    }];
+    SchemaSnapshot {
+        graph: Some(sift_core::catalog::graph_from_trees(
+            &trees,
+            CatalogCoverage::complete(),
+            "mock:db",
+        )),
+        trees,
+        fetched_at: chrono::Utc::now(),
+        scope: SchemaScope {
+            depth: SchemaDepth::Graph {
+                options: CatalogGraphOptions::default(),
+            },
+            filter: None,
+        },
+        incomplete: false,
+    }
 }
 
 #[tokio::test]
@@ -230,4 +262,183 @@ async fn mssql_explain_analyze_is_rejected() {
         .await
         .unwrap();
     assert_eq!(res.status(), StatusCode::UNPROCESSABLE_ENTITY);
+}
+
+#[tokio::test]
+async fn semantic_plan_capture_binds_revision_and_never_persists_raw_plan() {
+    let server_info = ServerInfo {
+        provider: Engine::Postgres.provider_ref("test"),
+        server_version: "MockDB 0.1".into(),
+        current_database: "mock".into(),
+        current_user: "mock".into(),
+        pool_warm_slots: None,
+    };
+    let driver = base_builder(Engine::Postgres)
+        .ping_ok(server_info.clone())
+        .ping_ok(server_info)
+        .schema_ok(graph_snapshot())
+        .execute_ok(pg_plan_pages())
+        .execute_ok(pg_plan_pages())
+        .build();
+    let metadata = MetadataStore::open_in_memory(Arc::new(MemorySecretStore::new())).unwrap();
+    metadata.bootstrap_local("local user").unwrap();
+    let profile = metadata
+        .upsert_connection_profile(
+            TenantId(1),
+            PrincipalId(1),
+            NewConnectionProfile {
+                name: "plan fixture".into(),
+                provider_id: Engine::Postgres.provider_id(),
+                configuration: serde_json::json!({
+                    "host": "mock.invalid",
+                    "database": "mock",
+                    "user": "mock"
+                }),
+                semantic_engine: Some(Engine::Postgres),
+                credentials: None,
+                credential_mode: CredentialMode::Shared,
+                tags: Vec::new(),
+            },
+        )
+        .await
+        .unwrap();
+    let sessions = SessionStore::new(DriverRegistry::builder().register(driver).build());
+    let router = app(AppState {
+        sessions: sessions.clone(),
+        rooms: RoomRuntime::default(),
+        shutdown: sift_server::shutdown::Shutdown::default(),
+        auth: AuthState::default(),
+        metadata: Some(metadata),
+    });
+    let response = router
+        .clone()
+        .oneshot(post_json("/v1/sessions".into(), serde_json::json!({})))
+        .await
+        .unwrap();
+    let session: sift_protocol::SessionInfo = body_json(response.into_body()).await;
+    let response = router
+        .clone()
+        .oneshot(post_json(
+            format!("/v1/sessions/{}/connections/from-profile", session.id),
+            serde_json::json!({"tenant_id": 1, "profile_id": profile.id.0}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let connection: sift_protocol::ConnectionInfo = body_json(response.into_body()).await;
+    let response = router
+        .clone()
+        .oneshot(post_json(
+            format!(
+                "/v1/sessions/{}/connections/{}/catalog/graph",
+                session.id, connection.id
+            ),
+            serde_json::json!({}),
+        ))
+        .await
+        .unwrap();
+    let graph: CatalogGraph = body_json(response.into_body()).await;
+    let semantic_base = format!(
+        "/v1/sessions/{}/connections/{}/semantic-documents",
+        session.id, connection.id
+    );
+    let response = router
+        .clone()
+        .oneshot(post_json(
+            semantic_base.clone(),
+            serde_json::json!({"text": "SELECT * FROM users"}),
+        ))
+        .await
+        .unwrap();
+    let document: sift_protocol::SemanticDocumentState = body_json(response.into_body()).await;
+    let response = router
+        .clone()
+        .oneshot(post_json(
+            format!(
+                "{}/{}/statements/select",
+                semantic_base, document.document_id
+            ),
+            serde_json::json!({"revision": document.revision, "cursor": 1}),
+        ))
+        .await
+        .unwrap();
+    let selection: sift_protocol::StatementSelection = body_json(response.into_body()).await;
+    let statement_id = selection.statements[0].statement_id.clone();
+    let capture_uri = format!(
+        "/v1/sessions/{}/connections/{}/plan-captures",
+        session.id, connection.id
+    );
+    let request = serde_json::json!({
+        "document_id": document.document_id,
+        "revision": document.revision,
+        "statement_id": statement_id,
+        "catalog_revision": graph.revision,
+        "include_raw_response": true
+    });
+    let response = router
+        .clone()
+        .oneshot(post_json(capture_uri.clone(), request.clone()))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let first: sift_protocol::PlanCapture = body_json(response.into_body()).await;
+    assert_eq!(first.source_digest, document.source_digest);
+    assert_eq!(first.document_revision, document.revision);
+    assert_eq!(first.catalog_revision, graph.revision);
+    assert!(first
+        .raw_response
+        .as_deref()
+        .is_some_and(|raw| raw.contains("Seq Scan")));
+    assert!(!first.root.extra.contains_key("Filter"));
+
+    let response = router
+        .clone()
+        .oneshot(
+            Request::get(format!("/v1/metadata/tenants/1/plan-captures/{}", first.id))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let persisted: sift_protocol::PlanCapture = body_json(response.into_body()).await;
+    assert!(persisted.raw_response.is_none());
+    assert!(!serde_json::to_string(&persisted)
+        .unwrap()
+        .contains("id > 5"));
+
+    let response = router
+        .clone()
+        .oneshot(post_json(capture_uri.clone(), request))
+        .await
+        .unwrap();
+    let second: sift_protocol::PlanCapture = body_json(response.into_body()).await;
+    let response = router
+        .clone()
+        .oneshot(post_json(
+            "/v1/metadata/tenants/1/plan-captures/compare".into(),
+            serde_json::json!({"left": first.id, "right": second.id}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let comparison: sift_protocol::PlanCaptureComparison = body_json(response.into_body()).await;
+    assert_eq!(comparison.operator_changes, 0);
+
+    let stale = router
+        .clone()
+        .oneshot(post_json(
+            capture_uri,
+            serde_json::json!({
+                "document_id": document.document_id,
+                "revision": document.revision + 1,
+                "statement_id": selection.statements[0].statement_id,
+                "catalog_revision": graph.revision
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(stale.status(), StatusCode::CONFLICT);
+    let audit = serde_json::to_string(&sessions.list_operations()).unwrap();
+    assert!(!audit.contains("SELECT * FROM users"));
+    assert!(!audit.contains("id > 5"));
 }

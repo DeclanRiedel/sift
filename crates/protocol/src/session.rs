@@ -187,6 +187,9 @@ pub struct TransactionInfo {
 pub struct ExecuteResponse {
     pub cursor_id: CursorId,
     pub columns: Vec<ColumnMetadata>,
+    /// Digest clients echo when selecting this immutable result for a
+    /// comparison.
+    pub schema_digest: String,
     pub rows: Vec<Row>,
     pub affected_rows: Option<u64>,
     pub warnings: Vec<DriverWarning>,

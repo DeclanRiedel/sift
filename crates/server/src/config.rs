@@ -238,6 +238,15 @@ pub struct LimitsConfig {
     /// Poll interval in seconds for the SQL Server schema invalidator
     /// (`sys.objects.modify_date`). Default 30.
     pub schema_mssql_poll_secs: u64,
+    /// Maximum normalized plan-tree plus warning bytes per durable capture.
+    /// May only lower the built-in 8 MiB ceiling.
+    pub plan_capture_max_bytes: usize,
+    /// Durable plan captures retained per tenant. May only lower 5000.
+    pub plan_capture_max_per_tenant: i64,
+    /// Durable plan captures retained per semantic source. May only lower 50.
+    pub plan_capture_max_per_source: i64,
+    /// Maximum durable plan-capture age in days. May only lower 30.
+    pub plan_capture_max_age_days: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -477,6 +486,10 @@ impl Default for LimitsConfig {
             cursor_spill_ttl_secs: 600,
             schema_cache_ttl_secs: 60,
             schema_mssql_poll_secs: 30,
+            plan_capture_max_bytes: 8 * 1024 * 1024,
+            plan_capture_max_per_tenant: 5_000,
+            plan_capture_max_per_source: 50,
+            plan_capture_max_age_days: 30,
         }
     }
 }

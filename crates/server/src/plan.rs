@@ -26,17 +26,28 @@ pub async fn explain(
     conn_id: ConnectionId,
     req: &ExplainRequest,
 ) -> ApiResult<ExplainResponse> {
-    store.authorize_connection_operation(
+    explain_as(
+        store,
         session_id,
         conn_id,
+        req,
         sift_protocol::OperationKind::Explain,
-        Some(&req.sql),
-        &[],
-    )?;
+    )
+    .await
+}
+
+pub(crate) async fn explain_as(
+    store: &SessionStore,
+    session_id: SessionId,
+    conn_id: ConnectionId,
+    req: &ExplainRequest,
+    operation: sift_protocol::OperationKind,
+) -> ApiResult<ExplainResponse> {
+    store.authorize_connection_operation(session_id, conn_id, operation, Some(&req.sql), &[])?;
     let engine = store.conn_entry(session_id, conn_id)?.driver.engine();
     match engine {
-        Engine::Postgres => explain_pg(store, session_id, conn_id, req).await,
-        Engine::SqlServer => explain_mssql(store, session_id, conn_id, req).await,
+        Engine::Postgres => explain_pg(store, session_id, conn_id, req, operation).await,
+        Engine::SqlServer => explain_mssql(store, session_id, conn_id, req, operation).await,
     }
 }
 
@@ -45,6 +56,7 @@ async fn explain_pg(
     session_id: SessionId,
     conn_id: ConnectionId,
     req: &ExplainRequest,
+    operation: sift_protocol::OperationKind,
 ) -> ApiResult<ExplainResponse> {
     let prefix = if req.analyze {
         "EXPLAIN (ANALYZE true, FORMAT JSON) "
@@ -56,8 +68,14 @@ async fn explain_pg(
     let resp = if req.analyze && !is_plain_read(&req.sql) {
         // Running the statement for real would commit side effects; wrap in a
         // transaction that always rolls back.
-        let mut rows =
-            run_seq_rollback(store, session_id, conn_id, vec![(sql, req.params.clone())]).await?;
+        let mut rows = run_seq_rollback(
+            store,
+            session_id,
+            conn_id,
+            vec![(sql, req.params.clone())],
+            operation,
+        )
+        .await?;
         rows.pop()
             .ok_or_else(|| ApiError::Internal("EXPLAIN produced no result".into()))?
     } else {
@@ -65,7 +83,7 @@ async fn explain_pg(
             .execute_http_as(
                 session_id,
                 exec(conn_id, sql, req.params.clone(), None),
-                sift_protocol::OperationKind::Explain,
+                operation,
             )
             .await?
     };
@@ -92,6 +110,7 @@ async fn explain_mssql(
     session_id: SessionId,
     conn_id: ConnectionId,
     req: &ExplainRequest,
+    operation: sift_protocol::OperationKind,
 ) -> ApiResult<ExplainResponse> {
     if req.analyze {
         return Err(ApiError::Driver(
@@ -110,21 +129,21 @@ async fn explain_mssql(
         .execute_http_as(
             session_id,
             exec(conn_id, "SET SHOWPLAN_XML ON".into(), vec![], None),
-            sift_protocol::OperationKind::Explain,
+            operation,
         )
         .await?;
     let plan_resp = store
         .execute_http_as(
             session_id,
             exec(conn_id, req.sql.clone(), req.params.clone(), None),
-            sift_protocol::OperationKind::Explain,
+            operation,
         )
         .await;
     let off = store
         .execute_http_as(
             session_id,
             exec(conn_id, "SET SHOWPLAN_XML OFF".into(), vec![], None),
-            sift_protocol::OperationKind::Explain,
+            operation,
         )
         .await;
     if let Err(e) = off {
@@ -155,6 +174,7 @@ async fn run_seq_rollback(
     session_id: SessionId,
     conn_id: ConnectionId,
     stmts: Vec<(String, Vec<Value>)>,
+    operation: sift_protocol::OperationKind,
 ) -> ApiResult<Vec<ExecuteResponse>> {
     let info = store
         .begin_transaction_as(
@@ -163,7 +183,7 @@ async fn run_seq_rollback(
                 connection: conn_id,
                 mode: TxMode::default(),
             },
-            sift_protocol::OperationKind::Explain,
+            operation,
         )
         .await?;
     let tx = TxHandleRef {
@@ -178,7 +198,7 @@ async fn run_seq_rollback(
             .execute_http_as(
                 session_id,
                 exec(conn_id, sql, params, Some(tx.clone())),
-                sift_protocol::OperationKind::Explain,
+                operation,
             )
             .await
         {
@@ -197,7 +217,7 @@ async fn run_seq_rollback(
                 connection: conn_id,
                 tx_id: tx.tx_id,
             },
-            sift_protocol::OperationKind::Explain,
+            operation,
         )
         .await
     {
@@ -223,6 +243,139 @@ fn exec(
         room_id: None,
         connection_profile_id: None,
     }
+}
+
+pub fn compare_plan_captures(
+    left: &sift_protocol::PlanCapture,
+    right: &sift_protocol::PlanCapture,
+    max_changes: usize,
+) -> ApiResult<sift_protocol::PlanCaptureComparison> {
+    if left.engine != right.engine {
+        return Err(ApiError::BadRequest(
+            "normalized plan costs cannot be compared across engines".into(),
+        ));
+    }
+    if max_changes == 0 || max_changes > 10_000 {
+        return Err(ApiError::BadRequest(
+            "plan comparison change limit must be between 1 and 10000".into(),
+        ));
+    }
+    let mut comparison = sift_protocol::PlanCaptureComparison {
+        left: left.id,
+        right: right.id,
+        engine: left.engine,
+        operator_changes: 0,
+        cardinality_changes: 0,
+        cost_changes: 0,
+        runtime_changes: 0,
+        changes: Vec::new(),
+        truncated: false,
+    };
+    compare_plan_nodes(
+        Some(&left.root),
+        Some(&right.root),
+        &mut Vec::new(),
+        &mut comparison,
+        max_changes,
+    );
+    Ok(comparison)
+}
+
+fn compare_plan_nodes(
+    left: Option<&PlanNode>,
+    right: Option<&PlanNode>,
+    path: &mut Vec<u32>,
+    comparison: &mut sift_protocol::PlanCaptureComparison,
+    max_changes: usize,
+) {
+    use sift_protocol::{PlanChangeKind, PlanNodeChange};
+
+    let change = match (left, right) {
+        (Some(left), Some(right)) => {
+            let operator_changed = left.op != right.op || left.relation != right.relation;
+            let cardinality_changed = left.est_rows != right.est_rows;
+            let cost_changed = left.est_cost != right.est_cost;
+            let runtime_changed =
+                left.actual_rows != right.actual_rows || left.actual_ms != right.actual_ms;
+            comparison.operator_changes += u32::from(operator_changed);
+            comparison.cardinality_changes += u32::from(cardinality_changed);
+            comparison.cost_changes += u32::from(cost_changed);
+            comparison.runtime_changes += u32::from(runtime_changed);
+            (operator_changed || cardinality_changed || cost_changed || runtime_changed).then(
+                || PlanNodeChange {
+                    path: path.clone(),
+                    kind: PlanChangeKind::Modified,
+                    left_operator: Some(left.op.clone()),
+                    right_operator: Some(right.op.clone()),
+                    estimated_rows_delta: delta(left.est_rows, right.est_rows),
+                    estimated_rows_ratio: ratio(left.est_rows, right.est_rows),
+                    estimated_cost_delta: delta(left.est_cost, right.est_cost),
+                    actual_rows_delta: delta(left.actual_rows, right.actual_rows),
+                    actual_ms_delta: delta(left.actual_ms, right.actual_ms),
+                },
+            )
+        }
+        (Some(left), None) => {
+            comparison.operator_changes += 1;
+            Some(PlanNodeChange {
+                path: path.clone(),
+                kind: PlanChangeKind::Removed,
+                left_operator: Some(left.op.clone()),
+                right_operator: None,
+                estimated_rows_delta: None,
+                estimated_rows_ratio: None,
+                estimated_cost_delta: None,
+                actual_rows_delta: None,
+                actual_ms_delta: None,
+            })
+        }
+        (None, Some(right)) => {
+            comparison.operator_changes += 1;
+            Some(PlanNodeChange {
+                path: path.clone(),
+                kind: PlanChangeKind::Added,
+                left_operator: None,
+                right_operator: Some(right.op.clone()),
+                estimated_rows_delta: None,
+                estimated_rows_ratio: None,
+                estimated_cost_delta: None,
+                actual_rows_delta: None,
+                actual_ms_delta: None,
+            })
+        }
+        (None, None) => None,
+    };
+    if let Some(change) = change {
+        if comparison.changes.len() < max_changes {
+            comparison.changes.push(change);
+        } else {
+            comparison.truncated = true;
+        }
+    }
+    let child_count = left
+        .map_or(0, |node| node.children.len())
+        .max(right.map_or(0, |node| node.children.len()));
+    for index in 0..child_count {
+        path.push(index as u32);
+        compare_plan_nodes(
+            left.and_then(|node| node.children.get(index)),
+            right.and_then(|node| node.children.get(index)),
+            path,
+            comparison,
+            max_changes,
+        );
+        path.pop();
+    }
+}
+
+fn delta(left: Option<f64>, right: Option<f64>) -> Option<f64> {
+    left.zip(right).map(|(left, right)| right - left)
+}
+
+fn ratio(left: Option<f64>, right: Option<f64>) -> Option<f64> {
+    left.zip(right)
+        .filter(|(left, right)| left.is_finite() && right.is_finite() && *left != 0.0)
+        .map(|(left, right)| right / left)
 }
 
 /// A statement whose leading keyword makes it a guaranteed read (no side
@@ -473,5 +626,66 @@ mod tests {
         assert_eq!(root.children[0].relation.as_deref(), Some("users"));
         assert_eq!(root.children[1].op, "Index Seek");
         assert_eq!(root.children[1].relation.as_deref(), Some("orders"));
+    }
+
+    fn capture(engine: Engine, root: PlanNode) -> sift_protocol::PlanCapture {
+        sift_protocol::PlanCapture {
+            id: sift_protocol::PlanCaptureId(uuid::Uuid::new_v4()),
+            tenant_id: 1,
+            connection_profile_id: 1,
+            creator_principal_id: 1,
+            provider: engine.provider_ref("test"),
+            server_version: "test".into(),
+            engine,
+            source_digest: format!("sha256:{}", "a".repeat(64)),
+            document_revision: 1,
+            statement_id: "stmt:test".into(),
+            statement_fingerprint: "sqlfp:test".into(),
+            catalog_revision: sift_protocol::CatalogRevision(1),
+            analyzed: false,
+            captured_at: chrono::Utc::now(),
+            duration_ms: 1,
+            root,
+            warnings: Vec::new(),
+            complete: true,
+            revision: 0,
+            raw_response: None,
+        }
+    }
+
+    #[test]
+    fn normalized_plan_comparison_reports_operator_cardinality_cost_and_runtime() {
+        let mut left = PlanNode::new("Seq Scan");
+        left.est_rows = Some(10.0);
+        left.est_cost = Some(2.0);
+        left.actual_rows = Some(8.0);
+        let mut right = PlanNode::new("Index Scan");
+        right.est_rows = Some(20.0);
+        right.est_cost = Some(1.0);
+        right.actual_rows = Some(18.0);
+        right.children.push(PlanNode::new("Bitmap Index Scan"));
+        let comparison = compare_plan_captures(
+            &capture(Engine::Postgres, left),
+            &capture(Engine::Postgres, right),
+            100,
+        )
+        .unwrap();
+        assert_eq!(comparison.operator_changes, 2);
+        assert_eq!(comparison.cardinality_changes, 1);
+        assert_eq!(comparison.cost_changes, 1);
+        assert_eq!(comparison.runtime_changes, 1);
+        assert_eq!(comparison.changes.len(), 2);
+        assert_eq!(comparison.changes[0].estimated_rows_ratio, Some(2.0));
+    }
+
+    #[test]
+    fn normalized_plan_comparison_rejects_cross_engine_costs() {
+        let error = compare_plan_captures(
+            &capture(Engine::Postgres, PlanNode::new("Scan")),
+            &capture(Engine::SqlServer, PlanNode::new("Scan")),
+            100,
+        )
+        .unwrap_err();
+        assert!(matches!(error, ApiError::BadRequest(_)));
     }
 }

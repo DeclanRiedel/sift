@@ -28,6 +28,26 @@ pub enum OperationKind {
     CloseConnection,
     PingConnection,
     RefreshSchema,
+    ReadCatalogGraph,
+    ProjectCatalogDiagram,
+    CreateCatalogSnapshot,
+    ListCatalogSnapshots,
+    GetCatalogSnapshot,
+    DeleteCatalogSnapshot,
+    CompareCatalogSchemas,
+    PreviewMigration,
+    ApplyMigration,
+    CancelMigration,
+    GetMigrationRun,
+    StartComparison,
+    PageComparison,
+    CancelComparison,
+    PrepareComparisonPatch,
+    CaptureSemanticPlan,
+    ListPlanCaptures,
+    GetPlanCapture,
+    ComparePlanCaptures,
+    DeletePlanCapture,
     GenerateDdl,
     ExecuteQuery,
     ExportQuery,
@@ -37,6 +57,10 @@ pub enum OperationKind {
     CloseSemanticDocument,
     SelectStatement,
     DiagnoseSql,
+    FormatSql,
+    SqlQuickFix,
+    FindSqlUsages,
+    PrepareSqlRefactor,
     Listen,
     CancelQuery,
     PreviewEdits,
@@ -64,7 +88,7 @@ pub enum OperationKind {
 }
 
 impl OperationKind {
-    pub const ALL: [Self; 56] = [
+    pub const ALL: [Self; 80] = [
         Self::Authenticate,
         Self::RefreshAuthSession,
         Self::Logout,
@@ -88,6 +112,26 @@ impl OperationKind {
         Self::CloseConnection,
         Self::PingConnection,
         Self::RefreshSchema,
+        Self::ReadCatalogGraph,
+        Self::ProjectCatalogDiagram,
+        Self::CreateCatalogSnapshot,
+        Self::ListCatalogSnapshots,
+        Self::GetCatalogSnapshot,
+        Self::DeleteCatalogSnapshot,
+        Self::CompareCatalogSchemas,
+        Self::PreviewMigration,
+        Self::ApplyMigration,
+        Self::CancelMigration,
+        Self::GetMigrationRun,
+        Self::StartComparison,
+        Self::PageComparison,
+        Self::CancelComparison,
+        Self::PrepareComparisonPatch,
+        Self::CaptureSemanticPlan,
+        Self::ListPlanCaptures,
+        Self::GetPlanCapture,
+        Self::ComparePlanCaptures,
+        Self::DeletePlanCapture,
         Self::GenerateDdl,
         Self::ExecuteQuery,
         Self::ExportQuery,
@@ -97,6 +141,10 @@ impl OperationKind {
         Self::CloseSemanticDocument,
         Self::SelectStatement,
         Self::DiagnoseSql,
+        Self::FormatSql,
+        Self::SqlQuickFix,
+        Self::FindSqlUsages,
+        Self::PrepareSqlRefactor,
         Self::Listen,
         Self::CancelQuery,
         Self::PreviewEdits,
@@ -144,6 +192,9 @@ impl OperationKind {
                 | Self::CommitTransaction
                 | Self::RollbackTransaction
                 | Self::Metadata
+                | Self::DeleteCatalogSnapshot
+                | Self::ApplyMigration
+                | Self::DeletePlanCapture
                 | Self::ApplyDocumentUpdate
         )
     }

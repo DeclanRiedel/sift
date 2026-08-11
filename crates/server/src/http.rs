@@ -32,20 +32,21 @@ use sift_protocol::{
     AcceptTenantInvitationRequest, AdminCreatePasswordPrincipalRequest,
     AdminLinkPasswordIdentityRequest, AdminSetPrincipalDisabledRequest, AuditEntry, AuthClientKind,
     AuthIdentitySummary, AuthPrincipal, AuthSessionSummary, AuthTenantMembership,
-    AuthTokensResponse, BeginTransactionRequest, BulkInsertRequest, CancelRequest,
-    ChangePasswordRequest, CreateGithubAllowlistRequest, CreateTenantInvitationRequest,
-    CsvImportRequest, CursorPage, EndTransactionRequest, ExecuteRequest, ExecuteRequestHttp,
-    ExpectedRevision, GithubNativeAuthExchangeRequest, GithubNativeAuthStartResponse,
-    HandshakeDeployment, HandshakeRequest, HandshakeResponse, HandshakeRuntimeMode,
-    HandshakeTransport, Health, InvitationRole, IssuedPasswordResetResponse,
-    IssuedTenantInvitationResponse, KeyAuthenticateRequest, KeyChallengeRequest,
-    KeyChallengeResponse, KillProcessRequest, ObjectPath, OpenConnectionRequest,
-    OpenSessionRequest, Operation, OperationStatus, PasswordLoginRequest, PasswordResetRequest,
-    ProtocolRange, Readiness, RefreshAuthRequest, RegisterPrincipalKeyRequest, RoomClientMessage,
-    RoomQueryResult, RoomServerMessage, SavepointRequest, SchemaFilter, SchemaScope,
-    SshProxyAccessGrant, SshProxyCapabilityExchangeRequest, TransactionPreviewRequest,
-    UpdateConnectionPolicyRequest, UpdateTenantLimitsRequest, WebAuthResponse, WhoAmIResponse,
-    WsClientMessage, WsServerMessage, PROTOCOL_VERSION, PROTOCOL_VERSION_NUMBER,
+    AuthTokensResponse, BeginTransactionRequest, BulkInsertRequest, CancelRequest, CatalogSnapshot,
+    CatalogSnapshotId, CatalogSnapshotSummary, ChangePasswordRequest, CreateCatalogSnapshotRequest,
+    CreateGithubAllowlistRequest, CreateTenantInvitationRequest, CsvImportRequest, CursorPage,
+    EndTransactionRequest, ExecuteRequest, ExecuteRequestHttp, ExpectedRevision,
+    GithubNativeAuthExchangeRequest, GithubNativeAuthStartResponse, HandshakeDeployment,
+    HandshakeRequest, HandshakeResponse, HandshakeRuntimeMode, HandshakeTransport, Health,
+    InvitationRole, IssuedPasswordResetResponse, IssuedTenantInvitationResponse,
+    KeyAuthenticateRequest, KeyChallengeRequest, KeyChallengeResponse, KillProcessRequest,
+    ObjectPath, OpenConnectionRequest, OpenSessionRequest, Operation, OperationStatus,
+    PasswordLoginRequest, PasswordResetRequest, ProtocolRange, Readiness, RefreshAuthRequest,
+    RegisterPrincipalKeyRequest, RoomClientMessage, RoomQueryResult, RoomServerMessage,
+    SavepointRequest, SchemaFilter, SchemaScope, SshProxyAccessGrant,
+    SshProxyCapabilityExchangeRequest, TransactionPreviewRequest, UpdateConnectionPolicyRequest,
+    UpdateTenantLimitsRequest, WebAuthResponse, WhoAmIResponse, WsClientMessage, WsServerMessage,
+    PROTOCOL_VERSION, PROTOCOL_VERSION_NUMBER,
 };
 
 use crate::config::{DeploymentPolicy, RuntimeMode, Transport};
@@ -438,6 +439,30 @@ pub fn app(state: AppState) -> Router {
             get_with(get_metadata_saved_query, doc("getMetadataSavedQuery", "")).put_with(update_metadata_saved_query, doc("updateMetadataSavedQuery", "")).delete_with(delete_metadata_saved_query, doc("deleteMetadataSavedQuery", "")),
         )
         .api_route(
+            "/v1/metadata/tenants/:tenant/catalog-snapshots",
+            get_with(list_catalog_snapshots, doc("listCatalogSnapshots", "List immutable catalog snapshots in a tenant")),
+        )
+        .api_route(
+            "/v1/metadata/tenants/:tenant/catalog-snapshots/:snapshot",
+            get_with(get_catalog_snapshot, doc("getCatalogSnapshot", "Get an immutable catalog snapshot")).delete_with(delete_catalog_snapshot, doc("deleteCatalogSnapshot", "Delete a catalog snapshot using its metadata revision")),
+        )
+        .api_route(
+            "/v1/metadata/tenants/:tenant/migration-runs/:run",
+            get_with(get_durable_migration_run, doc("getDurableMigrationRun", "Get a durable redacted migration run outcome")),
+        )
+        .api_route(
+            "/v1/metadata/tenants/:tenant/plan-captures",
+            get_with(list_plan_captures, doc("listPlanCaptures", "Keyset-page durable normalized plan captures")),
+        )
+        .api_route(
+            "/v1/metadata/tenants/:tenant/plan-captures/compare",
+            post_with(compare_plan_captures, doc("comparePlanCaptures", "Compare two same-engine normalized plan captures")),
+        )
+        .api_route(
+            "/v1/metadata/tenants/:tenant/plan-captures/:capture",
+            get_with(get_plan_capture, doc("getPlanCapture", "Get a durable normalized plan capture")).delete_with(delete_plan_capture, doc("deletePlanCapture", "Delete a plan capture using its metadata revision")),
+        )
+        .api_route(
             "/v1/auth/tokens",
             get_with(list_auth_tokens, doc("listAuthTokens", "List current principal API tokens")).post_with(issue_auth_token, doc("issueAuthToken", "Issue API token; plaintext returned once")),
         )
@@ -482,6 +507,66 @@ pub fn app(state: AppState) -> Router {
             get_with(get_schema, doc("getSchema", "Fetch schema")),
         )
         .api_route(
+            "/v1/sessions/:id/connections/:conn_id/catalog/graph",
+            post_with(post_catalog_graph, doc("getCatalogGraph", "Fetch a revisioned, dependency-aware catalog graph")),
+        )
+        .api_route(
+            "/v1/sessions/:id/connections/:conn_id/catalog/diagram",
+            post_with(post_catalog_diagram, doc("projectCatalogDiagram", "Project a deterministic diagram from an exact catalog revision")),
+        )
+        .api_route(
+            "/v1/sessions/:id/connections/:conn_id/catalog/diagram/mutations/preview",
+            post_with(preview_catalog_diagram_mutation, doc("previewCatalogDiagramMutation", "Translate a declarative diagram mutation into a normal migration plan")),
+        )
+        .api_route(
+            "/v1/sessions/:id/connections/:conn_id/catalog/snapshots",
+            post_with(create_catalog_snapshot, doc("createCatalogSnapshot", "Persist an immutable tenant-scoped catalog graph snapshot")),
+        )
+        .api_route(
+            "/v1/sessions/:id/connections/:conn_id/catalog/diffs",
+            post_with(compare_catalog_schemas, doc("compareCatalogSchemas", "Compare two authorized catalog sources using normalized dependency-aware changes")),
+        )
+        .api_route(
+            "/v1/sessions/:id/connections/:conn_id/catalog/migrations/preview",
+            post_with(preview_migration, doc("previewMigration", "Create a short-lived scope-bound migration plan from a revalidated schema diff")),
+        )
+        .api_route(
+            "/v1/sessions/:id/connections/:conn_id/catalog/migrations/apply",
+            post_with(apply_migration, doc("applyMigration", "Apply a one-use migration plan with revision and risk checks")),
+        )
+        .api_route(
+            "/v1/sessions/:id/connections/:conn_id/catalog/migrations/runs/:run",
+            get_with(get_migration_run, doc("getMigrationRun", "Get a process-local migration run outcome")),
+        )
+        .api_route(
+            "/v1/sessions/:id/connections/:conn_id/catalog/migrations/runs/:run/cancel",
+            post_with(cancel_migration, doc("cancelMigration", "Request cancellation at the next safe migration statement boundary")),
+        )
+        .api_route(
+            "/v1/sessions/:id/comparisons",
+            post_with(start_comparison, doc("startComparison", "Start a bounded comparison between exact live-table or immutable retained-result sources")),
+        )
+        .api_route(
+            "/v1/sessions/:id/comparisons/:comparison",
+            get_with(get_comparison, doc("getComparison", "Get an immutable comparison summary or current running state")),
+        )
+        .api_route(
+            "/v1/sessions/:id/comparisons/:comparison/pages",
+            post_with(page_comparison, doc("pageComparison", "Keyset-page retained comparison row differences")),
+        )
+        .api_route(
+            "/v1/sessions/:id/comparisons/:comparison/cancel",
+            post_with(cancel_comparison, doc("cancelComparison", "Cancel a running comparison")),
+        )
+        .api_route(
+            "/v1/sessions/:id/comparisons/:comparison/patch",
+            post_with(prepare_comparison_patch, doc("prepareComparisonPatch", "Prepare an optimistic edit plan for an eligible complete comparison")),
+        )
+        .api_route(
+            "/v1/sessions/:id/connections/:conn_id/plan-captures",
+            post_with(capture_semantic_plan, doc("captureSemanticPlan", "Capture and durably persist a revision-bound normalized semantic statement plan")),
+        )
+        .api_route(
             "/v1/sessions/:id/connections/:conn_id/ddl",
             get_with(get_object_ddl, doc("getObjectDdl", "Generate DDL (CREATE statement) for a database object. Query params: `name` (required), `schema`, `kind` (defaults to `table`).")),
         )
@@ -504,6 +589,26 @@ pub fn app(state: AppState) -> Router {
         .api_route(
             "/v1/sessions/:id/connections/:conn_id/semantic-documents/:document/diagnostics",
             post_with(semantic_diagnostics, doc("diagnoseSemanticDocument", "Read syntax diagnostics for an exact semantic document revision")),
+        )
+        .api_route(
+            "/v1/sessions/:id/connections/:conn_id/semantic-documents/:document/format",
+            post_with(format_semantic_document, doc("formatSemanticDocument", "Prepare deterministic formatting edits for an exact semantic document revision")),
+        )
+        .api_route(
+            "/v1/sessions/:id/connections/:conn_id/semantic-documents/:document/quick-fixes/:fix",
+            post_with(prepare_semantic_quick_fix, doc("prepareSemanticQuickFix", "Prepare a catalog-revision-bound semantic quick fix")),
+        )
+        .api_route(
+            "/v1/sessions/:id/connections/:conn_id/semantic-documents/:document/usages",
+            post_with(find_semantic_usages, doc("findSemanticUsages", "Find bounded usages in an exact semantic document revision")),
+        )
+        .api_route(
+            "/v1/sessions/:id/connections/:conn_id/semantic-documents/:document/refactors/prepare",
+            post_with(prepare_semantic_refactor, doc("prepareSemanticRefactor", "Prepare revision-bound semantic refactor edits without applying them")),
+        )
+        .api_route(
+            "/v1/sessions/:id/connections/:conn_id/semantic-documents/:document/complete",
+            post_with(complete_semantic_document, doc("completeSemanticDocument", "Complete SQL from an exact shared semantic document revision")),
         )
         .api_route(
             "/v1/sessions/:id/connections/:conn_id/export",
@@ -772,12 +877,22 @@ fn finish_operation<T>(
     result: ApiResult<T>,
     row_count: impl FnOnce(&T) -> Option<i64>,
 ) -> ApiResult<T> {
+    finish_operation_as(sessions, operation, result, None, row_count)
+}
+
+fn finish_operation_as<T>(
+    sessions: &SessionStore,
+    operation: Operation,
+    result: ApiResult<T>,
+    actor_principal_id: Option<i64>,
+    row_count: impl FnOnce(&T) -> Option<i64>,
+) -> ApiResult<T> {
     match result {
         Ok(value) => {
             sessions.push_operation_full(
                 operation,
                 OperationStatus::Succeeded,
-                None,
+                actor_principal_id,
                 None,
                 row_count(&value),
                 None,
@@ -794,7 +909,7 @@ fn finish_operation<T>(
             sessions.push_operation_full(
                 operation,
                 OperationStatus::Failed,
-                None,
+                actor_principal_id,
                 result_code,
                 None,
                 message,
@@ -949,7 +1064,16 @@ fn record_rate_rejection(
 
 fn rate_limit_class(method: &axum::http::Method, path: &str) -> sift_protocol::RateLimitClass {
     use sift_protocol::RateLimitClass;
-    if path.contains("/export") || path.contains("/import/") || path.ends_with("/bulk-insert") {
+    if path.contains("/export")
+        || path.contains("/import/")
+        || path.ends_with("/bulk-insert")
+        || path.ends_with("/catalog/graph")
+        || path.ends_with("/catalog/diagram")
+        || path.ends_with("/catalog/snapshots")
+        || path.ends_with("/catalog/diffs")
+        || path.contains("/catalog/migrations/")
+        || path.ends_with("/plan-captures")
+    {
         return RateLimitClass::HeavyTransfer;
     }
     if path.ends_with("/queries")
@@ -2937,6 +3061,24 @@ fn saved_query_id(id: i64) -> ApiResult<SavedQueryId> {
             "saved query id must be positive".into(),
         ))
     }
+}
+
+fn catalog_snapshot_id(id: &str) -> ApiResult<CatalogSnapshotId> {
+    uuid::Uuid::parse_str(id)
+        .map(CatalogSnapshotId)
+        .map_err(|_| ApiError::BadRequest("catalog snapshot id must be a UUID".into()))
+}
+
+fn migration_run_id(id: &str) -> ApiResult<sift_protocol::MigrationRunId> {
+    uuid::Uuid::parse_str(id)
+        .map(sift_protocol::MigrationRunId)
+        .map_err(|_| ApiError::BadRequest("migration run id must be a UUID".into()))
+}
+
+fn plan_capture_id(id: &str) -> ApiResult<sift_protocol::PlanCaptureId> {
+    uuid::Uuid::parse_str(id)
+        .map(sift_protocol::PlanCaptureId)
+        .map_err(|_| ApiError::BadRequest("plan capture id must be a UUID".into()))
 }
 
 /// True if the caller has an elevated role (Owner or Admin) in
@@ -5415,6 +5557,285 @@ async fn delete_metadata_saved_query(
     Ok(Json(json!({ "ok": true, "deleted": true })))
 }
 
+#[derive(Deserialize, JsonSchema)]
+struct CatalogSnapshotListQuery {
+    #[serde(default = "default_catalog_snapshot_limit")]
+    limit: u32,
+}
+
+const fn default_catalog_snapshot_limit() -> u32 {
+    50
+}
+
+async fn list_catalog_snapshots(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(tenant): Path<i64>,
+    Query(query): Query<CatalogSnapshotListQuery>,
+) -> ApiResult<Json<Vec<CatalogSnapshotSummary>>> {
+    let metadata = metadata_store_cloned(&state)?;
+    let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
+    let tenant = tenant_id(tenant)?;
+    ensure_tenant(&auth, tenant)?;
+    if !(1..=100).contains(&query.limit) {
+        return Err(ApiError::BadRequest(
+            "catalog snapshot limit must be between 1 and 100".into(),
+        ));
+    }
+    let operation = Operation::ListCatalogSnapshots {
+        tenant_id: tenant.0,
+    };
+    let result = metadata_blocking(move || {
+        metadata
+            .list_catalog_snapshots(tenant, query.limit)
+            .map_err(Into::into)
+    })
+    .await;
+    Ok(Json(finish_operation_as(
+        &state.sessions,
+        operation,
+        result,
+        Some(auth.principal_id.0),
+        |snapshots| i64::try_from(snapshots.len()).ok(),
+    )?))
+}
+
+async fn get_catalog_snapshot(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path((tenant, snapshot)): Path<(i64, String)>,
+) -> ApiResult<Json<CatalogSnapshot>> {
+    let metadata = metadata_store_cloned(&state)?;
+    let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
+    let tenant = tenant_id(tenant)?;
+    ensure_tenant(&auth, tenant)?;
+    let snapshot = catalog_snapshot_id(&snapshot)?;
+    let operation = Operation::GetCatalogSnapshot {
+        tenant_id: tenant.0,
+        snapshot,
+    };
+    let result = metadata_blocking(move || {
+        metadata
+            .get_catalog_snapshot(tenant, snapshot)
+            .map_err(Into::into)
+    })
+    .await;
+    Ok(Json(finish_operation_as(
+        &state.sessions,
+        operation,
+        result,
+        Some(auth.principal_id.0),
+        |_| Some(1),
+    )?))
+}
+
+async fn delete_catalog_snapshot(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path((tenant, snapshot)): Path<(i64, String)>,
+    Query(request): Query<sift_protocol::DeleteCatalogSnapshotRequest>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let metadata = metadata_store_cloned(&state)?;
+    let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
+    let tenant = tenant_id(tenant)?;
+    ensure_tenant(&auth, tenant)?;
+    let snapshot = catalog_snapshot_id(&snapshot)?;
+    let operation = Operation::DeleteCatalogSnapshot {
+        tenant_id: tenant.0,
+        snapshot,
+        expected_revision: request.expected_revision,
+    };
+    let result = metadata_blocking(move || {
+        metadata
+            .delete_catalog_snapshot(tenant, snapshot, request.expected_revision)
+            .map(|()| json!({ "ok": true, "deleted": true }))
+            .map_err(Into::into)
+    })
+    .await;
+    Ok(Json(finish_operation_as(
+        &state.sessions,
+        operation,
+        result,
+        Some(auth.principal_id.0),
+        |_| Some(1),
+    )?))
+}
+
+async fn get_durable_migration_run(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path((tenant, run)): Path<(i64, String)>,
+) -> ApiResult<Json<sift_protocol::MigrationRun>> {
+    let metadata = metadata_store_cloned(&state)?;
+    let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
+    let tenant = tenant_id(tenant)?;
+    ensure_tenant(&auth, tenant)?;
+    let run = migration_run_id(&run)?;
+    let operation = Operation::GetDurableMigrationRun {
+        tenant_id: tenant.0,
+        run_id: run,
+    };
+    let result =
+        metadata_blocking(move || metadata.get_migration_run(tenant, run).map_err(Into::into))
+            .await;
+    Ok(Json(finish_operation_as(
+        &state.sessions,
+        operation,
+        result,
+        Some(auth.principal_id.0),
+        |_| Some(1),
+    )?))
+}
+
+async fn list_plan_captures(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(tenant): Path<i64>,
+    Query(request): Query<sift_protocol::ListPlanCapturesRequest>,
+) -> ApiResult<Json<CursorPage<sift_protocol::PlanCaptureSummary>>> {
+    let metadata = metadata_store_cloned(&state)?;
+    let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
+    let tenant = tenant_id(tenant)?;
+    ensure_tenant(&auth, tenant)?;
+    let limit = request.limit.unwrap_or(50).clamp(1, 100);
+    if request.source_digest.as_ref().is_some_and(|digest| {
+        digest.len() != 71
+            || !digest.starts_with("sha256:")
+            || !digest[7..].bytes().all(|byte| byte.is_ascii_hexdigit())
+    }) {
+        return Err(ApiError::BadRequest(
+            "plan source_digest must be a sha256 fingerprint".into(),
+        ));
+    }
+    let operation = Operation::ListPlanCaptures {
+        tenant_id: tenant.0,
+        source_bound: request.source_digest.is_some(),
+        limit,
+    };
+    let source_digest = request.source_digest;
+    let cursor = request.cursor;
+    let result = metadata_blocking(move || {
+        metadata
+            .list_plan_captures(tenant, source_digest.as_deref(), cursor, limit + 1)
+            .map_err(Into::into)
+    })
+    .await
+    .map(|mut items| {
+        let has_more = items.len() > limit as usize;
+        items.truncate(limit as usize);
+        let next_cursor = has_more.then(|| {
+            items
+                .last()
+                .expect("a plan page with more rows is non-empty")
+                .id
+                .to_string()
+        });
+        CursorPage { items, next_cursor }
+    });
+    Ok(Json(finish_operation_as(
+        &state.sessions,
+        operation,
+        result,
+        Some(auth.principal_id.0),
+        |page| i64::try_from(page.items.len()).ok(),
+    )?))
+}
+
+async fn compare_plan_captures(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(tenant): Path<i64>,
+    Json(request): Json<sift_protocol::ComparePlanCapturesRequest>,
+) -> ApiResult<Json<sift_protocol::PlanCaptureComparison>> {
+    let metadata = metadata_store_cloned(&state)?;
+    let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
+    let tenant = tenant_id(tenant)?;
+    ensure_tenant(&auth, tenant)?;
+    let operation = Operation::ComparePlanCaptures {
+        tenant_id: tenant.0,
+        left: request.left,
+        right: request.right,
+    };
+    let left_id = request.left;
+    let right_id = request.right;
+    let result = metadata_blocking(move || {
+        Ok((
+            metadata.get_plan_capture(tenant, left_id)?,
+            metadata.get_plan_capture(tenant, right_id)?,
+        ))
+    })
+    .await
+    .and_then(|(left, right)| crate::plan::compare_plan_captures(&left, &right, 10_000));
+    Ok(Json(finish_operation_as(
+        &state.sessions,
+        operation,
+        result,
+        Some(auth.principal_id.0),
+        |comparison| i64::try_from(comparison.changes.len()).ok(),
+    )?))
+}
+
+async fn get_plan_capture(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path((tenant, capture)): Path<(i64, String)>,
+) -> ApiResult<Json<sift_protocol::PlanCapture>> {
+    let metadata = metadata_store_cloned(&state)?;
+    let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
+    let tenant = tenant_id(tenant)?;
+    ensure_tenant(&auth, tenant)?;
+    let capture = plan_capture_id(&capture)?;
+    let operation = Operation::GetPlanCapture {
+        tenant_id: tenant.0,
+        capture_id: capture,
+    };
+    let result = metadata_blocking(move || {
+        metadata
+            .get_plan_capture(tenant, capture)
+            .map_err(Into::into)
+    })
+    .await;
+    Ok(Json(finish_operation_as(
+        &state.sessions,
+        operation,
+        result,
+        Some(auth.principal_id.0),
+        |_| Some(1),
+    )?))
+}
+
+async fn delete_plan_capture(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path((tenant, capture)): Path<(i64, String)>,
+    Query(request): Query<sift_protocol::DeletePlanCaptureRequest>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let metadata = metadata_store_cloned(&state)?;
+    let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
+    let tenant = tenant_id(tenant)?;
+    ensure_tenant(&auth, tenant)?;
+    let capture = plan_capture_id(&capture)?;
+    let operation = Operation::DeletePlanCapture {
+        tenant_id: tenant.0,
+        capture_id: capture,
+        expected_revision: request.expected_revision,
+    };
+    let result = metadata_blocking(move || {
+        metadata
+            .delete_plan_capture(tenant, capture, request.expected_revision)
+            .map(|()| json!({"ok": true, "deleted": true}))
+            .map_err(Into::into)
+    })
+    .await;
+    Ok(Json(finish_operation_as(
+        &state.sessions,
+        operation,
+        result,
+        Some(auth.principal_id.0),
+        |_| Some(1),
+    )?))
+}
+
 async fn list_auth_tokens(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -6096,20 +6517,189 @@ async fn semantic_diagnostics(
     )>,
     Json(request): Json<sift_protocol::SemanticRevisionRequest>,
 ) -> ApiResult<Json<sift_protocol::DiagnosticsResponse>> {
-    let result =
-        state
-            .sessions
-            .semantic_diagnostics(session, connection, document, request.revision);
+    let revision = request.revision;
+    let result = state
+        .sessions
+        .semantic_diagnostics(session, connection, document, request)
+        .await;
     Ok(Json(finish_operation(
         &state.sessions,
         Operation::DiagnoseSql {
             session,
             connection,
             document,
-            revision: request.revision,
+            revision,
         },
         result,
         |diagnostics| Some(diagnostics.diagnostics.len() as i64),
+    )?))
+}
+
+async fn format_semantic_document(
+    State(state): State<AppState>,
+    Path((session, connection, document)): Path<(
+        sift_protocol::SessionId,
+        sift_protocol::ConnectionId,
+        sift_protocol::SemanticDocumentId,
+    )>,
+    Json(request): Json<sift_protocol::FormatSqlRequest>,
+) -> ApiResult<Json<sift_protocol::WorkspaceEdit>> {
+    let operation = Operation::FormatSql {
+        session,
+        connection,
+        document,
+        revision: request.revision,
+        range_requested: request.range.is_some(),
+    };
+    let result = state
+        .sessions
+        .format_semantic_document(session, connection, document, request)
+        .await;
+    Ok(Json(finish_operation(
+        &state.sessions,
+        operation,
+        result,
+        |edit| {
+            Some(
+                edit.documents
+                    .iter()
+                    .map(|document| document.edits.len() as i64)
+                    .sum(),
+            )
+        },
+    )?))
+}
+
+async fn prepare_semantic_quick_fix(
+    State(state): State<AppState>,
+    Path((session, connection, document, fix)): Path<(
+        sift_protocol::SessionId,
+        sift_protocol::ConnectionId,
+        sift_protocol::SemanticDocumentId,
+        String,
+    )>,
+    Json(request): Json<sift_protocol::SqlQuickFixRequest>,
+) -> ApiResult<Json<sift_protocol::WorkspaceEdit>> {
+    let operation = Operation::SqlQuickFix {
+        session,
+        connection,
+        document,
+        revision: request.revision,
+        catalog_revision: request.catalog_revision,
+    };
+    let result = state
+        .sessions
+        .prepare_semantic_quick_fix(session, connection, document, fix, request)
+        .await;
+    Ok(Json(finish_operation(
+        &state.sessions,
+        operation,
+        result,
+        |edit| {
+            Some(
+                edit.documents
+                    .iter()
+                    .map(|document| document.edits.len() as i64)
+                    .sum(),
+            )
+        },
+    )?))
+}
+
+async fn find_semantic_usages(
+    State(state): State<AppState>,
+    Path((session, connection, document)): Path<(
+        sift_protocol::SessionId,
+        sift_protocol::ConnectionId,
+        sift_protocol::SemanticDocumentId,
+    )>,
+    Json(request): Json<sift_protocol::FindSqlUsagesRequest>,
+) -> ApiResult<Json<sift_protocol::SqlUsagePage>> {
+    let operation = Operation::FindSqlUsages {
+        session,
+        connection,
+        document,
+        revision: request.revision,
+        catalog_bound: request.catalog_revision.is_some(),
+        limit: request.limit,
+    };
+    let result = state
+        .sessions
+        .find_semantic_usages(session, connection, document, request)
+        .await;
+    Ok(Json(finish_operation(
+        &state.sessions,
+        operation,
+        result,
+        |page| Some(page.usages.len() as i64),
+    )?))
+}
+
+async fn prepare_semantic_refactor(
+    State(state): State<AppState>,
+    Path((session, connection, document)): Path<(
+        sift_protocol::SessionId,
+        sift_protocol::ConnectionId,
+        sift_protocol::SemanticDocumentId,
+    )>,
+    Json(request): Json<sift_protocol::PrepareSqlRefactorRequest>,
+) -> ApiResult<Json<sift_protocol::WorkspaceEdit>> {
+    let operation = Operation::PrepareSqlRefactor {
+        session,
+        connection,
+        document,
+        revision: request.revision,
+        catalog_bound: request.catalog_revision.is_some(),
+        rename: matches!(
+            &request.refactor,
+            sift_protocol::SqlRefactor::RenameSymbol { .. }
+        ),
+    };
+    let result = state
+        .sessions
+        .prepare_semantic_refactor(session, connection, document, request)
+        .await;
+    Ok(Json(finish_operation(
+        &state.sessions,
+        operation,
+        result,
+        |edit| {
+            Some(
+                edit.documents
+                    .iter()
+                    .map(|document| document.edits.len() as i64)
+                    .sum(),
+            )
+        },
+    )?))
+}
+
+async fn complete_semantic_document(
+    State(state): State<AppState>,
+    Path((session, connection, document)): Path<(
+        sift_protocol::SessionId,
+        sift_protocol::ConnectionId,
+        sift_protocol::SemanticDocumentId,
+    )>,
+    Json(request): Json<sift_protocol::SemanticCompletionRequest>,
+) -> ApiResult<Json<sift_protocol::completion::CompletionResponse>> {
+    let operation = Operation::CompleteSemanticDocument {
+        session,
+        connection,
+        document,
+        revision: request.revision,
+        cursor: request.cursor,
+        limit: request.limit,
+    };
+    let result = state
+        .sessions
+        .complete_semantic_document(session, connection, document, request)
+        .await;
+    Ok(Json(finish_operation(
+        &state.sessions,
+        operation,
+        result,
+        |response| Some(response.candidates.len() as i64),
     )?))
 }
 
@@ -6245,6 +6835,691 @@ async fn get_schema(
         OperationStatus::Succeeded,
     );
     Ok(Json(snap))
+}
+
+async fn post_catalog_graph(
+    State(state): State<AppState>,
+    Path((session, connection)): Path<(sift_protocol::SessionId, sift_protocol::ConnectionId)>,
+    Json(request): Json<sift_protocol::CatalogGraphRequest>,
+) -> ApiResult<Json<sift_protocol::CatalogGraph>> {
+    let operation = Operation::ReadCatalogGraph {
+        session,
+        connection,
+        refresh: request.refresh,
+        requested_schema_count: request
+            .options
+            .schemas
+            .as_ref()
+            .map_or(0, |schemas| schemas.len() as u32),
+        requested_kind_count: request
+            .options
+            .kinds
+            .as_ref()
+            .map_or(0, |kinds| kinds.len() as u32),
+        include_definitions: request.options.include_definitions,
+        max_nodes: request.options.max_nodes,
+    };
+    let result = state
+        .sessions
+        .catalog_graph(session, connection, request)
+        .await;
+    Ok(Json(finish_operation(
+        &state.sessions,
+        operation,
+        result,
+        |graph| Some(graph.data.nodes.len() as i64),
+    )?))
+}
+
+async fn post_catalog_diagram(
+    State(state): State<AppState>,
+    Path((session, connection)): Path<(sift_protocol::SessionId, sift_protocol::ConnectionId)>,
+    Json(request): Json<sift_protocol::CatalogDiagramRequest>,
+) -> ApiResult<Json<sift_protocol::CatalogDiagram>> {
+    let operation = Operation::ProjectCatalogDiagram {
+        session,
+        connection,
+        catalog_revision: request.expected_revision,
+        requested_object_count: u32::try_from(request.object_ids.len()).unwrap_or(u32::MAX),
+        neighborhood_depth: request.neighborhood_depth,
+        include_columns: request.include_columns,
+        max_nodes: request.max_nodes,
+    };
+    let result = state
+        .sessions
+        .catalog_diagram(session, connection, request)
+        .await;
+    Ok(Json(finish_operation(
+        &state.sessions,
+        operation,
+        result,
+        |diagram| Some(diagram.nodes.len() as i64),
+    )?))
+}
+
+async fn preview_catalog_diagram_mutation(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path((session, connection)): Path<(sift_protocol::SessionId, sift_protocol::ConnectionId)>,
+    Json(request): Json<sift_protocol::PreviewCatalogDiagramMutationRequest>,
+) -> ApiResult<Json<sift_protocol::MigrationPlan>> {
+    let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
+    let operation = Operation::PreviewMigration {
+        session,
+        connection,
+        selected_change_count: 1,
+        expected_live_revision: request.expected_catalog_revision,
+    };
+    let result = async {
+        let (principal, tenant, profile, policy_revision) = state.sessions.managed_catalog_scope(
+            session,
+            connection,
+            sift_protocol::OperationKind::PreviewMigration,
+        )?;
+        if principal != auth.principal_id {
+            return Err(ApiError::Forbidden(
+                "diagram mutation caller must own the managed session".into(),
+            ));
+        }
+        ensure_tenant(&auth, tenant)?;
+        let live_options = sift_protocol::CatalogGraphOptions::default();
+        let live = state
+            .sessions
+            .catalog_graph_for_schema_diff(
+                session,
+                connection,
+                request.expected_catalog_revision,
+                live_options.clone(),
+            )
+            .await?;
+        if live.data.coverage.state != sift_protocol::CatalogCoverageState::Complete {
+            return Err(ApiError::BadRequest(
+                "diagram mutations require a complete catalog graph".into(),
+            ));
+        }
+        let (desired, accepted_renames) =
+            sift_core::catalog::apply_diagram_mutation(&live, &request.mutation)
+                .map_err(|error| ApiError::BadRequest(error.to_string()))?;
+        let source = sift_protocol::CatalogSourceRef::Live {
+            expected_revision: request.expected_catalog_revision,
+            options: live_options.clone(),
+        };
+        let diff = sift_core::schema_diff::diff_catalogs(
+            source.clone(),
+            &live,
+            source,
+            &desired,
+            &accepted_renames,
+            Some(1_024),
+        )
+        .map_err(|error| ApiError::BadRequest(error.to_string()))?;
+        let engine = state
+            .sessions
+            .conn_entry(session, connection)?
+            .driver
+            .engine();
+        let plan = crate::migration::render_plan(
+            engine,
+            &diff,
+            &live,
+            &desired,
+            &[],
+            request.expected_catalog_revision,
+            &request.options,
+        )
+        .map_err(|error| ApiError::BadRequest(error.to_string()))?;
+        state.sessions.store_migration_plan(
+            plan,
+            crate::session::MigrationPlanScope {
+                session,
+                connection,
+                principal,
+                tenant,
+                profile,
+                policy_revision,
+                live_options,
+            },
+        )
+    }
+    .await;
+    Ok(Json(finish_operation_as(
+        &state.sessions,
+        operation,
+        result,
+        Some(auth.principal_id.0),
+        |plan| {
+            i64::try_from(
+                plan.groups
+                    .iter()
+                    .map(|group| group.statements.len())
+                    .sum::<usize>(),
+            )
+            .ok()
+        },
+    )?))
+}
+
+async fn create_catalog_snapshot(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path((session, connection)): Path<(sift_protocol::SessionId, sift_protocol::ConnectionId)>,
+    Json(request): Json<CreateCatalogSnapshotRequest>,
+) -> ApiResult<Json<CatalogSnapshot>> {
+    let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
+    let operation = Operation::CreateCatalogSnapshot {
+        session,
+        connection,
+        catalog_revision: request.expected_catalog_revision,
+        accept_partial: request.accept_partial,
+    };
+    let result = async {
+        let (graph, principal, tenant, profile) = state
+            .sessions
+            .catalog_snapshot_source(session, connection, &request)
+            .await?;
+        if principal != auth.principal_id {
+            return Err(ApiError::Forbidden(
+                "catalog snapshot creator must own the managed session".into(),
+            ));
+        }
+        ensure_tenant(&auth, tenant)?;
+        let metadata = metadata_store_cloned(&state)?;
+        let description = request.description;
+        metadata_blocking(move || {
+            metadata
+                .create_catalog_snapshot(tenant, Some(profile), principal, description, &graph)
+                .map_err(Into::into)
+        })
+        .await
+    }
+    .await;
+    Ok(Json(finish_operation_as(
+        &state.sessions,
+        operation,
+        result,
+        Some(auth.principal_id.0),
+        |_| Some(1),
+    )?))
+}
+
+async fn compare_catalog_schemas(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path((session, connection)): Path<(sift_protocol::SessionId, sift_protocol::ConnectionId)>,
+    Json(request): Json<sift_protocol::SchemaDiffRequest>,
+) -> ApiResult<Json<sift_protocol::SchemaDiff>> {
+    let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
+    let operation = Operation::CompareCatalogSchemas {
+        session,
+        connection,
+        accepted_rename_count: u32::try_from(request.accepted_renames.len()).unwrap_or(u32::MAX),
+        max_changes: request.max_changes,
+    };
+    let result = async {
+        if request.accepted_renames.len() > 10_000 {
+            return Err(ApiError::BadRequest(
+                "schema diff accepts at most 10000 rename mappings".into(),
+            ));
+        }
+        let (principal, tenant, _, _) = state.sessions.managed_catalog_scope(
+            session,
+            connection,
+            sift_protocol::OperationKind::CompareCatalogSchemas,
+        )?;
+        if principal != auth.principal_id {
+            return Err(ApiError::Forbidden(
+                "schema diff caller must own the managed session".into(),
+            ));
+        }
+        ensure_tenant(&auth, tenant)?;
+        let from =
+            resolve_catalog_source(&state, session, connection, tenant, &request.from).await?;
+        let to = if request.from == request.to {
+            from.clone()
+        } else {
+            resolve_catalog_source(&state, session, connection, tenant, &request.to).await?
+        };
+        sift_core::schema_diff::diff_catalogs(
+            request.from.clone(),
+            &from,
+            request.to.clone(),
+            &to,
+            &request.accepted_renames,
+            request.max_changes,
+        )
+        .map_err(|error| ApiError::BadRequest(error.to_string()))
+    }
+    .await;
+    Ok(Json(finish_operation_as(
+        &state.sessions,
+        operation,
+        result,
+        Some(auth.principal_id.0),
+        |diff| i64::try_from(diff.changes.len()).ok(),
+    )?))
+}
+
+async fn resolve_catalog_source(
+    state: &AppState,
+    session: sift_protocol::SessionId,
+    connection: sift_protocol::ConnectionId,
+    tenant: TenantId,
+    source: &sift_protocol::CatalogSourceRef,
+) -> ApiResult<sift_protocol::CatalogGraph> {
+    match source {
+        sift_protocol::CatalogSourceRef::Live {
+            expected_revision,
+            options,
+        } => {
+            state
+                .sessions
+                .catalog_graph_for_schema_diff(
+                    session,
+                    connection,
+                    *expected_revision,
+                    options.clone(),
+                )
+                .await
+        }
+        sift_protocol::CatalogSourceRef::Snapshot { snapshot_id } => {
+            let metadata = metadata_store_cloned(state)?;
+            let snapshot_id = *snapshot_id;
+            metadata_blocking(move || {
+                metadata
+                    .get_catalog_snapshot(tenant, snapshot_id)
+                    .map(|snapshot| snapshot.graph)
+                    .map_err(Into::into)
+            })
+            .await
+        }
+    }
+}
+
+async fn preview_migration(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path((session, connection)): Path<(sift_protocol::SessionId, sift_protocol::ConnectionId)>,
+    Json(request): Json<sift_protocol::PreviewMigrationRequest>,
+) -> ApiResult<Json<sift_protocol::MigrationPlan>> {
+    let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
+    let operation = Operation::PreviewMigration {
+        session,
+        connection,
+        selected_change_count: u32::try_from(request.selected_changes.len()).unwrap_or(u32::MAX),
+        expected_live_revision: request.expected_live_revision,
+    };
+    let result = async {
+        if request.selected_changes.len() > 100_000 {
+            return Err(ApiError::BadRequest(
+                "migration selection exceeds 100000 changes".into(),
+            ));
+        }
+        let (principal, tenant, profile, policy_revision) = state.sessions.managed_catalog_scope(
+            session,
+            connection,
+            sift_protocol::OperationKind::PreviewMigration,
+        )?;
+        if principal != auth.principal_id {
+            return Err(ApiError::Forbidden(
+                "migration caller must own the managed session".into(),
+            ));
+        }
+        ensure_tenant(&auth, tenant)?;
+        let live_options = match &request.diff.from {
+            sift_protocol::CatalogSourceRef::Live {
+                expected_revision,
+                options,
+            } if *expected_revision == request.expected_live_revision => options.clone(),
+            _ => {
+                return Err(ApiError::BadRequest(
+                    "migration diff must use the active live catalog as its from source at expected_live_revision"
+                        .into(),
+                ));
+            }
+        };
+        let from = resolve_catalog_source(
+            &state,
+            session,
+            connection,
+            tenant,
+            &request.diff.from,
+        )
+        .await?;
+        let to = if request.diff.from == request.diff.to {
+            from.clone()
+        } else {
+            resolve_catalog_source(
+                &state,
+                session,
+                connection,
+                tenant,
+                &request.diff.to,
+            )
+            .await?
+        };
+        let diff = sift_core::schema_diff::diff_catalogs(
+            request.diff.from.clone(),
+            &from,
+            request.diff.to.clone(),
+            &to,
+            &request.diff.accepted_renames,
+            request.diff.max_changes,
+        )
+        .map_err(|error| ApiError::BadRequest(error.to_string()))?;
+        if diff.digest != request.expected_diff_digest {
+            return Err(ApiError::BadRequest(
+                "schema diff digest is stale or does not match the selected sources".into(),
+            ));
+        }
+        let engine = state
+            .sessions
+            .conn_entry(session, connection)?
+            .driver
+            .engine();
+        let plan = crate::migration::render_plan(
+            engine,
+            &diff,
+            &from,
+            &to,
+            &request.selected_changes,
+            request.expected_live_revision,
+            &request.options,
+        )
+        .map_err(|error| ApiError::BadRequest(error.to_string()))?;
+        state.sessions.store_migration_plan(
+            plan,
+            crate::session::MigrationPlanScope {
+                session,
+                connection,
+                principal,
+                tenant,
+                profile,
+                policy_revision,
+                live_options,
+            },
+        )
+    }
+    .await;
+    Ok(Json(finish_operation_as(
+        &state.sessions,
+        operation,
+        result,
+        Some(auth.principal_id.0),
+        |plan| {
+            i64::try_from(
+                plan.groups
+                    .iter()
+                    .map(|group| group.statements.len())
+                    .sum::<usize>(),
+            )
+            .ok()
+        },
+    )?))
+}
+
+async fn apply_migration(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path((session, connection)): Path<(sift_protocol::SessionId, sift_protocol::ConnectionId)>,
+    Json(request): Json<sift_protocol::ApplyMigrationRequest>,
+) -> ApiResult<Json<sift_protocol::MigrationRun>> {
+    let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
+    let operation = Operation::ApplyMigration {
+        session,
+        connection,
+        plan_id: request.plan_id,
+    };
+    let result = state
+        .sessions
+        .apply_migration(session, connection, auth.principal_id, request)
+        .await;
+    Ok(Json(finish_operation_as(
+        &state.sessions,
+        operation,
+        result,
+        Some(auth.principal_id.0),
+        |run| i64::try_from(run.outcomes.len()).ok(),
+    )?))
+}
+
+async fn get_migration_run(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path((session, connection, run)): Path<(
+        sift_protocol::SessionId,
+        sift_protocol::ConnectionId,
+        String,
+    )>,
+) -> ApiResult<Json<sift_protocol::MigrationRun>> {
+    let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
+    let run = migration_run_id(&run)?;
+    let operation = Operation::GetMigrationRun {
+        session,
+        connection,
+        run_id: run,
+    };
+    let result = state
+        .sessions
+        .migration_run(session, connection, auth.principal_id, run);
+    Ok(Json(finish_operation_as(
+        &state.sessions,
+        operation,
+        result,
+        Some(auth.principal_id.0),
+        |_| Some(1),
+    )?))
+}
+
+async fn cancel_migration(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path((session, connection, run)): Path<(
+        sift_protocol::SessionId,
+        sift_protocol::ConnectionId,
+        String,
+    )>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
+    let run = migration_run_id(&run)?;
+    let operation = Operation::CancelMigration {
+        session,
+        connection,
+        run_id: run,
+    };
+    let result = state
+        .sessions
+        .cancel_migration(session, connection, auth.principal_id, run)
+        .map(|()| json!({"ok": true, "cancel_requested": true}));
+    Ok(Json(finish_operation_as(
+        &state.sessions,
+        operation,
+        result,
+        Some(auth.principal_id.0),
+        |_| None,
+    )?))
+}
+
+async fn start_comparison(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(session): Path<sift_protocol::SessionId>,
+    Json(request): Json<sift_protocol::StartComparisonRequest>,
+) -> ApiResult<Json<sift_protocol::ComparisonSummary>> {
+    let auth = session_auth_context_blocking(state.clone(), headers).await?;
+    for source in [&request.left, &request.right] {
+        if let sift_protocol::CompareSource::RoomResult {
+            room_id: source_room_id,
+            ..
+        } = source
+        {
+            let metadata = metadata_store_cloned(&state)?;
+            let auth = auth.clone().ok_or(ApiError::Unauthorized)?;
+            let room = room_id(*source_room_id)?;
+            metadata_blocking(move || {
+                ensure_room_permission(&metadata, &auth, room, RoomPermission::Read).map(|_| ())
+            })
+            .await?;
+        }
+    }
+    let key_column_count = match &request.key {
+        sift_protocol::CompareKey::Explicit { columns } => {
+            u32::try_from(columns.len()).unwrap_or(u32::MAX)
+        }
+        sift_protocol::CompareKey::Infer | sift_protocol::CompareKey::RowOrdinal => 0,
+    };
+    let operation = Operation::StartComparison {
+        session,
+        left_source: compare_source_kind(&request.left).into(),
+        right_source: compare_source_kind(&request.right).into(),
+        mapped_column_count: u32::try_from(request.column_mappings.len()).unwrap_or(u32::MAX),
+        key_column_count,
+    };
+    let result = state
+        .sessions
+        .start_comparison(session, request, state.rooms.results().clone());
+    Ok(Json(finish_operation_as(
+        &state.sessions,
+        operation,
+        result,
+        auth.as_ref().map(|auth| auth.principal_id.0),
+        |_| None,
+    )?))
+}
+
+async fn get_comparison(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path((session, comparison)): Path<(sift_protocol::SessionId, uuid::Uuid)>,
+) -> ApiResult<Json<sift_protocol::ComparisonSummary>> {
+    let auth = session_auth_context_blocking(state.clone(), headers).await?;
+    let comparison_id = sift_protocol::ComparisonId(comparison);
+    let operation = Operation::PageComparison {
+        session,
+        comparison_id,
+        limit: 0,
+    };
+    let result = state.sessions.comparison_summary(session, comparison_id);
+    Ok(Json(finish_operation_as(
+        &state.sessions,
+        operation,
+        result,
+        auth.as_ref().map(|auth| auth.principal_id.0),
+        |_| Some(1),
+    )?))
+}
+
+async fn page_comparison(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path((session, comparison)): Path<(sift_protocol::SessionId, uuid::Uuid)>,
+    Json(request): Json<sift_protocol::ComparisonPageRequest>,
+) -> ApiResult<Json<sift_protocol::ComparisonPage>> {
+    let auth = session_auth_context_blocking(state.clone(), headers).await?;
+    let comparison_id = sift_protocol::ComparisonId(comparison);
+    let operation = Operation::PageComparison {
+        session,
+        comparison_id,
+        limit: request.limit.unwrap_or(100),
+    };
+    let result = state
+        .sessions
+        .comparison_page(session, comparison_id, request);
+    Ok(Json(finish_operation_as(
+        &state.sessions,
+        operation,
+        result,
+        auth.as_ref().map(|auth| auth.principal_id.0),
+        |page| i64::try_from(page.rows.len()).ok(),
+    )?))
+}
+
+async fn cancel_comparison(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path((session, comparison)): Path<(sift_protocol::SessionId, uuid::Uuid)>,
+) -> ApiResult<Json<sift_protocol::CancelComparisonResponse>> {
+    let auth = session_auth_context_blocking(state.clone(), headers).await?;
+    let comparison_id = sift_protocol::ComparisonId(comparison);
+    let operation = Operation::CancelComparison {
+        session,
+        comparison_id,
+    };
+    let result = state.sessions.cancel_comparison(session, comparison_id);
+    Ok(Json(finish_operation_as(
+        &state.sessions,
+        operation,
+        result,
+        auth.as_ref().map(|auth| auth.principal_id.0),
+        |_| None,
+    )?))
+}
+
+async fn prepare_comparison_patch(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path((session, comparison)): Path<(sift_protocol::SessionId, uuid::Uuid)>,
+    Json(request): Json<sift_protocol::PrepareComparisonPatchRequest>,
+) -> ApiResult<Json<sift_protocol::ComparisonPatchPreparation>> {
+    let auth = session_auth_context_blocking(state.clone(), headers).await?;
+    let comparison_id = sift_protocol::ComparisonId(comparison);
+    let operation = Operation::PrepareComparisonPatch {
+        session,
+        comparison_id,
+        catalog_revision: request.expected_catalog_revision,
+        max_statements: request.max_statements,
+    };
+    let result = state
+        .sessions
+        .prepare_comparison_patch(session, comparison_id, request)
+        .await;
+    Ok(Json(finish_operation_as(
+        &state.sessions,
+        operation,
+        result,
+        auth.as_ref().map(|auth| auth.principal_id.0),
+        |patch| {
+            patch
+                .edit_plan
+                .as_ref()
+                .and_then(|plan| i64::try_from(plan.statements.len()).ok())
+        },
+    )?))
+}
+
+fn compare_source_kind(source: &sift_protocol::CompareSource) -> &'static str {
+    match source {
+        sift_protocol::CompareSource::Table { .. } => "table",
+        sift_protocol::CompareSource::QueryResult { .. } => "query_result",
+        sift_protocol::CompareSource::RoomResult { .. } => "room_result",
+    }
+}
+
+async fn capture_semantic_plan(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path((session, connection)): Path<(sift_protocol::SessionId, sift_protocol::ConnectionId)>,
+    Json(request): Json<sift_protocol::CaptureSemanticPlanRequest>,
+) -> ApiResult<Json<sift_protocol::PlanCapture>> {
+    let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
+    let operation = Operation::CaptureSemanticPlan {
+        session,
+        connection,
+        document: request.document_id,
+        revision: request.revision,
+        catalog_revision: request.catalog_revision,
+        analyze: request.analyze,
+    };
+    let result = state
+        .sessions
+        .capture_semantic_plan(session, connection, request)
+        .await;
+    Ok(Json(finish_operation_as(
+        &state.sessions,
+        operation,
+        result,
+        Some(auth.principal_id.0),
+        |_| Some(1),
+    )?))
 }
 
 fn build_scope(q: SchemaQuery) -> ApiResult<SchemaScope> {

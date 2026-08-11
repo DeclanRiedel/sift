@@ -22,31 +22,56 @@
 
 use std::collections::HashMap;
 
-use sift_protocol::completion::{CompletionContext, CompletionRequest, CompletionResponse};
+use sift_protocol::completion::{CompletionContext, CompletionResponse};
 use sift_protocol::{ConnectionId, Engine, SchemaDepth, SchemaScope, SchemaSnapshot, SessionId};
 
 use crate::error::ApiResult;
 use crate::session::SessionStore;
 
-pub async fn generate_completion(
+pub async fn generate_completion_from_semantic(
     registry: &SessionStore,
     session_id: SessionId,
     conn_id: ConnectionId,
     engine: Engine,
-    req: CompletionRequest,
+    limit: Option<u32>,
+    ctx: sift_semantic::CompletionAnalysis,
 ) -> ApiResult<CompletionResponse> {
     let shallow = registry
         .schema_cached(session_id, conn_id, SchemaScope::shallow())
         .await?;
-    let cursor = usize::min(req.cursor as usize, req.sql.len());
-    let ctx = sift_completion::detect_context(&req.sql, cursor, engine);
+    generate_completion_from_analysis(registry, session_id, conn_id, engine, limit, ctx, shallow)
+        .await
+}
+
+async fn generate_completion_from_analysis(
+    registry: &SessionStore,
+    session_id: SessionId,
+    conn_id: ConnectionId,
+    engine: Engine,
+    limit: Option<u32>,
+    ctx: sift_semantic::CompletionAnalysis,
+    shallow: crate::schema_cache::CachedSchema,
+) -> ApiResult<CompletionResponse> {
+    let deep_qualifier = match &ctx.context {
+        CompletionContext::ExpectingColumn {
+            qualifier: Some(qualifier),
+        } => Some(
+            ctx.relations
+                .iter()
+                .find(|relation| relation.name.eq_ignore_ascii_case(qualifier))
+                .and_then(|relation| relation.target.as_deref())
+                .unwrap_or(qualifier)
+                .to_owned(),
+        ),
+        _ => None,
+    };
     let shallow_response =
-        sift_completion::complete_with_context(&req, &ctx, &shallow.dictionary, engine);
+        sift_completion::complete_with_analysis(limit, &ctx, &shallow.dictionary, engine);
 
     // If we're expecting a column and the qualifier resolves to a
     // shallow-known table, upgrade to a deep snapshot for that object.
-    if let CompletionContext::ExpectingColumn { qualifier: Some(q) } = &shallow_response.context {
-        if let Some(path) = shallow.dictionary.resolve_object_path(q) {
+    if let Some(qualifier) = deep_qualifier {
+        if let Some(path) = shallow.dictionary.resolve_object_path(&qualifier) {
             let deep_scope = SchemaScope {
                 depth: SchemaDepth::Deep { object: path },
                 filter: None,
@@ -58,8 +83,8 @@ pub async fn generate_completion(
                 let merged =
                     merge_deep_into_shallow((*shallow.snapshot).clone(), (*deep.snapshot).clone());
                 let dict = sift_completion::Dictionary::from_snapshot(&merged);
-                return Ok(sift_completion::complete_with_context(
-                    &req, &ctx, &dict, engine,
+                return Ok(sift_completion::complete_with_analysis(
+                    limit, &ctx, &dict, engine,
                 ));
             }
         }
@@ -147,6 +172,7 @@ mod tests {
             fetched_at: chrono::Utc::now(),
             scope: SchemaScope::shallow(),
             incomplete: false,
+            graph: None,
         }
     }
 

@@ -183,6 +183,7 @@ fn assert_indexes_equivalent(src: &[IndexInfo], dst: &[IndexInfo], ctx: &str) {
 /// it from any other occurrence.
 fn retarget_schema(ddl: &str, src_schema: &str, dst_schema: &str) -> String {
     ddl.replace(&format!("\"{src_schema}\"."), &format!("\"{dst_schema}\"."))
+        .replace(&format!("{src_schema}."), &format!("{dst_schema}."))
 }
 
 #[tokio::test]

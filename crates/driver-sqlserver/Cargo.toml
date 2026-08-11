@@ -12,6 +12,7 @@ live-mssql = []
 [dependencies]
 sift-protocol = { workspace = true }
 sift-driver-api = { workspace = true }
+sift-core = { workspace = true }
 async-trait = { workspace = true }
 chrono = { workspace = true }
 csv = { workspace = true }

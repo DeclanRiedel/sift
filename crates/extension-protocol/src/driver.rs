@@ -17,6 +17,7 @@ pub const DRIVER_RPC_V1_CAPABILITIES: &[&str] = &[
     "driver.cancel@1",
     "driver.schema.shallow@1",
     "driver.schema.deep@1",
+    "driver.schema.graph@1",
     "driver.transactions@1",
 ];
 
@@ -116,7 +117,15 @@ pub struct DriverSchemaScope {
     #[serde(default)]
     pub namespace: Option<String>,
     #[serde(default)]
+    pub namespaces: Vec<String>,
+    #[serde(default)]
     pub object: Option<String>,
+    #[serde(default)]
+    pub kinds: Vec<String>,
+    #[serde(default)]
+    pub include_definitions: bool,
+    #[serde(default)]
+    pub max_nodes: Option<u32>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -124,6 +133,7 @@ pub struct DriverSchemaScope {
 pub enum DriverSchemaDepth {
     Shallow,
     Deep,
+    Graph,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]

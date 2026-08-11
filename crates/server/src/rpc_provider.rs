@@ -396,12 +396,39 @@ fn rpc_schema_scope(scope: SchemaScope) -> DriverSchemaScope {
                 .and_then(|schemas| schemas.first())
                 .cloned(),
             object: scope.filter.and_then(|filter| filter.name_pattern),
+            namespaces: Vec::new(),
+            kinds: Vec::new(),
+            include_definitions: false,
+            max_nodes: None,
         },
         SchemaDepth::Deep { object } => DriverSchemaScope {
             depth: DriverSchemaDepth::Deep,
             catalog: object.catalog,
             namespace: object.schema,
             object: Some(object.name),
+            namespaces: Vec::new(),
+            kinds: Vec::new(),
+            include_definitions: false,
+            max_nodes: None,
+        },
+        SchemaDepth::Graph { options } => DriverSchemaScope {
+            depth: DriverSchemaDepth::Graph,
+            catalog: None,
+            namespace: None,
+            object: None,
+            namespaces: options.schemas.unwrap_or_default(),
+            kinds: options
+                .kinds
+                .unwrap_or_default()
+                .into_iter()
+                .filter_map(|kind| {
+                    serde_json::to_value(kind)
+                        .ok()
+                        .and_then(|value| value.as_str().map(str::to_string))
+                })
+                .collect(),
+            include_definitions: options.include_definitions,
+            max_nodes: options.max_nodes,
         },
     }
 }

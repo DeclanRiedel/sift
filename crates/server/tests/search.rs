@@ -30,6 +30,7 @@ fn shallow() -> SchemaSnapshot {
         fetched_at: chrono::Utc::now(),
         scope: SchemaScope::shallow(),
         incomplete: false,
+        graph: None,
     }
 }
 

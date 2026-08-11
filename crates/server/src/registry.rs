@@ -192,6 +192,7 @@ impl BuiltinProviderAdapter {
                     "driver.savepoints@1",
                     "driver.schema.shallow@1",
                     "driver.schema.deep@1",
+                    "driver.schema.graph@1",
                     "driver.cancel@1",
                     "driver.bulk@1",
                     "driver.notifications@1",
@@ -209,6 +210,7 @@ impl BuiltinProviderAdapter {
                     "driver.savepoints@1",
                     "driver.schema.shallow@1",
                     "driver.schema.deep@1",
+                    "driver.schema.graph@1",
                     "driver.cancel@1",
                     "driver.bulk@1",
                     "driver.process-control@1",
@@ -526,8 +528,17 @@ impl RuntimeDriver {
             | OperationKind::CloseConnection => "driver.core@1",
             OperationKind::RefreshSchema => {
                 return self.supports("driver.schema.shallow@1")
-                    || self.supports("driver.schema.deep@1");
+                    || self.supports("driver.schema.deep@1")
+                    || self.supports("driver.schema.graph@1");
             }
+            OperationKind::ReadCatalogGraph
+            | OperationKind::ProjectCatalogDiagram
+            | OperationKind::CreateCatalogSnapshot
+            | OperationKind::CompareCatalogSchemas
+            | OperationKind::PreviewMigration => "driver.schema.graph@1",
+            OperationKind::ApplyMigration
+            | OperationKind::CancelMigration
+            | OperationKind::GetMigrationRun => "driver.core@1",
             OperationKind::BeginTransaction
             | OperationKind::PreviewTransaction
             | OperationKind::CommitTransaction
@@ -547,6 +558,11 @@ impl RuntimeDriver {
             | OperationKind::CloseSemanticDocument
             | OperationKind::SelectStatement
             | OperationKind::DiagnoseSql
+            | OperationKind::FormatSql
+            | OperationKind::SqlQuickFix
+            | OperationKind::FindSqlUsages
+            | OperationKind::PrepareSqlRefactor
+            | OperationKind::CaptureSemanticPlan
             | OperationKind::PreviewEdits
             | OperationKind::ApplyEdits
             | OperationKind::SearchSchema
@@ -959,11 +975,17 @@ fn provider_schema(
     scope: SchemaScope,
     provider: &ProviderRef,
 ) -> Result<SchemaSnapshot, DriverError> {
+    let wants_graph = matches!(&scope.depth, SchemaDepth::Graph { .. });
+    let include_definitions = matches!(
+        &scope.depth,
+        SchemaDepth::Graph { options } if options.include_definitions
+    );
+    let snapshot_incomplete = snapshot.incomplete;
     let fetched_at = chrono::DateTime::from_timestamp_millis(snapshot.fetched_at_unix_ms)
         .ok_or_else(|| {
             DriverError::new(Code::DriverInternal, "invalid provider schema timestamp")
         })?;
-    let trees = snapshot
+    let trees: Vec<sift_protocol::CatalogTree> = snapshot
         .catalogs
         .into_iter()
         .map(|catalog| sift_protocol::CatalogTree {
@@ -976,7 +998,7 @@ fn provider_schema(
                     objects: namespace
                         .objects
                         .into_iter()
-                        .map(|object| {
+                        .map(|mut object| {
                             let kind = serde_json::from_value(serde_json::Value::String(
                                 object.kind.clone(),
                             ))
@@ -987,6 +1009,33 @@ fn provider_schema(
                                 .into_iter()
                                 .map(|column| provider_column(column, provider))
                                 .collect();
+                            info.routine_args = object
+                                .attributes
+                                .remove("routine_args")
+                                .and_then(|value| serde_json::from_value(value).ok());
+                            info.indexes = object
+                                .attributes
+                                .remove("indexes")
+                                .and_then(|value| serde_json::from_value(value).ok())
+                                .unwrap_or_default();
+                            info.constraints = object
+                                .attributes
+                                .remove("constraints")
+                                .and_then(|value| serde_json::from_value(value).ok())
+                                .unwrap_or_default();
+                            info.triggers = object
+                                .attributes
+                                .remove("triggers")
+                                .and_then(|value| serde_json::from_value(value).ok())
+                                .unwrap_or_default();
+                            if !include_definitions {
+                                for constraint in &mut info.constraints {
+                                    constraint.definition = None;
+                                }
+                                for trigger in &mut info.triggers {
+                                    trigger.definition = None;
+                                }
+                            }
                             info
                         })
                         .collect(),
@@ -994,11 +1043,34 @@ fn provider_schema(
                 .collect(),
         })
         .collect();
+    let graph = wants_graph.then(|| {
+        let mut coverage = sift_protocol::CatalogCoverage::complete();
+        coverage.state = sift_protocol::CatalogCoverageState::Partial;
+        coverage
+            .failures
+            .push(sift_protocol::CatalogCoverageFailure {
+                stage: "dependencies".into(),
+                schema: None,
+                code: if snapshot_incomplete {
+                    "provider_reported_incomplete"
+                } else {
+                    "driver_rpc_v1_dependency_edges_unavailable"
+                }
+                .into(),
+            });
+        let mut graph =
+            sift_core::catalog::graph_from_trees(&trees, coverage, provider.provider_id.as_str());
+        if let SchemaDepth::Graph { options } = &scope.depth {
+            sift_core::catalog::project_graph(&mut graph, options);
+        }
+        graph
+    });
     Ok(SchemaSnapshot {
         trees,
         fetched_at,
         scope,
-        incomplete: snapshot.incomplete,
+        incomplete: snapshot_incomplete,
+        graph,
     })
 }
 
@@ -1355,12 +1427,40 @@ fn driver_schema(snapshot: sift_protocol::SchemaSnapshot) -> DriverSchemaSnapsho
                 .filter
                 .as_ref()
                 .and_then(|filter| filter.name_pattern.clone()),
+            namespaces: Vec::new(),
+            kinds: Vec::new(),
+            include_definitions: false,
+            max_nodes: None,
         },
         SchemaDepth::Deep { object } => DriverSchemaScope {
             depth: DriverSchemaDepth::Deep,
             catalog: object.catalog.clone(),
             namespace: object.schema.clone(),
             object: Some(object.name.clone()),
+            namespaces: Vec::new(),
+            kinds: Vec::new(),
+            include_definitions: false,
+            max_nodes: None,
+        },
+        SchemaDepth::Graph { options } => DriverSchemaScope {
+            depth: DriverSchemaDepth::Graph,
+            catalog: None,
+            namespace: None,
+            object: None,
+            namespaces: options.schemas.clone().unwrap_or_default(),
+            kinds: options
+                .kinds
+                .clone()
+                .unwrap_or_default()
+                .into_iter()
+                .filter_map(|kind| {
+                    serde_json::to_value(kind)
+                        .ok()
+                        .and_then(|value| value.as_str().map(str::to_string))
+                })
+                .collect(),
+            include_definitions: options.include_definitions,
+            max_nodes: options.max_nodes,
         },
     };
     DriverSchemaSnapshot {
@@ -1578,6 +1678,10 @@ mod tests {
                     catalog: None,
                     namespace: None,
                     object: None,
+                    namespaces: Vec::new(),
+                    kinds: Vec::new(),
+                    include_definitions: false,
+                    max_nodes: None,
                 },
                 incomplete: false,
             })

@@ -53,6 +53,25 @@ pub fn filter_snapshot(policy: &ConnectionPolicy, snapshot: &mut SchemaSnapshot)
     let Some(selectors) = &policy.allowed_schemas else {
         return;
     };
+    let allowed = snapshot
+        .trees
+        .iter()
+        .flat_map(|catalog| {
+            catalog
+                .schemas
+                .iter()
+                .filter(|schema| {
+                    selectors.iter().any(|selector| {
+                        selector.schema == schema.name
+                            && selector
+                                .catalog
+                                .as_ref()
+                                .map_or(true, |expected| expected == &catalog.name)
+                    })
+                })
+                .map(|schema| format!("{}.{}", catalog.name, schema.name))
+        })
+        .collect::<std::collections::HashSet<_>>();
     snapshot.trees.retain_mut(|catalog| {
         catalog.schemas.retain(|schema| {
             selectors.iter().any(|selector| {
@@ -65,6 +84,69 @@ pub fn filter_snapshot(policy: &ConnectionPolicy, snapshot: &mut SchemaSnapshot)
         });
         !catalog.schemas.is_empty()
     });
+    if let Some(graph) = snapshot.graph.as_mut() {
+        let allowed_schema_ids = graph
+            .nodes
+            .iter()
+            .filter(|node| {
+                node.kind == sift_protocol::CatalogNodeKind::Schema
+                    && allowed.contains(&node.qualified_name)
+            })
+            .map(|node| node.id.clone())
+            .collect::<std::collections::HashSet<_>>();
+        let mut visible = allowed_schema_ids.clone();
+        loop {
+            let before = visible.len();
+            for node in &graph.nodes {
+                if visible.contains(&node.id) {
+                    if let Some(parent) = &node.parent_id {
+                        visible.insert(parent.clone());
+                    }
+                }
+            }
+            if visible.len() == before {
+                break;
+            }
+        }
+        loop {
+            let before = visible.len();
+            for node in &graph.nodes {
+                if node.kind != sift_protocol::CatalogNodeKind::Schema
+                    && node
+                        .parent_id
+                        .as_ref()
+                        .is_some_and(|parent| visible.contains(parent))
+                {
+                    visible.insert(node.id.clone());
+                }
+            }
+            if visible.len() == before {
+                break;
+            }
+        }
+        graph.nodes.retain(|node| visible.contains(&node.id));
+        graph.edges.retain_mut(|edge| {
+            if !visible.contains(&edge.from) {
+                return false;
+            }
+            if edge.to.as_ref().is_some_and(|to| !visible.contains(to)) {
+                edge.to = None;
+                edge.certainty = sift_protocol::CatalogEdgeCertainty::Inaccessible;
+                edge.referenced_path = None;
+                edge.column_pairs.clear();
+            }
+            true
+        });
+        graph.coverage.state = sift_protocol::CatalogCoverageState::Partial;
+        graph
+            .coverage
+            .failures
+            .push(sift_protocol::CatalogCoverageFailure {
+                stage: "authorization".into(),
+                schema: None,
+                code: "policy_filtered".into(),
+            });
+    }
 }
 
 fn enforce_sql(
@@ -458,10 +540,63 @@ mod tests {
             fetched_at: chrono::Utc::now(),
             scope: sift_protocol::SchemaScope::shallow(),
             incomplete: false,
+            graph: None,
         };
+        snapshot.graph = Some(sift_core::catalog::graph_from_trees(
+            &snapshot.trees,
+            sift_protocol::CatalogCoverage::complete(),
+            "test:db",
+        ));
+        let graph = snapshot.graph.as_mut().unwrap();
+        let public = graph
+            .nodes
+            .iter()
+            .find(|node| node.qualified_name == "app.public")
+            .unwrap()
+            .id
+            .clone();
+        let secret = graph
+            .nodes
+            .iter()
+            .find(|node| node.qualified_name == "app.secret")
+            .unwrap()
+            .id
+            .clone();
+        graph.edges.push(sift_protocol::CatalogEdge {
+            from: public,
+            to: Some(secret),
+            kind: sift_protocol::CatalogEdgeKind::DependsOn,
+            certainty: sift_protocol::CatalogEdgeCertainty::CatalogProven,
+            referenced_path: Some("app.secret".into()),
+            column_pairs: Vec::new(),
+        });
         filter_snapshot(&policy, &mut snapshot);
         assert_eq!(snapshot.trees.len(), 1);
         assert_eq!(snapshot.trees[0].schemas.len(), 1);
         assert_eq!(snapshot.trees[0].schemas[0].name, "public");
+        let graph = snapshot.graph.unwrap();
+        assert!(graph
+            .nodes
+            .iter()
+            .any(|node| node.qualified_name == "app.public"));
+        assert!(!graph
+            .nodes
+            .iter()
+            .any(|node| node.qualified_name.contains("secret")));
+        assert_eq!(
+            graph.coverage.state,
+            sift_protocol::CatalogCoverageState::Partial
+        );
+        let boundary = graph
+            .edges
+            .iter()
+            .find(|edge| edge.kind == sift_protocol::CatalogEdgeKind::DependsOn)
+            .unwrap();
+        assert_eq!(
+            boundary.certainty,
+            sift_protocol::CatalogEdgeCertainty::Inaccessible
+        );
+        assert!(boundary.to.is_none());
+        assert!(boundary.referenced_path.is_none());
     }
 }

@@ -18,6 +18,27 @@
     "schema_version": 28,
     "minimum_compatible_version": 19,
     "automatic_migration": "allowed",
+    "current_binary": "migration_required"
+  },
+  {
+    "name": "current-v29",
+    "schema_version": 29,
+    "minimum_compatible_version": 19,
+    "automatic_migration": "allowed",
+    "current_binary": "migration_required"
+  },
+  {
+    "name": "current-v30",
+    "schema_version": 30,
+    "minimum_compatible_version": 19,
+    "automatic_migration": "allowed",
+    "current_binary": "migration_required"
+  },
+  {
+    "name": "current-v31",
+    "schema_version": 31,
+    "minimum_compatible_version": 19,
+    "automatic_migration": "allowed",
     "current_binary": "accepted"
   }
 ]
