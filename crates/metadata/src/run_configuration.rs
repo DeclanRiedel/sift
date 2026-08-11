@@ -1014,5 +1014,41 @@ mod tests {
                 .state,
             ScheduleOccurrenceState::OutcomeUnknown
         );
+
+        {
+            let conn = store.conn().unwrap();
+            conn.execute(
+                "UPDATE run_execution SET state = 'running', finished_at = NULL WHERE id = ?1",
+                params![run.id.0],
+            )
+            .unwrap();
+            conn.execute(
+                "UPDATE schedule_occurrence SET state = 'leased', lease_owner = 'stale',
+                 lease_expires_at = '2099-01-01T00:00:00Z', finished_at = NULL WHERE id = ?1",
+                params![claimed[0].1.id.0],
+            )
+            .unwrap();
+        }
+        store.sanitize_phase_l_backup_snapshot().unwrap();
+        assert_eq!(
+            store
+                .run_execution_for_principal(run.id, actor, false)
+                .unwrap()
+                .run
+                .state,
+            RunState::OutcomeUnknown
+        );
+        let (state, owner, expiry): (String, Option<String>, Option<String>) = store
+            .conn()
+            .unwrap()
+            .query_row(
+                "SELECT state, lease_owner, lease_expires_at FROM schedule_occurrence WHERE id = ?1",
+                params![claimed[0].1.id.0],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(state, "outcome_unknown");
+        assert_eq!(owner, None);
+        assert_eq!(expiry, None);
     }
 }

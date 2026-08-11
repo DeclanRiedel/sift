@@ -71,6 +71,22 @@ impl FileSecretStore {
         persist_blocking(store_path, &cipher, &HashMap::new())
     }
 
+    /// Copy an encrypted store while omitting complete secret namespaces.
+    /// Plaintext entries remain internal to this module and are immediately
+    /// re-sealed with the same key.
+    pub fn copy_excluding_namespaces(
+        source_path: &Path,
+        key_file: &Path,
+        destination_path: &Path,
+        excluded: &[&str],
+    ) -> Result<()> {
+        let key = read_key(key_file)?;
+        let cipher = ChaCha20Poly1305::new(Key::from_slice(&key));
+        let mut entries = load(source_path, &cipher)?;
+        entries.retain(|(namespace, _), _| !excluded.iter().any(|excluded| namespace == excluded));
+        persist_blocking(destination_path, &cipher, &entries)
+    }
+
     /// Snapshot the map under the mutex, then perform the (blocking)
     /// encrypt + write on a dedicated blocking task so we don't stall a
     /// tokio worker thread on slow filesystems.
@@ -275,6 +291,37 @@ mod tests {
         assert!(
             !on_disk.windows(6).any(|w| w == b"s3cr3t"),
             "secret must not be stored in plaintext"
+        );
+    }
+
+    #[tokio::test]
+    async fn filtered_copy_omits_only_selected_namespaces() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = write_key(dir.path());
+        let source = dir.path().join("source.enc");
+        let destination = dir.path().join("destination.enc");
+        let store = FileSecretStore::open(&source, &key).unwrap();
+        store
+            .put("vcs-credential", "git", b"git-secret")
+            .await
+            .unwrap();
+        store
+            .put("connection", "database", b"db-secret")
+            .await
+            .unwrap();
+
+        FileSecretStore::copy_excluding_namespaces(
+            &source,
+            &key,
+            &destination,
+            &["vcs-credential"],
+        )
+        .unwrap();
+        let copied = FileSecretStore::open(destination, key).unwrap();
+        assert_eq!(copied.get("vcs-credential", "git").await.unwrap(), None);
+        assert_eq!(
+            copied.get("connection", "database").await.unwrap(),
+            Some(b"db-secret".to_vec())
         );
     }
 

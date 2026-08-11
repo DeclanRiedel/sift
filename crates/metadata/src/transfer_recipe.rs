@@ -390,6 +390,11 @@ mod tests {
         assert_eq!(record.content, b"complete");
         assert_eq!(record.artifact.byte_len, 8);
         assert_eq!(record.artifact.digest.len(), 64);
+        store.sanitize_phase_l_backup_snapshot().unwrap();
+        assert!(matches!(
+            store.workspace_artifact_for_principal(artifact.id, actor),
+            Err(MetadataError::WorkspaceArtifactNotFound(_))
+        ));
         assert!(matches!(
             store.workspace_artifact_for_principal(WorkspaceArtifactId(999), actor),
             Err(MetadataError::WorkspaceArtifactNotFound(_))

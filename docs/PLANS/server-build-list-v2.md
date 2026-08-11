@@ -57,6 +57,11 @@
   preview, and semantic plan retention are implemented across protocol,
   server, OpenAPI, and SDK. Safety matrices and measured budgets are in
   `docs/PLANS/phase-k-graduation-matrix.md`.
+- **Phase L is complete.** Room-owned virtual workspaces, optional projections,
+  hardened Git, deterministic runs, durable scheduling, and bounded extensible
+  transfer recipes are implemented across protocol, server, OpenAPI, and SDK.
+  Graduation evidence and budgets are in
+  `docs/PLANS/phase-l-graduation-matrix.md`.
 
 ---
 
@@ -495,7 +500,7 @@ Detailed implementation order and ADR-034 contract:
       stage-and-commit artifacts; bundled CSV/TSV/JSON/HTML/Markdown/XLSX,
       supervised extension format frames, run/schedule reuse, streaming SDK,
       audit, and exact OpenAPI operation coverage.
-- [ ] [Graduate] Local, SSH-remote, and network-hosted workspace matrices;
+- [x] [Graduate] Local, SSH-remote, and network-hosted workspace matrices;
       repository credential redaction; concurrent edit/VCS conflict tests;
       deterministic multi-script execution and recovery tests.
 

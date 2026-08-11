@@ -1,11 +1,11 @@
 # Phase L — Workspaces, VCS, And Execution Automation
 
-Status: accepted implementation contract; ADR-034 is graduated. Implementation
-is in progress.
+Status: **graduated on 2026-08-11.** ADR-034 and all selected v1 surfaces are
+implemented; evidence is in `phase-l-graduation-matrix.md`.
 
 Milestones: L0 contract lock, L1 virtual workspaces/history, L2 projections and
 offline DDL sources, L3 bundled Git, L4 foreground runs, and L5 durable
-scheduling, and L6 recipe-based import/export are complete; L7 remains.
+scheduling, L6 recipe-based import/export, and L7 graduation are complete.
 
 This plan expands Phase L in `server-build-list-v2.md`. It is intentionally
 ordered design-first: slice L0 locks the topology before any public workspace

@@ -853,6 +853,43 @@ impl MetadataStore {
         }
     }
 
+    /// Strip process-local Phase L state from an offline backup snapshot.
+    /// Definitions and completed history remain durable, while restoring the
+    /// archive cannot resume a checkout, credential, lease, artifact, or
+    /// in-flight database operation.
+    pub fn sanitize_phase_l_backup_snapshot(&self) -> Result<()> {
+        let now = now_text();
+        let mut conn = self.conn()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        tx.execute(
+            "UPDATE repository_binding SET credential_handle = NULL
+             WHERE credential_handle IS NOT NULL",
+            [],
+        )?;
+        tx.execute("DELETE FROM workspace_artifact", [])?;
+        tx.execute(
+            "UPDATE run_step_result SET state = 'cancelled', finished_at = COALESCE(finished_at, ?1)
+             WHERE state IN ('pending', 'running')",
+            params![&now],
+        )?;
+        tx.execute(
+            "UPDATE run_execution SET state = 'outcome_unknown', cancellation_requested = 0,
+             finished_at = COALESCE(finished_at, ?1), revision = revision + 1
+             WHERE state IN ('queued', 'admitted', 'preparing', 'running')",
+            params![&now],
+        )?;
+        tx.execute(
+            "UPDATE schedule_occurrence SET
+                 state = CASE WHEN state IN ('leased', 'running') THEN 'outcome_unknown' ELSE state END,
+                 error_code = CASE WHEN state IN ('leased', 'running') THEN 'backup_interrupted' ELSE error_code END,
+                 finished_at = CASE WHEN state IN ('leased', 'running') THEN COALESCE(finished_at, ?1) ELSE finished_at END,
+                 lease_owner = NULL, lease_expires_at = NULL",
+            params![&now],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
     /// Make restored durable state safe under the destination installation's
     /// identity. Durable principals and credentials remain; bearer and
     /// one-use authentication material does not.

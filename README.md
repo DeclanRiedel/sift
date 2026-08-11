@@ -43,6 +43,12 @@ Its catalog, diff, migration, comparison, diagram, semantic-plan, safety, and
 performance evidence is recorded in
 `docs/PLANS/phase-k-graduation-matrix.md`.
 
+Phase L virtual workspaces, projections, hardened Git, run configurations,
+durable scheduling, and extensible transfer recipes are implemented and
+graduated. Its deployment, conflict, recovery, security, compatibility, and
+measured budget evidence is recorded in
+`docs/PLANS/phase-l-graduation-matrix.md`.
+
 ## The five goals this product wishes to achieve
 
 1. **The server is the product.** All product behavior lives in `sift-server`;

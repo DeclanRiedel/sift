@@ -1367,3 +1367,8 @@ room-aware metadata instead of reviving V003, rooted filesystem traversal,
 typed VCS/run/recipe contracts, durable recovery state, capability discovery,
 and deployment/security graduation matrices. The normative implementation
 order is `docs/PLANS/phase-l-workspaces-vcs-automation.md`.
+
+**Graduation.** Implemented and graduated on 2026-08-11. Deployment,
+collaboration, conflict, recovery, transfer, security, compatibility, backup,
+and measured budget evidence is recorded in
+`docs/PLANS/phase-l-graduation-matrix.md`.

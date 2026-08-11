@@ -251,8 +251,16 @@ fn create_locked(
     store.integrity_check()?;
 
     let directory = tempfile::Builder::new().prefix("sift-backup-").tempdir()?;
+    let raw_snapshot = directory.path().join("raw-metadata.sqlite");
     let snapshot = directory.path().join(METADATA_ENTRY);
-    store.backup_database_to(&snapshot)?;
+    store.backup_database_to(&raw_snapshot)?;
+    {
+        let snapshot_store =
+            MetadataStore::open(&raw_snapshot, Arc::new(MemorySecretStore::new()))?;
+        snapshot_store.sanitize_phase_l_backup_snapshot()?;
+        snapshot_store.integrity_check()?;
+        snapshot_store.backup_database_to(&snapshot)?;
+    }
     let status = store.migration_status()?;
     let mut payload_paths = BTreeMap::new();
     payload_paths.insert(METADATA_ENTRY.to_string(), snapshot);
@@ -303,7 +311,14 @@ fn collect_secret_payloads(
             FileSecretStore::open(&secrets_path, &key_path)
                 .context("validating file secret store before backup")?;
             let portable_secrets = if secrets_path.exists() {
-                secrets_path
+                let filtered = workspace.join(SECRETS_ENTRY);
+                FileSecretStore::copy_excluding_namespaces(
+                    &secrets_path,
+                    &key_path,
+                    &filtered,
+                    &["vcs-credential"],
+                )?;
+                filtered
             } else {
                 let empty = workspace.join(SECRETS_ENTRY);
                 FileSecretStore::initialize_empty(&empty, &key_path)?;
@@ -941,7 +956,10 @@ fn sync_dir(path: &Path) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sift_metadata::PrincipalId;
+    use sift_metadata::{
+        MetadataError, NewRoom, NewTransferRecipe, PrincipalId, RoomKind, TenantId,
+    };
+    use sift_protocol::{TransferDirection, TransferEndpoint, WorkspaceArtifactId, WorkspaceId};
 
     fn write_private_key(path: &Path, byte: &str) {
         let mut options = OpenOptions::new();
@@ -997,6 +1015,47 @@ mod tests {
         secret_store
             .put("test", "credential", &secret)
             .await
+            .unwrap();
+        secret_store
+            .put("vcs-credential", "git", b"must-not-back-up")
+            .await
+            .unwrap();
+        let room = store
+            .create_room(
+                TenantId(1),
+                PrincipalId(1),
+                NewRoom {
+                    name: "backup-workspace-room".into(),
+                    kind: RoomKind::Shared,
+                },
+            )
+            .unwrap();
+        let workspace = store
+            .create_workspace(room.id, PrincipalId(1), "backup-workspace")
+            .unwrap();
+        store
+            .create_transfer_recipe(
+                workspace.id,
+                PrincipalId(1),
+                NewTransferRecipe {
+                    name: "durable-recipe".into(),
+                    direction: TransferDirection::Export,
+                    source: TransferEndpoint::Query,
+                    sink: TransferEndpoint::Artifact,
+                    format_id: "csv".into(),
+                    format_version: "1".into(),
+                    options: serde_json::json!({}),
+                },
+            )
+            .unwrap();
+        store
+            .create_workspace_artifact(
+                workspace.id,
+                PrincipalId(1),
+                "text/plain",
+                b"ephemeral".to_vec(),
+                None,
+            )
             .unwrap();
         store.ensure_auth_system_keys().await.unwrap();
         (api_token, secret)
@@ -1144,9 +1203,28 @@ mod tests {
             destination_secrets.get("test", "credential").await.unwrap(),
             Some(expected_secret)
         );
+        assert_eq!(
+            destination_secrets
+                .get("vcs-credential", "git")
+                .await
+                .unwrap(),
+            None
+        );
         let restored =
             MetadataStore::open(&metadata_path(&destination), destination_secrets).unwrap();
         assert!(restored.verify_api_token(&api_token).unwrap().is_none());
+        assert_eq!(
+            restored
+                .list_transfer_recipes_for_principal(WorkspaceId(1), PrincipalId(1))
+                .unwrap()
+                .len(),
+            1,
+            "durable Phase L definitions survive backup and restore"
+        );
+        assert!(matches!(
+            restored.workspace_artifact_for_principal(WorkspaceArtifactId(1), PrincipalId(1)),
+            Err(MetadataError::WorkspaceArtifactNotFound(_))
+        ));
         restored.integrity_check().unwrap();
     }
 
