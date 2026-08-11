@@ -25,6 +25,9 @@ actions!(
     [
         OpenCommandPalette,
         DismissModal,
+        PaletteUp,
+        PaletteDown,
+        PaletteConfirm,
         SplitPane,
         FocusNextPane,
         CloseActivePane,
@@ -394,6 +397,7 @@ impl gpui::Render for Pane {
 pub struct WorkspaceShell {
     focus_handle: FocusHandle,
     query_input: Entity<TextInput>,
+    palette_selected: usize,
     theme: Theme,
     dark_theme: bool,
     window_presentation: WindowPresentation,
@@ -463,7 +467,11 @@ impl WorkspaceShell {
             + 1;
         let query_input = cx.new(|cx| TextInput::new("", "Search commands…", cx));
         // Re-render the palette as the search text changes so its list filters.
-        cx.observe(&query_input, |_, _, cx| cx.notify()).detach();
+        cx.observe(&query_input, |shell, _, cx| {
+            shell.palette_selected = 0;
+            cx.notify();
+        })
+        .detach();
         panes[active_pane].focus_handle(cx).focus(window, cx);
         let bounds_subscription = cx.observe_window_bounds(window, |shell, window, cx| {
             shell.capture_window_bounds(window.window_bounds());
@@ -472,6 +480,7 @@ impl WorkspaceShell {
         Self {
             focus_handle: cx.focus_handle(),
             query_input,
+            palette_selected: 0,
             theme,
             dark_theme: state.dark_theme,
             window_presentation,
@@ -1012,8 +1021,47 @@ impl WorkspaceShell {
         cx: &mut Context<Self>,
     ) {
         self.modal = Some(Modal::CommandPalette);
+        self.palette_selected = 0;
         self.query_input.focus_handle(cx).focus(window, cx);
         cx.notify();
+    }
+
+    /// Commands matching the palette search text (case-insensitive substring).
+    fn filtered_commands(&self, cx: &App) -> Vec<CommandSpec> {
+        let query = self.query_input.read(cx).text().to_lowercase();
+        self.command_specs(cx)
+            .into_iter()
+            .filter(|command| query.is_empty() || command.label.to_lowercase().contains(&query))
+            .collect()
+    }
+
+    fn palette_up(&mut self, _: &PaletteUp, _: &mut Window, cx: &mut Context<Self>) {
+        if self.modal != Some(Modal::CommandPalette) {
+            return;
+        }
+        self.palette_selected = self.palette_selected.saturating_sub(1);
+        cx.notify();
+    }
+
+    fn palette_down(&mut self, _: &PaletteDown, _: &mut Window, cx: &mut Context<Self>) {
+        if self.modal != Some(Modal::CommandPalette) {
+            return;
+        }
+        let last = self.filtered_commands(cx).len().saturating_sub(1);
+        self.palette_selected = (self.palette_selected + 1).min(last);
+        cx.notify();
+    }
+
+    fn palette_confirm(&mut self, _: &PaletteConfirm, window: &mut Window, cx: &mut Context<Self>) {
+        if self.modal != Some(Modal::CommandPalette) {
+            return;
+        }
+        let commands = self.filtered_commands(cx);
+        if let Some(command) = commands.get(self.palette_selected) {
+            if command.enabled() {
+                self.run_command(command.id, window, cx);
+            }
+        }
     }
 
     fn dismiss_modal(&mut self, _: &DismissModal, _: &mut Window, cx: &mut Context<Self>) {
@@ -1282,18 +1330,20 @@ impl WorkspaceShell {
             let content = match modal {
                 Modal::CommandPalette => {
                     let query = self.query_input.read(cx).text().to_lowercase();
-                    let commands: Vec<CommandSpec> = self
-                        .command_specs(cx)
-                        .into_iter()
-                        .filter(|command| {
-                            query.is_empty() || command.label.to_lowercase().contains(&query)
-                        })
-                        .collect();
+                    let commands = self.filtered_commands(cx);
+                    let selected_idx = self.palette_selected.min(commands.len().saturating_sub(1));
                     div()
                         .flex()
                         .flex_col()
-                        .gap_1()
-                        .child(self.query_input.clone())
+                        .child(
+                            // Search field with a divider under it, Zed-style.
+                            div()
+                                .pb_2()
+                                .mb_1()
+                                .border_b_1()
+                                .border_color(colors.border)
+                                .child(self.query_input.clone()),
+                        )
                         .when(commands.is_empty(), |palette| {
                             palette.child(
                                 div()
@@ -1303,32 +1353,59 @@ impl WorkspaceShell {
                                     .child("No matching commands"),
                             )
                         })
-                        .children(commands.into_iter().map(|command| {
-                            let enabled = command.enabled();
-                            let id = command.id;
-                            let mut row =
-                                div()
-                                    .id(id)
-                                    .flex()
-                                    .items_center()
-                                    .justify_between()
-                                    .px_2()
-                                    .py_1()
-                                    .rounded_sm()
-                                    .when(!enabled, |row| row.text_color(colors.muted_text))
-                                    .child(command.label)
-                                    .child(div().text_xs().text_color(colors.muted_text).child(
-                                        command.disabled_reason.unwrap_or(command.shortcut),
-                                    ));
-                            if enabled {
-                                row = row.hover(|row| row.bg(colors.selected_surface)).on_click(
-                                    cx.listener(move |shell, _, window, cx| {
-                                        shell.run_command(id, window, cx)
-                                    }),
-                                );
-                            }
-                            row
-                        }))
+                        .child(
+                            div()
+                                .id("command-list")
+                                .flex()
+                                .flex_col()
+                                .gap_px()
+                                .max_h(px(360.))
+                                .overflow_y_scroll()
+                                .children(commands.into_iter().enumerate().map(
+                                    |(idx, command)| {
+                                        let enabled = command.enabled();
+                                        let id = command.id;
+                                        let selected = idx == selected_idx;
+                                        let right =
+                                            command.disabled_reason.unwrap_or(command.shortcut);
+                                        let mut row = div()
+                                            .id(id)
+                                            .flex()
+                                            .items_center()
+                                            .justify_between()
+                                            .gap_2()
+                                            .h(px(30.))
+                                            .px_2()
+                                            .rounded_sm()
+                                            .when(selected && enabled, |row| {
+                                                row.bg(colors.selected_surface)
+                                            })
+                                            .when(!enabled, |row| row.text_color(colors.muted_text))
+                                            .child(highlight_match(
+                                                command.label,
+                                                &query,
+                                                colors.accent,
+                                            ))
+                                            .child(
+                                                div()
+                                                    .flex_none()
+                                                    .text_xs()
+                                                    .text_color(colors.muted_text)
+                                                    .child(right),
+                                            );
+                                        if enabled {
+                                            row = row
+                                                .hover(|row| row.bg(colors.selected_surface))
+                                                .on_click(cx.listener(
+                                                    move |shell, _, window, cx| {
+                                                        shell.run_command(id, window, cx)
+                                                    },
+                                                ));
+                                        }
+                                        row
+                                    },
+                                )),
+                        )
                         .into_any_element()
                 }
                 Modal::ConfirmClose { title } => div()
@@ -1393,6 +1470,9 @@ impl gpui::Render for WorkspaceShell {
             .track_focus(&self.focus_handle)
             .on_action(cx.listener(Self::open_command_palette))
             .on_action(cx.listener(Self::dismiss_modal))
+            .on_action(cx.listener(Self::palette_up))
+            .on_action(cx.listener(Self::palette_down))
+            .on_action(cx.listener(Self::palette_confirm))
             .on_action(cx.listener(Self::split_pane))
             .on_action(cx.listener(Self::focus_next_pane))
             .on_action(cx.listener(Self::close_active_pane))
@@ -1483,6 +1563,29 @@ impl gpui::Render for WorkspaceShell {
                     .child(tooltip.message.clone())
             }))
             .children(self.render_modal(cx))
+    }
+}
+
+/// Render `label` with the case-insensitive `query` substring emphasized in the
+/// accent color, like a fuzzy-finder match highlight.
+fn highlight_match(label: &'static str, query: &str, accent: gpui::Hsla) -> impl IntoElement {
+    let base = div().flex().min_w_0();
+    if query.is_empty() {
+        return base.child(label);
+    }
+    match label.to_lowercase().find(query) {
+        Some(start) => {
+            let end = start + query.len();
+            base.child(&label[..start])
+                .child(
+                    div()
+                        .text_color(accent)
+                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                        .child(&label[start..end]),
+                )
+                .child(&label[end..])
+        }
+        None => base.child(label),
     }
 }
 
@@ -1621,6 +1724,23 @@ mod tests {
             workspace.read_with(&cx, |workspace, _| workspace.modal().cloned()),
             Some(Modal::CommandPalette)
         );
+    }
+
+    #[gpui::test]
+    fn palette_keyboard_nav_selects_and_runs(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        let focus = workspace.read_with(&cx, |shell, cx| shell.focus_handle(cx));
+        cx.update(|window, cx| focus.dispatch_action(&OpenCommandPalette, window, cx));
+        assert!(workspace.read_with(&cx, |shell, _| shell.left_dock.presentation.open));
+        // Arrow down to "Toggle Connections Dock" (index 5) and run it.
+        for _ in 0..5 {
+            cx.update(|window, cx| focus.dispatch_action(&PaletteDown, window, cx));
+        }
+        cx.update(|window, cx| focus.dispatch_action(&PaletteConfirm, window, cx));
+        assert!(!workspace.read_with(&cx, |shell, _| shell.left_dock.presentation.open));
+        assert!(workspace.read_with(&cx, |shell, _| shell.modal().is_none()));
     }
 
     #[gpui::test]
