@@ -7,8 +7,8 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+sift-api-types = { workspace = true }
 sift-doc = { workspace = true }
-sift-metadata = { workspace = true }
 sift-protocol = { workspace = true }
 chrono = { workspace = true }
 bytes = { workspace = true }

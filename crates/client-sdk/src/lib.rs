@@ -241,10 +241,9 @@ pub const SUPPORTED_HTTP_OPERATION_IDS: &[&str] = &[
     "whoAmI",
 ];
 
-// Request/response DTOs shared with the server. Re-export so downstream
-// consumers can build requests without depending on sift_metadata::http
-// directly.
-pub use sift_metadata::http::{
+// Pure request/response DTOs shared with the server. Re-export so downstream
+// consumers need no server-internal storage crate.
+pub use sift_api_types::{
     AddRoomMemberRequest, ApplyWorkspaceProjectionRequest, BindRepositoryRequest,
     BindRoomConnectionRequest, BindWorkspaceProjectionRequest, CreateDdlSourceRequest,
     CreateDocumentRequest, CreateRoomRequest, CreateRunConfigurationRequest,
@@ -263,10 +262,11 @@ pub use sift_metadata::http::{
     VcsRemoteRequest, WorkspaceBatchMutationItem, WorkspaceBatchMutationRequest,
     WorkspaceTreeResponse,
 };
-use sift_metadata::{
-    ApiTokenId, ConnectionProfile, ConnectionProfileId, Document, DocumentId, GithubAllowlistEntry,
-    PrincipalKey, QueryHistory, Room, RoomId, RoomMember, SavedQuery, SavedQueryId,
-    SavedQueryScope, TenantId, TenantInvitation, TenantLimitOverride, TenantMembership,
+use sift_api_types::{
+    ApiTokenId, ApiTokenRow, ConnectionProfile, ConnectionProfileId, Document, DocumentId,
+    GithubAllowlistEntry, OperationAudit, PrincipalKey, QueryHistory, Room, RoomId, RoomMember,
+    SavedQuery, SavedQueryId, SavedQueryScope, TenantId, TenantInvitation, TenantLimitOverride,
+    TenantMembership,
 };
 use sift_protocol::{
     AcceptTenantInvitationRequest, AdminCreatePasswordPrincipalRequest,
@@ -3139,7 +3139,7 @@ impl Client {
         .await
     }
 
-    pub async fn auth_tokens(&self) -> Result<Vec<sift_metadata::ApiTokenRow>> {
+    pub async fn auth_tokens(&self) -> Result<Vec<ApiTokenRow>> {
         self.get("/v1/auth/tokens").await
     }
 
@@ -3359,7 +3359,7 @@ impl Client {
 
     /// Durable operation-audit rows (actor, target, result code, row count,
     /// sanitized failure message). Requires a configured metadata store.
-    pub async fn operation_audit(&self) -> Result<Vec<sift_metadata::OperationAudit>> {
+    pub async fn operation_audit(&self) -> Result<Vec<OperationAudit>> {
         self.get("/v1/operations/audit").await
     }
 
@@ -3367,7 +3367,7 @@ impl Client {
         &self,
         cursor: Option<&str>,
         limit: Option<u32>,
-    ) -> Result<CursorPage<sift_metadata::OperationAudit>> {
+    ) -> Result<CursorPage<OperationAudit>> {
         let mut query = Vec::new();
         if let Some(cursor) = cursor {
             query.push(format!("cursor={cursor}"));

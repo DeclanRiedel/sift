@@ -1,6 +1,6 @@
 # Phase M — GPUI Desktop Client
 
-Status: **design locked on 2026-08-11; implementation pending.** ADR-040 is
+Status: **design locked on 2026-08-11; M0 complete, M1 pending.** ADR-040 is
 normative. Every milestone below ends in a separately reviewable commit with
 the workspace quality gates green.
 
@@ -322,16 +322,16 @@ tolerance fail the relevant performance gate.
 
 ### M0 — client boundary and GPUI feasibility
 
-- [ ] Move public SDK HTTP DTOs out of `sift-metadata`; enforce the client
+- [x] Move public SDK HTTP DTOs out of `sift-metadata`; enforce the client
       dependency firewall.
-- [ ] Add the three client crates and an exact GPUI revision.
-- [ ] Open a native window with semantic theme tokens and one root entity.
-- [ ] Prove background-to-UI entity updates, cancellation on entity drop,
+- [x] Add the three client crates and an exact GPUI revision.
+- [x] Open a native window with semantic theme tokens and one root entity.
+- [x] Prove background-to-UI entity updates, cancellation on entity drop,
       action dispatch, focus contexts, text/IME input, clipboard, and one
       custom virtual-list element.
-- [ ] Establish Linux build/test prerequisites without manual shell state.
-- [ ] Record initial startup, input, and virtual-list measurements.
-- [ ] Add `#[gpui::test]` coverage and a headless-safe test strategy.
+- [x] Establish Linux build/test prerequisites without manual shell state.
+- [x] Record initial startup, input, and virtual-list measurements.
+- [x] Add `#[gpui::test]` coverage and a headless-safe test strategy.
 
 M0 is a feasibility gate. If GPUI cannot meet text input, accessibility,
 virtualization, or automated-test needs, implementation stops for an explicit

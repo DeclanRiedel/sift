@@ -81,6 +81,17 @@ fn fixture(path: &str) -> Value {
     serde_json::from_str(path).unwrap()
 }
 
+fn sorted_object_keys(value: &Value) -> Vec<&str> {
+    let mut keys = value
+        .as_object()
+        .expect("fixture value is an object")
+        .keys()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    keys.sort_unstable();
+    keys
+}
+
 #[test]
 fn backup_cli_output_is_stable_structured_and_redacted() {
     let directory = tempfile::tempdir().unwrap();
@@ -183,13 +194,12 @@ fn remote_lifecycle_output_is_stable_structured_and_redacted() {
             .unwrap(),
     );
     assert_eq!(
-        migration.as_object().unwrap().keys().collect::<Vec<_>>(),
+        sorted_object_keys(&migration),
         vec!["migration", "upgraded_documents"]
     );
     assert_eq!(migration["upgraded_documents"], 0);
-    let report = migration["migration"].as_object().unwrap();
     assert_eq!(
-        report.keys().collect::<Vec<_>>(),
+        sorted_object_keys(&migration["migration"]),
         vec!["applied", "backup", "from_version", "to_version"]
     );
     assert_eq!(migration["migration"]["from_version"], 0);
@@ -200,7 +210,7 @@ fn remote_lifecycle_output_is_stable_structured_and_redacted() {
     );
     for descriptor in migration["migration"]["applied"].as_array().unwrap() {
         assert_eq!(
-            descriptor.as_object().unwrap().keys().collect::<Vec<_>>(),
+            sorted_object_keys(descriptor),
             vec!["automatic", "kind", "name", "version"]
         );
     }

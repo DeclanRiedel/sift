@@ -1,0 +1,12 @@
+[package]
+name = "sift-desktop"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+gpui = { workspace = true }
+gpui_platform = { workspace = true }
+sift-ui = { workspace = true }
+sift-workspace-ui = { workspace = true }

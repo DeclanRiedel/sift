@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/protocol",
+    "crates/api-types",
     "crates/extension-protocol",
     "crates/plugin-host",
     "crates/core",
@@ -14,6 +15,9 @@ members = [
     "crates/completion",
     "crates/server",
     "crates/client-sdk",
+    "crates/ui",
+    "crates/workspace-ui",
+    "crates/desktop",
 ]
 
 [workspace.package]
@@ -26,6 +30,7 @@ repository = "https://github.com/declan/sift"
 [workspace.dependencies]
 # Internal crates
 sift-protocol = { path = "crates/protocol", version = "0.1.0" }
+sift-api-types = { path = "crates/api-types", version = "0.1.0" }
 sift-extension-protocol = { path = "crates/extension-protocol", version = "0.1.0" }
 sift-plugin-host = { path = "crates/plugin-host", version = "0.1.0" }
 sift-core = { path = "crates/core", version = "0.1.0" }
@@ -38,6 +43,8 @@ sift-semantic = { path = "crates/semantic", version = "0.1.0" }
 sift-completion = { path = "crates/completion", version = "0.1.0" }
 sift-server = { path = "crates/server", version = "0.1.0" }
 sift-client-sdk = { path = "crates/client-sdk", version = "0.1.0" }
+sift-ui = { path = "crates/ui", version = "0.1.0" }
+sift-workspace-ui = { path = "crates/workspace-ui", version = "0.1.0" }
 
 # External
 serde = { version = "1.0", features = ["derive"] }
@@ -106,6 +113,12 @@ tokio-tungstenite = { version = "0.26", default-features = false, features = ["c
 sqlparser = { version = "0.52", default-features = false }
 loro = "=1.13.9"
 libc = "0.2"
+unicode-segmentation = "1"
+
+# Phase M pins GPUI exactly because the framework remains pre-1.0. Upgrades are
+# deliberate compatibility commits, never an unconstrained crates.io update.
+gpui = { version = "0.2.2", git = "https://github.com/zed-industries/zed.git", rev = "d71f1461045c098dc6ca6b1b5adcf1b8949722e8", default-features = false, features = ["wayland", "x11"] }
+gpui_platform = { version = "0.1.0", git = "https://github.com/zed-industries/zed.git", rev = "d71f1461045c098dc6ca6b1b5adcf1b8949722e8", default-features = false, features = ["font-kit", "wayland", "x11"] }
 
 [profile.dev]
 split-debuginfo = "unpacked"

@@ -3,6 +3,7 @@
 
 use axum::body::{to_bytes, Body};
 use axum::http::{Request, StatusCode};
+use sift_api_types::{RoomId as ApiRoomId, RoomKind as ApiRoomKind, TenantId as ApiTenantId};
 use sift_driver_api::{mock::MockDriver, BulkResult, PgNotification};
 use sift_metadata::{
     CredentialMode, MembershipRole, MemorySecretStore, MetadataStore, NewConnectionProfile,
@@ -930,17 +931,17 @@ async fn client_sdk_consumes_metadata_api() {
 
     let client = sift_client_sdk::Client::new(format!("http://{addr}"));
     let tenants = client.tenants().await.unwrap();
-    assert_eq!(tenants[0].tenant.id, TenantId(1));
+    assert_eq!(tenants[0].tenant.id, ApiTenantId(1));
 
     let room = client
         .create_room(sift_client_sdk::CreateRoomRequest {
             tenant_id: 1,
             name: "sdk room".into(),
-            kind: RoomKind::Shared,
+            kind: ApiRoomKind::Shared,
         })
         .await
         .unwrap();
-    let rooms = client.rooms(TenantId(1)).await.unwrap();
+    let rooms = client.rooms(ApiTenantId(1)).await.unwrap();
     assert!(rooms.iter().any(|listed| listed.id == room.id));
 
     let document = client
@@ -1583,7 +1584,10 @@ async fn room_websocket_lease_closes_when_membership_is_removed() {
     });
     let client =
         sift_client_sdk::Client::new(format!("http://{addr}")).with_session_tokens(provider);
-    let mut socket = client.connect_room_websocket(room.id).await.unwrap();
+    let mut socket = client
+        .connect_room_websocket(ApiRoomId(room.id.0))
+        .await
+        .unwrap();
     socket
         .send(RoomClientMessage::Attach {
             client_id: "membership-test".into(),
@@ -2954,8 +2958,14 @@ async fn two_online_editors_converge() {
 
     let client_a = sift_client_sdk::Client::new(url.clone()).with_bearer_token(token_a);
     let client_b = sift_client_sdk::Client::new(url).with_bearer_token(token_b);
-    let mut ws_a = client_a.connect_room_websocket(room.id).await.unwrap();
-    let mut ws_b = client_b.connect_room_websocket(room.id).await.unwrap();
+    let mut ws_a = client_a
+        .connect_room_websocket(ApiRoomId(room.id.0))
+        .await
+        .unwrap();
+    let mut ws_b = client_b
+        .connect_room_websocket(ApiRoomId(room.id.0))
+        .await
+        .unwrap();
     ws_a.attach("a").await.unwrap();
     ws_b.attach("b").await.unwrap();
 
@@ -2993,8 +3003,14 @@ async fn two_offline_editors_diverge_reconnect_and_converge() {
 
     let client_a = sift_client_sdk::Client::new(url.clone()).with_bearer_token(token_a);
     let client_b = sift_client_sdk::Client::new(url).with_bearer_token(token_b);
-    let mut ws_a = client_a.connect_room_websocket(room.id).await.unwrap();
-    let mut ws_b = client_b.connect_room_websocket(room.id).await.unwrap();
+    let mut ws_a = client_a
+        .connect_room_websocket(ApiRoomId(room.id.0))
+        .await
+        .unwrap();
+    let mut ws_b = client_b
+        .connect_room_websocket(ApiRoomId(room.id.0))
+        .await
+        .unwrap();
     ws_a.attach("a").await.unwrap();
     ws_b.attach("b").await.unwrap();
 
@@ -3051,7 +3067,10 @@ async fn viewer_synchronizes_but_cannot_submit() {
     let (url, server) = serve_app(state).await;
 
     let client = sift_client_sdk::Client::new(url).with_bearer_token(viewer_token);
-    let mut ws = client.connect_room_websocket(room.id).await.unwrap();
+    let mut ws = client
+        .connect_room_websocket(ApiRoomId(room.id.0))
+        .await
+        .unwrap();
     ws.attach("v").await.unwrap();
     let mut replica = sift_client_sdk::RoomReplica::new(document.id.0, 0x5A, None).unwrap();
     ws.sync_document(&mut replica).await.unwrap();
@@ -3076,8 +3095,14 @@ async fn duplicate_live_replica_writer_is_rejected() {
     // Two connections for the same principal, both writing as replica id 0xDEAD.
     let client1 = sift_client_sdk::Client::new(url.clone()).with_bearer_token(token.clone());
     let client2 = sift_client_sdk::Client::new(url).with_bearer_token(token);
-    let mut ws1 = client1.connect_room_websocket(room.id).await.unwrap();
-    let mut ws2 = client2.connect_room_websocket(room.id).await.unwrap();
+    let mut ws1 = client1
+        .connect_room_websocket(ApiRoomId(room.id.0))
+        .await
+        .unwrap();
+    let mut ws2 = client2
+        .connect_room_websocket(ApiRoomId(room.id.0))
+        .await
+        .unwrap();
     ws1.attach("c1").await.unwrap();
     ws2.attach("c2").await.unwrap();
 

@@ -33,6 +33,14 @@
           openssl
           postgresql.lib        # libpq headers — needed by tokio-postgres / sqlx at build time
           postgresql            # psql client + ability to run a local dev instance
+          # GPUI Linux build/runtime surface (X11 + Wayland + Vulkan).
+          fontconfig
+          freetype
+          libxkbcommon
+          vulkan-loader
+          wayland
+          libx11
+          libxcb
         ];
 
         # Rust + adjacent dev tooling.
@@ -391,6 +399,12 @@
           text = devCommand ''cargo check --workspace --all-targets'';
         };
 
+        desktop = pkgs.writeShellApplication {
+          name = "sift-desktop";
+          runtimeInputs = [ pkgs.nix ];
+          text = devCommand ''cargo run -p sift-desktop --'';
+        };
+
         devSecretKey = pkgs.writeShellApplication {
           name = "sift-dev-secret-key";
           runtimeInputs = with pkgs; [ coreutils openssl ];
@@ -426,6 +440,7 @@
               sift-smoke                Start a mock backend and exercise health/session/connection/schema/audit.
               sift-test                 Run cargo nextest for the whole workspace.
               sift-check                Run cargo check for the whole workspace.
+              sift-desktop              Run the native GPUI desktop client.
               sift-dev-secret-key       Generate the ignored local metadata secret key file.
               sift-dev-mssql            Manage a local SQL Server docker container for live-mssql tests.
                                         Sub: start | stop | reset | password | status. Password is
@@ -460,6 +475,7 @@
             smoke
             test
             check
+            desktop
             devSecretKey
           ];
 

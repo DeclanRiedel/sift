@@ -1619,6 +1619,43 @@ use sift_metadata::http::{
     WorkspaceBatchMutationRequest, WorkspaceCheckpointPageQuery, WorkspaceTreeResponse,
 };
 
+fn metadata_room_kind(kind: sift_api_types::RoomKind) -> sift_metadata::RoomKind {
+    match kind {
+        sift_api_types::RoomKind::Personal => sift_metadata::RoomKind::Personal,
+        sift_api_types::RoomKind::Shared => sift_metadata::RoomKind::Shared,
+    }
+}
+
+fn metadata_room_role(role: sift_api_types::RoomRole) -> sift_metadata::RoomRole {
+    match role {
+        sift_api_types::RoomRole::Owner => sift_metadata::RoomRole::Owner,
+        sift_api_types::RoomRole::Editor => sift_metadata::RoomRole::Editor,
+        sift_api_types::RoomRole::Viewer => sift_metadata::RoomRole::Viewer,
+    }
+}
+
+fn metadata_credential_mode(mode: sift_api_types::CredentialMode) -> sift_metadata::CredentialMode {
+    match mode {
+        sift_api_types::CredentialMode::Shared => sift_metadata::CredentialMode::Shared,
+        sift_api_types::CredentialMode::PerUser => sift_metadata::CredentialMode::PerUser,
+        sift_api_types::CredentialMode::Broker => sift_metadata::CredentialMode::Broker,
+    }
+}
+
+fn api_token_row(token: sift_metadata::ApiTokenRow) -> sift_api_types::ApiTokenRow {
+    sift_api_types::ApiTokenRow {
+        id: sift_api_types::ApiTokenId(token.id.0),
+        principal_id: sift_api_types::PrincipalId(token.principal_id.0),
+        tenant_id: token.tenant_id.map(|id| sift_api_types::TenantId(id.0)),
+        name: token.name,
+        created_at: token.created_at,
+        updated_at: token.updated_at,
+        last_used_at: token.last_used_at,
+        expires_at: token.expires_at,
+        revoked_at: token.revoked_at,
+    }
+}
+
 fn metadata_store(state: &AppState) -> ApiResult<&MetadataStore> {
     state.metadata.as_ref().ok_or(ApiError::MetadataUnavailable)
 }
@@ -4979,7 +5016,7 @@ async fn create_metadata_room(
                 auth.principal_id,
                 NewRoom {
                     name: req.name,
-                    kind: req.kind,
+                    kind: metadata_room_kind(req.kind),
                 },
             )
             .map_err(Into::into)
@@ -5044,7 +5081,7 @@ async fn add_metadata_room_member(
                 room,
                 actor,
                 principal,
-                req.role,
+                metadata_room_role(req.role),
                 metadata_audit_record(actor, "add_member", "room", Some(room.0)),
             )
             .map_err(Into::into)
@@ -9679,7 +9716,7 @@ async fn upsert_metadata_connection(
                 configuration: req.configuration,
                 semantic_engine,
                 credentials: req.credentials,
-                credential_mode: req.credential_mode,
+                credential_mode: metadata_credential_mode(req.credential_mode),
                 tags: req.tags,
             },
             profile_limit,
@@ -10605,7 +10642,10 @@ async fn issue_auth_token(
         "api_token",
         Some(token.id.0),
     );
-    Ok(Json(IssueTokenResponse { token, plaintext }))
+    Ok(Json(IssueTokenResponse {
+        token: api_token_row(token),
+        plaintext,
+    }))
 }
 
 async fn revoke_auth_token(
