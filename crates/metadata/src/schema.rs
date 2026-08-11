@@ -619,6 +619,34 @@ pub struct NewRepositoryCommit {
     pub workspace_revision: WorkspaceRevision,
 }
 
+#[derive(Debug, Clone)]
+pub struct NewRunConfiguration {
+    pub name: String,
+    pub scripts: Vec<sift_protocol::RunScriptStep>,
+    pub connection_profile_id: i64,
+    pub target_schema: Option<String>,
+    pub variables: Vec<sift_protocol::RunVariableDefinition>,
+    pub pre_tasks: Vec<sift_protocol::RunPreTask>,
+    pub transaction_policy: sift_protocol::RunTransactionPolicy,
+    pub error_policy: sift_protocol::RunErrorPolicy,
+}
+
+#[derive(Debug, Clone)]
+pub struct NewRunExecution {
+    pub configuration_id: sift_protocol::RunConfigurationId,
+    pub trigger: sift_protocol::RunTrigger,
+    pub manifest: sift_protocol::RunManifest,
+    pub resolved_scripts_json: String,
+    pub previous_run_id: Option<sift_protocol::RunId>,
+}
+
+#[derive(Debug, Clone)]
+pub struct RunExecutionRecord {
+    pub run: sift_protocol::Run,
+    pub resolved_scripts_json: String,
+    pub cancellation_requested: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct RoomAttachment {
     pub id: RoomAttachmentId,

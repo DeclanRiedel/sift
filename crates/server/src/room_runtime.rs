@@ -23,6 +23,7 @@ struct RoomRuntimeInner {
     workspace_adapter: RwLock<Option<Arc<crate::workspace_adapter::RootedFilesystemAdapter>>>,
     git_adapter: RwLock<Option<Arc<crate::git_adapter::GitAdapter>>>,
     vcs_pending: DashMap<(i64, String), sift_protocol::VcsPendingOperation>,
+    run_cancellations: DashMap<i64, tokio_util::sync::CancellationToken>,
 }
 
 struct RoomRuntimeRoom {
@@ -151,6 +152,26 @@ impl RoomRuntime {
             .filter(|entry| entry.key().0 == binding_id)
             .map(|entry| (entry.key().1.clone(), *entry.value()))
             .collect()
+    }
+
+    pub fn register_run(&self, run_id: i64) -> tokio_util::sync::CancellationToken {
+        let token = tokio_util::sync::CancellationToken::new();
+        self.inner.run_cancellations.insert(run_id, token.clone());
+        token
+    }
+
+    pub fn cancel_run(&self, run_id: i64) -> bool {
+        self.inner
+            .run_cancellations
+            .get(&run_id)
+            .is_some_and(|token| {
+                token.cancel();
+                true
+            })
+    }
+
+    pub fn finish_run(&self, run_id: i64) {
+        self.inner.run_cancellations.remove(&run_id);
     }
 
     pub fn attach(

@@ -4,7 +4,8 @@ Status: accepted implementation contract; ADR-034 is graduated. Implementation
 is in progress.
 
 Milestones: L0 contract lock, L1 virtual workspaces/history, L2 projections and
-offline DDL sources, and L3 bundled Git are complete; L4–L7 remain.
+offline DDL sources, L3 bundled Git, and L4 foreground runs are complete;
+L5–L7 remain.
 
 This plan expands Phase L in `server-build-list-v2.md`. It is intentionally
 ordered design-first: slice L0 locks the topology before any public workspace
@@ -441,6 +442,15 @@ collaborative edits remain uncommitted until a later reconcile, and no
 credential-shaped value reaches metadata, process inspection, logs, or audit.
 
 ### L4 — Run configurations and foreground execution
+
+Status: complete. V035 persists revisioned configurations, immutable manifests,
+ordered step results, and bounded redacted logs. Foreground execution reuses
+managed sessions and the existing bounded query/transaction paths, resolves an
+explicit profile and optional schema, supports the three transaction policies,
+publishes room state, records template-only query history, and exposes audited
+HTTP, SDK, and OpenAPI operations. Active cancellations close the managed
+connection and uncertain close/rollback outcomes fail closed as
+`outcome_unknown`; no startup path re-enqueues an interrupted run.
 
 1. Persist revisioned run configurations, ordered steps, variables, policies,
    and immutable run manifests.

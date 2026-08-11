@@ -247,6 +247,67 @@ pub struct VcsRemoteRequest {
     pub branch: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct CreateRunConfigurationRequest {
+    pub name: String,
+    pub scripts: Vec<sift_protocol::RunScriptStep>,
+    pub connection_profile_id: i64,
+    pub target_schema: Option<String>,
+    #[serde(default)]
+    pub variables: Vec<sift_protocol::RunVariableDefinition>,
+    #[serde(default)]
+    pub pre_tasks: Vec<sift_protocol::RunPreTask>,
+    pub transaction_policy: sift_protocol::RunTransactionPolicy,
+    pub error_policy: sift_protocol::RunErrorPolicy,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct UpdateRunConfigurationRequest {
+    pub expected_revision: u64,
+    #[serde(flatten)]
+    pub configuration: CreateRunConfigurationRequest,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct ExpectedRunConfigurationRevisionRequest {
+    pub expected_revision: u64,
+}
+
+#[derive(Clone, Serialize, Deserialize, JsonSchema)]
+pub struct StartRunRequest {
+    pub expected_configuration_revision: u64,
+    #[serde(default)]
+    pub variables: std::collections::BTreeMap<String, serde_json::Value>,
+    #[serde(default)]
+    pub timeout_secs: Option<u64>,
+}
+
+impl std::fmt::Debug for StartRunRequest {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("StartRunRequest")
+            .field(
+                "expected_configuration_revision",
+                &self.expected_configuration_revision,
+            )
+            .field("variables", &"[REDACTED]")
+            .field("timeout_secs", &self.timeout_secs)
+            .finish()
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct RunLogQuery {
+    #[serde(default)]
+    pub after: u64,
+    #[serde(default = "default_run_log_limit")]
+    pub limit: u32,
+}
+
+fn default_run_log_limit() -> u32 {
+    200
+}
+
 fn default_git_remote() -> String {
     "origin".into()
 }

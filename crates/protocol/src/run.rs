@@ -64,6 +64,13 @@ pub struct RunScriptStep {
     pub pinned_digest: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum RunPreTask {
+    PingTarget,
+    RefreshSchema,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct RunConfiguration {
     pub id: RunConfigurationId,
@@ -73,6 +80,8 @@ pub struct RunConfiguration {
     pub connection_profile_id: i64,
     pub target_schema: Option<String>,
     pub variables: Vec<RunVariableDefinition>,
+    #[serde(default)]
+    pub pre_tasks: Vec<RunPreTask>,
     pub transaction_policy: RunTransactionPolicy,
     pub error_policy: RunErrorPolicy,
     pub revision: u64,
@@ -118,6 +127,8 @@ pub struct RunManifest {
     pub target_schema: Option<String>,
     pub provider_id: String,
     pub variable_names: Vec<String>,
+    #[serde(default)]
+    pub pre_tasks: Vec<RunPreTask>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -133,6 +144,35 @@ pub struct Run {
     pub created_at: DateTime<Utc>,
     pub started_at: Option<DateTime<Utc>>,
     pub finished_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum RunStepState {
+    Pending,
+    Running,
+    Succeeded,
+    Failed,
+    Cancelled,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct RunStepResult {
+    pub ordinal: u32,
+    pub node_id: WorkspaceNodeId,
+    pub state: RunStepState,
+    pub row_count: Option<u64>,
+    pub error_code: Option<String>,
+    pub started_at: Option<DateTime<Utc>>,
+    pub finished_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct RunLogEntry {
+    pub sequence: u64,
+    pub level: String,
+    pub message: String,
+    pub created_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

@@ -25,11 +25,12 @@ use sift_metadata::{
     ApiTokenId, AuthClientKind as MetadataAuthClientKind, AuthIdentityId, ConnectionProfileId,
     Document, DocumentId, GithubAllowlistId, GithubProfile, MetadataStore, NewConnectionProfile,
     NewDdlSource, NewDocument, NewOperationAudit, NewProjectionBinding, NewQueryHistory,
-    NewRepositoryBinding, NewRoom, NewSavedQuery, NewWorkspaceCheckpoint, NewWorkspaceNode,
-    OperationAuditId, PrincipalId, PrincipalKeyId, ProjectionFileState, QueryHistory,
-    QueryHistoryId, QueryStatus, RefreshAuthResult, Room, RoomId, RoomMember, RoomRole, SavedQuery,
-    SavedQueryFilter, SavedQueryId, SavedQueryScope, TenantId, TenantInvitationId,
-    TenantMembership, UpdateSavedQuery, WorkspaceBatchMutation, WorkspaceCheckpointCapture,
+    NewRepositoryBinding, NewRoom, NewRunConfiguration, NewRunExecution, NewSavedQuery,
+    NewWorkspaceCheckpoint, NewWorkspaceNode, OperationAuditId, PrincipalId, PrincipalKeyId,
+    ProjectionFileState, QueryHistory, QueryHistoryId, QueryStatus, RefreshAuthResult, Room,
+    RoomId, RoomMember, RoomRole, SavedQuery, SavedQueryFilter, SavedQueryId, SavedQueryScope,
+    TenantId, TenantInvitationId, TenantMembership, UpdateSavedQuery, WorkspaceBatchMutation,
+    WorkspaceCheckpointCapture,
 };
 use sift_protocol::{
     AcceptTenantInvitationRequest, AdminCreatePasswordPrincipalRequest,
@@ -48,8 +49,10 @@ use sift_protocol::{
     PasswordLoginRequest, PasswordResetRequest, ProjectionBinding, ProjectionHealth,
     ProjectionMode, ProtocolRange, Readiness, ReconcilePlan, ReconcileResolution,
     RefreshAuthRequest, RegisterPrincipalKeyRequest, RepositoryBinding, RepositoryBindingId,
-    RoomClientMessage, RoomQueryResult, RoomServerMessage, SavepointRequest, SchemaFilter,
-    SchemaScope, SshProxyAccessGrant, SshProxyCapabilityExchangeRequest, TransactionPreviewRequest,
+    RoomClientMessage, RoomQueryResult, RoomServerMessage, Run, RunAction, RunConfiguration,
+    RunConfigurationAction, RunConfigurationId, RunId, RunLogEntry, RunManifest, RunManifestScript,
+    RunState, RunStepResult, RunTrigger, SavepointRequest, SchemaFilter, SchemaScope,
+    SshProxyAccessGrant, SshProxyCapabilityExchangeRequest, TransactionPreviewRequest,
     UpdateConnectionPolicyRequest, UpdateTenantLimitsRequest, VcsAction, VcsBranch,
     VcsCommitResult, VcsDiff, VcsPendingOperation, VcsRemoteResult, VcsStatus, WebAuthResponse,
     WhoAmIResponse, Workspace, WorkspaceAction, WorkspaceCheckpoint, WorkspaceCheckpointId,
@@ -497,6 +500,42 @@ pub fn app(state: AppState) -> Router {
         .api_route(
             "/v1/metadata/ddl-sources/:id/refresh",
             post_with(refresh_ddl_source, doc("refreshDdlSource", "Rebuild the deterministic offline catalog graph")),
+        )
+        .api_route(
+            "/v1/metadata/workspaces/:id/run-configurations",
+            get_with(list_run_configurations, doc("listRunConfigurations", "List workspace run configurations")).post_with(create_run_configuration, doc("createRunConfiguration", "Create a revisioned foreground run configuration")),
+        )
+        .api_route(
+            "/v1/metadata/run-configurations/:id",
+            get_with(get_run_configuration, doc("getRunConfiguration", "Get a run configuration")).put_with(update_run_configuration, doc("updateRunConfiguration", "Update a run configuration by revision")).delete_with(delete_run_configuration, doc("deleteRunConfiguration", "Delete an unused run configuration by revision")),
+        )
+        .api_route(
+            "/v1/metadata/run-configurations/:id/validate",
+            post_with(validate_run_configuration, doc("validateRunConfiguration", "Validate current scripts, variables, and target profile")),
+        )
+        .api_route(
+            "/v1/metadata/run-configurations/:id/runs",
+            post_with(start_run, doc("startRun", "Capture and start an immutable foreground run")),
+        )
+        .api_route(
+            "/v1/metadata/runs/:id",
+            get_with(get_run, doc("getRun", "Get durable foreground run state")),
+        )
+        .api_route(
+            "/v1/metadata/runs/:id/steps",
+            get_with(get_run_steps, doc("getRunSteps", "Get ordered run step outcomes")),
+        )
+        .api_route(
+            "/v1/metadata/runs/:id/logs",
+            get_with(get_run_logs, doc("getRunLogs", "Page bounded redacted run logs")),
+        )
+        .api_route(
+            "/v1/metadata/runs/:id/cancel",
+            post_with(cancel_run, doc("cancelRun", "Request cancellation of a foreground run")),
+        )
+        .api_route(
+            "/v1/metadata/runs/:id/rerun",
+            post_with(rerun, doc("rerun", "Create a new run from an immutable prior manifest")),
         )
         .api_route(
             "/v1/metadata/connections",
@@ -1516,16 +1555,17 @@ struct CursorListQuery {
 use sift_metadata::http::{
     AddRoomMemberRequest, ApplyWorkspaceProjectionRequest, BindRepositoryRequest,
     BindRoomConnectionRequest, BindWorkspaceProjectionRequest, CreateDdlSourceRequest,
-    CreateDocumentRequest, CreateRoomRequest, CreateSavedQueryRequest,
-    CreateWorkspaceCheckpointRequest, CreateWorkspaceNodeRequest, CreateWorkspaceRequest,
-    ExpectedDdlSourceRevisionRequest, ExpectedProjectionRevisionRequest,
-    ExpectedRepositoryRevisionRequest, ExpectedWorkspaceRevisionRequest, IssueTokenRequest,
-    IssueTokenResponse, MoveWorkspaceNodeRequest, OpenConnectionFromProfileRequest,
-    RestoreWorkspaceCheckpointRequest, SetCredentialRequest, SetVcsCredentialRequest,
-    UpdateDdlSourceRequest, UpdateDocumentSnapshotRequest, UpdateSavedQueryRequest,
-    UpdateWorkspaceRequest, UpsertConnectionProfileRequest, VcsCommitRequest, VcsDiffQuery,
-    VcsPathsRequest, VcsRemoteRequest, WorkspaceBatchMutationItem, WorkspaceBatchMutationRequest,
-    WorkspaceCheckpointPageQuery, WorkspaceTreeResponse,
+    CreateDocumentRequest, CreateRoomRequest, CreateRunConfigurationRequest,
+    CreateSavedQueryRequest, CreateWorkspaceCheckpointRequest, CreateWorkspaceNodeRequest,
+    CreateWorkspaceRequest, ExpectedDdlSourceRevisionRequest, ExpectedProjectionRevisionRequest,
+    ExpectedRepositoryRevisionRequest, ExpectedRunConfigurationRevisionRequest,
+    ExpectedWorkspaceRevisionRequest, IssueTokenRequest, IssueTokenResponse,
+    MoveWorkspaceNodeRequest, OpenConnectionFromProfileRequest, RestoreWorkspaceCheckpointRequest,
+    RunLogQuery, SetCredentialRequest, SetVcsCredentialRequest, StartRunRequest,
+    UpdateDdlSourceRequest, UpdateDocumentSnapshotRequest, UpdateRunConfigurationRequest,
+    UpdateSavedQueryRequest, UpdateWorkspaceRequest, UpsertConnectionProfileRequest,
+    VcsCommitRequest, VcsDiffQuery, VcsPathsRequest, VcsRemoteRequest, WorkspaceBatchMutationItem,
+    WorkspaceBatchMutationRequest, WorkspaceCheckpointPageQuery, WorkspaceTreeResponse,
 };
 
 fn metadata_store(state: &AppState) -> ApiResult<&MetadataStore> {
@@ -7563,6 +7603,741 @@ fn ddl_source_id(id: i64) -> ApiResult<DdlSourceId> {
             "DDL source id must be positive".into(),
         ))
     }
+}
+
+fn run_configuration_id(id: i64) -> ApiResult<RunConfigurationId> {
+    if id > 0 {
+        Ok(RunConfigurationId(id))
+    } else {
+        Err(ApiError::BadRequest(
+            "run configuration id must be positive".into(),
+        ))
+    }
+}
+
+fn run_id(id: i64) -> ApiResult<RunId> {
+    if id > 0 {
+        Ok(RunId(id))
+    } else {
+        Err(ApiError::BadRequest("run id must be positive".into()))
+    }
+}
+
+fn authorize_run_configuration_operation(
+    state: &AppState,
+    auth: &AuthContext,
+    workspace_id: WorkspaceId,
+    configuration_id: Option<RunConfigurationId>,
+    action: RunConfigurationAction,
+) -> ApiResult<()> {
+    let context = sift_protocol::OperationCapabilityContext {
+        workspace_id: Some(workspace_id),
+        ..Default::default()
+    };
+    let scope = capability_authorization_scope(state, Some(auth), &context)?
+        .ok_or(ApiError::Unauthorized)?;
+    crate::authorization::authorize(
+        &scope,
+        Operation::RunConfiguration {
+            action,
+            workspace_id,
+            configuration_id,
+        }
+        .kind(),
+    )
+    .map_err(|denial| ApiError::Forbidden(denial.public_reason().into()))
+}
+
+fn push_run_configuration_operation(
+    state: &AppState,
+    actor: PrincipalId,
+    workspace_id: WorkspaceId,
+    configuration_id: Option<RunConfigurationId>,
+    action: RunConfigurationAction,
+) {
+    state.sessions.push_operation_full(
+        Operation::RunConfiguration {
+            action,
+            workspace_id,
+            configuration_id,
+        },
+        OperationStatus::Succeeded,
+        Some(actor.0),
+        None,
+        None,
+        None,
+    );
+}
+
+fn authorize_run_operation(
+    state: &AppState,
+    auth: &AuthContext,
+    workspace_id: WorkspaceId,
+    run_id: Option<RunId>,
+    action: RunAction,
+) -> ApiResult<()> {
+    let context = sift_protocol::OperationCapabilityContext {
+        workspace_id: Some(workspace_id),
+        ..Default::default()
+    };
+    let scope = capability_authorization_scope(state, Some(auth), &context)?
+        .ok_or(ApiError::Unauthorized)?;
+    crate::authorization::authorize(
+        &scope,
+        Operation::Run {
+            action,
+            workspace_id,
+            run_id,
+        }
+        .kind(),
+    )
+    .map_err(|denial| ApiError::Forbidden(denial.public_reason().into()))
+}
+
+fn push_run_operation(
+    state: &AppState,
+    actor: PrincipalId,
+    workspace_id: WorkspaceId,
+    run_id: Option<RunId>,
+    action: RunAction,
+) {
+    state.sessions.push_operation_full(
+        Operation::Run {
+            action,
+            workspace_id,
+            run_id,
+        },
+        OperationStatus::Succeeded,
+        Some(actor.0),
+        None,
+        None,
+        None,
+    );
+}
+
+fn new_run_configuration(request: CreateRunConfigurationRequest) -> NewRunConfiguration {
+    NewRunConfiguration {
+        name: request.name,
+        scripts: request.scripts,
+        connection_profile_id: request.connection_profile_id,
+        target_schema: request.target_schema,
+        variables: request.variables,
+        pre_tasks: request.pre_tasks,
+        transaction_policy: request.transaction_policy,
+        error_policy: request.error_policy,
+    }
+}
+
+async fn list_run_configurations(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+) -> ApiResult<Json<Vec<RunConfiguration>>> {
+    let metadata = metadata_store_cloned(&state)?;
+    let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
+    let workspace_id = workspace_id(id)?;
+    authorize_run_configuration_operation(
+        &state,
+        &auth,
+        workspace_id,
+        None,
+        RunConfigurationAction::Read,
+    )?;
+    let actor = auth.principal_id;
+    let configurations = metadata_blocking(move || {
+        metadata
+            .list_run_configurations_for_principal(workspace_id, actor)
+            .map_err(Into::into)
+    })
+    .await?;
+    push_run_configuration_operation(
+        &state,
+        actor,
+        workspace_id,
+        None,
+        RunConfigurationAction::Read,
+    );
+    Ok(Json(configurations))
+}
+
+async fn create_run_configuration(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+    Json(request): Json<CreateRunConfigurationRequest>,
+) -> ApiResult<Json<RunConfiguration>> {
+    let metadata = metadata_store_cloned(&state)?;
+    let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
+    let workspace_id = workspace_id(id)?;
+    authorize_run_configuration_operation(
+        &state,
+        &auth,
+        workspace_id,
+        None,
+        RunConfigurationAction::Create,
+    )?;
+    let actor = auth.principal_id;
+    let configuration = metadata_blocking(move || {
+        metadata
+            .create_run_configuration(workspace_id, actor, new_run_configuration(request))
+            .map_err(Into::into)
+    })
+    .await?;
+    push_run_configuration_operation(
+        &state,
+        actor,
+        workspace_id,
+        Some(configuration.id),
+        RunConfigurationAction::Create,
+    );
+    Ok(Json(configuration))
+}
+
+async fn get_run_configuration(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+) -> ApiResult<Json<RunConfiguration>> {
+    let metadata = metadata_store_cloned(&state)?;
+    let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
+    let configuration_id = run_configuration_id(id)?;
+    let actor = auth.principal_id;
+    let configuration = metadata_blocking(move || {
+        metadata
+            .run_configuration_for_principal(configuration_id, actor, false)
+            .map_err(Into::into)
+    })
+    .await?;
+    authorize_run_configuration_operation(
+        &state,
+        &auth,
+        configuration.workspace_id,
+        Some(configuration_id),
+        RunConfigurationAction::Read,
+    )?;
+    push_run_configuration_operation(
+        &state,
+        actor,
+        configuration.workspace_id,
+        Some(configuration_id),
+        RunConfigurationAction::Read,
+    );
+    Ok(Json(configuration))
+}
+
+async fn update_run_configuration(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+    Json(request): Json<UpdateRunConfigurationRequest>,
+) -> ApiResult<Json<RunConfiguration>> {
+    let metadata = metadata_store_cloned(&state)?;
+    let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
+    let configuration_id = run_configuration_id(id)?;
+    let actor = auth.principal_id;
+    let current = metadata_blocking({
+        let metadata = metadata.clone();
+        move || {
+            metadata
+                .run_configuration_for_principal(configuration_id, actor, true)
+                .map_err(Into::into)
+        }
+    })
+    .await?;
+    authorize_run_configuration_operation(
+        &state,
+        &auth,
+        current.workspace_id,
+        Some(configuration_id),
+        RunConfigurationAction::Update,
+    )?;
+    let workspace_id = current.workspace_id;
+    let configuration = metadata_blocking(move || {
+        metadata
+            .update_run_configuration(
+                configuration_id,
+                actor,
+                request.expected_revision,
+                new_run_configuration(request.configuration),
+            )
+            .map_err(Into::into)
+    })
+    .await?;
+    push_run_configuration_operation(
+        &state,
+        actor,
+        workspace_id,
+        Some(configuration_id),
+        RunConfigurationAction::Update,
+    );
+    Ok(Json(configuration))
+}
+
+async fn delete_run_configuration(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+    Json(request): Json<ExpectedRunConfigurationRevisionRequest>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let metadata = metadata_store_cloned(&state)?;
+    let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
+    let configuration_id = run_configuration_id(id)?;
+    let actor = auth.principal_id;
+    let configuration = metadata_blocking({
+        let metadata = metadata.clone();
+        move || {
+            metadata
+                .run_configuration_for_principal(configuration_id, actor, true)
+                .map_err(Into::into)
+        }
+    })
+    .await?;
+    authorize_run_configuration_operation(
+        &state,
+        &auth,
+        configuration.workspace_id,
+        Some(configuration_id),
+        RunConfigurationAction::Delete,
+    )?;
+    metadata_blocking(move || {
+        metadata
+            .delete_run_configuration(configuration_id, actor, request.expected_revision)
+            .map_err(Into::into)
+    })
+    .await?;
+    push_run_configuration_operation(
+        &state,
+        actor,
+        configuration.workspace_id,
+        Some(configuration_id),
+        RunConfigurationAction::Delete,
+    );
+    Ok(Json(json!({"ok": true})))
+}
+
+fn capture_run_payload(
+    metadata: &MetadataStore,
+    rooms: &RoomRuntime,
+    actor: PrincipalId,
+    configuration: &RunConfiguration,
+) -> ApiResult<(
+    RunManifest,
+    crate::run_executor::ResolvedRunPayload,
+    RoomId,
+    TenantId,
+)> {
+    let workspace =
+        metadata.get_workspace_for_principal(configuration.workspace_id, actor, true)?;
+    let room = metadata.get_room(workspace.room_id)?;
+    let profile = metadata.get_connection_profile_for_principal(
+        ConnectionProfileId(configuration.connection_profile_id),
+        actor,
+    )?;
+    if profile.tenant_id != room.tenant_id {
+        return Err(ApiError::BadRequest(
+            "run target profile belongs to another tenant".into(),
+        ));
+    }
+    let nodes = metadata
+        .list_workspace_nodes_for_principal(configuration.workspace_id, actor)?
+        .into_iter()
+        .map(|node| (node.id, node))
+        .collect::<std::collections::HashMap<_, _>>();
+    let mut manifest_scripts = Vec::with_capacity(configuration.scripts.len());
+    let mut resolved_scripts = Vec::with_capacity(configuration.scripts.len());
+    for step in &configuration.scripts {
+        let node = nodes
+            .get(&step.node_id)
+            .filter(|node| node.kind == WorkspaceNodeKind::SqlDocument)
+            .ok_or_else(|| ApiError::BadRequest("run script is no longer available".into()))?;
+        let document = DocumentId(
+            node.document_id
+                .ok_or(sift_metadata::MetadataError::InvalidWorkspaceNode)?,
+        );
+        let document = rooms
+            .documents()
+            .get_or_load(metadata, document)
+            .map_err(workspace_actor_error)?;
+        let document = document
+            .lock()
+            .map_err(|_| ApiError::Internal("document actor mutex poisoned".into()))?;
+        let template_sql = document.text();
+        let content_digest = crate::run_executor::manifest_digest(template_sql.as_bytes());
+        if step.revision_policy == sift_protocol::ScriptRevisionPolicy::Pinned
+            && step.pinned_digest.as_deref() != Some(content_digest.as_str())
+        {
+            return Err(ApiError::BadRequest(
+                "pinned run script no longer matches its configured digest".into(),
+            ));
+        }
+        manifest_scripts.push(RunManifestScript {
+            node_id: step.node_id,
+            content_digest,
+            document_frontier_digest: crate::run_executor::manifest_digest(
+                &document.version_vector(),
+            ),
+        });
+        resolved_scripts.push(crate::run_executor::ResolvedRunScript {
+            node_id: step.node_id,
+            template_sql,
+        });
+    }
+    let manifest = RunManifest {
+        workspace_revision: workspace.revision,
+        scripts: manifest_scripts,
+        connection_profile_id: configuration.connection_profile_id,
+        target_schema: configuration.target_schema.clone(),
+        provider_id: profile.provider_id.as_str().to_string(),
+        variable_names: configuration
+            .variables
+            .iter()
+            .map(|variable| variable.name.clone())
+            .collect(),
+        pre_tasks: configuration.pre_tasks.clone(),
+    };
+    Ok((
+        manifest,
+        crate::run_executor::ResolvedRunPayload {
+            configuration: configuration.clone(),
+            scripts: resolved_scripts,
+        },
+        room.id,
+        room.tenant_id,
+    ))
+}
+
+async fn validate_run_configuration(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+) -> ApiResult<Json<RunManifest>> {
+    let metadata = metadata_store_cloned(&state)?;
+    let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
+    let configuration_id = run_configuration_id(id)?;
+    let actor = auth.principal_id;
+    let rooms = state.rooms.clone();
+    let (configuration, manifest) = metadata_blocking(move || {
+        let configuration =
+            metadata.run_configuration_for_principal(configuration_id, actor, false)?;
+        let (manifest, _, _, _) = capture_run_payload(&metadata, &rooms, actor, &configuration)?;
+        Ok::<_, ApiError>((configuration, manifest))
+    })
+    .await?;
+    authorize_run_configuration_operation(
+        &state,
+        &auth,
+        configuration.workspace_id,
+        Some(configuration_id),
+        RunConfigurationAction::Validate,
+    )?;
+    push_run_configuration_operation(
+        &state,
+        actor,
+        configuration.workspace_id,
+        Some(configuration_id),
+        RunConfigurationAction::Validate,
+    );
+    Ok(Json(manifest))
+}
+
+async fn start_run(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+    Json(request): Json<StartRunRequest>,
+) -> ApiResult<Json<Run>> {
+    let metadata = metadata_store_cloned(&state)?;
+    let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
+    let configuration_id = run_configuration_id(id)?;
+    let actor = auth.principal_id;
+    let timeout = crate::run_executor::validate_timeout(request.timeout_secs)?;
+    let configuration = metadata_blocking({
+        let metadata = metadata.clone();
+        move || {
+            metadata
+                .run_configuration_for_principal(configuration_id, actor, true)
+                .map_err(Into::into)
+        }
+    })
+    .await?;
+    if configuration.revision != request.expected_configuration_revision {
+        return Err(
+            sift_metadata::MetadataError::RunConfigurationRevisionConflict {
+                expected: request.expected_configuration_revision,
+                current: configuration.revision,
+            }
+            .into(),
+        );
+    }
+    authorize_run_operation(
+        &state,
+        &auth,
+        configuration.workspace_id,
+        None,
+        RunAction::Start,
+    )?;
+    let workspace_lock = state.rooms.workspace_lock(configuration.workspace_id.0);
+    let _workspace_guard = workspace_lock.lock().await;
+    let rooms = state.rooms.clone();
+    let expected_revision = request.expected_configuration_revision;
+    let (configuration, record, room_id, tenant_id) = metadata_blocking({
+        let metadata = metadata.clone();
+        move || {
+            let configuration =
+                metadata.run_configuration_for_principal(configuration_id, actor, true)?;
+            if configuration.revision != expected_revision {
+                return Err(
+                    sift_metadata::MetadataError::RunConfigurationRevisionConflict {
+                        expected: expected_revision,
+                        current: configuration.revision,
+                    }
+                    .into(),
+                );
+            }
+            let (manifest, payload, room_id, tenant_id) =
+                capture_run_payload(&metadata, &rooms, actor, &configuration)?;
+            let record = metadata.create_run_execution(
+                actor,
+                NewRunExecution {
+                    configuration_id,
+                    trigger: RunTrigger::Interactive,
+                    manifest,
+                    resolved_scripts_json: serde_json::to_string(&payload).map_err(|_| {
+                        ApiError::Internal("run manifest serialization failed".into())
+                    })?,
+                    previous_run_id: None,
+                },
+            )?;
+            Ok::<_, ApiError>((configuration, record, room_id, tenant_id))
+        }
+    })
+    .await?;
+    drop(_workspace_guard);
+    crate::run_executor::spawn_run(
+        state.clone(),
+        metadata,
+        crate::run_executor::RunInvocation {
+            actor,
+            room_id,
+            tenant_id,
+            configuration: configuration.clone(),
+            run_id: record.run.id,
+            variables: request.variables,
+            timeout,
+        },
+    );
+    push_run_operation(
+        &state,
+        actor,
+        configuration.workspace_id,
+        Some(record.run.id),
+        RunAction::Start,
+    );
+    Ok(Json(record.run))
+}
+
+async fn get_run(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+) -> ApiResult<Json<Run>> {
+    let metadata = metadata_store_cloned(&state)?;
+    let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
+    let run_id = run_id(id)?;
+    let actor = auth.principal_id;
+    let (run, workspace_id) = metadata_blocking(move || {
+        let record = metadata.run_execution_for_principal(run_id, actor, false)?;
+        let configuration =
+            metadata.run_configuration_for_principal(record.run.configuration_id, actor, false)?;
+        Ok::<_, ApiError>((record.run, configuration.workspace_id))
+    })
+    .await?;
+    authorize_run_operation(&state, &auth, workspace_id, Some(run_id), RunAction::Read)?;
+    push_run_operation(&state, actor, workspace_id, Some(run_id), RunAction::Read);
+    Ok(Json(run))
+}
+
+async fn get_run_steps(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+) -> ApiResult<Json<Vec<RunStepResult>>> {
+    let metadata = metadata_store_cloned(&state)?;
+    let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
+    let run_id = run_id(id)?;
+    let actor = auth.principal_id;
+    let (steps, workspace_id) = metadata_blocking(move || {
+        let record = metadata.run_execution_for_principal(run_id, actor, false)?;
+        let configuration =
+            metadata.run_configuration_for_principal(record.run.configuration_id, actor, false)?;
+        Ok::<_, ApiError>((
+            metadata.run_steps_for_principal(run_id, actor)?,
+            configuration.workspace_id,
+        ))
+    })
+    .await?;
+    authorize_run_operation(&state, &auth, workspace_id, Some(run_id), RunAction::Read)?;
+    Ok(Json(steps))
+}
+
+async fn get_run_logs(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+    Query(query): Query<RunLogQuery>,
+) -> ApiResult<Json<Vec<RunLogEntry>>> {
+    let metadata = metadata_store_cloned(&state)?;
+    let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
+    let run_id = run_id(id)?;
+    let actor = auth.principal_id;
+    let (logs, workspace_id) = metadata_blocking(move || {
+        let record = metadata.run_execution_for_principal(run_id, actor, false)?;
+        let configuration =
+            metadata.run_configuration_for_principal(record.run.configuration_id, actor, false)?;
+        Ok::<_, ApiError>((
+            metadata.run_logs_for_principal(run_id, actor, query.after, query.limit)?,
+            configuration.workspace_id,
+        ))
+    })
+    .await?;
+    authorize_run_operation(&state, &auth, workspace_id, Some(run_id), RunAction::Read)?;
+    Ok(Json(logs))
+}
+
+async fn cancel_run(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+) -> ApiResult<Json<Run>> {
+    let metadata = metadata_store_cloned(&state)?;
+    let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
+    let run_id = run_id(id)?;
+    let actor = auth.principal_id;
+    let (run, workspace_id) = metadata_blocking({
+        let metadata = metadata.clone();
+        move || {
+            let record = metadata.run_execution_for_principal(run_id, actor, true)?;
+            let configuration = metadata.run_configuration_for_principal(
+                record.run.configuration_id,
+                actor,
+                true,
+            )?;
+            Ok::<_, ApiError>((record.run, configuration.workspace_id))
+        }
+    })
+    .await?;
+    authorize_run_operation(&state, &auth, workspace_id, Some(run_id), RunAction::Cancel)?;
+    let requested = metadata_blocking(move || {
+        metadata
+            .request_run_cancellation(run_id, actor)
+            .map_err(Into::into)
+    })
+    .await?;
+    if !state.rooms.cancel_run(run_id.0) && run.state != RunState::Queued {
+        return Err(ApiError::BadRequest(
+            "run is not active in this server generation".into(),
+        ));
+    }
+    push_run_operation(&state, actor, workspace_id, Some(run_id), RunAction::Cancel);
+    Ok(Json(requested))
+}
+
+async fn rerun(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+    Json(request): Json<StartRunRequest>,
+) -> ApiResult<Json<Run>> {
+    let metadata = metadata_store_cloned(&state)?;
+    let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
+    let previous_id = run_id(id)?;
+    let actor = auth.principal_id;
+    let timeout = crate::run_executor::validate_timeout(request.timeout_secs)?;
+    let configuration = metadata_blocking({
+        let metadata = metadata.clone();
+        move || {
+            let previous = metadata.run_execution_for_principal(previous_id, actor, true)?;
+            let payload: crate::run_executor::ResolvedRunPayload =
+                serde_json::from_str(&previous.resolved_scripts_json)
+                    .map_err(|_| ApiError::Internal("stored run manifest is invalid".into()))?;
+            Ok::<_, ApiError>(payload.configuration)
+        }
+    })
+    .await?;
+    if configuration.revision != request.expected_configuration_revision {
+        return Err(
+            sift_metadata::MetadataError::RunConfigurationRevisionConflict {
+                expected: request.expected_configuration_revision,
+                current: configuration.revision,
+            }
+            .into(),
+        );
+    }
+    authorize_run_operation(
+        &state,
+        &auth,
+        configuration.workspace_id,
+        Some(previous_id),
+        RunAction::Rerun,
+    )?;
+    let expected_revision = request.expected_configuration_revision;
+    let (configuration, record, room_id, tenant_id) = metadata_blocking({
+        let metadata = metadata.clone();
+        move || {
+            let previous = metadata.run_execution_for_principal(previous_id, actor, true)?;
+            let payload: crate::run_executor::ResolvedRunPayload =
+                serde_json::from_str(&previous.resolved_scripts_json)
+                    .map_err(|_| ApiError::Internal("stored run manifest is invalid".into()))?;
+            if payload.configuration.revision != expected_revision {
+                return Err(
+                    sift_metadata::MetadataError::RunConfigurationRevisionConflict {
+                        expected: expected_revision,
+                        current: payload.configuration.revision,
+                    }
+                    .into(),
+                );
+            }
+            let workspace = metadata.get_workspace_for_principal(
+                payload.configuration.workspace_id,
+                actor,
+                true,
+            )?;
+            let room = metadata.get_room(workspace.room_id)?;
+            let record = metadata.create_run_execution(
+                actor,
+                NewRunExecution {
+                    configuration_id: previous.run.configuration_id,
+                    trigger: RunTrigger::Rerun,
+                    manifest: previous.run.manifest,
+                    resolved_scripts_json: previous.resolved_scripts_json,
+                    previous_run_id: Some(previous_id),
+                },
+            )?;
+            Ok::<_, ApiError>((payload.configuration, record, room.id, room.tenant_id))
+        }
+    })
+    .await?;
+    crate::run_executor::spawn_run(
+        state.clone(),
+        metadata,
+        crate::run_executor::RunInvocation {
+            actor,
+            room_id,
+            tenant_id,
+            configuration: configuration.clone(),
+            run_id: record.run.id,
+            variables: request.variables,
+            timeout,
+        },
+    );
+    push_run_operation(
+        &state,
+        actor,
+        configuration.workspace_id,
+        Some(record.run.id),
+        RunAction::Rerun,
+    );
+    Ok(Json(record.run))
 }
 
 async fn list_ddl_sources(

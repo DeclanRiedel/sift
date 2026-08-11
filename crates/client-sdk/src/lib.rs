@@ -209,6 +209,18 @@ pub const SUPPORTED_HTTP_OPERATION_IDS: &[&str] = &[
     "updateSemanticDocument",
     "upsertMetadataConnectionProfile",
     "validateExtension",
+    "cancelRun",
+    "createRunConfiguration",
+    "deleteRunConfiguration",
+    "getRun",
+    "getRunConfiguration",
+    "getRunLogs",
+    "getRunSteps",
+    "listRunConfigurations",
+    "rerun",
+    "startRun",
+    "updateRunConfiguration",
+    "validateRunConfiguration",
     "whoAmI",
 ];
 
@@ -218,16 +230,18 @@ pub const SUPPORTED_HTTP_OPERATION_IDS: &[&str] = &[
 pub use sift_metadata::http::{
     AddRoomMemberRequest, ApplyWorkspaceProjectionRequest, BindRepositoryRequest,
     BindRoomConnectionRequest, BindWorkspaceProjectionRequest, CreateDdlSourceRequest,
-    CreateDocumentRequest, CreateRoomRequest, CreateSavedQueryRequest,
-    CreateWorkspaceCheckpointRequest, CreateWorkspaceNodeRequest, CreateWorkspaceRequest,
-    ExpectedDdlSourceRevisionRequest, ExpectedProjectionRevisionRequest,
-    ExpectedRepositoryRevisionRequest, ExpectedWorkspaceRevisionRequest, IssueTokenRequest,
-    IssueTokenResponse, MoveWorkspaceNodeRequest, OpenConnectionFromProfileRequest,
-    ProjectionResolutionRequest, RestoreWorkspaceCheckpointRequest, SetCredentialRequest,
-    SetVcsCredentialRequest, UpdateDdlSourceRequest, UpdateDocumentSnapshotRequest,
-    UpdateSavedQueryRequest, UpdateWorkspaceRequest, UpsertConnectionProfileRequest,
-    VcsCommitRequest, VcsDiffQuery, VcsPathsRequest, VcsRemoteRequest, WorkspaceBatchMutationItem,
-    WorkspaceBatchMutationRequest, WorkspaceTreeResponse,
+    CreateDocumentRequest, CreateRoomRequest, CreateRunConfigurationRequest,
+    CreateSavedQueryRequest, CreateWorkspaceCheckpointRequest, CreateWorkspaceNodeRequest,
+    CreateWorkspaceRequest, ExpectedDdlSourceRevisionRequest, ExpectedProjectionRevisionRequest,
+    ExpectedRepositoryRevisionRequest, ExpectedRunConfigurationRevisionRequest,
+    ExpectedWorkspaceRevisionRequest, IssueTokenRequest, IssueTokenResponse,
+    MoveWorkspaceNodeRequest, OpenConnectionFromProfileRequest, ProjectionResolutionRequest,
+    RestoreWorkspaceCheckpointRequest, RunLogQuery, SetCredentialRequest, SetVcsCredentialRequest,
+    StartRunRequest, UpdateDdlSourceRequest, UpdateDocumentSnapshotRequest,
+    UpdateRunConfigurationRequest, UpdateSavedQueryRequest, UpdateWorkspaceRequest,
+    UpsertConnectionProfileRequest, VcsCommitRequest, VcsDiffQuery, VcsPathsRequest,
+    VcsRemoteRequest, WorkspaceBatchMutationItem, WorkspaceBatchMutationRequest,
+    WorkspaceTreeResponse,
 };
 use sift_metadata::{
     ApiTokenId, ConnectionProfile, ConnectionProfileId, Document, DocumentId, GithubAllowlistEntry,
@@ -256,7 +270,8 @@ use sift_protocol::{
     PasswordResetRequest, PreviewEditsRequest, ProjectionBinding, ProjectionBindingId,
     ProtocolRange, ProviderDescriptor, Readiness, ReconcilePlan, RefreshAuthRequest,
     RegisterPrincipalKeyRequest, RepositoryBinding, RepositoryBindingId, RoomQueryResult,
-    RoomResultId, RoomResultPages, RoomSelection, SavepointRequest, SchemaSearchRequest,
+    RoomResultId, RoomResultPages, RoomSelection, Run, RunConfiguration, RunConfigurationId, RunId,
+    RunLogEntry, RunManifest, RunStepResult, SavepointRequest, SchemaSearchRequest,
     SchemaSearchResponse, SchemaSnapshot, ServerInfo, SessionId, SessionInfo, SshProxyAccessGrant,
     SshProxyCapabilityExchangeRequest, TenantResourceLimits, TenantUsageSnapshot, ToolContext,
     TransactionEndAction, TransactionInfo, TransactionPreview, TransactionPreviewRequest,
@@ -2528,6 +2543,114 @@ impl Client {
             &request,
         )
         .await
+    }
+
+    pub async fn run_configurations(
+        &self,
+        workspace: WorkspaceId,
+    ) -> Result<Vec<RunConfiguration>> {
+        self.get(&format!(
+            "/v1/metadata/workspaces/{}/run-configurations",
+            workspace.0
+        ))
+        .await
+    }
+
+    pub async fn create_run_configuration(
+        &self,
+        workspace: WorkspaceId,
+        request: CreateRunConfigurationRequest,
+    ) -> Result<RunConfiguration> {
+        self.post(
+            &format!("/v1/metadata/workspaces/{}/run-configurations", workspace.0),
+            &request,
+        )
+        .await
+    }
+
+    pub async fn run_configuration(
+        &self,
+        configuration: RunConfigurationId,
+    ) -> Result<RunConfiguration> {
+        self.get(&format!(
+            "/v1/metadata/run-configurations/{}",
+            configuration.0
+        ))
+        .await
+    }
+
+    pub async fn update_run_configuration(
+        &self,
+        configuration: RunConfigurationId,
+        request: UpdateRunConfigurationRequest,
+    ) -> Result<RunConfiguration> {
+        self.put(
+            &format!("/v1/metadata/run-configurations/{}", configuration.0),
+            &request,
+        )
+        .await
+    }
+
+    pub async fn delete_run_configuration(
+        &self,
+        configuration: RunConfigurationId,
+        request: ExpectedRunConfigurationRevisionRequest,
+    ) -> Result<()> {
+        self.delete_body(
+            &format!("/v1/metadata/run-configurations/{}", configuration.0),
+            &request,
+        )
+        .await
+    }
+
+    pub async fn validate_run_configuration(
+        &self,
+        configuration: RunConfigurationId,
+    ) -> Result<RunManifest> {
+        self.post_empty(&format!(
+            "/v1/metadata/run-configurations/{}/validate",
+            configuration.0
+        ))
+        .await
+    }
+
+    pub async fn start_run(
+        &self,
+        configuration: RunConfigurationId,
+        request: StartRunRequest,
+    ) -> Result<Run> {
+        self.post(
+            &format!("/v1/metadata/run-configurations/{}/runs", configuration.0),
+            &request,
+        )
+        .await
+    }
+
+    pub async fn run(&self, run: RunId) -> Result<Run> {
+        self.get(&format!("/v1/metadata/runs/{}", run.0)).await
+    }
+
+    pub async fn run_steps(&self, run: RunId) -> Result<Vec<RunStepResult>> {
+        self.get(&format!("/v1/metadata/runs/{}/steps", run.0))
+            .await
+    }
+
+    pub async fn run_logs(&self, run: RunId, query: RunLogQuery) -> Result<Vec<RunLogEntry>> {
+        self.get(&format!(
+            "/v1/metadata/runs/{}/logs?after={}&limit={}",
+            run.0, query.after, query.limit
+        ))
+        .await
+    }
+
+    pub async fn cancel_run(&self, run: RunId) -> Result<Run> {
+        self.post_empty(&format!("/v1/metadata/runs/{}/cancel", run.0))
+            .await
+    }
+
+    pub async fn rerun(&self, run: RunId, request: StartRunRequest) -> Result<Run> {
+        self.post(&format!("/v1/metadata/runs/{}/rerun", run.0), &request)
+            .await
     }
 
     pub async fn ddl_sources(&self, workspace: WorkspaceId) -> Result<Vec<DdlSource>> {

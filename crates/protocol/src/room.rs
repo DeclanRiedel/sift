@@ -149,6 +149,12 @@ pub enum RoomServerMessage {
         source_id: i64,
         revision: u64,
     },
+    RunChanged {
+        workspace_id: i64,
+        run_id: i64,
+        state: crate::RunState,
+        revision: u64,
+    },
     QueryResult {
         result: RoomQueryResult,
     },
