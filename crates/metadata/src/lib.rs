@@ -31,6 +31,7 @@ mod migration_run;
 mod plan_capture;
 pub mod schema;
 pub mod secrets;
+mod workspace;
 
 pub use approval::*;
 pub use extension::*;
@@ -40,6 +41,7 @@ pub use schema::*;
 #[cfg(feature = "os-keychain")]
 pub use secrets::OsKeychainSecretStore;
 pub use secrets::{FileSecretStore, MemorySecretStore, SecretStore};
+pub use workspace::public_workspace;
 
 mod migrations {
     refinery::embed_migrations!("migrations");
@@ -50,7 +52,7 @@ fn migration_kind(version: u32) -> Result<MigrationKind> {
         6 => Ok(MigrationKind::LegacyContract),
         19 => Ok(MigrationKind::Contract),
         26 | 27 => Ok(MigrationKind::Data),
-        1..=5 | 7..=18 | 20..=25 | 28..=31 => Ok(MigrationKind::Expand),
+        1..=5 | 7..=18 | 20..=25 | 28..=32 => Ok(MigrationKind::Expand),
         _ => Err(MetadataError::InvalidMigrationHistory(format!(
             "embedded V{version} has no lifecycle classification"
         ))),
@@ -133,6 +135,30 @@ pub enum MetadataError {
     PolicyRevisionConflict { expected: u64, current: u64 },
     #[error("saved query revision conflict: expected {expected}, current {current}")]
     SavedQueryRevisionConflict { expected: u64, current: u64 },
+    #[error("workspace {0:?} not found")]
+    WorkspaceNotFound(sift_protocol::WorkspaceId),
+    #[error("workspace node {0:?} not found")]
+    WorkspaceNodeNotFound(sift_protocol::WorkspaceNodeId),
+    #[error("workspace checkpoint {0:?} not found")]
+    WorkspaceCheckpointNotFound(sift_protocol::WorkspaceCheckpointId),
+    #[error("workspace revision conflict: expected {expected}, current {current}")]
+    WorkspaceRevisionConflict { expected: u64, current: u64 },
+    #[error("workspace name is invalid")]
+    InvalidWorkspaceName,
+    #[error("workspace path is invalid")]
+    InvalidWorkspacePath,
+    #[error("workspace path already exists")]
+    WorkspacePathConflict,
+    #[error("workspace node kind or content is invalid")]
+    InvalidWorkspaceNode,
+    #[error("workspace checkpoint is invalid")]
+    InvalidWorkspaceCheckpoint,
+    #[error("workspace-owned documents must be mutated through the workspace API")]
+    WorkspaceDocumentManaged,
+    #[error("workspace resource limit reached")]
+    WorkspaceLimitReached,
+    #[error("workspace batch is empty or exceeds its mutation limit")]
+    InvalidWorkspaceBatch,
     #[error("catalog snapshot not found")]
     CatalogSnapshotNotFound,
     #[error("catalog snapshot revision conflict: expected {expected}, current {current}")]
@@ -3783,13 +3809,16 @@ impl MetadataStore {
 
     pub fn create_document(&self, room: RoomId, input: NewDocument) -> Result<Document> {
         let now = now_text();
-        let conn = self.conn()?;
-        conn.execute(
+        let mut conn = self.conn()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let document_id = allocate_document_id(&tx)?;
+        tx.execute(
             "INSERT INTO document
-             (room_id, kind, title, crdt_type, crdt_state, crdt_format_version, snapshot_version,
+             (id, room_id, kind, title, crdt_type, crdt_state, crdt_format_version, snapshot_version,
               position, connection_profile_id, created_at, updated_at)
-             VALUES (?1, ?2, ?3, 'loro', ?4, 1, ?5, ?6, ?7, ?8, ?8)",
+             VALUES (?1, ?2, ?3, ?4, 'loro', ?5, 1, ?6, ?7, ?8, ?9, ?9)",
             params![
+                document_id.0,
                 room.0,
                 input.kind,
                 input.title,
@@ -3800,8 +3829,9 @@ impl MetadataStore {
                 now
             ],
         )?;
-        let document_id = DocumentId(conn.last_insert_rowid());
-        self.document_by_id_locked(&conn, document_id)
+        let document = self.document_by_id_locked(&tx, document_id)?;
+        tx.commit()?;
+        Ok(document)
     }
 
     /// Insert a pre-Phase-G legacy document row (`crdt_format_version = 0`,
@@ -3816,15 +3846,18 @@ impl MetadataStore {
         raw_text: &[u8],
     ) -> Result<DocumentId> {
         let now = now_text();
-        let conn = self.conn()?;
-        conn.execute(
+        let mut conn = self.conn()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let document_id = allocate_document_id(&tx)?;
+        tx.execute(
             "INSERT INTO document
-             (room_id, kind, title, crdt_type, crdt_state, crdt_format_version, snapshot_version,
+             (id, room_id, kind, title, crdt_type, crdt_state, crdt_format_version, snapshot_version,
               position, connection_profile_id, created_at, updated_at)
-             VALUES (?1, 'sql', ?2, 'loro', ?3, 0, x'', 0, NULL, ?4, ?4)",
-            params![room.0, title, raw_text, now],
+             VALUES (?1, ?2, 'sql', ?3, 'loro', ?4, 0, x'', 0, NULL, ?5, ?5)",
+            params![document_id.0, room.0, title, raw_text, now],
         )?;
-        Ok(DocumentId(conn.last_insert_rowid()))
+        tx.commit()?;
+        Ok(document_id)
     }
 
     pub fn create_document_for_principal(
@@ -3856,12 +3889,14 @@ impl MetadataStore {
                 return Err(MetadataError::TenantMismatch(profile, TenantId(tenant_id)));
             }
         }
+        let document_id = allocate_document_id(&tx)?;
         tx.execute(
             "INSERT INTO document
-             (room_id, kind, title, crdt_type, crdt_state, crdt_format_version, snapshot_version,
+             (id, room_id, kind, title, crdt_type, crdt_state, crdt_format_version, snapshot_version,
               position, connection_profile_id, created_at, updated_at)
-             VALUES (?1, ?2, ?3, 'loro', ?4, 1, ?5, ?6, ?7, ?8, ?8)",
+             VALUES (?1, ?2, ?3, ?4, 'loro', ?5, 1, ?6, ?7, ?8, ?9, ?9)",
             params![
+                document_id.0,
                 room.0,
                 input.kind,
                 input.title,
@@ -3872,7 +3907,6 @@ impl MetadataStore {
                 now
             ],
         )?;
-        let document_id = DocumentId(tx.last_insert_rowid());
         let document = self.document_by_id_locked(&tx, document_id)?;
         tx.commit()?;
         Ok(document)
@@ -3970,6 +4004,14 @@ impl MetadataStore {
     ) -> Result<Document> {
         let now = now_text();
         let conn = self.conn()?;
+        let managed: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM workspace_node WHERE document_id = ?1)",
+            params![document.0],
+            |row| row.get(0),
+        )?;
+        if managed {
+            return Err(MetadataError::WorkspaceDocumentManaged);
+        }
         let updated = conn.execute(
             "UPDATE document SET crdt_state = ?1, updated_at = ?2
              WHERE id = ?3 AND EXISTS (
@@ -4172,6 +4214,14 @@ impl MetadataStore {
         principal: PrincipalId,
     ) -> Result<()> {
         let conn = self.conn()?;
+        let managed: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM workspace_node WHERE document_id = ?1)",
+            params![document.0],
+            |row| row.get(0),
+        )?;
+        if managed {
+            return Err(MetadataError::WorkspaceDocumentManaged);
+        }
         let deleted = conn.execute(
             "DELETE FROM document WHERE id = ?1 AND EXISTS (
                  SELECT 1 FROM room_member m
@@ -4806,6 +4856,16 @@ fn configure_connection(conn: &Connection) -> Result<()> {
 
 fn now_text() -> String {
     Utc::now().to_rfc3339()
+}
+
+fn allocate_document_id(conn: &Connection) -> Result<DocumentId> {
+    conn.execute("INSERT INTO document_id_allocator DEFAULT VALUES", [])?;
+    let id = DocumentId(conn.last_insert_rowid());
+    conn.execute(
+        "DELETE FROM document_id_allocator WHERE id = ?1",
+        params![id.0],
+    )?;
+    Ok(id)
 }
 
 fn parse_time(value: String) -> Result<DateTime<Utc>> {
@@ -5727,13 +5787,13 @@ mod tests {
         assert!(!path.exists());
         let status = store.migration_status().unwrap();
         assert_eq!(status.current_version, 0);
-        assert_eq!(status.latest_version, 31);
-        assert_eq!(status.pending.len(), 31);
+        assert_eq!(status.latest_version, 32);
+        assert_eq!(status.pending.len(), 32);
         assert!(matches!(
             store.ensure_schema_current(),
             Err(MetadataError::MigrationRequired {
                 current: 0,
-                latest: 31
+                latest: 32
             })
         ));
         assert!(!path.exists());
@@ -5753,7 +5813,7 @@ mod tests {
         let store = MetadataStore::open(&path, Arc::new(MemorySecretStore::new())).unwrap();
         let report = store.apply_migrations(false).unwrap();
         assert_eq!(report.from_version, 1);
-        assert_eq!(report.to_version, 31);
+        assert_eq!(report.to_version, 32);
         let backup = report.backup.expect("existing schema is backed up");
         assert!(backup.is_file());
 
@@ -5790,7 +5850,7 @@ mod tests {
 
         store.apply_migrations(false).unwrap();
         let status = store.migration_status().unwrap();
-        assert_eq!(status.current_version, 31);
+        assert_eq!(status.current_version, 32);
         assert_eq!(status.minimum_compatible_version, 19);
     }
 
@@ -5802,7 +5862,7 @@ mod tests {
                 .iter()
                 .map(|fixture| fixture.schema_version)
                 .collect::<Vec<_>>(),
-            vec![18, 19, 28, 29, 30, 31],
+            vec![18, 19, 28, 29, 30, 31, 32],
             "the durable matrix must retain the pre-contract, contract, and current boundaries"
         );
 
@@ -5832,7 +5892,7 @@ mod tests {
                         store.ensure_schema_current(),
                         Err(MetadataError::MigrationRequired {
                             current,
-                            latest: 31
+                            latest: 32
                         }) if current == fixture.schema_version
                     ),
                     "{} should require migration",
@@ -5860,7 +5920,7 @@ mod tests {
                         "{}",
                         fixture.name
                     );
-                    assert_eq!(report.to_version, 31, "{}", fixture.name);
+                    assert_eq!(report.to_version, 32, "{}", fixture.name);
                 }
             }
         }
@@ -5868,7 +5928,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let current_fixture = schema_compatibility_fixtures()
             .into_iter()
-            .find(|fixture| fixture.schema_version == 31)
+            .find(|fixture| fixture.schema_version == 32)
             .unwrap();
         let path = copy_schema_fixture(directory.path(), &current_fixture);
         let connection = Connection::open(&path).unwrap();
@@ -5876,7 +5936,7 @@ mod tests {
             .execute(
                 "INSERT INTO refinery_schema_history
                  (version, name, applied_on, checksum)
-                 VALUES (32, 'future_additive_fixture', '2026-08-03T00:00:00Z', '1')",
+                 VALUES (33, 'future_additive_fixture', '2026-08-03T00:00:00Z', '1')",
                 [],
             )
             .unwrap();
@@ -5885,8 +5945,8 @@ mod tests {
 
         let store = MetadataStore::open(&path, Arc::new(MemorySecretStore::new())).unwrap();
         let status = store.migration_status().unwrap();
-        assert_eq!(status.current_version, 32);
-        assert_eq!(status.latest_version, 31);
+        assert_eq!(status.current_version, 33);
+        assert_eq!(status.latest_version, 32);
         assert!(status.pending.is_empty());
         store
             .ensure_schema_current()
@@ -5894,20 +5954,20 @@ mod tests {
         assert!(store.apply_migrations(false).unwrap().applied.is_empty());
 
         let connection = Connection::open(&path).unwrap();
-        connection.pragma_update(None, "user_version", 32).unwrap();
+        connection.pragma_update(None, "user_version", 33).unwrap();
         drop(connection);
         assert!(matches!(
             store.ensure_schema_current(),
             Err(MetadataError::BinaryTooOld {
-                minimum: 32,
-                latest: 31
+                minimum: 33,
+                latest: 32
             })
         ));
         assert!(matches!(
             store.apply_migrations(false),
             Err(MetadataError::BinaryTooOld {
-                minimum: 32,
-                latest: 31
+                minimum: 33,
+                latest: 32
             })
         ));
     }

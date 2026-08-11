@@ -2,6 +2,10 @@ use chrono::{DateTime, Utc};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use sift_protocol::{ConnectionPolicy, Engine, ProviderId, TenantResourceLimits, TenantRole};
+use sift_protocol::{
+    WorkspaceCheckpointId, WorkspaceCheckpointReason, WorkspaceId, WorkspaceNodeId,
+    WorkspaceNodeKind, WorkspacePath, WorkspaceRevision,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 pub struct TenantId(pub i64);
@@ -465,6 +469,73 @@ pub struct NewDocumentUpdate {
     pub submitted_by: PrincipalId,
     pub update_bytes: Vec<u8>,
     pub decoded_len: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct WorkspaceRecord {
+    pub id: WorkspaceId,
+    pub room_id: RoomId,
+    pub name: String,
+    pub revision: WorkspaceRevision,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone)]
+pub struct NewWorkspaceNode {
+    pub parent_id: Option<WorkspaceNodeId>,
+    pub path: WorkspacePath,
+    pub kind: WorkspaceNodeKind,
+    pub initial_snapshot: Option<Vec<u8>>,
+    pub initial_snapshot_version: Option<Vec<u8>>,
+}
+
+#[derive(Debug, Clone)]
+pub enum WorkspaceBatchMutation {
+    Create(NewWorkspaceNode),
+    Move {
+        node_id: WorkspaceNodeId,
+        parent_id: Option<WorkspaceNodeId>,
+        path: WorkspacePath,
+    },
+    Delete {
+        node_id: WorkspaceNodeId,
+    },
+}
+
+#[derive(Debug, Clone)]
+pub struct WorkspaceCheckpointCapture {
+    pub node_id: WorkspaceNodeId,
+    pub snapshot_bytes: Vec<u8>,
+    pub snapshot_version: Vec<u8>,
+}
+
+#[derive(Debug, Clone)]
+pub struct WorkspaceCheckpointNode {
+    pub node_id: WorkspaceNodeId,
+    pub parent_id: Option<WorkspaceNodeId>,
+    pub path: WorkspacePath,
+    pub kind: WorkspaceNodeKind,
+    pub content_digest: Option<String>,
+    pub snapshot_bytes: Option<Vec<u8>>,
+    pub snapshot_version: Option<Vec<u8>>,
+}
+
+#[derive(Debug, Clone)]
+pub struct NewWorkspaceCheckpoint {
+    pub expected_revision: WorkspaceRevision,
+    pub reason: WorkspaceCheckpointReason,
+    pub name: Option<String>,
+    pub captures: Vec<WorkspaceCheckpointCapture>,
+}
+
+#[derive(Debug, Clone)]
+pub struct WorkspaceRestorePlan {
+    pub checkpoint_id: WorkspaceCheckpointId,
+    pub workspace_id: WorkspaceId,
+    pub checkpoint_revision: WorkspaceRevision,
+    pub current_revision: WorkspaceRevision,
+    pub nodes: Vec<WorkspaceCheckpointNode>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]

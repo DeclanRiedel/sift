@@ -28,6 +28,7 @@ thiserror = { workspace = true }
 tokio = { workspace = true, features = ["rt"] }
 tracing = { workspace = true }
 uuid = { workspace = true }
+unicode-normalization = { workspace = true }
 
 [features]
 # OS keychain secret backend (keyring). Pure-Rust build (no system libdbus).

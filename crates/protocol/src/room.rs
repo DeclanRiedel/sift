@@ -136,6 +136,14 @@ pub enum RoomServerMessage {
     Presence {
         presence: Vec<RoomPresence>,
     },
+    /// The authoritative virtual tree or its checkpoint history changed.
+    /// Clients refetch using `revision`; SQL text still synchronizes through
+    /// the document messages below.
+    WorkspaceChanged {
+        workspace_id: i64,
+        revision: u64,
+        checkpoints_changed: bool,
+    },
     QueryResult {
         result: RoomQueryResult,
     },

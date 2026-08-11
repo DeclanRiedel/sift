@@ -23,10 +23,12 @@ use aide::transform::TransformOperation;
 use sift_metadata::{
     ApiTokenId, AuthClientKind as MetadataAuthClientKind, AuthIdentityId, ConnectionProfileId,
     Document, DocumentId, GithubAllowlistId, GithubProfile, MetadataStore, NewConnectionProfile,
-    NewDocument, NewOperationAudit, NewQueryHistory, NewRoom, NewSavedQuery, OperationAuditId,
-    PrincipalId, PrincipalKeyId, QueryHistory, QueryHistoryId, QueryStatus, RefreshAuthResult,
-    Room, RoomId, RoomMember, RoomRole, SavedQuery, SavedQueryFilter, SavedQueryId,
-    SavedQueryScope, TenantId, TenantInvitationId, TenantMembership, UpdateSavedQuery,
+    NewDocument, NewOperationAudit, NewQueryHistory, NewRoom, NewSavedQuery,
+    NewWorkspaceCheckpoint, NewWorkspaceNode, OperationAuditId, PrincipalId, PrincipalKeyId,
+    QueryHistory, QueryHistoryId, QueryStatus, RefreshAuthResult, Room, RoomId, RoomMember,
+    RoomRole, SavedQuery, SavedQueryFilter, SavedQueryId, SavedQueryScope, TenantId,
+    TenantInvitationId, TenantMembership, UpdateSavedQuery, WorkspaceBatchMutation,
+    WorkspaceCheckpointCapture,
 };
 use sift_protocol::{
     AcceptTenantInvitationRequest, AdminCreatePasswordPrincipalRequest,
@@ -45,8 +47,9 @@ use sift_protocol::{
     RegisterPrincipalKeyRequest, RoomClientMessage, RoomQueryResult, RoomServerMessage,
     SavepointRequest, SchemaFilter, SchemaScope, SshProxyAccessGrant,
     SshProxyCapabilityExchangeRequest, TransactionPreviewRequest, UpdateConnectionPolicyRequest,
-    UpdateTenantLimitsRequest, WebAuthResponse, WhoAmIResponse, WsClientMessage, WsServerMessage,
-    PROTOCOL_VERSION, PROTOCOL_VERSION_NUMBER,
+    UpdateTenantLimitsRequest, WebAuthResponse, WhoAmIResponse, Workspace, WorkspaceAction,
+    WorkspaceCheckpoint, WorkspaceCheckpointId, WorkspaceId, WorkspaceNodeId, WorkspaceNodeKind,
+    WsClientMessage, WsServerMessage, PROTOCOL_VERSION, PROTOCOL_VERSION_NUMBER,
 };
 
 use crate::config::{DeploymentPolicy, RuntimeMode, Transport};
@@ -393,6 +396,34 @@ pub fn app(state: AppState) -> Router {
         .api_route(
             "/v1/metadata/documents/:id",
             put_with(update_metadata_document, doc("updateMetadataDocument", "Update document CRDT snapshot")).delete_with(delete_metadata_document, doc("deleteMetadataDocument", "Delete document")),
+        )
+        .api_route(
+            "/v1/metadata/rooms/:id/workspaces",
+            get_with(list_room_workspaces, doc("listRoomWorkspaces", "List virtual workspaces in a room")).post_with(create_room_workspace, doc("createRoomWorkspace", "Create a room-owned virtual workspace")),
+        )
+        .api_route(
+            "/v1/metadata/workspaces/:id",
+            get_with(get_workspace, doc("getWorkspace", "Get a virtual workspace")).put_with(update_workspace, doc("updateWorkspace", "Rename a virtual workspace using its expected revision")).delete_with(delete_workspace, doc("deleteWorkspace", "Delete a virtual workspace using its expected revision")),
+        )
+        .api_route(
+            "/v1/metadata/workspaces/:id/nodes",
+            get_with(list_workspace_nodes, doc("listWorkspaceNodes", "List the authoritative workspace tree")).post_with(create_workspace_node, doc("createWorkspaceNode", "Create a folder or collaborative SQL file")),
+        )
+        .api_route(
+            "/v1/metadata/workspaces/:id/nodes/batch",
+            post_with(mutate_workspace_batch, doc("mutateWorkspaceBatch", "Atomically apply a bounded workspace tree mutation batch")),
+        )
+        .api_route(
+            "/v1/metadata/workspace-nodes/:id",
+            put_with(move_workspace_node, doc("moveWorkspaceNode", "Move or rename a workspace subtree")).delete_with(delete_workspace_node, doc("deleteWorkspaceNode", "Delete a workspace subtree")),
+        )
+        .api_route(
+            "/v1/metadata/workspaces/:id/checkpoints",
+            get_with(list_workspace_checkpoints, doc("listWorkspaceCheckpoints", "Keyset-page immutable workspace checkpoints")).post_with(create_workspace_checkpoint, doc("createWorkspaceCheckpoint", "Capture an immutable workspace checkpoint")),
+        )
+        .api_route(
+            "/v1/metadata/workspace-checkpoints/:id/restore",
+            post_with(restore_workspace_checkpoint, doc("restoreWorkspaceCheckpoint", "Restore a checkpoint as a new workspace head revision")),
         )
         .api_route(
             "/v1/metadata/connections",
@@ -1411,9 +1442,13 @@ struct CursorListQuery {
 
 use sift_metadata::http::{
     AddRoomMemberRequest, BindRoomConnectionRequest, CreateDocumentRequest, CreateRoomRequest,
-    CreateSavedQueryRequest, IssueTokenRequest, IssueTokenResponse,
-    OpenConnectionFromProfileRequest, SetCredentialRequest, UpdateDocumentSnapshotRequest,
-    UpdateSavedQueryRequest, UpsertConnectionProfileRequest,
+    CreateSavedQueryRequest, CreateWorkspaceCheckpointRequest, CreateWorkspaceNodeRequest,
+    CreateWorkspaceRequest, ExpectedWorkspaceRevisionRequest, IssueTokenRequest,
+    IssueTokenResponse, MoveWorkspaceNodeRequest, OpenConnectionFromProfileRequest,
+    RestoreWorkspaceCheckpointRequest, SetCredentialRequest, UpdateDocumentSnapshotRequest,
+    UpdateSavedQueryRequest, UpdateWorkspaceRequest, UpsertConnectionProfileRequest,
+    WorkspaceBatchMutationItem, WorkspaceBatchMutationRequest, WorkspaceCheckpointPageQuery,
+    WorkspaceTreeResponse,
 };
 
 fn metadata_store(state: &AppState) -> ApiResult<&MetadataStore> {
@@ -3035,6 +3070,34 @@ fn document_id(id: i64) -> ApiResult<DocumentId> {
     }
 }
 
+fn workspace_id(id: i64) -> ApiResult<WorkspaceId> {
+    if id > 0 {
+        Ok(WorkspaceId(id))
+    } else {
+        Err(ApiError::BadRequest("workspace id must be positive".into()))
+    }
+}
+
+fn workspace_node_id(id: i64) -> ApiResult<WorkspaceNodeId> {
+    if id > 0 {
+        Ok(WorkspaceNodeId(id))
+    } else {
+        Err(ApiError::BadRequest(
+            "workspace node id must be positive".into(),
+        ))
+    }
+}
+
+fn workspace_checkpoint_id(id: i64) -> ApiResult<WorkspaceCheckpointId> {
+    if id > 0 {
+        Ok(WorkspaceCheckpointId(id))
+    } else {
+        Err(ApiError::BadRequest(
+            "workspace checkpoint id must be positive".into(),
+        ))
+    }
+}
+
 fn connection_profile_id(id: i64) -> ApiResult<ConnectionProfileId> {
     if id > 0 {
         Ok(ConnectionProfileId(id))
@@ -3167,6 +3230,79 @@ fn push_metadata_operation(
         None,
         None,
     );
+}
+
+fn push_workspace_operation(
+    state: &AppState,
+    actor: PrincipalId,
+    action: WorkspaceAction,
+    workspace_id: Option<WorkspaceId>,
+    node_id: Option<WorkspaceNodeId>,
+) {
+    state.sessions.push_operation_full(
+        Operation::Workspace {
+            action,
+            workspace_id,
+            node_id,
+        },
+        OperationStatus::Succeeded,
+        Some(actor.0),
+        None,
+        None,
+        None,
+    );
+}
+
+fn authorize_workspace_operation(
+    state: &AppState,
+    auth: &AuthContext,
+    room_id: Option<RoomId>,
+    workspace_id: Option<WorkspaceId>,
+    action: WorkspaceAction,
+) -> ApiResult<()> {
+    let context = sift_protocol::OperationCapabilityContext {
+        tenant_id: None,
+        room_id: room_id.map(|id| id.0),
+        connection_profile_id: None,
+        session: None,
+        connection: None,
+        transaction: None,
+        workspace_id,
+    };
+    let scope = capability_authorization_scope(state, Some(auth), &context)?
+        .ok_or(ApiError::Unauthorized)?;
+    let operation = Operation::Workspace {
+        action,
+        workspace_id,
+        node_id: None,
+    };
+    crate::authorization::authorize(&scope, operation.kind())
+        .map_err(|denial| ApiError::Forbidden(denial.public_reason().into()))
+}
+
+fn publish_workspace_changed(state: &AppState, workspace: &Workspace, checkpoints_changed: bool) {
+    state.rooms.publish_presence(
+        workspace.room_id,
+        RoomServerMessage::WorkspaceChanged {
+            workspace_id: workspace.id.0,
+            revision: workspace.revision.0,
+            checkpoints_changed,
+        },
+    );
+}
+
+fn workspace_actor_error(error: crate::document_actor::ApplyError) -> ApiError {
+    match error {
+        crate::document_actor::ApplyError::Metadata(error) => error.into(),
+        crate::document_actor::ApplyError::InvalidUpdate(message) => ApiError::BadRequest(message),
+        crate::document_actor::ApplyError::DependenciesMissing => {
+            ApiError::Internal("workspace document has unresolved CRDT dependencies".into())
+        }
+        crate::document_actor::ApplyError::DocumentTooLarge => {
+            ApiError::BadRequest("workspace document exceeds collaboration limits".into())
+        }
+        crate::document_actor::ApplyError::Doc(error) => ApiError::Internal(error.to_string()),
+    }
 }
 
 /// Build the durable audit record for a successful security-critical
@@ -3566,10 +3702,18 @@ fn capability_authorization_scope(
     if let Some(profile) = &profile {
         merge_capability_tenant(&mut tenant, profile.tenant_id)?;
     }
-    let room = context
-        .room_id
-        .map(room_id)
-        .transpose()?
+    let mut resolved_room_id = context.room_id.map(room_id).transpose()?;
+    if let Some(workspace_id) = context.workspace_id {
+        let workspace =
+            metadata.get_workspace_for_principal(workspace_id, auth.principal_id, false)?;
+        if resolved_room_id.is_some_and(|room| room != workspace.room_id) {
+            return Err(ApiError::BadRequest(
+                "capability workspace does not belong to the requested room".into(),
+            ));
+        }
+        resolved_room_id = Some(workspace.room_id);
+    }
+    let room = resolved_room_id
         .map(|id| metadata.get_room(id))
         .transpose()?;
     if let Some(room) = &room {
@@ -4895,6 +5039,780 @@ async fn delete_metadata_document(
     .await?;
     push_metadata_operation(&state, actor, "delete", "document", Some(document.0));
     Ok(Json(json!({"ok": true})))
+}
+
+async fn list_room_workspaces(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+) -> ApiResult<Json<Vec<Workspace>>> {
+    let metadata = metadata_store_cloned(&state)?;
+    let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
+    let room = room_id(id)?;
+    let actor = auth.principal_id;
+    authorize_workspace_operation(&state, &auth, Some(room), None, WorkspaceAction::Read)?;
+    let workspaces = metadata_blocking(move || {
+        metadata
+            .list_workspaces_for_principal(room, actor)
+            .map(|items| {
+                items
+                    .into_iter()
+                    .map(sift_metadata::public_workspace)
+                    .collect::<Vec<Workspace>>()
+            })
+            .map_err(Into::into)
+    })
+    .await?;
+    for workspace in &workspaces {
+        push_workspace_operation(
+            &state,
+            actor,
+            WorkspaceAction::Read,
+            Some(workspace.id),
+            None,
+        );
+    }
+    Ok(Json(workspaces))
+}
+
+async fn create_room_workspace(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+    Json(req): Json<CreateWorkspaceRequest>,
+) -> ApiResult<Json<Workspace>> {
+    let metadata = metadata_store_cloned(&state)?;
+    let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
+    let room = room_id(id)?;
+    let actor = auth.principal_id;
+    authorize_workspace_operation(&state, &auth, Some(room), None, WorkspaceAction::Create)?;
+    let workspace = metadata_blocking(move || {
+        metadata
+            .create_workspace(room, actor, &req.name)
+            .map(sift_metadata::public_workspace)
+            .map_err(Into::into)
+    })
+    .await?;
+    push_workspace_operation(
+        &state,
+        actor,
+        WorkspaceAction::Create,
+        Some(workspace.id),
+        None,
+    );
+    publish_workspace_changed(&state, &workspace, false);
+    Ok(Json(workspace))
+}
+
+async fn get_workspace(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+) -> ApiResult<Json<Workspace>> {
+    let metadata = metadata_store_cloned(&state)?;
+    let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
+    let workspace_id = workspace_id(id)?;
+    let actor = auth.principal_id;
+    authorize_workspace_operation(
+        &state,
+        &auth,
+        None,
+        Some(workspace_id),
+        WorkspaceAction::Read,
+    )?;
+    let workspace = metadata_blocking(move || {
+        metadata
+            .get_workspace_for_principal(workspace_id, actor, false)
+            .map(sift_metadata::public_workspace)
+            .map_err(Into::into)
+    })
+    .await?;
+    push_workspace_operation(
+        &state,
+        actor,
+        WorkspaceAction::Read,
+        Some(workspace_id),
+        None,
+    );
+    Ok(Json(workspace))
+}
+
+async fn update_workspace(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+    Json(req): Json<UpdateWorkspaceRequest>,
+) -> ApiResult<Json<Workspace>> {
+    let metadata = metadata_store_cloned(&state)?;
+    let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
+    let workspace_id = workspace_id(id)?;
+    let actor = auth.principal_id;
+    authorize_workspace_operation(
+        &state,
+        &auth,
+        None,
+        Some(workspace_id),
+        WorkspaceAction::Update,
+    )?;
+    let lock = state.rooms.workspace_lock(workspace_id.0);
+    let _guard = lock.lock().await;
+    let workspace = metadata_blocking(move || {
+        metadata
+            .update_workspace(workspace_id, actor, req.expected_revision, &req.name)
+            .map(sift_metadata::public_workspace)
+            .map_err(Into::into)
+    })
+    .await?;
+    push_workspace_operation(
+        &state,
+        actor,
+        WorkspaceAction::Update,
+        Some(workspace_id),
+        None,
+    );
+    publish_workspace_changed(&state, &workspace, false);
+    Ok(Json(workspace))
+}
+
+async fn delete_workspace(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+    Json(req): Json<ExpectedWorkspaceRevisionRequest>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let metadata = metadata_store_cloned(&state)?;
+    let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
+    let workspace_id = workspace_id(id)?;
+    let actor = auth.principal_id;
+    authorize_workspace_operation(
+        &state,
+        &auth,
+        None,
+        Some(workspace_id),
+        WorkspaceAction::Delete,
+    )?;
+    let lock = state.rooms.workspace_lock(workspace_id.0);
+    let _guard = lock.lock().await;
+    let (room, documents) = metadata_blocking(move || {
+        let workspace = metadata.get_workspace_for_principal(workspace_id, actor, true)?;
+        let documents = metadata
+            .list_workspace_nodes_for_principal(workspace_id, actor)?
+            .into_iter()
+            .filter_map(|node| node.document_id.map(DocumentId))
+            .collect::<Vec<_>>();
+        metadata.delete_workspace(workspace_id, actor, req.expected_revision)?;
+        Ok::<_, ApiError>((workspace.room_id, documents))
+    })
+    .await?;
+    for document in documents {
+        state.rooms.documents().evict(document);
+    }
+    push_workspace_operation(
+        &state,
+        actor,
+        WorkspaceAction::Delete,
+        Some(workspace_id),
+        None,
+    );
+    state.rooms.publish_presence(
+        room.0,
+        RoomServerMessage::WorkspaceChanged {
+            workspace_id: workspace_id.0,
+            revision: 0,
+            checkpoints_changed: true,
+        },
+    );
+    Ok(Json(json!({"ok": true})))
+}
+
+async fn list_workspace_nodes(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+) -> ApiResult<Json<WorkspaceTreeResponse>> {
+    let metadata = metadata_store_cloned(&state)?;
+    let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
+    let workspace_id = workspace_id(id)?;
+    let actor = auth.principal_id;
+    authorize_workspace_operation(
+        &state,
+        &auth,
+        None,
+        Some(workspace_id),
+        WorkspaceAction::Read,
+    )?;
+    let response = metadata_blocking(move || {
+        let workspace = metadata
+            .get_workspace_for_principal(workspace_id, actor, false)
+            .map(sift_metadata::public_workspace)?;
+        let nodes = metadata.list_workspace_nodes_for_principal(workspace_id, actor)?;
+        Ok::<_, ApiError>(WorkspaceTreeResponse { workspace, nodes })
+    })
+    .await?;
+    push_workspace_operation(
+        &state,
+        actor,
+        WorkspaceAction::Read,
+        Some(workspace_id),
+        None,
+    );
+    Ok(Json(response))
+}
+
+async fn create_workspace_node(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+    Json(req): Json<CreateWorkspaceNodeRequest>,
+) -> ApiResult<Json<WorkspaceTreeResponse>> {
+    let metadata = metadata_store_cloned(&state)?;
+    let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
+    let workspace_id = workspace_id(id)?;
+    let actor = auth.principal_id;
+    authorize_workspace_operation(
+        &state,
+        &auth,
+        None,
+        Some(workspace_id),
+        WorkspaceAction::CreateNode,
+    )?;
+    let lock = state.rooms.workspace_lock(workspace_id.0);
+    let _guard = lock.lock().await;
+    let response = metadata_blocking(move || {
+        let (initial_snapshot, initial_snapshot_version) = match req.kind {
+            WorkspaceNodeKind::Folder if req.initial_text.is_none() => (None, None),
+            WorkspaceNodeKind::SqlDocument => {
+                let replica = sift_doc::TextReplica::new(sift_doc::random_peer_id())
+                    .map_err(|error| ApiError::Internal(error.to_string()))?;
+                if let Some(text) = req.initial_text.as_deref().filter(|text| !text.is_empty()) {
+                    replica
+                        .insert(0, text)
+                        .map_err(|error| ApiError::BadRequest(error.to_string()))?;
+                }
+                (
+                    Some(
+                        replica
+                            .export_snapshot()
+                            .map_err(|error| ApiError::Internal(error.to_string()))?,
+                    ),
+                    Some(replica.version_vector()),
+                )
+            }
+            _ => {
+                return Err(ApiError::BadRequest(
+                    "folders cannot carry text and artifact nodes are not available".into(),
+                ))
+            }
+        };
+        let (workspace, node) = metadata.create_workspace_node(
+            workspace_id,
+            actor,
+            req.expected_workspace_revision,
+            NewWorkspaceNode {
+                parent_id: req.parent_id,
+                path: req.path,
+                kind: req.kind,
+                initial_snapshot,
+                initial_snapshot_version,
+            },
+        )?;
+        Ok::<_, ApiError>(WorkspaceTreeResponse {
+            workspace: sift_metadata::public_workspace(workspace),
+            nodes: vec![node],
+        })
+    })
+    .await?;
+    let node = response.nodes.first().map(|node| node.id);
+    push_workspace_operation(
+        &state,
+        actor,
+        WorkspaceAction::CreateNode,
+        Some(workspace_id),
+        node,
+    );
+    publish_workspace_changed(&state, &response.workspace, false);
+    Ok(Json(response))
+}
+
+async fn mutate_workspace_batch(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+    Json(req): Json<WorkspaceBatchMutationRequest>,
+) -> ApiResult<Json<WorkspaceTreeResponse>> {
+    let metadata = metadata_store_cloned(&state)?;
+    let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
+    let workspace_id = workspace_id(id)?;
+    let actor = auth.principal_id;
+    authorize_workspace_operation(
+        &state,
+        &auth,
+        None,
+        Some(workspace_id),
+        WorkspaceAction::BatchMutate,
+    )?;
+    let lock = state.rooms.workspace_lock(workspace_id.0);
+    let _guard = lock.lock().await;
+    let (response, removed_documents) = metadata_blocking(move || {
+        let mutations =
+            req.mutations
+                .into_iter()
+                .map(|mutation| match mutation {
+                    WorkspaceBatchMutationItem::Create {
+                        parent_id,
+                        path,
+                        kind,
+                        initial_text,
+                    } => {
+                        let (initial_snapshot, initial_snapshot_version) = match kind {
+                            WorkspaceNodeKind::Folder if initial_text.is_none() => (None, None),
+                            WorkspaceNodeKind::SqlDocument => {
+                                let replica =
+                                    sift_doc::TextReplica::new(sift_doc::random_peer_id())
+                                        .map_err(|error| ApiError::Internal(error.to_string()))?;
+                                if let Some(text) =
+                                    initial_text.as_deref().filter(|text| !text.is_empty())
+                                {
+                                    replica
+                                        .insert(0, text)
+                                        .map_err(|error| ApiError::BadRequest(error.to_string()))?;
+                                }
+                                (
+                                    Some(
+                                        replica.export_snapshot().map_err(|error| {
+                                            ApiError::Internal(error.to_string())
+                                        })?,
+                                    ),
+                                    Some(replica.version_vector()),
+                                )
+                            }
+                            _ => return Err(ApiError::BadRequest(
+                                "folders cannot carry text and artifact nodes are not available"
+                                    .into(),
+                            )),
+                        };
+                        Ok(WorkspaceBatchMutation::Create(NewWorkspaceNode {
+                            parent_id,
+                            path,
+                            kind,
+                            initial_snapshot,
+                            initial_snapshot_version,
+                        }))
+                    }
+                    WorkspaceBatchMutationItem::Move {
+                        node_id,
+                        parent_id,
+                        path,
+                    } => Ok(WorkspaceBatchMutation::Move {
+                        node_id,
+                        parent_id,
+                        path,
+                    }),
+                    WorkspaceBatchMutationItem::Delete { node_id } => {
+                        Ok(WorkspaceBatchMutation::Delete { node_id })
+                    }
+                })
+                .collect::<ApiResult<Vec<_>>>()?;
+        let (workspace, nodes, removed_documents) = metadata.mutate_workspace_batch(
+            workspace_id,
+            actor,
+            req.expected_workspace_revision,
+            mutations,
+        )?;
+        Ok::<_, ApiError>((
+            WorkspaceTreeResponse {
+                workspace: sift_metadata::public_workspace(workspace),
+                nodes,
+            },
+            removed_documents,
+        ))
+    })
+    .await?;
+    for document in removed_documents {
+        state.rooms.documents().evict(document);
+    }
+    push_workspace_operation(
+        &state,
+        actor,
+        WorkspaceAction::BatchMutate,
+        Some(workspace_id),
+        None,
+    );
+    publish_workspace_changed(&state, &response.workspace, false);
+    Ok(Json(response))
+}
+
+async fn move_workspace_node(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+    Json(req): Json<MoveWorkspaceNodeRequest>,
+) -> ApiResult<Json<WorkspaceTreeResponse>> {
+    let metadata = metadata_store_cloned(&state)?;
+    let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
+    let node_id = workspace_node_id(id)?;
+    let actor = auth.principal_id;
+    // Resolve the workspace before acquiring its process-local lock; the
+    // metadata method rechecks authorization and revision inside its tx.
+    let current = metadata_blocking({
+        let metadata = metadata.clone();
+        move || {
+            metadata
+                .workspace_for_node(node_id, actor)
+                .map_err(Into::into)
+        }
+    })
+    .await?;
+    let workspace_id = current.id;
+    authorize_workspace_operation(
+        &state,
+        &auth,
+        None,
+        Some(workspace_id),
+        WorkspaceAction::MoveNode,
+    )?;
+    let lock = state.rooms.workspace_lock(workspace_id.0);
+    let _guard = lock.lock().await;
+    let response = metadata_blocking(move || {
+        let (workspace, nodes) = metadata.move_workspace_node(
+            node_id,
+            actor,
+            req.expected_workspace_revision,
+            req.parent_id,
+            req.path,
+        )?;
+        Ok::<_, ApiError>(WorkspaceTreeResponse {
+            workspace: sift_metadata::public_workspace(workspace),
+            nodes,
+        })
+    })
+    .await?;
+    push_workspace_operation(
+        &state,
+        actor,
+        WorkspaceAction::MoveNode,
+        Some(workspace_id),
+        Some(node_id),
+    );
+    publish_workspace_changed(&state, &response.workspace, false);
+    Ok(Json(response))
+}
+
+async fn delete_workspace_node(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+    Json(req): Json<ExpectedWorkspaceRevisionRequest>,
+) -> ApiResult<Json<Workspace>> {
+    let metadata = metadata_store_cloned(&state)?;
+    let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
+    let node_id = workspace_node_id(id)?;
+    let actor = auth.principal_id;
+    let current = metadata_blocking({
+        let metadata = metadata.clone();
+        move || {
+            metadata
+                .workspace_for_node(node_id, actor)
+                .map_err(Into::into)
+        }
+    })
+    .await?;
+    let workspace_id = current.id;
+    authorize_workspace_operation(
+        &state,
+        &auth,
+        None,
+        Some(workspace_id),
+        WorkspaceAction::DeleteNode,
+    )?;
+    let lock = state.rooms.workspace_lock(workspace_id.0);
+    let _guard = lock.lock().await;
+    let (workspace, removed_documents) = metadata_blocking(move || {
+        let removed_documents = metadata.workspace_subtree_document_ids(node_id, actor)?;
+        let workspace = metadata.delete_workspace_node(node_id, actor, req.expected_revision)?;
+        Ok::<_, ApiError>((
+            sift_metadata::public_workspace(workspace),
+            removed_documents,
+        ))
+    })
+    .await?;
+    for document in removed_documents {
+        state.rooms.documents().evict(document);
+    }
+    push_workspace_operation(
+        &state,
+        actor,
+        WorkspaceAction::DeleteNode,
+        Some(workspace_id),
+        Some(node_id),
+    );
+    publish_workspace_changed(&state, &workspace, false);
+    Ok(Json(workspace))
+}
+
+async fn list_workspace_checkpoints(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+    Query(query): Query<WorkspaceCheckpointPageQuery>,
+) -> ApiResult<Json<Vec<WorkspaceCheckpoint>>> {
+    let metadata = metadata_store_cloned(&state)?;
+    let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
+    let workspace_id = workspace_id(id)?;
+    let actor = auth.principal_id;
+    authorize_workspace_operation(
+        &state,
+        &auth,
+        None,
+        Some(workspace_id),
+        WorkspaceAction::ReadHistory,
+    )?;
+    let checkpoints = metadata_blocking(move || {
+        metadata
+            .list_workspace_checkpoints_for_principal(
+                workspace_id,
+                actor,
+                query.before_id,
+                query.limit,
+            )
+            .map_err(Into::into)
+    })
+    .await?;
+    push_workspace_operation(
+        &state,
+        actor,
+        WorkspaceAction::ReadHistory,
+        Some(workspace_id),
+        None,
+    );
+    Ok(Json(checkpoints))
+}
+
+async fn create_workspace_checkpoint(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+    Json(req): Json<CreateWorkspaceCheckpointRequest>,
+) -> ApiResult<Json<WorkspaceCheckpoint>> {
+    let metadata = metadata_store_cloned(&state)?;
+    let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
+    let workspace_id = workspace_id(id)?;
+    let actor = auth.principal_id;
+    authorize_workspace_operation(
+        &state,
+        &auth,
+        None,
+        Some(workspace_id),
+        WorkspaceAction::CreateCheckpoint,
+    )?;
+    let lock = state.rooms.workspace_lock(workspace_id.0);
+    let _guard = lock.lock().await;
+    let rooms = state.rooms.clone();
+    let (checkpoint, workspace) = metadata_blocking(move || {
+        let workspace = metadata.get_workspace_for_principal(workspace_id, actor, true)?;
+        if workspace.revision != req.expected_workspace_revision {
+            return Err(sift_metadata::MetadataError::WorkspaceRevisionConflict {
+                expected: req.expected_workspace_revision.0,
+                current: workspace.revision.0,
+            }
+            .into());
+        }
+        let nodes = metadata.list_workspace_nodes_for_principal(workspace_id, actor)?;
+        let mut captures = Vec::new();
+        for node in nodes
+            .iter()
+            .filter(|node| node.kind == WorkspaceNodeKind::SqlDocument)
+        {
+            let document = DocumentId(
+                node.document_id
+                    .ok_or(sift_metadata::MetadataError::InvalidWorkspaceNode)?,
+            );
+            let document_actor = rooms
+                .documents()
+                .get_or_load(&metadata, document)
+                .map_err(workspace_actor_error)?;
+            let guard = document_actor
+                .lock()
+                .map_err(|_| ApiError::Internal("document actor mutex poisoned".into()))?;
+            captures.push(WorkspaceCheckpointCapture {
+                node_id: node.id,
+                snapshot_bytes: guard.snapshot().map_err(workspace_actor_error)?,
+                snapshot_version: guard.version_vector(),
+            });
+        }
+        let checkpoint = metadata.create_workspace_checkpoint(
+            workspace_id,
+            actor,
+            NewWorkspaceCheckpoint {
+                expected_revision: req.expected_workspace_revision,
+                reason: req.reason,
+                name: req.name,
+                captures,
+            },
+        )?;
+        Ok::<_, ApiError>((checkpoint, sift_metadata::public_workspace(workspace)))
+    })
+    .await?;
+    push_workspace_operation(
+        &state,
+        actor,
+        WorkspaceAction::CreateCheckpoint,
+        Some(workspace_id),
+        None,
+    );
+    publish_workspace_changed(&state, &workspace, true);
+    Ok(Json(checkpoint))
+}
+
+async fn restore_workspace_checkpoint(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+    Json(req): Json<RestoreWorkspaceCheckpointRequest>,
+) -> ApiResult<Json<WorkspaceTreeResponse>> {
+    let metadata = metadata_store_cloned(&state)?;
+    let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
+    let checkpoint_id = workspace_checkpoint_id(id)?;
+    let actor = auth.principal_id;
+    let plan = metadata_blocking({
+        let metadata = metadata.clone();
+        move || {
+            metadata
+                .workspace_restore_plan(checkpoint_id, actor, req.expected_workspace_revision)
+                .map_err(Into::into)
+        }
+    })
+    .await?;
+    let workspace_id = plan.workspace_id;
+    authorize_workspace_operation(
+        &state,
+        &auth,
+        None,
+        Some(workspace_id),
+        WorkspaceAction::RestoreCheckpoint,
+    )?;
+    let lock = state.rooms.workspace_lock(workspace_id.0);
+    let _guard = lock.lock().await;
+    let rooms = state.rooms.clone();
+    let (response, broadcasts, removed_documents) = metadata_blocking(move || {
+        // Revalidate after waiting for the lock.
+        let plan = metadata.workspace_restore_plan(
+            checkpoint_id,
+            actor,
+            req.expected_workspace_revision,
+        )?;
+        let current = metadata.list_workspace_nodes_for_principal(workspace_id, actor)?;
+        let current = current
+            .into_iter()
+            .map(|node| (node.id, node))
+            .collect::<std::collections::HashMap<_, _>>();
+        let mut broadcasts = Vec::new();
+        for wanted in &plan.nodes {
+            let Some(existing) = current.get(&wanted.node_id) else {
+                continue;
+            };
+            if wanted.kind != WorkspaceNodeKind::SqlDocument
+                || existing.kind != WorkspaceNodeKind::SqlDocument
+            {
+                continue;
+            }
+            let snapshot = wanted
+                .snapshot_bytes
+                .as_deref()
+                .ok_or(sift_metadata::MetadataError::InvalidWorkspaceCheckpoint)?;
+            let replacement =
+                sift_doc::TextReplica::from_snapshot(sift_doc::random_peer_id(), snapshot)
+                    .map_err(|error| ApiError::Internal(error.to_string()))?
+                    .text();
+            let document = DocumentId(
+                existing
+                    .document_id
+                    .ok_or(sift_metadata::MetadataError::InvalidWorkspaceNode)?,
+            );
+            let document_actor = rooms
+                .documents()
+                .get_or_load(&metadata, document)
+                .map_err(workspace_actor_error)?;
+            let mut guard = document_actor
+                .lock()
+                .map_err(|_| ApiError::Internal("document actor mutex poisoned".into()))?;
+            let update_id = uuid::Uuid::new_v4().to_string();
+            if let Some(authored) = guard
+                .author_replacement(
+                    &metadata,
+                    actor,
+                    "sift-workspace-restore",
+                    &update_id,
+                    &replacement,
+                )
+                .map_err(workspace_actor_error)?
+            {
+                if let crate::document_actor::ApplyOutcome::Applied { server_seq, .. } =
+                    authored.outcome
+                {
+                    broadcasts.push((
+                        document,
+                        authored.replica_id,
+                        update_id,
+                        server_seq,
+                        authored.update_bytes,
+                        authored.server_version,
+                    ));
+                }
+            }
+        }
+        let (workspace, nodes, removed_documents) = metadata.apply_workspace_restore_structure(
+            checkpoint_id,
+            actor,
+            req.expected_workspace_revision,
+        )?;
+        Ok::<_, ApiError>((
+            WorkspaceTreeResponse {
+                workspace: sift_metadata::public_workspace(workspace),
+                nodes,
+            },
+            broadcasts,
+            removed_documents,
+        ))
+    })
+    .await?;
+    for document in removed_documents {
+        state.rooms.documents().evict(document);
+    }
+    for (document, replica_id, update_id, server_seq, update, version) in broadcasts {
+        state.rooms.publish_doc(
+            response.workspace.room_id,
+            RoomServerMessage::DocumentUpdateCommitted {
+                document_id: document.0,
+                replica_id: sift_protocol::ReplicaId(replica_id),
+                server_seq,
+                update: sift_protocol::CrdtUpdate::new(update),
+                server_version: sift_protocol::DocumentVersion::new(version),
+            },
+        );
+        state.sessions.push_operation_full(
+            Operation::ApplyDocumentUpdate {
+                room_id: response.workspace.room_id,
+                document_id: document.0,
+                update_id,
+                server_seq,
+            },
+            OperationStatus::Succeeded,
+            Some(actor.0),
+            None,
+            None,
+            None,
+        );
+    }
+    push_workspace_operation(
+        &state,
+        actor,
+        WorkspaceAction::RestoreCheckpoint,
+        Some(workspace_id),
+        None,
+    );
+    publish_workspace_changed(&state, &response.workspace, true);
+    Ok(Json(response))
 }
 
 async fn list_metadata_connections(

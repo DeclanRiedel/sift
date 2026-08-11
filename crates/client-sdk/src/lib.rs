@@ -45,14 +45,19 @@ pub const SUPPORTED_HTTP_OPERATION_IDS: &[&str] = &[
     "createMetadataDocument",
     "createMetadataRoom",
     "createMetadataSavedQuery",
+    "createRoomWorkspace",
     "createCatalogSnapshot",
     "createSavepoint",
     "createSession",
     "createTenantInvitation",
+    "createWorkspaceCheckpoint",
+    "createWorkspaceNode",
     "deleteMetadataConnectionProfile",
     "deleteMetadataDocument",
     "deleteMetadataRoom",
     "deleteMetadataSavedQuery",
+    "deleteWorkspace",
+    "deleteWorkspaceNode",
     "deletePlanCapture",
     "deleteCatalogSnapshot",
     "deleteSpilledCursor",
@@ -75,6 +80,7 @@ pub const SUPPORTED_HTTP_OPERATION_IDS: &[&str] = &[
     "getMigrationRun",
     "getPlanCapture",
     "getObjectDdl",
+    "getWorkspace",
     "getRoomResult",
     "getRoomResultPages",
     "getSchema",
@@ -116,9 +122,12 @@ pub const SUPPORTED_HTTP_OPERATION_IDS: &[&str] = &[
     "listProcesses",
     "listProviders",
     "listRoomResults",
+    "listRoomWorkspaces",
     "listSessions",
     "listTenantInvitations",
     "listTransactions",
+    "listWorkspaceCheckpoints",
+    "listWorkspaceNodes",
     "logoutAllAuth",
     "logoutAuth",
     "openConnection",
@@ -146,6 +155,7 @@ pub const SUPPORTED_HTTP_OPERATION_IDS: &[&str] = &[
     "registerPrincipalKey",
     "releaseSavepoint",
     "removeMetadataRoomMember",
+    "restoreWorkspaceCheckpoint",
     "resetPassword",
     "revokeAuthToken",
     "revokeGithubAllowlist",
@@ -170,6 +180,9 @@ pub const SUPPORTED_HTTP_OPERATION_IDS: &[&str] = &[
     "updateMetadataConnectionPolicy",
     "updateMetadataDocument",
     "updateMetadataSavedQuery",
+    "updateWorkspace",
+    "moveWorkspaceNode",
+    "mutateWorkspaceBatch",
     "updateSemanticDocument",
     "upsertMetadataConnectionProfile",
     "validateExtension",
@@ -181,9 +194,12 @@ pub const SUPPORTED_HTTP_OPERATION_IDS: &[&str] = &[
 // directly.
 pub use sift_metadata::http::{
     AddRoomMemberRequest, BindRoomConnectionRequest, CreateDocumentRequest, CreateRoomRequest,
-    CreateSavedQueryRequest, IssueTokenRequest, IssueTokenResponse,
-    OpenConnectionFromProfileRequest, SetCredentialRequest, UpdateDocumentSnapshotRequest,
-    UpdateSavedQueryRequest, UpsertConnectionProfileRequest,
+    CreateSavedQueryRequest, CreateWorkspaceCheckpointRequest, CreateWorkspaceNodeRequest,
+    CreateWorkspaceRequest, ExpectedWorkspaceRevisionRequest, IssueTokenRequest,
+    IssueTokenResponse, MoveWorkspaceNodeRequest, OpenConnectionFromProfileRequest,
+    RestoreWorkspaceCheckpointRequest, SetCredentialRequest, UpdateDocumentSnapshotRequest,
+    UpdateSavedQueryRequest, UpdateWorkspaceRequest, UpsertConnectionProfileRequest,
+    WorkspaceBatchMutationItem, WorkspaceBatchMutationRequest, WorkspaceTreeResponse,
 };
 use sift_metadata::{
     ApiTokenId, ConnectionProfile, ConnectionProfileId, Document, DocumentId, GithubAllowlistEntry,
@@ -216,6 +232,7 @@ use sift_protocol::{
     TransactionEndAction, TransactionInfo, TransactionPreview, TransactionPreviewRequest,
     TransactionState, TxHandleRef, TxId, TxMode, UpdateConnectionPolicyRequest,
     UpdateTenantLimitsRequest, ValidatedExtensionPackage, Value, WebAuthResponse, WhoAmIResponse,
+    Workspace, WorkspaceCheckpoint, WorkspaceCheckpointId, WorkspaceId, WorkspaceNodeId,
     WsClientMessage, WsServerMessage, PROTOCOL_VERSION_NUMBER,
 };
 
@@ -2143,6 +2160,149 @@ impl Client {
             .await
     }
 
+    pub async fn room_workspaces(&self, room: RoomId) -> Result<Vec<Workspace>> {
+        self.get(&format!("/v1/metadata/rooms/{}/workspaces", room.0))
+            .await
+    }
+
+    pub async fn create_workspace(
+        &self,
+        room: RoomId,
+        request: CreateWorkspaceRequest,
+    ) -> Result<Workspace> {
+        self.post(
+            &format!("/v1/metadata/rooms/{}/workspaces", room.0),
+            &request,
+        )
+        .await
+    }
+
+    pub async fn workspace(&self, workspace: WorkspaceId) -> Result<Workspace> {
+        self.get(&format!("/v1/metadata/workspaces/{}", workspace.0))
+            .await
+    }
+
+    pub async fn update_workspace(
+        &self,
+        workspace: WorkspaceId,
+        request: UpdateWorkspaceRequest,
+    ) -> Result<Workspace> {
+        self.put(
+            &format!("/v1/metadata/workspaces/{}", workspace.0),
+            &request,
+        )
+        .await
+    }
+
+    pub async fn delete_workspace(
+        &self,
+        workspace: WorkspaceId,
+        request: ExpectedWorkspaceRevisionRequest,
+    ) -> Result<()> {
+        self.delete_body(
+            &format!("/v1/metadata/workspaces/{}", workspace.0),
+            &request,
+        )
+        .await
+    }
+
+    pub async fn workspace_nodes(&self, workspace: WorkspaceId) -> Result<WorkspaceTreeResponse> {
+        self.get(&format!("/v1/metadata/workspaces/{}/nodes", workspace.0))
+            .await
+    }
+
+    pub async fn create_workspace_node(
+        &self,
+        workspace: WorkspaceId,
+        request: CreateWorkspaceNodeRequest,
+    ) -> Result<WorkspaceTreeResponse> {
+        self.post(
+            &format!("/v1/metadata/workspaces/{}/nodes", workspace.0),
+            &request,
+        )
+        .await
+    }
+
+    pub async fn move_workspace_node(
+        &self,
+        node: WorkspaceNodeId,
+        request: MoveWorkspaceNodeRequest,
+    ) -> Result<WorkspaceTreeResponse> {
+        self.put(
+            &format!("/v1/metadata/workspace-nodes/{}", node.0),
+            &request,
+        )
+        .await
+    }
+
+    pub async fn mutate_workspace_batch(
+        &self,
+        workspace: WorkspaceId,
+        request: WorkspaceBatchMutationRequest,
+    ) -> Result<WorkspaceTreeResponse> {
+        self.post(
+            &format!("/v1/metadata/workspaces/{}/nodes/batch", workspace.0),
+            &request,
+        )
+        .await
+    }
+
+    pub async fn delete_workspace_node(
+        &self,
+        node: WorkspaceNodeId,
+        request: ExpectedWorkspaceRevisionRequest,
+    ) -> Result<Workspace> {
+        self.send(
+            self.http
+                .delete(self.url(&format!("/v1/metadata/workspace-nodes/{}", node.0)))
+                .json(&request),
+        )
+        .await
+    }
+
+    pub async fn workspace_checkpoints(
+        &self,
+        workspace: WorkspaceId,
+        before_id: Option<WorkspaceCheckpointId>,
+        limit: u32,
+    ) -> Result<Vec<WorkspaceCheckpoint>> {
+        let before = before_id
+            .map(|id| format!("&before_id={}", id.0))
+            .unwrap_or_default();
+        self.get(&format!(
+            "/v1/metadata/workspaces/{}/checkpoints?limit={limit}{before}",
+            workspace.0
+        ))
+        .await
+    }
+
+    pub async fn create_workspace_checkpoint(
+        &self,
+        workspace: WorkspaceId,
+        request: CreateWorkspaceCheckpointRequest,
+    ) -> Result<WorkspaceCheckpoint> {
+        self.post(
+            &format!("/v1/metadata/workspaces/{}/checkpoints", workspace.0),
+            &request,
+        )
+        .await
+    }
+
+    pub async fn restore_workspace_checkpoint(
+        &self,
+        checkpoint: WorkspaceCheckpointId,
+        request: RestoreWorkspaceCheckpointRequest,
+    ) -> Result<WorkspaceTreeResponse> {
+        self.post(
+            &format!(
+                "/v1/metadata/workspace-checkpoints/{}/restore",
+                checkpoint.0
+            ),
+            &request,
+        )
+        .await
+    }
+
     pub async fn connection_profiles(&self, tenant: TenantId) -> Result<Vec<ConnectionProfile>> {
         self.get(&format!("/v1/metadata/connections?tenant={}", tenant.0))
             .await
@@ -2834,6 +2994,13 @@ impl Client {
 
     async fn delete(&self, path: &str) -> Result<()> {
         let _: serde_json::Value = self.send(self.http.delete(self.url(path))).await?;
+        Ok(())
+    }
+
+    async fn delete_body<B: serde::Serialize>(&self, path: &str, body: &B) -> Result<()> {
+        let _: serde_json::Value = self
+            .send(self.http.delete(self.url(path)).json(body))
+            .await?;
         Ok(())
     }
 

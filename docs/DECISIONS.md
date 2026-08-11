@@ -1329,9 +1329,11 @@ root. Public requests contain only normalized workspace-relative paths and
 opaque binding ids. Reconciliation compares the last materialized revision and
 per-file digests, returns a deterministic typed plan, and requires an explicit
 preconditioned resolution when both sides changed. Symlink/hard-link escapes,
-special files, traversal, aliases, and case-fold collisions fail closed. V003
-legacy tables are renamed and preserved; their rows are never silently
-reinterpreted as collaborative resources.
+special files, traversal, aliases, and case-fold collisions fail closed. The
+V003 principal-owned tables were already retired by the ADR-007 contract
+migration in V006, which dropped `tab`, `session_snapshot`, and `workspace`.
+L1 therefore creates a new room-owned schema rather than reinterpreting legacy
+rows.
 
 Git is a VCS adapter over one projection checkpoint. The bundled adapter uses a
 fixed system Git executable, structured arguments, bounded output and process

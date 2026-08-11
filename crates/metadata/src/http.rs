@@ -8,7 +8,10 @@
 use chrono::{DateTime, Utc};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use sift_protocol::ProviderId;
+use sift_protocol::{
+    ProviderId, Workspace, WorkspaceCheckpointId, WorkspaceCheckpointReason, WorkspaceNode,
+    WorkspaceNodeId, WorkspaceNodeKind, WorkspacePath, WorkspaceRevision,
+};
 
 use crate::{ApiTokenRow, CredentialMode, RoomKind, RoomRole};
 
@@ -40,6 +43,95 @@ pub struct CreateDocumentRequest {
     pub initial_text: Option<String>,
     pub position: i64,
     pub connection_profile_id: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct CreateWorkspaceRequest {
+    pub name: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct UpdateWorkspaceRequest {
+    pub expected_revision: WorkspaceRevision,
+    pub name: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct ExpectedWorkspaceRevisionRequest {
+    pub expected_revision: WorkspaceRevision,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct CreateWorkspaceNodeRequest {
+    pub expected_workspace_revision: WorkspaceRevision,
+    pub parent_id: Option<WorkspaceNodeId>,
+    pub path: WorkspacePath,
+    pub kind: WorkspaceNodeKind,
+    #[serde(default)]
+    pub initial_text: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct MoveWorkspaceNodeRequest {
+    pub expected_workspace_revision: WorkspaceRevision,
+    pub parent_id: Option<WorkspaceNodeId>,
+    pub path: WorkspacePath,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct WorkspaceBatchMutationRequest {
+    pub expected_workspace_revision: WorkspaceRevision,
+    pub mutations: Vec<WorkspaceBatchMutationItem>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "operation", rename_all = "snake_case")]
+pub enum WorkspaceBatchMutationItem {
+    Create {
+        parent_id: Option<WorkspaceNodeId>,
+        path: WorkspacePath,
+        kind: WorkspaceNodeKind,
+        #[serde(default)]
+        initial_text: Option<String>,
+    },
+    Move {
+        node_id: WorkspaceNodeId,
+        parent_id: Option<WorkspaceNodeId>,
+        path: WorkspacePath,
+    },
+    Delete {
+        node_id: WorkspaceNodeId,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct CreateWorkspaceCheckpointRequest {
+    pub expected_workspace_revision: WorkspaceRevision,
+    pub reason: WorkspaceCheckpointReason,
+    #[serde(default)]
+    pub name: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct RestoreWorkspaceCheckpointRequest {
+    pub expected_workspace_revision: WorkspaceRevision,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct WorkspaceCheckpointPageQuery {
+    pub before_id: Option<WorkspaceCheckpointId>,
+    #[serde(default = "default_workspace_checkpoint_page_limit")]
+    pub limit: u32,
+}
+
+fn default_workspace_checkpoint_page_limit() -> u32 {
+    50
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct WorkspaceTreeResponse {
+    pub workspace: Workspace,
+    pub nodes: Vec<WorkspaceNode>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]

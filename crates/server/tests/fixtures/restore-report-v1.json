@@ -3,7 +3,7 @@
   "apply": false,
   "source_instance_id": null,
   "destination_instance_id": null,
-  "metadata_version": 31,
+  "metadata_version": 32,
   "sessions_revoked": false,
   "external_secrets_required": false,
   "rescue_archive": null

@@ -39,6 +39,13 @@
     "schema_version": 31,
     "minimum_compatible_version": 19,
     "automatic_migration": "allowed",
+    "current_binary": "migration_required"
+  },
+  {
+    "name": "current-v32",
+    "schema_version": 32,
+    "minimum_compatible_version": 19,
+    "automatic_migration": "allowed",
     "current_binary": "accepted"
   }
 ]

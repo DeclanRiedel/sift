@@ -3,6 +3,9 @@
 Status: accepted implementation contract; ADR-034 is graduated. Implementation
 is in progress.
 
+Milestones: L0 contract lock and L1 virtual workspaces/history are complete;
+L2–L7 remain.
+
 This plan expands Phase L in `server-build-list-v2.md`. It is intentionally
 ordered design-first: slice L0 locks the topology before any public workspace
 contract or metadata migration lands.
@@ -42,10 +45,11 @@ Phase L extends these contracts rather than replacing them:
   offline catch-up, and room membership checks.
 - Phase J provides OpenAPI/SDK parity gates and state backup/restore.
 
-`V003__workspaces.sql` contains an older principal-owned workspace/session/tab
-model. ADR-007 superseded that ownership model, and there is no public API for
-it. L0 must explicitly migrate, rename, or retire those tables; new code must
-not silently give the legacy rows new collaborative semantics.
+`V003__workspaces.sql` introduced an older principal-owned
+workspace/session/tab model. ADR-007 superseded it, and
+`V006__rooms.sql` already dropped `tab`, `session_snapshot`, and `workspace`.
+L1 creates a new room-owned schema; no legacy rows are reinterpreted as
+collaborative resources.
 
 ## Zed Git architecture adopted as design input
 
@@ -174,8 +178,8 @@ actor so connected replicas can resynchronize.
   recipes; general editable text and binary files are deferred.
 - Automatic history checkpoints occur at meaningful operations, not on a
   timer. Users may also create named checkpoints.
-- Legacy V003 tables are preserved under explicit legacy names in L1 and are
-  never automatically reinterpreted. An importer may consume meaningful rows.
+- V003's legacy tables were already retired by V006. L1 uses new room-owned
+  tables and has no legacy importer or implicit reinterpretation path.
 - Git lands local-first (status/diff/stage/commit), followed by authenticated
   fetch/push. Clone, merge, rebase, force-push, and forge UI are deferred.
 - A schedule is owned by a normal principal. Service principals and event
@@ -275,6 +279,15 @@ format contribution, or scheduling is unavailable.
 12. Plugin formatters and adapters cross the Phase I framed RPC/supervision
     boundary. Core validates schemas, record/byte limits, cancellation, and
     output before committing product state.
+
+### Locked initial ceilings
+
+The first implementation enforces 32 workspaces per room, 10,000 nodes per
+workspace, 100 mutations per atomic tree batch, 200 checkpoints per workspace,
+64 MiB of captured snapshot bytes per checkpoint, 256 MiB of distinct retained
+checkpoint content per workspace, and 100 rows per checkpoint-history page.
+Later slices add their process/diff/run/artifact ceilings before exposing the
+corresponding capability.
 
 ## Execution semantics to lock before L4
 

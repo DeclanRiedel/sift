@@ -68,6 +68,13 @@ pub enum ApplyOutcome {
     Idempotent,
 }
 
+pub struct AuthoredReplacement {
+    pub outcome: ApplyOutcome,
+    pub update_bytes: Vec<u8>,
+    pub server_version: Vec<u8>,
+    pub replica_id: u64,
+}
+
 /// A loaded document's serialized CRDT state.
 pub struct DocumentActor {
     document: DocumentId,
@@ -204,6 +211,41 @@ impl DocumentActor {
             server_seq,
             version_fingerprint,
         })
+    }
+
+    /// Author a whole-text replacement as native Loro operations and pass it
+    /// through the same validation, durable sequencing, and limits as a client
+    /// update. This is used by checkpoint restore; snapshots are never written
+    /// over a live collaborative document.
+    pub fn author_replacement(
+        &mut self,
+        metadata: &MetadataStore,
+        submitted_by: PrincipalId,
+        replica_id: &str,
+        update_id: &str,
+        replacement: &str,
+    ) -> Result<Option<AuthoredReplacement>, ApplyError> {
+        if self.committed.text() == replacement {
+            return Ok(None);
+        }
+        let since = self.committed.version_vector();
+        let authored = self.committed.fork();
+        let current_len = authored.text().chars().count();
+        if current_len > 0 {
+            authored.delete(0, current_len)?;
+        }
+        if !replacement.is_empty() {
+            authored.insert(0, replacement)?;
+        }
+        let update_bytes = authored.export_updates_since(&since)?;
+        let outcome =
+            self.apply_update(metadata, submitted_by, replica_id, update_id, &update_bytes)?;
+        Ok(Some(AuthoredReplacement {
+            outcome,
+            update_bytes,
+            server_version: self.committed.version_vector(),
+            replica_id: authored.peer_id(),
+        }))
     }
 
     /// Whether accumulated updates warrant a fresh snapshot.

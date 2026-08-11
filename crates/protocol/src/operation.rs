@@ -70,6 +70,7 @@ pub enum WorkspaceAction {
     CreateNode,
     MoveNode,
     DeleteNode,
+    BatchMutate,
     CreateCheckpoint,
     ReadHistory,
     RestoreCheckpoint,
@@ -694,7 +695,8 @@ impl Operation {
                 | WorkspaceAction::Delete
                 | WorkspaceAction::CreateNode
                 | WorkspaceAction::MoveNode
-                | WorkspaceAction::DeleteNode => OperationKind::ManageWorkspace,
+                | WorkspaceAction::DeleteNode
+                | WorkspaceAction::BatchMutate => OperationKind::ManageWorkspace,
             },
             Self::Vcs { action, .. } => match action {
                 VcsAction::Status | VcsAction::Diff => OperationKind::ReadVcs,
@@ -1116,6 +1118,7 @@ impl WorkspaceAction {
             Self::CreateNode => "create_node",
             Self::MoveNode => "move_node",
             Self::DeleteNode => "delete_node",
+            Self::BatchMutate => "batch_mutate",
             Self::CreateCheckpoint => "create_checkpoint",
             Self::ReadHistory => "read_history",
             Self::RestoreCheckpoint => "restore_checkpoint",

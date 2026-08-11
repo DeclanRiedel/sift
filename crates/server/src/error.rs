@@ -147,6 +147,9 @@ impl ApiError {
                 | MetadataError::DocumentNotFound(_)
                 | MetadataError::RoomAttachmentNotFound(_)
                 | MetadataError::SavedQueryNotFound(_)
+                | MetadataError::WorkspaceNotFound(_)
+                | MetadataError::WorkspaceNodeNotFound(_)
+                | MetadataError::WorkspaceCheckpointNotFound(_)
                 | MetadataError::CatalogSnapshotNotFound
                 | MetadataError::MigrationRunNotFound
                 | MetadataError::PlanCaptureNotFound
@@ -174,6 +177,18 @@ impl ApiError {
                 }
                 MetadataError::SavedQueryRevisionConflict { .. } => {
                     (StatusCode::CONFLICT, "saved_query_revision_conflict")
+                }
+                MetadataError::WorkspaceRevisionConflict { .. } => {
+                    (StatusCode::CONFLICT, "workspace_revision_conflict")
+                }
+                MetadataError::WorkspacePathConflict => {
+                    (StatusCode::CONFLICT, "workspace_path_conflict")
+                }
+                MetadataError::WorkspaceDocumentManaged => {
+                    (StatusCode::CONFLICT, "workspace_document_managed")
+                }
+                MetadataError::WorkspaceLimitReached => {
+                    (StatusCode::CONFLICT, "workspace_limit_reached")
                 }
                 MetadataError::CatalogSnapshotRevisionConflict { .. } => {
                     (StatusCode::CONFLICT, "catalog_snapshot_revision_conflict")
@@ -227,6 +242,11 @@ impl ApiError {
                 | MetadataError::InvalidPasswordReset
                 | MetadataError::ExtensionStorageInvalidKey
                 | MetadataError::InvalidCatalogSnapshotDescription
+                | MetadataError::InvalidWorkspaceName
+                | MetadataError::InvalidWorkspacePath
+                | MetadataError::InvalidWorkspaceNode
+                | MetadataError::InvalidWorkspaceCheckpoint
+                | MetadataError::InvalidWorkspaceBatch
                 | MetadataError::Json(_) => (StatusCode::BAD_REQUEST, "bad_request"),
                 MetadataError::ExtensionStorageValueTooLarge { .. }
                 | MetadataError::CatalogSnapshotTooLarge { .. }

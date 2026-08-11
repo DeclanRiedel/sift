@@ -19,6 +19,7 @@ struct RoomRuntimeInner {
     next_attachment_id: AtomicI64,
     documents: DocumentRegistry,
     results: crate::room_results::RoomResultRegistry,
+    workspace_locks: DashMap<i64, Arc<tokio::sync::Mutex<()>>>,
 }
 
 struct RoomRuntimeRoom {
@@ -146,6 +147,16 @@ impl RoomRuntime {
     /// The process-wide document actor registry, leases, and runtime epoch.
     pub fn documents(&self) -> &DocumentRegistry {
         &self.inner.documents
+    }
+
+    /// Serialize cross-resource workspace mutations, especially checkpoint
+    /// restore where Loro document updates and tree metadata must agree.
+    pub fn workspace_lock(&self, workspace_id: i64) -> Arc<tokio::sync::Mutex<()>> {
+        self.inner
+            .workspace_locks
+            .entry(workspace_id)
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+            .clone()
     }
 
     pub fn results(&self) -> &crate::room_results::RoomResultRegistry {
