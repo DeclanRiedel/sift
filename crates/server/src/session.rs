@@ -96,6 +96,7 @@ struct SessionStoreInner {
     /// Durable policy source used by the dispatcher for managed connections.
     authorization_store: RwLock<Option<MetadataStore>>,
     tool_registry: RwLock<Option<crate::automation::GovernedToolRegistry>>,
+    formatter_registry: crate::formatter_extension::FormatterRegistry,
     package_registry: RwLock<Option<Arc<sift_plugin_host::ExtensionPackageRegistry>>>,
     extension_generation_limiter: Arc<sift_plugin_host::GenerationLimiter>,
     extension_runtime_monitor: RwLock<crate::extension_runtime::ExtensionRuntimeMonitor>,
@@ -308,6 +309,7 @@ impl SessionStore {
                 audit_tx: Mutex::new(None),
                 authorization_store: RwLock::new(None),
                 tool_registry: RwLock::new(None),
+                formatter_registry: Default::default(),
                 package_registry: RwLock::new(None),
                 extension_generation_limiter: Arc::new(sift_plugin_host::GenerationLimiter::new(
                     Default::default(),
@@ -362,6 +364,7 @@ impl SessionStore {
                 audit_tx: Mutex::new(None),
                 authorization_store: RwLock::new(None),
                 tool_registry: RwLock::new(None),
+                formatter_registry: Default::default(),
                 package_registry: RwLock::new(None),
                 extension_generation_limiter: Arc::new(sift_plugin_host::GenerationLimiter::new(
                     Default::default(),
@@ -461,6 +464,10 @@ impl SessionStore {
             .clone()
     }
 
+    pub fn formatter_registry(&self) -> crate::formatter_extension::FormatterRegistry {
+        self.inner.formatter_registry.clone()
+    }
+
     pub fn set_package_registry(&self, registry: Arc<sift_plugin_host::ExtensionPackageRegistry>) {
         *self
             .inner
@@ -518,6 +525,10 @@ impl SessionStore {
             )?;
         }
         let monitor = runtimes.monitor.clone();
+        self.inner
+            .formatter_registry
+            .replace(runtimes.formatters)
+            .map_err(|error| ApiError::Internal(error.to_string()))?;
         if let Some(tools) = self.tool_registry() {
             tools
                 .dispatcher()

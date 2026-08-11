@@ -26,6 +26,7 @@ use tokio::sync::Mutex;
 
 use crate::{
     extension_dispatch::{ActionInvoker, ActionRegistration},
+    formatter_extension::FormatterRegistration,
     registry::{
         ProviderConnectionHandle, ProviderOpenRequest, ProviderResultStream,
         ProviderTransactionHandle,
@@ -98,6 +99,7 @@ pub struct InstalledExtensionRuntimes {
     pub providers: Vec<Arc<dyn DatabaseProvider>>,
     pub actions: Vec<ActionRegistration>,
     pub tools: Vec<GovernedToolDescriptor>,
+    pub formatters: Vec<FormatterRegistration>,
     eager: Vec<(Arc<ExtensionProcessRuntime>, i64)>,
     pub monitor: ExtensionRuntimeMonitor,
 }
@@ -506,6 +508,7 @@ pub fn installed_extension_runtimes(
     let mut providers = Vec::new();
     let mut actions = Vec::new();
     let mut tools = Vec::new();
+    let mut formatters = Vec::new();
     let mut eager = Vec::new();
     let mut monitored = HashMap::new();
     let mut hydration_failures = HashMap::new();
@@ -568,6 +571,7 @@ pub fn installed_extension_runtimes(
         providers.extend(parts.providers);
         actions.extend(parts.actions);
         tools.extend(parts.tools);
+        formatters.extend(parts.formatters);
         eager.extend(parts.eager);
         if let Some(runtime) = parts.runtime {
             monitored.insert(extension_id, runtime);
@@ -577,6 +581,7 @@ pub fn installed_extension_runtimes(
         providers,
         actions,
         tools,
+        formatters,
         eager,
         monitor: ExtensionRuntimeMonitor {
             runtimes: Arc::new(monitored),
@@ -614,6 +619,7 @@ struct ExtensionRuntimeParts {
     providers: Vec<Arc<dyn DatabaseProvider>>,
     actions: Vec<ActionRegistration>,
     tools: Vec<GovernedToolDescriptor>,
+    formatters: Vec<FormatterRegistration>,
     eager: Vec<(Arc<ExtensionProcessRuntime>, i64)>,
     runtime: Option<Arc<ExtensionProcessRuntime>>,
 }
@@ -627,6 +633,7 @@ fn build_extension_runtime(
     let mut providers = Vec::new();
     let mut actions = Vec::new();
     let mut tools = Vec::new();
+    let mut formatters = Vec::new();
     let mut eager = Vec::new();
     let manifest: ExtensionManifest =
         serde_json::from_str(&package.manifest_json).map_err(protocol_error)?;
@@ -635,6 +642,7 @@ fn build_extension_runtime(
             providers,
             actions,
             tools,
+            formatters,
             eager,
             runtime: None,
         });
@@ -769,6 +777,35 @@ fn build_extension_runtime(
             });
         }
     }
+    for (kind, contribution) in manifest
+        .contributions
+        .import_format
+        .iter()
+        .map(|contribution| ("import_format", contribution))
+        .chain(
+            manifest
+                .contributions
+                .export_format
+                .iter()
+                .map(|contribution| ("export_format", contribution)),
+        )
+    {
+        let id = ContributionId::new(format!("{}/{kind}/{}", manifest.id, contribution.id))
+            .map_err(|error| protocol_error(error.to_string()))?;
+        let options_schema = contribution.config_schema.as_deref().map_or_else(
+            || Ok(serde_json::json!({"type": "object"})),
+            |path| load_schema(registry, package, path),
+        )?;
+        formatters.push(FormatterRegistration {
+            id,
+            version: package.version.clone(),
+            options_schema,
+            timeout: Duration::from_secs(5 * 60),
+            invoker: Arc::new(RuntimeActionInvoker {
+                runtime: runtime.clone(),
+            }),
+        });
+    }
     if manifest.lifecycle.mode == LifecycleMode::Eager {
         for tenant_id in metadata
             .extension_allowed_tenants(manifest.id.as_str())
@@ -781,6 +818,7 @@ fn build_extension_runtime(
         providers,
         actions,
         tools,
+        formatters,
         eager,
         runtime: Some(runtime),
     })

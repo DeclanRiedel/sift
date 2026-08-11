@@ -262,6 +262,72 @@ async fn execute_run(
             &variables,
             &profile.provider_id,
         )?;
+        if let Some(recipe_id) = configuration.scripts[ordinal].transfer_recipe_id {
+            let recipe = metadata.transfer_recipe_for_principal(recipe_id, actor, true)?;
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            let execute = crate::transfer::execute_recipe(
+                &state.sessions,
+                metadata,
+                actor,
+                &recipe,
+                sift_metadata::http::ExecuteTransferRecipeRequest {
+                    session_id: session.id,
+                    connection_id: connection.id,
+                    sql: Some(sql),
+                    params,
+                    data: None,
+                    table: None,
+                    sheet: None,
+                    create_table: false,
+                    conflict_policy: None,
+                },
+            );
+            let result = tokio::select! {
+                result = execute => Some(result),
+                _ = cancellation.cancelled() => None,
+                _ = tokio::time::sleep(remaining) => None,
+            };
+            match result {
+                Some(Ok(sift_protocol::TransferExecutionResult::Artifact { artifact })) => {
+                    metadata.update_run_step(
+                        run_id,
+                        ordinal as u32,
+                        RunStepState::Succeeded,
+                        None,
+                        None,
+                    )?;
+                    metadata.append_run_log(
+                        run_id,
+                        "info",
+                        &format!("transfer artifact {} published", artifact.id.0),
+                    )?;
+                }
+                Some(Ok(_)) | Some(Err(_)) => {
+                    metadata.update_run_step(
+                        run_id,
+                        ordinal as u32,
+                        RunStepState::Failed,
+                        None,
+                        Some("transfer_failed"),
+                    )?;
+                    failed = true;
+                }
+                None => {
+                    metadata.update_run_step(
+                        run_id,
+                        ordinal as u32,
+                        RunStepState::Cancelled,
+                        None,
+                        None,
+                    )?;
+                    cancelled = true;
+                }
+            }
+            if cancelled || (failed && configuration.error_policy == RunErrorPolicy::Stop) {
+                break;
+            }
+            continue;
+        }
         let per_script_tx = if configuration.transaction_policy == RunTransactionPolicy::PerScript {
             Some(
                 state

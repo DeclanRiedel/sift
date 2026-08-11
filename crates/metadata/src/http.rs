@@ -335,6 +335,74 @@ fn default_schedule_occurrence_limit() -> u32 {
     100
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct CreateTransferRecipeRequest {
+    pub name: String,
+    pub direction: sift_protocol::TransferDirection,
+    pub source: sift_protocol::TransferEndpoint,
+    pub sink: sift_protocol::TransferEndpoint,
+    pub format_id: String,
+    #[serde(default = "default_format_version")]
+    pub format_version: String,
+    #[serde(default = "default_options_object")]
+    pub options: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct UpdateTransferRecipeRequest {
+    pub expected_revision: u64,
+    #[serde(flatten)]
+    pub recipe: CreateTransferRecipeRequest,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct ExpectedTransferRecipeRevisionRequest {
+    pub expected_revision: u64,
+}
+
+#[derive(Clone, Serialize, Deserialize, JsonSchema)]
+pub struct ExecuteTransferRecipeRequest {
+    pub session_id: sift_protocol::SessionId,
+    pub connection_id: sift_protocol::ConnectionId,
+    #[serde(default)]
+    pub sql: Option<String>,
+    #[serde(default)]
+    pub params: Vec<sift_protocol::Value>,
+    #[serde(default)]
+    pub data: Option<Vec<u8>>,
+    #[serde(default)]
+    pub table: Option<sift_protocol::ObjectPath>,
+    #[serde(default)]
+    pub sheet: Option<String>,
+    #[serde(default)]
+    pub create_table: bool,
+    #[serde(default)]
+    pub conflict_policy: Option<sift_protocol::CsvConflictPolicy>,
+}
+
+impl std::fmt::Debug for ExecuteTransferRecipeRequest {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ExecuteTransferRecipeRequest")
+            .field("session_id", &self.session_id)
+            .field("connection_id", &self.connection_id)
+            .field("sql", &self.sql.as_ref().map(|_| "[REDACTED]"))
+            .field("data", &self.data.as_ref().map(Vec::len))
+            .field("table", &self.table)
+            .field("sheet", &self.sheet)
+            .field("create_table", &self.create_table)
+            .field("conflict_policy", &self.conflict_policy)
+            .finish()
+    }
+}
+
+fn default_format_version() -> String {
+    "1".into()
+}
+fn default_options_object() -> serde_json::Value {
+    serde_json::json!({})
+}
+
 fn default_run_log_limit() -> u32 {
     200
 }

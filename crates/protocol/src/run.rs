@@ -2,7 +2,7 @@ use chrono::{DateTime, Utc};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::{WorkspaceId, WorkspaceNodeId, WorkspaceRevision};
+use crate::{TransferRecipeId, WorkspaceId, WorkspaceNodeId, WorkspaceRevision};
 
 macro_rules! integer_id {
     ($name:ident) => {
@@ -63,6 +63,10 @@ pub struct RunScriptStep {
     pub node_id: WorkspaceNodeId,
     pub revision_policy: ScriptRevisionPolicy,
     pub pinned_digest: Option<String>,
+    /// When present, the script's query is exported through this validated
+    /// recipe instead of being executed as an ordinary statement.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transfer_recipe_id: Option<TransferRecipeId>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

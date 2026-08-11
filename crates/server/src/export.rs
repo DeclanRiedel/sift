@@ -35,6 +35,9 @@ pub fn content_type(format: ExportFormat) -> &'static str {
         ExportFormat::Tsv => "text/tab-separated-values; charset=utf-8",
         ExportFormat::JsonLines => "application/x-ndjson",
         ExportFormat::JsonArray => "application/json",
+        ExportFormat::Html => "text/html; charset=utf-8",
+        ExportFormat::Markdown => "text/markdown; charset=utf-8",
+        ExportFormat::Xlsx => "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     }
 }
 
@@ -63,8 +66,11 @@ pub fn encode_stream<G: PageRetention>(
         let mut row_buf = BytesMut::with_capacity(8192);
         let mut header_sent = false;
         let mut first_row_in_array = true;
+        let mut xlsx_sheet = String::from("<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?><worksheet xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\"><sheetData>");
         if matches!(format, ExportFormat::JsonArray) {
             yield Bytes::from_static(b"[");
+        } else if matches!(format, ExportFormat::Html) {
+            yield Bytes::from_static(b"<!doctype html><meta charset=\"utf-8\"><table>\n");
         }
         while let Some(page) = rx.recv().await {
             _guard.page_received();
@@ -88,18 +94,30 @@ pub fn encode_stream<G: PageRetention>(
                         if matches!(format, ExportFormat::Csv | ExportFormat::Tsv) && emit_header {
                             let bytes = header_line(&columns, format);
                             yield bytes;
+                        } else if matches!(format, ExportFormat::Html | ExportFormat::Markdown) {
+                            yield rich_header(&columns, format);
+                        } else if matches!(format, ExportFormat::Xlsx) {
+                            append_xlsx_row(&mut xlsx_sheet, columns.iter().map(|column| column.name.as_str()))?;
                         }
                         header_sent = true;
                     }
                     for row in rows {
-                        yield encode_row(
-                            &mut row_buf,
-                            &row,
-                            &columns,
-                            format,
-                            &null_display,
-                            &mut first_row_in_array,
-                        );
+                        if matches!(format, ExportFormat::Xlsx) {
+                            let values = row.values.iter().map(value_to_text).collect::<Vec<_>>();
+                            append_xlsx_row(&mut xlsx_sheet, values.iter().map(String::as_str))?;
+                            if xlsx_sheet.len() > 64 * 1024 * 1024 {
+                                Err(std::io::Error::other("XLSX export exceeds 64 MiB"))?;
+                            }
+                        } else {
+                            yield encode_row(
+                                &mut row_buf,
+                                &row,
+                                &columns,
+                                format,
+                                &null_display,
+                                &mut first_row_in_array,
+                            );
+                        }
                     }
                 }
                 Page::Done { .. } => break,
@@ -114,6 +132,11 @@ pub fn encode_stream<G: PageRetention>(
         }
         if matches!(format, ExportFormat::JsonArray) {
             yield Bytes::from_static(b"]");
+        } else if matches!(format, ExportFormat::Html) {
+            yield Bytes::from_static(b"</table>\n");
+        } else if matches!(format, ExportFormat::Xlsx) {
+            xlsx_sheet.push_str("</sheetData></worksheet>");
+            yield build_xlsx(&xlsx_sheet)?;
         }
     }
 }
@@ -179,6 +202,27 @@ fn encode_row(
             write_json_object(buf, row, columns);
             buf.split().freeze()
         }
+        ExportFormat::Html => {
+            buf.extend_from_slice(b"<tr>");
+            for value in &row.values {
+                buf.extend_from_slice(b"<td>");
+                buf.extend_from_slice(html_escape(&value_to_text(value)).as_bytes());
+                buf.extend_from_slice(b"</td>");
+            }
+            buf.extend_from_slice(b"</tr>\n");
+            buf.split().freeze()
+        }
+        ExportFormat::Markdown => {
+            buf.put_u8(b'|');
+            for value in &row.values {
+                buf.put_u8(b' ');
+                buf.extend_from_slice(markdown_escape(&value_to_text(value)).as_bytes());
+                buf.extend_from_slice(b" |");
+            }
+            buf.put_u8(b'\n');
+            buf.split().freeze()
+        }
+        ExportFormat::Xlsx => unreachable!("XLSX rows are buffered into the workbook"),
     }
 }
 
@@ -193,7 +237,11 @@ fn write_delimited_value(buf: &mut BytesMut, v: &Value, format: ExportFormat, nu
     match format {
         ExportFormat::Csv => write_csv_value(buf, v, null_display),
         ExportFormat::Tsv => write_tsv_value(buf, v, null_display),
-        ExportFormat::JsonLines | ExportFormat::JsonArray => {}
+        ExportFormat::JsonLines
+        | ExportFormat::JsonArray
+        | ExportFormat::Html
+        | ExportFormat::Markdown
+        | ExportFormat::Xlsx => {}
     }
 }
 
@@ -361,5 +409,173 @@ fn write_json_value(buf: &mut BytesMut, v: &Value) {
         Value::Json(v) => write_json(buf, v),
         Value::Interval(_) => write_json(buf, &format!("{v:?}")),
         Value::Native { display_text, .. } => write_json(buf, display_text),
+    }
+}
+
+fn rich_header(columns: &[ColumnMetadata], format: ExportFormat) -> Bytes {
+    match format {
+        ExportFormat::Html => Bytes::from(format!(
+            "<thead><tr>{}</tr></thead><tbody>\n",
+            columns
+                .iter()
+                .map(|column| format!("<th>{}</th>", html_escape(&column.name)))
+                .collect::<String>()
+        )),
+        ExportFormat::Markdown => {
+            let names = columns
+                .iter()
+                .map(|column| markdown_escape(&column.name))
+                .collect::<Vec<_>>();
+            Bytes::from(format!(
+                "| {} |\n| {} |\n",
+                names.join(" | "),
+                names.iter().map(|_| "---").collect::<Vec<_>>().join(" | ")
+            ))
+        }
+        _ => Bytes::new(),
+    }
+}
+
+fn html_escape(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&#39;")
+}
+
+fn markdown_escape(value: &str) -> String {
+    value
+        .replace('\\', "\\\\")
+        .replace('|', "\\|")
+        .replace('\r', " ")
+        .replace('\n', "<br>")
+}
+
+fn value_to_text(value: &Value) -> String {
+    match value {
+        Value::Null | Value::TypedNull { .. } => String::new(),
+        Value::Bool(value) => value.to_string(),
+        Value::Int16(value) => value.to_string(),
+        Value::Int32(value) => value.to_string(),
+        Value::Int64(value) => value.to_string(),
+        Value::Float32(value) => value.to_string(),
+        Value::Float64(value) => value.to_string(),
+        Value::Decimal(value) | Value::Text(value) => value.clone(),
+        Value::Blob(value) => hex_encode(value),
+        Value::Date(value) => value.to_string(),
+        Value::Time(value) => value.to_string(),
+        Value::Timestamp(value) => value.to_string(),
+        Value::TimestampTz(value) => value.to_string(),
+        Value::Uuid(value) => value.to_string(),
+        Value::Json(value) => value.to_string(),
+        Value::Interval(_) => format!("{value:?}"),
+        Value::Native { display_text, .. } => display_text.clone(),
+    }
+}
+
+fn append_xlsx_row<'a>(
+    sheet: &mut String,
+    values: impl IntoIterator<Item = &'a str>,
+) -> std::io::Result<()> {
+    sheet.push_str("<row>");
+    for value in values {
+        sheet.push_str("<c t=\"inlineStr\"><is><t xml:space=\"preserve\">");
+        sheet.push_str(&html_escape(value));
+        sheet.push_str("</t></is></c>");
+    }
+    sheet.push_str("</row>");
+    Ok(())
+}
+
+pub(crate) fn build_xlsx(sheet: &str) -> std::io::Result<Bytes> {
+    use std::io::{Cursor, Write as _};
+    use zip::write::SimpleFileOptions;
+    use zip::{CompressionMethod, ZipWriter};
+
+    let mut output = Cursor::new(Vec::new());
+    {
+        let mut zip = ZipWriter::new(&mut output);
+        let options = SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
+        for (path, content) in [
+            ("[Content_Types].xml", "<?xml version=\"1.0\" encoding=\"UTF-8\"?><Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\"><Default Extension=\"rels\" ContentType=\"application/vnd.openxmlformats-package.relationships+xml\"/><Default Extension=\"xml\" ContentType=\"application/xml\"/><Override PartName=\"/xl/workbook.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml\"/><Override PartName=\"/xl/worksheets/sheet1.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml\"/></Types>"),
+            ("_rels/.rels", "<?xml version=\"1.0\" encoding=\"UTF-8\"?><Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\"><Relationship Id=\"rId1\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument\" Target=\"xl/workbook.xml\"/></Relationships>"),
+            ("xl/workbook.xml", "<?xml version=\"1.0\" encoding=\"UTF-8\"?><workbook xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\" xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\"><sheets><sheet name=\"Results\" sheetId=\"1\" r:id=\"rId1\"/></sheets></workbook>"),
+            ("xl/_rels/workbook.xml.rels", "<?xml version=\"1.0\" encoding=\"UTF-8\"?><Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\"><Relationship Id=\"rId1\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet\" Target=\"worksheets/sheet1.xml\"/></Relationships>"),
+            ("xl/worksheets/sheet1.xml", sheet),
+        ] {
+            zip.start_file(path, options)?;
+            zip.write_all(content.as_bytes())?;
+        }
+        zip.finish()?;
+    }
+    Ok(Bytes::from(output.into_inner()))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::Read as _;
+
+    use futures::StreamExt as _;
+
+    use super::*;
+
+    struct Retention;
+    impl PageRetention for Retention {
+        fn page_received(&self) {}
+        fn page_processed(&self) {}
+    }
+
+    fn pages() -> Vec<Page> {
+        vec![
+            Page::NextResult {
+                columns: vec![synthetic_column(0)],
+            },
+            Page::Rows {
+                rows: vec![Row {
+                    values: vec![Value::Text("<x>|=SUM(1,1)".into())],
+                }],
+            },
+            Page::Done {
+                affected_rows: None,
+                warnings: Vec::new(),
+            },
+        ]
+    }
+
+    async fn encoded(format: ExportFormat) -> Vec<u8> {
+        let (tx, rx) = tokio::sync::mpsc::channel(8);
+        for page in pages() {
+            tx.send(page).await.unwrap();
+        }
+        drop(tx);
+        let stream = encode_stream(rx, format, true, String::new(), Retention);
+        futures::pin_mut!(stream);
+        let mut output = Vec::new();
+        while let Some(chunk) = stream.next().await {
+            output.extend_from_slice(&chunk.unwrap());
+        }
+        output
+    }
+
+    #[tokio::test]
+    async fn rich_formats_escape_markup_and_xlsx_formulas() {
+        let html = String::from_utf8(encoded(ExportFormat::Html).await).unwrap();
+        assert!(html.contains("&lt;x&gt;|=SUM(1,1)"));
+        let markdown = String::from_utf8(encoded(ExportFormat::Markdown).await).unwrap();
+        assert!(markdown.contains("<x>\\|=SUM(1,1)"));
+
+        let xlsx = encoded(ExportFormat::Xlsx).await;
+        let mut archive = zip::ZipArchive::new(std::io::Cursor::new(xlsx)).unwrap();
+        let mut sheet = String::new();
+        archive
+            .by_name("xl/worksheets/sheet1.xml")
+            .unwrap()
+            .read_to_string(&mut sheet)
+            .unwrap();
+        assert!(sheet.contains("t=\"inlineStr\""));
+        assert!(!sheet.contains("<f>"));
+        assert!(sheet.contains("&lt;x&gt;|=SUM(1,1)"));
     }
 }

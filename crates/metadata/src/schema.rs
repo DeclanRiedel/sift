@@ -657,6 +657,23 @@ pub struct NewRunSchedule {
     pub next_fire_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
+#[derive(Debug, Clone)]
+pub struct NewTransferRecipe {
+    pub name: String,
+    pub direction: sift_protocol::TransferDirection,
+    pub source: sift_protocol::TransferEndpoint,
+    pub sink: sift_protocol::TransferEndpoint,
+    pub format_id: String,
+    pub format_version: String,
+    pub options: serde_json::Value,
+}
+
+#[derive(Debug, Clone)]
+pub struct WorkspaceArtifactRecord {
+    pub artifact: sift_protocol::WorkspaceArtifact,
+    pub content: Vec<u8>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct RoomAttachment {
     pub id: RoomAttachmentId,

@@ -51,3 +51,10 @@ pub struct WorkspaceArtifact {
     pub pinned: bool,
     pub created_at: DateTime<Utc>,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum TransferExecutionResult {
+    Artifact { artifact: WorkspaceArtifact },
+    Import { result: crate::CsvImportResponse },
+}

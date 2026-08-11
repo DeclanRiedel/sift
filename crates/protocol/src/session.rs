@@ -109,6 +109,12 @@ pub enum ExportFormat {
     /// Single JSON array wrapping all rows. Each element is an
     /// object keyed by column name.
     JsonArray,
+    /// Escaped HTML table document.
+    Html,
+    /// GitHub-flavored Markdown table.
+    Markdown,
+    /// Office Open XML workbook with one worksheet.
+    Xlsx,
 }
 
 /// Body of `POST /v1/sessions/:id/connections/:conn_id/export`. The

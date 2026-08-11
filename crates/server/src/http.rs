@@ -53,7 +53,8 @@ use sift_protocol::{
     RunConfigurationAction, RunConfigurationId, RunId, RunLogEntry, RunManifest, RunManifestScript,
     RunSchedule, RunState, RunStepResult, RunTrigger, SavepointRequest, ScheduleAction, ScheduleId,
     ScheduleOccurrence, ScheduleOccurrenceId, SchemaFilter, SchemaScope, SshProxyAccessGrant,
-    SshProxyCapabilityExchangeRequest, TransactionPreviewRequest, UpdateConnectionPolicyRequest,
+    SshProxyCapabilityExchangeRequest, TransactionPreviewRequest, TransferRecipe,
+    TransferRecipeAction, TransferRecipeId, UpdateConnectionPolicyRequest,
     UpdateTenantLimitsRequest, VcsAction, VcsBranch, VcsCommitResult, VcsDiff, VcsPendingOperation,
     VcsRemoteResult, VcsStatus, WebAuthResponse, WhoAmIResponse, Workspace, WorkspaceAction,
     WorkspaceCheckpoint, WorkspaceCheckpointId, WorkspaceId, WorkspaceNodeId, WorkspaceNodeKind,
@@ -543,6 +544,26 @@ pub fn app(state: AppState) -> Router {
         .api_route(
             "/v1/metadata/schedule-occurrences/:id/resume",
             post_with(resume_schedule_occurrence, doc("resumeScheduleOccurrence", "Requeue a blocked occurrence after reauthorization")),
+        )
+        .api_route(
+            "/v1/metadata/workspaces/:id/transfer-recipes",
+            get_with(list_transfer_recipes, doc("listTransferRecipes", "List workspace transfer recipes")).post_with(create_transfer_recipe, doc("createTransferRecipe", "Create a revisioned transfer recipe")),
+        )
+        .api_route(
+            "/v1/metadata/transfer-recipes/:id",
+            get_with(get_transfer_recipe, doc("getTransferRecipe", "Get a transfer recipe")).put_with(update_transfer_recipe, doc("updateTransferRecipe", "Update a transfer recipe by revision")).delete_with(delete_transfer_recipe, doc("deleteTransferRecipe", "Delete a transfer recipe by revision")),
+        )
+        .api_route(
+            "/v1/metadata/transfer-recipes/:id/validate",
+            post_with(validate_transfer_recipe, doc("validateTransferRecipe", "Validate a recipe and bundled format")),
+        )
+        .api_route(
+            "/v1/metadata/transfer-recipes/:id/execute",
+            post_with(execute_transfer_recipe, doc("executeTransferRecipe", "Execute a bounded query-to-artifact recipe")),
+        )
+        .api_route(
+            "/v1/metadata/artifacts/:id",
+            get_with(get_workspace_artifact, doc("getWorkspaceArtifact", "Download an immutable workspace artifact")),
         )
         .api_route(
             "/v1/metadata/runs/:id",
@@ -1583,15 +1604,17 @@ use sift_metadata::http::{
     AddRoomMemberRequest, ApplyWorkspaceProjectionRequest, BindRepositoryRequest,
     BindRoomConnectionRequest, BindWorkspaceProjectionRequest, CreateDdlSourceRequest,
     CreateDocumentRequest, CreateRoomRequest, CreateRunConfigurationRequest,
-    CreateRunScheduleRequest, CreateSavedQueryRequest, CreateWorkspaceCheckpointRequest,
-    CreateWorkspaceNodeRequest, CreateWorkspaceRequest, ExpectedDdlSourceRevisionRequest,
+    CreateRunScheduleRequest, CreateSavedQueryRequest, CreateTransferRecipeRequest,
+    CreateWorkspaceCheckpointRequest, CreateWorkspaceNodeRequest, CreateWorkspaceRequest,
+    ExecuteTransferRecipeRequest, ExpectedDdlSourceRevisionRequest,
     ExpectedProjectionRevisionRequest, ExpectedRepositoryRevisionRequest,
-    ExpectedRunConfigurationRevisionRequest, ExpectedWorkspaceRevisionRequest, IssueTokenRequest,
-    IssueTokenResponse, MoveWorkspaceNodeRequest, OpenConnectionFromProfileRequest,
-    RestoreWorkspaceCheckpointRequest, RunLogQuery, ScheduleOccurrenceQuery, SetCredentialRequest,
-    SetVcsCredentialRequest, StartRunRequest, UpdateDdlSourceRequest,
-    UpdateDocumentSnapshotRequest, UpdateRunConfigurationRequest, UpdateRunScheduleRequest,
-    UpdateSavedQueryRequest, UpdateWorkspaceRequest, UpsertConnectionProfileRequest,
+    ExpectedRunConfigurationRevisionRequest, ExpectedTransferRecipeRevisionRequest,
+    ExpectedWorkspaceRevisionRequest, IssueTokenRequest, IssueTokenResponse,
+    MoveWorkspaceNodeRequest, OpenConnectionFromProfileRequest, RestoreWorkspaceCheckpointRequest,
+    RunLogQuery, ScheduleOccurrenceQuery, SetCredentialRequest, SetVcsCredentialRequest,
+    StartRunRequest, UpdateDdlSourceRequest, UpdateDocumentSnapshotRequest,
+    UpdateRunConfigurationRequest, UpdateRunScheduleRequest, UpdateSavedQueryRequest,
+    UpdateTransferRecipeRequest, UpdateWorkspaceRequest, UpsertConnectionProfileRequest,
     VcsCommitRequest, VcsDiffQuery, VcsPathsRequest, VcsRemoteRequest, WorkspaceBatchMutationItem,
     WorkspaceBatchMutationRequest, WorkspaceCheckpointPageQuery, WorkspaceTreeResponse,
 };
@@ -7669,6 +7692,16 @@ fn schedule_occurrence_id(id: i64) -> ApiResult<ScheduleOccurrenceId> {
     }
 }
 
+fn transfer_recipe_id(id: i64) -> ApiResult<TransferRecipeId> {
+    if id > 0 {
+        Ok(TransferRecipeId(id))
+    } else {
+        Err(ApiError::BadRequest(
+            "transfer recipe id must be positive".into(),
+        ))
+    }
+}
+
 fn authorize_run_configuration_operation(
     state: &AppState,
     auth: &AuthContext,
@@ -7798,6 +7831,52 @@ fn push_schedule_operation(
             action,
             workspace_id,
             schedule_id,
+        },
+        OperationStatus::Succeeded,
+        Some(actor.0),
+        None,
+        None,
+        None,
+    );
+}
+
+fn authorize_transfer_operation(
+    state: &AppState,
+    auth: &AuthContext,
+    workspace_id: WorkspaceId,
+    recipe_id: Option<TransferRecipeId>,
+    action: TransferRecipeAction,
+) -> ApiResult<()> {
+    let context = sift_protocol::OperationCapabilityContext {
+        workspace_id: Some(workspace_id),
+        ..Default::default()
+    };
+    let scope = capability_authorization_scope(state, Some(auth), &context)?
+        .ok_or(ApiError::Unauthorized)?;
+    crate::authorization::authorize(
+        &scope,
+        Operation::TransferRecipe {
+            action,
+            workspace_id,
+            recipe_id,
+        }
+        .kind(),
+    )
+    .map_err(|denial| ApiError::Forbidden(denial.public_reason().into()))
+}
+
+fn push_transfer_operation(
+    state: &AppState,
+    actor: PrincipalId,
+    workspace_id: WorkspaceId,
+    recipe_id: Option<TransferRecipeId>,
+    action: TransferRecipeAction,
+) {
+    state.sessions.push_operation_full(
+        Operation::TransferRecipe {
+            action,
+            workspace_id,
+            recipe_id,
         },
         OperationStatus::Succeeded,
         Some(actor.0),
@@ -8787,6 +8866,368 @@ async fn resume_schedule_occurrence(
         ScheduleAction::Resume,
     );
     Ok(Json(resumed))
+}
+
+fn new_transfer_recipe(request: CreateTransferRecipeRequest) -> sift_metadata::NewTransferRecipe {
+    sift_metadata::NewTransferRecipe {
+        name: request.name,
+        direction: request.direction,
+        source: request.source,
+        sink: request.sink,
+        format_id: request.format_id,
+        format_version: request.format_version,
+        options: request.options,
+    }
+}
+
+fn validate_transfer_format(
+    state: &AppState,
+    format_id: &str,
+    format_version: &str,
+    options: &serde_json::Value,
+) -> ApiResult<()> {
+    if matches!(
+        format_id,
+        "csv" | "tsv" | "jsonl" | "json_array" | "html" | "markdown" | "xlsx"
+    ) || state
+        .sessions
+        .formatter_registry()
+        .validates(format_id, format_version, options)
+    {
+        Ok(())
+    } else {
+        Err(ApiError::BadRequest(
+            "transfer format is not installed or its options are invalid".into(),
+        ))
+    }
+}
+
+async fn list_transfer_recipes(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+) -> ApiResult<Json<Vec<TransferRecipe>>> {
+    let metadata = metadata_store_cloned(&state)?;
+    let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
+    let workspace_id = workspace_id(id)?;
+    authorize_transfer_operation(
+        &state,
+        &auth,
+        workspace_id,
+        None,
+        TransferRecipeAction::Read,
+    )?;
+    let actor = auth.principal_id;
+    let recipes = metadata_blocking(move || {
+        metadata
+            .list_transfer_recipes_for_principal(workspace_id, actor)
+            .map_err(Into::into)
+    })
+    .await?;
+    push_transfer_operation(
+        &state,
+        actor,
+        workspace_id,
+        None,
+        TransferRecipeAction::Read,
+    );
+    Ok(Json(recipes))
+}
+
+async fn create_transfer_recipe(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+    Json(request): Json<CreateTransferRecipeRequest>,
+) -> ApiResult<Json<TransferRecipe>> {
+    let metadata = metadata_store_cloned(&state)?;
+    let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
+    let workspace_id = workspace_id(id)?;
+    authorize_transfer_operation(
+        &state,
+        &auth,
+        workspace_id,
+        None,
+        TransferRecipeAction::Create,
+    )?;
+    validate_transfer_format(
+        &state,
+        &request.format_id,
+        &request.format_version,
+        &request.options,
+    )?;
+    let actor = auth.principal_id;
+    let recipe = metadata_blocking(move || {
+        metadata
+            .create_transfer_recipe(workspace_id, actor, new_transfer_recipe(request))
+            .map_err(Into::into)
+    })
+    .await?;
+    push_transfer_operation(
+        &state,
+        actor,
+        workspace_id,
+        Some(recipe.id),
+        TransferRecipeAction::Create,
+    );
+    Ok(Json(recipe))
+}
+
+async fn get_transfer_recipe(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+) -> ApiResult<Json<TransferRecipe>> {
+    let metadata = metadata_store_cloned(&state)?;
+    let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
+    let id = transfer_recipe_id(id)?;
+    let actor = auth.principal_id;
+    let recipe = metadata_blocking(move || {
+        metadata
+            .transfer_recipe_for_principal(id, actor, false)
+            .map_err(Into::into)
+    })
+    .await?;
+    authorize_transfer_operation(
+        &state,
+        &auth,
+        recipe.workspace_id,
+        Some(id),
+        TransferRecipeAction::Read,
+    )?;
+    push_transfer_operation(
+        &state,
+        actor,
+        recipe.workspace_id,
+        Some(id),
+        TransferRecipeAction::Read,
+    );
+    Ok(Json(recipe))
+}
+
+async fn update_transfer_recipe(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+    Json(request): Json<UpdateTransferRecipeRequest>,
+) -> ApiResult<Json<TransferRecipe>> {
+    let metadata = metadata_store_cloned(&state)?;
+    let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
+    let id = transfer_recipe_id(id)?;
+    let actor = auth.principal_id;
+    let current = metadata_blocking({
+        let metadata = metadata.clone();
+        move || {
+            metadata
+                .transfer_recipe_for_principal(id, actor, true)
+                .map_err(Into::into)
+        }
+    })
+    .await?;
+    authorize_transfer_operation(
+        &state,
+        &auth,
+        current.workspace_id,
+        Some(id),
+        TransferRecipeAction::Update,
+    )?;
+    validate_transfer_format(
+        &state,
+        &request.recipe.format_id,
+        &request.recipe.format_version,
+        &request.recipe.options,
+    )?;
+    let workspace_id = current.workspace_id;
+    let recipe = metadata_blocking(move || {
+        metadata
+            .update_transfer_recipe(
+                id,
+                actor,
+                request.expected_revision,
+                new_transfer_recipe(request.recipe),
+            )
+            .map_err(Into::into)
+    })
+    .await?;
+    push_transfer_operation(
+        &state,
+        actor,
+        workspace_id,
+        Some(id),
+        TransferRecipeAction::Update,
+    );
+    Ok(Json(recipe))
+}
+
+async fn delete_transfer_recipe(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+    Json(request): Json<ExpectedTransferRecipeRevisionRequest>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let metadata = metadata_store_cloned(&state)?;
+    let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
+    let id = transfer_recipe_id(id)?;
+    let actor = auth.principal_id;
+    let current = metadata_blocking({
+        let metadata = metadata.clone();
+        move || {
+            metadata
+                .transfer_recipe_for_principal(id, actor, true)
+                .map_err(Into::into)
+        }
+    })
+    .await?;
+    authorize_transfer_operation(
+        &state,
+        &auth,
+        current.workspace_id,
+        Some(id),
+        TransferRecipeAction::Delete,
+    )?;
+    metadata_blocking(move || {
+        metadata
+            .delete_transfer_recipe(id, actor, request.expected_revision)
+            .map_err(Into::into)
+    })
+    .await?;
+    push_transfer_operation(
+        &state,
+        actor,
+        current.workspace_id,
+        Some(id),
+        TransferRecipeAction::Delete,
+    );
+    Ok(Json(json!({"ok": true})))
+}
+
+async fn validate_transfer_recipe(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+) -> ApiResult<Json<TransferRecipe>> {
+    let metadata = metadata_store_cloned(&state)?;
+    let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
+    let id = transfer_recipe_id(id)?;
+    let actor = auth.principal_id;
+    let recipe = metadata_blocking(move || {
+        metadata
+            .transfer_recipe_for_principal(id, actor, false)
+            .map_err(Into::into)
+    })
+    .await?;
+    authorize_transfer_operation(
+        &state,
+        &auth,
+        recipe.workspace_id,
+        Some(id),
+        TransferRecipeAction::Validate,
+    )?;
+    validate_transfer_format(
+        &state,
+        &recipe.format_id,
+        &recipe.format_version,
+        &recipe.options,
+    )?;
+    push_transfer_operation(
+        &state,
+        actor,
+        recipe.workspace_id,
+        Some(id),
+        TransferRecipeAction::Validate,
+    );
+    Ok(Json(recipe))
+}
+
+async fn execute_transfer_recipe(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+    Json(request): Json<ExecuteTransferRecipeRequest>,
+) -> ApiResult<Json<sift_protocol::TransferExecutionResult>> {
+    let metadata = metadata_store_cloned(&state)?;
+    let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
+    let id = transfer_recipe_id(id)?;
+    let actor = auth.principal_id;
+    let recipe = metadata_blocking({
+        let metadata = metadata.clone();
+        move || {
+            metadata
+                .transfer_recipe_for_principal(id, actor, false)
+                .map_err(Into::into)
+        }
+    })
+    .await?;
+    authorize_transfer_operation(
+        &state,
+        &auth,
+        recipe.workspace_id,
+        Some(id),
+        TransferRecipeAction::Execute,
+    )?;
+    validate_transfer_format(
+        &state,
+        &recipe.format_id,
+        &recipe.format_version,
+        &recipe.options,
+    )?;
+    let result =
+        crate::transfer::execute_recipe(&state.sessions, &metadata, actor, &recipe, request)
+            .await?;
+    push_transfer_operation(
+        &state,
+        actor,
+        recipe.workspace_id,
+        Some(id),
+        TransferRecipeAction::Execute,
+    );
+    Ok(Json(result))
+}
+
+async fn get_workspace_artifact(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+) -> ApiResult<Response> {
+    use axum::body::Body;
+    use axum::response::IntoResponse;
+    let metadata = metadata_store_cloned(&state)?;
+    let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
+    if id <= 0 {
+        return Err(ApiError::BadRequest("artifact id must be positive".into()));
+    }
+    let actor = auth.principal_id;
+    let record = metadata_blocking(move || {
+        metadata
+            .workspace_artifact_for_principal(sift_protocol::WorkspaceArtifactId(id), actor)
+            .map_err(Into::into)
+    })
+    .await?;
+    authorize_transfer_operation(
+        &state,
+        &auth,
+        record.artifact.workspace_id,
+        None,
+        TransferRecipeAction::Read,
+    )?;
+    let mut response = Body::from(record.content).into_response();
+    response.headers_mut().insert(
+        axum::http::header::CONTENT_TYPE,
+        record
+            .artifact
+            .content_type
+            .parse()
+            .map_err(|_| ApiError::Internal("invalid artifact content type".into()))?,
+    );
+    response.headers_mut().insert(
+        "x-content-sha256",
+        record
+            .artifact
+            .digest
+            .parse()
+            .map_err(|_| ApiError::Internal("invalid artifact digest".into()))?,
+    );
+    Ok(response)
 }
 
 async fn list_ddl_sources(

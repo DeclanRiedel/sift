@@ -212,24 +212,32 @@ pub const SUPPORTED_HTTP_OPERATION_IDS: &[&str] = &[
     "cancelRun",
     "createRunConfiguration",
     "createRunSchedule",
+    "createTransferRecipe",
     "deleteRunConfiguration",
     "deleteRunSchedule",
+    "deleteTransferRecipe",
     "disableRunSchedule",
     "enableRunSchedule",
+    "executeTransferRecipe",
     "getRun",
     "getRunConfiguration",
     "getRunLogs",
     "getRunSteps",
     "getRunSchedule",
+    "getTransferRecipe",
+    "getWorkspaceArtifact",
     "listRunConfigurations",
     "listRunSchedules",
     "listScheduleOccurrences",
+    "listTransferRecipes",
     "rerun",
     "resumeScheduleOccurrence",
     "startRun",
     "updateRunConfiguration",
     "updateRunSchedule",
+    "updateTransferRecipe",
     "validateRunConfiguration",
+    "validateTransferRecipe",
     "whoAmI",
 ];
 
@@ -240,15 +248,17 @@ pub use sift_metadata::http::{
     AddRoomMemberRequest, ApplyWorkspaceProjectionRequest, BindRepositoryRequest,
     BindRoomConnectionRequest, BindWorkspaceProjectionRequest, CreateDdlSourceRequest,
     CreateDocumentRequest, CreateRoomRequest, CreateRunConfigurationRequest,
-    CreateRunScheduleRequest, CreateSavedQueryRequest, CreateWorkspaceCheckpointRequest,
-    CreateWorkspaceNodeRequest, CreateWorkspaceRequest, ExpectedDdlSourceRevisionRequest,
+    CreateRunScheduleRequest, CreateSavedQueryRequest, CreateTransferRecipeRequest,
+    CreateWorkspaceCheckpointRequest, CreateWorkspaceNodeRequest, CreateWorkspaceRequest,
+    ExecuteTransferRecipeRequest, ExpectedDdlSourceRevisionRequest,
     ExpectedProjectionRevisionRequest, ExpectedRepositoryRevisionRequest,
-    ExpectedRunConfigurationRevisionRequest, ExpectedWorkspaceRevisionRequest, IssueTokenRequest,
-    IssueTokenResponse, MoveWorkspaceNodeRequest, OpenConnectionFromProfileRequest,
-    ProjectionResolutionRequest, RestoreWorkspaceCheckpointRequest, RunLogQuery,
-    ScheduleOccurrenceQuery, SetCredentialRequest, SetVcsCredentialRequest, StartRunRequest,
-    UpdateDdlSourceRequest, UpdateDocumentSnapshotRequest, UpdateRunConfigurationRequest,
-    UpdateRunScheduleRequest, UpdateSavedQueryRequest, UpdateWorkspaceRequest,
+    ExpectedRunConfigurationRevisionRequest, ExpectedTransferRecipeRevisionRequest,
+    ExpectedWorkspaceRevisionRequest, IssueTokenRequest, IssueTokenResponse,
+    MoveWorkspaceNodeRequest, OpenConnectionFromProfileRequest, ProjectionResolutionRequest,
+    RestoreWorkspaceCheckpointRequest, RunLogQuery, ScheduleOccurrenceQuery, SetCredentialRequest,
+    SetVcsCredentialRequest, StartRunRequest, UpdateDdlSourceRequest,
+    UpdateDocumentSnapshotRequest, UpdateRunConfigurationRequest, UpdateRunScheduleRequest,
+    UpdateSavedQueryRequest, UpdateTransferRecipeRequest, UpdateWorkspaceRequest,
     UpsertConnectionProfileRequest, VcsCommitRequest, VcsDiffQuery, VcsPathsRequest,
     VcsRemoteRequest, WorkspaceBatchMutationItem, WorkspaceBatchMutationRequest,
     WorkspaceTreeResponse,
@@ -286,11 +296,12 @@ use sift_protocol::{
     SchemaSnapshot, ServerInfo, SessionId, SessionInfo, SshProxyAccessGrant,
     SshProxyCapabilityExchangeRequest, TenantResourceLimits, TenantUsageSnapshot, ToolContext,
     TransactionEndAction, TransactionInfo, TransactionPreview, TransactionPreviewRequest,
-    TransactionState, TxHandleRef, TxId, TxMode, UpdateConnectionPolicyRequest,
-    UpdateTenantLimitsRequest, ValidatedExtensionPackage, Value, VcsBranch, VcsCommitResult,
-    VcsDiff, VcsDiffSide, VcsRemoteResult, VcsStatus, WebAuthResponse, WhoAmIResponse, Workspace,
-    WorkspaceCheckpoint, WorkspaceCheckpointId, WorkspaceId, WorkspaceNodeId, WsClientMessage,
-    WsServerMessage, PROTOCOL_VERSION_NUMBER,
+    TransactionState, TransferExecutionResult, TransferRecipe, TransferRecipeId, TxHandleRef, TxId,
+    TxMode, UpdateConnectionPolicyRequest, UpdateTenantLimitsRequest, ValidatedExtensionPackage,
+    Value, VcsBranch, VcsCommitResult, VcsDiff, VcsDiffSide, VcsRemoteResult, VcsStatus,
+    WebAuthResponse, WhoAmIResponse, Workspace, WorkspaceArtifactId, WorkspaceCheckpoint,
+    WorkspaceCheckpointId, WorkspaceId, WorkspaceNodeId, WsClientMessage, WsServerMessage,
+    PROTOCOL_VERSION_NUMBER,
 };
 
 #[derive(Clone)]
@@ -2758,6 +2769,116 @@ impl Client {
             occurrence.0
         ))
         .await
+    }
+
+    pub async fn transfer_recipes(&self, workspace: WorkspaceId) -> Result<Vec<TransferRecipe>> {
+        self.get(&format!(
+            "/v1/metadata/workspaces/{}/transfer-recipes",
+            workspace.0
+        ))
+        .await
+    }
+
+    pub async fn create_transfer_recipe(
+        &self,
+        workspace: WorkspaceId,
+        request: CreateTransferRecipeRequest,
+    ) -> Result<TransferRecipe> {
+        self.post(
+            &format!("/v1/metadata/workspaces/{}/transfer-recipes", workspace.0),
+            &request,
+        )
+        .await
+    }
+
+    pub async fn transfer_recipe(&self, recipe: TransferRecipeId) -> Result<TransferRecipe> {
+        self.get(&format!("/v1/metadata/transfer-recipes/{}", recipe.0))
+            .await
+    }
+
+    pub async fn update_transfer_recipe(
+        &self,
+        recipe: TransferRecipeId,
+        request: UpdateTransferRecipeRequest,
+    ) -> Result<TransferRecipe> {
+        self.put(
+            &format!("/v1/metadata/transfer-recipes/{}", recipe.0),
+            &request,
+        )
+        .await
+    }
+
+    pub async fn delete_transfer_recipe(
+        &self,
+        recipe: TransferRecipeId,
+        request: ExpectedTransferRecipeRevisionRequest,
+    ) -> Result<()> {
+        self.delete_body(
+            &format!("/v1/metadata/transfer-recipes/{}", recipe.0),
+            &request,
+        )
+        .await
+    }
+
+    pub async fn validate_transfer_recipe(
+        &self,
+        recipe: TransferRecipeId,
+    ) -> Result<TransferRecipe> {
+        self.post_empty(&format!(
+            "/v1/metadata/transfer-recipes/{}/validate",
+            recipe.0
+        ))
+        .await
+    }
+
+    pub async fn execute_transfer_recipe(
+        &self,
+        recipe: TransferRecipeId,
+        request: ExecuteTransferRecipeRequest,
+    ) -> Result<TransferExecutionResult> {
+        self.post(
+            &format!("/v1/metadata/transfer-recipes/{}/execute", recipe.0),
+            &request,
+        )
+        .await
+    }
+
+    pub async fn workspace_artifact(&self, artifact: WorkspaceArtifactId) -> Result<Vec<u8>> {
+        use futures::StreamExt as _;
+
+        let mut stream = self.stream_workspace_artifact(artifact).await?;
+        let mut content = Vec::new();
+        while let Some(chunk) = stream.next().await {
+            content.extend_from_slice(&chunk?);
+        }
+        Ok(content)
+    }
+
+    /// Consume a staged transfer artifact incrementally with HTTP
+    /// backpressure. The artifact is immutable for the lifetime of the stream.
+    pub async fn stream_workspace_artifact(
+        &self,
+        artifact: WorkspaceArtifactId,
+    ) -> Result<ExportStream> {
+        let response = self
+            .send_response(
+                self.http
+                    .get(self.url(&format!("/v1/metadata/artifacts/{}", artifact.0))),
+            )
+            .await?;
+        if !response.status().is_success() {
+            return Err(server_error(response).await);
+        }
+        let content_type = response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned);
+        Ok(ExportStream {
+            content_type,
+            content_disposition: None,
+            body: Box::pin(response.bytes_stream()),
+        })
     }
 
     pub async fn ddl_sources(&self, workspace: WorkspaceId) -> Result<Vec<DdlSource>> {

@@ -419,6 +419,11 @@ fn validate_configuration(input: &NewRunConfiguration) -> Result<()> {
         })
         || (input.transaction_policy == RunTransactionPolicy::AllScripts
             && input.error_policy == RunErrorPolicy::Continue)
+        || (input.transaction_policy != RunTransactionPolicy::None
+            && input
+                .scripts
+                .iter()
+                .any(|script| script.transfer_recipe_id.is_some()))
     {
         return Err(MetadataError::InvalidRunConfiguration);
     }
@@ -484,6 +489,19 @@ fn validate_configuration_targets(
         )?;
         if !valid {
             return Err(MetadataError::InvalidRunConfiguration);
+        }
+        if let Some(recipe_id) = script.transfer_recipe_id {
+            let recipe_valid: bool = conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM transfer_recipe
+                 WHERE id = ?1 AND workspace_id = ?2 AND direction = 'export'
+                   AND json_extract(source_json, '$.kind') = 'query'
+                   AND json_extract(sink_json, '$.kind') = 'artifact')",
+                params![recipe_id.0, workspace_id.0],
+                |row| row.get(0),
+            )?;
+            if !recipe_valid {
+                return Err(MetadataError::InvalidRunConfiguration);
+            }
         }
     }
     Ok(())
@@ -699,12 +717,13 @@ mod tests {
     use sift_protocol::{
         ConnectionSpec, Engine, RunManifest, RunManifestScript, RunScriptStep,
         ScheduleConcurrencyPolicy, ScheduleMisfirePolicy, ScheduleOccurrenceState,
-        ScriptRevisionPolicy, WorkspaceNodeKind, WorkspacePath,
+        ScriptRevisionPolicy, TransferDirection, TransferEndpoint, WorkspaceNodeKind,
+        WorkspacePath,
     };
 
     use crate::{
-        CredentialMode, MemorySecretStore, NewConnectionProfile, NewRoom, NewWorkspaceNode,
-        RoomKind, TenantId,
+        CredentialMode, MemorySecretStore, NewConnectionProfile, NewRoom, NewTransferRecipe,
+        NewWorkspaceNode, RoomKind, TenantId,
     };
 
     use super::*;
@@ -780,6 +799,7 @@ mod tests {
                 node_id,
                 revision_policy: ScriptRevisionPolicy::LatestAtRunStart,
                 pinned_digest: None,
+                transfer_recipe_id: None,
             })
             .collect::<Vec<_>>();
         let input = NewRunConfiguration {
@@ -803,6 +823,49 @@ mod tests {
             .update_run_configuration(configuration.id, actor, 1, input)
             .unwrap();
         assert_eq!(configuration.revision, 2);
+
+        let recipe = store
+            .create_transfer_recipe(
+                current.id,
+                actor,
+                NewTransferRecipe {
+                    name: "scheduled-export".into(),
+                    direction: TransferDirection::Export,
+                    source: TransferEndpoint::Query,
+                    sink: TransferEndpoint::Artifact,
+                    format_id: "csv".into(),
+                    format_version: "1".into(),
+                    options: serde_json::json!({}),
+                },
+            )
+            .unwrap();
+        let recipe_input = NewRunConfiguration {
+            name: "recipe-step".into(),
+            scripts: vec![RunScriptStep {
+                transfer_recipe_id: Some(recipe.id),
+                ..scripts[0].clone()
+            }],
+            connection_profile_id: profile.id.0,
+            target_schema: None,
+            variables: vec![],
+            pre_tasks: vec![],
+            transaction_policy: RunTransactionPolicy::None,
+            error_policy: RunErrorPolicy::Stop,
+        };
+        assert!(store
+            .create_run_configuration(current.id, actor, recipe_input.clone())
+            .is_ok());
+        assert!(matches!(
+            store.create_run_configuration(
+                current.id,
+                actor,
+                NewRunConfiguration {
+                    transaction_policy: RunTransactionPolicy::PerScript,
+                    ..recipe_input
+                }
+            ),
+            Err(MetadataError::InvalidRunConfiguration)
+        ));
 
         let manifest = RunManifest {
             workspace_revision: current.revision,

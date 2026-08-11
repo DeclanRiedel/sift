@@ -156,6 +156,8 @@ impl ApiError {
                 | MetadataError::RunConfigurationNotFound(_)
                 | MetadataError::RunNotFound(_)
                 | MetadataError::RunScheduleNotFound(_)
+                | MetadataError::TransferRecipeNotFound(_)
+                | MetadataError::WorkspaceArtifactNotFound(_)
                 | MetadataError::CatalogSnapshotNotFound
                 | MetadataError::MigrationRunNotFound
                 | MetadataError::PlanCaptureNotFound
@@ -201,6 +203,9 @@ impl ApiError {
                 }
                 MetadataError::RunScheduleRevisionConflict { .. } => {
                     (StatusCode::CONFLICT, "run_schedule_revision_conflict")
+                }
+                MetadataError::TransferRecipeRevisionConflict { .. } => {
+                    (StatusCode::CONFLICT, "transfer_recipe_revision_conflict")
                 }
                 MetadataError::InvalidRunTransition => {
                     (StatusCode::CONFLICT, "invalid_run_transition")
@@ -276,6 +281,7 @@ impl ApiError {
                 | MetadataError::InvalidRepositoryBinding
                 | MetadataError::InvalidRunConfiguration
                 | MetadataError::InvalidRunSchedule
+                | MetadataError::InvalidTransferRecipe
                 | MetadataError::Json(_) => (StatusCode::BAD_REQUEST, "bad_request"),
                 MetadataError::ExtensionStorageValueTooLarge { .. }
                 | MetadataError::CatalogSnapshotTooLarge { .. }

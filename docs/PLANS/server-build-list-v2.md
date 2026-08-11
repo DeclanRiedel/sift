@@ -491,8 +491,10 @@ Detailed implementation order and ADR-034 contract:
       generation leases, cron/timezone evaluation, misfire/concurrency policy,
       per-occurrence reauthorization, conservative restart recovery, operator
       inspection/resume, audit, SDK, and OpenAPI.
-- [ ] [Implement] Recipe-based import/export; remaining SDK/OpenAPI and remote
-      integration.
+- [x] [Implement] Revisioned recipe-based import/export with bounded,
+      stage-and-commit artifacts; bundled CSV/TSV/JSON/HTML/Markdown/XLSX,
+      supervised extension format frames, run/schedule reuse, streaming SDK,
+      audit, and exact OpenAPI operation coverage.
 - [ ] [Graduate] Local, SSH-remote, and network-hosted workspace matrices;
       repository credential redaction; concurrent edit/VCS conflict tests;
       deterministic multi-script execution and recovery tests.

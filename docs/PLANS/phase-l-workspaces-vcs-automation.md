@@ -5,7 +5,7 @@ is in progress.
 
 Milestones: L0 contract lock, L1 virtual workspaces/history, L2 projections and
 offline DDL sources, L3 bundled Git, L4 foreground runs, and L5 durable
-scheduling are complete; L6–L7 remain.
+scheduling, and L6 recipe-based import/export are complete; L7 remains.
 
 This plan expands Phase L in `server-build-list-v2.md`. It is intentionally
 ordered design-first: slice L0 locks the topology before any public workspace
