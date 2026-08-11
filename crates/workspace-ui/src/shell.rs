@@ -232,6 +232,17 @@ impl Pane {
     fn active_item_mut(&mut self) -> Option<&mut ItemPresentation> {
         self.items.get_mut(self.active_item)
     }
+
+    /// The focus handle that should receive keyboard input for this pane: the
+    /// active query item's editor when there is one, else the pane itself. This
+    /// keeps the `SiftEditor` key context active so editing keys route.
+    fn active_focus_handle(&self, cx: &App) -> FocusHandle {
+        self.active_item()
+            .filter(|item| item.kind == ItemKind::Query)
+            .and_then(|item| self.editors.get(&item.id))
+            .map(|editor| editor.focus_handle(cx))
+            .unwrap_or_else(|| self.focus_handle.clone())
+    }
 }
 
 impl Focusable for Pane {
@@ -472,7 +483,10 @@ impl WorkspaceShell {
             cx.notify();
         })
         .detach();
-        panes[active_pane].focus_handle(cx).focus(window, cx);
+        panes[active_pane]
+            .read(cx)
+            .active_focus_handle(cx)
+            .focus(window, cx);
         let bounds_subscription = cx.observe_window_bounds(window, |shell, window, cx| {
             shell.capture_window_bounds(window.window_bounds());
             shell.persist(cx);
@@ -859,11 +873,25 @@ impl WorkspaceShell {
         cx.subscribe_in(&pane, window, Self::on_pane_event).detach();
         self.panes.push(pane);
         self.active_pane = self.panes.len() - 1;
-        self.panes[self.active_pane]
-            .focus_handle(cx)
-            .focus(window, cx);
+        self.focus_active_pane(window, cx);
         self.persist(cx);
         cx.notify();
+    }
+
+    /// Move keyboard focus to the active pane's editor (or the pane itself).
+    /// Called whenever the active pane changes or a modal is dismissed so focus
+    /// is never orphaned — an orphaned focus silently drops all keybindings.
+    fn focus_active_pane(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(pane) = self.panes.get(self.active_pane) {
+            pane.read(cx).active_focus_handle(cx).focus(window, cx);
+        }
+    }
+
+    #[cfg(test)]
+    fn active_editor_focused(&self, window: &Window, cx: &App) -> bool {
+        self.panes
+            .get(self.active_pane)
+            .is_some_and(|pane| pane.read(cx).active_focus_handle(cx).is_focused(window))
     }
 
     fn on_pane_event(
@@ -878,11 +906,11 @@ impl WorkspaceShell {
         };
         match event {
             PaneEvent::FocusRequested => {
-                if self.active_pane != index {
-                    self.active_pane = index;
-                    self.panes[index].focus_handle(cx).focus(window, cx);
-                    cx.notify();
-                }
+                // Always (re)focus the clicked pane's editor — not just when the
+                // active pane changes — so a click after a modal restores focus.
+                self.active_pane = index;
+                self.focus_active_pane(window, cx);
+                cx.notify();
             }
             PaneEvent::CloseRequested => {
                 self.active_pane = index;
@@ -916,9 +944,7 @@ impl WorkspaceShell {
         }
         self.panes.remove(index);
         self.active_pane = self.active_pane.min(self.panes.len() - 1);
-        self.panes[self.active_pane]
-            .focus_handle(cx)
-            .focus(window, cx);
+        self.focus_active_pane(window, cx);
         self.persist(cx);
         cx.notify();
     }
@@ -934,9 +960,7 @@ impl WorkspaceShell {
 
     fn focus_next_pane(&mut self, _: &FocusNextPane, window: &mut Window, cx: &mut Context<Self>) {
         self.active_pane = (self.active_pane + 1) % self.panes.len();
-        self.panes[self.active_pane]
-            .focus_handle(cx)
-            .focus(window, cx);
+        self.focus_active_pane(window, cx);
         cx.notify();
     }
 
@@ -980,6 +1004,9 @@ impl WorkspaceShell {
         if emptied && self.panes.len() > 1 {
             self.close_pane_at(self.active_pane, window, cx);
         } else {
+            // The closed item's editor may have held focus; move it to the new
+            // active item so keyboard input keeps routing.
+            self.focus_active_pane(window, cx);
             self.persist(cx);
             cx.notify();
         }
@@ -1064,8 +1091,10 @@ impl WorkspaceShell {
         }
     }
 
-    fn dismiss_modal(&mut self, _: &DismissModal, _: &mut Window, cx: &mut Context<Self>) {
+    fn dismiss_modal(&mut self, _: &DismissModal, window: &mut Window, cx: &mut Context<Self>) {
         self.modal = None;
+        // Return focus to the workspace so keybindings keep routing.
+        self.focus_active_pane(window, cx);
         cx.notify();
     }
 
@@ -1724,6 +1753,21 @@ mod tests {
             workspace.read_with(&cx, |workspace, _| workspace.modal().cloned()),
             Some(Modal::CommandPalette)
         );
+    }
+
+    #[gpui::test]
+    fn dismissing_the_palette_restores_editor_focus(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        let focus = workspace.read_with(&cx, |shell, cx| shell.focus_handle(cx));
+        // Opening the palette moves focus to its search field…
+        cx.update(|window, cx| focus.dispatch_action(&OpenCommandPalette, window, cx));
+        // …and dismissing it must return focus to the query editor, or all
+        // keybindings silently stop routing.
+        cx.update(|window, cx| focus.dispatch_action(&DismissModal, window, cx));
+        let focused = cx.update(|window, cx| workspace.read(cx).active_editor_focused(window, cx));
+        assert!(focused);
     }
 
     #[gpui::test]
