@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use gpui::{
@@ -6,6 +7,8 @@ use gpui::{
 };
 use sift_api_types::RoomId;
 use sift_ui::{button, ControlState, ControlTone, TextInput, Theme};
+
+use crate::editor::{QueryDocument, QueryEditor};
 
 use crate::presentation::{
     DockPresentation, ItemKind, ItemPresentation, PanePresentation, PresentationState,
@@ -108,17 +111,39 @@ pub struct Pane {
     active_item: usize,
     focus_handle: FocusHandle,
     theme: Theme,
+    /// Live editor per query item. Not persisted — the document is server/Loro
+    /// backed and rehydrated by reference, so the client stores no query text.
+    editors: HashMap<u64, Entity<QueryEditor>>,
 }
 
 impl Pane {
     fn from_presentation(pane: PanePresentation, theme: Theme, cx: &mut Context<Self>) -> Self {
+        let editors = pane
+            .items
+            .iter()
+            .filter(|item| item.kind == ItemKind::Query)
+            .map(|item| {
+                let document = QueryDocument::with_random_peer("");
+                let editor = cx.new(|cx| QueryEditor::new(document, theme, cx));
+                (item.id, editor)
+            })
+            .collect();
         Self {
             id: pane.id,
             items: pane.items,
             active_item: pane.active_item,
             focus_handle: cx.focus_handle(),
             theme,
+            editors,
         }
+    }
+
+    fn set_theme(&mut self, theme: Theme, cx: &mut Context<Self>) {
+        self.theme = theme;
+        for editor in self.editors.values() {
+            editor.update(cx, |editor, cx| editor.set_theme(theme, cx));
+        }
+        cx.notify();
     }
 
     fn snapshot(&self) -> PanePresentation {
@@ -151,7 +176,8 @@ impl Pane {
         if index >= self.items.len() {
             return;
         }
-        self.items.remove(index);
+        let removed = self.items.remove(index);
+        self.editors.remove(&removed.id);
         if self.active_item >= self.items.len() {
             self.active_item = self.items.len().saturating_sub(1);
         }
@@ -260,16 +286,30 @@ impl gpui::Render for Pane {
                             .child("⨯"),
                     ),
             )
-            .child(
-                div()
-                    .flex_1()
-                    .p_4()
-                    .children(active.map(|item| match item.kind {
-                        ItemKind::Query => format!("Query editor · {}", item.title),
-                        ItemKind::Schema => format!("Schema view · {}", item.title),
-                        ItemKind::Welcome => "Welcome to Sift".into(),
-                    })),
-            )
+            .child({
+                let body = div().flex_1().min_h_0().flex().flex_col();
+                match active {
+                    Some(item) if item.kind == ItemKind::Query => {
+                        match self.editors.get(&item.id) {
+                            Some(editor) => body.child(editor.clone()),
+                            None => body
+                                .child(div().p_4().child(format!("Query editor · {}", item.title))),
+                        }
+                    }
+                    Some(item) => body.child(div().p_4().text_color(colors.muted_text).child(
+                        match item.kind {
+                            ItemKind::Schema => format!("Schema view · {}", item.title),
+                            _ => "Welcome to Sift".into(),
+                        },
+                    )),
+                    None => body.child(
+                        div()
+                            .p_4()
+                            .text_color(colors.muted_text)
+                            .child("No open items"),
+                    ),
+                }
+            })
     }
 }
 
@@ -793,8 +833,9 @@ impl WorkspaceShell {
         } else {
             Theme::light()
         };
+        let theme = self.theme;
         for pane in &self.panes {
-            pane.update(cx, |pane, _| pane.theme = self.theme);
+            pane.update(cx, |pane, cx| pane.set_theme(theme, cx));
         }
         self.persist(cx);
         cx.notify();

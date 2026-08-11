@@ -7425,6 +7425,7 @@ dependencies = [
  "serde_json",
  "sift-api-types",
  "sift-client-sdk",
+ "sift-doc",
  "sift-protocol",
  "sift-ui",
  "tempfile",

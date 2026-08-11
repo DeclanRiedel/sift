@@ -365,8 +365,14 @@ ADR amendment instead of burying a second UI toolkit behind an abstraction.
 
 ### M3 — daily-driver SQL vertical slice
 
-- [ ] Implement the SQL query item, selections, statement targeting, undo/redo,
-      clipboard, find, and server-backed Loro document replica.
+- [~] Implement the SQL query item, selections, statement targeting, undo/redo,
+      clipboard, find, and server-backed Loro document replica. **Landed:**
+      `QueryDocument` (Loro `TextReplica`-backed buffer, byte-offset selections
+      with sticky goal column, edit + undo/redo, quote/comment-aware statement
+      targeting, case-insensitive find) and the multi-line `QueryEditor` view
+      (custom element, `EntityInputHandler` text/IME, `SiftEditor` keymap),
+      hosted per query item in each pane. **Remaining:** wiring the replica to
+      the room WebSocket for live collaboration (currently a local replica).
 - [ ] Integrate completion, diagnostics, formatting, quick fixes, usages, and
       semantic revision cancellation.
 - [ ] Execute selection/document, stream status, cancel, and distinguish

@@ -9,9 +9,44 @@ use sift_ui::{Copy, Cut, Paste, SelectAll};
 use crate::app::{display_rects, SiftApp, SiftWindow};
 use crate::platform::shell_key_bindings;
 use sift_workspace_ui::{
-    CloseActiveItem, CloseActivePane, FocusNextPane, OpenCommandPalette, SaveActiveItem, SplitPane,
-    ToggleBottomDock, ToggleLeftDock, ToggleRightDock, ToggleShellTheme,
+    editor as ed, CloseActiveItem, CloseActivePane, FocusNextPane, OpenCommandPalette,
+    SaveActiveItem, SplitPane, ToggleBottomDock, ToggleLeftDock, ToggleRightDock, ToggleShellTheme,
 };
+
+/// Keymap for the SQL editor. Bound under the `SiftEditor` focus context so
+/// these never intercept workspace or text-field commands. Character and IME
+/// input arrive through the editor's input handler, not these bindings.
+fn editor_key_bindings() -> Vec<gpui::KeyBinding> {
+    let ctx = Some("SiftEditor");
+    vec![
+        gpui::KeyBinding::new("backspace", ed::Backspace, ctx),
+        gpui::KeyBinding::new("delete", ed::DeleteForward, ctx),
+        gpui::KeyBinding::new("enter", ed::Newline, ctx),
+        gpui::KeyBinding::new("tab", ed::Indent, ctx),
+        gpui::KeyBinding::new("left", ed::MoveLeft, ctx),
+        gpui::KeyBinding::new("right", ed::MoveRight, ctx),
+        gpui::KeyBinding::new("up", ed::MoveUp, ctx),
+        gpui::KeyBinding::new("down", ed::MoveDown, ctx),
+        gpui::KeyBinding::new("shift-left", ed::SelectLeft, ctx),
+        gpui::KeyBinding::new("shift-right", ed::SelectRight, ctx),
+        gpui::KeyBinding::new("shift-up", ed::SelectUp, ctx),
+        gpui::KeyBinding::new("shift-down", ed::SelectDown, ctx),
+        gpui::KeyBinding::new("home", ed::LineStart, ctx),
+        gpui::KeyBinding::new("end", ed::LineEnd, ctx),
+        gpui::KeyBinding::new("ctrl-a", ed::SelectAll, ctx),
+        gpui::KeyBinding::new("cmd-a", ed::SelectAll, ctx),
+        gpui::KeyBinding::new("ctrl-c", ed::Copy, ctx),
+        gpui::KeyBinding::new("cmd-c", ed::Copy, ctx),
+        gpui::KeyBinding::new("ctrl-x", ed::Cut, ctx),
+        gpui::KeyBinding::new("cmd-x", ed::Cut, ctx),
+        gpui::KeyBinding::new("ctrl-v", ed::Paste, ctx),
+        gpui::KeyBinding::new("cmd-v", ed::Paste, ctx),
+        gpui::KeyBinding::new("ctrl-z", ed::Undo, ctx),
+        gpui::KeyBinding::new("cmd-z", ed::Undo, ctx),
+        gpui::KeyBinding::new("ctrl-shift-z", ed::Redo, ctx),
+        gpui::KeyBinding::new("cmd-shift-z", ed::Redo, ctx),
+    ]
+}
 
 fn main() {
     application().run(|cx| {
@@ -44,6 +79,7 @@ fn main() {
             gpui::KeyBinding::new("cmd-v", Paste, Some("SiftTextInput")),
             gpui::KeyBinding::new("cmd-a", SelectAll, Some("SiftTextInput")),
         ]);
+        cx.bind_keys(editor_key_bindings());
 
         let app = SiftApp::new();
         let state = app.restore(&display_rects(cx));

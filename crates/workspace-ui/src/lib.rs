@@ -1,8 +1,11 @@
 //! GPUI-owned projection of one server-authoritative Sift workspace.
 
+pub mod editor;
 mod lifecycle;
 mod presentation;
 mod shell;
+
+pub use editor::{QueryDocument, QueryEditor};
 
 pub use lifecycle::{
     create_virtual_workspace, load_instance, stream_room_presence, ConnectionPhase, DegradedReason,
