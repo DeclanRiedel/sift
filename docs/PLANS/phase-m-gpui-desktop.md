@@ -375,11 +375,22 @@ ADR amendment instead of burying a second UI toolkit behind an abstraction.
       the room WebSocket for live collaboration (currently a local replica).
 - [ ] Integrate completion, diagnostics, formatting, quick fixes, usages, and
       semantic revision cancellation.
-- [ ] Execute selection/document, stream status, cancel, and distinguish
+- [~] Execute selection/document, stream status, cancel, and distinguish
       rejected, failed, cancelled, timed-out, and outcome-unknown operations.
-- [ ] Implement virtualized results with typed cells, null/error states, column
+      **Landed:** editor `ExecuteStatement`/`ExecuteDocument` actions
+      (Ctrl/Cmd+Enter) emit an `EditorEvent::Execute`; the `ResultState` model
+      has the distinct Idle/Pending/Ready/Unavailable/Failed/Cancelled/
+      TimedOut/OutcomeUnknown states with `from_execute`/`from_pages` mappers.
+      **Remaining:** the SDK transport (session/connection → `execute`/
+      `stream_query`/cancel) driving these states — today Execute reports the
+      not-connected state because no session is attached yet.
+- [~] Implement virtualized results with typed cells, null/error states, column
       resizing/reordering, selection, copy, paging, resume, and bounded prefetch.
-- [ ] Add query-owned Data/Messages/Explain/History tabs plus pin/promote.
+      **Landed:** `uniform_list`-virtualized grid, typed cell rendering
+      (null/number/bool/text/temporal/binary/structured), header type badges,
+      cell selection + copy, horizontal scroll. **Remaining:** column
+      resize/reorder, paging/resume, bounded prefetch.
+- [x] Add query-owned Data/Messages/Explain/History tabs plus pin/promote.
 - [ ] Restore query and result references without persisting result data.
 - [ ] Meet measured typing, first-result, scroll, and memory budgets on large
       fixtures.

@@ -8,7 +8,8 @@ use gpui::{
 use sift_api_types::RoomId;
 use sift_ui::{button, ControlState, ControlTone, TextInput, Theme};
 
-use crate::editor::{QueryDocument, QueryEditor};
+use crate::editor::{EditorEvent, QueryDocument, QueryEditor};
+use crate::results::{ResultState, ResultsView};
 
 use crate::presentation::{
     DockPresentation, ItemKind, ItemPresentation, PanePresentation, PresentationState,
@@ -114,20 +115,30 @@ pub struct Pane {
     /// Live editor per query item. Not persisted — the document is server/Loro
     /// backed and rehydrated by reference, so the client stores no query text.
     editors: HashMap<u64, Entity<QueryEditor>>,
+    /// The Data/Messages/Explain/History surface owned by each query item.
+    results: HashMap<u64, Entity<ResultsView>>,
 }
 
 impl Pane {
     fn from_presentation(pane: PanePresentation, theme: Theme, cx: &mut Context<Self>) -> Self {
-        let editors = pane
+        let mut editors = HashMap::new();
+        let mut results = HashMap::new();
+        for item in pane
             .items
             .iter()
             .filter(|item| item.kind == ItemKind::Query)
-            .map(|item| {
-                let document = QueryDocument::with_random_peer("");
-                let editor = cx.new(|cx| QueryEditor::new(document, theme, cx));
-                (item.id, editor)
+        {
+            let id = item.id;
+            let document = QueryDocument::with_random_peer("");
+            let editor = cx.new(|cx| QueryEditor::new(document, theme, cx));
+            let result = cx.new(|cx| ResultsView::new(theme, cx));
+            cx.subscribe(&editor, move |pane, _, event, cx| {
+                pane.on_editor_event(id, event, cx);
             })
-            .collect();
+            .detach();
+            editors.insert(id, editor);
+            results.insert(id, result);
+        }
         Self {
             id: pane.id,
             items: pane.items,
@@ -135,6 +146,29 @@ impl Pane {
             focus_handle: cx.focus_handle(),
             theme,
             editors,
+            results,
+        }
+    }
+
+    fn on_editor_event(&mut self, item_id: u64, event: &EditorEvent, cx: &mut Context<Self>) {
+        match event {
+            EditorEvent::Execute { .. } => {
+                let Some(result) = self.results.get(&item_id) else {
+                    return;
+                };
+                // Execution transport (session/connection → SDK execute/stream)
+                // lands in the next M3 slice; until a connection is attached the
+                // surface reports the honest not-connected state rather than
+                // faking rows.
+                result.update(cx, |result, cx| {
+                    result.set_state(
+                        ResultState::Unavailable(
+                            "Attach a database connection to run this query.".into(),
+                        ),
+                        cx,
+                    );
+                });
+            }
         }
     }
 
@@ -142,6 +176,9 @@ impl Pane {
         self.theme = theme;
         for editor in self.editors.values() {
             editor.update(cx, |editor, cx| editor.set_theme(theme, cx));
+        }
+        for result in self.results.values() {
+            result.update(cx, |result, cx| result.set_theme(theme, cx));
         }
         cx.notify();
     }
@@ -178,6 +215,7 @@ impl Pane {
         }
         let removed = self.items.remove(index);
         self.editors.remove(&removed.id);
+        self.results.remove(&removed.id);
         if self.active_item >= self.items.len() {
             self.active_item = self.items.len().saturating_sub(1);
         }
@@ -290,9 +328,18 @@ impl gpui::Render for Pane {
                 let body = div().flex_1().min_h_0().flex().flex_col();
                 match active {
                     Some(item) if item.kind == ItemKind::Query => {
-                        match self.editors.get(&item.id) {
-                            Some(editor) => body.child(editor.clone()),
-                            None => body
+                        match (self.editors.get(&item.id), self.results.get(&item.id)) {
+                            (Some(editor), Some(result)) => body
+                                .child(div().flex_1().min_h_0().child(editor.clone()))
+                                .child(
+                                    div()
+                                        .h(px(240.))
+                                        .min_h_0()
+                                        .border_t_1()
+                                        .border_color(colors.border)
+                                        .child(result.clone()),
+                                ),
+                            _ => body
                                 .child(div().p_4().child(format!("Query editor · {}", item.title))),
                         }
                     }

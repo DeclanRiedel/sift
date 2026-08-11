@@ -7,9 +7,9 @@ use std::ops::Range;
 
 use gpui::{
     actions, div, fill, point, prelude::*, px, size, App, Bounds, ClipboardItem, Context,
-    CursorStyle, Element, ElementId, ElementInputHandler, Entity, EntityInputHandler, FocusHandle,
-    Focusable, GlobalElementId, IntoElement, LayoutId, PaintQuad, Pixels, Role, ShapedLine, Style,
-    TextRun, UTF16Selection, Window,
+    CursorStyle, Element, ElementId, ElementInputHandler, Entity, EntityInputHandler, EventEmitter,
+    FocusHandle, Focusable, GlobalElementId, IntoElement, LayoutId, PaintQuad, Pixels, Role,
+    ShapedLine, Style, TextRun, UTF16Selection, Window,
 };
 use sift_doc::{random_peer_id, TextReplica};
 use sift_ui::Theme;
@@ -486,11 +486,21 @@ fn find_ci(original: &str, lowered: &str, needle: &str) -> Vec<Range<usize>> {
     matches
 }
 
+/// Raised by the editor for its owning query item to act on. The editor never
+/// talks to the SDK directly; it reports intent and the workspace dispatches.
+#[derive(Debug, Clone)]
+pub enum EditorEvent {
+    /// Run this SQL (the statement under the caret, or the whole document).
+    Execute { sql: String },
+}
+
 actions!(
     sift_editor,
     [
         Backspace,
         DeleteForward,
+        ExecuteStatement,
+        ExecuteDocument,
         MoveLeft,
         MoveRight,
         MoveUp,
@@ -663,6 +673,25 @@ impl QueryEditor {
         }
     }
 
+    fn execute_statement(&mut self, _: &ExecuteStatement, _: &mut Window, cx: &mut Context<Self>) {
+        let sql = self
+            .document
+            .active_statement()
+            .map(|range| self.document.text()[range].to_string())
+            .filter(|sql| !sql.trim().is_empty())
+            .unwrap_or_else(|| self.document.text().trim().to_string());
+        if !sql.trim().is_empty() {
+            cx.emit(EditorEvent::Execute { sql });
+        }
+    }
+
+    fn execute_document(&mut self, _: &ExecuteDocument, _: &mut Window, cx: &mut Context<Self>) {
+        let sql = self.document.text().trim().to_string();
+        if !sql.is_empty() {
+            cx.emit(EditorEvent::Execute { sql });
+        }
+    }
+
     fn offset_from_utf16(&self, offset: usize) -> usize {
         offset_from_utf16(self.document.text(), offset)
     }
@@ -687,6 +716,8 @@ impl QueryEditor {
         (line, line_start)
     }
 }
+
+impl EventEmitter<EditorEvent> for QueryEditor {}
 
 impl Focusable for QueryEditor {
     fn focus_handle(&self, _: &App) -> FocusHandle {
@@ -843,6 +874,8 @@ impl gpui::Render for QueryEditor {
             .on_action(cx.listener(Self::paste))
             .on_action(cx.listener(Self::undo))
             .on_action(cx.listener(Self::redo))
+            .on_action(cx.listener(Self::execute_statement))
+            .on_action(cx.listener(Self::execute_document))
             .child(QueryEditorElement {
                 editor: cx.entity(),
             })

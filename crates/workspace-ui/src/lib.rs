@@ -3,9 +3,11 @@
 pub mod editor;
 mod lifecycle;
 mod presentation;
+pub mod results;
 mod shell;
 
 pub use editor::{QueryDocument, QueryEditor};
+pub use results::{ResultData, ResultState, ResultsEvent, ResultsView};
 
 pub use lifecycle::{
     create_virtual_workspace, load_instance, stream_room_presence, ConnectionPhase, DegradedReason,

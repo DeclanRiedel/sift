@@ -9,8 +9,9 @@ use sift_ui::{Copy, Cut, Paste, SelectAll};
 use crate::app::{display_rects, SiftApp, SiftWindow};
 use crate::platform::shell_key_bindings;
 use sift_workspace_ui::{
-    editor as ed, CloseActiveItem, CloseActivePane, FocusNextPane, OpenCommandPalette,
-    SaveActiveItem, SplitPane, ToggleBottomDock, ToggleLeftDock, ToggleRightDock, ToggleShellTheme,
+    editor as ed, results as res, CloseActiveItem, CloseActivePane, FocusNextPane,
+    OpenCommandPalette, SaveActiveItem, SplitPane, ToggleBottomDock, ToggleLeftDock,
+    ToggleRightDock, ToggleShellTheme,
 };
 
 /// Keymap for the SQL editor. Bound under the `SiftEditor` focus context so
@@ -45,6 +46,12 @@ fn editor_key_bindings() -> Vec<gpui::KeyBinding> {
         gpui::KeyBinding::new("cmd-z", ed::Undo, ctx),
         gpui::KeyBinding::new("ctrl-shift-z", ed::Redo, ctx),
         gpui::KeyBinding::new("cmd-shift-z", ed::Redo, ctx),
+        gpui::KeyBinding::new("ctrl-enter", ed::ExecuteStatement, ctx),
+        gpui::KeyBinding::new("cmd-enter", ed::ExecuteStatement, ctx),
+        gpui::KeyBinding::new("ctrl-shift-enter", ed::ExecuteDocument, ctx),
+        gpui::KeyBinding::new("cmd-shift-enter", ed::ExecuteDocument, ctx),
+        gpui::KeyBinding::new("ctrl-c", res::CopySelectedCell, Some("SiftResults")),
+        gpui::KeyBinding::new("cmd-c", res::CopySelectedCell, Some("SiftResults")),
     ]
 }
 
@@ -60,6 +67,10 @@ fn main() {
                 MenuItem::separator(),
                 MenuItem::action("Save Item", SaveActiveItem),
                 MenuItem::action("Close Item", CloseActiveItem),
+            ]),
+            Menu::new("Query").items([
+                MenuItem::action("Run Statement", ed::ExecuteStatement),
+                MenuItem::action("Run Document", ed::ExecuteDocument),
             ]),
             Menu::new("View").items([
                 MenuItem::action("Connections Dock", ToggleLeftDock),
