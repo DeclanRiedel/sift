@@ -21,13 +21,14 @@ party should be able to build a working UI against the OpenAPI spec alone.
 
 ## Status
 
-The server substrate is the active work surface: two real drivers (Postgres,
-SQL Server), HTTP + WebSocket surfaces, sessions, rooms, metadata, and audit
-are in place. No product GUI exists yet (ADR-010). For the code-grounded
-backlog and verified gaps, see `docs/PLANS/server-build-list-v2.md`; for
-load-bearing decisions, see `docs/DECISIONS.md`. Remote SSH operation,
-lifecycle modes, and signed release staging are covered in
-`docs/REMOTE-AND-UPDATES.md`.
+The server substrate is in place: two real drivers (Postgres, SQL Server),
+HTTP + WebSocket surfaces, sessions, rooms, metadata, and audit. Phase M now
+includes a native GPUI desktop shell with instance switching, workspace
+navigation, query editing/execution, and result rendering; product-client work
+is still active. For the code-grounded backlog and verified gaps, see
+`docs/PLANS/server-build-list-v2.md`; for load-bearing decisions, see
+`docs/DECISIONS.md`. Remote SSH operation, lifecycle modes, and signed release
+staging are covered in `docs/REMOTE-AND-UPDATES.md`.
 
 Installed local and daemon releases start through `sift-launcher`, which
 health-checks staged updates, commits healthy candidates, and rolls back failed

@@ -107,6 +107,12 @@ name, the server URL, and the bearer token, then select **Test & Connect**.
 The desktop completes the protocol handshake and authenticates before it
 switches the active instance.
 
+The top app bar always shows the active Sift server and its connection state.
+Select it to switch quickly between Local Sift and saved servers, or open the
+full server-management dialog. The center shows the active room/workspace;
+database profiles remain in the Connections dock. The square account control
+shows the identity returned by the current server.
+
 Enable **Remember token in the OS keychain** to save the credential in the
 platform credential service. Disable it for a session-only token. Saved
 instance names and URLs live in the private desktop `instances.json`; bearer

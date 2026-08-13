@@ -64,7 +64,9 @@ pub struct Dock {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Modal {
     CommandPalette,
+    ServerPicker,
     ServerConnection,
+    Account,
     ConfirmClose { title: String },
 }
 
@@ -674,6 +676,47 @@ impl WorkspaceShell {
             .unwrap_or_else(|| "Local workspace".into())
     }
 
+    fn workspace_context_label(&self) -> String {
+        let workspace = self.workspace_label();
+        self.selected_workspace_id
+            .and_then(|selected| {
+                self.lifecycle
+                    .tenants
+                    .iter()
+                    .flat_map(|tenant| &tenant.rooms)
+                    .find(|room| room.workspaces.iter().any(|entry| entry.id == selected))
+                    .map(|room| format!("{} / {workspace}", room.name))
+            })
+            .unwrap_or(workspace)
+    }
+
+    fn active_server_name(&self) -> String {
+        self.lifecycle
+            .selected_instance
+            .as_ref()
+            .map(|instance| instance.name.clone())
+            .unwrap_or_else(|| "Local Sift".into())
+    }
+
+    fn account_initials(&self) -> String {
+        let Some(identity) = &self.lifecycle.identity else {
+            return "?".into();
+        };
+        let initials = identity
+            .principal
+            .display_name
+            .split_whitespace()
+            .filter_map(|part| part.chars().next())
+            .take(2)
+            .flat_map(char::to_uppercase)
+            .collect::<String>();
+        if initials.is_empty() {
+            "?".into()
+        } else {
+            initials
+        }
+    }
+
     pub fn active_pane(&self) -> usize {
         self.active_pane
     }
@@ -1185,6 +1228,42 @@ impl WorkspaceShell {
         cx.notify();
     }
 
+    fn open_server_picker(&mut self, cx: &mut Context<Self>) {
+        self.modal = Some(Modal::ServerPicker);
+        self.server_connection_error = None;
+        cx.notify();
+    }
+
+    fn open_account(&mut self, cx: &mut Context<Self>) {
+        self.modal = Some(Modal::Account);
+        cx.notify();
+    }
+
+    fn connect_saved_server(&mut self, profile: &SavedServerProfile, cx: &mut Context<Self>) {
+        if self.server_connection_pending {
+            return;
+        }
+        let Some(sender) = &self.instance_sender else {
+            self.server_connection_error = Some("Desktop connection manager is unavailable".into());
+            cx.notify();
+            return;
+        };
+        let command = InstanceCommand::Connect {
+            profile_id: Some(profile.id.clone()),
+            name: profile.name.clone(),
+            base_url: profile.base_url.clone(),
+            bearer_token: None,
+            remember_token: profile.has_saved_token,
+        };
+        if sender.send(command).is_err() {
+            self.server_connection_error = Some("Desktop connection manager stopped".into());
+        } else {
+            self.server_connection_pending = true;
+            self.server_connection_error = None;
+        }
+        cx.notify();
+    }
+
     fn select_server_profile(
         &mut self,
         profile: &SavedServerProfile,
@@ -1369,16 +1448,15 @@ impl WorkspaceShell {
         cx.notify();
     }
 
-    /// Compact, blocky top toolbar in the Zed idiom. The only interactive
-    /// control is the hamburger, which opens the command palette; the brand,
-    /// workspace label, and connection indicator are read-only. Controls whose
-    /// behavior is not built yet are omitted rather than shown as dead buttons.
+    /// Global application context: commands, Sift instance, workspace, updates,
+    /// and identity. Database profiles deliberately stay in the workspace dock.
     fn render_toolbar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = self.theme.colors;
-        let workspace_label = self.workspace_label();
+        let workspace_label = self.workspace_context_label();
+        let server_name = self.active_server_name();
+        let account_initials = self.account_initials();
 
-        // Read-only connection/sync indicator driven by the lifecycle phase.
-        let (update_glyph, update_label, update_color) = match &self.lifecycle.phase {
+        let (status_glyph, status_label, status_color) = match &self.lifecycle.phase {
             crate::ConnectionPhase::Ready => ("●", "Connected".to_string(), colors.success),
             crate::ConnectionPhase::Degraded(_) => {
                 ("!", self.lifecycle.status_label(), colors.warning)
@@ -1406,10 +1484,10 @@ impl WorkspaceShell {
             .child(
                 div()
                     .flex()
+                    .flex_1()
                     .items_center()
-                    .gap_2()
+                    .gap_1()
                     .min_w_0()
-                    // The only interactive control: opens the command palette.
                     .child(
                         div()
                             .id("toolbar-menu")
@@ -1428,30 +1506,78 @@ impl WorkspaceShell {
                             }))
                             .child("☰"),
                     )
-                    .child(div().font_weight(gpui::FontWeight::SEMIBOLD).child("sift"))
-                    // Current workspace — a static label, not a switcher yet.
                     .child(
                         div()
+                            .id("toolbar-server-picker")
+                            .role(Role::Button)
+                            .aria_label(format!(
+                                "Current Sift server: {server_name}, {status_label}"
+                            ))
+                            .h(px(28.))
+                            .max_w(px(260.))
+                            .px_2()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .rounded_sm()
+                            .hover(|slot| slot.bg(colors.selected_surface))
+                            .on_click(cx.listener(|shell, _, _, cx| shell.open_server_picker(cx)))
                             .min_w_0()
                             .text_sm()
-                            .text_color(colors.muted_text)
-                            .truncate()
-                            .child(workspace_label),
+                            .child(div().text_color(status_color).child(status_glyph))
+                            .child(div().min_w_0().truncate().child(server_name))
+                            .child(div().text_xs().text_color(colors.muted_text).child("⌄")),
                     ),
             )
             .child(
                 div()
-                    .id("toolbar-status")
-                    .aria_label(update_label.clone())
+                    .flex_1()
+                    .min_w_0()
                     .flex()
                     .items_center()
-                    .gap_1()
-                    .h(px(24.))
-                    .px_2()
-                    .text_xs()
+                    .justify_center()
+                    .px_3()
+                    .text_sm()
                     .text_color(colors.muted_text)
-                    .child(div().text_color(update_color).child(update_glyph))
-                    .child(update_label),
+                    .child(div().truncate().child(workspace_label)),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .flex()
+                    .items_center()
+                    .justify_end()
+                    .gap_1()
+                    // A download control belongs here once the desktop supplies
+                    // a verified available-update state. It stays absent while
+                    // current or unknown rather than presenting a dead button.
+                    .child(
+                        div()
+                            .id("toolbar-account")
+                            .role(Role::Button)
+                            .aria_label(
+                                self.lifecycle
+                                    .identity
+                                    .as_ref()
+                                    .map(|identity| {
+                                        format!("Account: {}", identity.principal.display_name)
+                                    })
+                                    .unwrap_or_else(|| "Account unavailable while offline".into()),
+                            )
+                            .size(px(26.))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded_sm()
+                            .border_1()
+                            .border_color(colors.border)
+                            .bg(colors.elevated_surface)
+                            .text_xs()
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .hover(|avatar| avatar.bg(colors.selected_surface))
+                            .on_click(cx.listener(|shell, _, _, cx| shell.open_account(cx)))
+                            .child(account_initials),
+                    ),
             )
     }
 
@@ -1590,6 +1716,15 @@ impl WorkspaceShell {
     fn render_modal(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
         let colors = self.theme.colors;
         self.modal.as_ref().map(|modal| {
+            let server_picker = matches!(modal, Modal::ServerPicker);
+            let account = matches!(modal, Modal::Account);
+            let card_width = if server_picker {
+                360.0
+            } else if account {
+                320.0
+            } else {
+                520.0
+            };
             let content = match modal {
                 Modal::CommandPalette => {
                     let query = self.query_input.read(cx).text().to_lowercase();
@@ -1668,6 +1803,162 @@ impl WorkspaceShell {
                                         row
                                     },
                                 )),
+                        )
+                        .into_any_element()
+                }
+                Modal::ServerPicker => {
+                    let current_id = self
+                        .lifecycle
+                        .selected_instance
+                        .as_ref()
+                        .map(|instance| instance.id.clone());
+                    let pending = self.server_connection_pending;
+                    let mut rows = Vec::new();
+                    let local_active = current_id.as_deref() == Some("local");
+                    rows.push(
+                        div()
+                            .id("picker-local-sift")
+                            .role(Role::Button)
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .px_2()
+                            .py_2()
+                            .rounded_sm()
+                            .when(local_active, |row| row.bg(colors.selected_surface))
+                            .when(!pending && !local_active, |row| {
+                                row.hover(|row| row.bg(colors.selected_surface)).on_click(
+                                    cx.listener(|shell, _, _, cx| shell.use_local_server(cx)),
+                                )
+                            })
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_2()
+                                    .child(
+                                        div()
+                                            .text_color(if local_active {
+                                                colors.success
+                                            } else {
+                                                colors.muted_text
+                                            })
+                                            .child("●"),
+                                    )
+                                    .child("Local Sift"),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(colors.muted_text)
+                                    .child(if local_active { "Current" } else { "Bundled" }),
+                            )
+                            .into_any_element(),
+                    );
+                    for (index, profile) in self.saved_servers.iter().cloned().enumerate() {
+                        let active = current_id.as_deref()
+                            == Some(format!("hosted:{}", profile.id).as_str());
+                        let profile_for_click = profile.clone();
+                        rows.push(
+                            div()
+                                .id(("picker-saved-server", index))
+                                .role(Role::Button)
+                                .flex()
+                                .items_center()
+                                .justify_between()
+                                .gap_3()
+                                .px_2()
+                                .py_2()
+                                .rounded_sm()
+                                .when(active, |row| row.bg(colors.selected_surface))
+                                .when(!pending && !active, |row| {
+                                    row.hover(|row| row.bg(colors.selected_surface)).on_click(
+                                        cx.listener(move |shell, _, _, cx| {
+                                            shell.connect_saved_server(&profile_for_click, cx)
+                                        }),
+                                    )
+                                })
+                                .child(
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .gap_2()
+                                        .min_w_0()
+                                        .child(
+                                            div()
+                                                .text_color(if active {
+                                                    colors.success
+                                                } else {
+                                                    colors.muted_text
+                                                })
+                                                .child("●"),
+                                        )
+                                        .child(
+                                            div()
+                                                .flex()
+                                                .flex_col()
+                                                .min_w_0()
+                                                .child(profile.name)
+                                                .child(
+                                                    div()
+                                                        .text_xs()
+                                                        .text_color(colors.muted_text)
+                                                        .truncate()
+                                                        .child(profile.base_url),
+                                                ),
+                                        ),
+                                )
+                                .when(active, |row| {
+                                    row.child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(colors.muted_text)
+                                            .child("Current"),
+                                    )
+                                })
+                                .into_any_element(),
+                        );
+                    }
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_2()
+                        .child(
+                            div()
+                                .font_weight(gpui::FontWeight::SEMIBOLD)
+                                .child("Sift Server"),
+                        )
+                        .child(div().flex().flex_col().gap_1().children(rows))
+                        .children(self.server_connection_error.as_ref().map(|message| {
+                            div()
+                                .text_sm()
+                                .text_color(colors.danger)
+                                .child(message.clone())
+                        }))
+                        .when(pending, |picker| {
+                            picker.child(
+                                div()
+                                    .px_2()
+                                    .text_xs()
+                                    .text_color(colors.muted_text)
+                                    .child("Testing connection…"),
+                            )
+                        })
+                        .child(
+                            div()
+                                .id("picker-manage-servers")
+                                .role(Role::Button)
+                                .mt_1()
+                                .pt_2()
+                                .px_2()
+                                .border_t_1()
+                                .border_color(colors.border)
+                                .text_color(colors.muted_text)
+                                .hover(|button| button.text_color(colors.text))
+                                .on_click(cx.listener(|shell, _, window, cx| {
+                                    shell.open_server_connection(&OpenServerConnection, window, cx)
+                                }))
+                                .child("Connect to or manage servers…"),
                         )
                         .into_any_element()
                 }
@@ -1914,6 +2205,82 @@ impl WorkspaceShell {
                         )
                         .into_any_element()
                 }
+                Modal::Account => {
+                    let server_name = self.active_server_name();
+                    match &self.lifecycle.identity {
+                        Some(identity) => div()
+                            .flex()
+                            .flex_col()
+                            .gap_3()
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_3()
+                                    .child(
+                                        div()
+                                            .size(px(40.))
+                                            .flex()
+                                            .items_center()
+                                            .justify_center()
+                                            .rounded_sm()
+                                            .border_1()
+                                            .border_color(colors.border)
+                                            .bg(colors.selected_surface)
+                                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                                            .child(self.account_initials()),
+                                    )
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .flex_col()
+                                            .child(identity.principal.display_name.clone())
+                                            .children(identity.principal.email.clone().map(
+                                                |email| {
+                                                    div()
+                                                        .text_sm()
+                                                        .text_color(colors.muted_text)
+                                                        .child(email)
+                                                },
+                                            )),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .pt_2()
+                                    .border_t_1()
+                                    .border_color(colors.border)
+                                    .text_sm()
+                                    .text_color(colors.muted_text)
+                                    .child(format!("Signed in on {server_name}")),
+                            )
+                            .child(div().text_xs().text_color(colors.muted_text).child(format!(
+                                "{} tenant membership(s){}",
+                                identity.memberships.len(),
+                                if identity.principal.is_instance_admin {
+                                    " · Instance administrator"
+                                } else {
+                                    ""
+                                }
+                            )))
+                            .into_any_element(),
+                        None => {
+                            div()
+                                .flex()
+                                .flex_col()
+                                .gap_2()
+                                .child(
+                                    div()
+                                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                                        .child("Account unavailable"),
+                                )
+                                .child(div().text_sm().text_color(colors.muted_text).child(
+                                    format!("Connect to {server_name} to load your identity."),
+                                ))
+                                .into_any_element()
+                        }
+                    }
+                }
                 Modal::ConfirmClose { title } => div()
                     .flex()
                     .flex_col()
@@ -1929,12 +2296,16 @@ impl WorkspaceShell {
                 .inset_0()
                 .flex()
                 .items_start()
-                .justify_center()
-                .pt(px(100.))
-                .bg(colors.scrim)
+                .when(server_picker, |layer| {
+                    layer.justify_start().pt(px(38.)).pl(px(38.))
+                })
+                .when(account, |layer| layer.justify_end().pt(px(38.)).pr_2())
+                .when(!server_picker && !account, |layer| {
+                    layer.justify_center().pt(px(100.)).bg(colors.scrim)
+                })
                 .child(
                     div()
-                        .w(px(520.))
+                        .w(px(card_width))
                         .p_4()
                         .rounded_lg()
                         .border_1()
@@ -2355,6 +2726,110 @@ mod tests {
                 panic!("expected connect command")
             }
         }
+    }
+
+    #[gpui::test]
+    fn app_bar_server_picker_switches_using_the_saved_profile(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let (_event_sender, event_receiver) = tokio::sync::mpsc::unbounded_channel();
+        let profile = SavedServerProfile {
+            id: "team".into(),
+            name: "Team Sift".into(),
+            base_url: "https://sift.example.test".into(),
+            has_saved_token: true,
+        };
+        workspace.update(&mut cx, |shell, cx| {
+            shell.attach_instance_manager(sender, event_receiver, vec![profile.clone()], cx);
+            shell.open_server_picker(cx);
+            shell.connect_saved_server(&profile, cx);
+        });
+        assert_eq!(
+            workspace.read_with(&cx, |shell, _| shell.modal().cloned()),
+            Some(Modal::ServerPicker)
+        );
+        match receiver.try_recv().unwrap() {
+            InstanceCommand::Connect {
+                profile_id,
+                name,
+                base_url,
+                bearer_token,
+                remember_token,
+            } => {
+                assert_eq!(profile_id.as_deref(), Some("team"));
+                assert_eq!(name, "Team Sift");
+                assert_eq!(base_url, "https://sift.example.test");
+                assert!(bearer_token.is_none());
+                assert!(remember_token);
+            }
+            InstanceCommand::UseLocal | InstanceCommand::Forget { .. } => {
+                panic!("expected connect command")
+            }
+        }
+    }
+
+    #[gpui::test]
+    fn app_bar_uses_authenticated_identity_and_room_workspace_context(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        workspace.update(&mut cx, |shell, _| {
+            shell.selected_workspace_id = Some(12);
+            shell
+                .lifecycle
+                .apply(LifecycleEvent::Selected(crate::InstanceSpec {
+                    id: "hosted:team".into(),
+                    name: "Team Sift".into(),
+                    base_url: "https://sift.example.test".into(),
+                    kind: crate::InstanceKind::Hosted,
+                }));
+            shell.lifecycle.apply(LifecycleEvent::Authenticated(
+                sift_protocol::WhoAmIResponse {
+                    principal: sift_protocol::AuthPrincipal {
+                        id: 7,
+                        display_name: "Ada Lovelace".into(),
+                        email: Some("ada@example.test".into()),
+                        avatar_url: None,
+                        is_instance_admin: false,
+                    },
+                    memberships: Vec::new(),
+                    auth_session_id: Some("session".into()),
+                },
+            ));
+            shell
+                .lifecycle
+                .apply(LifecycleEvent::TenantLoaded(crate::TenantNavEntry {
+                    id: sift_api_types::TenantId(1),
+                    name: "Analytical Engine".into(),
+                    connections: Vec::new(),
+                    rooms: vec![crate::RoomNavEntry {
+                        id: RoomId(4),
+                        tenant_id: sift_api_types::TenantId(1),
+                        name: "Research".into(),
+                        workspaces: vec![WorkspaceNavEntry {
+                            id: 12,
+                            room_id: 4,
+                            name: "Reporting".into(),
+                            git_enabled: false,
+                            scheduling_enabled: false,
+                        }],
+                    }],
+                }));
+        });
+        assert_eq!(
+            workspace.read_with(&cx, |shell, _| shell.active_server_name()),
+            "Team Sift"
+        );
+        assert_eq!(
+            workspace.read_with(&cx, |shell, _| shell.workspace_context_label()),
+            "Research / Reporting"
+        );
+        assert_eq!(
+            workspace.read_with(&cx, |shell, _| shell.account_initials()),
+            "AL"
+        );
     }
 
     #[gpui::test]
