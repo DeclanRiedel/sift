@@ -7184,6 +7184,7 @@ version = "0.1.0"
 dependencies = [
  "gpui",
  "gpui_platform",
+ "reqwest",
  "sift-api-types",
  "sift-client-sdk",
  "sift-protocol",

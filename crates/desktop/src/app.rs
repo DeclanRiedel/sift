@@ -8,8 +8,70 @@ use sift_workspace_ui::{
     ResultState, WorkspaceShell,
 };
 
+use crate::config::DesktopConfig;
 use crate::local_server::{LocalServerLease, LocalServerManager};
 use crate::platform::{current_platform, presentation_state_path, PlatformKind};
+
+#[derive(Clone)]
+pub enum DesktopServer {
+    Local(LocalServerManager),
+    Remote {
+        client: Client,
+        instance: sift_workspace_ui::InstanceSpec,
+    },
+}
+
+impl DesktopServer {
+    fn from_config(config: DesktopConfig, runtime_state_dir: std::path::PathBuf) -> Self {
+        match config.remote {
+            Some(remote) => {
+                let mut client = Client::new(&remote.base_url);
+                if let Some(token) = remote.bearer_token() {
+                    client = client.with_bearer_token(token);
+                }
+                Self::Remote {
+                    client,
+                    instance: sift_workspace_ui::InstanceSpec {
+                        id: format!("hosted:{}", remote.base_url),
+                        name: remote.name,
+                        base_url: remote.base_url,
+                        kind: sift_workspace_ui::InstanceKind::Hosted,
+                    },
+                }
+            }
+            None => Self::Local(
+                LocalServerManager::bundled(runtime_state_dir)
+                    .expect("resolving bundled local server"),
+            ),
+        }
+    }
+
+    async fn client(&self) -> Result<Client, String> {
+        match self {
+            Self::Local(local) => local.ensure_ready().await,
+            Self::Remote { client, .. } => Ok(client.clone()),
+        }
+    }
+
+    fn instance(&self) -> sift_workspace_ui::InstanceSpec {
+        match self {
+            Self::Local(_) => sift_workspace_ui::InstanceSpec {
+                id: "local".into(),
+                name: "Local Sift".into(),
+                base_url: "http://127.0.0.1:7474".into(),
+                kind: sift_workspace_ui::InstanceKind::Local,
+            },
+            Self::Remote { instance, .. } => instance.clone(),
+        }
+    }
+
+    fn acquire_local_lease(&self) -> Option<LocalServerLease> {
+        match self {
+            Self::Local(local) => Some(local.acquire()),
+            Self::Remote { .. } => None,
+        }
+    }
+}
 
 /// Process-wide desktop services. Product state remains behind the SDK; this
 /// object owns only platform and presentation concerns.
@@ -17,11 +79,11 @@ pub struct SiftApp {
     pub platform: PlatformKind,
     pub presentation_store: Arc<PresentationStore>,
     pub runtime: Arc<tokio::runtime::Runtime>,
-    pub local_server: LocalServerManager,
+    pub server: DesktopServer,
 }
 
 impl SiftApp {
-    pub fn new() -> Self {
+    pub fn new(config: DesktopConfig) -> Self {
         let state_path = presentation_state_path();
         let runtime_state_dir = state_path
             .parent()
@@ -31,8 +93,7 @@ impl SiftApp {
             platform: current_platform(),
             presentation_store: Arc::new(PresentationStore::new(state_path)),
             runtime: Arc::new(tokio::runtime::Runtime::new().expect("creating client runtime")),
-            local_server: LocalServerManager::bundled(runtime_state_dir)
-                .expect("resolving bundled local server"),
+            server: DesktopServer::from_config(config, runtime_state_dir),
         }
     }
 
@@ -47,7 +108,7 @@ impl SiftApp {
 /// one virtual workspace without adding product state to `SiftApp`.
 pub struct SiftWindow {
     workspace: Entity<WorkspaceShell>,
-    _local_server_lease: LocalServerLease,
+    _local_server_lease: Option<LocalServerLease>,
 }
 
 impl SiftWindow {
@@ -55,13 +116,14 @@ impl SiftWindow {
         state: PresentationState,
         store: Arc<PresentationStore>,
         runtime: Arc<tokio::runtime::Runtime>,
-        local_server: LocalServerManager,
+        server: DesktopServer,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        let state = prepare_state_for_instance(state, &server.instance());
         let restored_workspace_id = state.workspace.workspace_id;
         let workspace = cx.new(|cx| WorkspaceShell::new(state, Some(store), window, cx));
-        let lease = local_server.acquire();
+        let lease = server.acquire_local_lease();
         let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
         let (presence_sender, presence_receiver) = tokio::sync::mpsc::unbounded_channel();
         let (command_sender, command_receiver) = tokio::sync::mpsc::unbounded_channel();
@@ -71,22 +133,29 @@ impl SiftWindow {
             workspace.attach_presence(presence_receiver, cx);
             workspace.attach_executor(command_sender, event_receiver, cx);
         });
-        std::mem::drop(runtime.spawn(supervise_local_instance(
-            local_server.clone(),
+        std::mem::drop(runtime.spawn(supervise_instance(
+            server.clone(),
             restored_workspace_id,
             sender,
             presence_sender,
         )));
-        std::mem::drop(runtime.spawn(run_query_executor(
-            local_server,
-            command_receiver,
-            event_sender,
-        )));
+        std::mem::drop(runtime.spawn(run_query_executor(server, command_receiver, event_sender)));
         Self {
             workspace,
             _local_server_lease: lease,
         }
     }
+}
+
+fn prepare_state_for_instance(
+    mut state: PresentationState,
+    instance: &sift_workspace_ui::InstanceSpec,
+) -> PresentationState {
+    if state.workspace.instance_id.as_deref() != Some(instance.id.as_str()) {
+        state.workspace.instance_id = Some(instance.id.clone());
+        state.workspace.workspace_id = None;
+    }
+    state
 }
 
 /// An opened, reusable execution target: one client, session, and connection.
@@ -100,7 +169,7 @@ struct QueryContext {
 /// explicit — the user picks a profile in the UI; the executor opens it and
 /// runs queries against it. The UI thread never touches the SDK directly.
 async fn run_query_executor(
-    local_server: LocalServerManager,
+    server: DesktopServer,
     mut commands: tokio::sync::mpsc::UnboundedReceiver<ExecutorCommand>,
     events: tokio::sync::mpsc::UnboundedSender<ExecutorEvent>,
 ) {
@@ -115,7 +184,7 @@ async fn run_query_executor(
                 if let Some(previous) = context.take() {
                     let _ = previous.client.close_session(previous.session).await;
                 }
-                let status = match open_query_context(&local_server, tenant_id, profile_id).await {
+                let status = match open_query_context(&server, tenant_id, profile_id).await {
                     Ok(opened) => {
                         context = Some(opened);
                         ConnectionStatus::Connected { profile_id, name }
@@ -182,11 +251,11 @@ async fn run_one(
 /// Open a session and a connection for the chosen tenant/profile. Ids come from
 /// the UI's connection picker, so no discovery/guessing happens here.
 async fn open_query_context(
-    local_server: &LocalServerManager,
+    server: &DesktopServer,
     tenant_id: i64,
     profile_id: i64,
 ) -> Result<QueryContext, String> {
-    let client = local_server.ensure_ready().await?;
+    let client = server.client().await?;
     let session = client
         .open_session(None)
         .await
@@ -210,24 +279,19 @@ async fn open_query_context(
     })
 }
 
-async fn supervise_local_instance(
-    local_server: LocalServerManager,
+async fn supervise_instance(
+    server: DesktopServer,
     restored_workspace_id: Option<i64>,
     sender: tokio::sync::mpsc::UnboundedSender<sift_workspace_ui::LifecycleEvent>,
     presence_sender: tokio::sync::mpsc::UnboundedSender<sift_workspace_ui::PresenceEvent>,
 ) {
-    let instance = sift_workspace_ui::InstanceSpec {
-        id: "local".into(),
-        name: "Local Sift".into(),
-        base_url: "http://127.0.0.1:7474".into(),
-        kind: sift_workspace_ui::InstanceKind::Local,
-    };
+    let instance = server.instance();
     let mut attempt = 0_u32;
     loop {
         if sender.is_closed() {
             return;
         }
-        let client = match local_server.ensure_ready().await {
+        let client = match server.client().await {
             Ok(client) => client,
             Err(message) => {
                 let _ = sender.send(sift_workspace_ui::LifecycleEvent::Phase(
@@ -366,5 +430,26 @@ mod tests {
         assert_eq!(reconnect_delay(1), std::time::Duration::from_millis(100));
         assert_eq!(reconnect_delay(2), std::time::Duration::from_millis(200));
         assert_eq!(reconnect_delay(99), std::time::Duration::from_secs(3));
+    }
+
+    #[test]
+    fn changing_instances_drops_a_stale_workspace_selection() {
+        let mut state = PresentationState::default();
+        state.workspace.instance_id = Some("local".into());
+        state.workspace.workspace_id = Some(42);
+        let remote = sift_workspace_ui::InstanceSpec {
+            id: "hosted:https://sift.lan".into(),
+            name: "LAN".into(),
+            base_url: "https://sift.lan".into(),
+            kind: sift_workspace_ui::InstanceKind::Hosted,
+        };
+
+        let state = prepare_state_for_instance(state, &remote);
+
+        assert_eq!(
+            state.workspace.instance_id.as_deref(),
+            Some(remote.id.as_str())
+        );
+        assert_eq!(state.workspace.workspace_id, None);
     }
 }

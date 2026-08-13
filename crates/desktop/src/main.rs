@@ -1,4 +1,5 @@
 mod app;
+mod config;
 mod local_server;
 mod platform;
 
@@ -7,6 +8,7 @@ use gpui_platform::application;
 use sift_ui::{Backspace, Copy, Cut, Delete, End, Home, Left, Paste, Right, SelectAll};
 
 use crate::app::{display_rects, SiftApp, SiftWindow};
+use crate::config::DesktopConfig;
 use crate::platform::shell_key_bindings;
 use sift_workspace_ui::{
     editor as ed, results as res, CloseActiveItem, CloseActivePane, FocusNextPane,
@@ -56,7 +58,11 @@ fn editor_key_bindings() -> Vec<gpui::KeyBinding> {
 }
 
 fn main() {
-    application().run(|cx| {
+    let config = DesktopConfig::load().unwrap_or_else(|error| {
+        eprintln!("sift-desktop: {error}");
+        std::process::exit(2);
+    });
+    application().run(move |cx| {
         cx.bind_keys(shell_key_bindings());
         cx.set_menus([
             Menu::new("Sift").items([MenuItem::action("Command Palette…", OpenCommandPalette)]),
@@ -97,7 +103,7 @@ fn main() {
         ]);
         cx.bind_keys(editor_key_bindings());
 
-        let app = SiftApp::new();
+        let app = SiftApp::new(config.clone());
         let state = app.restore(&display_rects(cx));
         let saved = state.window.bounds;
         let bounds = Bounds {
@@ -111,7 +117,7 @@ fn main() {
         };
         let store = app.presentation_store.clone();
         let runtime = app.runtime.clone();
-        let local_server = app.local_server.clone();
+        let server = app.server.clone();
         let platform = format!("{:?}", app.platform);
         cx.open_window(
             WindowOptions {
@@ -122,9 +128,7 @@ fn main() {
                 }),
                 ..Default::default()
             },
-            |window, cx| {
-                cx.new(|cx| SiftWindow::new(state, store, runtime, local_server, window, cx))
-            },
+            |window, cx| cx.new(|cx| SiftWindow::new(state, store, runtime, server, window, cx)),
         )
         .expect("failed to open the Sift desktop window");
         cx.activate(true);

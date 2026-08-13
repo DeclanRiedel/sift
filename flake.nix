@@ -484,6 +484,11 @@
           RUST_BACKTRACE = "1";
           RUST_LOG = "sift=debug,info";
 
+          # GPUI's Linux backend dlopens wayland-client/vulkan/etc at runtime,
+          # and NixOS has no FHS /usr/lib. Expose every buildInput's lib dir
+          # so `cargo run -p sift-desktop` can resolve them via dlopen.
+          LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath buildInputs;
+
           # Keep sccache inside the repo so it survives GC and is machine-local.
           SCCACHE_DIR = "${toString ./.}/.cache/sccache";
 

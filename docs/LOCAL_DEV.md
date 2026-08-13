@@ -77,3 +77,45 @@ Never commit real values for:
 
 Treat private hostnames, usernames, database names, and local filesystem paths
 as sensitive unless they are clearly disposable dev defaults.
+
+## Testing a Desktop Against a LAN Server
+
+The desktop defaults to its bundled server at `127.0.0.1:7474`. To run the
+server on one machine and only `sift-desktop` on another, configure the server
+machine's ignored `.env` with a random bearer token:
+
+```dotenv
+SIFT_DEPLOYMENT=personal
+SIFT_TRANSPORT=network
+SIFT_MODE=daemon
+SIFT_BIND=0.0.0.0:7474
+SIFT_AUTH__LOOPBACK_BYPASS=false
+SIFT_AUTH__BEARER_TOKEN=replace-with-a-strong-random-token
+```
+
+Apply migrations before the first daemon start, then start the installed
+server through its launcher:
+
+```sh
+sift-server migrate apply
+sift-launcher --mode daemon
+```
+
+Allow TCP port 7474 only from the intended private subnet. On the desktop
+machine, put the same token in a private file and launch:
+
+```sh
+sift-desktop \
+  --server-url http://192.168.1.20:7474 \
+  --server-name "LAN Sift" \
+  --bearer-token-file /private/path/sift-token
+```
+
+Equivalently, set `SIFT_DESKTOP__SERVER_URL`,
+`SIFT_DESKTOP__SERVER_NAME`, and either `SIFT_DESKTOP__BEARER_TOKEN_FILE` or
+`SIFT_DESKTOP__BEARER_TOKEN` in the desktop environment. When a remote URL is
+configured, the desktop does not look for or start a local `sift-launcher`.
+
+Plain HTTP exposes the bearer token to anyone able to observe LAN traffic. It
+is suitable only for short-lived testing on a trusted network; use an HTTPS
+reverse proxy or an encrypted private network for persistent deployments.
