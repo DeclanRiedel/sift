@@ -147,7 +147,7 @@ fn build(raw: RawOptions) -> Result<DesktopConfig, String> {
     })
 }
 
-fn validate_base_url(value: &str) -> Result<String, String> {
+pub(crate) fn validate_base_url(value: &str) -> Result<String, String> {
     let mut url =
         reqwest::Url::parse(value).map_err(|error| format!("invalid server URL: {error}"))?;
     if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
@@ -173,12 +173,15 @@ fn read_token(path: &Path) -> Result<String, String> {
     validate_token(token.trim_end_matches(['\r', '\n']).to_owned())
 }
 
-fn validate_token(token: String) -> Result<String, String> {
+pub(crate) fn validate_token(token: String) -> Result<String, String> {
     if token.is_empty() {
         return Err("bearer token must not be empty".into());
     }
     if token.contains(['\r', '\n']) {
         return Err("bearer token must be a single line".into());
+    }
+    if !token.bytes().all(|byte| byte.is_ascii_graphic()) {
+        return Err("bearer token must contain only printable ASCII without spaces".into());
     }
     Ok(token)
 }

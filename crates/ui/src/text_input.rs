@@ -19,6 +19,7 @@ pub struct TextInput {
     focus_handle: FocusHandle,
     content: SharedString,
     placeholder: SharedString,
+    masked: bool,
     selected_range: Range<usize>,
     selection_reversed: bool,
     marked_range: Option<Range<usize>>,
@@ -38,6 +39,7 @@ impl TextInput {
             focus_handle: cx.focus_handle(),
             content,
             placeholder: placeholder.into(),
+            masked: false,
             selected_range: cursor..cursor,
             selection_reversed: false,
             marked_range: None,
@@ -48,6 +50,20 @@ impl TextInput {
 
     pub fn text(&self) -> &str {
         &self.content
+    }
+
+    pub fn masked(mut self) -> Self {
+        self.masked = true;
+        self
+    }
+
+    pub fn set_text(&mut self, content: impl Into<SharedString>, cx: &mut Context<Self>) {
+        self.content = content.into();
+        let cursor = self.content.len();
+        self.selected_range = cursor..cursor;
+        self.selection_reversed = false;
+        self.marked_range = None;
+        cx.notify();
     }
 
     fn cursor_offset(&self) -> usize {
@@ -399,6 +415,8 @@ impl Element for TextElement {
         let style = window.text_style();
         let (display_text, color) = if content.is_empty() {
             (input.placeholder.clone(), hsla(0., 0., 0.55, 1.))
+        } else if input.masked {
+            ("*".repeat(content.len()).into(), style.color)
         } else {
             (content, style.color)
         };
@@ -550,5 +568,15 @@ mod tests {
             input.read_with(&visual, |input, _| input.text().to_string()),
             "select 表"
         );
+    }
+
+    #[gpui::test]
+    fn masked_input_retains_secret_but_exposes_only_mask_for_layout(cx: &mut TestAppContext) {
+        let input = cx.new(|cx| TextInput::new("secret", "Token", cx).masked());
+        assert_eq!(
+            input.read_with(cx, |input, _| input.text().to_owned()),
+            "secret"
+        );
+        assert!(input.read_with(cx, |input, _| input.masked));
     }
 }

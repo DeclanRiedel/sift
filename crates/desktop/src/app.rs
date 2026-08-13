@@ -9,8 +9,13 @@ use sift_workspace_ui::{
 };
 
 use crate::config::DesktopConfig;
-use crate::local_server::{LocalServerLease, LocalServerManager};
-use crate::platform::{current_platform, presentation_state_path, PlatformKind};
+use crate::instances::{
+    run_instance_manager, DesktopCredentialStore, InstanceManagerChannels, InstanceStore,
+};
+use crate::local_server::LocalServerManager;
+use crate::platform::{
+    current_platform, instance_state_path, presentation_state_path, PlatformKind,
+};
 
 #[derive(Clone)]
 pub enum DesktopServer {
@@ -22,6 +27,12 @@ pub enum DesktopServer {
 }
 
 impl DesktopServer {
+    fn local(runtime_state_dir: std::path::PathBuf) -> Self {
+        Self::Local(
+            LocalServerManager::bundled(runtime_state_dir).expect("resolving bundled local server"),
+        )
+    }
+
     fn from_config(config: DesktopConfig, runtime_state_dir: std::path::PathBuf) -> Self {
         match config.remote {
             Some(remote) => {
@@ -39,14 +50,30 @@ impl DesktopServer {
                     },
                 }
             }
-            None => Self::Local(
-                LocalServerManager::bundled(runtime_state_dir)
-                    .expect("resolving bundled local server"),
-            ),
+            None => Self::local(runtime_state_dir),
         }
     }
 
-    async fn client(&self) -> Result<Client, String> {
+    pub(crate) fn remote(
+        profile: sift_workspace_ui::SavedServerProfile,
+        token: Option<String>,
+    ) -> Self {
+        let mut client = Client::new(&profile.base_url);
+        if let Some(token) = token {
+            client = client.with_bearer_token(token);
+        }
+        Self::Remote {
+            client,
+            instance: sift_workspace_ui::InstanceSpec {
+                id: format!("hosted:{}", profile.id),
+                name: profile.name,
+                base_url: profile.base_url,
+                kind: sift_workspace_ui::InstanceKind::Hosted,
+            },
+        }
+    }
+
+    pub(crate) async fn client(&self) -> Result<Client, String> {
         match self {
             Self::Local(local) => local.ensure_ready().await,
             Self::Remote { client, .. } => Ok(client.clone()),
@@ -65,7 +92,7 @@ impl DesktopServer {
         }
     }
 
-    fn acquire_local_lease(&self) -> Option<LocalServerLease> {
+    fn acquire_local_lease(&self) -> Option<crate::local_server::LocalServerLease> {
         match self {
             Self::Local(local) => Some(local.acquire()),
             Self::Remote { .. } => None,
@@ -80,6 +107,23 @@ pub struct SiftApp {
     pub presentation_store: Arc<PresentationStore>,
     pub runtime: Arc<tokio::runtime::Runtime>,
     pub server: DesktopServer,
+    pub instance_store: InstanceStore,
+    pub credentials: DesktopCredentialStore,
+    pub saved_servers: Vec<sift_workspace_ui::SavedServerProfile>,
+    pub local_target: DesktopServer,
+    startup_remote: bool,
+}
+
+#[derive(Clone)]
+pub struct WindowServices {
+    store: Arc<PresentationStore>,
+    runtime: Arc<tokio::runtime::Runtime>,
+    server: DesktopServer,
+    instance_store: InstanceStore,
+    credentials: DesktopCredentialStore,
+    saved_servers: Vec<sift_workspace_ui::SavedServerProfile>,
+    local_target: DesktopServer,
+    restored_profile_id: Option<String>,
 }
 
 impl SiftApp {
@@ -89,11 +133,25 @@ impl SiftApp {
             .parent()
             .unwrap_or_else(|| std::path::Path::new("."))
             .join("runtime");
+        let instance_store = InstanceStore::new(instance_state_path());
+        let saved_servers = instance_store.load();
+        let local_target = DesktopServer::local(runtime_state_dir.clone());
+        let startup_remote = config.remote.is_some();
+        let server = if startup_remote {
+            DesktopServer::from_config(config, runtime_state_dir)
+        } else {
+            local_target.clone()
+        };
         Self {
             platform: current_platform(),
             presentation_store: Arc::new(PresentationStore::new(state_path)),
             runtime: Arc::new(tokio::runtime::Runtime::new().expect("creating client runtime")),
-            server: DesktopServer::from_config(config, runtime_state_dir),
+            server,
+            instance_store,
+            credentials: DesktopCredentialStore,
+            saved_servers,
+            local_target,
+            startup_remote,
         }
     }
 
@@ -102,48 +160,113 @@ impl SiftApp {
             .load()
             .recover_for_displays(displays)
     }
+
+    pub fn window_services(&self, state: &PresentationState) -> WindowServices {
+        let restored_profile = restored_server_profile(
+            state.workspace.instance_id.as_deref(),
+            &self.saved_servers,
+            self.startup_remote,
+        );
+        WindowServices {
+            store: self.presentation_store.clone(),
+            runtime: self.runtime.clone(),
+            server: restored_profile
+                .as_ref()
+                .map(|profile| DesktopServer::remote(profile.clone(), None))
+                .unwrap_or_else(|| self.server.clone()),
+            instance_store: self.instance_store.clone(),
+            credentials: self.credentials.clone(),
+            saved_servers: self.saved_servers.clone(),
+            local_target: self.local_target.clone(),
+            restored_profile_id: restored_profile.map(|profile| profile.id),
+        }
+    }
+}
+
+fn restored_server_profile(
+    instance_id: Option<&str>,
+    profiles: &[sift_workspace_ui::SavedServerProfile],
+    startup_remote: bool,
+) -> Option<sift_workspace_ui::SavedServerProfile> {
+    if startup_remote {
+        return None;
+    }
+    let profile_id = instance_id?.strip_prefix("hosted:")?;
+    profiles
+        .iter()
+        .find(|profile| profile.id == profile_id)
+        .cloned()
 }
 
 /// Window-level ownership boundary. Additional windows can each own exactly
 /// one virtual workspace without adding product state to `SiftApp`.
 pub struct SiftWindow {
     workspace: Entity<WorkspaceShell>,
-    _local_server_lease: Option<LocalServerLease>,
 }
 
 impl SiftWindow {
     pub fn new(
         state: PresentationState,
-        store: Arc<PresentationStore>,
-        runtime: Arc<tokio::runtime::Runtime>,
-        server: DesktopServer,
+        services: WindowServices,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        let WindowServices {
+            store,
+            runtime,
+            server,
+            instance_store,
+            credentials,
+            saved_servers,
+            local_target,
+            restored_profile_id,
+        } = services;
         let state = prepare_state_for_instance(state, &server.instance());
         let restored_workspace_id = state.workspace.workspace_id;
         let workspace = cx.new(|cx| WorkspaceShell::new(state, Some(store), window, cx));
-        let lease = server.acquire_local_lease();
         let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
         let (presence_sender, presence_receiver) = tokio::sync::mpsc::unbounded_channel();
         let (command_sender, command_receiver) = tokio::sync::mpsc::unbounded_channel();
         let (event_sender, event_receiver) = tokio::sync::mpsc::unbounded_channel();
+        let (instance_sender, instance_receiver) = tokio::sync::mpsc::unbounded_channel();
+        let (instance_event_sender, instance_event_receiver) =
+            tokio::sync::mpsc::unbounded_channel();
+        let (target_sender, target_receiver) = tokio::sync::watch::channel(server.clone());
         workspace.update(cx, |workspace, cx| {
             workspace.attach_lifecycle(receiver, cx);
             workspace.attach_presence(presence_receiver, cx);
             workspace.attach_executor(command_sender, event_receiver, cx);
+            workspace.attach_instance_manager(
+                instance_sender,
+                instance_event_receiver,
+                saved_servers.clone(),
+                cx,
+            );
         });
-        std::mem::drop(runtime.spawn(supervise_instance(
-            server.clone(),
+        std::mem::drop(runtime.spawn(supervise_instances(
+            target_receiver.clone(),
             restored_workspace_id,
             sender,
             presence_sender,
         )));
-        std::mem::drop(runtime.spawn(run_query_executor(server, command_receiver, event_sender)));
-        Self {
-            workspace,
-            _local_server_lease: lease,
-        }
+        std::mem::drop(runtime.spawn(run_query_executor(
+            target_receiver,
+            command_receiver,
+            event_sender,
+        )));
+        std::mem::drop(runtime.spawn(run_instance_manager(
+            instance_store,
+            credentials,
+            saved_servers,
+            InstanceManagerChannels {
+                commands: instance_receiver,
+                events: instance_event_sender,
+                targets: target_sender,
+            },
+            local_target,
+            restored_profile_id,
+        )));
+        Self { workspace }
     }
 }
 
@@ -169,12 +292,30 @@ struct QueryContext {
 /// explicit — the user picks a profile in the UI; the executor opens it and
 /// runs queries against it. The UI thread never touches the SDK directly.
 async fn run_query_executor(
-    server: DesktopServer,
+    mut targets: tokio::sync::watch::Receiver<DesktopServer>,
     mut commands: tokio::sync::mpsc::UnboundedReceiver<ExecutorCommand>,
     events: tokio::sync::mpsc::UnboundedSender<ExecutorEvent>,
 ) {
     let mut context: Option<QueryContext> = None;
-    while let Some(command) = commands.recv().await {
+    loop {
+        let command = tokio::select! {
+            command = commands.recv() => command,
+            changed = targets.changed() => {
+                if changed.is_err() {
+                    return;
+                }
+                if let Some(previous) = context.take() {
+                    let _ = previous.client.close_session(previous.session).await;
+                }
+                if events.send(ExecutorEvent::Connection(ConnectionStatus::Disconnected)).is_err() {
+                    return;
+                }
+                continue;
+            }
+        };
+        let Some(command) = command else {
+            return;
+        };
         match command {
             ExecutorCommand::Connect {
                 tenant_id,
@@ -184,6 +325,7 @@ async fn run_query_executor(
                 if let Some(previous) = context.take() {
                     let _ = previous.client.close_session(previous.session).await;
                 }
+                let server = targets.borrow().clone();
                 let status = match open_query_context(&server, tenant_id, profile_id).await {
                     Ok(opened) => {
                         context = Some(opened);
@@ -279,18 +421,20 @@ async fn open_query_context(
     })
 }
 
-async fn supervise_instance(
-    server: DesktopServer,
-    restored_workspace_id: Option<i64>,
+async fn supervise_instances(
+    mut targets: tokio::sync::watch::Receiver<DesktopServer>,
+    mut restored_workspace_id: Option<i64>,
     sender: tokio::sync::mpsc::UnboundedSender<sift_workspace_ui::LifecycleEvent>,
     presence_sender: tokio::sync::mpsc::UnboundedSender<sift_workspace_ui::PresenceEvent>,
 ) {
-    let instance = server.instance();
     let mut attempt = 0_u32;
     loop {
         if sender.is_closed() {
             return;
         }
+        let server = targets.borrow().clone();
+        let _local_server_lease = server.acquire_local_lease();
+        let instance = server.instance();
         let client = match server.client().await {
             Ok(client) => client,
             Err(message) => {
@@ -306,22 +450,26 @@ async fn supervise_instance(
                 continue;
             }
         };
-        let loaded = match sift_workspace_ui::load_instance(
-            client.clone(),
-            instance.clone(),
-            sender.clone(),
-        )
-        .await
-        {
-            Ok(loaded) => loaded,
-            Err(sift_workspace_ui::DegradedReason::Offline) => {
+        let load =
+            sift_workspace_ui::load_instance(client.clone(), instance.clone(), sender.clone());
+        let loaded = match tokio::select! {
+            loaded = load => Some(loaded),
+            changed = targets.changed() => {
+                if changed.is_err() { return; }
+                restored_workspace_id = None;
+                None
+            }
+        } {
+            None => continue,
+            Some(Ok(loaded)) => loaded,
+            Some(Err(sift_workspace_ui::DegradedReason::Offline)) => {
                 attempt = attempt.saturating_add(1);
                 if !wait_to_reconnect(attempt, &sender).await {
                     return;
                 }
                 continue;
             }
-            Err(_) => return,
+            Some(Err(_)) => return,
         };
         attempt = 0;
         let selected_room = restored_workspace_id.and_then(|workspace_id| {
@@ -340,9 +488,22 @@ async fn supervise_instance(
                     presence_sender.clone(),
                 ) => result,
                 result = wait_for_server_loss(&client) => result,
+                changed = targets.changed() => {
+                    if changed.is_err() { return; }
+                    restored_workspace_id = None;
+                    let _ = presence_sender.send(sift_workspace_ui::PresenceEvent::Left);
+                    continue;
+                },
             }
         } else {
-            wait_for_server_loss(&client).await
+            tokio::select! {
+                result = wait_for_server_loss(&client) => result,
+                changed = targets.changed() => {
+                    if changed.is_err() { return; }
+                    restored_workspace_id = None;
+                    continue;
+                },
+            }
         };
         let _ = presence_sender.send(sift_workspace_ui::PresenceEvent::Left);
         match disconnected {
@@ -354,7 +515,11 @@ async fn supervise_instance(
                 let _ = sender.send(sift_workspace_ui::LifecycleEvent::Phase(
                     sift_workspace_ui::ConnectionPhase::Degraded(reason),
                 ));
-                return;
+                if targets.changed().await.is_err() {
+                    return;
+                }
+                restored_workspace_id = None;
+                continue;
             }
             _ => {
                 attempt = attempt.saturating_add(1);
@@ -451,5 +616,27 @@ mod tests {
             Some(remote.id.as_str())
         );
         assert_eq!(state.workspace.workspace_id, None);
+    }
+
+    #[test]
+    fn saved_instance_restores_unless_startup_configuration_overrides_it() {
+        let profile = sift_workspace_ui::SavedServerProfile {
+            id: "server-one".into(),
+            name: "LAN".into(),
+            base_url: "https://sift.lan".into(),
+            has_saved_token: true,
+        };
+        assert_eq!(
+            restored_server_profile(
+                Some("hosted:server-one"),
+                std::slice::from_ref(&profile),
+                false
+            ),
+            Some(profile.clone())
+        );
+        assert_eq!(
+            restored_server_profile(Some("hosted:server-one"), &[profile], true),
+            None
+        );
     }
 }

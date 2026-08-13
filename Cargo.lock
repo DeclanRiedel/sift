@@ -7184,13 +7184,18 @@ version = "0.1.0"
 dependencies = [
  "gpui",
  "gpui_platform",
+ "keyring",
  "reqwest",
+ "serde",
+ "serde_json",
  "sift-api-types",
  "sift-client-sdk",
  "sift-protocol",
  "sift-ui",
  "sift-workspace-ui",
+ "tempfile",
  "tokio",
+ "uuid",
 ]
 
 [[package]]

@@ -101,8 +101,21 @@ sift-server migrate apply
 sift-launcher --mode daemon
 ```
 
-Allow TCP port 7474 only from the intended private subnet. On the desktop
-machine, put the same token in a private file and launch:
+Allow TCP port 7474 only from the intended private subnet. Start
+`sift-desktop`, then choose **Sift → Connect to Server…**. Enter a display
+name, the server URL, and the bearer token, then select **Test & Connect**.
+The desktop completes the protocol handshake and authenticates before it
+switches the active instance.
+
+Enable **Remember token in the OS keychain** to save the credential in the
+platform credential service. Disable it for a session-only token. Saved
+instance names and URLs live in the private desktop `instances.json`; bearer
+tokens never enter that file. The last selected saved server is restored on
+the next launch. The same dialog can edit or forget saved servers and switch
+back to the bundled **Local Sift** instance.
+
+For scripted testing, the startup flags remain available. Put the token in a
+private file and launch:
 
 ```sh
 sift-desktop \

@@ -1,5 +1,6 @@
 mod app;
 mod config;
+mod instances;
 mod local_server;
 mod platform;
 
@@ -12,8 +13,8 @@ use crate::config::DesktopConfig;
 use crate::platform::shell_key_bindings;
 use sift_workspace_ui::{
     editor as ed, results as res, CloseActiveItem, CloseActivePane, FocusNextPane,
-    OpenCommandPalette, SaveActiveItem, SplitPane, ToggleBottomDock, ToggleLeftDock,
-    ToggleRightDock,
+    OpenCommandPalette, OpenServerConnection, SaveActiveItem, SplitPane, ToggleBottomDock,
+    ToggleLeftDock, ToggleRightDock,
 };
 
 /// Keymap for the SQL editor. Bound under the `SiftEditor` focus context so
@@ -65,7 +66,11 @@ fn main() {
     application().run(move |cx| {
         cx.bind_keys(shell_key_bindings());
         cx.set_menus([
-            Menu::new("Sift").items([MenuItem::action("Command Palette…", OpenCommandPalette)]),
+            Menu::new("Sift").items([
+                MenuItem::action("Connect to Server…", OpenServerConnection),
+                MenuItem::separator(),
+                MenuItem::action("Command Palette…", OpenCommandPalette),
+            ]),
             Menu::new("Workspace").items([
                 MenuItem::action("Split Pane", SplitPane),
                 MenuItem::action("Focus Next Pane", FocusNextPane),
@@ -115,9 +120,7 @@ fn main() {
         } else {
             WindowBounds::Windowed(bounds)
         };
-        let store = app.presentation_store.clone();
-        let runtime = app.runtime.clone();
-        let server = app.server.clone();
+        let services = app.window_services(&state);
         let platform = format!("{:?}", app.platform);
         cx.open_window(
             WindowOptions {
@@ -128,7 +131,7 @@ fn main() {
                 }),
                 ..Default::default()
             },
-            |window, cx| cx.new(|cx| SiftWindow::new(state, store, runtime, server, window, cx)),
+            |window, cx| cx.new(|cx| SiftWindow::new(state, services, window, cx)),
         )
         .expect("failed to open the Sift desktop window");
         cx.activate(true);

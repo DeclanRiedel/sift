@@ -8,10 +8,17 @@ repository.workspace = true
 [dependencies]
 gpui = { workspace = true }
 gpui_platform = { workspace = true }
+keyring = { workspace = true }
 reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
 sift-api-types = { workspace = true }
 sift-client-sdk = { workspace = true }
 sift-protocol = { workspace = true }
 sift-ui = { workspace = true }
 sift-workspace-ui = { workspace = true }
 tokio = { workspace = true }
+uuid = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

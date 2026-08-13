@@ -24,6 +24,7 @@ actions!(
     sift_shell,
     [
         OpenCommandPalette,
+        OpenServerConnection,
         DismissModal,
         PaletteUp,
         PaletteDown,
@@ -63,7 +64,40 @@ pub struct Dock {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Modal {
     CommandPalette,
+    ServerConnection,
     ConfirmClose { title: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct SavedServerProfile {
+    pub id: String,
+    pub name: String,
+    pub base_url: String,
+    #[serde(default, skip_serializing)]
+    pub has_saved_token: bool,
+}
+
+#[derive(Clone)]
+pub enum InstanceCommand {
+    UseLocal,
+    Connect {
+        profile_id: Option<String>,
+        name: String,
+        base_url: String,
+        bearer_token: Option<String>,
+        remember_token: bool,
+    },
+    Forget {
+        profile_id: String,
+    },
+}
+
+#[derive(Debug, Clone)]
+pub enum InstanceManagerEvent {
+    Profiles(Vec<SavedServerProfile>),
+    Testing,
+    Connected { name: String },
+    Failed { message: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -408,6 +442,9 @@ impl gpui::Render for Pane {
 pub struct WorkspaceShell {
     focus_handle: FocusHandle,
     query_input: Entity<TextInput>,
+    server_name_input: Entity<TextInput>,
+    server_url_input: Entity<TextInput>,
+    server_token_input: Entity<TextInput>,
     palette_selected: usize,
     theme: Theme,
     dark_theme: bool,
@@ -428,7 +465,14 @@ pub struct WorkspaceShell {
     _lifecycle_task: Option<Task<()>>,
     _presence_task: Option<Task<()>>,
     _executor_task: Option<Task<()>>,
+    _instance_task: Option<Task<()>>,
     executor_sender: Option<tokio::sync::mpsc::UnboundedSender<ExecutorCommand>>,
+    instance_sender: Option<tokio::sync::mpsc::UnboundedSender<InstanceCommand>>,
+    saved_servers: Vec<SavedServerProfile>,
+    selected_server_profile: Option<String>,
+    remember_server_token: bool,
+    server_connection_pending: bool,
+    server_connection_error: Option<String>,
     connection_status: ConnectionStatus,
     store: Option<Arc<PresentationStore>>,
     _bounds_subscription: Subscription,
@@ -477,6 +521,10 @@ impl WorkspaceShell {
             .unwrap_or(0)
             + 1;
         let query_input = cx.new(|cx| TextInput::new("", "Search commands…", cx));
+        let server_name_input = cx.new(|cx| TextInput::new("", "Display name", cx));
+        let server_url_input = cx.new(|cx| TextInput::new("", "http://192.168.1.20:7474", cx));
+        let server_token_input =
+            cx.new(|cx| TextInput::new("", "Bearer token (or use saved token)", cx).masked());
         // Re-render the palette as the search text changes so its list filters.
         cx.observe(&query_input, |shell, _, cx| {
             shell.palette_selected = 0;
@@ -494,6 +542,9 @@ impl WorkspaceShell {
         Self {
             focus_handle: cx.focus_handle(),
             query_input,
+            server_name_input,
+            server_url_input,
+            server_token_input,
             palette_selected: 0,
             theme,
             dark_theme: state.dark_theme,
@@ -523,7 +574,14 @@ impl WorkspaceShell {
             _lifecycle_task: None,
             _presence_task: None,
             _executor_task: None,
+            _instance_task: None,
             executor_sender: None,
+            instance_sender: None,
+            saved_servers: Vec::new(),
+            selected_server_profile: None,
+            remember_server_token: true,
+            server_connection_pending: false,
+            server_connection_error: None,
             connection_status: ConnectionStatus::Disconnected,
             store,
             _bounds_subscription: bounds_subscription,
@@ -539,6 +597,12 @@ impl WorkspaceShell {
         let has_extra_pane = self.panes.len() > 1;
         let no_item = (!has_item).then_some("No active item");
         vec![
+            CommandSpec {
+                id: "instance.connect-server",
+                label: "Connect to Server…",
+                shortcut: "",
+                disabled_reason: None,
+            },
             CommandSpec {
                 id: "workspace.split-pane",
                 label: "Split Pane",
@@ -643,12 +707,21 @@ impl WorkspaceShell {
             while let Some(event) = receiver.recv().await {
                 if shell
                     .update(cx, |shell, cx| {
+                        let mut instance_changed = false;
                         if let LifecycleEvent::Selected(instance) = &event {
+                            instance_changed =
+                                shell.selected_instance_id.as_deref() != Some(instance.id.as_str());
                             shell.selected_instance_id = Some(instance.id.clone());
+                            if instance_changed {
+                                shell.selected_workspace_id = None;
+                            }
                         }
                         shell.lifecycle.apply(event);
                         shell.status.connection = shell.lifecycle.status_label();
                         shell.reconcile_restored_workspace(cx);
+                        if instance_changed {
+                            shell.persist(cx);
+                        }
                         cx.notify();
                     })
                     .is_err()
@@ -699,6 +772,52 @@ impl WorkspaceShell {
                 }
             }
         }));
+    }
+
+    pub fn attach_instance_manager(
+        &mut self,
+        sender: tokio::sync::mpsc::UnboundedSender<InstanceCommand>,
+        mut receiver: tokio::sync::mpsc::UnboundedReceiver<InstanceManagerEvent>,
+        profiles: Vec<SavedServerProfile>,
+        cx: &mut Context<Self>,
+    ) {
+        self.instance_sender = Some(sender);
+        self.saved_servers = profiles;
+        self._instance_task = Some(cx.spawn(async move |shell, cx| {
+            while let Some(event) = receiver.recv().await {
+                if shell
+                    .update(cx, |shell, cx| shell.on_instance_manager_event(event, cx))
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        }));
+    }
+
+    fn on_instance_manager_event(&mut self, event: InstanceManagerEvent, cx: &mut Context<Self>) {
+        match event {
+            InstanceManagerEvent::Profiles(profiles) => self.saved_servers = profiles,
+            InstanceManagerEvent::Testing => {
+                self.server_connection_pending = true;
+                self.server_connection_error = None;
+            }
+            InstanceManagerEvent::Connected { name } => {
+                self.server_connection_pending = false;
+                self.server_connection_error = None;
+                self.modal = None;
+                self.server_token_input
+                    .update(cx, |input, cx| input.set_text("", cx));
+                self.toasts.push(Toast {
+                    message: format!("Connected to {name}"),
+                });
+            }
+            InstanceManagerEvent::Failed { message } => {
+                self.server_connection_pending = false;
+                self.server_connection_error = Some(message);
+            }
+        }
+        cx.notify();
     }
 
     fn on_executor_event(&mut self, event: ExecutorEvent, cx: &mut Context<Self>) {
@@ -1053,6 +1172,114 @@ impl WorkspaceShell {
         cx.notify();
     }
 
+    fn open_server_connection(
+        &mut self,
+        _: &OpenServerConnection,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.modal = Some(Modal::ServerConnection);
+        self.server_connection_error = None;
+        self.server_connection_pending = false;
+        self.server_name_input.focus_handle(cx).focus(window, cx);
+        cx.notify();
+    }
+
+    fn select_server_profile(
+        &mut self,
+        profile: &SavedServerProfile,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.selected_server_profile = Some(profile.id.clone());
+        self.server_name_input
+            .update(cx, |input, cx| input.set_text(profile.name.clone(), cx));
+        self.server_url_input
+            .update(cx, |input, cx| input.set_text(profile.base_url.clone(), cx));
+        self.server_token_input
+            .update(cx, |input, cx| input.set_text("", cx));
+        self.server_url_input.focus_handle(cx).focus(window, cx);
+        self.server_connection_error = None;
+        cx.notify();
+    }
+
+    fn new_server_profile(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.selected_server_profile = None;
+        self.server_name_input
+            .update(cx, |input, cx| input.set_text("", cx));
+        self.server_url_input
+            .update(cx, |input, cx| input.set_text("", cx));
+        self.server_token_input
+            .update(cx, |input, cx| input.set_text("", cx));
+        self.server_connection_error = None;
+        self.server_name_input.focus_handle(cx).focus(window, cx);
+        cx.notify();
+    }
+
+    fn submit_server_connection(&mut self, cx: &mut Context<Self>) {
+        if self.server_connection_pending {
+            return;
+        }
+        let Some(sender) = &self.instance_sender else {
+            self.server_connection_error = Some("Desktop connection manager is unavailable".into());
+            cx.notify();
+            return;
+        };
+        let name = self.server_name_input.read(cx).text().trim().to_owned();
+        let base_url = self.server_url_input.read(cx).text().trim().to_owned();
+        let token = self.server_token_input.read(cx).text().to_owned();
+        if name.is_empty() || base_url.is_empty() {
+            self.server_connection_error = Some("Display name and server URL are required".into());
+            cx.notify();
+            return;
+        }
+        let command = InstanceCommand::Connect {
+            profile_id: self.selected_server_profile.clone(),
+            name,
+            base_url,
+            bearer_token: (!token.is_empty()).then_some(token),
+            remember_token: self.remember_server_token,
+        };
+        if sender.send(command).is_err() {
+            self.server_connection_error = Some("Desktop connection manager stopped".into());
+        } else {
+            self.server_connection_pending = true;
+            self.server_connection_error = None;
+        }
+        cx.notify();
+    }
+
+    fn use_local_server(&mut self, cx: &mut Context<Self>) {
+        let Some(sender) = &self.instance_sender else {
+            self.server_connection_error = Some("Desktop connection manager is unavailable".into());
+            cx.notify();
+            return;
+        };
+        if sender.send(InstanceCommand::UseLocal).is_err() {
+            self.server_connection_error = Some("Desktop connection manager stopped".into());
+        } else {
+            self.server_connection_pending = true;
+            self.server_connection_error = None;
+        }
+        cx.notify();
+    }
+
+    fn forget_selected_server(&mut self, cx: &mut Context<Self>) {
+        let Some(profile_id) = self.selected_server_profile.take() else {
+            return;
+        };
+        if let Some(sender) = &self.instance_sender {
+            let _ = sender.send(InstanceCommand::Forget { profile_id });
+        }
+        self.server_name_input
+            .update(cx, |input, cx| input.set_text("", cx));
+        self.server_url_input
+            .update(cx, |input, cx| input.set_text("", cx));
+        self.server_token_input
+            .update(cx, |input, cx| input.set_text("", cx));
+        cx.notify();
+    }
+
     /// Commands matching the palette search text (case-insensitive substring).
     fn filtered_commands(&self, cx: &App) -> Vec<CommandSpec> {
         let query = self.query_input.read(cx).text().to_lowercase();
@@ -1092,6 +1319,10 @@ impl WorkspaceShell {
     }
 
     fn dismiss_modal(&mut self, _: &DismissModal, window: &mut Window, cx: &mut Context<Self>) {
+        if self.modal == Some(Modal::ServerConnection) {
+            self.server_token_input
+                .update(cx, |input, cx| input.set_text("", cx));
+        }
         self.modal = None;
         // Return focus to the workspace so keybindings keep routing.
         self.focus_active_pane(window, cx);
@@ -1103,6 +1334,9 @@ impl WorkspaceShell {
     fn run_command(&mut self, id: &'static str, window: &mut Window, cx: &mut Context<Self>) {
         self.dismiss_modal(&DismissModal, window, cx);
         match id {
+            "instance.connect-server" => {
+                self.open_server_connection(&OpenServerConnection, window, cx)
+            }
             "workspace.split-pane" => self.split_pane(&SplitPane, window, cx),
             "workspace.focus-next-pane" => self.focus_next_pane(&FocusNextPane, window, cx),
             "workspace.close-pane" => self.close_active_pane(&CloseActivePane, window, cx),
@@ -1437,6 +1671,249 @@ impl WorkspaceShell {
                         )
                         .into_any_element()
                 }
+                Modal::ServerConnection => {
+                    let profiles = self.saved_servers.clone();
+                    let selected = self.selected_server_profile.clone();
+                    let pending = self.server_connection_pending;
+                    let remember = self.remember_server_token;
+                    let mut saved_rows = Vec::new();
+                    for (profile_index, profile) in profiles.into_iter().enumerate() {
+                        let active = selected.as_deref() == Some(profile.id.as_str());
+                        let profile_for_click = profile.clone();
+                        saved_rows.push(
+                            div()
+                                .id(("saved-server", profile_index))
+                                .flex()
+                                .items_center()
+                                .justify_between()
+                                .px_2()
+                                .py_1()
+                                .rounded_sm()
+                                .when(active, |row| row.bg(colors.selected_surface))
+                                .hover(|row| row.bg(colors.selected_surface))
+                                .on_click(cx.listener(move |shell, _, window, cx| {
+                                    shell.select_server_profile(&profile_for_click, window, cx)
+                                }))
+                                .child(
+                                    div()
+                                        .flex()
+                                        .flex_col()
+                                        .min_w_0()
+                                        .child(profile.name.clone())
+                                        .child(
+                                            div()
+                                                .text_xs()
+                                                .text_color(colors.muted_text)
+                                                .truncate()
+                                                .child(profile.base_url.clone()),
+                                        ),
+                                )
+                                .when(profile.has_saved_token, |row| {
+                                    row.child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(colors.success)
+                                            .child("Token saved"),
+                                    )
+                                })
+                                .into_any_element(),
+                        );
+                    }
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_3()
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .justify_between()
+                                .child(
+                                    div()
+                                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                                        .child("Connect to Sift Server"),
+                                )
+                                .child(
+                                    div()
+                                        .id("new-server-profile")
+                                        .px_2()
+                                        .py_1()
+                                        .rounded_sm()
+                                        .text_color(colors.muted_text)
+                                        .hover(|button| {
+                                            button
+                                                .bg(colors.selected_surface)
+                                                .text_color(colors.text)
+                                        })
+                                        .on_click(cx.listener(|shell, _, window, cx| {
+                                            shell.new_server_profile(window, cx)
+                                        }))
+                                        .child("New Server"),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .id("use-local-sift")
+                                .flex()
+                                .items_center()
+                                .justify_between()
+                                .px_2()
+                                .py_1()
+                                .rounded_sm()
+                                .hover(|row| row.bg(colors.selected_surface))
+                                .on_click(cx.listener(|shell, _, _, cx| shell.use_local_server(cx)))
+                                .child("Local Sift")
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(colors.muted_text)
+                                        .child("Bundled server"),
+                                ),
+                        )
+                        .when(!saved_rows.is_empty(), |form| {
+                            form.child(
+                                div()
+                                    .flex()
+                                    .flex_col()
+                                    .gap_1()
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(colors.muted_text)
+                                            .child("SAVED SERVERS"),
+                                    )
+                                    .children(saved_rows),
+                            )
+                        })
+                        .child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .gap_1()
+                                .child(div().text_xs().text_color(colors.muted_text).child("NAME"))
+                                .child(
+                                    div()
+                                        .border_1()
+                                        .border_color(colors.border)
+                                        .rounded_sm()
+                                        .child(self.server_name_input.clone()),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .gap_1()
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(colors.muted_text)
+                                        .child("SERVER URL"),
+                                )
+                                .child(
+                                    div()
+                                        .border_1()
+                                        .border_color(colors.border)
+                                        .rounded_sm()
+                                        .child(self.server_url_input.clone()),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .gap_1()
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(colors.muted_text)
+                                        .child("BEARER TOKEN"),
+                                )
+                                .child(
+                                    div()
+                                        .border_1()
+                                        .border_color(colors.border)
+                                        .rounded_sm()
+                                        .child(self.server_token_input.clone()),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .id("remember-server-token")
+                                .role(Role::CheckBox)
+                                .aria_label(if remember {
+                                    "Remember token in the OS keychain, checked"
+                                } else {
+                                    "Remember token in the OS keychain, unchecked"
+                                })
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .cursor_pointer()
+                                .on_click(cx.listener(|shell, _, _, cx| {
+                                    shell.remember_server_token = !shell.remember_server_token;
+                                    cx.notify();
+                                }))
+                                .child(if remember { "☑" } else { "☐" })
+                                .child("Remember token in the OS keychain"),
+                        )
+                        .children(self.server_connection_error.as_ref().map(|message| {
+                            div()
+                                .p_2()
+                                .rounded_sm()
+                                .bg(colors.surface)
+                                .text_color(colors.danger)
+                                .child(message.clone())
+                        }))
+                        .child(
+                            div()
+                                .flex()
+                                .justify_between()
+                                .items_center()
+                                .child(
+                                    div()
+                                        .id("forget-server")
+                                        .px_2()
+                                        .py_1()
+                                        .rounded_sm()
+                                        .text_color(colors.muted_text)
+                                        .when(selected.is_some(), |button| {
+                                            button
+                                                .hover(|button| button.text_color(colors.danger))
+                                                .on_click(cx.listener(|shell, _, _, cx| {
+                                                    shell.forget_selected_server(cx)
+                                                }))
+                                        })
+                                        .child(if selected.is_some() { "Forget" } else { "" }),
+                                )
+                                .child(
+                                    div()
+                                        .id("connect-server")
+                                        .px_3()
+                                        .py_1()
+                                        .rounded_sm()
+                                        .bg(if pending {
+                                            colors.surface
+                                        } else {
+                                            colors.accent
+                                        })
+                                        .text_color(colors.text)
+                                        .when(!pending, |button| {
+                                            button
+                                                .hover(|button| button.bg(colors.accent_hover))
+                                                .on_click(cx.listener(|shell, _, _, cx| {
+                                                    shell.submit_server_connection(cx)
+                                                }))
+                                        })
+                                        .child(if pending {
+                                            "Testing connection…"
+                                        } else {
+                                            "Test & Connect"
+                                        }),
+                                ),
+                        )
+                        .into_any_element()
+                }
                 Modal::ConfirmClose { title } => div()
                     .flex()
                     .flex_col()
@@ -1498,6 +1975,7 @@ impl gpui::Render for WorkspaceShell {
             .aria_label("Sift database workspace")
             .track_focus(&self.focus_handle)
             .on_action(cx.listener(Self::open_command_palette))
+            .on_action(cx.listener(Self::open_server_connection))
             .on_action(cx.listener(Self::dismiss_modal))
             .on_action(cx.listener(Self::palette_up))
             .on_action(cx.listener(Self::palette_down))
@@ -1778,8 +2256,8 @@ mod tests {
         let focus = workspace.read_with(&cx, |shell, cx| shell.focus_handle(cx));
         cx.update(|window, cx| focus.dispatch_action(&OpenCommandPalette, window, cx));
         assert!(workspace.read_with(&cx, |shell, _| shell.left_dock.presentation.open));
-        // Arrow down to "Toggle Connections Dock" (index 5) and run it.
-        for _ in 0..5 {
+        // Arrow down to "Toggle Connections Dock" (index 6) and run it.
+        for _ in 0..6 {
             cx.update(|window, cx| focus.dispatch_action(&PaletteDown, window, cx));
         }
         cx.update(|window, cx| focus.dispatch_action(&PaletteConfirm, window, cx));
@@ -1836,6 +2314,47 @@ mod tests {
         });
         assert!(!workspace.read_with(&cx, |shell, _| shell.left_dock.presentation.open));
         assert!(workspace.read_with(&cx, |shell, _| shell.modal().is_none()));
+    }
+
+    #[gpui::test]
+    fn connect_dialog_sends_a_typed_secret_bearing_request(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let (_event_sender, event_receiver) = tokio::sync::mpsc::unbounded_channel();
+        workspace.update(&mut cx, |shell, cx| {
+            shell.attach_instance_manager(sender, event_receiver, Vec::new(), cx);
+            shell
+                .server_name_input
+                .update(cx, |input, cx| input.set_text("LAN", cx));
+            shell.server_url_input.update(cx, |input, cx| {
+                input.set_text("http://192.168.1.20:7474", cx)
+            });
+            shell
+                .server_token_input
+                .update(cx, |input, cx| input.set_text("secret", cx));
+            shell.remember_server_token = false;
+            shell.submit_server_connection(cx);
+        });
+        let command = receiver.try_recv().unwrap();
+        match command {
+            InstanceCommand::Connect {
+                name,
+                base_url,
+                bearer_token,
+                remember_token,
+                ..
+            } => {
+                assert_eq!(name, "LAN");
+                assert_eq!(base_url, "http://192.168.1.20:7474");
+                assert_eq!(bearer_token.as_deref(), Some("secret"));
+                assert!(!remember_token);
+            }
+            InstanceCommand::UseLocal | InstanceCommand::Forget { .. } => {
+                panic!("expected connect command")
+            }
+        }
     }
 
     #[gpui::test]

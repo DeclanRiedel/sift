@@ -21,9 +21,10 @@ pub use presentation::{
 };
 pub use shell::{
     CloseActiveItem, CloseActivePane, CommandSpec, ConfirmCloseWithoutSaving, ConnectionStatus,
-    DismissModal, Dock, ExecutorCommand, ExecutorEvent, FocusNextPane, Modal, OpenCommandPalette,
-    PaletteConfirm, PaletteDown, PaletteUp, Pane, PaneEvent, SaveActiveItem, SplitPane, StatusBar,
-    Toast, ToggleBottomDock, ToggleLeftDock, ToggleRightDock, Tooltip, WorkspaceShell,
+    DismissModal, Dock, ExecutorCommand, ExecutorEvent, FocusNextPane, InstanceCommand,
+    InstanceManagerEvent, Modal, OpenCommandPalette, OpenServerConnection, PaletteConfirm,
+    PaletteDown, PaletteUp, Pane, PaneEvent, SaveActiveItem, SavedServerProfile, SplitPane,
+    StatusBar, Toast, ToggleBottomDock, ToggleLeftDock, ToggleRightDock, Tooltip, WorkspaceShell,
 };
 
 use std::{ops::Range, time::Duration};

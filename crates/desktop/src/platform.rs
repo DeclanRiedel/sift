@@ -53,6 +53,10 @@ pub fn presentation_state_path() -> PathBuf {
     std::env::temp_dir().join("sift-presentation.json")
 }
 
+pub fn instance_state_path() -> PathBuf {
+    presentation_state_path().with_file_name("instances.json")
+}
+
 pub fn shell_key_bindings() -> Vec<KeyBinding> {
     let primary = if current_platform() == PlatformKind::MacOS {
         "cmd"
