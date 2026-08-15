@@ -12,7 +12,7 @@ use gpui::{
     Role, ShapedLine, Style, TextRun, UTF16Selection, Window,
 };
 use sift_doc::{random_peer_id, TextReplica};
-use sift_ui::Theme;
+use sift_ui::{icon, IconName, Theme};
 
 /// A single applied edit, retained so it can be inverted for undo/redo. Offsets
 /// are byte offsets into the materialized text at the time the edit applied.
@@ -841,6 +841,11 @@ impl EntityInputHandler for QueryEditor {
 
 impl gpui::Render for QueryEditor {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let colors = self.theme.colors;
+        let line_count = self.document.text().split('\n').count();
+        let active_line = self.document.text()[..self.document.cursor()]
+            .matches('\n')
+            .count();
         div()
             .id("sift-query-editor")
             .key_context("SiftEditor")
@@ -851,9 +856,10 @@ impl gpui::Render for QueryEditor {
             .size_full()
             .min_h_0()
             .overflow_hidden()
-            .px_3()
-            .py_2()
-            .text_color(self.theme.colors.text)
+            .flex()
+            .flex_col()
+            .font_family("monospace")
+            .text_color(colors.text)
             // Clicking the editor focuses it directly (synchronously), so the
             // SiftEditor key context is active and editing keys route.
             .on_mouse_down(
@@ -884,9 +890,94 @@ impl gpui::Render for QueryEditor {
             .on_action(cx.listener(Self::redo))
             .on_action(cx.listener(Self::execute_statement))
             .on_action(cx.listener(Self::execute_document))
-            .child(QueryEditorElement {
-                editor: cx.entity(),
-            })
+            .child(
+                div()
+                    .h(px(30.))
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .px_2()
+                    .border_b_1()
+                    .border_color(colors.subtle_border)
+                    .bg(colors.toolbar)
+                    .font_family(".SystemUIFont")
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .text_xs()
+                            .text_color(colors.muted_text)
+                            .child("SQL")
+                            .child(div().size(px(3.)).rounded_full().bg(colors.strong_border))
+                            .child("Collaborative query"),
+                    )
+                    .child(
+                        div()
+                            .id("editor-run-statement")
+                            .role(Role::Button)
+                            .aria_label("Run current SQL statement")
+                            .h(px(24.))
+                            .px_2()
+                            .flex()
+                            .items_center()
+                            .gap_1()
+                            .rounded(px(5.))
+                            .bg(colors.accent_muted)
+                            .text_xs()
+                            .text_color(colors.accent_hover)
+                            .hover(|button| {
+                                button.bg(colors.active_surface).text_color(colors.text)
+                            })
+                            .on_click(cx.listener(|editor, _, window, cx| {
+                                editor.execute_statement(&ExecuteStatement, window, cx)
+                            }))
+                            .child(icon(IconName::Play, colors.accent_hover, 12.))
+                            .child("Run")
+                            .child(div().ml_1().text_color(colors.muted_text).child("Ctrl ↵")),
+                    ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_1()
+                    .min_h_0()
+                    .bg(colors.background)
+                    .child(
+                        div()
+                            .w(px(44.))
+                            .flex_none()
+                            .pt_2()
+                            .pr_2()
+                            .border_r_1()
+                            .border_color(colors.subtle_border)
+                            .bg(colors.editor_gutter)
+                            .text_xs()
+                            .text_color(colors.disabled_text)
+                            .children((0..line_count).map(|line| {
+                                div()
+                                    .h(px(20.))
+                                    .flex()
+                                    .items_center()
+                                    .justify_end()
+                                    .when(line == active_line, |number| {
+                                        number.text_color(colors.muted_text)
+                                    })
+                                    .child((line + 1).to_string())
+                            })),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .overflow_hidden()
+                            .px_3()
+                            .py_2()
+                            .child(QueryEditorElement {
+                                editor: cx.entity(),
+                            }),
+                    ),
+            )
     }
 }
 
@@ -897,6 +988,7 @@ struct QueryEditorElement {
 struct EditorPrepaint {
     lines: Vec<ShapedLine>,
     line_starts: Vec<usize>,
+    active_line: Option<PaintQuad>,
     selections: Vec<PaintQuad>,
     cursor: Option<PaintQuad>,
     line_height: Pixels,
@@ -954,30 +1046,32 @@ impl Element for QueryEditorElement {
         let font_size = style.font_size.to_pixels(window.rem_size());
         let line_height = window.line_height();
 
-        let run_color = theme.colors.text;
         let mut lines = Vec::new();
         let mut line_starts = Vec::new();
         let mut selections = Vec::new();
         let mut cursor_quad = None;
+        let mut active_line_quad = None;
 
         let mut offset = 0usize;
         for (line_index, line) in text.split('\n').enumerate() {
             line_starts.push(offset);
             let line_end = offset + line.len();
-            let run = TextRun {
-                len: line.len(),
-                font: style.font(),
-                color: run_color,
-                background_color: None,
-                underline: None,
-                strikethrough: None,
-            };
-            let runs = if line.is_empty() { vec![] } else { vec![run] };
+            let runs = sql_text_runs(line, style.font(), theme);
             let shaped =
                 window
                     .text_system()
                     .shape_line(line.to_string().into(), font_size, &runs, None);
             let top = bounds.top() + line_height * line_index as f32;
+
+            if cursor >= offset && cursor <= line_end {
+                active_line_quad = Some(fill(
+                    Bounds::new(
+                        point(bounds.left(), top),
+                        size(bounds.size.width, line_height),
+                    ),
+                    theme.colors.editor_active_line,
+                ));
+            }
 
             // Selection rectangle for the portion of this line inside the range.
             if !selection.is_empty() {
@@ -1016,6 +1110,7 @@ impl Element for QueryEditorElement {
         EditorPrepaint {
             lines,
             line_starts,
+            active_line: active_line_quad,
             selections,
             cursor: cursor_quad,
             line_height,
@@ -1038,6 +1133,9 @@ impl Element for QueryEditorElement {
             ElementInputHandler::new(bounds, self.editor.clone()),
             cx,
         );
+        if let Some(active_line) = prepaint.active_line.take() {
+            window.paint_quad(active_line);
+        }
         for selection in prepaint.selections.drain(..) {
             window.paint_quad(selection);
         }
@@ -1061,6 +1159,119 @@ impl Element for QueryEditorElement {
             editor.last_bounds = Some(bounds);
         });
     }
+}
+
+fn sql_text_runs(line: &str, font: gpui::Font, theme: Theme) -> Vec<TextRun> {
+    let mut runs = Vec::new();
+    let bytes = line.as_bytes();
+    let mut start = 0;
+    while start < bytes.len() {
+        let (end, color) = if bytes[start..].starts_with(b"--") {
+            (bytes.len(), theme.colors.syntax_comment)
+        } else if bytes[start] == b'\'' {
+            let mut end = start + 1;
+            while end < bytes.len() {
+                if bytes[end] == b'\'' {
+                    end += 1;
+                    if end < bytes.len() && bytes[end] == b'\'' {
+                        end += 1;
+                        continue;
+                    }
+                    break;
+                }
+                end += line[end..].chars().next().map_or(1, char::len_utf8);
+            }
+            (end, theme.colors.syntax_string)
+        } else if bytes[start].is_ascii_digit() {
+            let end = bytes[start..]
+                .iter()
+                .position(|byte| !byte.is_ascii_digit() && *byte != b'.' && *byte != b'_')
+                .map_or(bytes.len(), |offset| start + offset);
+            (end, theme.colors.syntax_number)
+        } else if bytes[start].is_ascii_alphabetic() || bytes[start] == b'_' {
+            let end = bytes[start..]
+                .iter()
+                .position(|byte| !byte.is_ascii_alphanumeric() && *byte != b'_')
+                .map_or(bytes.len(), |offset| start + offset);
+            let word = &line[start..end];
+            let color = if is_sql_keyword(word) {
+                theme.colors.syntax_keyword
+            } else {
+                theme.colors.text
+            };
+            (end, color)
+        } else {
+            (
+                start + line[start..].chars().next().map_or(1, char::len_utf8),
+                theme.colors.text,
+            )
+        };
+        runs.push(TextRun {
+            len: end - start,
+            font: font.clone(),
+            color,
+            background_color: None,
+            underline: None,
+            strikethrough: None,
+        });
+        start = end;
+    }
+    runs
+}
+
+fn is_sql_keyword(word: &str) -> bool {
+    matches!(
+        word.to_ascii_uppercase().as_str(),
+        "SELECT"
+            | "FROM"
+            | "WHERE"
+            | "JOIN"
+            | "INNER"
+            | "LEFT"
+            | "RIGHT"
+            | "FULL"
+            | "OUTER"
+            | "ON"
+            | "AS"
+            | "AND"
+            | "OR"
+            | "NOT"
+            | "NULL"
+            | "IS"
+            | "IN"
+            | "LIKE"
+            | "GROUP"
+            | "BY"
+            | "ORDER"
+            | "HAVING"
+            | "LIMIT"
+            | "OFFSET"
+            | "INSERT"
+            | "INTO"
+            | "VALUES"
+            | "UPDATE"
+            | "SET"
+            | "DELETE"
+            | "CREATE"
+            | "ALTER"
+            | "DROP"
+            | "TABLE"
+            | "VIEW"
+            | "WITH"
+            | "UNION"
+            | "ALL"
+            | "DISTINCT"
+            | "CASE"
+            | "WHEN"
+            | "THEN"
+            | "ELSE"
+            | "END"
+            | "BEGIN"
+            | "COMMIT"
+            | "ROLLBACK"
+            | "RETURNING"
+            | "OUTPUT"
+    )
 }
 
 fn offset_from_utf16(text: &str, offset: usize) -> usize {
@@ -1244,4 +1455,18 @@ mod tests {
             assert!(document.text().is_char_boundary(range.end));
         }
     }
+}
+#[test]
+fn sql_presentation_runs_cover_text_and_classify_keywords() {
+    let theme = Theme::dark();
+    let text = "select 42 -- rows";
+    let runs = sql_text_runs(text, gpui::font("monospace"), theme);
+    assert_eq!(runs.iter().map(|run| run.len).sum::<usize>(), text.len());
+    assert_eq!(runs[0].color, theme.colors.syntax_keyword);
+    assert!(runs
+        .iter()
+        .any(|run| run.color == theme.colors.syntax_number));
+    assert!(runs
+        .iter()
+        .any(|run| run.color == theme.colors.syntax_comment));
 }

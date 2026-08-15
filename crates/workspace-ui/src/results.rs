@@ -13,9 +13,10 @@ use gpui::{
 use sift_protocol::{
     ColumnMetadata, DriverWarning, ExecuteResponse, Nullability, Page, Row, TypeRef, Value,
 };
-use sift_ui::Theme;
+use sift_ui::{icon, IconName, Theme};
 
 const COLUMN_WIDTH: f32 = 184.0;
+const ROW_NUMBER_WIDTH: f32 = 46.0;
 const ROW_HEIGHT: f32 = 24.0;
 
 /// How a single cell's value should be classified for rendering. Keeps color
@@ -322,9 +323,11 @@ impl ResultsView {
         let colors = self.theme.colors;
         match class {
             CellClass::Null => colors.muted_text,
-            CellClass::Number | CellClass::Temporal => colors.text,
+            CellClass::Number => colors.syntax_number,
+            CellClass::Temporal => colors.syntax_string,
             CellClass::Bool => colors.accent,
-            CellClass::Binary | CellClass::Structured => colors.muted_text,
+            CellClass::Binary => colors.muted_text,
+            CellClass::Structured => colors.warning,
             CellClass::Text => colors.text,
         }
     }
@@ -336,8 +339,8 @@ impl ResultsView {
             .flex()
             .items_stretch()
             .border_b_1()
-            .border_color(colors.border)
-            .bg(colors.surface)
+            .border_color(colors.subtle_border)
+            .bg(colors.toolbar)
             .child(
                 div()
                     .flex()
@@ -351,10 +354,20 @@ impl ResultsView {
                             .items_center()
                             .h_full()
                             .px_3()
-                            .border_r_1()
-                            .border_color(colors.border)
+                            .relative()
                             .text_sm()
-                            .when(selected, |el| el.bg(colors.selected_surface))
+                            .when(selected, |el| el.text_color(colors.text))
+                            .when(selected, |el| {
+                                el.child(
+                                    div()
+                                        .absolute()
+                                        .left_2()
+                                        .right_2()
+                                        .bottom_0()
+                                        .h(px(1.))
+                                        .bg(colors.accent),
+                                )
+                            })
                             .when(!selected, |el| el.text_color(colors.muted_text))
                             .hover(|el| el.text_color(colors.text))
                             .on_click(cx.listener(move |view, _, _, cx| view.select_tab(tab, cx)))
@@ -365,10 +378,33 @@ impl ResultsView {
                 div()
                     .flex()
                     .items_center()
+                    .gap_2()
                     .px_2()
                     .text_xs()
                     .text_color(colors.muted_text)
-                    .child(self.state.status_label()),
+                    .child(
+                        div()
+                            .px_1()
+                            .rounded(px(3.))
+                            .bg(colors.hovered_surface)
+                            .child(self.state.status_label()),
+                    )
+                    .child(
+                        div()
+                            .id("copy-result-cell")
+                            .role(gpui::Role::Button)
+                            .aria_label("Copy selected result cell")
+                            .size(px(24.))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded(px(4.))
+                            .hover(|button| button.bg(colors.hovered_surface))
+                            .on_click(cx.listener(|view, _, window, cx| {
+                                view.copy_selected_cell(&CopySelectedCell, window, cx)
+                            }))
+                            .child(icon(IconName::Copy, colors.muted_text, 13.)),
+                    ),
             )
     }
 
@@ -388,14 +424,28 @@ impl ResultsView {
                 .child(self.state.status_label())
                 .into_any_element();
         }
-        let grid_width = px(COLUMN_WIDTH * data.columns.len() as f32);
+        let grid_width = px(ROW_NUMBER_WIDTH + COLUMN_WIDTH * data.columns.len() as f32);
         let header = div()
             .flex()
             .h(px(ROW_HEIGHT + 4.0))
             .w(grid_width)
             .border_b_1()
-            .border_color(colors.border)
-            .bg(colors.surface)
+            .border_color(colors.subtle_border)
+            .bg(colors.toolbar)
+            .child(
+                div()
+                    .w(px(ROW_NUMBER_WIDTH))
+                    .h_full()
+                    .flex()
+                    .items_center()
+                    .justify_end()
+                    .pr_2()
+                    .border_r_1()
+                    .border_color(colors.subtle_border)
+                    .text_xs()
+                    .text_color(colors.disabled_text)
+                    .child("#"),
+            )
             .children(data.columns.iter().map(|column| {
                 div()
                     .w(px(COLUMN_WIDTH))
@@ -405,8 +455,14 @@ impl ResultsView {
                     .justify_center()
                     .overflow_hidden()
                     .border_r_1()
-                    .border_color(colors.border)
-                    .child(div().text_sm().truncate().child(column.name.clone()))
+                    .border_color(colors.subtle_border)
+                    .child(
+                        div()
+                            .text_sm()
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .truncate()
+                            .child(column.name.clone()),
+                    )
                     .child(
                         div()
                             .text_xs()
@@ -454,9 +510,19 @@ impl ResultsView {
                                     .items_center()
                                     .overflow_hidden()
                                     .border_r_1()
-                                    .border_color(colors.border)
+                                    .border_color(colors.subtle_border)
                                     .text_color(color)
-                                    .when(is_selected, |el| el.bg(colors.selected_surface))
+                                    .when(
+                                        rendered.as_ref().is_some_and(|cell| {
+                                            matches!(cell.class, CellClass::Number)
+                                        }),
+                                        |el| el.justify_end(),
+                                    )
+                                    .when(is_selected, |el| {
+                                        el.bg(colors.active_surface)
+                                            .border_1()
+                                            .border_color(colors.accent)
+                                    })
                                     .on_click(cx.listener(move |view, _, _, cx| {
                                         view.select_cell(row_index, column_index, cx)
                                     }))
@@ -466,9 +532,25 @@ impl ResultsView {
                         div()
                             .flex()
                             .h(px(ROW_HEIGHT))
+                            .when(row_index % 2 == 1, |el| el.bg(colors.grid_stripe))
                             .when(selected_row == Some(row_index), |el| {
                                 el.bg(colors.selected_surface)
                             })
+                            .hover(|el| el.bg(colors.hovered_surface))
+                            .child(
+                                div()
+                                    .w(px(ROW_NUMBER_WIDTH))
+                                    .h_full()
+                                    .flex()
+                                    .items_center()
+                                    .justify_end()
+                                    .pr_2()
+                                    .border_r_1()
+                                    .border_color(colors.subtle_border)
+                                    .text_xs()
+                                    .text_color(colors.disabled_text)
+                                    .child((row_index + 1).to_string()),
+                            )
                             .children(cells)
                     })
                     .collect()
