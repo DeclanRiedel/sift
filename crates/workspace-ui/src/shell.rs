@@ -8,7 +8,7 @@ use gpui::{
     UniformListScrollHandle, Window, WindowBounds,
 };
 use sift_api_types::RoomId;
-use sift_ui::{database_logo, TextInput, Theme};
+use sift_ui::{database_logo, icon, IconName, TextInput, Theme};
 
 use crate::editor::{EditorEvent, QueryDocument, QueryEditor};
 use crate::results::{ResultState, ResultsView};
@@ -364,8 +364,10 @@ impl Pane {
 }
 
 impl gpui::Render for Pane {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = self.theme.colors;
+        let is_focused = self.active_focus_handle(cx).is_focused(window)
+            || self.focus_handle.contains_focused(window, cx);
         let active = self.active_item().cloned();
         div()
             .id(("pane", self.id as usize))
@@ -381,14 +383,21 @@ impl gpui::Render for Pane {
             .flex_col()
             .flex_1()
             .min_w_0()
+            .border_t_1()
+            .border_color(if is_focused {
+                colors.accent
+            } else {
+                colors.subtle_border
+            })
+            .bg(colors.background)
             .child(
                 div()
-                    .h(px(32.))
+                    .h(self.theme.metrics.tab_height)
                     .flex()
                     .items_stretch()
                     .border_b_1()
-                    .border_color(colors.border)
-                    .bg(colors.surface)
+                    .border_color(colors.subtle_border)
+                    .bg(colors.toolbar)
                     .child(
                         div()
                             .flex()
@@ -397,23 +406,33 @@ impl gpui::Render for Pane {
                             .items_stretch()
                             .overflow_hidden()
                             .children(self.items.iter().enumerate().map(|(index, item)| {
-                                let dirty = if item.dirty { " ●" } else { "" };
                                 let selected = index == self.active_item;
                                 div()
                                     .id(("tab", item.id as usize))
                                     .flex()
                                     .items_center()
                                     .h_full()
-                                    .border_r_1()
-                                    .border_color(colors.border)
-                                    .when(selected, |tab| tab.bg(colors.selected_surface))
+                                    .relative()
+                                    .when(selected, |tab| tab.bg(colors.background))
+                                    .when(selected, |tab| {
+                                        tab.child(
+                                            div()
+                                                .absolute()
+                                                .left_0()
+                                                .right_0()
+                                                .bottom_0()
+                                                .h(px(1.))
+                                                .bg(colors.accent),
+                                        )
+                                    })
                                     .child(
                                         div()
                                             .id(("tab-label", item.id as usize))
                                             .flex()
                                             .items_center()
                                             .h_full()
-                                            .px_2()
+                                            .pl_3()
+                                            .pr_1()
                                             .when(!selected, |label| {
                                                 label.text_color(colors.muted_text)
                                             })
@@ -422,7 +441,16 @@ impl gpui::Render for Pane {
                                                 pane.active_item = index;
                                                 cx.notify();
                                             }))
-                                            .child(format!("{}{dirty}", item.title)),
+                                            .child(item.title.clone())
+                                            .when(item.dirty, |label| {
+                                                label.child(
+                                                    div()
+                                                        .ml_1()
+                                                        .size(px(5.))
+                                                        .rounded_full()
+                                                        .bg(colors.accent),
+                                                )
+                                            }),
                                     )
                                     .child(
                                         div()
@@ -431,15 +459,17 @@ impl gpui::Render for Pane {
                                             .items_center()
                                             .justify_center()
                                             .h_full()
-                                            .px_1()
+                                            .w(px(24.))
                                             .text_color(colors.muted_text)
                                             .hover(|close| {
-                                                close.bg(colors.border).text_color(colors.text)
+                                                close
+                                                    .bg(colors.hovered_surface)
+                                                    .text_color(colors.text)
                                             })
                                             .on_click(cx.listener(move |pane, _, _, cx| {
                                                 pane.close_item(index, cx);
                                             }))
-                                            .child("×"),
+                                            .child(icon(IconName::Close, colors.muted_text, 13.)),
                                     )
                             })),
                     )
@@ -452,13 +482,11 @@ impl gpui::Render for Pane {
                             .w(px(28.))
                             .h_full()
                             .border_l_1()
-                            .border_color(colors.border)
+                            .border_color(colors.subtle_border)
                             .text_color(colors.muted_text)
-                            .hover(|close| {
-                                close.bg(colors.selected_surface).text_color(colors.text)
-                            })
+                            .hover(|close| close.bg(colors.hovered_surface).text_color(colors.text))
                             .on_click(cx.listener(|_, _, _, cx| cx.emit(PaneEvent::CloseRequested)))
-                            .child("⨯"),
+                            .child(icon(IconName::Close, colors.muted_text, 14.)),
                     ),
             )
             .child({
@@ -2029,16 +2057,16 @@ impl WorkspaceShell {
         div()
             .id("integrated-titlebar")
             .key_context("SiftWindow")
-            .h(px(34.))
+            .h(self.theme.metrics.toolbar_height)
             .flex()
             .items_center()
             .justify_between()
-            .pl_1()
+            .pl_2()
             .pr_2()
             .gap_2()
             .border_b_1()
-            .border_color(colors.border)
-            .bg(colors.surface)
+            .border_color(colors.subtle_border)
+            .bg(colors.toolbar)
             .child(
                 div()
                     .flex()
@@ -2046,6 +2074,20 @@ impl WorkspaceShell {
                     .items_center()
                     .gap_1()
                     .min_w_0()
+                    .child(
+                        div()
+                            .size(px(22.))
+                            .mr_1()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded(px(6.))
+                            .bg(colors.accent)
+                            .text_xs()
+                            .font_weight(gpui::FontWeight::BOLD)
+                            .text_color(gpui::white())
+                            .child("S"),
+                    )
                     .child(
                         div()
                             .id("toolbar-menu")
@@ -2062,7 +2104,7 @@ impl WorkspaceShell {
                             .on_click(cx.listener(|shell, _, window, cx| {
                                 shell.open_command_palette(&OpenCommandPalette, window, cx)
                             }))
-                            .child("☰"),
+                            .child(icon(IconName::Menu, colors.muted_text, 15.)),
                     )
                     .child(
                         div()
@@ -2078,10 +2120,16 @@ impl WorkspaceShell {
                             .items_center()
                             .gap_2()
                             .rounded_sm()
-                            .hover(|slot| slot.bg(colors.selected_surface))
+                            .border_1()
+                            .border_color(colors.subtle_border)
+                            .bg(colors.surface)
+                            .hover(|slot| {
+                                slot.bg(colors.hovered_surface).border_color(colors.border)
+                            })
                             .on_click(cx.listener(|shell, _, _, cx| shell.open_server_picker(cx)))
                             .min_w_0()
                             .text_sm()
+                            .child(icon(IconName::Server, colors.muted_text, 14.))
                             .child(div().min_w_0().truncate().child(server_name))
                             .when(show_status, |picker| {
                                 picker.child(
@@ -2091,7 +2139,7 @@ impl WorkspaceShell {
                                         .child(status_label),
                                 )
                             })
-                            .child(div().text_xs().text_color(colors.muted_text).child("⌄")),
+                            .child(icon(IconName::ChevronDown, colors.muted_text, 12.)),
                     ),
             )
             .child(
@@ -2104,7 +2152,17 @@ impl WorkspaceShell {
                     .px_3()
                     .text_sm()
                     .text_color(colors.muted_text)
-                    .child(div().truncate().child(workspace_label)),
+                    .child(
+                        div()
+                            .max_w(px(420.))
+                            .min_w_0()
+                            .px_2()
+                            .flex()
+                            .items_center()
+                            .gap_1()
+                            .child(icon(IconName::Workspace, colors.muted_text, 13.))
+                            .child(div().truncate().child(workspace_label)),
+                    ),
             )
             .child(
                 div()
@@ -2129,17 +2187,17 @@ impl WorkspaceShell {
                                     })
                                     .unwrap_or_else(|| "Account unavailable while offline".into()),
                             )
-                            .size(px(26.))
+                            .size(px(24.))
                             .flex()
                             .items_center()
                             .justify_center()
                             .rounded_sm()
                             .border_1()
-                            .border_color(colors.border)
-                            .bg(colors.elevated_surface)
+                            .border_color(colors.strong_border)
+                            .bg(colors.surface)
                             .text_xs()
                             .font_weight(gpui::FontWeight::SEMIBOLD)
-                            .hover(|avatar| avatar.bg(colors.selected_surface))
+                            .hover(|avatar| avatar.bg(colors.hovered_surface))
                             .on_click(cx.listener(|shell, _, _, cx| shell.open_account(cx)))
                             .child(account_initials),
                     ),
@@ -2148,22 +2206,34 @@ impl WorkspaceShell {
 
     fn render_dock(&self, dock: &Dock, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = self.theme.colors;
+        let dock_icon = if dock.title == "Connections" {
+            IconName::Database
+        } else {
+            IconName::Info
+        };
         div()
             .id(dock.title)
             .key_context("SiftDock")
             .w(px(dock.presentation.size))
             .flex()
             .flex_col()
-            .p_3()
-            .gap_2()
-            .border_r_1()
-            .border_color(colors.border)
-            .bg(colors.surface)
+            .py_2()
+            .border_color(colors.subtle_border)
+            .when(dock.title == "Connections", |dock| dock.border_r_1())
+            .when(dock.title == "Inspector", |dock| dock.border_l_1())
+            .bg(colors.panel)
             .text_sm()
             .child(
                 div()
+                    .h(px(26.))
+                    .px_3()
+                    .flex()
+                    .items_center()
+                    .gap_2()
                     .text_xs()
                     .text_color(colors.muted_text)
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .child(icon(dock_icon, colors.muted_text, 13.))
                     .child(dock.title.to_uppercase()),
             )
             .when(dock.title == "Connections", |dock_view| {
@@ -2171,15 +2241,20 @@ impl WorkspaceShell {
                     div()
                         .id("add-database-connection")
                         .role(Role::Button)
+                        .mx_2()
+                        .h(self.theme.metrics.row_height)
                         .px_2()
-                        .py_1()
+                        .flex()
+                        .items_center()
+                        .gap_2()
                         .rounded_sm()
                         .text_color(colors.muted_text)
-                        .hover(|button| button.bg(colors.selected_surface).text_color(colors.text))
+                        .hover(|button| button.bg(colors.hovered_surface).text_color(colors.text))
                         .on_click(cx.listener(|shell, _, window, cx| {
                             shell.open_database_connection(window, cx)
                         }))
-                        .child("+ Add database connection…"),
+                        .child(icon(IconName::Add, colors.muted_text, 14.))
+                        .child("Add database connection…"),
                 )
             })
             .when(dock.title == "Connections", |dock_view| {
@@ -2189,7 +2264,14 @@ impl WorkspaceShell {
                     rows.push(
                         div()
                             .mt_2()
+                            .h(px(24.))
+                            .px_3()
+                            .flex()
+                            .items_center()
+                            .gap_1()
+                            .text_xs()
                             .text_color(colors.muted_text)
+                            .child(icon(IconName::ChevronDown, colors.muted_text, 11.))
                             .child(tenant.name.clone())
                             .into_any_element(),
                     );
@@ -2216,13 +2298,21 @@ impl WorkspaceShell {
                             .id(("conn", conn.id as usize))
                             .flex()
                             .items_center()
-                            .gap_1()
-                            .pl_2()
-                            .py_1()
+                            .gap_2()
+                            .mx_2()
+                            .h(self.theme.metrics.row_height)
+                            .px_2()
                             .rounded_sm()
-                            .when(connected, |row| row.bg(colors.selected_surface))
-                            .hover(|row| row.bg(colors.selected_surface))
-                            .child(div().text_color(dot).child("●"))
+                            .when(connected, |row| row.bg(colors.active_surface))
+                            .hover(|row| row.bg(colors.hovered_surface))
+                            .child(
+                                div()
+                                    .size(px(7.))
+                                    .rounded_full()
+                                    .bg(dot)
+                                    .border_1()
+                                    .border_color(colors.panel),
+                            )
                             .child(div().flex_1().min_w_0().truncate().child(conn.name.clone()));
                         if connected {
                             row = row.child(
@@ -2256,17 +2346,25 @@ impl WorkspaceShell {
                             rows.push(
                                 div()
                                     .id(("workspace", workspace.id as usize))
-                                    .pl_2()
-                                    .py_1()
+                                    .mx_2()
+                                    .h(self.theme.metrics.row_height)
+                                    .px_2()
+                                    .flex()
+                                    .items_center()
+                                    .gap_2()
                                     .rounded_sm()
                                     .when(is_open, |row| {
-                                        row.bg(colors.selected_surface).text_color(colors.text)
+                                        row.bg(colors.active_surface).text_color(colors.text)
                                     })
-                                    .hover(|row| row.bg(colors.selected_surface))
+                                    .hover(|row| row.bg(colors.hovered_surface))
                                     .on_click(cx.listener(move |shell, _, _, cx| {
                                         shell.open_workspace(&entry, cx)
                                     }))
-                                    .child(format!("{} / {}{features}", room.name, workspace.name))
+                                    .child(icon(IconName::Workspace, colors.muted_text, 13.))
+                                    .child(div().min_w_0().truncate().child(format!(
+                                        "{} / {}{features}",
+                                        room.name, workspace.name
+                                    )))
                                     .into_any_element(),
                             );
                         }
@@ -2279,6 +2377,8 @@ impl WorkspaceShell {
                 |dock_view| {
                     dock_view.child(
                         div()
+                            .px_3()
+                            .py_2()
                             .text_color(colors.muted_text)
                             .child(self.lifecycle.status_label()),
                     )
@@ -3549,8 +3649,8 @@ impl gpui::Render for WorkspaceShell {
                         .px_3()
                         .py_2()
                         .border_t_1()
-                        .border_color(colors.border)
-                        .bg(colors.surface)
+                        .border_color(colors.subtle_border)
+                        .bg(colors.panel)
                         .text_sm()
                         .text_color(colors.muted_text)
                         .child("Query output opens with each query, beside its editor."),
@@ -3559,21 +3659,53 @@ impl gpui::Render for WorkspaceShell {
             .child(
                 div()
                     .id("status-bar")
-                    .h(px(26.))
+                    .h(self.theme.metrics.status_height)
                     .flex()
                     .items_center()
                     .justify_between()
                     .px_3()
                     .border_t_1()
-                    .border_color(colors.border)
-                    .bg(colors.surface)
+                    .border_color(colors.subtle_border)
+                    .bg(colors.toolbar)
                     .text_xs()
                     .text_color(colors.muted_text)
-                    .child(format!(
-                        "{} · {} · {}",
-                        self.status.connection, self.status.database, self.status.transaction
-                    ))
-                    .child(format!("{} · {}", self.status.room, self.status.execution)),
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_3()
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_1()
+                                    .child(div().size(px(6.)).rounded_full().bg(
+                                        match &self.connection_status {
+                                            ConnectionStatus::Connected { .. } => colors.success,
+                                            ConnectionStatus::Connecting { .. } => colors.warning,
+                                            ConnectionStatus::Failed { .. } => colors.danger,
+                                            ConnectionStatus::Disconnected => colors.muted_text,
+                                        },
+                                    ))
+                                    .child(self.status.connection.clone()),
+                            )
+                            .child(self.status.database.clone())
+                            .child(self.status.transaction.clone()),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_3()
+                            .child(self.status.room.clone())
+                            .child(
+                                div()
+                                    .px_1()
+                                    .rounded(px(3.))
+                                    .bg(colors.hovered_surface)
+                                    .child(self.status.execution.clone()),
+                            ),
+                    ),
             )
             .children(self.toasts.last().map(|toast| {
                 div()
