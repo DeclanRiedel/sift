@@ -1,4 +1,5 @@
 use std::ops::Range;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use gpui::{
     actions, div, fill, hsla, point, prelude::*, px, relative, rgba, size, App, Bounds,
@@ -10,15 +11,19 @@ use unicode_segmentation::UnicodeSegmentation as _;
 
 actions!(
     sift_text_input,
-    [Backspace, Delete, Left, Right, Home, End, Copy, Cut, Paste, SelectAll]
+    [Backspace, Delete, Left, Right, Home, End, Copy, Cut, Paste, SelectAll, Tab, Backtab]
 );
 
 /// Minimal single-line GPUI text input used to prove the Phase M input
 /// boundary. The full SQL editor will build on the same input-handler contract.
 pub struct TextInput {
+    id: usize,
     focus_handle: FocusHandle,
     content: SharedString,
     placeholder: SharedString,
+    aria_label: SharedString,
+    tab_next: Option<FocusHandle>,
+    tab_previous: Option<FocusHandle>,
     masked: bool,
     selected_range: Range<usize>,
     selection_reversed: bool,
@@ -34,11 +39,16 @@ impl TextInput {
         cx: &mut Context<Self>,
     ) -> Self {
         let content = content.into();
+        let placeholder = placeholder.into();
         let cursor = content.len();
         Self {
+            id: NEXT_TEXT_INPUT_ID.fetch_add(1, Ordering::Relaxed),
             focus_handle: cx.focus_handle(),
             content,
-            placeholder: placeholder.into(),
+            aria_label: placeholder.clone(),
+            placeholder,
+            tab_next: None,
+            tab_previous: None,
             masked: false,
             selected_range: cursor..cursor,
             selection_reversed: false,
@@ -55,6 +65,22 @@ impl TextInput {
     pub fn masked(mut self) -> Self {
         self.masked = true;
         self
+    }
+
+    pub fn aria_label(mut self, label: impl Into<SharedString>) -> Self {
+        self.aria_label = label.into();
+        self
+    }
+
+    pub fn set_tab_targets(
+        &mut self,
+        previous: Option<FocusHandle>,
+        next: Option<FocusHandle>,
+        cx: &mut Context<Self>,
+    ) {
+        self.tab_previous = previous;
+        self.tab_next = next;
+        cx.notify();
     }
 
     pub fn set_text(&mut self, content: impl Into<SharedString>, cx: &mut Context<Self>) {
@@ -163,6 +189,22 @@ impl TextInput {
     fn paste(&mut self, _: &Paste, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
             self.replace_text_in_range(None, &text.replace(['\r', '\n'], " "), window, cx);
+        }
+    }
+
+    fn tab(&mut self, _: &Tab, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(target) = &self.tab_next {
+            target.focus(window, cx);
+        } else {
+            window.focus_next(cx);
+        }
+    }
+
+    fn backtab(&mut self, _: &Backtab, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(target) = &self.tab_previous {
+            target.focus(window, cx);
+        } else {
+            window.focus_prev(cx);
         }
     }
 
@@ -333,12 +375,19 @@ impl EntityInputHandler for TextInput {
 impl gpui::Render for TextInput {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         div()
-            .id("sift-feasibility-input")
+            .id(("sift-text-input", self.id))
             .key_context("SiftTextInput")
             .role(Role::TextInput)
-            .aria_label("SQL feasibility input")
+            .aria_label(self.aria_label.clone())
             .track_focus(&self.focus_handle)
+            .tab_index(0)
             .cursor(CursorStyle::IBeam)
+            .on_mouse_down(
+                gpui::MouseButton::Left,
+                cx.listener(|input, _, window, cx| {
+                    input.focus_handle.focus(window, cx);
+                }),
+            )
             .on_action(cx.listener(Self::backspace))
             .on_action(cx.listener(Self::delete))
             .on_action(cx.listener(Self::left))
@@ -349,12 +398,16 @@ impl gpui::Render for TextInput {
             .on_action(cx.listener(Self::cut))
             .on_action(cx.listener(Self::paste))
             .on_action(cx.listener(Self::select_all))
+            .on_action(cx.listener(Self::tab))
+            .on_action(cx.listener(Self::backtab))
             .w_full()
             .px_2()
             .py_1()
             .child(TextElement { input: cx.entity() })
     }
 }
+
+static NEXT_TEXT_INPUT_ID: AtomicUsize = AtomicUsize::new(1);
 
 struct TextElement {
     input: Entity<TextInput>,
@@ -539,7 +592,7 @@ impl Element for TextElement {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gpui::{TestAppContext, VisualTestContext};
+    use gpui::{Modifiers, TestAppContext, VisualTestContext};
 
     #[gpui::test]
     fn utf16_round_trip_handles_non_bmp_input(cx: &mut TestAppContext) {
@@ -567,6 +620,30 @@ mod tests {
         assert_eq!(
             input.read_with(&visual, |input, _| input.text().to_string()),
             "select 表"
+        );
+    }
+
+    #[gpui::test]
+    fn clicking_input_focuses_it_for_typing(cx: &mut TestAppContext) {
+        let window = cx.update(|cx| {
+            cx.open_window(Default::default(), |_, cx| {
+                cx.new(|cx| TextInput::new("", "Host", cx))
+            })
+            .unwrap()
+        });
+        let mut visual = VisualTestContext::from_window(window.into(), cx);
+        let input = window.root(&mut visual).unwrap();
+        visual.run_until_parked();
+        let bounds = input
+            .read_with(&visual, |input, _| input.last_bounds)
+            .expect("input should have painted bounds");
+
+        visual.simulate_click(bounds.center(), Modifiers::default());
+        visual.simulate_input("db.internal");
+
+        assert_eq!(
+            input.read_with(&visual, |input, _| input.text().to_owned()),
+            "db.internal"
         );
     }
 

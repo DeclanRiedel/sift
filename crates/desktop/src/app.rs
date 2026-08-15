@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use gpui::{prelude::*, App, Context, Entity, IntoElement, Window};
+use sift_api_types::{CredentialMode, UpsertConnectionProfileRequest};
 use sift_client_sdk::{Client, Error as ClientError, OpenConnectionFromProfileRequest};
 use sift_protocol::{ConnectionId, SessionId};
 use sift_workspace_ui::{
@@ -202,6 +203,10 @@ fn restored_server_profile(
 /// one virtual workspace without adding product state to `SiftApp`.
 pub struct SiftWindow {
     workspace: Entity<WorkspaceShell>,
+    // The spawned lifecycle, query, and instance-manager tasks are owned by
+    // this runtime. Keeping it with the window prevents dropping the last
+    // runtime handle immediately after application startup.
+    _runtime: Arc<tokio::runtime::Runtime>,
 }
 
 impl SiftWindow {
@@ -266,7 +271,10 @@ impl SiftWindow {
             local_target,
             restored_profile_id,
         )));
-        Self { workspace }
+        Self {
+            workspace,
+            _runtime: runtime,
+        }
     }
 }
 
@@ -357,8 +365,100 @@ async fn run_query_executor(
                     return;
                 }
             }
+            ExecutorCommand::CreateConnectionProfile {
+                tenant_id,
+                name,
+                provider_id,
+                configuration,
+                credentials,
+            } => {
+                if let Some(previous) = context.take() {
+                    let _ = previous.client.close_session(previous.session).await;
+                }
+                let server = targets.borrow().clone();
+                let result = create_connection_profile(
+                    &server,
+                    tenant_id,
+                    name,
+                    provider_id,
+                    configuration,
+                    credentials,
+                )
+                .await;
+                match result {
+                    Ok(entry) => {
+                        let connection_error =
+                            match open_query_context(&server, tenant_id, entry.id).await {
+                                Ok(opened) => {
+                                    context = Some(opened);
+                                    let _ = events.send(ExecutorEvent::Connection(
+                                        ConnectionStatus::Connected {
+                                            profile_id: entry.id,
+                                            name: entry.name.clone(),
+                                        },
+                                    ));
+                                    None
+                                }
+                                Err(reason) => {
+                                    let _ = events.send(ExecutorEvent::Connection(
+                                        ConnectionStatus::Failed {
+                                            profile_id: entry.id,
+                                            reason: reason.clone(),
+                                        },
+                                    ));
+                                    Some(reason)
+                                }
+                            };
+                        if events
+                            .send(ExecutorEvent::ProfileCreated {
+                                entry,
+                                connection_error,
+                            })
+                            .is_err()
+                        {
+                            return;
+                        }
+                    }
+                    Err(message) => {
+                        if events
+                            .send(ExecutorEvent::ProfileCreationFailed(message))
+                            .is_err()
+                        {
+                            return;
+                        }
+                    }
+                }
+            }
         }
     }
+}
+
+async fn create_connection_profile(
+    server: &DesktopServer,
+    tenant_id: i64,
+    name: String,
+    provider_id: sift_protocol::ProviderId,
+    configuration: serde_json::Value,
+    credentials: Option<serde_json::Value>,
+) -> Result<sift_workspace_ui::ConnectionNavEntry, String> {
+    let client = server.client().await?;
+    let profile = client
+        .upsert_connection_profile(UpsertConnectionProfileRequest {
+            tenant_id,
+            name: name.clone(),
+            provider_id,
+            configuration,
+            credentials,
+            credential_mode: CredentialMode::Shared,
+            tags: Vec::new(),
+        })
+        .await
+        .map_err(|error| format!("saving connection profile failed: {error}"))?;
+    Ok(sift_workspace_ui::ConnectionNavEntry {
+        id: profile.id.0,
+        tenant_id,
+        name,
+    })
 }
 
 /// Run one query against the current connection, or report not-connected.
@@ -399,7 +499,7 @@ async fn open_query_context(
 ) -> Result<QueryContext, String> {
     let client = server.client().await?;
     let session = client
-        .open_session(None)
+        .open_session_for_tenant(None, Some(tenant_id))
         .await
         .map_err(|error| format!("opening a session failed: {error}"))?
         .id;

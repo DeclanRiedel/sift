@@ -402,7 +402,10 @@
         desktop = pkgs.writeShellApplication {
           name = "sift-desktop";
           runtimeInputs = [ pkgs.nix ];
-          text = devCommand ''cargo run -p sift-desktop --'';
+          text = devCommand ''
+            cargo build -p sift-server --bin sift-launcher
+            cargo run -p sift-desktop -- "$@"
+          '';
         };
 
         devSecretKey = pkgs.writeShellApplication {

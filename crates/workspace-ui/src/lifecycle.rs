@@ -2,7 +2,9 @@ use std::time::Duration;
 
 use sift_api_types::{RoomId, TenantId};
 use sift_client_sdk::{Client, CreateWorkspaceRequest, Error as ClientError};
-use sift_protocol::{HandshakeResponse, RoomPresence, RoomServerMessage, WhoAmIResponse};
+use sift_protocol::{
+    HandshakeResponse, ProviderDescriptor, RoomPresence, RoomServerMessage, WhoAmIResponse,
+};
 use tokio::sync::mpsc;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -116,6 +118,7 @@ pub struct LifecycleProjection {
     pub phase: ConnectionPhase,
     pub handshake: Option<HandshakeResponse>,
     pub identity: Option<WhoAmIResponse>,
+    pub providers: Vec<ProviderDescriptor>,
     pub tenants: Vec<TenantNavEntry>,
 }
 
@@ -126,6 +129,7 @@ impl Default for LifecycleProjection {
             phase: ConnectionPhase::Offline,
             handshake: None,
             identity: None,
+            providers: Vec::new(),
             tenants: Vec::new(),
         }
     }
@@ -137,6 +141,7 @@ pub enum LifecycleEvent {
     Phase(ConnectionPhase),
     Negotiated(HandshakeResponse),
     Authenticated(WhoAmIResponse),
+    Providers(Vec<ProviderDescriptor>),
     TenantLoaded(TenantNavEntry),
     ResetNavigation,
 }
@@ -164,11 +169,13 @@ impl LifecycleProjection {
                 self.selected_instance = Some(instance);
                 self.handshake = None;
                 self.identity = None;
+                self.providers.clear();
                 self.tenants.clear();
             }
             LifecycleEvent::Phase(phase) => self.phase = phase,
             LifecycleEvent::Negotiated(handshake) => self.handshake = Some(handshake),
             LifecycleEvent::Authenticated(identity) => self.identity = Some(identity),
+            LifecycleEvent::Providers(providers) => self.providers = providers,
             LifecycleEvent::TenantLoaded(tenant) => {
                 if let Some(existing) = self.tenants.iter_mut().find(|row| row.id == tenant.id) {
                     *existing = tenant;
@@ -275,6 +282,13 @@ pub async fn load_instance(
         Ok(memberships) => memberships,
         Err(error) => return Err(fail(&sender, &error)),
     };
+    let providers = match client.providers().await {
+        Ok(providers) => providers,
+        Err(error) => return Err(fail(&sender, &error)),
+    };
+    if !send(&sender, LifecycleEvent::Providers(providers)) {
+        return Err(DegradedReason::Offline);
+    }
     let mut loaded = LoadedInstance::default();
     for membership in memberships {
         let tenant_id = membership.tenant.id;

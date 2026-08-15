@@ -1,12 +1,14 @@
 use std::collections::HashMap;
+use std::ops::Range;
 use std::sync::Arc;
 
 use gpui::{
-    actions, div, prelude::*, px, App, Context, Entity, EventEmitter, FocusHandle, Focusable,
-    IntoElement, MouseButton, Role, Subscription, Task, Window, WindowBounds,
+    actions, div, img, prelude::*, px, uniform_list, App, Context, Entity, EventEmitter,
+    FocusHandle, Focusable, IntoElement, MouseButton, Role, ScrollStrategy, Subscription, Task,
+    UniformListScrollHandle, Window, WindowBounds,
 };
 use sift_api_types::RoomId;
-use sift_ui::{TextInput, Theme};
+use sift_ui::{database_logo, TextInput, Theme};
 
 use crate::editor::{EditorEvent, QueryDocument, QueryEditor};
 use crate::results::{ResultState, ResultsView};
@@ -19,6 +21,37 @@ use crate::{
     ConnectionNavEntry, LifecycleEvent, LifecycleProjection, PresenceEvent, RoomPresenceProjection,
     WorkspaceNavEntry,
 };
+
+const PALETTE_VISIBLE_ROWS: usize = 10;
+const PALETTE_ROW_HEIGHT: f32 = 30.0;
+
+fn optional_u32_field(
+    input: &Entity<TextInput>,
+    label: &str,
+    cx: &App,
+) -> Result<Option<u32>, String> {
+    let value = input.read(cx).text().trim();
+    if value.is_empty() {
+        return Ok(None);
+    }
+    value
+        .parse::<u32>()
+        .ok()
+        .filter(|value| *value > 0)
+        .map(Some)
+        .ok_or_else(|| format!("{label} must be a positive whole number"))
+}
+
+fn optional_pool_min_field(input: &Entity<TextInput>, cx: &App) -> Result<Option<u32>, String> {
+    let value = input.read(cx).text().trim();
+    if value.is_empty() {
+        return Ok(None);
+    }
+    value
+        .parse::<u32>()
+        .map(Some)
+        .map_err(|_| "Minimum pool size must be a non-negative whole number".into())
+}
 
 actions!(
     sift_shell,
@@ -67,7 +100,15 @@ pub enum Modal {
     ServerPicker,
     ServerConnection,
     Account,
+    DatabaseConnection,
     ConfirmClose { title: String },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DatabaseWizardStep {
+    Provider,
+    Details,
+    Review,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -157,7 +198,7 @@ pub enum ConnectionStatus {
 
 /// Shell → executor. The executor owns the SDK client, session, and
 /// connection; the shell only reports intent (connect / disconnect / run).
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub enum ExecutorCommand {
     Connect {
         tenant_id: i64,
@@ -169,6 +210,13 @@ pub enum ExecutorCommand {
         item_id: u64,
         sql: String,
     },
+    CreateConnectionProfile {
+        tenant_id: i64,
+        name: String,
+        provider_id: sift_protocol::ProviderId,
+        configuration: serde_json::Value,
+        credentials: Option<serde_json::Value>,
+    },
 }
 
 /// Executor → shell. Connection-state changes and query outcomes share one
@@ -176,7 +224,15 @@ pub enum ExecutorCommand {
 #[derive(Debug, Clone)]
 pub enum ExecutorEvent {
     Connection(ConnectionStatus),
-    Execution { item_id: u64, state: ResultState },
+    Execution {
+        item_id: u64,
+        state: ResultState,
+    },
+    ProfileCreated {
+        entry: ConnectionNavEntry,
+        connection_error: Option<String>,
+    },
+    ProfileCreationFailed(String),
 }
 
 /// A pane owns its ordered items and focus handle. The workspace owns panes;
@@ -447,7 +503,19 @@ pub struct WorkspaceShell {
     server_name_input: Entity<TextInput>,
     server_url_input: Entity<TextInput>,
     server_token_input: Entity<TextInput>,
+    database_name_input: Entity<TextInput>,
+    database_host_input: Entity<TextInput>,
+    database_port_input: Entity<TextInput>,
+    database_catalog_input: Entity<TextInput>,
+    database_user_input: Entity<TextInput>,
+    database_password_input: Entity<TextInput>,
+    database_search_path_input: Entity<TextInput>,
+    database_application_name_input: Entity<TextInput>,
+    database_timeout_input: Entity<TextInput>,
+    database_pool_min_input: Entity<TextInput>,
+    database_pool_max_input: Entity<TextInput>,
     palette_selected: usize,
+    palette_scroll_handle: UniformListScrollHandle,
     theme: Theme,
     dark_theme: bool,
     window_presentation: WindowPresentation,
@@ -468,6 +536,7 @@ pub struct WorkspaceShell {
     _presence_task: Option<Task<()>>,
     _executor_task: Option<Task<()>>,
     _instance_task: Option<Task<()>>,
+    _toast_task: Option<Task<()>>,
     executor_sender: Option<tokio::sync::mpsc::UnboundedSender<ExecutorCommand>>,
     instance_sender: Option<tokio::sync::mpsc::UnboundedSender<InstanceCommand>>,
     saved_servers: Vec<SavedServerProfile>,
@@ -476,6 +545,12 @@ pub struct WorkspaceShell {
     server_connection_pending: bool,
     server_connection_error: Option<String>,
     connection_status: ConnectionStatus,
+    selected_database_tenant: Option<i64>,
+    selected_database_provider: Option<String>,
+    selected_database_ssl_mode: Option<String>,
+    database_wizard_step: DatabaseWizardStep,
+    database_connection_pending: bool,
+    database_connection_error: Option<String>,
     store: Option<Arc<PresentationStore>>,
     _bounds_subscription: Subscription,
     next_id: u64,
@@ -527,9 +602,36 @@ impl WorkspaceShell {
         let server_url_input = cx.new(|cx| TextInput::new("", "http://192.168.1.20:7474", cx));
         let server_token_input =
             cx.new(|cx| TextInput::new("", "Bearer token (or use saved token)", cx).masked());
+        let database_name_input =
+            cx.new(|cx| TextInput::new("", "Display name", cx).aria_label("Connection name"));
+        let database_host_input =
+            cx.new(|cx| TextInput::new("", "Database host", cx).aria_label("Host"));
+        let database_port_input = cx.new(|cx| TextInput::new("", "Port", cx));
+        let database_catalog_input =
+            cx.new(|cx| TextInput::new("", "Database (optional)", cx).aria_label("Database"));
+        let database_user_input = cx.new(|cx| TextInput::new("", "Username", cx));
+        let database_password_input = cx.new(|cx| {
+            TextInput::new("", "Password (optional)", cx)
+                .aria_label("Password")
+                .masked()
+        });
+        let database_search_path_input =
+            cx.new(|cx| TextInput::new("", "public, reporting", cx).aria_label("Search path"));
+        let database_application_name_input =
+            cx.new(|cx| TextInput::new("", "sift", cx).aria_label("Database application name"));
+        let database_timeout_input = cx.new(|cx| {
+            TextInput::new("", "Server default", cx).aria_label("Connection timeout in seconds")
+        });
+        let database_pool_min_input =
+            cx.new(|cx| TextInput::new("", "0", cx).aria_label("Minimum pool size"));
+        let database_pool_max_input =
+            cx.new(|cx| TextInput::new("", "Server default", cx).aria_label("Maximum pool size"));
         // Re-render the palette as the search text changes so its list filters.
         cx.observe(&query_input, |shell, _, cx| {
             shell.palette_selected = 0;
+            shell
+                .palette_scroll_handle
+                .scroll_to_item(0, ScrollStrategy::Top);
             cx.notify();
         })
         .detach();
@@ -547,7 +649,19 @@ impl WorkspaceShell {
             server_name_input,
             server_url_input,
             server_token_input,
+            database_name_input,
+            database_host_input,
+            database_port_input,
+            database_catalog_input,
+            database_user_input,
+            database_password_input,
+            database_search_path_input,
+            database_application_name_input,
+            database_timeout_input,
+            database_pool_min_input,
+            database_pool_max_input,
             palette_selected: 0,
+            palette_scroll_handle: UniformListScrollHandle::new(),
             theme,
             dark_theme: state.dark_theme,
             window_presentation,
@@ -577,6 +691,7 @@ impl WorkspaceShell {
             _presence_task: None,
             _executor_task: None,
             _instance_task: None,
+            _toast_task: None,
             executor_sender: None,
             instance_sender: None,
             saved_servers: Vec::new(),
@@ -585,6 +700,12 @@ impl WorkspaceShell {
             server_connection_pending: false,
             server_connection_error: None,
             connection_status: ConnectionStatus::Disconnected,
+            selected_database_tenant: None,
+            selected_database_provider: None,
+            selected_database_ssl_mode: Some("prefer".into()),
+            database_wizard_step: DatabaseWizardStep::Provider,
+            database_connection_pending: false,
+            database_connection_error: None,
             store,
             _bounds_subscription: bounds_subscription,
             next_id,
@@ -604,6 +725,30 @@ impl WorkspaceShell {
                 label: "Connect to Server…",
                 shortcut: "",
                 disabled_reason: None,
+            },
+            CommandSpec {
+                id: "query.execute-statement",
+                label: "Run Query Statement",
+                shortcut: "Ctrl+Enter",
+                disabled_reason: no_item,
+            },
+            CommandSpec {
+                id: "query.execute-document",
+                label: "Run Query Document",
+                shortcut: "Ctrl+Shift+Enter",
+                disabled_reason: no_item,
+            },
+            CommandSpec {
+                id: "query.undo",
+                label: "Undo Query Edit",
+                shortcut: "Ctrl+Z",
+                disabled_reason: no_item,
+            },
+            CommandSpec {
+                id: "query.redo",
+                label: "Redo Query Edit",
+                shortcut: "Ctrl+Shift+Z",
+                disabled_reason: no_item,
             },
             CommandSpec {
                 id: "workspace.split-pane",
@@ -851,9 +996,7 @@ impl WorkspaceShell {
                 self.modal = None;
                 self.server_token_input
                     .update(cx, |input, cx| input.set_text("", cx));
-                self.toasts.push(Toast {
-                    message: format!("Connected to {name}"),
-                });
+                self.show_toast(format!("Connected to {name}"), cx);
             }
             InstanceManagerEvent::Failed { message } => {
                 self.server_connection_pending = false;
@@ -876,7 +1019,69 @@ impl WorkspaceShell {
                 cx.notify();
             }
             ExecutorEvent::Execution { item_id, state } => self.route_result(item_id, state, cx),
+            ExecutorEvent::ProfileCreated {
+                entry,
+                connection_error,
+            } => {
+                if let Some(tenant) = self
+                    .lifecycle
+                    .tenants
+                    .iter_mut()
+                    .find(|tenant| tenant.id.0 == entry.tenant_id)
+                {
+                    tenant.connections.push(entry.clone());
+                    tenant
+                        .connections
+                        .sort_by(|left, right| left.name.cmp(&right.name));
+                }
+                self.database_connection_pending = false;
+                self.database_connection_error = None;
+                self.modal = None;
+                self.database_password_input
+                    .update(cx, |input, cx| input.set_text("", cx));
+                self.show_toast(
+                    connection_error.map_or_else(
+                        || format!("Added and connected to {}", entry.name),
+                        |error| format!("Added {}, but connection failed: {error}", entry.name),
+                    ),
+                    cx,
+                );
+            }
+            ExecutorEvent::ProfileCreationFailed(message) => {
+                self.database_connection_pending = false;
+                self.database_connection_error = Some(message);
+                cx.notify();
+            }
         }
+    }
+
+    fn show_toast(&mut self, message: String, cx: &mut Context<Self>) {
+        self.toasts.clear();
+        self.toasts.push(Toast {
+            message: message.clone(),
+        });
+        self._toast_task = Some(cx.spawn(async move |shell, cx| {
+            cx.background_executor()
+                .timer(std::time::Duration::from_secs(4))
+                .await;
+            let _ = shell.update(cx, |shell, cx| {
+                if shell
+                    .toasts
+                    .last()
+                    .is_some_and(|toast| toast.message == message)
+                {
+                    shell.toasts.clear();
+                    cx.notify();
+                }
+            });
+        }));
+        cx.notify();
+    }
+
+    fn dismiss_toast(&mut self, cx: &mut Context<Self>) {
+        self.toasts.clear();
+        self._toast_task = None;
+        cx.notify();
     }
 
     pub fn connection_status(&self) -> &ConnectionStatus {
@@ -909,6 +1114,333 @@ impl WorkspaceShell {
         }
         self.connection_status = ConnectionStatus::Disconnected;
         self.status.database = "No database".into();
+        cx.notify();
+    }
+
+    fn open_database_connection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.selected_database_tenant = self.lifecycle.tenants.first().map(|tenant| tenant.id.0);
+        self.selected_database_provider = None;
+        self.database_wizard_step = DatabaseWizardStep::Provider;
+        self.database_name_input
+            .update(cx, |input, cx| input.set_text("", cx));
+        self.database_host_input
+            .update(cx, |input, cx| input.set_text("localhost", cx));
+        self.database_port_input
+            .update(cx, |input, cx| input.set_text("", cx));
+        self.database_catalog_input
+            .update(cx, |input, cx| input.set_text("", cx));
+        self.database_user_input
+            .update(cx, |input, cx| input.set_text("", cx));
+        self.database_password_input
+            .update(cx, |input, cx| input.set_text("", cx));
+        for input in [
+            &self.database_search_path_input,
+            &self.database_application_name_input,
+            &self.database_timeout_input,
+            &self.database_pool_min_input,
+            &self.database_pool_max_input,
+        ] {
+            input.update(cx, |input, cx| input.set_text("", cx));
+        }
+        self.selected_database_ssl_mode = None;
+        self.database_connection_error = None;
+        self.database_connection_pending = false;
+        self.modal = Some(Modal::DatabaseConnection);
+        self.focus_handle.focus(window, cx);
+        cx.notify();
+    }
+
+    fn select_database_provider(&mut self, provider_id: String, cx: &mut Context<Self>) {
+        let port = match provider_id.as_str() {
+            "sift/postgres" => "5432",
+            "sift/sql-server" => "1433",
+            _ => "",
+        };
+        self.selected_database_provider = Some(provider_id);
+        self.selected_database_ssl_mode = Some(
+            match self.selected_database_provider.as_deref() {
+                Some("sift/sql-server") => "require",
+                _ => "prefer",
+            }
+            .into(),
+        );
+        self.database_port_input
+            .update(cx, |input, cx| input.set_text(port, cx));
+        self.configure_database_tab_order(cx);
+        cx.notify();
+    }
+
+    fn configure_database_tab_order(&self, cx: &mut Context<Self>) {
+        let mut fields = vec![
+            self.database_name_input.clone(),
+            self.database_catalog_input.clone(),
+            self.database_host_input.clone(),
+            self.database_port_input.clone(),
+            self.database_user_input.clone(),
+            self.database_password_input.clone(),
+        ];
+        if self.selected_database_provider.as_deref() == Some("sift/postgres") {
+            fields.push(self.database_search_path_input.clone());
+            fields.push(self.database_application_name_input.clone());
+        }
+        fields.push(self.database_timeout_input.clone());
+        fields.push(self.database_pool_min_input.clone());
+        if self.selected_database_provider.as_deref() == Some("sift/postgres") {
+            fields.push(self.database_pool_max_input.clone());
+        }
+
+        let handles = fields
+            .iter()
+            .map(|field| field.focus_handle(cx))
+            .collect::<Vec<_>>();
+        for (index, field) in fields.into_iter().enumerate() {
+            let previous = index.checked_sub(1).map(|index| handles[index].clone());
+            let next = handles.get(index + 1).cloned();
+            field.update(cx, |input, cx| input.set_tab_targets(previous, next, cx));
+        }
+    }
+
+    fn database_form_error(&self, cx: &App) -> Option<String> {
+        if self.selected_database_tenant.is_none() {
+            return Some("Select a workspace".into());
+        }
+        if self.selected_database_provider.is_none() {
+            return Some("Select a database type".into());
+        }
+        let required = [
+            ("Connection name", &self.database_name_input),
+            ("Host", &self.database_host_input),
+            ("Username", &self.database_user_input),
+        ];
+        if let Some((label, _)) = required
+            .into_iter()
+            .find(|(_, input)| input.read(cx).text().trim().is_empty())
+        {
+            return Some(format!("{label} is required"));
+        }
+        let port = self.database_port_input.read(cx).text().trim();
+        if !port.is_empty() && !matches!(port.parse::<u16>(), Ok(value) if value > 0) {
+            return Some("Port must be between 1 and 65535".into());
+        }
+        for (input, label) in [
+            (&self.database_timeout_input, "Connection timeout"),
+            (&self.database_pool_max_input, "Maximum pool size"),
+        ] {
+            if let Err(error) = optional_u32_field(input, label, cx) {
+                return Some(error);
+            }
+        }
+        let pool_min = match optional_pool_min_field(&self.database_pool_min_input, cx) {
+            Ok(value) => value,
+            Err(error) => return Some(error),
+        };
+        let pool_max = optional_u32_field(&self.database_pool_max_input, "Maximum pool size", cx)
+            .ok()
+            .flatten();
+        if matches!((pool_min, pool_max), (Some(min), Some(max)) if min > max) {
+            return Some("Minimum pool size cannot exceed maximum pool size".into());
+        }
+        None
+    }
+
+    fn database_wizard_next(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.database_connection_error = None;
+        match self.database_wizard_step {
+            DatabaseWizardStep::Provider => {
+                if self.selected_database_provider.is_none() {
+                    self.database_connection_error =
+                        Some("Choose a database type to continue".into());
+                } else {
+                    self.database_wizard_step = DatabaseWizardStep::Details;
+                    self.database_name_input.focus_handle(cx).focus(window, cx);
+                }
+            }
+            DatabaseWizardStep::Details => {
+                if let Some(error) = self.database_form_error(cx) {
+                    self.database_connection_error = Some(error);
+                } else {
+                    self.database_wizard_step = DatabaseWizardStep::Review;
+                    self.focus_handle.focus(window, cx);
+                }
+            }
+            DatabaseWizardStep::Review => {}
+        }
+        cx.notify();
+    }
+
+    fn database_wizard_back(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.database_connection_error = None;
+        self.database_wizard_step = match self.database_wizard_step {
+            DatabaseWizardStep::Provider => DatabaseWizardStep::Provider,
+            DatabaseWizardStep::Details => DatabaseWizardStep::Provider,
+            DatabaseWizardStep::Review => DatabaseWizardStep::Details,
+        };
+        if self.database_wizard_step == DatabaseWizardStep::Details {
+            self.database_name_input.focus_handle(cx).focus(window, cx);
+        } else {
+            self.focus_handle.focus(window, cx);
+        }
+        cx.notify();
+    }
+
+    fn submit_database_connection(&mut self, cx: &mut Context<Self>) {
+        if self.database_connection_pending {
+            return;
+        }
+        let Some(sender) = &self.executor_sender else {
+            self.database_connection_error =
+                Some("Database connection manager is unavailable".into());
+            cx.notify();
+            return;
+        };
+        if let Some(error) = self.database_form_error(cx) {
+            self.database_connection_error = Some(error);
+            cx.notify();
+            return;
+        }
+        let tenant_id = self
+            .selected_database_tenant
+            .expect("form validation checked tenant");
+        let Some(provider_id) = self
+            .selected_database_provider
+            .as_deref()
+            .and_then(|id| sift_protocol::ProviderId::new(id).ok())
+        else {
+            self.database_connection_error = Some("Select an available database provider".into());
+            cx.notify();
+            return;
+        };
+        let name = self.database_name_input.read(cx).text().trim().to_owned();
+        let host = self.database_host_input.read(cx).text().trim().to_owned();
+        let user = self.database_user_input.read(cx).text().trim().to_owned();
+        let port_text = self.database_port_input.read(cx).text().trim().to_owned();
+        let port = if port_text.is_empty() {
+            None
+        } else {
+            match port_text.parse::<u16>() {
+                Ok(port) if port > 0 => Some(port),
+                _ => {
+                    self.database_connection_error =
+                        Some("Port must be between 1 and 65535".into());
+                    cx.notify();
+                    return;
+                }
+            }
+        };
+        let database = self
+            .database_catalog_input
+            .read(cx)
+            .text()
+            .trim()
+            .to_owned();
+        let password = self.database_password_input.read(cx).text().to_owned();
+        let mut configuration = serde_json::Map::from_iter([
+            ("host".into(), serde_json::Value::String(host)),
+            ("user".into(), serde_json::Value::String(user)),
+        ]);
+        if let Some(port) = port {
+            configuration.insert("port".into(), serde_json::json!(port));
+        }
+        if !database.is_empty() {
+            configuration.insert("database".into(), serde_json::Value::String(database));
+        }
+        if let Some(security_mode) = &self.selected_database_ssl_mode {
+            if provider_id.as_str() == "sift/sql-server" {
+                let (encrypt, trust_server_certificate) = match security_mode.as_str() {
+                    "disable" => (false, false),
+                    "trust_server_certificate" => (true, true),
+                    _ => (true, false),
+                };
+                let mut engine = serde_json::Map::from_iter([
+                    ("encrypt".into(), serde_json::json!(encrypt)),
+                    (
+                        "trust_server_certificate".into(),
+                        serde_json::json!(trust_server_certificate),
+                    ),
+                ]);
+                if let Some(timeout) =
+                    optional_u32_field(&self.database_timeout_input, "Connection timeout", cx)
+                        .expect("form validation checked timeout")
+                {
+                    engine.insert("connect_timeout_secs".into(), serde_json::json!(timeout));
+                }
+                if let Some(pool_min) = optional_pool_min_field(&self.database_pool_min_input, cx)
+                    .expect("form validation checked pool minimum")
+                {
+                    engine.insert("pool_min_size".into(), serde_json::json!(pool_min));
+                }
+                configuration.insert("engine_specific".into(), engine.into());
+            } else {
+                configuration.insert(
+                    "ssl_mode".into(),
+                    serde_json::Value::String(security_mode.clone()),
+                );
+                let mut engine = serde_json::Map::new();
+                let search_path = self.database_search_path_input.read(cx).text().trim();
+                if !search_path.is_empty() {
+                    engine.insert(
+                        "search_path".into(),
+                        serde_json::Value::Array(
+                            search_path
+                                .split(',')
+                                .map(str::trim)
+                                .filter(|value| !value.is_empty())
+                                .map(|value| serde_json::Value::String(value.to_owned()))
+                                .collect(),
+                        ),
+                    );
+                }
+                let application_name = self.database_application_name_input.read(cx).text().trim();
+                if !application_name.is_empty() {
+                    engine.insert(
+                        "application_name".into(),
+                        serde_json::Value::String(application_name.to_owned()),
+                    );
+                }
+                for (key, input, label) in [
+                    (
+                        "connect_timeout_secs",
+                        &self.database_timeout_input,
+                        "Connection timeout",
+                    ),
+                    (
+                        "pool_max_size",
+                        &self.database_pool_max_input,
+                        "Maximum pool size",
+                    ),
+                ] {
+                    if let Some(value) = optional_u32_field(input, label, cx)
+                        .expect("form validation checked numeric fields")
+                    {
+                        engine.insert(key.into(), serde_json::json!(value));
+                    }
+                }
+                if let Some(pool_min) = optional_pool_min_field(&self.database_pool_min_input, cx)
+                    .expect("form validation checked pool minimum")
+                {
+                    engine.insert("pool_min_size".into(), serde_json::json!(pool_min));
+                }
+                if !engine.is_empty() {
+                    configuration.insert("engine_specific".into(), engine.into());
+                }
+            }
+        }
+        let credentials = (!password.is_empty()).then(|| serde_json::json!({"password": password}));
+        if sender
+            .send(ExecutorCommand::CreateConnectionProfile {
+                tenant_id,
+                name,
+                provider_id,
+                configuration: serde_json::Value::Object(configuration),
+                credentials,
+            })
+            .is_err()
+        {
+            self.database_connection_error = Some("Database connection manager stopped".into());
+        } else {
+            self.database_connection_pending = true;
+            self.database_connection_error = None;
+        }
         cx.notify();
     }
 
@@ -952,9 +1484,7 @@ impl WorkspaceShell {
             .any(|workspace| workspace.id == selected);
         if !exists {
             self.selected_workspace_id = None;
-            self.toasts.push(Toast {
-                message: "Restored workspace is no longer available".into(),
-            });
+            self.show_toast("Restored workspace is no longer available".into(), cx);
             self.persist(cx);
         }
     }
@@ -1182,9 +1712,7 @@ impl WorkspaceShell {
     ) {
         let close_after_save = matches!(self.modal, Some(Modal::ConfirmClose { .. }));
         self.mark_active_item_dirty(false, cx);
-        self.toasts.push(Toast {
-            message: "Presentation saved".into(),
-        });
+        self.show_toast("Presentation saved".into(), cx);
         if close_after_save {
             self.remove_active_item(window, cx);
         } else {
@@ -1211,6 +1739,8 @@ impl WorkspaceShell {
     ) {
         self.modal = Some(Modal::CommandPalette);
         self.palette_selected = 0;
+        self.palette_scroll_handle
+            .scroll_to_item(0, ScrollStrategy::Top);
         self.query_input.focus_handle(cx).focus(window, cx);
         cx.notify();
     }
@@ -1329,6 +1859,14 @@ impl WorkspaceShell {
     }
 
     fn use_local_server(&mut self, cx: &mut Context<Self>) {
+        if self
+            .lifecycle
+            .selected_instance
+            .as_ref()
+            .is_some_and(|instance| instance.kind == crate::InstanceKind::Local)
+        {
+            return;
+        }
         let Some(sender) = &self.instance_sender else {
             self.server_connection_error = Some("Desktop connection manager is unavailable".into());
             cx.notify();
@@ -1373,6 +1911,8 @@ impl WorkspaceShell {
             return;
         }
         self.palette_selected = self.palette_selected.saturating_sub(1);
+        self.palette_scroll_handle
+            .scroll_to_item(self.palette_selected, ScrollStrategy::Nearest);
         cx.notify();
     }
 
@@ -1382,6 +1922,8 @@ impl WorkspaceShell {
         }
         let last = self.filtered_commands(cx).len().saturating_sub(1);
         self.palette_selected = (self.palette_selected + 1).min(last);
+        self.palette_scroll_handle
+            .scroll_to_item(self.palette_selected, ScrollStrategy::Nearest);
         cx.notify();
     }
 
@@ -1402,6 +1944,10 @@ impl WorkspaceShell {
             self.server_token_input
                 .update(cx, |input, cx| input.set_text("", cx));
         }
+        if self.modal == Some(Modal::DatabaseConnection) {
+            self.database_password_input
+                .update(cx, |input, cx| input.set_text("", cx));
+        }
         self.modal = None;
         // Return focus to the workspace so keybindings keep routing.
         self.focus_active_pane(window, cx);
@@ -1416,6 +1962,14 @@ impl WorkspaceShell {
             "instance.connect-server" => {
                 self.open_server_connection(&OpenServerConnection, window, cx)
             }
+            "query.execute-statement" => {
+                self.dispatch_active_editor_action(&crate::editor::ExecuteStatement, window, cx)
+            }
+            "query.execute-document" => {
+                self.dispatch_active_editor_action(&crate::editor::ExecuteDocument, window, cx)
+            }
+            "query.undo" => self.dispatch_active_editor_action(&crate::editor::Undo, window, cx),
+            "query.redo" => self.dispatch_active_editor_action(&crate::editor::Redo, window, cx),
             "workspace.split-pane" => self.split_pane(&SplitPane, window, cx),
             "workspace.focus-next-pane" => self.focus_next_pane(&FocusNextPane, window, cx),
             "workspace.close-pane" => self.close_active_pane(&CloseActivePane, window, cx),
@@ -1427,6 +1981,19 @@ impl WorkspaceShell {
                 self.toggle_bottom_dock(&ToggleBottomDock, window, cx)
             }
             _ => {}
+        }
+    }
+
+    fn dispatch_active_editor_action(
+        &self,
+        action: &dyn gpui::Action,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(pane) = self.panes.get(self.active_pane) {
+            pane.read(cx)
+                .active_focus_handle(cx)
+                .dispatch_action(action, window, cx);
         }
     }
 
@@ -1456,17 +2023,8 @@ impl WorkspaceShell {
         let server_name = self.active_server_name();
         let account_initials = self.account_initials();
 
-        let (status_glyph, status_label, status_color) = match &self.lifecycle.phase {
-            crate::ConnectionPhase::Ready => ("●", "Connected".to_string(), colors.success),
-            crate::ConnectionPhase::Degraded(_) => {
-                ("!", self.lifecycle.status_label(), colors.warning)
-            }
-            crate::ConnectionPhase::Offline => ("○", "Offline".to_string(), colors.muted_text),
-            crate::ConnectionPhase::Reconnecting { .. } => {
-                ("⟳", self.lifecycle.status_label(), colors.warning)
-            }
-            _ => ("⟳", self.lifecycle.status_label(), colors.accent),
-        };
+        let status_label = self.lifecycle.status_label();
+        let show_status = !matches!(self.lifecycle.phase, crate::ConnectionPhase::Ready);
 
         div()
             .id("integrated-titlebar")
@@ -1524,8 +2082,15 @@ impl WorkspaceShell {
                             .on_click(cx.listener(|shell, _, _, cx| shell.open_server_picker(cx)))
                             .min_w_0()
                             .text_sm()
-                            .child(div().text_color(status_color).child(status_glyph))
                             .child(div().min_w_0().truncate().child(server_name))
+                            .when(show_status, |picker| {
+                                picker.child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(colors.muted_text)
+                                        .child(status_label),
+                                )
+                            })
                             .child(div().text_xs().text_color(colors.muted_text).child("⌄")),
                     ),
             )
@@ -1601,6 +2166,22 @@ impl WorkspaceShell {
                     .text_color(colors.muted_text)
                     .child(dock.title.to_uppercase()),
             )
+            .when(dock.title == "Connections", |dock_view| {
+                dock_view.child(
+                    div()
+                        .id("add-database-connection")
+                        .role(Role::Button)
+                        .px_2()
+                        .py_1()
+                        .rounded_sm()
+                        .text_color(colors.muted_text)
+                        .hover(|button| button.bg(colors.selected_surface).text_color(colors.text))
+                        .on_click(cx.listener(|shell, _, window, cx| {
+                            shell.open_database_connection(window, cx)
+                        }))
+                        .child("+ Add database connection…"),
+                )
+            })
             .when(dock.title == "Connections", |dock_view| {
                 let selected = self.selected_workspace_id;
                 let mut rows: Vec<gpui::AnyElement> = Vec::new();
@@ -1718,18 +2299,26 @@ impl WorkspaceShell {
         self.modal.as_ref().map(|modal| {
             let server_picker = matches!(modal, Modal::ServerPicker);
             let account = matches!(modal, Modal::Account);
+            let database_connection = matches!(modal, Modal::DatabaseConnection);
             let card_width = if server_picker {
                 360.0
             } else if account {
                 320.0
+            } else if database_connection {
+                match self.database_wizard_step {
+                    DatabaseWizardStep::Provider => 760.0,
+                    DatabaseWizardStep::Details => 900.0,
+                    DatabaseWizardStep::Review => 720.0,
+                }
             } else {
                 520.0
             };
             let content = match modal {
                 Modal::CommandPalette => {
-                    let query = self.query_input.read(cx).text().to_lowercase();
                     let commands = self.filtered_commands(cx);
-                    let selected_idx = self.palette_selected.min(commands.len().saturating_sub(1));
+                    let command_count = commands.len();
+                    let palette_height =
+                        command_count.min(PALETTE_VISIBLE_ROWS) as f32 * PALETTE_ROW_HEIGHT;
                     div()
                         .flex()
                         .flex_col()
@@ -1751,59 +2340,79 @@ impl WorkspaceShell {
                                     .child("No matching commands"),
                             )
                         })
-                        .child(
-                            div()
-                                .id("command-list")
-                                .flex()
-                                .flex_col()
-                                .gap_px()
-                                .max_h(px(360.))
-                                .overflow_y_scroll()
-                                .children(commands.into_iter().enumerate().map(
-                                    |(idx, command)| {
-                                        let enabled = command.enabled();
-                                        let id = command.id;
-                                        let selected = idx == selected_idx;
-                                        let right =
-                                            command.disabled_reason.unwrap_or(command.shortcut);
-                                        let mut row = div()
-                                            .id(id)
-                                            .flex()
-                                            .items_center()
-                                            .justify_between()
-                                            .gap_2()
-                                            .h(px(30.))
-                                            .px_2()
-                                            .rounded_sm()
-                                            .when(selected && enabled, |row| {
-                                                row.bg(colors.selected_surface)
+                        .when(command_count > 0, |palette| {
+                            palette.child(
+                                uniform_list(
+                                    "command-list",
+                                    command_count,
+                                    cx.processor(move |shell, range: Range<usize>, _, cx| {
+                                        let query =
+                                            shell.query_input.read(cx).text().to_lowercase();
+                                        let commands = shell.filtered_commands(cx);
+                                        let selected_idx = shell
+                                            .palette_selected
+                                            .min(commands.len().saturating_sub(1));
+                                        range
+                                            .filter_map(|idx| {
+                                                commands
+                                                    .get(idx)
+                                                    .cloned()
+                                                    .map(|command| (idx, command))
                                             })
-                                            .when(!enabled, |row| row.text_color(colors.muted_text))
-                                            .child(highlight_match(
-                                                command.label,
-                                                &query,
-                                                colors.accent,
-                                            ))
-                                            .child(
-                                                div()
-                                                    .flex_none()
-                                                    .text_xs()
-                                                    .text_color(colors.muted_text)
-                                                    .child(right),
-                                            );
-                                        if enabled {
-                                            row = row
-                                                .hover(|row| row.bg(colors.selected_surface))
-                                                .on_click(cx.listener(
-                                                    move |shell, _, window, cx| {
-                                                        shell.run_command(id, window, cx)
-                                                    },
-                                                ));
-                                        }
-                                        row
-                                    },
-                                )),
-                        )
+                                            .map(|(idx, command)| {
+                                                let enabled = command.enabled();
+                                                let id = command.id;
+                                                let selected = idx == selected_idx;
+                                                let right = command
+                                                    .disabled_reason
+                                                    .unwrap_or(command.shortcut);
+                                                let mut row = div()
+                                                    .id(id)
+                                                    .flex()
+                                                    .items_center()
+                                                    .justify_between()
+                                                    .gap_2()
+                                                    .h(px(PALETTE_ROW_HEIGHT))
+                                                    .px_2()
+                                                    .rounded_sm()
+                                                    .when(selected && enabled, |row| {
+                                                        row.bg(colors.selected_surface)
+                                                    })
+                                                    .when(!enabled, |row| {
+                                                        row.text_color(colors.muted_text)
+                                                    })
+                                                    .child(highlight_match(
+                                                        command.label,
+                                                        &query,
+                                                        colors.accent,
+                                                    ))
+                                                    .child(
+                                                        div()
+                                                            .flex_none()
+                                                            .text_xs()
+                                                            .text_color(colors.muted_text)
+                                                            .child(right),
+                                                    );
+                                                if enabled {
+                                                    row = row
+                                                        .hover(|row| {
+                                                            row.bg(colors.selected_surface)
+                                                        })
+                                                        .on_click(cx.listener(
+                                                            move |shell, _, window, cx| {
+                                                                shell.run_command(id, window, cx)
+                                                            },
+                                                        ));
+                                                }
+                                                row
+                                            })
+                                            .collect()
+                                    }),
+                                )
+                                .h(px(palette_height))
+                                .track_scroll(&self.palette_scroll_handle),
+                            )
+                        })
                         .into_any_element()
                 }
                 Modal::ServerPicker => {
@@ -1831,22 +2440,7 @@ impl WorkspaceShell {
                                     cx.listener(|shell, _, _, cx| shell.use_local_server(cx)),
                                 )
                             })
-                            .child(
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .gap_2()
-                                    .child(
-                                        div()
-                                            .text_color(if local_active {
-                                                colors.success
-                                            } else {
-                                                colors.muted_text
-                                            })
-                                            .child("●"),
-                                    )
-                                    .child("Local Sift"),
-                            )
+                            .child(div().flex().items_center().gap_2().child("Local Sift"))
                             .child(
                                 div()
                                     .text_xs()
@@ -1879,34 +2473,20 @@ impl WorkspaceShell {
                                     )
                                 })
                                 .child(
-                                    div()
-                                        .flex()
-                                        .items_center()
-                                        .gap_2()
-                                        .min_w_0()
-                                        .child(
-                                            div()
-                                                .text_color(if active {
-                                                    colors.success
-                                                } else {
-                                                    colors.muted_text
-                                                })
-                                                .child("●"),
-                                        )
-                                        .child(
-                                            div()
-                                                .flex()
-                                                .flex_col()
-                                                .min_w_0()
-                                                .child(profile.name)
-                                                .child(
-                                                    div()
-                                                        .text_xs()
-                                                        .text_color(colors.muted_text)
-                                                        .truncate()
-                                                        .child(profile.base_url),
-                                                ),
-                                        ),
+                                    div().flex().items_center().gap_2().min_w_0().child(
+                                        div()
+                                            .flex()
+                                            .flex_col()
+                                            .min_w_0()
+                                            .child(profile.name)
+                                            .child(
+                                                div()
+                                                    .text_xs()
+                                                    .text_color(colors.muted_text)
+                                                    .truncate()
+                                                    .child(profile.base_url),
+                                            ),
+                                    ),
                                 )
                                 .when(active, |row| {
                                     row.child(
@@ -2281,6 +2861,566 @@ impl WorkspaceShell {
                         }
                     }
                 }
+                Modal::DatabaseConnection => {
+                    let step = self.database_wizard_step;
+                    let selected_tenant = self.selected_database_tenant;
+                    let selected_provider = self.selected_database_provider.clone();
+                    let selected_ssl_mode = self.selected_database_ssl_mode.clone();
+                    let pending = self.database_connection_pending;
+                    let tenant_rows = self.lifecycle.tenants.iter().map(|tenant| {
+                        let tenant_id = tenant.id.0;
+                        let selected = selected_tenant == Some(tenant_id);
+                        div()
+                            .id(("database-tenant", tenant_id as usize))
+                            .role(Role::Button)
+                            .px_2()
+                            .py_1()
+                            .rounded_sm()
+                            .border_1()
+                            .border_color(if selected { colors.accent } else { colors.border })
+                            .when(selected, |row| {
+                                row.bg(colors.accent).text_color(gpui::white())
+                            })
+                            .when(!selected, |row| {
+                                row.hover(|row| row.bg(colors.selected_surface))
+                            })
+                            .on_click(cx.listener(move |shell, _, _, cx| {
+                                shell.selected_database_tenant = Some(tenant_id);
+                                cx.notify();
+                            }))
+                            .child(tenant.name.clone())
+                    });
+                    let provider_rows = [
+                        (
+                            "sift/postgres",
+                            "PostgreSQL",
+                            "databases/postgres.svg",
+                        ),
+                        (
+                            "sift/sql-server",
+                            "Microsoft SQL Server",
+                            "databases/sql-server.svg",
+                        ),
+                    ]
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, (provider_id, display_name, asset))| {
+                            let available = self
+                                .lifecycle
+                                .providers
+                                .iter()
+                                .find(|provider| {
+                                    provider.provider.provider_id.as_str() == provider_id
+                                })
+                                .is_some_and(|provider| provider.available);
+                            let selected =
+                                selected_provider.as_deref() == Some(provider_id);
+                            let logo_size = if provider_id == "sift/postgres" {
+                                82.0
+                            } else {
+                                76.0
+                            };
+                            let provider_id = provider_id.to_owned();
+                            div()
+                                .id(("database-provider", index))
+                                .role(Role::Button)
+                                .aria_label(format!("Select {display_name}"))
+                                .relative()
+                                .flex_1()
+                                .min_w(px(280.))
+                                .min_h(px(190.))
+                                .p_4()
+                                .rounded_lg()
+                                .border_2()
+                                .border_color(if selected {
+                                    colors.accent
+                                } else {
+                                    colors.border
+                                })
+                                .when(selected, |row| {
+                                    row.bg(colors.accent).text_color(gpui::white())
+                                })
+                                .when(!available, |row| row.opacity(0.45))
+                                .when(!selected && available, |row| {
+                                    row.hover(|row| row.bg(colors.selected_surface))
+                                })
+                                .when(available, |row| {
+                                    row.on_click(cx.listener(move |shell, _, _, cx| {
+                                        shell.select_database_provider(provider_id.clone(), cx);
+                                    }))
+                                })
+                                .child(
+                                    div()
+                                        .h(px(112.))
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .child(
+                                            div()
+                                                .size(px(96.))
+                                                .flex()
+                                                .items_center()
+                                                .justify_center()
+                                                .rounded_lg()
+                                                .bg(gpui::white())
+                                                .border_1()
+                                                .border_color(colors.border)
+                                                .child(
+                                                    img(database_logo(asset))
+                                                        .size(px(logo_size))
+                                                        .object_fit(gpui::ObjectFit::Contain),
+                                                ),
+                                        ),
+                                )
+                                .child(
+                                    div()
+                                        .text_center()
+                                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                                        .child(display_name),
+                                )
+                                .when(!available, |card| card.child(
+                                    div()
+                                        .text_xs()
+                                        .text_center()
+                                        .when(!selected, |copy| copy.text_color(colors.muted_text))
+                                        .child("Unavailable on this server"),
+                                ))
+                                .when(selected, |card| {
+                                    card.child(
+                                        div()
+                                            .absolute()
+                                            .top_2()
+                                            .right_2()
+                                            .size(px(22.))
+                                            .flex()
+                                            .items_center()
+                                            .justify_center()
+                                            .rounded_full()
+                                            .bg(gpui::white())
+                                            .text_color(colors.accent)
+                                            .child("✓"),
+                                    )
+                                })
+                        });
+                    let (security_label, security_options): (&str, &[(&str, &str)]) =
+                        if selected_provider.as_deref() == Some("sift/sql-server") {
+                            (
+                                "ENCRYPTION",
+                                &[
+                                    ("disable", "Disabled"),
+                                    ("require", "Required"),
+                                    ("trust_server_certificate", "Trust Server Certificate"),
+                                ],
+                            )
+                        } else {
+                            (
+                                "SSL MODE",
+                                &[
+                                    ("disable", "Disabled"),
+                                    ("prefer", "Prefer"),
+                                    ("require", "Require"),
+                                    ("verify_ca", "Verify CA"),
+                                    ("verify_full", "Verify Full"),
+                                ],
+                            )
+                        };
+                    let ssl_rows = security_options.iter().copied().enumerate().map(
+                        |(index, (value, label))| {
+                            let selected = selected_ssl_mode.as_deref() == Some(value);
+                            div()
+                                .id(("database-ssl-mode", index))
+                                .role(Role::Button)
+                                .px_2()
+                                .py_1()
+                                .rounded_sm()
+                                .border_1()
+                                .border_color(if selected {
+                                    colors.accent
+                                } else {
+                                    colors.border
+                                })
+                                .when(selected, |row| {
+                                    row.bg(colors.accent).text_color(gpui::white())
+                                })
+                                .when(!selected, |row| {
+                                    row.hover(|row| row.bg(colors.selected_surface))
+                                })
+                                .on_click(cx.listener(move |shell, _, _, cx| {
+                                    shell.selected_database_ssl_mode = Some(value.to_owned());
+                                    cx.notify();
+                                }))
+                                .child(label)
+                        },
+                    );
+                    let field = |label: &'static str, input: Entity<TextInput>| {
+                        let focus_handle = input.focus_handle(cx);
+                        div()
+                            .debug_selector(move || label.to_owned())
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .child(div().text_xs().text_color(colors.muted_text).child(label))
+                            .child(
+                                div()
+                                    .border_1()
+                                    .border_color(colors.border)
+                                    .rounded_sm()
+                                    .cursor(gpui::CursorStyle::IBeam)
+                                    .on_mouse_down(
+                                        MouseButton::Left,
+                                        move |_, window, cx| {
+                                            cx.stop_propagation();
+                                            focus_handle.focus(window, cx);
+                                        },
+                                    )
+                                    .child(input),
+                            )
+                    };
+                    let step_number = match step {
+                        DatabaseWizardStep::Provider => 1,
+                        DatabaseWizardStep::Details => 2,
+                        DatabaseWizardStep::Review => 3,
+                    };
+                    let step_rows = ["Database", "Connection", "Review"]
+                        .into_iter()
+                        .enumerate()
+                        .map(|(index, label)| {
+                            let number = index + 1;
+                            let active = number == step_number;
+                            let complete = number < step_number;
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .child(
+                                    div()
+                                        .size(px(22.))
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .rounded_full()
+                                        .border_1()
+                                        .border_color(if active || complete {
+                                            colors.accent
+                                        } else {
+                                            colors.border
+                                        })
+                                        .when(active || complete, |circle| {
+                                            circle.bg(colors.accent).text_color(gpui::white())
+                                        })
+                                        .text_xs()
+                                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                                        .child(if complete {
+                                            "✓".to_owned()
+                                        } else {
+                                            number.to_string()
+                                        }),
+                                )
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .font_weight(if active {
+                                            gpui::FontWeight::SEMIBOLD
+                                        } else {
+                                            gpui::FontWeight::NORMAL
+                                        })
+                                        .text_color(if active {
+                                            colors.text
+                                        } else {
+                                            colors.muted_text
+                                        })
+                                        .child(label),
+                                )
+                        });
+                    let provider_name = selected_provider
+                        .as_deref()
+                        .map(|provider| match provider {
+                            "sift/postgres" => "PostgreSQL",
+                            "sift/sql-server" => "Microsoft SQL Server",
+                            _ => provider,
+                        })
+                        .unwrap_or("Not selected");
+                    let tenant_name = selected_tenant
+                        .and_then(|id| {
+                            self.lifecycle
+                                .tenants
+                                .iter()
+                                .find(|tenant| tenant.id.0 == id)
+                        })
+                        .map(|tenant| tenant.name.clone())
+                        .unwrap_or_else(|| "Not selected".into());
+                    let review_row = |label: &'static str, value: String| {
+                        div()
+                            .flex()
+                            .items_start()
+                            .justify_between()
+                            .gap_4()
+                            .py_2()
+                            .border_b_1()
+                            .border_color(colors.border)
+                            .child(div().text_color(colors.muted_text).child(label))
+                            .child(div().text_right().child(value))
+                    };
+                    div()
+                        .flex()
+                        .flex_col()
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .justify_between()
+                                .gap_6()
+                                .px_4()
+                                .py_3()
+                                .border_b_1()
+                                .border_color(colors.border)
+                                .child(
+                                    div()
+                                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                                        .child("Add Database Connection"),
+                                )
+                                .child(
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .gap_5()
+                                        .children(step_rows),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .id("database-connection-form")
+                                .tab_group()
+                                .flex()
+                                .flex_col()
+                                .gap_4()
+                                .max_h(px(560.))
+                                .overflow_y_scroll()
+                                .p_5()
+                                .when(step == DatabaseWizardStep::Provider, |form| {
+                                    form.child(
+                                        div()
+                                            .flex()
+                                            .flex_col()
+                                            .gap_4()
+                                            .child(
+                                                div()
+                                                    .flex()
+                                                    .flex_wrap()
+                                                    .gap_3()
+                                                    .children(provider_rows),
+                                            ),
+                                    )
+                                })
+                                .when(step == DatabaseWizardStep::Details, |form| {
+                                    form
+                                        .child(
+                                            div()
+                                                .flex_col()
+                                                .flex()
+                                                .gap_2()
+                                                .child(
+                                                    div()
+                                                        .text_xs()
+                                                        .text_color(colors.muted_text)
+                                                        .child("WORKSPACE"),
+                                                )
+                                                .child(div().flex().flex_1().flex_wrap().gap_1().children(tenant_rows)),
+                                        )
+                                        .child(
+                                            div()
+                                                .flex()
+                                                .gap_3()
+                                                .child(div().flex_1().child(field("CONNECTION NAME", self.database_name_input.clone())))
+                                                .child(div().flex_1().child(field("DATABASE", self.database_catalog_input.clone()))),
+                                        )
+                                        .child(
+                                            div()
+                                                .flex()
+                                                .gap_3()
+                                                .child(div().flex_1().child(field("HOST", self.database_host_input.clone())))
+                                                .child(div().w(px(130.)).child(field("PORT", self.database_port_input.clone()))),
+                                        )
+                                        .child(
+                                            div()
+                                                .flex()
+                                                .gap_3()
+                                                .child(div().flex_1().child(field("USERNAME", self.database_user_input.clone())))
+                                                .child(div().flex_1().child(field("PASSWORD", self.database_password_input.clone()))),
+                                        )
+                                        .child(
+                                            div()
+                                                .flex()
+                                                .flex_col()
+                                                .gap_1()
+                                                .child(div().text_xs().text_color(colors.muted_text).child(security_label))
+                                                .child(div().flex().flex_wrap().gap_1().children(ssl_rows)),
+                                        )
+                                        .child(
+                                            div()
+                                                .pt_3()
+                                                .border_t_1()
+                                                .border_color(colors.border)
+                                                .font_weight(gpui::FontWeight::SEMIBOLD)
+                                                .child("Advanced"),
+                                        )
+                                        .when(selected_provider.as_deref() == Some("sift/postgres"), |form| {
+                                            form.child(
+                                                div()
+                                                    .flex()
+                                                    .gap_3()
+                                                    .child(div().flex_1().child(field("SEARCH PATH", self.database_search_path_input.clone())))
+                                                    .child(div().flex_1().child(field("APPLICATION NAME", self.database_application_name_input.clone()))),
+                                            )
+                                        })
+                                        .child(
+                                            div()
+                                                .flex()
+                                                .gap_3()
+                                                .child(div().flex_1().child(field("CONNECT TIMEOUT (SECONDS)", self.database_timeout_input.clone())))
+                                                .child(div().flex_1().child(field("MINIMUM POOL SIZE", self.database_pool_min_input.clone())))
+                                                .when(selected_provider.as_deref() == Some("sift/postgres"), |row| {
+                                                    row.child(div().flex_1().child(field("MAXIMUM POOL SIZE", self.database_pool_max_input.clone())))
+                                                }),
+                                        )
+                                })
+                                .when(step == DatabaseWizardStep::Review, |form| {
+                                    form
+                                        .child(review_row("Database type", provider_name.to_owned()))
+                                        .child(review_row("Workspace", tenant_name))
+                                        .child(review_row("Connection name", self.database_name_input.read(cx).text().to_owned()))
+                                        .child(review_row(
+                                            "Server",
+                                            format!("{}:{}", self.database_host_input.read(cx).text(), self.database_port_input.read(cx).text()),
+                                        ))
+                                        .child(review_row(
+                                            "Database",
+                                            if self.database_catalog_input.read(cx).text().is_empty() {
+                                                "Provider default".into()
+                                            } else {
+                                                self.database_catalog_input.read(cx).text().to_owned()
+                                            },
+                                        ))
+                                        .child(review_row("Username", self.database_user_input.read(cx).text().to_owned()))
+                                        .child(review_row(
+                                            "Password",
+                                            if self.database_password_input.read(cx).text().is_empty() {
+                                                "Not provided".into()
+                                            } else {
+                                                "Stored securely".into()
+                                            },
+                                        ))
+                                        .child(review_row(
+                                            "Transport security",
+                                            selected_ssl_mode.clone().unwrap_or_else(|| "Provider default".into()).replace('_', " "),
+                                        ))
+                                })
+                                .children(self.database_connection_error.as_ref().map(|message| {
+                                    div()
+                                        .p_2()
+                                        .rounded_sm()
+                                        .bg(colors.surface)
+                                        .text_color(colors.danger)
+                                        .child(message.clone())
+                                })),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .justify_end()
+                                .px_4()
+                                .py_3()
+                                .border_t_1()
+                                .border_color(colors.border)
+                                .child(
+                                    div()
+                                        .flex()
+                                        .gap_2()
+                                        .child(
+                                            div()
+                                                .id("database-wizard-secondary")
+                                                .role(Role::Button)
+                                                .px_3()
+                                                .py_1()
+                                                .rounded_sm()
+                                                .hover(|button| button.bg(colors.selected_surface))
+                                                .when(!pending, |button| {
+                                                    button.on_click(cx.listener(
+                                                        move |shell, _, window, cx| {
+                                                            if step
+                                                                == DatabaseWizardStep::Provider
+                                                            {
+                                                                shell.dismiss_modal(
+                                                                    &DismissModal,
+                                                                    window,
+                                                                    cx,
+                                                                )
+                                                            } else {
+                                                                shell.database_wizard_back(
+                                                                    window, cx,
+                                                                )
+                                                            }
+                                                        },
+                                                    ))
+                                                })
+                                                .child(
+                                                    if step == DatabaseWizardStep::Provider {
+                                                        "Cancel"
+                                                    } else {
+                                                        "Back"
+                                                    },
+                                                ),
+                                        )
+                                        .child(
+                                            div()
+                                                .id("database-wizard-primary")
+                                                .role(Role::Button)
+                                                .px_3()
+                                                .py_1()
+                                                .rounded_sm()
+                                                .bg(if pending
+                                                    || (step == DatabaseWizardStep::Provider
+                                                        && selected_provider.is_none())
+                                                {
+                                                    colors.surface
+                                                } else {
+                                                    colors.accent
+                                                })
+                                                .when(
+                                                    !pending
+                                                        && (step != DatabaseWizardStep::Provider
+                                                            || selected_provider.is_some()),
+                                                    |button| {
+                                                        button
+                                                            .hover(|button| {
+                                                                button.bg(colors.accent_hover)
+                                                            })
+                                                            .on_click(cx.listener(
+                                                                move |shell, _, window, cx| {
+                                                                    if step
+                                                                        == DatabaseWizardStep::Review
+                                                                    {
+                                                                        shell.submit_database_connection(cx)
+                                                                    } else {
+                                                                        shell.database_wizard_next(window, cx)
+                                                                    }
+                                                                },
+                                                            ))
+                                                    },
+                                                )
+                                                .child(if pending {
+                                                    "Saving & Testing…"
+                                                } else if step == DatabaseWizardStep::Review {
+                                                    "Save & Connect"
+                                                } else {
+                                                    "Continue"
+                                                }),
+                                        ),
+                                ),
+                        )
+                        .into_any_element()
+                }
                 Modal::ConfirmClose { title } => div()
                     .flex()
                     .flex_col()
@@ -2294,19 +3434,39 @@ impl WorkspaceShell {
                 .key_context("SiftModal")
                 .absolute()
                 .inset_0()
+                .occlude()
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                 .flex()
                 .items_start()
                 .when(server_picker, |layer| {
                     layer.justify_start().pt(px(38.)).pl(px(38.))
                 })
                 .when(account, |layer| layer.justify_end().pt(px(38.)).pr_2())
-                .when(!server_picker && !account, |layer| {
-                    layer.justify_center().pt(px(100.)).bg(colors.scrim)
+                .when(database_connection, |layer| {
+                    layer
+                        .justify_center()
+                        .px_4()
+                        .pt(px(24.))
+                        .pb_4()
+                        .bg(colors.scrim)
                 })
+                .when(
+                    !server_picker && !account && !database_connection,
+                    |layer| layer.justify_center().pt(px(100.)).bg(colors.scrim),
+                )
                 .child(
                     div()
-                        .w(px(card_width))
-                        .p_4()
+                        .id("modal-card")
+                        .occlude()
+                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                        .w_full()
+                        .max_w(px(card_width))
+                        .when(server_picker || account, |card| {
+                            card.on_mouse_down_out(cx.listener(|shell, _, window, cx| {
+                                shell.dismiss_modal(&DismissModal, window, cx)
+                            }))
+                        })
+                        .when(!database_connection, |card| card.p_4())
                         .rounded_lg()
                         .border_1()
                         .border_color(colors.border)
@@ -2418,6 +3578,8 @@ impl gpui::Render for WorkspaceShell {
             .children(self.toasts.last().map(|toast| {
                 div()
                     .id("toast")
+                    .role(Role::Button)
+                    .aria_label("Dismiss notification")
                     .absolute()
                     .right_3()
                     .bottom(px(38.))
@@ -2426,6 +3588,8 @@ impl gpui::Render for WorkspaceShell {
                     .border_1()
                     .border_color(colors.border)
                     .bg(colors.elevated_surface)
+                    .hover(|toast| toast.bg(colors.selected_surface))
+                    .on_click(cx.listener(|shell, _, _, cx| shell.dismiss_toast(cx)))
                     .child(toast.message.clone())
             }))
             .children(self.tooltip.as_ref().map(|tooltip| {
@@ -2470,7 +3634,7 @@ fn highlight_match(label: &'static str, query: &str, accent: gpui::Hsla) -> impl
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gpui::{TestAppContext, VisualTestContext};
+    use gpui::{point, Modifiers, TestAppContext, VisualTestContext};
 
     fn shell(cx: &mut TestAppContext) -> gpui::WindowHandle<WorkspaceShell> {
         cx.update(|cx| {
@@ -2627,13 +3791,30 @@ mod tests {
         let focus = workspace.read_with(&cx, |shell, cx| shell.focus_handle(cx));
         cx.update(|window, cx| focus.dispatch_action(&OpenCommandPalette, window, cx));
         assert!(workspace.read_with(&cx, |shell, _| shell.left_dock.presentation.open));
-        // Arrow down to "Toggle Connections Dock" (index 6) and run it.
-        for _ in 0..6 {
+        // Arrow down to "Toggle Connections Dock" (index 10) and run it.
+        // This crosses the virtual list's ten-row viewport, exercising the
+        // scroll-to-selection path as well as command dispatch.
+        for _ in 0..10 {
             cx.update(|window, cx| focus.dispatch_action(&PaletteDown, window, cx));
         }
         cx.update(|window, cx| focus.dispatch_action(&PaletteConfirm, window, cx));
         assert!(!workspace.read_with(&cx, |shell, _| shell.left_dock.presentation.open));
         assert!(workspace.read_with(&cx, |shell, _| shell.modal().is_none()));
+    }
+
+    #[gpui::test]
+    fn command_palette_registry_exceeds_the_lazy_viewport(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        let commands = workspace.read_with(&cx, |shell, cx| shell.command_specs(cx));
+        assert!(commands.len() > PALETTE_VISIBLE_ROWS);
+        assert!(commands
+            .iter()
+            .any(|command| command.id == "query.execute-statement"));
+        assert!(commands
+            .iter()
+            .any(|command| command.id == "query.execute-document"));
     }
 
     #[gpui::test]
@@ -2671,6 +3852,242 @@ mod tests {
             workspace.read_with(&cx, |shell, _| shell.status.database.clone()),
             "No database"
         );
+    }
+
+    #[gpui::test]
+    fn add_database_form_sends_profile_without_exposing_password(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let (_event_sender, event_receiver) = tokio::sync::mpsc::unbounded_channel();
+        workspace.update(&mut cx, |shell, cx| {
+            shell.attach_executor(sender, event_receiver, cx);
+            shell.selected_database_tenant = Some(7);
+            shell.selected_database_provider = Some("sift/postgres".into());
+            shell
+                .database_name_input
+                .update(cx, |input, cx| input.set_text("Reporting", cx));
+            shell
+                .database_host_input
+                .update(cx, |input, cx| input.set_text("db.internal", cx));
+            shell
+                .database_port_input
+                .update(cx, |input, cx| input.set_text("5432", cx));
+            shell
+                .database_catalog_input
+                .update(cx, |input, cx| input.set_text("analytics", cx));
+            shell
+                .database_user_input
+                .update(cx, |input, cx| input.set_text("sift", cx));
+            shell
+                .database_password_input
+                .update(cx, |input, cx| input.set_text("top-secret", cx));
+            shell
+                .database_search_path_input
+                .update(cx, |input, cx| input.set_text("public, reporting", cx));
+            shell
+                .database_application_name_input
+                .update(cx, |input, cx| input.set_text("sift-desktop", cx));
+            shell
+                .database_timeout_input
+                .update(cx, |input, cx| input.set_text("15", cx));
+            shell
+                .database_pool_min_input
+                .update(cx, |input, cx| input.set_text("2", cx));
+            shell
+                .database_pool_max_input
+                .update(cx, |input, cx| input.set_text("12", cx));
+            shell.submit_database_connection(cx);
+        });
+        match receiver.try_recv().unwrap() {
+            ExecutorCommand::CreateConnectionProfile {
+                tenant_id,
+                name,
+                provider_id,
+                configuration,
+                credentials,
+            } => {
+                assert_eq!(tenant_id, 7);
+                assert_eq!(name, "Reporting");
+                assert_eq!(provider_id.as_str(), "sift/postgres");
+                assert_eq!(configuration["port"], 5432);
+                assert_eq!(configuration["ssl_mode"], "prefer");
+                assert_eq!(
+                    configuration["engine_specific"]["search_path"],
+                    serde_json::json!(["public", "reporting"])
+                );
+                assert_eq!(
+                    configuration["engine_specific"]["application_name"],
+                    "sift-desktop"
+                );
+                assert_eq!(configuration["engine_specific"]["connect_timeout_secs"], 15);
+                assert_eq!(configuration["engine_specific"]["pool_min_size"], 2);
+                assert_eq!(configuration["engine_specific"]["pool_max_size"], 12);
+                assert_eq!(credentials.unwrap()["password"], "top-secret");
+            }
+            _ => panic!("expected profile creation command"),
+        }
+    }
+
+    #[gpui::test]
+    fn database_wizard_stages_selection_details_and_review(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+
+        workspace.update_in(&mut cx, |shell, window, cx| {
+            shell.open_database_connection(window, cx);
+            assert_eq!(shell.database_wizard_step, DatabaseWizardStep::Provider);
+            assert!(shell.selected_database_provider.is_none());
+            shell.select_database_provider("sift/postgres".into(), cx);
+            assert_eq!(shell.database_port_input.read(cx).text(), "5432");
+            assert_eq!(shell.selected_database_ssl_mode.as_deref(), Some("prefer"));
+            shell.database_wizard_next(window, cx);
+            assert_eq!(shell.database_wizard_step, DatabaseWizardStep::Details);
+            shell.selected_database_tenant = Some(7);
+            shell
+                .database_name_input
+                .update(cx, |input, cx| input.set_text("Reporting", cx));
+            shell
+                .database_user_input
+                .update(cx, |input, cx| input.set_text("sift", cx));
+            shell.database_wizard_next(window, cx);
+            assert_eq!(shell.database_wizard_step, DatabaseWizardStep::Review);
+        });
+    }
+
+    #[gpui::test]
+    fn database_details_support_tab_and_shift_tab_focus_traversal(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+
+        workspace.update_in(&mut cx, |shell, _, cx| {
+            shell.modal = Some(Modal::DatabaseConnection);
+            shell.database_wizard_step = DatabaseWizardStep::Details;
+            shell.select_database_provider("sift/postgres".into(), cx);
+            cx.notify();
+        });
+        cx.run_until_parked();
+
+        let name_bounds = cx
+            .debug_bounds("CONNECTION NAME")
+            .expect("connection name field should be rendered");
+        cx.simulate_click(name_bounds.center(), gpui::Modifiers::default());
+        cx.simulate_input("Reporting");
+
+        let name_focus =
+            workspace.read_with(&cx, |shell, cx| shell.database_name_input.focus_handle(cx));
+        workspace.update_in(&mut cx, |_, window, _| {
+            assert!(
+                name_focus.is_focused(window),
+                "clicking the modal field should retain input focus"
+            );
+        });
+        cx.update(|window, cx| name_focus.dispatch_action(&sift_ui::Tab, window, cx));
+        workspace.update_in(&mut cx, |shell, window, cx| {
+            assert!(
+                shell
+                    .database_catalog_input
+                    .focus_handle(cx)
+                    .is_focused(window),
+                "Tab should move focus from connection name to database"
+            );
+        });
+        cx.simulate_input("analytics");
+        assert_eq!(
+            workspace.read_with(&cx, |shell, cx| shell
+                .database_catalog_input
+                .read(cx)
+                .text()
+                .to_owned()),
+            "analytics"
+        );
+
+        let catalog_focus = workspace.read_with(&cx, |shell, cx| {
+            shell.database_catalog_input.focus_handle(cx)
+        });
+        cx.update(|window, cx| catalog_focus.dispatch_action(&sift_ui::Backtab, window, cx));
+        assert_eq!(
+            workspace.read_with(&cx, |shell, cx| shell
+                .database_name_input
+                .read(cx)
+                .text()
+                .to_owned()),
+            "Reporting"
+        );
+    }
+
+    #[gpui::test]
+    fn sql_server_selection_sets_defaults_and_engine_security(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let (_event_sender, event_receiver) = tokio::sync::mpsc::unbounded_channel();
+        workspace.update(&mut cx, |shell, cx| {
+            shell.attach_executor(sender, event_receiver, cx);
+            shell.selected_database_tenant = Some(7);
+            shell.select_database_provider("sift/sql-server".into(), cx);
+            shell
+                .database_name_input
+                .update(cx, |input, cx| input.set_text("Warehouse", cx));
+            shell
+                .database_host_input
+                .update(cx, |input, cx| input.set_text("sql.internal", cx));
+            shell
+                .database_user_input
+                .update(cx, |input, cx| input.set_text("sift", cx));
+            shell.selected_database_ssl_mode = Some("trust_server_certificate".into());
+            shell.submit_database_connection(cx);
+        });
+
+        match receiver.try_recv().unwrap() {
+            ExecutorCommand::CreateConnectionProfile {
+                provider_id,
+                configuration,
+                ..
+            } => {
+                assert_eq!(provider_id.as_str(), "sift/sql-server");
+                assert_eq!(configuration["port"], 1433);
+                assert!(configuration.get("ssl_mode").is_none());
+                assert_eq!(configuration["engine_specific"]["encrypt"], true);
+                assert_eq!(
+                    configuration["engine_specific"]["trust_server_certificate"],
+                    true
+                );
+            }
+            _ => panic!("expected profile creation command"),
+        }
+    }
+
+    #[gpui::test]
+    fn toast_expires_and_current_local_server_is_a_no_op(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let (_event_sender, event_receiver) = tokio::sync::mpsc::unbounded_channel();
+        workspace.update(&mut cx, |shell, cx| {
+            shell.attach_instance_manager(sender, event_receiver, Vec::new(), cx);
+            shell
+                .lifecycle
+                .apply(LifecycleEvent::Selected(crate::InstanceSpec {
+                    id: "local".into(),
+                    name: "Local Sift".into(),
+                    base_url: "http://127.0.0.1:7474".into(),
+                    kind: crate::InstanceKind::Local,
+                }));
+            shell.use_local_server(cx);
+            shell.show_toast("Connected to Local Sift".into(), cx);
+        });
+        assert!(receiver.try_recv().is_err());
+        assert!(workspace.read_with(&cx, |shell, _| !shell.toasts.is_empty()));
+        cx.background_executor
+            .advance_clock(std::time::Duration::from_secs(5));
+        cx.run_until_parked();
+        assert!(workspace.read_with(&cx, |shell, _| shell.toasts.is_empty()));
     }
 
     #[gpui::test]
@@ -2768,6 +4185,29 @@ mod tests {
                 panic!("expected connect command")
             }
         }
+    }
+
+    #[gpui::test]
+    fn app_bar_popovers_dismiss_on_mouse_down_outside(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+
+        workspace.update(&mut cx, |shell, cx| shell.open_server_picker(cx));
+        cx.simulate_mouse_down(
+            point(px(10.), px(500.)),
+            MouseButton::Left,
+            Modifiers::default(),
+        );
+        assert!(workspace.read_with(&cx, |shell, _| shell.modal().is_none()));
+
+        workspace.update(&mut cx, |shell, cx| shell.open_account(cx));
+        cx.simulate_mouse_down(
+            point(px(10.), px(500.)),
+            MouseButton::Left,
+            Modifiers::default(),
+        );
+        assert!(workspace.read_with(&cx, |shell, _| shell.modal().is_none()));
     }
 
     #[gpui::test]

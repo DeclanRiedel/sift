@@ -199,7 +199,9 @@ surfaces, then admin/platform. Within P0, the connection experience comes first.
 
 ### Connection profiles & credentials — connection editor
 
-- [ ] `upsert_connection_profile`, `delete_connection_profile` — profile editor (M4)
+- [~] `upsert_connection_profile`, `delete_connection_profile` — create and
+  Save & Connect are available in the Connections dock; edit/delete remain for
+  the full profile editor (M4)
 - [ ] `set_connection_credential` — credential entry (M4)
 - [ ] `connection_policy`, `update_connection_policy` — policy editor (M5)
 

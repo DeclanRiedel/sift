@@ -113,6 +113,12 @@ full server-management dialog. The center shows the active room/workspace;
 database profiles remain in the Connections dock. The square account control
 shows the identity returned by the current server.
 
+To add a PostgreSQL or SQL Server database, choose **+ Add database
+connection…** at the top of the Connections dock. Select the tenant and
+provider, enter the host and credentials, then choose **Save & Connect**.
+Connection passwords are sent to the server's configured secret backend and
+are not persisted in desktop presentation state.
+
 Enable **Remember token in the OS keychain** to save the credential in the
 platform credential service. Disable it for a session-only token. Saved
 instance names and URLs live in the private desktop `instances.json`; bearer
