@@ -401,8 +401,13 @@ impl gpui::Render for TextInput {
             .on_action(cx.listener(Self::tab))
             .on_action(cx.listener(Self::backtab))
             .w_full()
+            .min_w_0()
+            .h(px(26.))
+            .flex()
+            .items_center()
+            .overflow_hidden()
+            .whitespace_nowrap()
             .px_2()
-            .py_1()
             .child(TextElement { input: cx.entity() })
     }
 }

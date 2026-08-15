@@ -904,17 +904,21 @@ impl gpui::Render for QueryEditor {
                     .child(
                         div()
                             .flex()
+                            .flex_1()
+                            .min_w_0()
+                            .overflow_hidden()
                             .items_center()
                             .gap_2()
                             .text_xs()
                             .text_color(colors.muted_text)
                             .child("SQL")
                             .child(div().size(px(3.)).rounded_full().bg(colors.strong_border))
-                            .child("Collaborative query"),
+                            .child(div().min_w_0().truncate().child("Collaborative query")),
                     )
                     .child(
                         div()
                             .id("editor-run-statement")
+                            .flex_none()
                             .role(Role::Button)
                             .aria_label("Run current SQL statement")
                             .h(px(24.))
@@ -934,7 +938,13 @@ impl gpui::Render for QueryEditor {
                             }))
                             .child(icon(IconName::Play, colors.accent_hover, 12.))
                             .child("Run")
-                            .child(div().ml_1().text_color(colors.muted_text).child("Ctrl ↵")),
+                            .child(
+                                div()
+                                    .flex_none()
+                                    .ml_1()
+                                    .text_color(colors.muted_text)
+                                    .child("Ctrl ↵"),
+                            ),
                     ),
             )
             .child(

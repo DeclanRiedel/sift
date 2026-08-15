@@ -143,14 +143,14 @@ impl Theme {
 impl Default for ThemeMetrics {
     fn default() -> Self {
         Self {
-            control_height: px(28.),
-            compact_control_height: px(24.),
-            row_height: px(28.),
+            control_height: px(24.),
+            compact_control_height: px(20.),
+            row_height: px(26.),
             tab_height: px(32.),
-            toolbar_height: px(36.),
-            status_height: px(24.),
-            radius: px(5.),
-            radius_large: px(9.),
+            toolbar_height: px(34.),
+            status_height: px(22.),
+            radius: px(4.),
+            radius_large: px(8.),
         }
     }
 }

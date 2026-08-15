@@ -336,6 +336,7 @@ impl ResultsView {
         let colors = self.theme.colors;
         div()
             .h(px(30.))
+            .flex_none()
             .flex()
             .items_stretch()
             .border_b_1()
@@ -345,38 +346,54 @@ impl ResultsView {
                 div()
                     .flex()
                     .flex_1()
+                    .min_w_0()
+                    .overflow_x_hidden()
                     .items_stretch()
-                    .children(ResultTab::ALL.into_iter().map(|tab| {
-                        let selected = tab == self.tab;
+                    .child(
                         div()
-                            .id(("result-tab", tab as usize))
+                            .id("result-tabs-scroll")
                             .flex()
-                            .items_center()
                             .h_full()
-                            .px_3()
-                            .relative()
-                            .text_sm()
-                            .when(selected, |el| el.text_color(colors.text))
-                            .when(selected, |el| {
-                                el.child(
-                                    div()
-                                        .absolute()
-                                        .left_2()
-                                        .right_2()
-                                        .bottom_0()
-                                        .h(px(1.))
-                                        .bg(colors.accent),
-                                )
-                            })
-                            .when(!selected, |el| el.text_color(colors.muted_text))
-                            .hover(|el| el.text_color(colors.text))
-                            .on_click(cx.listener(move |view, _, _, cx| view.select_tab(tab, cx)))
-                            .child(tab.label())
-                    })),
+                            .overflow_x_scroll()
+                            .children(ResultTab::ALL.into_iter().map(|tab| {
+                                let selected = tab == self.tab;
+                                div()
+                                    .id(("result-tab", tab as usize))
+                                    .flex_none()
+                                    .flex()
+                                    .items_center()
+                                    .h_full()
+                                    .px_3()
+                                    .relative()
+                                    .text_sm()
+                                    .when(selected, |el| el.text_color(colors.text))
+                                    .when(selected, |el| {
+                                        el.child(
+                                            div()
+                                                .absolute()
+                                                .left_2()
+                                                .right_2()
+                                                .bottom_0()
+                                                .h(px(1.))
+                                                .bg(colors.accent),
+                                        )
+                                    })
+                                    .when(!selected, |el| el.text_color(colors.muted_text))
+                                    .hover(|el| el.text_color(colors.text))
+                                    .on_click(
+                                        cx.listener(move |view, _, _, cx| view.select_tab(tab, cx)),
+                                    )
+                                    .child(tab.label())
+                            })),
+                    ),
             )
             .child(
                 div()
                     .flex()
+                    .flex_shrink_0()
+                    .max_w(px(260.))
+                    .min_w_0()
+                    .overflow_hidden()
                     .items_center()
                     .gap_2()
                     .px_2()
@@ -384,6 +401,8 @@ impl ResultsView {
                     .text_color(colors.muted_text)
                     .child(
                         div()
+                            .min_w_0()
+                            .truncate()
                             .px_1()
                             .rounded(px(3.))
                             .bg(colors.hovered_surface)
@@ -392,6 +411,7 @@ impl ResultsView {
                     .child(
                         div()
                             .id("copy-result-cell")
+                            .flex_none()
                             .role(gpui::Role::Button)
                             .aria_label("Copy selected result cell")
                             .size(px(24.))
