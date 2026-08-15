@@ -432,14 +432,24 @@ impl ResultsView {
         let colors = self.theme.colors;
         let Some(data) = self.state.ready() else {
             return div()
+                .size_full()
+                .flex()
+                .items_center()
+                .justify_center()
                 .p_4()
+                .text_center()
                 .text_color(colors.muted_text)
                 .child(self.state.status_label())
                 .into_any_element();
         };
         if data.columns.is_empty() {
             return div()
+                .size_full()
+                .flex()
+                .items_center()
+                .justify_center()
                 .p_4()
+                .text_center()
                 .text_color(colors.muted_text)
                 .child(self.state.status_label())
                 .into_any_element();
@@ -653,12 +663,22 @@ impl gpui::Render for ResultsView {
             ResultTab::Data => self.render_grid(cx),
             ResultTab::Messages => self.render_messages().into_any_element(),
             ResultTab::Explain => div()
+                .size_full()
+                .flex()
+                .items_center()
+                .justify_center()
                 .p_4()
+                .text_center()
                 .text_color(colors.muted_text)
                 .child("Run with EXPLAIN to see a plan here.")
                 .into_any_element(),
             ResultTab::History => div()
+                .size_full()
+                .flex()
+                .items_center()
+                .justify_center()
                 .p_4()
+                .text_center()
                 .text_color(colors.muted_text)
                 .child("Query history appears here.")
                 .into_any_element(),

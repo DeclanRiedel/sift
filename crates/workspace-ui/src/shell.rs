@@ -538,19 +538,48 @@ impl gpui::Render for Pane {
                                         .border_color(colors.subtle_border)
                                         .child(result.clone()),
                                 ),
-                            _ => body
-                                .child(div().p_4().child(format!("Query editor · {}", item.title))),
+                            _ => body.child(
+                                div()
+                                    .size_full()
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .p_4()
+                                    .text_color(colors.muted_text)
+                                    .child(format!("Query editor · {}", item.title)),
+                            ),
                         }
                     }
-                    Some(item) => body.child(div().p_4().text_color(colors.muted_text).child(
-                        match item.kind {
-                            ItemKind::Schema => format!("Schema view · {}", item.title),
-                            _ => "Welcome to Sift".into(),
-                        },
-                    )),
+                    Some(item) => body.child(
+                        div()
+                            .size_full()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .p_4()
+                            .child(
+                                div()
+                                    .max_w(px(420.))
+                                    .min_w_0()
+                                    .text_center()
+                                    .text_color(colors.muted_text)
+                                    .whitespace_normal()
+                                    .child(match item.kind {
+                                        ItemKind::Schema => {
+                                            format!("Schema view · {}", item.title)
+                                        }
+                                        _ => "Open a connection or create a query to begin.".into(),
+                                    }),
+                            ),
+                    ),
                     None => body.child(
                         div()
+                            .size_full()
+                            .flex()
+                            .items_center()
+                            .justify_center()
                             .p_4()
+                            .text_center()
                             .text_color(colors.muted_text)
                             .child("No open items"),
                     ),
@@ -2488,9 +2517,7 @@ impl WorkspaceShell {
                                     .flex()
                                     .items_center()
                                     .justify_center()
-                                    .gap_2()
                                     .text_color(colors.muted_text)
-                                    .child(icon(IconName::Search, colors.disabled_text, 15.))
                                     .child("No matching commands"),
                             )
                         })
@@ -3880,10 +3907,10 @@ impl WorkspaceShell {
                 .when(account, |layer| layer.justify_end().pt(px(38.)).pr_2())
                 .when(database_connection, |layer| {
                     layer
+                        .items_center()
                         .justify_center()
                         .px_4()
-                        .pt(px(24.))
-                        .pb_4()
+                        .py_4()
                         .bg(colors.scrim)
                 })
                 .when(
