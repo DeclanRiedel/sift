@@ -2149,7 +2149,6 @@ impl WorkspaceShell {
                             .on_click(cx.listener(|shell, _, _, cx| shell.open_server_picker(cx)))
                             .min_w_0()
                             .text_sm()
-                            .child(icon(IconName::Server, colors.muted_text, 14.))
                             .child(div().min_w_0().truncate().child(server_name))
                             .when(show_status, |picker| {
                                 picker.child(
@@ -2180,7 +2179,6 @@ impl WorkspaceShell {
                             .flex()
                             .items_center()
                             .gap_1()
-                            .child(icon(IconName::Workspace, colors.muted_text, 13.))
                             .child(div().truncate().child(workspace_label)),
                     ),
             )
@@ -2227,11 +2225,6 @@ impl WorkspaceShell {
 
     fn render_dock(&self, dock: &Dock, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = self.theme.colors;
-        let dock_icon = if dock.title == "Connections" {
-            IconName::Database
-        } else {
-            IconName::Info
-        };
         div()
             .id(dock.title)
             .key_context("SiftDock")
@@ -2256,7 +2249,6 @@ impl WorkspaceShell {
                     .text_xs()
                     .text_color(colors.muted_text)
                     .font_weight(gpui::FontWeight::SEMIBOLD)
-                    .child(icon(dock_icon, colors.muted_text, 13.))
                     .child(dock.title.to_uppercase()),
             )
             .when(dock.title == "Connections", |dock_view| {
@@ -2384,7 +2376,6 @@ impl WorkspaceShell {
                                     .on_click(cx.listener(move |shell, _, _, cx| {
                                         shell.open_workspace(&entry, cx)
                                     }))
-                                    .child(icon(IconName::Workspace, colors.muted_text, 13.))
                                     .child(div().min_w_0().truncate().child(format!(
                                         "{} / {}{features}",
                                         room.name, workspace.name
@@ -2613,7 +2604,6 @@ impl WorkspaceShell {
                                     .min_w_0()
                                     .items_center()
                                     .gap_2()
-                                    .child(icon(IconName::Server, colors.muted_text, 14.))
                                     .child(div().min_w_0().truncate().child("Local Sift")),
                             )
                             .child(
@@ -2658,7 +2648,6 @@ impl WorkspaceShell {
                                         .items_center()
                                         .gap_2()
                                         .min_w_0()
-                                        .child(icon(IconName::Server, colors.muted_text, 14.))
                                         .child(
                                         div()
                                             .flex()
@@ -2698,7 +2687,6 @@ impl WorkspaceShell {
                                 .items_center()
                                 .gap_2()
                                 .font_weight(gpui::FontWeight::SEMIBOLD)
-                                .child(icon(IconName::Server, colors.muted_text, 15.))
                                 .child("Sift Server"),
                         )
                         .child(div().flex().flex_col().gap_1().children(rows))
@@ -2874,7 +2862,6 @@ impl WorkspaceShell {
                                         .min_w_0()
                                         .items_center()
                                         .gap_2()
-                                        .child(icon(IconName::Server, colors.muted_text, 14.))
                                         .child(
                                             div().min_w_0().truncate().child("Local Sift"),
                                         ),
@@ -3086,9 +3073,6 @@ impl WorkspaceShell {
                                             "Testing connection…"
                                         } else {
                                             "Test & Connect"
-                                        })
-                                        .when(!pending, |button| {
-                                            button.child(icon(IconName::ChevronRight, colors.text, 12.))
                                         }),
                                 ),
                         )
@@ -3191,9 +3175,7 @@ impl WorkspaceShell {
                             } else {
                                 colors.subtle_border
                             })
-                            .when(selected, |row| {
-                                row.bg(colors.accent).text_color(gpui::white())
-                            })
+                            .when(selected, |row| row.bg(colors.accent_muted))
                             .when(!selected, |row| {
                                 row.hover(|row| row.bg(colors.hovered_surface))
                             })
@@ -3250,9 +3232,7 @@ impl WorkspaceShell {
                                 } else {
                                     colors.subtle_border
                                 })
-                                .when(selected, |row| {
-                                    row.bg(colors.accent).text_color(gpui::white())
-                                })
+                                .when(selected, |row| row.bg(colors.accent_muted))
                                 .when(!available, |row| row.opacity(0.45))
                                 .when(!selected && available, |row| {
                                     row.hover(|row| row.bg(colors.hovered_surface))
@@ -3309,9 +3289,8 @@ impl WorkspaceShell {
                                             .items_center()
                                             .justify_center()
                                             .rounded_full()
-                                            .bg(gpui::white())
-                                            .text_color(colors.accent)
-                                            .child(icon(IconName::Check, colors.accent, 13.)),
+                                            .bg(colors.accent)
+                                            .child(icon(IconName::Check, gpui::white(), 13.)),
                                     )
                                 })
                         });
@@ -3352,9 +3331,7 @@ impl WorkspaceShell {
                                 } else {
                                     colors.subtle_border
                                 })
-                                .when(selected, |row| {
-                                    row.bg(colors.accent).text_color(gpui::white())
-                                })
+                                .when(selected, |row| row.bg(colors.accent_muted))
                                 .when(!selected, |row| {
                                     row.hover(|row| row.bg(colors.hovered_surface))
                                 })
@@ -3525,7 +3502,6 @@ impl WorkspaceShell {
                                         .items_center()
                                         .gap_2()
                                         .font_weight(gpui::FontWeight::SEMIBOLD)
-                                        .child(icon(IconName::Database, colors.muted_text, 16.))
                                         .child(
                                             div()
                                                 .min_w_0()
@@ -3799,19 +3775,7 @@ impl WorkspaceShell {
                                                     "Save & Connect"
                                                 } else {
                                                     "Continue"
-                                                })
-                                                .when(
-                                                    !pending
-                                                        && (step != DatabaseWizardStep::Provider
-                                                            || selected_provider.is_some()),
-                                                    |button| {
-                                                        button.child(icon(
-                                                            IconName::ChevronRight,
-                                                            colors.text,
-                                                            12.,
-                                                        ))
-                                                    },
-                                                ),
+                                                }),
                                         ),
                                 ),
                         )
