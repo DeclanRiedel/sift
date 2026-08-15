@@ -990,7 +990,7 @@ impl WorkspaceShell {
             .items_center()
             .justify_center()
             .overflow_hidden()
-            .rounded_full()
+            .rounded(px(4.))
             .border_1()
             .border_color(colors.strong_border)
             .bg(colors.accent_muted)
@@ -2397,7 +2397,7 @@ impl WorkspaceShell {
                             .flex()
                             .items_center()
                             .justify_center()
-                            .rounded_full()
+                            .rounded(px(5.))
                             .hover(|avatar| avatar.bg(colors.hovered_surface))
                             .on_click(cx.listener(|shell, _, _, cx| shell.open_account(cx)))
                             .child(self.render_account_avatar(20.)),
