@@ -501,7 +501,7 @@ impl gpui::Render for Pane {
                                         .h(px(240.))
                                         .min_h_0()
                                         .border_t_1()
-                                        .border_color(colors.border)
+                                        .border_color(colors.subtle_border)
                                         .child(result.clone()),
                                 ),
                             _ => body
@@ -2100,7 +2100,7 @@ impl WorkspaceShell {
                             .justify_center()
                             .rounded_sm()
                             .text_color(colors.muted_text)
-                            .hover(|slot| slot.bg(colors.selected_surface).text_color(colors.text))
+                            .hover(|slot| slot.bg(colors.hovered_surface).text_color(colors.text))
                             .on_click(cx.listener(|shell, _, window, cx| {
                                 shell.open_command_palette(&OpenCommandPalette, window, cx)
                             }))
@@ -2400,6 +2400,7 @@ impl WorkspaceShell {
             let server_picker = matches!(modal, Modal::ServerPicker);
             let account = matches!(modal, Modal::Account);
             let database_connection = matches!(modal, Modal::DatabaseConnection);
+            let command_palette = matches!(modal, Modal::CommandPalette);
             let card_width = if server_picker {
                 360.0
             } else if account {
@@ -2423,20 +2424,29 @@ impl WorkspaceShell {
                         .flex()
                         .flex_col()
                         .child(
-                            // Search field with a divider under it, Zed-style.
                             div()
-                                .pb_2()
-                                .mb_1()
+                                .h(px(38.))
+                                .px_2()
+                                .flex()
+                                .items_center()
+                                .gap_2()
                                 .border_b_1()
-                                .border_color(colors.border)
+                                .border_color(colors.subtle_border)
+                                .bg(colors.toolbar)
+                                .child(icon(IconName::Search, colors.muted_text, 15.))
                                 .child(self.query_input.clone()),
                         )
                         .when(commands.is_empty(), |palette| {
                             palette.child(
                                 div()
                                     .px_2()
-                                    .py_1()
+                                    .py_4()
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .gap_2()
                                     .text_color(colors.muted_text)
+                                    .child(icon(IconName::Search, colors.disabled_text, 15.))
                                     .child("No matching commands"),
                             )
                         })
@@ -2476,7 +2486,7 @@ impl WorkspaceShell {
                                                     .px_2()
                                                     .rounded_sm()
                                                     .when(selected && enabled, |row| {
-                                                        row.bg(colors.selected_surface)
+                                                        row.bg(colors.active_surface)
                                                     })
                                                     .when(!enabled, |row| {
                                                         row.text_color(colors.muted_text)
@@ -2496,7 +2506,7 @@ impl WorkspaceShell {
                                                 if enabled {
                                                     row = row
                                                         .hover(|row| {
-                                                            row.bg(colors.selected_surface)
+                                                            row.bg(colors.hovered_surface)
                                                         })
                                                         .on_click(cx.listener(
                                                             move |shell, _, window, cx| {
@@ -2533,18 +2543,29 @@ impl WorkspaceShell {
                             .justify_between()
                             .px_2()
                             .py_2()
+                            .gap_2()
                             .rounded_sm()
-                            .when(local_active, |row| row.bg(colors.selected_surface))
+                            .when(local_active, |row| row.bg(colors.active_surface))
                             .when(!pending && !local_active, |row| {
-                                row.hover(|row| row.bg(colors.selected_surface)).on_click(
+                                row.hover(|row| row.bg(colors.hovered_surface)).on_click(
                                     cx.listener(|shell, _, _, cx| shell.use_local_server(cx)),
                                 )
                             })
-                            .child(div().flex().items_center().gap_2().child("Local Sift"))
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_2()
+                                    .child(icon(IconName::Server, colors.muted_text, 14.))
+                                    .child("Local Sift"),
+                            )
                             .child(
                                 div()
                                     .text_xs()
                                     .text_color(colors.muted_text)
+                                    .px_1()
+                                    .rounded(px(3.))
+                                    .bg(colors.hovered_surface)
                                     .child(if local_active { "Current" } else { "Bundled" }),
                             )
                             .into_any_element(),
@@ -2564,16 +2585,22 @@ impl WorkspaceShell {
                                 .px_2()
                                 .py_2()
                                 .rounded_sm()
-                                .when(active, |row| row.bg(colors.selected_surface))
+                                .when(active, |row| row.bg(colors.active_surface))
                                 .when(!pending && !active, |row| {
-                                    row.hover(|row| row.bg(colors.selected_surface)).on_click(
+                                    row.hover(|row| row.bg(colors.hovered_surface)).on_click(
                                         cx.listener(move |shell, _, _, cx| {
                                             shell.connect_saved_server(&profile_for_click, cx)
                                         }),
                                     )
                                 })
                                 .child(
-                                    div().flex().items_center().gap_2().min_w_0().child(
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .gap_2()
+                                        .min_w_0()
+                                        .child(icon(IconName::Server, colors.muted_text, 14.))
+                                        .child(
                                         div()
                                             .flex()
                                             .flex_col()
@@ -2586,7 +2613,7 @@ impl WorkspaceShell {
                                                     .truncate()
                                                     .child(profile.base_url),
                                             ),
-                                    ),
+                                        ),
                                 )
                                 .when(active, |row| {
                                     row.child(
@@ -2605,7 +2632,12 @@ impl WorkspaceShell {
                         .gap_2()
                         .child(
                             div()
+                                .h(px(28.))
+                                .flex()
+                                .items_center()
+                                .gap_2()
                                 .font_weight(gpui::FontWeight::SEMIBOLD)
+                                .child(icon(IconName::Server, colors.muted_text, 15.))
                                 .child("Sift Server"),
                         )
                         .child(div().flex().flex_col().gap_1().children(rows))
@@ -2632,13 +2664,24 @@ impl WorkspaceShell {
                                 .pt_2()
                                 .px_2()
                                 .border_t_1()
-                                .border_color(colors.border)
+                                .border_color(colors.subtle_border)
                                 .text_color(colors.muted_text)
-                                .hover(|button| button.text_color(colors.text))
+                                .hover(|button| {
+                                    button
+                                        .bg(colors.hovered_surface)
+                                        .text_color(colors.text)
+                                })
                                 .on_click(cx.listener(|shell, _, window, cx| {
                                     shell.open_server_connection(&OpenServerConnection, window, cx)
                                 }))
-                                .child("Connect to or manage servers…"),
+                                .child(
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .gap_2()
+                                        .child(icon(IconName::Add, colors.muted_text, 13.))
+                                        .child("Connect to or manage servers…"),
+                                ),
                         )
                         .into_any_element()
                 }
@@ -2660,8 +2703,8 @@ impl WorkspaceShell {
                                 .px_2()
                                 .py_1()
                                 .rounded_sm()
-                                .when(active, |row| row.bg(colors.selected_surface))
-                                .hover(|row| row.bg(colors.selected_surface))
+                                .when(active, |row| row.bg(colors.active_surface))
+                                .hover(|row| row.bg(colors.hovered_surface))
                                 .on_click(cx.listener(move |shell, _, window, cx| {
                                     shell.select_server_profile(&profile_for_click, window, cx)
                                 }))
@@ -2707,33 +2750,46 @@ impl WorkspaceShell {
                                 .child(
                                     div()
                                         .id("new-server-profile")
+                                        .role(Role::Button)
+                                        .h(self.theme.metrics.control_height)
                                         .px_2()
-                                        .py_1()
+                                        .flex()
+                                        .items_center()
+                                        .gap_1()
                                         .rounded_sm()
                                         .text_color(colors.muted_text)
                                         .hover(|button| {
                                             button
-                                                .bg(colors.selected_surface)
+                                                .bg(colors.hovered_surface)
                                                 .text_color(colors.text)
                                         })
                                         .on_click(cx.listener(|shell, _, window, cx| {
                                             shell.new_server_profile(window, cx)
                                         }))
+                                        .child(icon(IconName::Add, colors.muted_text, 13.))
                                         .child("New Server"),
                                 ),
                         )
                         .child(
                             div()
                                 .id("use-local-sift")
+                                .role(Role::Button)
+                                .h(self.theme.metrics.row_height)
                                 .flex()
                                 .items_center()
                                 .justify_between()
                                 .px_2()
-                                .py_1()
                                 .rounded_sm()
-                                .hover(|row| row.bg(colors.selected_surface))
+                                .hover(|row| row.bg(colors.hovered_surface))
                                 .on_click(cx.listener(|shell, _, _, cx| shell.use_local_server(cx)))
-                                .child("Local Sift")
+                                .child(
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .gap_2()
+                                        .child(icon(IconName::Server, colors.muted_text, 14.))
+                                        .child("Local Sift"),
+                                )
                                 .child(
                                     div()
                                         .text_xs()
@@ -2765,8 +2821,9 @@ impl WorkspaceShell {
                                 .child(
                                     div()
                                         .border_1()
-                                        .border_color(colors.border)
+                                        .border_color(colors.subtle_border)
                                         .rounded_sm()
+                                        .bg(colors.background)
                                         .child(self.server_name_input.clone()),
                                 ),
                         )
@@ -2784,8 +2841,9 @@ impl WorkspaceShell {
                                 .child(
                                     div()
                                         .border_1()
-                                        .border_color(colors.border)
+                                        .border_color(colors.subtle_border)
                                         .rounded_sm()
+                                        .bg(colors.background)
                                         .child(self.server_url_input.clone()),
                                 ),
                         )
@@ -2803,8 +2861,9 @@ impl WorkspaceShell {
                                 .child(
                                     div()
                                         .border_1()
-                                        .border_color(colors.border)
+                                        .border_color(colors.subtle_border)
                                         .rounded_sm()
+                                        .bg(colors.background)
                                         .child(self.server_token_input.clone()),
                                 ),
                         )
@@ -2825,15 +2884,39 @@ impl WorkspaceShell {
                                     shell.remember_server_token = !shell.remember_server_token;
                                     cx.notify();
                                 }))
-                                .child(if remember { "☑" } else { "☐" })
+                                .child(
+                                    div()
+                                        .size(px(16.))
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .rounded(px(4.))
+                                        .border_1()
+                                        .border_color(if remember {
+                                            colors.accent
+                                        } else {
+                                            colors.strong_border
+                                        })
+                                        .when(remember, |box_view| {
+                                            box_view
+                                                .bg(colors.accent)
+                                                .child(icon(IconName::Check, gpui::white(), 11.))
+                                        }),
+                                )
                                 .child("Remember token in the OS keychain"),
                         )
                         .children(self.server_connection_error.as_ref().map(|message| {
                             div()
-                                .p_2()
+                                .p_3()
+                                .flex()
+                                .items_start()
+                                .gap_2()
                                 .rounded_sm()
-                                .bg(colors.surface)
+                                .border_1()
+                                .border_color(colors.danger)
+                                .bg(colors.danger_muted)
                                 .text_color(colors.danger)
+                                .child(icon(IconName::Warning, colors.danger, 14.))
                                 .child(message.clone())
                         }))
                         .child(
@@ -2844,8 +2927,11 @@ impl WorkspaceShell {
                                 .child(
                                     div()
                                         .id("forget-server")
+                                        .role(Role::Button)
+                                        .h(self.theme.metrics.control_height)
                                         .px_2()
-                                        .py_1()
+                                        .flex()
+                                        .items_center()
                                         .rounded_sm()
                                         .text_color(colors.muted_text)
                                         .when(selected.is_some(), |button| {
@@ -2860,11 +2946,15 @@ impl WorkspaceShell {
                                 .child(
                                     div()
                                         .id("connect-server")
+                                        .role(Role::Button)
+                                        .h(self.theme.metrics.control_height)
                                         .px_3()
-                                        .py_1()
+                                        .flex()
+                                        .items_center()
+                                        .gap_1()
                                         .rounded_sm()
                                         .bg(if pending {
-                                            colors.surface
+                                            colors.hovered_surface
                                         } else {
                                             colors.accent
                                         })
@@ -2880,6 +2970,9 @@ impl WorkspaceShell {
                                             "Testing connection…"
                                         } else {
                                             "Test & Connect"
+                                        })
+                                        .when(!pending, |button| {
+                                            button.child(icon(IconName::ChevronRight, colors.text, 12.))
                                         }),
                                 ),
                         )
@@ -2903,10 +2996,10 @@ impl WorkspaceShell {
                                             .flex()
                                             .items_center()
                                             .justify_center()
-                                            .rounded_sm()
+                                            .rounded(px(10.))
                                             .border_1()
-                                            .border_color(colors.border)
-                                            .bg(colors.selected_surface)
+                                            .border_color(colors.strong_border)
+                                            .bg(colors.accent_muted)
                                             .font_weight(gpui::FontWeight::SEMIBOLD)
                                             .child(self.account_initials()),
                                     )
@@ -2929,7 +3022,7 @@ impl WorkspaceShell {
                                 div()
                                     .pt_2()
                                     .border_t_1()
-                                    .border_color(colors.border)
+                                    .border_color(colors.subtle_border)
                                     .text_sm()
                                     .text_color(colors.muted_text)
                                     .child(format!("Signed in on {server_name}")),
@@ -2977,12 +3070,16 @@ impl WorkspaceShell {
                             .py_1()
                             .rounded_sm()
                             .border_1()
-                            .border_color(if selected { colors.accent } else { colors.border })
+                            .border_color(if selected {
+                                colors.accent
+                            } else {
+                                colors.subtle_border
+                            })
                             .when(selected, |row| {
                                 row.bg(colors.accent).text_color(gpui::white())
                             })
                             .when(!selected, |row| {
-                                row.hover(|row| row.bg(colors.selected_surface))
+                                row.hover(|row| row.bg(colors.hovered_surface))
                             })
                             .on_click(cx.listener(move |shell, _, _, cx| {
                                 shell.selected_database_tenant = Some(tenant_id);
@@ -3035,14 +3132,14 @@ impl WorkspaceShell {
                                 .border_color(if selected {
                                     colors.accent
                                 } else {
-                                    colors.border
+                                    colors.subtle_border
                                 })
                                 .when(selected, |row| {
                                     row.bg(colors.accent).text_color(gpui::white())
                                 })
                                 .when(!available, |row| row.opacity(0.45))
                                 .when(!selected && available, |row| {
-                                    row.hover(|row| row.bg(colors.selected_surface))
+                                    row.hover(|row| row.bg(colors.hovered_surface))
                                 })
                                 .when(available, |row| {
                                     row.on_click(cx.listener(move |shell, _, _, cx| {
@@ -3064,7 +3161,7 @@ impl WorkspaceShell {
                                                 .rounded_lg()
                                                 .bg(gpui::white())
                                                 .border_1()
-                                                .border_color(colors.border)
+                                                .border_color(colors.subtle_border)
                                                 .child(
                                                     img(database_logo(asset))
                                                         .size(px(logo_size))
@@ -3098,7 +3195,7 @@ impl WorkspaceShell {
                                             .rounded_full()
                                             .bg(gpui::white())
                                             .text_color(colors.accent)
-                                            .child("✓"),
+                                            .child(icon(IconName::Check, colors.accent, 13.)),
                                     )
                                 })
                         });
@@ -3137,13 +3234,13 @@ impl WorkspaceShell {
                                 .border_color(if selected {
                                     colors.accent
                                 } else {
-                                    colors.border
+                                    colors.subtle_border
                                 })
                                 .when(selected, |row| {
                                     row.bg(colors.accent).text_color(gpui::white())
                                 })
                                 .when(!selected, |row| {
-                                    row.hover(|row| row.bg(colors.selected_surface))
+                                    row.hover(|row| row.bg(colors.hovered_surface))
                                 })
                                 .on_click(cx.listener(move |shell, _, _, cx| {
                                     shell.selected_database_ssl_mode = Some(value.to_owned());
@@ -3163,8 +3260,9 @@ impl WorkspaceShell {
                             .child(
                                 div()
                                     .border_1()
-                                    .border_color(colors.border)
+                                    .border_color(colors.subtle_border)
                                     .rounded_sm()
+                                    .bg(colors.background)
                                     .cursor(gpui::CursorStyle::IBeam)
                                     .on_mouse_down(
                                         MouseButton::Left,
@@ -3203,17 +3301,18 @@ impl WorkspaceShell {
                                         .border_color(if active || complete {
                                             colors.accent
                                         } else {
-                                            colors.border
+                                            colors.strong_border
                                         })
                                         .when(active || complete, |circle| {
                                             circle.bg(colors.accent).text_color(gpui::white())
                                         })
                                         .text_xs()
                                         .font_weight(gpui::FontWeight::SEMIBOLD)
-                                        .child(if complete {
-                                            "✓".to_owned()
-                                        } else {
-                                            number.to_string()
+                                        .when(complete, |circle| {
+                                            circle.child(icon(IconName::Check, gpui::white(), 12.))
+                                        })
+                                        .when(!complete, |circle| {
+                                            circle.child(number.to_string())
                                         }),
                                 )
                                 .child(
@@ -3257,7 +3356,7 @@ impl WorkspaceShell {
                             .gap_4()
                             .py_2()
                             .border_b_1()
-                            .border_color(colors.border)
+                            .border_color(colors.subtle_border)
                             .child(div().text_color(colors.muted_text).child(label))
                             .child(div().text_right().child(value))
                     };
@@ -3273,10 +3372,15 @@ impl WorkspaceShell {
                                 .px_4()
                                 .py_3()
                                 .border_b_1()
-                                .border_color(colors.border)
+                                .border_color(colors.subtle_border)
+                                .bg(colors.toolbar)
                                 .child(
                                     div()
+                                        .flex()
+                                        .items_center()
+                                        .gap_2()
                                         .font_weight(gpui::FontWeight::SEMIBOLD)
+                                        .child(icon(IconName::Database, colors.muted_text, 16.))
                                         .child("Add Database Connection"),
                                 )
                                 .child(
@@ -3360,7 +3464,7 @@ impl WorkspaceShell {
                                             div()
                                                 .pt_3()
                                                 .border_t_1()
-                                                .border_color(colors.border)
+                                                .border_color(colors.subtle_border)
                                                 .font_weight(gpui::FontWeight::SEMIBOLD)
                                                 .child("Advanced"),
                                         )
@@ -3417,10 +3521,16 @@ impl WorkspaceShell {
                                 })
                                 .children(self.database_connection_error.as_ref().map(|message| {
                                     div()
-                                        .p_2()
+                                        .p_3()
+                                        .flex()
+                                        .items_start()
+                                        .gap_2()
                                         .rounded_sm()
-                                        .bg(colors.surface)
+                                        .border_1()
+                                        .border_color(colors.danger)
+                                        .bg(colors.danger_muted)
                                         .text_color(colors.danger)
+                                        .child(icon(IconName::Warning, colors.danger, 14.))
                                         .child(message.clone())
                                 })),
                         )
@@ -3432,7 +3542,8 @@ impl WorkspaceShell {
                                 .px_4()
                                 .py_3()
                                 .border_t_1()
-                                .border_color(colors.border)
+                                .border_color(colors.subtle_border)
+                                .bg(colors.toolbar)
                                 .child(
                                     div()
                                         .flex()
@@ -3441,10 +3552,15 @@ impl WorkspaceShell {
                                             div()
                                                 .id("database-wizard-secondary")
                                                 .role(Role::Button)
+                                                .h(self.theme.metrics.control_height)
                                                 .px_3()
-                                                .py_1()
+                                                .flex()
+                                                .items_center()
                                                 .rounded_sm()
-                                                .hover(|button| button.bg(colors.selected_surface))
+                                                .border_1()
+                                                .border_color(colors.subtle_border)
+                                                .bg(colors.surface)
+                                                .hover(|button| button.bg(colors.hovered_surface))
                                                 .when(!pending, |button| {
                                                     button.on_click(cx.listener(
                                                         move |shell, _, window, cx| {
@@ -3476,14 +3592,17 @@ impl WorkspaceShell {
                                             div()
                                                 .id("database-wizard-primary")
                                                 .role(Role::Button)
+                                                .h(self.theme.metrics.control_height)
                                                 .px_3()
-                                                .py_1()
+                                                .flex()
+                                                .items_center()
+                                                .gap_1()
                                                 .rounded_sm()
                                                 .bg(if pending
                                                     || (step == DatabaseWizardStep::Provider
                                                         && selected_provider.is_none())
                                                 {
-                                                    colors.surface
+                                                    colors.hovered_surface
                                                 } else {
                                                     colors.accent
                                                 })
@@ -3515,7 +3634,19 @@ impl WorkspaceShell {
                                                     "Save & Connect"
                                                 } else {
                                                     "Continue"
-                                                }),
+                                                })
+                                                .when(
+                                                    !pending
+                                                        && (step != DatabaseWizardStep::Provider
+                                                            || selected_provider.is_some()),
+                                                    |button| {
+                                                        button.child(icon(
+                                                            IconName::ChevronRight,
+                                                            colors.text,
+                                                            12.,
+                                                        ))
+                                                    },
+                                                ),
                                         ),
                                 ),
                         )
@@ -3524,9 +3655,85 @@ impl WorkspaceShell {
                 Modal::ConfirmClose { title } => div()
                     .flex()
                     .flex_col()
-                    .gap_3()
-                    .child(format!("Save changes to {title}?"))
-                    .child("Use Save, Close Without Saving, or Escape.")
+                    .gap_4()
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .child(icon(IconName::Warning, colors.warning, 16.))
+                            .child(format!("Save changes to {title}?")),
+                    )
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(colors.muted_text)
+                            .child("Your edits have not been saved."),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .justify_end()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .id("cancel-close-item")
+                                    .role(Role::Button)
+                                    .h(self.theme.metrics.control_height)
+                                    .px_3()
+                                    .flex()
+                                    .items_center()
+                                    .rounded_sm()
+                                    .border_1()
+                                    .border_color(colors.subtle_border)
+                                    .hover(|button| button.bg(colors.hovered_surface))
+                                    .on_click(cx.listener(|shell, _, window, cx| {
+                                        shell.dismiss_modal(&DismissModal, window, cx)
+                                    }))
+                                    .child("Cancel"),
+                            )
+                            .child(
+                                div()
+                                    .id("close-item-without-saving")
+                                    .role(Role::Button)
+                                    .h(self.theme.metrics.control_height)
+                                    .px_3()
+                                    .flex()
+                                    .items_center()
+                                    .rounded_sm()
+                                    .bg(colors.danger_muted)
+                                    .text_color(colors.danger)
+                                    .hover(|button| {
+                                        button.bg(colors.danger).text_color(gpui::white())
+                                    })
+                                    .on_click(cx.listener(|shell, _, window, cx| {
+                                        shell.confirm_close_without_saving(
+                                            &ConfirmCloseWithoutSaving,
+                                            window,
+                                            cx,
+                                        )
+                                    }))
+                                    .child("Discard"),
+                            )
+                            .child(
+                                div()
+                                    .id("save-and-close-item")
+                                    .role(Role::Button)
+                                    .h(self.theme.metrics.control_height)
+                                    .px_3()
+                                    .flex()
+                                    .items_center()
+                                    .rounded_sm()
+                                    .bg(colors.accent)
+                                    .hover(|button| button.bg(colors.accent_hover))
+                                    .on_click(cx.listener(|shell, _, window, cx| {
+                                        shell.save_active_item(&SaveActiveItem, window, cx)
+                                    }))
+                                    .child("Save"),
+                            ),
+                    )
                     .into_any_element(),
             };
             div()
@@ -3566,11 +3773,12 @@ impl WorkspaceShell {
                                 shell.dismiss_modal(&DismissModal, window, cx)
                             }))
                         })
-                        .when(!database_connection, |card| card.p_4())
-                        .rounded_lg()
+                        .when(!database_connection && !command_palette, |card| card.p_4())
+                        .overflow_hidden()
+                        .rounded(self.theme.metrics.radius_large)
                         .border_1()
-                        .border_color(colors.border)
-                        .bg(colors.elevated_surface)
+                        .border_color(colors.strong_border)
+                        .bg(colors.panel)
                         .shadow_lg()
                         .child(content),
                 )
@@ -3715,14 +3923,37 @@ impl gpui::Render for WorkspaceShell {
                     .absolute()
                     .right_3()
                     .bottom(px(38.))
-                    .p_3()
-                    .rounded_md()
+                    .min_w(px(260.))
+                    .max_w(px(420.))
+                    .p_2()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .rounded(self.theme.metrics.radius_large)
                     .border_1()
-                    .border_color(colors.border)
+                    .border_color(colors.strong_border)
                     .bg(colors.elevated_surface)
-                    .hover(|toast| toast.bg(colors.selected_surface))
+                    .shadow_lg()
+                    .hover(|toast| toast.bg(colors.hovered_surface))
                     .on_click(cx.listener(|shell, _, _, cx| shell.dismiss_toast(cx)))
-                    .child(toast.message.clone())
+                    .child(
+                        div()
+                            .size(px(24.))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded(px(6.))
+                            .bg(colors.accent_muted)
+                            .child(icon(IconName::Info, colors.accent_hover, 14.)),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .text_sm()
+                            .child(toast.message.clone()),
+                    )
+                    .child(icon(IconName::Close, colors.muted_text, 12.))
             }))
             .children(self.tooltip.as_ref().map(|tooltip| {
                 div()
@@ -3733,7 +3964,11 @@ impl gpui::Render for WorkspaceShell {
                     .px_2()
                     .py_1()
                     .rounded_sm()
+                    .border_1()
+                    .border_color(colors.strong_border)
                     .bg(colors.elevated_surface)
+                    .shadow_md()
+                    .text_xs()
                     .child(tooltip.message.clone())
             }))
             .children(self.render_modal(cx))
