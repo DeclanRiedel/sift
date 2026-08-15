@@ -40,6 +40,20 @@ impl AssetSource for SiftAssets {
             "databases/sql-server.svg" => {
                 Some(include_bytes!("../assets/databases/sql-server.svg"))
             }
+            "icons/add.svg" => Some(include_bytes!("../assets/icons/add.svg")),
+            "icons/check.svg" => Some(include_bytes!("../assets/icons/check.svg")),
+            "icons/chevron-down.svg" => Some(include_bytes!("../assets/icons/chevron-down.svg")),
+            "icons/chevron-right.svg" => Some(include_bytes!("../assets/icons/chevron-right.svg")),
+            "icons/close.svg" => Some(include_bytes!("../assets/icons/close.svg")),
+            "icons/database.svg" => Some(include_bytes!("../assets/icons/database.svg")),
+            "icons/info.svg" => Some(include_bytes!("../assets/icons/info.svg")),
+            "icons/menu.svg" => Some(include_bytes!("../assets/icons/menu.svg")),
+            "icons/play.svg" => Some(include_bytes!("../assets/icons/play.svg")),
+            "icons/search.svg" => Some(include_bytes!("../assets/icons/search.svg")),
+            "icons/server.svg" => Some(include_bytes!("../assets/icons/server.svg")),
+            "icons/user.svg" => Some(include_bytes!("../assets/icons/user.svg")),
+            "icons/warning.svg" => Some(include_bytes!("../assets/icons/warning.svg")),
+            "icons/workspace.svg" => Some(include_bytes!("../assets/icons/workspace.svg")),
             _ => None,
         };
         Ok(bytes.map(Cow::Borrowed))
@@ -48,6 +62,22 @@ impl AssetSource for SiftAssets {
     fn list(&self, path: &str) -> Result<Vec<SharedString>> {
         Ok(match path {
             "databases" => vec!["postgres.svg".into(), "sql-server.svg".into()],
+            "icons" => vec![
+                "add.svg".into(),
+                "check.svg".into(),
+                "chevron-down.svg".into(),
+                "chevron-right.svg".into(),
+                "close.svg".into(),
+                "database.svg".into(),
+                "info.svg".into(),
+                "menu.svg".into(),
+                "play.svg".into(),
+                "search.svg".into(),
+                "server.svg".into(),
+                "user.svg".into(),
+                "warning.svg".into(),
+                "workspace.svg".into(),
+            ],
             _ => Vec::new(),
         })
     }
@@ -58,12 +88,19 @@ mod tests {
     use super::*;
 
     #[test]
-    fn database_marks_are_embedded_in_the_desktop_binary() {
+    fn visual_assets_are_embedded_in_the_desktop_binary() {
         let assets = SiftAssets;
-        for path in ["databases/postgres.svg", "databases/sql-server.svg"] {
+        for path in [
+            "databases/postgres.svg",
+            "databases/sql-server.svg",
+            "icons/menu.svg",
+            "icons/play.svg",
+        ] {
             let bytes = assets.load(path).unwrap().expect("database asset");
             assert!(bytes.starts_with(b"<svg"));
-            let _rendered = database_logo(path);
+            if path.starts_with("databases/") {
+                let _rendered = database_logo(path);
+            }
         }
     }
 }

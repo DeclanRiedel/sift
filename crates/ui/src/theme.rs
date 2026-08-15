@@ -1,28 +1,61 @@
-use gpui::{hsla, Hsla};
+use gpui::{hsla, px, Hsla, Pixels};
 
 /// Semantic colors consumed by Sift components.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ThemeColors {
     pub background: Hsla,
     pub surface: Hsla,
+    pub panel: Hsla,
+    pub toolbar: Hsla,
     pub elevated_surface: Hsla,
+    pub hovered_surface: Hsla,
     pub selected_surface: Hsla,
+    pub active_surface: Hsla,
     pub scrim: Hsla,
     pub border: Hsla,
+    pub subtle_border: Hsla,
+    pub strong_border: Hsla,
     pub text: Hsla,
     pub muted_text: Hsla,
+    pub disabled_text: Hsla,
     pub accent: Hsla,
+    pub accent_muted: Hsla,
     pub accent_hover: Hsla,
     pub focus_ring: Hsla,
     pub danger: Hsla,
+    pub danger_muted: Hsla,
     pub warning: Hsla,
+    pub warning_muted: Hsla,
     pub success: Hsla,
+    pub success_muted: Hsla,
+    pub editor_gutter: Hsla,
+    pub editor_active_line: Hsla,
+    pub grid_stripe: Hsla,
+    pub syntax_keyword: Hsla,
+    pub syntax_string: Hsla,
+    pub syntax_number: Hsla,
+    pub syntax_comment: Hsla,
+}
+
+/// Shared density and shape values. Keeping these here makes the shell feel
+/// like one product instead of a collection of locally-sized controls.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ThemeMetrics {
+    pub control_height: Pixels,
+    pub compact_control_height: Pixels,
+    pub row_height: Pixels,
+    pub tab_height: Pixels,
+    pub toolbar_height: Pixels,
+    pub status_height: Pixels,
+    pub radius: Pixels,
+    pub radius_large: Pixels,
 }
 
 /// Complete semantic theme used by the desktop shell.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Theme {
     pub colors: ThemeColors,
+    pub metrics: ThemeMetrics,
 }
 
 impl Theme {
@@ -30,20 +63,39 @@ impl Theme {
         Self {
             colors: ThemeColors {
                 background: hsla(0.625, 0.16, 0.105, 1.0),
-                surface: hsla(0.625, 0.14, 0.135, 1.0),
-                elevated_surface: hsla(0.625, 0.13, 0.17, 1.0),
-                selected_surface: hsla(0.0, 0.0, 1.0, 0.07),
+                surface: hsla(0.625, 0.14, 0.125, 1.0),
+                panel: hsla(0.625, 0.14, 0.142, 1.0),
+                toolbar: hsla(0.625, 0.15, 0.118, 1.0),
+                elevated_surface: hsla(0.625, 0.13, 0.18, 1.0),
+                hovered_surface: hsla(0.60, 0.12, 1.0, 0.055),
+                selected_surface: hsla(0.55, 0.42, 0.52, 0.14),
+                active_surface: hsla(0.55, 0.50, 0.52, 0.20),
                 scrim: hsla(0.0, 0.0, 0.0, 0.40),
-                border: hsla(0.625, 0.10, 0.245, 1.0),
+                border: hsla(0.625, 0.10, 0.235, 1.0),
+                subtle_border: hsla(0.625, 0.10, 0.195, 1.0),
+                strong_border: hsla(0.61, 0.10, 0.33, 1.0),
                 text: hsla(0.60, 0.12, 0.90, 1.0),
                 muted_text: hsla(0.60, 0.08, 0.62, 1.0),
+                disabled_text: hsla(0.60, 0.06, 0.42, 1.0),
                 accent: hsla(0.55, 0.62, 0.56, 1.0),
+                accent_muted: hsla(0.55, 0.55, 0.52, 0.16),
                 accent_hover: hsla(0.55, 0.68, 0.64, 1.0),
                 focus_ring: hsla(0.55, 0.72, 0.62, 1.0),
                 danger: hsla(0.005, 0.68, 0.58, 1.0),
+                danger_muted: hsla(0.005, 0.60, 0.52, 0.16),
                 warning: hsla(0.105, 0.72, 0.58, 1.0),
+                warning_muted: hsla(0.105, 0.65, 0.52, 0.16),
                 success: hsla(0.39, 0.50, 0.48, 1.0),
+                success_muted: hsla(0.39, 0.45, 0.46, 0.16),
+                editor_gutter: hsla(0.625, 0.14, 0.118, 1.0),
+                editor_active_line: hsla(0.60, 0.10, 1.0, 0.025),
+                grid_stripe: hsla(0.60, 0.08, 1.0, 0.018),
+                syntax_keyword: hsla(0.76, 0.58, 0.72, 1.0),
+                syntax_string: hsla(0.39, 0.42, 0.66, 1.0),
+                syntax_number: hsla(0.08, 0.68, 0.70, 1.0),
+                syntax_comment: hsla(0.60, 0.08, 0.48, 1.0),
             },
+            metrics: ThemeMetrics::default(),
         }
     }
 
@@ -52,19 +104,53 @@ impl Theme {
             colors: ThemeColors {
                 background: hsla(0.60, 0.18, 0.965, 1.0),
                 surface: hsla(0.60, 0.12, 0.995, 1.0),
+                panel: hsla(0.60, 0.14, 0.98, 1.0),
+                toolbar: hsla(0.60, 0.16, 0.955, 1.0),
                 elevated_surface: hsla(0.60, 0.12, 1.0, 1.0),
+                hovered_surface: hsla(0.60, 0.30, 0.35, 0.055),
                 selected_surface: hsla(0.55, 0.40, 0.43, 0.10),
+                active_surface: hsla(0.55, 0.50, 0.43, 0.16),
                 scrim: hsla(0.0, 0.0, 0.0, 0.28),
                 border: hsla(0.60, 0.10, 0.82, 1.0),
+                subtle_border: hsla(0.60, 0.10, 0.89, 1.0),
+                strong_border: hsla(0.60, 0.10, 0.70, 1.0),
                 text: hsla(0.625, 0.20, 0.18, 1.0),
                 muted_text: hsla(0.62, 0.09, 0.43, 1.0),
+                disabled_text: hsla(0.62, 0.07, 0.63, 1.0),
                 accent: hsla(0.55, 0.68, 0.43, 1.0),
+                accent_muted: hsla(0.55, 0.58, 0.43, 0.12),
                 accent_hover: hsla(0.55, 0.72, 0.36, 1.0),
                 focus_ring: hsla(0.55, 0.72, 0.43, 1.0),
                 danger: hsla(0.005, 0.72, 0.48, 1.0),
+                danger_muted: hsla(0.005, 0.62, 0.48, 0.12),
                 warning: hsla(0.105, 0.78, 0.43, 1.0),
+                warning_muted: hsla(0.105, 0.70, 0.43, 0.14),
                 success: hsla(0.39, 0.58, 0.36, 1.0),
+                success_muted: hsla(0.39, 0.50, 0.36, 0.12),
+                editor_gutter: hsla(0.60, 0.16, 0.95, 1.0),
+                editor_active_line: hsla(0.55, 0.30, 0.43, 0.035),
+                grid_stripe: hsla(0.60, 0.15, 0.40, 0.025),
+                syntax_keyword: hsla(0.76, 0.50, 0.47, 1.0),
+                syntax_string: hsla(0.39, 0.50, 0.35, 1.0),
+                syntax_number: hsla(0.06, 0.62, 0.46, 1.0),
+                syntax_comment: hsla(0.60, 0.08, 0.52, 1.0),
             },
+            metrics: ThemeMetrics::default(),
+        }
+    }
+}
+
+impl Default for ThemeMetrics {
+    fn default() -> Self {
+        Self {
+            control_height: px(28.),
+            compact_control_height: px(24.),
+            row_height: px(28.),
+            tab_height: px(32.),
+            toolbar_height: px(36.),
+            status_height: px(24.),
+            radius: px(5.),
+            radius_large: px(9.),
         }
     }
 }
