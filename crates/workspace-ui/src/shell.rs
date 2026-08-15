@@ -133,6 +133,14 @@ pub enum InstanceCommand {
     Forget {
         profile_id: String,
     },
+    SignInWithPassword {
+        username: String,
+        password: String,
+    },
+    SignInWithGithub,
+    SignOut {
+        everywhere: bool,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -141,6 +149,11 @@ pub enum InstanceManagerEvent {
     Testing,
     Connected { name: String },
     Failed { message: String },
+    AuthenticationPending,
+    GithubAuthorization { url: String },
+    Authenticated { display_name: String },
+    SignedOut,
+    AuthenticationFailed { message: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -594,6 +607,8 @@ pub struct WorkspaceShell {
     server_name_input: Entity<TextInput>,
     server_url_input: Entity<TextInput>,
     server_token_input: Entity<TextInput>,
+    account_username_input: Entity<TextInput>,
+    account_password_input: Entity<TextInput>,
     database_name_input: Entity<TextInput>,
     database_host_input: Entity<TextInput>,
     database_port_input: Entity<TextInput>,
@@ -635,6 +650,8 @@ pub struct WorkspaceShell {
     remember_server_token: bool,
     server_connection_pending: bool,
     server_connection_error: Option<String>,
+    account_pending: bool,
+    account_error: Option<String>,
     connection_status: ConnectionStatus,
     selected_database_tenant: Option<i64>,
     selected_database_provider: Option<String>,
@@ -693,6 +710,13 @@ impl WorkspaceShell {
         let server_url_input = cx.new(|cx| TextInput::new("", "http://192.168.1.20:7474", cx));
         let server_token_input =
             cx.new(|cx| TextInput::new("", "Bearer token (or use saved token)", cx).masked());
+        let account_username_input =
+            cx.new(|cx| TextInput::new("", "Username", cx).aria_label("Account username"));
+        let account_password_input = cx.new(|cx| {
+            TextInput::new("", "Password", cx)
+                .aria_label("Account password")
+                .masked()
+        });
         let database_name_input =
             cx.new(|cx| TextInput::new("", "Display name", cx).aria_label("Connection name"));
         let database_host_input =
@@ -740,6 +764,8 @@ impl WorkspaceShell {
             server_name_input,
             server_url_input,
             server_token_input,
+            account_username_input,
+            account_password_input,
             database_name_input,
             database_host_input,
             database_port_input,
@@ -790,6 +816,8 @@ impl WorkspaceShell {
             remember_server_token: true,
             server_connection_pending: false,
             server_connection_error: None,
+            account_pending: false,
+            account_error: None,
             connection_status: ConnectionStatus::Disconnected,
             selected_database_tenant: None,
             selected_database_provider: None,
@@ -953,6 +981,38 @@ impl WorkspaceShell {
         }
     }
 
+    fn render_account_avatar(&self, size: f32) -> gpui::AnyElement {
+        let colors = self.theme.colors;
+        let avatar = div()
+            .relative()
+            .size(px(size))
+            .flex()
+            .items_center()
+            .justify_center()
+            .overflow_hidden()
+            .rounded_full()
+            .border_1()
+            .border_color(colors.strong_border)
+            .bg(colors.accent_muted)
+            .text_xs()
+            .font_weight(gpui::FontWeight::SEMIBOLD);
+        match &self.lifecycle.identity {
+            Some(identity) => avatar
+                .child(self.account_initials())
+                .children(identity.principal.avatar_url.clone().map(|url| {
+                    img(url)
+                        .absolute()
+                        .inset_0()
+                        .size_full()
+                        .object_fit(gpui::ObjectFit::Cover)
+                }))
+                .into_any_element(),
+            None => avatar
+                .child(icon(IconName::User, colors.muted_text, size * 0.55))
+                .into_any_element(),
+        }
+    }
+
     pub fn active_pane(&self) -> usize {
         self.active_pane
     }
@@ -1092,6 +1152,32 @@ impl WorkspaceShell {
             InstanceManagerEvent::Failed { message } => {
                 self.server_connection_pending = false;
                 self.server_connection_error = Some(message);
+            }
+            InstanceManagerEvent::AuthenticationPending => {
+                self.account_pending = true;
+                self.account_error = None;
+            }
+            InstanceManagerEvent::GithubAuthorization { url } => {
+                cx.open_url(&url);
+                self.show_toast("Complete sign in in your browser".into(), cx);
+            }
+            InstanceManagerEvent::Authenticated { display_name } => {
+                self.account_pending = false;
+                self.account_error = None;
+                self.modal = None;
+                self.account_password_input
+                    .update(cx, |input, cx| input.set_text("", cx));
+                self.show_toast(format!("Signed in as {display_name}"), cx);
+            }
+            InstanceManagerEvent::SignedOut => {
+                self.account_pending = false;
+                self.account_error = None;
+                self.modal = None;
+                self.show_toast("Signed out".into(), cx);
+            }
+            InstanceManagerEvent::AuthenticationFailed { message } => {
+                self.account_pending = false;
+                self.account_error = Some(message);
             }
         }
         cx.notify();
@@ -1857,6 +1943,79 @@ impl WorkspaceShell {
 
     fn open_account(&mut self, cx: &mut Context<Self>) {
         self.modal = Some(Modal::Account);
+        self.account_error = None;
+        cx.notify();
+    }
+
+    fn sign_in_with_password(&mut self, cx: &mut Context<Self>) {
+        if self.account_pending {
+            return;
+        }
+        let username = self
+            .account_username_input
+            .read(cx)
+            .text()
+            .trim()
+            .to_owned();
+        let password = self.account_password_input.read(cx).text().to_owned();
+        if username.is_empty() || password.is_empty() {
+            self.account_error = Some("Username and password are required".into());
+            cx.notify();
+            return;
+        }
+        let Some(sender) = &self.instance_sender else {
+            self.account_error = Some("Desktop account manager is unavailable".into());
+            cx.notify();
+            return;
+        };
+        if sender
+            .send(InstanceCommand::SignInWithPassword { username, password })
+            .is_err()
+        {
+            self.account_error = Some("Desktop account manager stopped".into());
+        } else {
+            self.account_pending = true;
+            self.account_error = None;
+        }
+        cx.notify();
+    }
+
+    fn sign_in_with_github(&mut self, cx: &mut Context<Self>) {
+        if self.account_pending {
+            return;
+        }
+        let Some(sender) = &self.instance_sender else {
+            self.account_error = Some("Desktop account manager is unavailable".into());
+            cx.notify();
+            return;
+        };
+        if sender.send(InstanceCommand::SignInWithGithub).is_err() {
+            self.account_error = Some("Desktop account manager stopped".into());
+        } else {
+            self.account_pending = true;
+            self.account_error = None;
+        }
+        cx.notify();
+    }
+
+    fn sign_out(&mut self, everywhere: bool, cx: &mut Context<Self>) {
+        if self.account_pending {
+            return;
+        }
+        let Some(sender) = &self.instance_sender else {
+            self.account_error = Some("Desktop account manager is unavailable".into());
+            cx.notify();
+            return;
+        };
+        if sender
+            .send(InstanceCommand::SignOut { everywhere })
+            .is_err()
+        {
+            self.account_error = Some("Desktop account manager stopped".into());
+        } else {
+            self.account_pending = true;
+            self.account_error = None;
+        }
         cx.notify();
     }
 
@@ -2112,7 +2271,6 @@ impl WorkspaceShell {
         let colors = self.theme.colors;
         let workspace_label = self.workspace_context_label();
         let server_name = self.active_server_name();
-        let account_initials = self.account_initials();
 
         let status_label = self.lifecycle.status_label();
         let show_status = !matches!(self.lifecycle.phase, crate::ConnectionPhase::Ready);
@@ -2239,15 +2397,10 @@ impl WorkspaceShell {
                             .flex()
                             .items_center()
                             .justify_center()
-                            .rounded_sm()
-                            .border_1()
-                            .border_color(colors.strong_border)
-                            .bg(colors.surface)
-                            .text_xs()
-                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .rounded_full()
                             .hover(|avatar| avatar.bg(colors.hovered_surface))
                             .on_click(cx.listener(|shell, _, _, cx| shell.open_account(cx)))
-                            .child(account_initials),
+                            .child(self.render_account_avatar(20.)),
                     ),
             )
     }
@@ -3107,79 +3260,265 @@ impl WorkspaceShell {
                 }
                 Modal::Account => {
                     let server_name = self.active_server_name();
-                    match &self.lifecycle.identity {
-                        Some(identity) => div()
+                    let is_local = self
+                        .lifecycle
+                        .selected_instance
+                        .as_ref()
+                        .is_some_and(|instance| instance.kind == crate::InstanceKind::Local);
+                    let interactive = self
+                        .lifecycle
+                        .identity
+                        .as_ref()
+                        .is_some_and(|identity| identity.auth_session_id.is_some());
+                    let pending = self.account_pending;
+                    let field = |label: &'static str, input: Entity<TextInput>| {
+                        div()
                             .flex()
                             .flex_col()
-                            .gap_3()
+                            .gap_1()
                             .child(
                                 div()
-                                    .flex()
-                                    .items_center()
-                                    .gap_3()
-                                    .child(
-                                        div()
-                                            .size(px(40.))
-                                            .flex()
-                                            .items_center()
-                                            .justify_center()
-                                            .rounded(px(10.))
-                                            .border_1()
-                                            .border_color(colors.strong_border)
-                                            .bg(colors.accent_muted)
-                                            .font_weight(gpui::FontWeight::SEMIBOLD)
-                                            .child(self.account_initials()),
-                                    )
-                                    .child(
-                                        div()
-                                            .flex()
-                                            .flex_col()
-                                            .child(identity.principal.display_name.clone())
-                                            .children(identity.principal.email.clone().map(
-                                                |email| {
-                                                    div()
-                                                        .text_sm()
-                                                        .text_color(colors.muted_text)
-                                                        .child(email)
-                                                },
-                                            )),
-                                    ),
+                                    .text_xs()
+                                    .text_color(colors.muted_text)
+                                    .child(label),
                             )
-                            .child(
+                            .child(input)
+                    };
+                    div()
+                        .flex()
+                        .flex_col()
+                        .min_w_0()
+                        .gap_3()
+                        .when_some(self.lifecycle.identity.as_ref(), |account, identity| {
+                            account
+                                .child(
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .min_w_0()
+                                        .gap_3()
+                                        .child(self.render_account_avatar(40.))
+                                        .child(
+                                            div()
+                                                .flex()
+                                                .flex_col()
+                                                .min_w_0()
+                                                .child(
+                                                    div()
+                                                        .truncate()
+                                                        .child(identity.principal.display_name.clone()),
+                                                )
+                                                .children(identity.principal.email.clone().map(
+                                                    |email| {
+                                                        div()
+                                                            .truncate()
+                                                            .text_sm()
+                                                            .text_color(colors.muted_text)
+                                                            .child(email)
+                                                    },
+                                                )),
+                                        ),
+                                )
+                                .child(
+                                    div()
+                                        .text_sm()
+                                        .text_color(colors.muted_text)
+                                        .child(format!("Signed in on {server_name}")),
+                                )
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(colors.muted_text)
+                                        .whitespace_normal()
+                                        .child(format!(
+                                            "{} tenant membership(s){}",
+                                            identity.memberships.len(),
+                                            if identity.principal.is_instance_admin {
+                                                " · Instance administrator"
+                                            } else {
+                                                ""
+                                            }
+                                        )),
+                                )
+                        })
+                        .when(self.lifecycle.identity.is_none(), |account| {
+                            account
+                                .child(
+                                    div()
+                                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                                        .child(format!("Sign in to {server_name}")),
+                                )
+                                .child(
+                                    div()
+                                        .text_sm()
+                                        .text_color(colors.muted_text)
+                                        .whitespace_normal()
+                                        .child("Use the account your Sift administrator has enabled."),
+                                )
+                        })
+                        .when(is_local, |account| {
+                            account.child(
                                 div()
                                     .pt_2()
                                     .border_t_1()
                                     .border_color(colors.subtle_border)
                                     .text_sm()
                                     .text_color(colors.muted_text)
-                                    .child(format!("Signed in on {server_name}")),
+                                    .child("Local Sift uses its built-in local identity."),
                             )
-                            .child(div().text_xs().text_color(colors.muted_text).child(format!(
-                                "{} tenant membership(s){}",
-                                identity.memberships.len(),
-                                if identity.principal.is_instance_admin {
-                                    " · Instance administrator"
-                                } else {
-                                    ""
-                                }
-                            )))
-                            .into_any_element(),
-                        None => {
+                        })
+                        .when(!is_local && !interactive, |account| {
+                            account.child(
+                                div()
+                                    .pt_3()
+                                    .border_t_1()
+                                    .border_color(colors.subtle_border)
+                                    .flex()
+                                    .flex_col()
+                                    .gap_3()
+                                    .child(
+                                        div()
+                                            .id("account-github-sign-in")
+                                            .role(Role::Button)
+                                            .h(self.theme.metrics.control_height)
+                                            .px_3()
+                                            .flex()
+                                            .items_center()
+                                            .justify_center()
+                                            .rounded_sm()
+                                            .bg(if pending {
+                                                colors.hovered_surface
+                                            } else {
+                                                colors.accent
+                                            })
+                                            .when(!pending, |button| {
+                                                button
+                                                    .hover(|button| button.bg(colors.accent_hover))
+                                                    .on_click(cx.listener(|shell, _, _, cx| {
+                                                        shell.sign_in_with_github(cx)
+                                                    }))
+                                            })
+                                            .child(if pending {
+                                                "Waiting for sign in…"
+                                            } else {
+                                                "Continue with GitHub"
+                                            }),
+                                    )
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .items_center()
+                                            .gap_2()
+                                            .child(
+                                                div()
+                                                    .flex_1()
+                                                    .border_t_1()
+                                                    .border_color(colors.subtle_border),
+                                            )
+                                            .child(
+                                                div()
+                                                    .text_xs()
+                                                    .text_color(colors.muted_text)
+                                                    .child("OR"),
+                                            )
+                                            .child(
+                                                div()
+                                                    .flex_1()
+                                                    .border_t_1()
+                                                    .border_color(colors.subtle_border),
+                                            ),
+                                    )
+                                    .child(field("USERNAME", self.account_username_input.clone()))
+                                    .child(field("PASSWORD", self.account_password_input.clone()))
+                                    .child(
+                                        div()
+                                            .id("account-password-sign-in")
+                                            .role(Role::Button)
+                                            .h(self.theme.metrics.control_height)
+                                            .px_3()
+                                            .flex()
+                                            .items_center()
+                                            .justify_center()
+                                            .rounded_sm()
+                                            .border_1()
+                                            .border_color(colors.subtle_border)
+                                            .bg(colors.surface)
+                                            .when(!pending, |button| {
+                                                button
+                                                    .hover(|button| button.bg(colors.hovered_surface))
+                                                    .on_click(cx.listener(|shell, _, _, cx| {
+                                                        shell.sign_in_with_password(cx)
+                                                    }))
+                                            })
+                                            .child("Sign in with password"),
+                                    ),
+                            )
+                        })
+                        .when(!is_local && interactive, |account| {
+                            account.child(
+                                div()
+                                    .pt_3()
+                                    .border_t_1()
+                                    .border_color(colors.subtle_border)
+                                    .flex()
+                                    .items_center()
+                                    .justify_between()
+                                    .gap_2()
+                                    .child(
+                                        div()
+                                            .id("account-sign-out-all")
+                                            .role(Role::Button)
+                                            .h(self.theme.metrics.control_height)
+                                            .px_2()
+                                            .flex()
+                                            .items_center()
+                                            .rounded_sm()
+                                            .text_color(colors.muted_text)
+                                            .when(!pending, |button| {
+                                                button
+                                                    .hover(|button| button.text_color(colors.danger))
+                                                    .on_click(cx.listener(|shell, _, _, cx| {
+                                                        shell.sign_out(true, cx)
+                                                    }))
+                                            })
+                                            .child("Sign out everywhere"),
+                                    )
+                                    .child(
+                                        div()
+                                            .id("account-sign-out")
+                                            .role(Role::Button)
+                                            .h(self.theme.metrics.control_height)
+                                            .px_3()
+                                            .flex()
+                                            .items_center()
+                                            .rounded_sm()
+                                            .border_1()
+                                            .border_color(colors.subtle_border)
+                                            .bg(colors.surface)
+                                            .when(!pending, |button| {
+                                                button
+                                                    .hover(|button| button.bg(colors.hovered_surface))
+                                                    .on_click(cx.listener(|shell, _, _, cx| {
+                                                        shell.sign_out(false, cx)
+                                                    }))
+                                            })
+                                            .child(if pending { "Signing out…" } else { "Sign out" }),
+                                    ),
+                            )
+                        })
+                        .children(self.account_error.as_ref().map(|message| {
                             div()
-                                .flex()
-                                .flex_col()
-                                .gap_2()
-                                .child(
-                                    div()
-                                        .font_weight(gpui::FontWeight::SEMIBOLD)
-                                        .child("Account unavailable"),
-                                )
-                                .child(div().text_sm().text_color(colors.muted_text).child(
-                                    format!("Connect to {server_name} to load your identity."),
-                                ))
-                                .into_any_element()
-                        }
-                    }
+                                .p_2()
+                                .rounded_sm()
+                                .border_1()
+                                .border_color(colors.danger)
+                                .bg(colors.danger_muted)
+                                .text_sm()
+                                .text_color(colors.danger)
+                                .whitespace_normal()
+                                .child(message.clone())
+                        }))
+                        .into_any_element()
                 }
                 Modal::DatabaseConnection => {
                     let step = self.database_wizard_step;
@@ -4442,6 +4781,68 @@ mod tests {
     }
 
     #[gpui::test]
+    fn account_actions_route_typed_authentication_commands(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let (_event_sender, event_receiver) = tokio::sync::mpsc::unbounded_channel();
+        workspace.update(&mut cx, |shell, cx| {
+            shell.attach_instance_manager(sender, event_receiver, Vec::new(), cx);
+            shell
+                .account_username_input
+                .update(cx, |input, cx| input.set_text("octocat", cx));
+            shell
+                .account_password_input
+                .update(cx, |input, cx| input.set_text("correct horse", cx));
+            shell.sign_in_with_password(cx);
+        });
+        match receiver.try_recv().unwrap() {
+            InstanceCommand::SignInWithPassword { username, password } => {
+                assert_eq!(username, "octocat");
+                assert_eq!(password, "correct horse");
+            }
+            _ => panic!("expected password sign-in command"),
+        }
+
+        workspace.update(&mut cx, |shell, cx| {
+            shell.account_pending = false;
+            shell.sign_in_with_github(cx);
+        });
+        assert!(matches!(
+            receiver.try_recv().unwrap(),
+            InstanceCommand::SignInWithGithub
+        ));
+
+        workspace.update(&mut cx, |shell, cx| {
+            shell.account_pending = false;
+            shell.sign_out(true, cx);
+        });
+        assert!(matches!(
+            receiver.try_recv().unwrap(),
+            InstanceCommand::SignOut { everywhere: true }
+        ));
+    }
+
+    #[gpui::test]
+    fn account_rejects_empty_password_login_before_dispatch(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let (_event_sender, event_receiver) = tokio::sync::mpsc::unbounded_channel();
+        workspace.update(&mut cx, |shell, cx| {
+            shell.attach_instance_manager(sender, event_receiver, Vec::new(), cx);
+            shell.sign_in_with_password(cx);
+        });
+        assert!(receiver.try_recv().is_err());
+        assert_eq!(
+            workspace.read_with(&cx, |shell, _| shell.account_error.clone()),
+            Some("Username and password are required".into())
+        );
+    }
+
+    #[gpui::test]
     fn add_database_form_sends_profile_without_exposing_password(cx: &mut TestAppContext) {
         let window = shell(cx);
         let mut cx = VisualTestContext::from_window(window.into(), cx);
@@ -4726,9 +5127,7 @@ mod tests {
                 assert_eq!(bearer_token.as_deref(), Some("secret"));
                 assert!(!remember_token);
             }
-            InstanceCommand::UseLocal | InstanceCommand::Forget { .. } => {
-                panic!("expected connect command")
-            }
+            _ => panic!("expected connect command"),
         }
     }
 
@@ -4768,9 +5167,7 @@ mod tests {
                 assert!(bearer_token.is_none());
                 assert!(remember_token);
             }
-            InstanceCommand::UseLocal | InstanceCommand::Forget { .. } => {
-                panic!("expected connect command")
-            }
+            _ => panic!("expected connect command"),
         }
     }
 

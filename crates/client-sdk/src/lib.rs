@@ -325,6 +325,12 @@ impl SessionTokenProvider {
         }
     }
 
+    /// Copy the current token pair for storage in a platform credential vault.
+    /// Callers must treat the returned value as secret material.
+    pub async fn snapshot(&self) -> AuthTokensResponse {
+        self.tokens.read().await.clone()
+    }
+
     async fn access_token(&self) -> String {
         self.tokens.read().await.access_token.clone()
     }
@@ -3856,5 +3862,8 @@ mod tests {
         provider.replace(tokens("access-two", "refresh-two")).await;
         assert_eq!(provider.access_token().await, "access-two");
         assert_eq!(provider.refresh_token().await, "refresh-two");
+        let snapshot = provider.snapshot().await;
+        assert_eq!(snapshot.access_token, "access-two");
+        assert_eq!(snapshot.refresh_token, "refresh-two");
     }
 }

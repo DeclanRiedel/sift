@@ -2,7 +2,9 @@ use std::sync::Arc;
 
 use gpui::{prelude::*, App, Context, Entity, IntoElement, Window};
 use sift_api_types::{CredentialMode, UpsertConnectionProfileRequest};
-use sift_client_sdk::{Client, Error as ClientError, OpenConnectionFromProfileRequest};
+use sift_client_sdk::{
+    Client, Error as ClientError, OpenConnectionFromProfileRequest, SessionTokenProvider,
+};
 use sift_protocol::{ConnectionId, SessionId};
 use sift_workspace_ui::{
     ConnectionStatus, ExecutorCommand, ExecutorEvent, PresentationState, PresentationStore, Rect,
@@ -81,7 +83,30 @@ impl DesktopServer {
         }
     }
 
-    fn instance(&self) -> sift_workspace_ui::InstanceSpec {
+    pub(crate) fn with_session_tokens(
+        &self,
+        session_tokens: SessionTokenProvider,
+    ) -> Result<Self, String> {
+        match self {
+            Self::Local(_) => Err("Local Sift uses its built-in identity".into()),
+            Self::Remote { instance, .. } => Ok(Self::Remote {
+                client: Client::new(&instance.base_url).with_session_tokens(session_tokens),
+                instance: instance.clone(),
+            }),
+        }
+    }
+
+    pub(crate) fn without_authentication(&self) -> Result<Self, String> {
+        match self {
+            Self::Local(_) => Err("Local Sift uses its built-in identity".into()),
+            Self::Remote { instance, .. } => Ok(Self::Remote {
+                client: Client::new(&instance.base_url),
+                instance: instance.clone(),
+            }),
+        }
+    }
+
+    pub(crate) fn instance(&self) -> sift_workspace_ui::InstanceSpec {
         match self {
             Self::Local(_) => sift_workspace_ui::InstanceSpec {
                 id: "local".into(),
@@ -567,6 +592,16 @@ async fn supervise_instances(
                 if !wait_to_reconnect(attempt, &sender).await {
                     return;
                 }
+                continue;
+            }
+            Some(Err(
+                sift_workspace_ui::DegradedReason::AuthenticationExpired
+                | sift_workspace_ui::DegradedReason::AccessRevoked,
+            )) => {
+                if targets.changed().await.is_err() {
+                    return;
+                }
+                restored_workspace_id = None;
                 continue;
             }
             Some(Err(_)) => return,

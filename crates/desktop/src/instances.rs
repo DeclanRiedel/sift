@@ -3,6 +3,8 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use keyring::{Entry, Error as KeyringError};
+use sift_client_sdk::SessionTokenProvider;
+use sift_protocol::{AuthClientKind, AuthTokensResponse, PasswordLoginRequest};
 use sift_workspace_ui::{InstanceCommand, InstanceManagerEvent, SavedServerProfile};
 
 use crate::app::DesktopServer;
@@ -122,10 +124,52 @@ impl DesktopCredentialStore {
         })
         .await
     }
+
+    async fn get_session(&self, profile_id: &str) -> Result<Option<SessionTokenProvider>, String> {
+        let profile_id = profile_id.to_owned();
+        keychain_blocking(move || match auth_entry(&profile_id)?.get_password() {
+            Ok(encoded) => serde_json::from_str::<AuthTokensResponse>(&encoded)
+                .map(SessionTokenProvider::new)
+                .map(Some)
+                .map_err(|error| format!("decoding session from OS keychain: {error}")),
+            Err(KeyringError::NoEntry) => Ok(None),
+            Err(error) => Err(keychain_error(error)),
+        })
+        .await
+    }
+
+    async fn put_session(
+        &self,
+        profile_id: &str,
+        provider: &SessionTokenProvider,
+    ) -> Result<(), String> {
+        let profile_id = profile_id.to_owned();
+        let encoded = serde_json::to_string(&provider.snapshot().await)
+            .map_err(|error| format!("encoding session for OS keychain: {error}"))?;
+        keychain_blocking(move || {
+            auth_entry(&profile_id)?
+                .set_password(&encoded)
+                .map_err(keychain_error)
+        })
+        .await
+    }
+
+    async fn delete_session(&self, profile_id: &str) -> Result<(), String> {
+        let profile_id = profile_id.to_owned();
+        keychain_blocking(move || match auth_entry(&profile_id)?.delete_credential() {
+            Ok(()) | Err(KeyringError::NoEntry) => Ok(()),
+            Err(error) => Err(keychain_error(error)),
+        })
+        .await
+    }
 }
 
 fn entry(profile_id: &str) -> Result<Entry, String> {
     Entry::new(KEYCHAIN_SERVICE, &format!("server:{profile_id}")).map_err(keychain_error)
+}
+
+fn auth_entry(profile_id: &str) -> Result<Entry, String> {
+    Entry::new(KEYCHAIN_SERVICE, &format!("auth:{profile_id}")).map_err(keychain_error)
 }
 
 fn keychain_error(error: KeyringError) -> String {
@@ -172,12 +216,18 @@ pub async fn run_instance_manager(
         .and_then(|id| profiles.iter().find(|profile| profile.id == id))
         .cloned()
     {
-        let token = if profile.has_saved_token {
+        let session = credentials.get_session(&profile.id).await.ok().flatten();
+        let token = if session.is_none() && profile.has_saved_token {
             credentials.get(&profile.id).await.ok().flatten()
         } else {
             None
         };
-        let _ = channels.targets.send(DesktopServer::remote(profile, token));
+        let target = DesktopServer::remote(profile, token);
+        let target = match session {
+            Some(session) => target.with_session_tokens(session).unwrap_or(target),
+            None => target,
+        };
+        let _ = channels.targets.send(target);
     }
     if channels
         .events
@@ -187,8 +237,10 @@ pub async fn run_instance_manager(
         return;
     }
     while let Some(command) = channels.commands.recv().await {
-        let result = match command {
-            InstanceCommand::UseLocal => connect_local(&channels.targets, &local_target).await,
+        let (authentication, result) = match command {
+            InstanceCommand::UseLocal => {
+                (false, connect_local(&channels.targets, &local_target).await)
+            }
             InstanceCommand::Connect {
                 profile_id,
                 name,
@@ -197,21 +249,53 @@ pub async fn run_instance_manager(
                 remember_token,
             } => {
                 let _ = channels.events.send(InstanceManagerEvent::Testing);
-                connect(
-                    &store,
-                    &credentials,
-                    &mut profiles,
-                    &channels.targets,
-                    profile_id,
-                    name,
-                    base_url,
-                    bearer_token,
-                    remember_token,
+                (
+                    false,
+                    connect(
+                        &store,
+                        &credentials,
+                        &mut profiles,
+                        &channels.targets,
+                        profile_id,
+                        name,
+                        base_url,
+                        bearer_token,
+                        remember_token,
+                    )
+                    .await,
                 )
-                .await
             }
-            InstanceCommand::Forget { profile_id } => {
-                forget(&store, &credentials, &mut profiles, &profile_id).await
+            InstanceCommand::Forget { profile_id } => (
+                false,
+                forget(&store, &credentials, &mut profiles, &profile_id).await,
+            ),
+            InstanceCommand::SignInWithPassword { username, password } => {
+                let _ = channels
+                    .events
+                    .send(InstanceManagerEvent::AuthenticationPending);
+                (
+                    true,
+                    sign_in_with_password(&channels.targets, &credentials, username, password)
+                        .await,
+                )
+            }
+            InstanceCommand::SignInWithGithub => {
+                let _ = channels
+                    .events
+                    .send(InstanceManagerEvent::AuthenticationPending);
+                (
+                    true,
+                    sign_in_with_github(&channels.targets, &channels.events, &credentials).await,
+                )
+            }
+            InstanceCommand::SignOut { everywhere } => {
+                let _ = channels
+                    .events
+                    .send(InstanceManagerEvent::AuthenticationPending);
+                (
+                    true,
+                    sign_out(&channels.targets, &credentials, everywhere).await,
+                )
             }
         };
         match result {
@@ -228,10 +312,21 @@ pub async fn run_instance_manager(
                     .events
                     .send(InstanceManagerEvent::Profiles(profiles.clone()));
             }
-            Err(message) => {
+            Ok(ManagerOutcome::Authenticated(display_name)) => {
                 let _ = channels
                     .events
-                    .send(InstanceManagerEvent::Failed { message });
+                    .send(InstanceManagerEvent::Authenticated { display_name });
+            }
+            Ok(ManagerOutcome::SignedOut) => {
+                let _ = channels.events.send(InstanceManagerEvent::SignedOut);
+            }
+            Err(message) => {
+                let event = if authentication {
+                    InstanceManagerEvent::AuthenticationFailed { message }
+                } else {
+                    InstanceManagerEvent::Failed { message }
+                };
+                let _ = channels.events.send(event);
             }
         }
     }
@@ -252,6 +347,119 @@ async fn connect_local(
 enum ManagerOutcome {
     Connected(String),
     ProfilesChanged,
+    Authenticated(String),
+    SignedOut,
+}
+
+async fn sign_in_with_password(
+    targets: &tokio::sync::watch::Sender<DesktopServer>,
+    credentials: &DesktopCredentialStore,
+    username: String,
+    password: String,
+) -> Result<ManagerOutcome, String> {
+    let server = targets.borrow().clone();
+    let anonymous = server.without_authentication()?;
+    let client = anonymous.client().await?;
+    let provider = client
+        .password_login(PasswordLoginRequest {
+            username,
+            password,
+            client_kind: AuthClientKind::Native,
+            client_label: Some("Sift Desktop".into()),
+        })
+        .await
+        .map_err(|error| format!("signing in failed: {error}"))?;
+    activate_session(targets, credentials, &server, provider).await
+}
+
+async fn sign_in_with_github(
+    targets: &tokio::sync::watch::Sender<DesktopServer>,
+    events: &tokio::sync::mpsc::UnboundedSender<InstanceManagerEvent>,
+    credentials: &DesktopCredentialStore,
+) -> Result<ManagerOutcome, String> {
+    let server = targets.borrow().clone();
+    let anonymous = server.without_authentication()?;
+    let client = anonymous.client().await?;
+    let start = client
+        .github_native_start()
+        .await
+        .map_err(|error| format!("starting GitHub sign in failed: {error}"))?;
+    events
+        .send(InstanceManagerEvent::GithubAuthorization {
+            url: start.authorization_url,
+        })
+        .map_err(|_| "desktop window closed during GitHub sign in".to_string())?;
+
+    for _ in 0..300 {
+        match client
+            .github_native_exchange(start.handoff_token.clone())
+            .await
+        {
+            Ok(provider) => {
+                return activate_session(targets, credentials, &server, provider).await;
+            }
+            Err(sift_client_sdk::Error::Server { status, .. })
+                if status == reqwest::StatusCode::UNAUTHORIZED =>
+            {
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            }
+            Err(error) => return Err(format!("completing GitHub sign in failed: {error}")),
+        }
+    }
+    Err("GitHub sign in timed out; start the flow again".into())
+}
+
+async fn activate_session(
+    targets: &tokio::sync::watch::Sender<DesktopServer>,
+    credentials: &DesktopCredentialStore,
+    server: &DesktopServer,
+    provider: sift_client_sdk::SessionTokenProvider,
+) -> Result<ManagerOutcome, String> {
+    let authenticated = server.with_session_tokens(provider.clone())?;
+    let identity = authenticated
+        .client()
+        .await?
+        .whoami()
+        .await
+        .map_err(|error| format!("loading the signed-in account failed: {error}"))?;
+    let profile_id = auth_profile_id(server)?;
+    credentials.put_session(&profile_id, &provider).await?;
+    targets
+        .send(authenticated)
+        .map_err(|_| "desktop server supervisor stopped".to_string())?;
+    Ok(ManagerOutcome::Authenticated(
+        identity.principal.display_name,
+    ))
+}
+
+async fn sign_out(
+    targets: &tokio::sync::watch::Sender<DesktopServer>,
+    credentials: &DesktopCredentialStore,
+    everywhere: bool,
+) -> Result<ManagerOutcome, String> {
+    let server = targets.borrow().clone();
+    let profile_id = auth_profile_id(&server)?;
+    let client = server.client().await?;
+    if everywhere {
+        client.logout_all().await
+    } else {
+        client.logout().await
+    }
+    .map_err(|error| format!("signing out failed: {error}"))?;
+    credentials.delete_session(&profile_id).await?;
+    targets
+        .send(server.without_authentication()?)
+        .map_err(|_| "desktop server supervisor stopped".to_string())?;
+    Ok(ManagerOutcome::SignedOut)
+}
+
+fn auth_profile_id(server: &DesktopServer) -> Result<String, String> {
+    server
+        .instance()
+        .id
+        .strip_prefix("hosted:")
+        .map(str::to_owned)
+        .ok_or_else(|| "Local Sift uses its built-in identity".into())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -319,10 +527,16 @@ async fn test_client(client: &sift_client_sdk::Client, label: &str) -> Result<()
             .connect()
             .await
             .map_err(|error| format!("{label} handshake failed: {error}"))?;
-        client
-            .whoami()
-            .await
-            .map_err(|error| format!("{label} authentication failed: {error}"))?;
+        match client.whoami().await {
+            Ok(_) => {}
+            Err(sift_client_sdk::Error::Server { status, .. })
+                if status == reqwest::StatusCode::UNAUTHORIZED =>
+            {
+                // The server is valid and reachable. Selecting it must be
+                // allowed so the account popover can complete authentication.
+            }
+            Err(error) => return Err(format!("{label} authentication failed: {error}")),
+        }
         Ok(())
     })
     .await
@@ -336,6 +550,7 @@ async fn forget(
     profile_id: &str,
 ) -> Result<ManagerOutcome, String> {
     credentials.delete(profile_id).await?;
+    credentials.delete_session(profile_id).await?;
     profiles.retain(|profile| profile.id != profile_id);
     store.save(profiles)?;
     Ok(ManagerOutcome::ProfilesChanged)
