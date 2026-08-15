@@ -193,7 +193,7 @@
 
         demoPostgres = pkgs.writeShellApplication {
           name = "sift-demo-postgres";
-          runtimeInputs = with pkgs; [ curl nodejs nix postgresql ];
+          runtimeInputs = with pkgs; [ curl jq nodejs nix postgresql ];
           text = ''
             set -euo pipefail
 
@@ -214,6 +214,8 @@
             pgport="''${SIFT_DEMO_PG_PORT:-5433}"
             pgsocket="''${SIFT_DEMO_PG_SOCKET_DIR:-/tmp/sift-demo-pg-socket}"
             backend_log="''${SIFT_BACKEND_LAB_BACKEND_LOG:-/tmp/sift-backend-lab-backend.log}"
+            bind="''${SIFT_BIND:-127.0.0.1:3000}"
+            base_url="http://$bind"
             mkdir -p "$pgsocket"
 
             if [ ! -f "$pgdata/PG_VERSION" ]; then
@@ -249,7 +251,7 @@
             SQL
 
             cd "$repo"
-            nix develop "$repo" --command env SIFT_BIND="''${SIFT_BIND:-127.0.0.1:3000}" cargo run -p sift-server -- >"$backend_log" 2>&1 &
+            nix develop "$repo" --command env SIFT_BIND="$bind" cargo run -p sift-server -- >"$backend_log" 2>&1 &
             backend_pid=$!
             cleanup() {
               kill "$backend_pid" >/dev/null 2>&1 || true
@@ -260,7 +262,7 @@
 
             ready=0
             for _ in $(seq 1 "''${SIFT_BACKEND_LAB_READY_TRIES:-480}"); do
-              if curl -fsS "http://''${SIFT_BIND:-127.0.0.1:3000}/v1/health" >/dev/null 2>&1; then
+              if curl -fsS "$base_url/v1/health" >/dev/null 2>&1; then
                 ready=1
                 break
               fi
@@ -277,12 +279,52 @@
               exit 1
             fi
 
+            protocol_version="$(
+              curl -fsS -X POST "$base_url/v1/handshake" \
+                -H 'content-type: application/json' \
+                -d '{
+                  "client_version":"sift-demo-postgres",
+                  "client_kind":"automation",
+                  "protocol":{"minimum":1,"maximum":1}
+                }' \
+                | jq -er .selected_protocol
+            )"
+            profile_payload="$(
+              jq -n --argjson port "$pgport" '{
+                tenant_id: 1,
+                name: "Demo Postgres",
+                provider_id: "sift/postgres",
+                configuration: {
+                  host: "127.0.0.1",
+                  port: $port,
+                  database: "sifttest",
+                  user: "sift",
+                  ssl_mode: "disable",
+                  engine_specific: {
+                    search_path: ["lab"],
+                    application_name: "sift-demo"
+                  }
+                },
+                credential_mode: "shared",
+                tags: ["demo", "seeded", "lab.people"]
+              }'
+            )"
+            profile_id="$(
+              curl -fsS -X POST "$base_url/v1/metadata/connections" \
+                -H 'content-type: application/json' \
+                -H "x-sift-protocol-version: $protocol_version" \
+                -d "$profile_payload" \
+                | jq -er .id
+            )"
+
             cd "$lab"
             if [ ! -d node_modules ]; then
               npm ci
             fi
 
             echo "Postgres: host=127.0.0.1 port=$pgport db=sifttest user=sift password=<empty> ssl=disable"
+            echo "Sift connection: Demo Postgres (profile $profile_id)"
+            echo "Seeded query: SELECT * FROM lab.people;"
             echo "Backend log: $backend_log"
             echo "Postgres log: $pglog"
             echo "Lab UI: http://127.0.0.1:5177"
@@ -438,7 +480,7 @@
               sift-backend-lab          Run the browser backend lab UI from .labs/sift-backend-lab.
               sift-backend-lab-backend  Run the backend for the lab on SIFT_BIND, mock mode by default.
               sift-backend-lab-stack    Run mock backend + network-bound lab UI together.
-              sift-demo-postgres        Run temporary local Postgres + backend + lab UI together.
+              sift-demo-postgres        Run seeded Postgres + backend + registered demo connection + lab UI.
               sift-health               Curl /v1/health from the configured backend and pretty-print JSON.
               sift-smoke                Start a mock backend and exercise health/session/connection/schema/audit.
               sift-test                 Run cargo nextest for the whole workspace.
