@@ -177,7 +177,7 @@ pub(super) fn render_status_bar(
                 .child(
                     button(
                         "footer-git",
-                        IconName::Github,
+                        IconName::VersionControl,
                         "Git workspace".into(),
                         shell.left_dock.presentation.open
                             && shell.active_left_panel == LeftPanel::Git,

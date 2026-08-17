@@ -63,6 +63,9 @@ impl AssetSource for SiftAssets {
             "icons/terminal.svg" => Some(include_bytes!("../assets/icons/terminal.svg")),
             "icons/user.svg" => Some(include_bytes!("../assets/icons/user.svg")),
             "icons/users.svg" => Some(include_bytes!("../assets/icons/users.svg")),
+            "icons/version-control.svg" => {
+                Some(include_bytes!("../assets/icons/version-control.svg"))
+            }
             "icons/warning.svg" => Some(include_bytes!("../assets/icons/warning.svg")),
             "icons/workspace.svg" => Some(include_bytes!("../assets/icons/workspace.svg")),
             "icons/LICENSE.qlementine-icons" => {
@@ -100,6 +103,7 @@ impl AssetSource for SiftAssets {
                 "terminal.svg".into(),
                 "user.svg".into(),
                 "users.svg".into(),
+                "version-control.svg".into(),
                 "warning.svg".into(),
                 "workspace.svg".into(),
             ],

@@ -39,12 +39,13 @@ pub enum IconName {
     Terminal,
     User,
     Users,
+    VersionControl,
     Warning,
     Workspace,
 }
 
 impl IconName {
-    pub const ALL: [Self; 25] = [
+    pub const ALL: [Self; 26] = [
         Self::Activity,
         Self::Add,
         Self::Automations,
@@ -68,6 +69,7 @@ impl IconName {
         Self::Terminal,
         Self::User,
         Self::Users,
+        Self::VersionControl,
         Self::Warning,
         Self::Workspace,
     ];
@@ -97,6 +99,7 @@ impl IconName {
             Self::Terminal => "icons/terminal.svg",
             Self::User => "icons/user.svg",
             Self::Users => "icons/users.svg",
+            Self::VersionControl => "icons/version-control.svg",
             Self::Warning => "icons/warning.svg",
             Self::Workspace => "icons/workspace.svg",
         }

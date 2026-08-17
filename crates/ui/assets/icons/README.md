@@ -34,5 +34,6 @@ must be used when Qlementine has no appropriate semantic icon.
 | `terminal.svg` | `software/command-line.svg` |
 | `user.svg` | `misc/user.svg` |
 | `users.svg` | `misc/users.svg` |
+| `version-control.svg` | `software/version-control.svg` |
 | `warning.svg` | `misc/warning.svg` |
 | `workspace.svg` | `software/desktop.svg` |
