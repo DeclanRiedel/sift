@@ -5086,9 +5086,12 @@ fn dock_resize_handle(dock: DockId, accent: gpui::Hsla) -> gpui::AnyElement {
         .id(id)
         .debug_selector(move || id.to_owned())
         .absolute()
+        .group("dock-resize")
+        .flex()
+        .items_center()
+        .justify_center()
         .cursor(cursor)
         .block_mouse_except_scroll()
-        .hover(move |handle| handle.bg(accent))
         .on_drag(DockResizeDrag { dock }, |_, _, _, cx| {
             cx.new(|_| gpui::Empty)
         });
@@ -5098,17 +5101,35 @@ fn dock_resize_handle(dock: DockId, accent: gpui::Hsla) -> gpui::AnyElement {
             .right_0()
             .top_0()
             .h_full()
-            .w(px(DOCK_RESIZE_HANDLE_SIZE)),
+            .w(px(DOCK_RESIZE_HANDLE_SIZE))
+            .child(
+                div()
+                    .h_full()
+                    .w(px(1.))
+                    .group_hover("dock-resize", move |line| line.bg(accent)),
+            ),
         DockId::Inspector => handle
             .left_0()
             .top_0()
             .h_full()
-            .w(px(DOCK_RESIZE_HANDLE_SIZE)),
+            .w(px(DOCK_RESIZE_HANDLE_SIZE))
+            .child(
+                div()
+                    .h_full()
+                    .w(px(1.))
+                    .group_hover("dock-resize", move |line| line.bg(accent)),
+            ),
         DockId::Bottom => handle
             .top_0()
             .left_0()
             .w_full()
-            .h(px(DOCK_RESIZE_HANDLE_SIZE)),
+            .h(px(DOCK_RESIZE_HANDLE_SIZE))
+            .child(
+                div()
+                    .h(px(1.))
+                    .w_full()
+                    .group_hover("dock-resize", move |line| line.bg(accent)),
+            ),
     }
     .into_any_element()
 }
