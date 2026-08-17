@@ -2374,6 +2374,17 @@ impl WorkspaceShell {
         }
     }
 
+    fn dismiss_app_bar_overlays(&mut self, cx: &mut Context<Self>) {
+        let changed =
+            self.app_bar_expanded || self.app_bar_menu.is_some() || self.app_bar_modal_is_open();
+        self.close_app_bar_modal(cx);
+        self.app_bar_expanded = false;
+        self.app_bar_menu = None;
+        if changed {
+            cx.notify();
+        }
+    }
+
     fn app_bar_menu_items(menu: AppBarMenu) -> Vec<AppBarMenuItem> {
         use AppBarMenuItem as Item;
         match menu {
@@ -2691,10 +2702,14 @@ impl WorkspaceShell {
                             .flex()
                             .items_center()
                             .window_control_area(WindowControlArea::Drag)
-                            .on_mouse_down(MouseButton::Left, |_, window, cx| {
-                                cx.stop_propagation();
-                                window.start_window_move();
-                            })
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(|shell, _, window, cx| {
+                                    cx.stop_propagation();
+                                    shell.dismiss_app_bar_overlays(cx);
+                                    window.start_window_move();
+                                }),
+                            )
                             .truncate()
                             .text_center()
                             .text_sm()
@@ -2808,10 +2823,14 @@ impl WorkspaceShell {
                             .h_full()
                             .flex_1()
                             .window_control_area(WindowControlArea::Drag)
-                            .on_mouse_down(MouseButton::Left, |_, window, cx| {
-                                cx.stop_propagation();
-                                window.start_window_move();
-                            }),
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(|shell, _, window, cx| {
+                                    cx.stop_propagation();
+                                    shell.dismiss_app_bar_overlays(cx);
+                                    window.start_window_move();
+                                }),
+                            ),
                     ),
             )
             .child(
@@ -5468,6 +5487,13 @@ mod tests {
         assert_eq!(
             workspace.read_with(&cx, |shell, _| shell.app_bar_menu),
             Some(AppBarMenu::Help)
+        );
+
+        workspace.update(&mut cx, |shell, cx| shell.dismiss_app_bar_overlays(cx));
+        assert!(!workspace.read_with(&cx, |shell, _| shell.app_bar_navigation_expanded()));
+        assert_eq!(
+            workspace.read_with(&cx, |shell, _| shell.app_bar_menu),
+            None
         );
     }
 
