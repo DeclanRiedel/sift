@@ -672,6 +672,7 @@ pub struct WorkspaceShell {
     right_dock: Dock,
     bottom_dock: Dock,
     modal: Option<Modal>,
+    app_bar_expanded: bool,
     app_bar_menu: Option<AppBarMenu>,
     toasts: Vec<Toast>,
     tooltip: Option<Tooltip>,
@@ -839,6 +840,7 @@ impl WorkspaceShell {
                 presentation: workspace.bottom_dock,
             },
             modal: None,
+            app_bar_expanded: false,
             app_bar_menu: None,
             toasts: Vec::new(),
             tooltip: None,
@@ -2311,21 +2313,14 @@ impl WorkspaceShell {
         cx.notify();
     }
 
+    fn toggle_app_bar_navigation(&mut self, cx: &mut Context<Self>) {
+        self.app_bar_expanded = !self.app_bar_expanded;
+        self.app_bar_menu = self.app_bar_expanded.then_some(AppBarMenu::Main);
+        cx.notify();
+    }
+
     fn app_bar_navigation_expanded(&self) -> bool {
-        matches!(
-            self.app_bar_menu,
-            Some(
-                AppBarMenu::Main
-                    | AppBarMenu::File
-                    | AppBarMenu::Edit
-                    | AppBarMenu::Selection
-                    | AppBarMenu::View
-                    | AppBarMenu::Go
-                    | AppBarMenu::Run
-                    | AppBarMenu::Window
-                    | AppBarMenu::Help
-            )
-        )
+        self.app_bar_expanded
     }
 
     fn dismiss_app_bar_menu(&mut self, cx: &mut Context<Self>) {
@@ -2688,7 +2683,7 @@ impl WorkspaceShell {
                                         slot.bg(colors.hovered_surface).text_color(colors.text)
                                     })
                                     .on_click(cx.listener(|shell, _, _, cx| {
-                                        shell.toggle_app_bar_menu(AppBarMenu::Main, cx)
+                                        shell.toggle_app_bar_navigation(cx)
                                     }))
                                     .child(launcher_content),
                             )
@@ -5166,6 +5161,7 @@ mod tests {
         let workspace = window.root(&mut cx).unwrap();
         assert!(!workspace.read_with(&cx, |shell, _| shell.app_bar_navigation_expanded()));
 
+        workspace.update(&mut cx, |shell, cx| shell.toggle_app_bar_navigation(cx));
         workspace.update(&mut cx, |shell, cx| {
             shell.toggle_app_bar_menu(AppBarMenu::File, cx)
         });
@@ -5183,7 +5179,7 @@ mod tests {
             workspace.read_with(&cx, |shell, _| shell.app_bar_menu),
             None
         );
-        assert!(!workspace.read_with(&cx, |shell, _| shell.app_bar_navigation_expanded()));
+        assert!(workspace.read_with(&cx, |shell, _| shell.app_bar_navigation_expanded()));
 
         workspace.update(&mut cx, |shell, cx| {
             shell.toggle_app_bar_menu(AppBarMenu::Help, cx)
@@ -5193,6 +5189,47 @@ mod tests {
             MouseButton::Left,
             Modifiers::default(),
         );
+        assert_eq!(
+            workspace.read_with(&cx, |shell, _| shell.app_bar_menu),
+            None
+        );
+        assert!(workspace.read_with(&cx, |shell, _| shell.app_bar_navigation_expanded()));
+    }
+
+    #[gpui::test]
+    fn app_bar_launcher_is_a_strict_two_state_switch(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+
+        workspace.update(&mut cx, |shell, cx| shell.toggle_app_bar_navigation(cx));
+        assert_eq!(
+            workspace.read_with(&cx, |shell, _| shell.app_bar_menu),
+            Some(AppBarMenu::Main)
+        );
+
+        workspace.update(&mut cx, |shell, cx| {
+            shell.toggle_app_bar_menu(AppBarMenu::File, cx)
+        });
+        workspace.update(&mut cx, |shell, cx| shell.dismiss_app_bar_menu(cx));
+        assert!(workspace.read_with(&cx, |shell, _| shell.app_bar_navigation_expanded()));
+        assert_eq!(
+            workspace.read_with(&cx, |shell, _| shell.app_bar_menu),
+            None
+        );
+
+        workspace.update(&mut cx, |shell, cx| shell.toggle_app_bar_navigation(cx));
+        assert_eq!(
+            workspace.read_with(&cx, |shell, _| shell.app_bar_menu),
+            None
+        );
+
+        workspace.update(&mut cx, |shell, cx| shell.toggle_app_bar_navigation(cx));
+        assert_eq!(
+            workspace.read_with(&cx, |shell, _| shell.app_bar_menu),
+            Some(AppBarMenu::Main)
+        );
+        workspace.update(&mut cx, |shell, cx| shell.toggle_app_bar_navigation(cx));
         assert_eq!(
             workspace.read_with(&cx, |shell, _| shell.app_bar_menu),
             None
