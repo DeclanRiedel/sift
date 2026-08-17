@@ -3,9 +3,10 @@ use std::ops::Range;
 use std::sync::Arc;
 
 use gpui::{
-    actions, deferred, div, img, prelude::*, px, uniform_list, App, Context, Entity, EventEmitter,
-    FocusHandle, Focusable, IntoElement, MouseButton, Role, ScrollStrategy, Subscription, Task,
-    UniformListScrollHandle, Window, WindowBounds, WindowControlArea,
+    actions, deferred, div, img, prelude::*, px, uniform_list, App, Context, CursorStyle, Entity,
+    EventEmitter, FocusHandle, Focusable, IntoElement, MouseButton, ResizeEdge, Role,
+    ScrollStrategy, Subscription, Task, UniformListScrollHandle, Window, WindowBounds,
+    WindowControlArea,
 };
 use sift_api_types::RoomId;
 use sift_ui::{database_logo, icon, IconName, TextInput, Theme};
@@ -2668,16 +2669,23 @@ impl WorkspaceShell {
                 div()
                     .absolute()
                     .inset_0()
-                    .window_control_area(WindowControlArea::Drag)
-                    .on_mouse_down(MouseButton::Left, |_, window, _| window.start_window_move())
                     .flex()
                     .items_center()
                     .justify_center()
                     .child(
                         div()
+                            .id("toolbar-title-drag-region")
+                            .h_full()
                             .max_w(px(260.))
                             .min_w_0()
                             .px_3()
+                            .flex()
+                            .items_center()
+                            .window_control_area(WindowControlArea::Drag)
+                            .on_mouse_down(MouseButton::Left, |_, window, cx| {
+                                cx.stop_propagation();
+                                window.start_window_move();
+                            })
                             .truncate()
                             .text_center()
                             .text_sm()
@@ -2778,7 +2786,18 @@ impl WorkspaceShell {
                     .children(go_menu)
                     .children(run_menu)
                     .children(window_menu)
-                    .children(help_menu),
+                    .children(help_menu)
+                    .child(
+                        div()
+                            .id("toolbar-empty-drag-region")
+                            .h_full()
+                            .flex_1()
+                            .window_control_area(WindowControlArea::Drag)
+                            .on_mouse_down(MouseButton::Left, |_, window, cx| {
+                                cx.stop_propagation();
+                                window.start_window_move();
+                            }),
+                    ),
             )
             .child(
                 div()
@@ -4789,6 +4808,76 @@ impl Focusable for WorkspaceShell {
     }
 }
 
+fn window_resize_handle(
+    id: &'static str,
+    edge: ResizeEdge,
+    cursor: CursorStyle,
+) -> gpui::AnyElement {
+    const EDGE_SIZE: f32 = 5.;
+    const CORNER_SIZE: f32 = 10.;
+
+    let handle = div().id(id).absolute().cursor(cursor).on_mouse_down(
+        MouseButton::Left,
+        move |_, window, cx| {
+            cx.stop_propagation();
+            window.start_window_resize(edge);
+        },
+    );
+
+    match edge {
+        ResizeEdge::Top => handle.top_0().left_0().w_full().h(px(EDGE_SIZE)),
+        ResizeEdge::Right => handle.top_0().right_0().h_full().w(px(EDGE_SIZE)),
+        ResizeEdge::Bottom => handle.bottom_0().left_0().w_full().h(px(EDGE_SIZE)),
+        ResizeEdge::Left => handle.top_0().left_0().h_full().w(px(EDGE_SIZE)),
+        ResizeEdge::TopLeft => handle.top_0().left_0().size(px(CORNER_SIZE)),
+        ResizeEdge::TopRight => handle.top_0().right_0().size(px(CORNER_SIZE)),
+        ResizeEdge::BottomRight => handle.bottom_0().right_0().size(px(CORNER_SIZE)),
+        ResizeEdge::BottomLeft => handle.bottom_0().left_0().size(px(CORNER_SIZE)),
+    }
+    .into_any_element()
+}
+
+fn window_resize_handles() -> Vec<gpui::AnyElement> {
+    vec![
+        window_resize_handle("resize-top", ResizeEdge::Top, CursorStyle::ResizeUpDown),
+        window_resize_handle(
+            "resize-right",
+            ResizeEdge::Right,
+            CursorStyle::ResizeLeftRight,
+        ),
+        window_resize_handle(
+            "resize-bottom",
+            ResizeEdge::Bottom,
+            CursorStyle::ResizeUpDown,
+        ),
+        window_resize_handle(
+            "resize-left",
+            ResizeEdge::Left,
+            CursorStyle::ResizeLeftRight,
+        ),
+        window_resize_handle(
+            "resize-top-left",
+            ResizeEdge::TopLeft,
+            CursorStyle::ResizeUpLeftDownRight,
+        ),
+        window_resize_handle(
+            "resize-top-right",
+            ResizeEdge::TopRight,
+            CursorStyle::ResizeUpRightDownLeft,
+        ),
+        window_resize_handle(
+            "resize-bottom-right",
+            ResizeEdge::BottomRight,
+            CursorStyle::ResizeUpLeftDownRight,
+        ),
+        window_resize_handle(
+            "resize-bottom-left",
+            ResizeEdge::BottomLeft,
+            CursorStyle::ResizeUpRightDownLeft,
+        ),
+    ]
+}
+
 impl gpui::Render for WorkspaceShell {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = self.theme.colors;
@@ -5029,6 +5118,7 @@ impl gpui::Render for WorkspaceShell {
                     .child(tooltip.message.clone())
             }))
             .children(self.render_modal(cx))
+            .children(window_resize_handles())
     }
 }
 
