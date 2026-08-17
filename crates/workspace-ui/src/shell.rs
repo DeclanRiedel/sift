@@ -5,7 +5,7 @@ use std::sync::Arc;
 use gpui::{
     actions, deferred, div, img, prelude::*, px, uniform_list, App, Context, Entity, EventEmitter,
     FocusHandle, Focusable, IntoElement, MouseButton, Role, ScrollStrategy, Subscription, Task,
-    UniformListScrollHandle, Window, WindowBounds,
+    UniformListScrollHandle, Window, WindowBounds, WindowControlArea,
 };
 use sift_api_types::RoomId;
 use sift_ui::{database_logo, icon, IconName, TextInput, Theme};
@@ -1971,7 +1971,7 @@ impl WorkspaceShell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.modal = Some(Modal::ServerConnection);
+        self.open_app_bar_modal(Modal::ServerConnection, cx);
         self.server_connection_error = None;
         self.server_connection_pending = false;
         self.server_name_input.focus_handle(cx).focus(window, cx);
@@ -1979,15 +1979,13 @@ impl WorkspaceShell {
     }
 
     fn open_server_picker(&mut self, cx: &mut Context<Self>) {
-        self.modal = Some(Modal::ServerPicker);
+        self.open_app_bar_modal(Modal::ServerPicker, cx);
         self.server_connection_error = None;
-        cx.notify();
     }
 
     fn open_account(&mut self, cx: &mut Context<Self>) {
-        self.modal = Some(Modal::Account);
+        self.open_app_bar_modal(Modal::Account, cx);
         self.account_error = None;
-        cx.notify();
     }
 
     fn sign_in_with_password(&mut self, cx: &mut Context<Self>) {
@@ -2309,13 +2307,48 @@ impl WorkspaceShell {
     }
 
     fn toggle_app_bar_menu(&mut self, menu: AppBarMenu, cx: &mut Context<Self>) {
+        self.close_app_bar_modal(cx);
         self.app_bar_menu = (self.app_bar_menu != Some(menu)).then_some(menu);
         cx.notify();
     }
 
     fn toggle_app_bar_navigation(&mut self, cx: &mut Context<Self>) {
+        self.close_app_bar_modal(cx);
         self.app_bar_expanded = !self.app_bar_expanded;
         self.app_bar_menu = self.app_bar_expanded.then_some(AppBarMenu::Main);
+        cx.notify();
+    }
+
+    fn app_bar_modal_is_open(&self) -> bool {
+        matches!(
+            self.modal,
+            Some(Modal::ServerPicker | Modal::ServerConnection | Modal::Account)
+        )
+    }
+
+    fn close_app_bar_modal(&mut self, cx: &mut Context<Self>) {
+        if !self.app_bar_modal_is_open() {
+            return;
+        }
+        if self.modal == Some(Modal::ServerConnection) {
+            self.server_token_input
+                .update(cx, |input, cx| input.set_text("", cx));
+        }
+        if self.modal == Some(Modal::Account) {
+            self.account_password_input
+                .update(cx, |input, cx| input.set_text("", cx));
+        }
+        self.modal = None;
+    }
+
+    fn open_app_bar_modal(&mut self, modal: Modal, cx: &mut Context<Self>) {
+        debug_assert!(matches!(
+            &modal,
+            Modal::ServerPicker | Modal::ServerConnection | Modal::Account
+        ));
+        self.close_app_bar_modal(cx);
+        self.app_bar_menu = None;
+        self.modal = Some(modal);
         cx.notify();
     }
 
@@ -2635,6 +2668,8 @@ impl WorkspaceShell {
                 div()
                     .absolute()
                     .inset_0()
+                    .window_control_area(WindowControlArea::Drag)
+                    .on_mouse_down(MouseButton::Left, |_, window, _| window.start_window_move())
                     .flex()
                     .items_center()
                     .justify_center()
@@ -5243,6 +5278,45 @@ mod tests {
         assert_eq!(
             workspace.read_with(&cx, |shell, _| shell.app_bar_menu),
             None
+        );
+    }
+
+    #[gpui::test]
+    fn app_bar_overlays_are_mutually_exclusive(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+
+        workspace.update(&mut cx, |shell, cx| shell.open_account(cx));
+        assert_eq!(
+            workspace.read_with(&cx, |shell, _| shell.modal().cloned()),
+            Some(Modal::Account)
+        );
+
+        workspace.update(&mut cx, |shell, cx| {
+            shell.toggle_app_bar_menu(AppBarMenu::Profile, cx)
+        });
+        assert!(workspace.read_with(&cx, |shell, _| shell.modal().is_none()));
+        assert_eq!(
+            workspace.read_with(&cx, |shell, _| shell.app_bar_menu),
+            Some(AppBarMenu::Profile)
+        );
+
+        workspace.update(&mut cx, |shell, cx| shell.open_server_picker(cx));
+        assert_eq!(
+            workspace.read_with(&cx, |shell, _| shell.modal().cloned()),
+            Some(Modal::ServerPicker)
+        );
+        assert_eq!(
+            workspace.read_with(&cx, |shell, _| shell.app_bar_menu),
+            None
+        );
+
+        workspace.update(&mut cx, |shell, cx| shell.toggle_app_bar_navigation(cx));
+        assert!(workspace.read_with(&cx, |shell, _| shell.modal().is_none()));
+        assert_eq!(
+            workspace.read_with(&cx, |shell, _| shell.app_bar_menu),
+            Some(AppBarMenu::Main)
         );
     }
 
