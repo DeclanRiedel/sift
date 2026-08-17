@@ -26,6 +26,7 @@ use crate::{
 mod app_bar;
 mod bottom_tools;
 mod commands;
+mod dock_layout;
 mod docks;
 mod items;
 mod status_bar;
@@ -39,6 +40,12 @@ use app_bar::AppBarMenu;
 
 const PALETTE_VISIBLE_ROWS: usize = 10;
 const PALETTE_ROW_HEIGHT: f32 = 30.0;
+const DOCK_RESIZE_HANDLE_SIZE: f32 = 7.0;
+
+#[derive(Debug, Clone, Copy)]
+struct DockResizeDrag {
+    dock: DockId,
+}
 
 fn optional_u32_field(
     input: &Entity<TextInput>,
@@ -749,9 +756,31 @@ impl WorkspaceShell {
             .active_focus_handle(cx)
             .focus(window, cx);
         let bounds_subscription = cx.observe_window_bounds(window, |shell, window, cx| {
-            shell.capture_window_bounds(window.window_bounds());
+            let bounds = window.window_bounds();
+            shell.capture_window_bounds(bounds);
+            let size = bounds.get_bounds().size;
+            shell.fit_docks_to_viewport(size.width.into(), size.height.into());
             shell.persist(cx);
         });
+        let mut left_dock = DockRegistry::create(DockId::Left, workspace.left_dock.clone());
+        let mut right_dock = DockRegistry::create(DockId::Inspector, workspace.right_dock.clone());
+        let mut bottom_dock = DockRegistry::create(DockId::Bottom, workspace.bottom_dock.clone());
+        let viewport = window.window_bounds().get_bounds().size;
+        let side_sizes = dock_layout::fit_side_docks(
+            viewport.width.into(),
+            left_dock.presentation.size,
+            right_dock.presentation.size,
+            left_dock.presentation.open,
+            right_dock.presentation.open,
+        );
+        left_dock.presentation.size = side_sizes.left;
+        right_dock.presentation.size = side_sizes.right;
+        let vertical_chrome: f32 =
+            (theme.metrics.toolbar_height + theme.metrics.status_height).into();
+        bottom_dock.presentation.size = dock_layout::fit_bottom_dock(
+            f32::from(viewport.height) - vertical_chrome,
+            bottom_dock.presentation.size,
+        );
         Self {
             focus_handle: cx.focus_handle(),
             query_input,
@@ -780,9 +809,9 @@ impl WorkspaceShell {
             active_pane,
             selected_workspace_id,
             selected_instance_id,
-            left_dock: DockRegistry::create(DockId::Left, workspace.left_dock),
-            right_dock: DockRegistry::create(DockId::Inspector, workspace.right_dock),
-            bottom_dock: DockRegistry::create(DockId::Bottom, workspace.bottom_dock),
+            left_dock,
+            right_dock,
+            bottom_dock,
             active_left_panel: workspace.left_panel,
             active_bottom_tool: workspace.bottom_tool,
             modal: None,
@@ -1579,6 +1608,7 @@ impl WorkspaceShell {
             self.active_left_panel = panel;
             self.left_dock.presentation.open = true;
         }
+        self.fit_side_docks_to_width(self.window_presentation.bounds.width);
         self.persist(cx);
         cx.notify();
     }
@@ -1704,6 +1734,74 @@ impl WorkspaceShell {
             let _ = store.save(&state);
         })
         .detach();
+    }
+
+    fn fit_side_docks_to_width(&mut self, width: f32) {
+        let sizes = dock_layout::fit_side_docks(
+            width,
+            self.left_dock.presentation.size,
+            self.right_dock.presentation.size,
+            self.left_dock.presentation.open,
+            self.right_dock.presentation.open,
+        );
+        self.left_dock.presentation.size = sizes.left;
+        self.right_dock.presentation.size = sizes.right;
+    }
+
+    fn fit_docks_to_viewport(&mut self, width: f32, height: f32) {
+        self.fit_side_docks_to_width(width);
+
+        let vertical_chrome: f32 =
+            (self.theme.metrics.toolbar_height + self.theme.metrics.status_height).into();
+        self.bottom_dock.presentation.size = dock_layout::fit_bottom_dock(
+            (height - vertical_chrome).max(0.0),
+            self.bottom_dock.presentation.size,
+        );
+    }
+
+    fn resize_dock(
+        &mut self,
+        event: &gpui::DragMoveEvent<DockResizeDrag>,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let dock = event.drag(cx).dock;
+        let width: f32 = event.bounds.size.width.into();
+        let height: f32 = event.bounds.size.height.into();
+        let pointer_x: f32 = (event.event.position.x - event.bounds.left()).into();
+        let pointer_y: f32 = (event.event.position.y - event.bounds.top()).into();
+
+        match dock {
+            DockId::Left | DockId::Inspector => {
+                let requested = match dock {
+                    DockId::Left => pointer_x,
+                    DockId::Inspector => width - pointer_x,
+                    DockId::Bottom => unreachable!(),
+                };
+                let sizes = dock_layout::resize_side_dock(
+                    width,
+                    dock_layout::SideDockSizes {
+                        left: self.left_dock.presentation.size,
+                        right: self.right_dock.presentation.size,
+                    },
+                    self.left_dock.presentation.open,
+                    self.right_dock.presentation.open,
+                    dock,
+                    requested,
+                );
+                self.left_dock.presentation.size = sizes.left;
+                self.right_dock.presentation.size = sizes.right;
+            }
+            DockId::Bottom => {
+                self.bottom_dock.presentation.size =
+                    dock_layout::fit_bottom_dock(height, height - pointer_y);
+            }
+        }
+        cx.notify();
+    }
+
+    fn finish_dock_resize(&mut self, _: &DockResizeDrag, _: &mut Window, cx: &mut Context<Self>) {
+        self.persist(cx);
     }
 
     fn capture_window_bounds(&mut self, window_bounds: WindowBounds) {
@@ -2257,20 +2355,44 @@ impl WorkspaceShell {
         }
     }
 
-    fn toggle_left_dock(&mut self, _: &ToggleLeftDock, _: &mut Window, cx: &mut Context<Self>) {
+    fn toggle_left_dock(
+        &mut self,
+        _: &ToggleLeftDock,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.left_dock.presentation.open = !self.left_dock.presentation.open;
+        self.fit_side_docks_to_width(window.window_bounds().get_bounds().size.width.into());
         self.persist(cx);
         cx.notify();
     }
 
-    fn toggle_right_dock(&mut self, _: &ToggleRightDock, _: &mut Window, cx: &mut Context<Self>) {
+    fn toggle_right_dock(
+        &mut self,
+        _: &ToggleRightDock,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.right_dock.presentation.open = !self.right_dock.presentation.open;
+        self.fit_side_docks_to_width(window.window_bounds().get_bounds().size.width.into());
         self.persist(cx);
         cx.notify();
     }
 
-    fn toggle_bottom_dock(&mut self, _: &ToggleBottomDock, _: &mut Window, cx: &mut Context<Self>) {
+    fn toggle_bottom_dock(
+        &mut self,
+        _: &ToggleBottomDock,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.bottom_dock.presentation.open = !self.bottom_dock.presentation.open;
+        let viewport = window.window_bounds().get_bounds().size;
+        let vertical_chrome: f32 =
+            (self.theme.metrics.toolbar_height + self.theme.metrics.status_height).into();
+        self.bottom_dock.presentation.size = dock_layout::fit_bottom_dock(
+            f32::from(viewport.height) - vertical_chrome,
+            self.bottom_dock.presentation.size,
+        );
         self.persist(cx);
         cx.notify();
     }
@@ -2828,9 +2950,16 @@ impl WorkspaceShell {
             DockId::Left => self.active_left_panel.label(),
             DockId::Inspector | DockId::Bottom => definition.title,
         };
+        let debug_selector = match dock.id {
+            DockId::Left => "left-dock",
+            DockId::Inspector => "right-dock",
+            DockId::Bottom => "bottom-dock",
+        };
         div()
             .id(title)
+            .debug_selector(move || debug_selector.to_owned())
             .key_context("SiftDock")
+            .relative()
             .w(px(dock.presentation.size))
             .min_h_0()
             .flex()
@@ -3139,6 +3268,7 @@ impl WorkspaceShell {
                         ),
                 )
             })
+            .child(dock_resize_handle(dock.id, colors.accent))
     }
 
     fn render_modal(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
@@ -4946,6 +5076,43 @@ fn edge_resize_enabled(is_maximized: bool, is_fullscreen: bool) -> bool {
     !is_maximized && !is_fullscreen
 }
 
+fn dock_resize_handle(dock: DockId, accent: gpui::Hsla) -> gpui::AnyElement {
+    let (id, cursor) = match dock {
+        DockId::Left => ("resize-left-dock", CursorStyle::ResizeLeftRight),
+        DockId::Inspector => ("resize-right-dock", CursorStyle::ResizeLeftRight),
+        DockId::Bottom => ("resize-bottom-dock", CursorStyle::ResizeUpDown),
+    };
+    let handle = div()
+        .id(id)
+        .debug_selector(move || id.to_owned())
+        .absolute()
+        .cursor(cursor)
+        .block_mouse_except_scroll()
+        .hover(move |handle| handle.bg(accent))
+        .on_drag(DockResizeDrag { dock }, |_, _, _, cx| {
+            cx.new(|_| gpui::Empty)
+        });
+
+    match dock {
+        DockId::Left => handle
+            .right_0()
+            .top_0()
+            .h_full()
+            .w(px(DOCK_RESIZE_HANDLE_SIZE)),
+        DockId::Inspector => handle
+            .left_0()
+            .top_0()
+            .h_full()
+            .w(px(DOCK_RESIZE_HANDLE_SIZE)),
+        DockId::Bottom => handle
+            .top_0()
+            .left_0()
+            .w_full()
+            .h(px(DOCK_RESIZE_HANDLE_SIZE)),
+    }
+    .into_any_element()
+}
+
 impl gpui::Render for WorkspaceShell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = self.theme.colors;
@@ -4961,6 +5128,11 @@ impl gpui::Render for WorkspaceShell {
             .presentation
             .open
             .then(|| self.render_dock(&self.right_dock, cx));
+        let bottom_dock = self
+            .bottom_dock
+            .presentation
+            .open
+            .then(|| bottom_tools::render_bottom_panel(self));
         div()
             .id("sift-shell")
             .key_context("SiftWorkspace")
@@ -4995,22 +5167,32 @@ impl gpui::Render for WorkspaceShell {
             .child(self.render_toolbar(cx))
             .child(
                 div()
+                    .id("workspace-content")
                     .flex()
                     .flex_1()
                     .min_h_0()
+                    .on_drag_move::<DockResizeDrag>(cx.listener(Self::resize_dock))
+                    .on_drop::<DockResizeDrag>(cx.listener(Self::finish_dock_resize))
                     .children(left_dock)
                     .child(
                         div()
                             .flex()
+                            .flex_col()
                             .flex_1()
                             .min_w_0()
-                            .children(self.panes.iter().cloned()),
+                            .min_h_0()
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .min_h_0()
+                                    .children(self.panes.iter().cloned()),
+                            )
+                            .children(bottom_dock),
                     )
                     .children(right_dock),
             )
-            .when(self.bottom_dock.presentation.open, |shell| {
-                shell.child(bottom_tools::render_bottom_panel(self))
-            })
             .child(status_bar::render_status_bar(self, cx))
             .children(self.toasts.last().map(|toast| {
                 div()
@@ -6208,6 +6390,28 @@ mod tests {
             assert!(!snapshot.workspace.bottom_dock.open);
             assert!(!snapshot.workspace.right_dock.open);
         });
+    }
+
+    #[gpui::test]
+    fn bottom_dock_is_laid_out_between_the_side_docks(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        workspace.update(&mut cx, |shell, cx| {
+            shell.bottom_dock.presentation.open = true;
+            cx.notify();
+        });
+        cx.run_until_parked();
+
+        let left = cx.debug_bounds("left-dock").expect("left dock");
+        let right = cx.debug_bounds("right-dock").expect("right dock");
+        let bottom = cx.debug_bounds("bottom-dock").expect("bottom dock");
+
+        assert!(bottom.left() >= left.right());
+        assert!(bottom.right() <= right.left());
+        assert!(cx.debug_bounds("resize-left-dock").is_some());
+        assert!(cx.debug_bounds("resize-right-dock").is_some());
+        assert!(cx.debug_bounds("resize-bottom-dock").is_some());
     }
 
     #[gpui::test]

@@ -30,7 +30,10 @@ pub(super) fn render_bottom_panel(shell: &WorkspaceShell) -> gpui::AnyElement {
         ),
     };
     div()
-        .h(px(dock.presentation.size.min(160.0)))
+        .debug_selector(|| "bottom-dock".into())
+        .relative()
+        .h(px(dock.presentation.size))
+        .flex_none()
         .flex()
         .flex_col()
         .border_t_1()
@@ -68,5 +71,6 @@ pub(super) fn render_bottom_panel(shell: &WorkspaceShell) -> gpui::AnyElement {
                         .child(body),
                 ),
         )
+        .child(dock_resize_handle(DockId::Bottom, colors.accent))
         .into_any_element()
 }
