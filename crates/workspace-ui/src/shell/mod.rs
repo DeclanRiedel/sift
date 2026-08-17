@@ -381,6 +381,7 @@ impl gpui::Render for Pane {
         let is_focused = self.active_focus_handle(cx).is_focused(window)
             || self.focus_handle.contains_focused(window, cx);
         let active = self.active_item().cloned();
+        let has_items = !self.items.is_empty();
         div()
             .id(("pane", self.id as usize))
             .key_context("SiftPane")
@@ -398,8 +399,9 @@ impl gpui::Render for Pane {
             .border_t_1()
             .border_color(pane_border_color(&self.theme, is_focused))
             .bg(colors.background)
-            .child(
+            .children(has_items.then(|| {
                 div()
+                    .debug_selector(|| "pane-tab-bar".into())
                     .h(self.theme.metrics.tab_height)
                     .flex_none()
                     .flex()
@@ -515,7 +517,7 @@ impl gpui::Render for Pane {
                                     )),
                             ),
                     )
-                    .children((!self.items.is_empty()).then(|| {
+                    .child(
                         div()
                             .id(("pane-close", self.id as usize))
                             .debug_selector(|| "pane-close".into())
@@ -529,9 +531,9 @@ impl gpui::Render for Pane {
                             .text_color(colors.muted_text)
                             .hover(|close| close.bg(colors.hovered_surface).text_color(colors.text))
                             .on_click(cx.listener(|_, _, _, cx| cx.emit(PaneEvent::CloseRequested)))
-                            .child(icon(IconName::Close, colors.muted_text, 14.))
-                    })),
-            )
+                            .child(icon(IconName::Close, colors.muted_text, 14.)),
+                    )
+            }))
             .child({
                 let body = div().flex_1().min_h_0().flex().flex_col();
                 match active {
@@ -5433,12 +5435,13 @@ mod tests {
     }
 
     #[gpui::test]
-    fn empty_pane_hides_its_close_button(cx: &mut TestAppContext) {
+    fn empty_pane_hides_its_tab_bar(cx: &mut TestAppContext) {
         let window = shell(cx);
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         let workspace = window.root(&mut cx).unwrap();
         cx.run_until_parked();
         assert!(cx.debug_bounds("pane-close").is_some());
+        assert!(cx.debug_bounds("pane-tab-bar").is_some());
 
         let focus = workspace.read_with(&cx, |shell, cx| shell.focus_handle(cx));
         cx.update(|window, cx| focus.dispatch_action(&CloseActiveItem, window, cx));
@@ -5449,6 +5452,7 @@ mod tests {
             0
         );
         assert!(cx.debug_bounds("pane-close").is_none());
+        assert!(cx.debug_bounds("pane-tab-bar").is_none());
     }
 
     #[gpui::test]
