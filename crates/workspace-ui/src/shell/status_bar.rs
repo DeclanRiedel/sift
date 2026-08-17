@@ -128,6 +128,15 @@ pub(super) fn render_status_bar(
         }
         _ => shell.status.database.clone(),
     };
+    let (cursor_label, cursor_tooltip) = shell.active_cursor_position(cx).map_or_else(
+        || ("-:-".into(), "No active query cursor".into()),
+        |(line, column)| {
+            (
+                format!("{line}:{column}"),
+                format!("Line {line}, column {column}"),
+            )
+        },
+    );
 
     div()
         .id("status-bar")
@@ -288,17 +297,48 @@ pub(super) fn render_status_bar(
                 .flex_none()
                 .items_center()
                 .gap_1()
-                .child(
-                    button(
-                        "footer-editor-mode",
-                        IconName::Keyboard,
-                        "Editor mode: Standard".into(),
-                        false,
-                        None,
-                        false,
-                    )
-                    .on_click(cx.listener(|shell, _, _, cx| shell.show_editor_mode(cx))),
-                )
+                .child({
+                    let tooltip = cursor_tooltip.clone();
+                    div()
+                        .id("footer-cursor-position")
+                        .aria_label(cursor_tooltip)
+                        .h(theme.metrics.compact_control_height)
+                        .min_w(px(30.))
+                        .px_1()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .font_family("monospace")
+                        .text_color(colors.muted_text)
+                        .child(cursor_label)
+                        .tooltip(move |_, cx| {
+                            cx.new(|_| StatusTooltip {
+                                message: tooltip.clone(),
+                                theme,
+                            })
+                            .into()
+                        })
+                })
+                .child({
+                    let tooltip = "Standard editor keymap".to_string();
+                    div()
+                        .id("footer-editor-mode")
+                        .aria_label(tooltip.clone())
+                        .h(theme.metrics.compact_control_height)
+                        .px_1()
+                        .flex()
+                        .items_center()
+                        .text_color(colors.muted_text)
+                        .child("STANDARD")
+                        .tooltip(move |_, cx| {
+                            cx.new(|_| StatusTooltip {
+                                message: tooltip.clone(),
+                                theme,
+                            })
+                            .into()
+                        })
+                })
+                .child(separator())
                 .child(
                     button(
                         "footer-console",
@@ -340,7 +380,19 @@ pub(super) fn render_status_bar(
                     .on_click(cx.listener(|shell, _, _, cx| {
                         shell.select_bottom_tool(BottomTool::Automations, cx)
                     })),
-                ),
+                )
+                .children(shell.right_dock.presentation.open.then(separator))
+                .children(shell.right_dock.presentation.open.then(|| {
+                    button(
+                        "footer-close-inspector",
+                        IconName::Close,
+                        "Close Inspector".into(),
+                        false,
+                        None,
+                        false,
+                    )
+                    .on_click(cx.listener(|shell, _, _, cx| shell.close_inspector(cx)))
+                })),
         )
         .into_any_element()
 }

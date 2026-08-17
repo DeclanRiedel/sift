@@ -169,6 +169,8 @@ pub enum PaneEvent {
     FocusRequested,
     /// The pane should be removed (its close control was used, or it emptied).
     CloseRequested,
+    /// Active editor cursor or input state changed.
+    EditorStateChanged,
     /// A query item asked to run SQL; the workspace dispatches it to execution.
     ExecuteRequested { item_id: u64, sql: String },
 }
@@ -270,6 +272,7 @@ impl Pane {
 
     fn on_editor_event(&mut self, item_id: u64, event: &EditorEvent, cx: &mut Context<Self>) {
         match event {
+            EditorEvent::StateChanged => cx.emit(PaneEvent::EditorStateChanged),
             EditorEvent::Execute { sql } => {
                 // Show the pending state immediately, then ask the workspace to
                 // dispatch the run. The workspace owns the executor channel.
@@ -321,6 +324,13 @@ impl Pane {
             .and_then(|item| self.editors.get(&item.id))
             .map(|editor| editor.focus_handle(cx))
             .unwrap_or_else(|| self.focus_handle.clone())
+    }
+
+    fn active_cursor_position(&self, cx: &App) -> Option<(usize, usize)> {
+        let item = self.active_item()?;
+        self.editors
+            .get(&item.id)
+            .map(|editor| editor.read(cx).cursor_position())
     }
 }
 
@@ -1583,6 +1593,12 @@ impl WorkspaceShell {
         cx.notify();
     }
 
+    fn close_inspector(&mut self, cx: &mut Context<Self>) {
+        self.right_dock.presentation.open = false;
+        self.persist(cx);
+        cx.notify();
+    }
+
     fn show_project_search(&mut self, cx: &mut Context<Self>) {
         self.show_toast("Project search is not wired to the desktop yet".into(), cx);
     }
@@ -1603,11 +1619,10 @@ impl WorkspaceShell {
         self.show_toast("Copied current diagnostic".into(), cx);
     }
 
-    fn show_editor_mode(&mut self, cx: &mut Context<Self>) {
-        self.show_toast(
-            "Standard keymap active; Vim and Helix modes are planned".into(),
-            cx,
-        );
+    fn active_cursor_position(&self, cx: &App) -> Option<(usize, usize)> {
+        self.panes
+            .get(self.active_pane)
+            .and_then(|pane| pane.read(cx).active_cursor_position(cx))
     }
 
     pub fn open_workspace(&mut self, workspace: &WorkspaceNavEntry, cx: &mut Context<Self>) {
@@ -1767,6 +1782,7 @@ impl WorkspaceShell {
                 self.active_pane = index;
                 self.close_pane_at(index, window, cx);
             }
+            PaneEvent::EditorStateChanged => cx.notify(),
             PaneEvent::ExecuteRequested { item_id, sql } => match &self.executor_sender {
                 Some(sender) => {
                     self.status.execution = "Running…".into();
@@ -6161,11 +6177,16 @@ mod tests {
             shell.select_bottom_tool(BottomTool::Automations, cx);
             assert!(!shell.bottom_dock.presentation.open);
 
+            assert!(shell.right_dock.presentation.open);
+            shell.close_inspector(cx);
+            assert!(!shell.right_dock.presentation.open);
+
             let snapshot = shell.snapshot(cx);
             assert_eq!(snapshot.workspace.left_panel, LeftPanel::QueryOutline);
             assert_eq!(snapshot.workspace.bottom_tool, BottomTool::Automations);
             assert!(!snapshot.workspace.left_dock.open);
             assert!(!snapshot.workspace.bottom_dock.open);
+            assert!(!snapshot.workspace.right_dock.open);
         });
     }
 

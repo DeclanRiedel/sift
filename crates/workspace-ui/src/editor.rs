@@ -104,6 +104,16 @@ impl QueryDocument {
         }
     }
 
+    /// One-based line and Unicode-scalar column for status-bar presentation.
+    pub fn cursor_position(&self) -> (usize, usize) {
+        let before = &self.text[..self.cursor()];
+        let line_start = before.rfind('\n').map_or(0, |index| index + 1);
+        (
+            before.matches('\n').count() + 1,
+            before[line_start..].chars().count() + 1,
+        )
+    }
+
     /// Apply a text splice against the replica and refresh the cached text. Only
     /// touches CRDT state; selection and history are the caller's concern.
     fn splice(&mut self, start: usize, end: usize, new_text: &str) {
@@ -490,6 +500,8 @@ fn find_ci(original: &str, lowered: &str, needle: &str) -> Vec<Range<usize>> {
 /// talks to the SDK directly; it reports intent and the workspace dispatches.
 #[derive(Debug, Clone)]
 pub enum EditorEvent {
+    /// Cursor or document state changed and parent projections must refresh.
+    StateChanged,
     /// Run this SQL (the statement under the caret, or the whole document).
     Execute { sql: String },
 }
@@ -554,6 +566,10 @@ impl QueryEditor {
         &self.document
     }
 
+    pub fn cursor_position(&self) -> (usize, usize) {
+        self.document.cursor_position()
+    }
+
     pub fn set_theme(&mut self, theme: Theme, cx: &mut Context<Self>) {
         self.theme = theme;
         cx.notify();
@@ -561,6 +577,12 @@ impl QueryEditor {
 
     fn edited(&mut self, cx: &mut Context<Self>) {
         self.marked_range = None;
+        cx.emit(EditorEvent::StateChanged);
+        cx.notify();
+    }
+
+    fn selection_changed(&mut self, cx: &mut Context<Self>) {
+        cx.emit(EditorEvent::StateChanged);
         cx.notify();
     }
 
@@ -586,57 +608,57 @@ impl QueryEditor {
 
     fn move_left(&mut self, _: &MoveLeft, _: &mut Window, cx: &mut Context<Self>) {
         self.document.move_left(false);
-        cx.notify();
+        self.selection_changed(cx);
     }
 
     fn move_right(&mut self, _: &MoveRight, _: &mut Window, cx: &mut Context<Self>) {
         self.document.move_right(false);
-        cx.notify();
+        self.selection_changed(cx);
     }
 
     fn move_up(&mut self, _: &MoveUp, _: &mut Window, cx: &mut Context<Self>) {
         self.document.move_up(false);
-        cx.notify();
+        self.selection_changed(cx);
     }
 
     fn move_down(&mut self, _: &MoveDown, _: &mut Window, cx: &mut Context<Self>) {
         self.document.move_down(false);
-        cx.notify();
+        self.selection_changed(cx);
     }
 
     fn select_left(&mut self, _: &SelectLeft, _: &mut Window, cx: &mut Context<Self>) {
         self.document.move_left(true);
-        cx.notify();
+        self.selection_changed(cx);
     }
 
     fn select_right(&mut self, _: &SelectRight, _: &mut Window, cx: &mut Context<Self>) {
         self.document.move_right(true);
-        cx.notify();
+        self.selection_changed(cx);
     }
 
     fn select_up(&mut self, _: &SelectUp, _: &mut Window, cx: &mut Context<Self>) {
         self.document.move_up(true);
-        cx.notify();
+        self.selection_changed(cx);
     }
 
     fn select_down(&mut self, _: &SelectDown, _: &mut Window, cx: &mut Context<Self>) {
         self.document.move_down(true);
-        cx.notify();
+        self.selection_changed(cx);
     }
 
     fn line_start(&mut self, _: &LineStart, _: &mut Window, cx: &mut Context<Self>) {
         self.document.move_line_start(false);
-        cx.notify();
+        self.selection_changed(cx);
     }
 
     fn line_end(&mut self, _: &LineEnd, _: &mut Window, cx: &mut Context<Self>) {
         self.document.move_line_end(false);
-        cx.notify();
+        self.selection_changed(cx);
     }
 
     fn select_all(&mut self, _: &SelectAll, _: &mut Window, cx: &mut Context<Self>) {
         self.document.select_all();
-        cx.notify();
+        self.selection_changed(cx);
     }
 
     fn copy(&mut self, _: &Copy, _: &mut Window, cx: &mut Context<Self>) {
@@ -758,7 +780,7 @@ impl EntityInputHandler for QueryEditor {
 
     fn unmark_text(&mut self, _: &mut Window, cx: &mut Context<Self>) {
         self.marked_range = None;
-        cx.notify();
+        self.selection_changed(cx);
     }
 
     fn replace_text_in_range(
@@ -777,7 +799,7 @@ impl EntityInputHandler for QueryEditor {
             None => self.document.insert(new_text),
         }
         self.marked_range = None;
-        cx.notify();
+        self.selection_changed(cx);
     }
 
     fn replace_and_mark_text_in_range(
@@ -801,7 +823,7 @@ impl EntityInputHandler for QueryEditor {
             let end = offset_from_utf16(new_text, selection.end) + range.start;
             self.document.set_selection(start..end, false);
         }
-        cx.notify();
+        self.selection_changed(cx);
     }
 
     fn bounds_for_range(
@@ -1406,6 +1428,17 @@ mod tests {
         document.move_up(false);
         document.move_up(false);
         assert_eq!(document.cursor(), 3);
+    }
+
+    #[test]
+    fn cursor_position_is_one_based_and_unicode_aware() {
+        let mut document = doc("αβ\nxyz");
+        document.set_selection(0..0, false);
+        assert_eq!(document.cursor_position(), (1, 1));
+        document.set_selection(4..4, false);
+        assert_eq!(document.cursor_position(), (1, 3));
+        document.set_selection(6..6, false);
+        assert_eq!(document.cursor_position(), (2, 2));
     }
 
     #[test]
