@@ -2312,6 +2312,15 @@ impl WorkspaceShell {
         cx.notify();
     }
 
+    fn hover_app_bar_menu(&mut self, menu: AppBarMenu, hovered: bool, cx: &mut Context<Self>) {
+        if !hovered || !self.app_bar_expanded || self.app_bar_menu == Some(menu) {
+            return;
+        }
+        self.close_app_bar_modal(cx);
+        self.app_bar_menu = Some(menu);
+        cx.notify();
+    }
+
     fn toggle_app_bar_navigation(&mut self, cx: &mut Context<Self>) {
         self.close_app_bar_modal(cx);
         self.app_bar_expanded = !self.app_bar_expanded;
@@ -2584,6 +2593,9 @@ impl WorkspaceShell {
                     .text_color(if open { colors.text } else { colors.muted_text })
                     .when(open, |button| button.bg(colors.active_surface))
                     .hover(|button| button.bg(colors.hovered_surface).text_color(colors.text))
+                    .on_hover(cx.listener(move |shell, hovered: &bool, _, cx| {
+                        shell.hover_app_bar_menu(menu, *hovered, cx)
+                    }))
                     .on_click(
                         cx.listener(move |shell, _, _, cx| shell.toggle_app_bar_menu(menu, cx)),
                     )
@@ -2726,6 +2738,9 @@ impl WorkspaceShell {
                                     .hover(|slot| {
                                         slot.bg(colors.hovered_surface).text_color(colors.text)
                                     })
+                                    .on_hover(cx.listener(|shell, hovered: &bool, _, cx| {
+                                        shell.hover_app_bar_menu(AppBarMenu::Main, *hovered, cx)
+                                    }))
                                     .on_click(cx.listener(|shell, _, _, cx| {
                                         shell.toggle_app_bar_navigation(cx)
                                     }))
@@ -5410,6 +5425,49 @@ mod tests {
         assert_eq!(
             workspace.read_with(&cx, |shell, _| shell.app_bar_menu),
             None
+        );
+    }
+
+    #[gpui::test]
+    fn expanded_app_bar_switches_menus_on_hover(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+
+        workspace.update(&mut cx, |shell, cx| {
+            shell.hover_app_bar_menu(AppBarMenu::File, true, cx)
+        });
+        assert_eq!(
+            workspace.read_with(&cx, |shell, _| shell.app_bar_menu),
+            None
+        );
+
+        workspace.update(&mut cx, |shell, cx| shell.toggle_app_bar_navigation(cx));
+        workspace.update(&mut cx, |shell, cx| {
+            shell.hover_app_bar_menu(AppBarMenu::File, true, cx)
+        });
+        assert_eq!(
+            workspace.read_with(&cx, |shell, _| shell.app_bar_menu),
+            Some(AppBarMenu::File)
+        );
+
+        workspace.update(&mut cx, |shell, cx| {
+            shell.hover_app_bar_menu(AppBarMenu::File, false, cx);
+            shell.hover_app_bar_menu(AppBarMenu::Edit, true, cx);
+        });
+        assert_eq!(
+            workspace.read_with(&cx, |shell, _| shell.app_bar_menu),
+            Some(AppBarMenu::Edit)
+        );
+
+        workspace.update(&mut cx, |shell, cx| {
+            shell.open_app_bar_modal(Modal::Account, cx);
+            shell.hover_app_bar_menu(AppBarMenu::Help, true, cx);
+        });
+        assert!(workspace.read_with(&cx, |shell, _| shell.modal().is_none()));
+        assert_eq!(
+            workspace.read_with(&cx, |shell, _| shell.app_bar_menu),
+            Some(AppBarMenu::Help)
         );
     }
 
