@@ -63,6 +63,61 @@ cp sift.example.toml sift.toml
 # secret_key_file = ".sift/dev-secret.key"
 ```
 
+## Seeded Desktop Demo
+
+To exercise desktop UI against real query results instead of an empty client:
+
+```sh
+nix develop
+sift-desktop-demo
+```
+
+That command starts a throwaway Postgres cluster (default `/tmp/sift-demo-pg`,
+port 5433) seeded with `lab.people`, applies metadata migrations, starts a real
+`sift-server` on `SIFT_BIND` (default `127.0.0.1:7474`), registers a **Demo
+Postgres** connection profile, and launches `sift-desktop` attached to that
+server. The profile appears in the Connections dock; `SELECT * FROM lab.people;`
+returns three rows.
+
+Both helper steps are also usable on their own:
+
+```sh
+scripts/dev-seed-postgres.sh                                   # prints the port
+scripts/dev-register-demo-connection.sh http://127.0.0.1:7474  # prints profile id
+```
+
+Both are idempotent — rerunning reuses the existing cluster and profile.
+
+Useful overrides:
+
+- `SIFT_DEMO_PG_PORT` — port for the demo cluster.
+- `SIFT_DEMO_PGDATA` — cluster data directory.
+- `SIFT_DEMO_KEEP_POSTGRES=1` — leave the cluster running after the desktop exits.
+- `SIFT_BIND` — backend bind address.
+
+The demo cluster uses trust auth on loopback with an empty password. It is a
+disposable dev fixture; never point it at real data.
+
+## Build Resource Limits
+
+The committed `.cargo/config.toml` sets `jobs = -6` (all logical cores minus
+six) so a workspace build leaves headroom for the editor, rust-analyzer, a
+running server, and Postgres. `Cargo.toml` limits dev debuginfo to line tables
+and builds dependencies at `opt-level = 2` with no debuginfo, which cuts both
+link-time memory and `target/` size while keeping GPUI usable at runtime.
+
+The Nix dev shell additionally links with `mold` (`RUSTFLAGS=-C
+link-arg=-fuse-ld=mold`), the largest single reduction in peak build memory.
+Because `RUSTFLAGS` is part of the build fingerprint, the first build after
+entering the shell rebuilds the workspace once.
+
+For a fast optimized local build without the release profile's LTO and
+single-codegen-unit memory spike:
+
+```sh
+cargo run --profile release-dev -p sift-desktop
+```
+
 ## Sensitive Values
 
 Never commit real values for:

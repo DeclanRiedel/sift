@@ -122,7 +122,25 @@ gpui_platform = { version = "0.1.0", git = "https://github.com/zed-industries/ze
 
 [profile.dev]
 split-debuginfo = "unpacked"
+# Full debuginfo for this workspace plus GPUI dominates both link-time memory
+# and target/ size. Line tables keep backtraces and profiler symbols usable.
+debug = "line-tables-only"
+
+# Dependencies are rebuilt rarely, so pay once for optimized deps: GPUI's
+# renderer and the drivers are unusably slow in a fully unoptimized debug
+# build, and dropping their debuginfo is the single biggest link-memory win.
+[profile.dev.package."*"]
+opt-level = 2
+debug = false
 
 [profile.release]
 lto = "thin"
 codegen-units = 1
+
+# Release-quality binary without the single-codegen-unit + LTO memory spike.
+# Use for local "does it feel fast" builds: cargo run --profile release-dev.
+[profile.release-dev]
+inherits = "release"
+lto = false
+codegen-units = 16
+debug = "line-tables-only"

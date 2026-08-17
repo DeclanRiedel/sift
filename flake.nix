@@ -38,15 +38,43 @@
           freetype
           libxkbcommon
           vulkan-loader
+          mesa                  # Vulkan ICDs + libgbm/libdrm for the GPUI renderer
           wayland
           libx11
           libxcb
         ];
 
+        # GPUI renders through Vulkan. The dev shell replaces LD_LIBRARY_PATH,
+        # so on a non-NixOS host the system ICD JSONs under /usr/share/vulkan
+        # still resolve but their relative `libvulkan_*.so` no longer do:
+        # `vkCreateInstance: Found no drivers!`, surfacing in the client as
+        # "Failed to create surface for any enabled backend". Point the loader
+        # at Nix's mesa ICDs, whose JSONs carry absolute store paths.
+        vulkanIcdNames =
+          if pkgs.stdenv.hostPlatform.isx86_64 then [
+            "intel_icd.x86_64.json"
+            "intel_hasvk_icd.x86_64.json"
+            "radeon_icd.x86_64.json"
+            "nouveau_icd.x86_64.json"
+            "virtio_icd.x86_64.json"
+            "lvp_icd.x86_64.json"       # software fallback, keep last
+          ] else [
+            "panfrost_icd.aarch64.json"
+            "freedreno_icd.aarch64.json"
+            "broadcom_icd.aarch64.json"
+            "asahi_icd.aarch64.json"
+            "nouveau_icd.aarch64.json"
+            "lvp_icd.aarch64.json"
+          ];
+        vulkanIcdFilenames = pkgs.lib.concatMapStringsSep ":"
+          (name: "${pkgs.mesa}/share/vulkan/icd.d/${name}")
+          vulkanIcdNames;
+
         # Rust + adjacent dev tooling.
         rustDeps = with pkgs; [
           rustToolchain
           rust-analyzer
+          mold                  # linker: far less RAM + wall time than bfd/gold
           sccache               # shared compile cache across checkouts / machines
           cargo-nextest         # faster, better test runner
           cargo-watch           # auto-rebuild on save
@@ -211,46 +239,15 @@
 
             pgdata="''${SIFT_DEMO_PGDATA:-/tmp/sift-demo-pg}"
             pglog="''${SIFT_DEMO_PG_LOG:-/tmp/sift-demo-pg.log}"
-            pgport="''${SIFT_DEMO_PG_PORT:-5433}"
-            pgsocket="''${SIFT_DEMO_PG_SOCKET_DIR:-/tmp/sift-demo-pg-socket}"
             backend_log="''${SIFT_BACKEND_LAB_BACKEND_LOG:-/tmp/sift-backend-lab-backend.log}"
             bind="''${SIFT_BIND:-127.0.0.1:3000}"
             base_url="http://$bind"
-            mkdir -p "$pgsocket"
 
-            if [ ! -f "$pgdata/PG_VERSION" ]; then
-              rm -rf "$pgdata"
-              initdb -D "$pgdata" -U sift --auth=trust --no-locale --encoding=UTF8
-              {
-                echo "listen_addresses = '127.0.0.1'"
-                echo "port = $pgport"
-                echo "unix_socket_directories = '$pgsocket'"
-              } >> "$pgdata/postgresql.conf"
-            fi
-            if ! grep -q "unix_socket_directories = '$pgsocket'" "$pgdata/postgresql.conf"; then
-              echo "unix_socket_directories = '$pgsocket'" >> "$pgdata/postgresql.conf"
-            fi
-
-            pg_ctl -D "$pgdata" -l "$pglog" -w start
-            createdb -h 127.0.0.1 -p "$pgport" -U sift sifttest 2>/dev/null || true
-            psql -h 127.0.0.1 -p "$pgport" -U sift -d sifttest <<'SQL'
-            CREATE SCHEMA IF NOT EXISTS lab;
-            CREATE TABLE IF NOT EXISTS lab.people (
-              id integer PRIMARY KEY,
-              name text NOT NULL,
-              role text NOT NULL,
-              created_at timestamptz NOT NULL DEFAULT now()
-            );
-            INSERT INTO lab.people (id, name, role) VALUES
-              (1, 'Ada', 'engineer'),
-              (2, 'Grace', 'analyst'),
-              (3, 'Linus', 'operator')
-            ON CONFLICT (id) DO UPDATE
-              SET name = EXCLUDED.name,
-                  role = EXCLUDED.role;
-            SQL
+            pgport="$(sh "$repo/scripts/dev-seed-postgres.sh")"
 
             cd "$repo"
+            # Real (non-mock) backend: a fresh metadata database must be migrated first.
+            nix develop "$repo" --command cargo run -q -p sift-server -- migrate apply
             nix develop "$repo" --command env SIFT_BIND="$bind" cargo run -p sift-server -- >"$backend_log" 2>&1 &
             backend_pid=$!
             cleanup() {
@@ -279,43 +276,7 @@
               exit 1
             fi
 
-            protocol_version="$(
-              curl -fsS -X POST "$base_url/v1/handshake" \
-                -H 'content-type: application/json' \
-                -d '{
-                  "client_version":"sift-demo-postgres",
-                  "client_kind":"automation",
-                  "protocol":{"minimum":1,"maximum":1}
-                }' \
-                | jq -er .selected_protocol
-            )"
-            profile_payload="$(
-              jq -n --argjson port "$pgport" '{
-                tenant_id: 1,
-                name: "Demo Postgres",
-                provider_id: "sift/postgres",
-                configuration: {
-                  host: "127.0.0.1",
-                  port: $port,
-                  database: "sifttest",
-                  user: "sift",
-                  ssl_mode: "disable",
-                  engine_specific: {
-                    search_path: ["lab"],
-                    application_name: "sift-demo"
-                  }
-                },
-                credential_mode: "shared",
-                tags: ["demo", "seeded", "lab.people"]
-              }'
-            )"
-            profile_id="$(
-              curl -fsS -X POST "$base_url/v1/metadata/connections" \
-                -H 'content-type: application/json' \
-                -H "x-sift-protocol-version: $protocol_version" \
-                -d "$profile_payload" \
-                | jq -er .id
-            )"
+            profile_id="$(sh "$repo/scripts/dev-register-demo-connection.sh" "$base_url" "$pgport")"
 
             cd "$lab"
             if [ ! -d node_modules ]; then
@@ -450,6 +411,99 @@
           '';
         };
 
+        # Seeded end-to-end desktop demo: local Postgres with `lab.people`, a
+        # real (non-mock) sift-server, a registered connection profile, and the
+        # GPUI client attached to that server. This is the loop for working on
+        # desktop UI against real query results instead of an empty shell.
+        desktopDemo = pkgs.writeShellApplication {
+          name = "sift-desktop-demo";
+          runtimeInputs = with pkgs; [ curl jq nix postgresql util-linux ];
+          text = ''
+            set -euo pipefail
+
+            repo="''${SIFT_REPO:-$PWD}"
+            if [ ! -f "$repo/flake.nix" ] || [ ! -f "$repo/Cargo.toml" ]; then
+              echo "Run this from the sift checkout, or set SIFT_REPO=/path/to/sift." >&2
+              exit 1
+            fi
+
+            pgdata="''${SIFT_DEMO_PGDATA:-/tmp/sift-demo-pg}"
+            pglog="''${SIFT_DEMO_PG_LOG:-/tmp/sift-demo-pg.log}"
+            backend_log="''${SIFT_DESKTOP_DEMO_BACKEND_LOG:-/tmp/sift-desktop-demo-backend.log}"
+            bind="''${SIFT_BIND:-127.0.0.1:7474}"
+            base_url="http://$bind"
+
+            run_in_dev() {
+              if [ -n "''${IN_NIX_SHELL:-}" ]; then
+                "$@"
+              else
+                nix develop "$repo" --command "$@"
+              fi
+            }
+
+            pgport="$(sh "$repo/scripts/dev-seed-postgres.sh")"
+
+            cd "$repo"
+            # Build first, in the foreground: a cold GPUI build takes minutes,
+            # and a background build makes the readiness loop look like a hang.
+            run_in_dev cargo build -p sift-server -p sift-desktop
+
+            # A fresh metadata database refuses to serve until migrations are
+            # applied; the mock-backend demos never hit this, a real one always does.
+            run_in_dev cargo run -q -p sift-server -- migrate apply
+
+            # Own process group: killing cargo alone orphans the sift-server it
+            # spawned, which then holds SIFT_BIND against the next run.
+            if [ -n "''${IN_NIX_SHELL:-}" ]; then
+              setsid env SIFT_BIND="$bind" cargo run -q -p sift-server -- >"$backend_log" 2>&1 &
+            else
+              setsid nix develop "$repo" --command \
+                env SIFT_BIND="$bind" cargo run -q -p sift-server -- >"$backend_log" 2>&1 &
+            fi
+            backend_pid=$!
+            cleanup() {
+              kill -TERM "-$backend_pid" >/dev/null 2>&1 || kill "$backend_pid" >/dev/null 2>&1 || true
+              wait "$backend_pid" >/dev/null 2>&1 || true
+              if [ "''${SIFT_DEMO_KEEP_POSTGRES:-0}" != "1" ]; then
+                pg_ctl -D "$pgdata" -m fast -w stop >/dev/null 2>&1 || true
+              fi
+            }
+            trap cleanup EXIT
+
+            ready=0
+            for _ in $(seq 1 "''${SIFT_DESKTOP_DEMO_READY_TRIES:-480}"); do
+              if curl -fsS "$base_url/v1/health" >/dev/null 2>&1; then
+                ready=1
+                break
+              fi
+              if ! kill -0 "$backend_pid" >/dev/null 2>&1; then
+                echo "sift backend exited before becoming ready. Log follows:" >&2
+                sed -n '1,240p' "$backend_log" >&2
+                exit 1
+              fi
+              sleep 0.25
+            done
+            if [ "$ready" != 1 ]; then
+              echo "sift backend was not ready before timeout. Log follows:" >&2
+              sed -n '1,240p' "$backend_log" >&2
+              exit 1
+            fi
+
+            profile_id="$(sh "$repo/scripts/dev-register-demo-connection.sh" "$base_url" "$pgport")"
+
+            echo "Postgres: host=127.0.0.1 port=$pgport db=sifttest user=sift password=<empty> ssl=disable"
+            echo "Sift connection: Demo Postgres (profile $profile_id)"
+            echo "Seeded query: SELECT * FROM lab.people;"
+            echo "Backend log: $backend_log"
+            echo "Postgres log: $pglog"
+            echo "Desktop: attaching to $base_url"
+
+            run_in_dev cargo run -p sift-desktop -- \
+              --server-url "$base_url" \
+              --server-name "Demo Sift" "$@"
+          '';
+        };
+
         devSecretKey = pkgs.writeShellApplication {
           name = "sift-dev-secret-key";
           runtimeInputs = with pkgs; [ coreutils openssl ];
@@ -486,6 +540,7 @@
               sift-test                 Run cargo nextest for the whole workspace.
               sift-check                Run cargo check for the whole workspace.
               sift-desktop              Run the native GPUI desktop client.
+              sift-desktop-demo         Seeded Postgres + real backend + registered connection + desktop.
               sift-dev-secret-key       Generate the ignored local metadata secret key file.
               sift-dev-mssql            Manage a local SQL Server docker container for live-mssql tests.
                                         Sub: start | stop | reset | password | status. Password is
@@ -496,9 +551,15 @@
               sift-help
               sift-backend-lab-stack
 
+            Desktop UI flow:
+              nix develop
+              sift-desktop-demo            Opens the client on a seeded `lab.people` table.
+
             Environment:
               SIFT_REPO=/path/to/sift      Override checkout path for commands that need it.
               SIFT_BIND=127.0.0.1:3000     Override backend bind address where supported.
+              SIFT_DEMO_PG_PORT=5433       Port for the seeded demo Postgres.
+              SIFT_DEMO_KEEP_POSTGRES=1    Leave the demo cluster running after the desktop exits.
               .env.example                 Template for local env vars; never commit .env.
               sift.example.toml            Template for local sift.toml; never commit sift.toml.
             EOF
@@ -521,7 +582,9 @@
             test
             check
             desktop
+            desktopDemo
             devSecretKey
+            devMssql
           ];
 
           # Point rust-analyzer + cargo at the right std sources.
@@ -534,8 +597,19 @@
           # so `cargo run -p sift-desktop` can resolve them via dlopen.
           LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath buildInputs;
 
+          # Both spellings: the loader reads VK_DRIVER_FILES and falls back to
+          # the deprecated VK_ICD_FILENAMES depending on its version.
+          VK_DRIVER_FILES = vulkanIcdFilenames;
+          VK_ICD_FILENAMES = vulkanIcdFilenames;
+
           # Keep sccache inside the repo so it survives GC and is machine-local.
           SCCACHE_DIR = "${toString ./.}/.cache/sccache";
+
+          # Link with mold. Linking GPUI + server with the default linker is the
+          # single largest memory spike in a build; mold cuts both peak RSS and
+          # link time by a wide margin. Job count and debuginfo limits live in
+          # the committed .cargo/config.toml so non-Nix hosts get them too.
+          RUSTFLAGS = "-C link-arg=-fuse-ld=mold";
 
           # Generate a local dev keyfile for the encrypted-file secret backend
           # and export its path. Selecting the backend stays opt-in.
@@ -570,6 +644,14 @@
           demo-postgres = {
             type = "app";
             program = "${demoPostgres}/bin/sift-demo-postgres";
+          };
+          desktop = {
+            type = "app";
+            program = "${desktop}/bin/sift-desktop";
+          };
+          desktop-demo = {
+            type = "app";
+            program = "${desktopDemo}/bin/sift-desktop-demo";
           };
           health = {
             type = "app";
