@@ -2323,8 +2323,11 @@ impl WorkspaceShell {
         self.app_bar_expanded
     }
 
-    fn dismiss_app_bar_menu(&mut self, cx: &mut Context<Self>) {
-        if self.app_bar_menu.take().is_some() {
+    fn collapse_app_bar_navigation(&mut self, cx: &mut Context<Self>) {
+        let changed = self.app_bar_expanded || self.app_bar_menu.is_some();
+        self.app_bar_expanded = false;
+        self.app_bar_menu = None;
+        if changed {
             cx.notify();
         }
     }
@@ -2428,6 +2431,7 @@ impl WorkspaceShell {
         cx: &mut Context<Self>,
     ) {
         self.app_bar_menu = None;
+        self.app_bar_expanded = false;
         match command {
             "ui.command-palette" => self.open_command_palette(&OpenCommandPalette, window, cx),
             "account.open" => self.open_account(cx),
@@ -2519,7 +2523,6 @@ impl WorkspaceShell {
             .bg(colors.elevated_surface)
             .shadow_lg()
             .occlude()
-            .on_mouse_down_out(cx.listener(|shell, _, _, cx| shell.dismiss_app_bar_menu(cx)))
             .children(rows)
             .into_any_element()
     }
@@ -2627,6 +2630,7 @@ impl WorkspaceShell {
             .border_b_1()
             .border_color(colors.subtle_border)
             .bg(colors.toolbar)
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .child(
                 div()
                     .absolute()
@@ -4771,6 +4775,10 @@ impl gpui::Render for WorkspaceShell {
             .role(Role::Application)
             .aria_label("Sift database workspace")
             .track_focus(&self.focus_handle)
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|shell, _, _, cx| shell.collapse_app_bar_navigation(cx)),
+            )
             .on_action(cx.listener(Self::open_command_palette))
             .on_action(cx.listener(Self::open_server_connection))
             .on_action(cx.listener(Self::dismiss_modal))
@@ -5193,7 +5201,7 @@ mod tests {
             workspace.read_with(&cx, |shell, _| shell.app_bar_menu),
             None
         );
-        assert!(workspace.read_with(&cx, |shell, _| shell.app_bar_navigation_expanded()));
+        assert!(!workspace.read_with(&cx, |shell, _| shell.app_bar_navigation_expanded()));
     }
 
     #[gpui::test]
@@ -5211,7 +5219,9 @@ mod tests {
         workspace.update(&mut cx, |shell, cx| {
             shell.toggle_app_bar_menu(AppBarMenu::File, cx)
         });
-        workspace.update(&mut cx, |shell, cx| shell.dismiss_app_bar_menu(cx));
+        workspace.update(&mut cx, |shell, cx| {
+            shell.toggle_app_bar_menu(AppBarMenu::File, cx)
+        });
         assert!(workspace.read_with(&cx, |shell, _| shell.app_bar_navigation_expanded()));
         assert_eq!(
             workspace.read_with(&cx, |shell, _| shell.app_bar_menu),
