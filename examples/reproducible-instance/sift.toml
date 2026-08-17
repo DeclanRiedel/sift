@@ -1,0 +1,69 @@
+kind = "sift-instance"
+format_version = 1
+manifest_id = "b654b918-b1f1-4d70-924d-e4c1014f482f"
+name = "demo-sift"
+
+[compatibility]
+sift = ">=0.1,<0.2"
+
+[server]
+deployment = "personal"
+transport = "loopback"
+mode = "daemon"
+bind = "auto-loopback"
+
+[server.timeouts]
+request_secs = 30
+shutdown_drain_secs = 60
+
+[server.metadata]
+secret_backend = "file"
+store_sql = false
+
+[server.limits]
+max_http_result_rows = 10000
+max_http_result_bytes = 16777216
+max_connections = 64
+max_concurrent_queries = 16
+
+[automation]
+unattended_apply = "disabled"
+
+[auth.github]
+flow = "local-device"
+
+[auth.admission]
+mode = "allowlist"
+
+# Replace with the immutable numeric id returned by GitHub's user API.
+[[identity.github_principals]]
+name = "operator"
+subject = "12345678"
+login_hint = "replace-me"
+instance_admin = true
+bootstrap = true
+
+[[tenants]]
+name = "demo"
+
+[[tenants.memberships]]
+principal = "operator"
+role = "owner"
+
+[[connections]]
+name = "demo/postgres"
+tenant = "demo"
+provider = "postgres"
+connection_string = "postgresql://sift@127.0.0.1:5432/postgres?sslmode=prefer"
+credential_mode = "shared"
+credential = "credential:demo/postgres/shared"
+enabled = true
+tags = ["demo", "local"]
+
+[connections.policy]
+allow_sql = true
+allow_schema_read = true
+allow_export = false
+
+[connections.lifecycle]
+prevent_destroy = true
