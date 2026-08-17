@@ -28,6 +28,7 @@ mod ddl_source;
 mod extension;
 mod extension_storage;
 pub mod http;
+mod instance_manifest;
 mod migration_run;
 mod plan_capture;
 mod projection;
@@ -42,6 +43,7 @@ mod workspace;
 pub use approval::*;
 pub use extension::*;
 pub use extension_storage::*;
+pub use instance_manifest::*;
 pub use plan_capture::PlanCaptureRetention;
 pub use schema::*;
 #[cfg(feature = "os-keychain")]
@@ -60,7 +62,7 @@ fn migration_kind(version: u32) -> Result<MigrationKind> {
         6 => Ok(MigrationKind::LegacyContract),
         19 => Ok(MigrationKind::Contract),
         26 | 27 => Ok(MigrationKind::Data),
-        1..=5 | 7..=18 | 20..=25 | 28..=37 => Ok(MigrationKind::Expand),
+        1..=5 | 7..=18 | 20..=25 | 28..=38 => Ok(MigrationKind::Expand),
         _ => Err(MetadataError::InvalidMigrationHistory(format!(
             "embedded V{version} has no lifecycle classification"
         ))),
@@ -108,6 +110,18 @@ pub enum MetadataError {
     Migration(#[from] refinery::Error),
     #[error("json error: {0}")]
     Json(#[from] serde_json::Error),
+    #[error("instance configuration error: {0}")]
+    InstanceConfig(#[from] sift_instance_config::ConfigError),
+    #[error("instance manifest conflict: {0}")]
+    InstanceManifestConflict(String),
+    #[error("apply would destroy managed resources; rerun with explicit destroy approval: {0:?}")]
+    InstanceDestroyApprovalRequired(Vec<String>),
+    #[error("managed resource `{0}` has prevent_destroy enabled")]
+    InstancePreventDestroy(String),
+    #[error("credential slot `{0}` was not declared by the active manifest")]
+    InstanceCredentialSlotNotFound(String),
+    #[error("credential for slot `{slot}` is invalid: {message}")]
+    InstanceCredentialInvalid { slot: String, message: String },
     #[error("password hash error: {0}")]
     PasswordHash(String),
     #[error("invalid {field} value: {value}")]
@@ -1151,6 +1165,23 @@ impl MetadataStore {
             |row| row.get(0),
         )?;
         Ok(count > 0)
+    }
+
+    /// Resolve the deterministic local-console principal for a personal
+    /// instance. Used only behind the verified loopback/OS trust boundary.
+    pub fn local_instance_admin(&self) -> Result<Option<Principal>> {
+        let conn = self.conn()?;
+        conn.query_row(
+            "SELECT id, external_id, display_name, email, avatar_url, disabled_at,
+                    is_instance_admin, created_at, updated_at
+             FROM principal
+             WHERE is_instance_admin = 1 AND disabled_at IS NULL
+             ORDER BY id LIMIT 1",
+            [],
+            principal_from_row,
+        )
+        .optional()
+        .map_err(Into::into)
     }
 
     /// Atomically creates the stable principal, its personal tenant and owner
@@ -5874,13 +5905,13 @@ mod tests {
         assert!(!path.exists());
         let status = store.migration_status().unwrap();
         assert_eq!(status.current_version, 0);
-        assert_eq!(status.latest_version, 37);
-        assert_eq!(status.pending.len(), 37);
+        assert_eq!(status.latest_version, 38);
+        assert_eq!(status.pending.len(), 38);
         assert!(matches!(
             store.ensure_schema_current(),
             Err(MetadataError::MigrationRequired {
                 current: 0,
-                latest: 37
+                latest: 38
             })
         ));
         assert!(!path.exists());
@@ -5900,7 +5931,7 @@ mod tests {
         let store = MetadataStore::open(&path, Arc::new(MemorySecretStore::new())).unwrap();
         let report = store.apply_migrations(false).unwrap();
         assert_eq!(report.from_version, 1);
-        assert_eq!(report.to_version, 37);
+        assert_eq!(report.to_version, 38);
         let backup = report.backup.expect("existing schema is backed up");
         assert!(backup.is_file());
 
@@ -5937,7 +5968,7 @@ mod tests {
 
         store.apply_migrations(false).unwrap();
         let status = store.migration_status().unwrap();
-        assert_eq!(status.current_version, 37);
+        assert_eq!(status.current_version, 38);
         assert_eq!(status.minimum_compatible_version, 19);
     }
 
@@ -5949,7 +5980,7 @@ mod tests {
                 .iter()
                 .map(|fixture| fixture.schema_version)
                 .collect::<Vec<_>>(),
-            vec![18, 19, 28, 29, 30, 31, 32, 37],
+            vec![18, 19, 28, 29, 30, 31, 32, 38],
             "the durable matrix must retain the pre-contract, contract, and current boundaries"
         );
 
@@ -5979,7 +6010,7 @@ mod tests {
                         store.ensure_schema_current(),
                         Err(MetadataError::MigrationRequired {
                             current,
-                            latest: 37
+                            latest: 38
                         }) if current == fixture.schema_version
                     ),
                     "{} should require migration",
@@ -6007,7 +6038,7 @@ mod tests {
                         "{}",
                         fixture.name
                     );
-                    assert_eq!(report.to_version, 37, "{}", fixture.name);
+                    assert_eq!(report.to_version, 38, "{}", fixture.name);
                 }
             }
         }
@@ -6015,7 +6046,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let current_fixture = schema_compatibility_fixtures()
             .into_iter()
-            .find(|fixture| fixture.schema_version == 37)
+            .find(|fixture| fixture.schema_version == 38)
             .unwrap();
         let path = copy_schema_fixture(directory.path(), &current_fixture);
         let connection = Connection::open(&path).unwrap();
@@ -6023,7 +6054,7 @@ mod tests {
             .execute(
                 "INSERT INTO refinery_schema_history
                  (version, name, applied_on, checksum)
-                 VALUES (38, 'future_additive_fixture', '2026-08-11T00:00:00Z', '1')",
+                 VALUES (39, 'future_additive_fixture', '2026-08-17T00:00:00Z', '1')",
                 [],
             )
             .unwrap();
@@ -6032,8 +6063,8 @@ mod tests {
 
         let store = MetadataStore::open(&path, Arc::new(MemorySecretStore::new())).unwrap();
         let status = store.migration_status().unwrap();
-        assert_eq!(status.current_version, 38);
-        assert_eq!(status.latest_version, 37);
+        assert_eq!(status.current_version, 39);
+        assert_eq!(status.latest_version, 38);
         assert!(status.pending.is_empty());
         store
             .ensure_schema_current()
@@ -6041,20 +6072,20 @@ mod tests {
         assert!(store.apply_migrations(false).unwrap().applied.is_empty());
 
         let connection = Connection::open(&path).unwrap();
-        connection.pragma_update(None, "user_version", 38).unwrap();
+        connection.pragma_update(None, "user_version", 39).unwrap();
         drop(connection);
         assert!(matches!(
             store.ensure_schema_current(),
             Err(MetadataError::BinaryTooOld {
-                minimum: 38,
-                latest: 37
+                minimum: 39,
+                latest: 38
             })
         ));
         assert!(matches!(
             store.apply_migrations(false),
             Err(MetadataError::BinaryTooOld {
-                minimum: 38,
-                latest: 37
+                minimum: 39,
+                latest: 38
             })
         ));
     }

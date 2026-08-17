@@ -29,6 +29,7 @@ pub mod formatter_extension;
 pub mod git_adapter;
 pub mod http;
 pub mod identity;
+pub mod instance_runtime;
 pub mod metadata_runtime;
 pub mod migration;
 pub mod plan;

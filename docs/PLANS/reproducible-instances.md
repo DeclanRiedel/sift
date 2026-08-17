@@ -22,8 +22,8 @@ reproduce the host operating system.
 
 ```text
 server-root/
-  sift.instance.toml   # operator edits and copies this
-  sift.instance.lock   # Sift generates and copies this
+  sift.toml   # operator edits and copies this
+  sift.lock   # Sift generates and copies this
 ```
 
 Everything else is generated private state or an optional transport artifact,
@@ -31,7 +31,7 @@ not another canonical configuration file.
 
 ## V1 artifacts
 
-### `sift.instance.toml`
+### `sift.toml`
 
 The public, human-readable desired configuration. "Public" means
 non-secret, not anonymously readable through the server. It contains:
@@ -54,7 +54,7 @@ a remote server they live with the remote deployment; the desktop bookmark
 does not silently cache or override them. An authorized admin
 may explicitly export/check out a remote manifest as a draft.
 
-### `sift.instance.lock`
+### `sift.lock`
 
 Generated, public resolution data. It pins the configuration digest, Sift and
 protocol compatibility, provider schema digests, and external extension
@@ -110,7 +110,7 @@ must provide one.
 
 ## Source-of-truth model
 
-`sift.instance.toml` is the operator's portable desired-state artifact. The
+`sift.toml` is the operator's portable desired-state artifact. The
 running server uses the selected immutable generation under private machine
 state. It does not hot-watch or automatically apply edits.
 
@@ -138,6 +138,238 @@ The resolved source mode is private machine state, not another config file:
 Manual file edits never hot-apply. `inspect/plan/apply` compares file,
 generation, and lock digests. Lock regeneration after an ordinary semantic edit
 preserves already selected input versions; only `lock --update` changes them.
+
+## Infrastructure-as-code contract
+
+Sift follows a push-based infrastructure-as-code model in v1:
+
+```text
+sift.toml + sift.lock
+        |
+        v
+ validate -> refresh -> plan -> authorize -> apply -> generation
+```
+
+The config pair is the only portable desired state. The destination stores
+observed state, ownership, journals, content-addressed artifacts, secrets, and
+generations privately. There is no portable `.tfstate` equivalent and no
+client-side state file to lose, merge, or accidentally commit.
+
+### Desired, generated, and external state
+
+| State | Authority | Portable config |
+| --- | --- | --- |
+| server/auth/tenant/connection/policy/extension intent | `sift.toml` | yes |
+| exact Sift/provider/extension inputs | `sift.lock` | yes |
+| resolved host bindings and active generation | destination | no; exportable as realized manifest |
+| SQLite ids, ownership map, journal, audit, sessions | destination | no |
+| secret values and device private keys | secret backend/OS keystore | no |
+| database contents, DNS, certificates, external service state | external system | no; verified prerequisite only |
+
+Managed fields cannot be mutated around the config engine. Desktop forms edit
+the manifest draft. A managed local source writes the approved TOML/lock pair;
+a read-only or remote source exports a patch/new pair for the operator's repo.
+Credential value rotation remains a separate write-only operation against a
+declared slot because values never enter desired state.
+
+### Stable resource addresses
+
+Every managed resource has a deterministic address derived from manifest id,
+kind, and logical name:
+
+```text
+tenant.analytics
+principal.operator
+membership.analytics.operator
+connection.analytics.warehouse
+credential.analytics.warehouse.shared
+extension.acme.redaction
+```
+
+Plans and audit use these addresses. Destination database ids and secret
+handles never appear in config. Resource rename is never inferred from similar
+content; it needs an explicit future `moved_from` declaration or plans create
+plus destroy/preserve according to lifecycle policy.
+
+### Plan and apply protocol
+
+`plan` is read-only and deterministic for:
+
+```text
+(base generation, normalized config, lock, resolved bindings,
+ destination capabilities, refreshed observed state)
+```
+
+It returns additions, updates, replacements, removals, drift, prerequisites,
+credential readiness, lifecycle class, authorization risk, and final admin
+invariant. Exit status is stable: `0` clean, `2` valid changes, `1` invalid or
+unavailable. It never fetches artifacts, opens database connections, sends
+stored credentials, or mutates state unless the operator separately requested
+an explicit prerequisite/connection test.
+
+`apply` performs:
+
+1. Safe-open and reparse the exact pair; reject symlink/content swaps.
+2. Verify schema, canonical digest, lock, signatures, platform closure, and
+   destination instance id.
+3. Refresh observed managed state and reject a stale base generation.
+4. Recompute the plan and authorization risk; compare exact plan digest.
+5. Authenticate human or deployment authority and consume required approval.
+6. Stage artifacts, secrets, metadata, and a complete candidate generation.
+7. Reconcile resources in dependency order through existing domain services.
+8. Verify invariants/readiness, atomically select the generation, then activate
+   live-safe or restart-required changes.
+9. Emit sanitized report/audit and clean superseded unreachable staging.
+
+The same pair applied twice is a no-op. Concurrent applies use one destination
+apply lock plus base-generation compare-and-swap. Failure yields the prior
+running generation, the complete new generation, or RecoveryRequired—never an
+unreported partially active mix.
+
+### Drift model
+
+Sift reports separate drift classes:
+
+- **source pending**: editable pair differs from selected generation;
+- **managed drift**: observed managed resource differs from generation;
+- **binding drift**: resolved host prerequisite changed or disappeared;
+- **artifact drift**: selected bytes/signature differ from lock;
+- **credential drift**: slot is Missing, Invalid, changed externally, or has a
+  newer write-only revision; and
+- **unmanaged**: destination resource has no manifest ownership.
+
+`verify` reports declared input/generation integrity. `doctor` probes mutable
+external prerequisites. Neither silently repairs. `apply` reconciles only
+manifest-owned addresses and never adopts an unmanaged resource by name.
+Ownership transfer requires an explicit address map, collision plan, and human
+admin approval; it is not part of ordinary import.
+
+### Git and deployment workflow
+
+Recommended repository layout keeps one two-file root per server:
+
+```text
+infrastructure/
+  personal/
+    sift.toml
+    sift.lock
+  team-production/
+    sift.toml
+    sift.lock
+  lab/
+    sift.toml
+    sift.lock
+```
+
+Normal workflow:
+
+```text
+sift instance fmt .
+sift instance validate .
+sift instance lock .        # refresh config digest; preserve locked inputs
+sift instance plan .
+sift instance apply .
+git add sift.toml sift.lock
+```
+
+Dependency update is visibly different:
+
+```text
+sift instance lock . --update sift
+sift instance lock . --update extension:acme/redaction
+sift instance plan .
+```
+
+V1 does not poll Git, execute repository hooks, evaluate templates, or follow
+remote includes. CI/CD pushes the exact pair to the authenticated server API.
+A future pull controller must use signed commits, pinned repository identity,
+bounded checkout, and the same plan/apply engine; it cannot become a bypass.
+
+### Proposed deployment authority
+
+Human admins use ordinary session plus risk-based step-up. For unattended IaC,
+the recommended design adds destination-registered Ed25519 deployment keys:
+
+- private key remains in CI/HSM/secret manager;
+- Sift stores public key, principal, scopes, expiry, and revocation only;
+- enrollment/rotation/removal requires human admin step-up;
+- request signature covers instance id, configuration/lock/plan digests, base
+  generation, operation, nonce, and short expiry;
+- keys cannot authenticate interactive SQL, reveal/export secrets, recover an
+  admin, change their own authority, or bypass final-admin/destructive policy;
+- policy caps unattended risk. Recommended default permits plan plus
+  standard-risk apply and requires human approval for elevated/destructive
+  changes.
+
+Deployment-key trust is a destination binding, not portable desired state. It
+is enrolled after bootstrap through the admin API and appears only as a
+Missing/Bound/Revoked prerequisite in plans. The copied manifest may set the
+maximum automation policy, but neither it nor the lock contains or activates a
+trusted public key. Changing that policy is elevated and cannot be applied by a
+deployment key.
+
+### Secret sources
+
+Config declares typed slot identity and consumption only. Supported value
+channels remain:
+
+1. interactive write-only entry;
+2. encrypted `.siftbundle` transport; and
+3. encrypted authenticated CI request bound to slot consumer digest.
+
+No `env://`, `file://`, command execution, or plaintext interpolation occurs in
+the server config. External secret-manager references can be added later as a
+locked typed resolver; resolver authentication remains destination-private and
+the config contains only provider/path/version metadata.
+
+### V1 managed scope
+
+The manifest manages server infrastructure, not collaborative or database
+content. V1 includes:
+
+- server transport, public origin, TLS policy, limits, timeouts, audit policy,
+  and destination binding requirements;
+- authentication providers, bootstrap/admin intent, admission allowlists,
+  tenants, memberships, and roles;
+- database connection definitions, typed credential slots, connection access
+  policy, and readiness gates; and
+- extensions, exact artifacts, grants, workspace/VCS capabilities, and network
+  permissions.
+
+V1 excludes rooms, documents/query text, query history/results, discovered
+schema caches, database schemas/data/migrations, active sessions, API tokens,
+per-user credentials, and desktop preferences. Schedules and executable hooks
+are excluded from the first schema: they mix infrastructure with user SQL/code
+and need a separate signed-content and execution-policy design. A later schema
+may reference immutable content-addressed jobs without embedding mutable code.
+
+### Security invariants and limits
+
+No design is "fully secure" without a threat model, implementation review, and
+testing. This design makes the following invariants release gates:
+
+- copied TOML and lock bytes are always untrusted input until strict parsing,
+  normalization, signature/lock verification, authorization, and plan approval
+  finish on the destination;
+- possession of the files grants no server authority, secret access, admin
+  session, destination identity, or deployment-key enrollment;
+- every online mutation is authenticated to the destination instance and exact
+  plan; every offline mutation requires OS authority, a stopped server, and an
+  exclusive maintenance lock;
+- config, lock, plans, generations, state metadata, diagnostics, and audit
+  never contain secret values or device/deployment private keys;
+- parsers and artifact handling perform no command execution, interpolation,
+  implicit network fetch, archive path escape, or unbounded allocation; and
+- rollback, recovery, drift repair, UI editing, and CI deployment use the same
+  authorization and reconciliation engine as ordinary apply.
+
+The files can still disclose non-secret but sensitive topology such as host
+names, tenant names, usernames, and policies. Repository and filesystem access
+must therefore follow the operator's confidentiality policy. Compromise of the
+destination OS/root account, an enrolled admin/deployment private key, GitHub
+account, database, or trusted artifact publisher remains outside what config
+format cryptography alone can prevent; recovery, revocation, least privilege,
+and audit address those failures.
 
 Container deployments may mount the manifest and lock read-only. Startup
 reports drift and exits with a dedicated status when the mounted desired
@@ -296,6 +528,7 @@ The exact schema is finalized with fixtures before implementation. This is the
 v1 shape, not executable configuration:
 
 ```toml
+kind = "sift-instance"
 format_version = 1
 manifest_id = "b654b918-b1f1-4d70-924d-e4c1014f482f"
 name = "analytics-sift"
@@ -318,10 +551,16 @@ shutdown_drain_secs = 60
 secret_backend = "file"
 store_sql = false
 
+[automation]
+unattended_apply = "standard-risk"
+
 [auth.github]
 flow = "hosted-code"
 client_id = "Ov23liExample"
 client_secret = "credential:instance/github-oauth-client-secret"
+
+[auth.admission]
+mode = "allowlist"
 
 [[identity.github_principals]]
 name = "operator"
@@ -341,59 +580,71 @@ role = "owner"
 name = "analytics/warehouse"
 tenant = "analytics"
 provider = "postgres"
+connection_string = "postgresql://sift@warehouse.internal:5432/analytics?sslmode=verify-full"
 credential_mode = "shared"
 credential = "credential:analytics/warehouse/shared"
 enabled = true
 tags = ["production", "warehouse"]
 
-[connections.config]
-host = "warehouse.internal"
-port = 5432
-database = "analytics"
-tls_mode = "verify-full"
-
 [connections.policy]
 allow_sql = true
 allow_schema_read = true
 allow_export = false
+
+[connections.lifecycle]
+prevent_destroy = true
 ```
 
 Schema rules:
 
-- `format_version` is mandatory. Unknown versions and unknown fields fail.
+- `kind = "sift-instance"` and `format_version` are mandatory. Unknown kinds,
+  versions, and fields fail. There is no legacy shape detection.
 - Logical names are unique within their kind, length-bounded, normalized, and
   immutable once a resource is managed. Renames use an explicit `moved_from`
   field in a later version; v1 plans rename as create plus preserve-old.
 - Exactly one GitHub principal has `bootstrap = true` in v1. It must also have
   `instance_admin = true` and an immutable decimal GitHub user id. A login or
   organization name is never an authentication subject.
+- With `auth.admission.mode = "allowlist"`, only immutable subjects declared in
+  `identity.github_principals` may sign in. Unknown subjects fail generically
+  and are never auto-provisioned.
 - `bootstrap` authorizes the first claim only. On a claimed instance, changing
   principals or admin roles is an ordinary high-risk desired-state change
   requiring an existing admin's step-up. It never reopens claim mode.
 - `github.flow = "local-device"` is valid only for managed-loopback first claim
   and forbids a client-secret slot. Network/team sign-in uses `hosted-code` and
   requires its exact public origin and client credential binding.
-- Connection `config` is checked against the selected provider schema. Sift
-  rejects provider fields it does not understand.
+- `automation.unattended_apply` is `disabled` or `standard-risk`; v1 never
+  permits a deployment key to authorize elevated/destructive changes or change
+  this field itself.
+- `connection_string` is parsed by the selected provider schema. It may contain
+  endpoints, database/catalog names, usernames, and non-secret connection
+  options. Passwords, tokens, private keys, secret query parameters, and
+  provider-specific secret aliases are rejected. Sift combines the parsed
+  non-secret definition with the referenced credential only in memory when
+  opening a connection; it never serializes the combined value.
 - Secret references use named typed slots. TOML cannot contain inline secret
   values in a field whose schema is secret-bearing.
+- `prevent_destroy` is valid only on durable resource kinds and defaults to
+  false; changing it is itself visible in the plan and cannot authorize a
+  deletion in the same apply.
 - Portable host fields accept only exact values or their schema-declared
   symbolic binding. Exact local paths are absolute. There are no `~`,
   environment, command, or arbitrary relative-path expansions.
 - Every collection has count and byte limits before allocation. Duplicate
   tables and ambiguous dotted-key forms fail.
 
-Not every existing `sift.toml` field should become portable. Process discovery,
-temporary directories, key-file paths, cache paths, development driver mocks,
-and launcher-owned paths remain destination bindings. The plan reports these
-separately and requires the destination to supply them. Security-relevant
-behavior such as deployment, transport, auth provider, public origin, limits,
-connection policy, workspace roots, VCS network permission, and extension
-grants belongs in the manifest.
+The new schema replaces the current runtime `Config`; it is not a wrapper
+around it. Process discovery, temporary directories, private key-file paths,
+caches, development driver mocks, and launcher-owned state are not server
+settings and remain destination-private implementation state. Deployment,
+transport, auth provider, public origin, limits, allowlists, connection strings
+and policy, workspace roots, VCS network permission, and extension grants
+belong in the manifest.
 
 ## Lock schema and reproducibility
 
-`sift.instance.lock` is machine-generated and committed or copied beside the
+`sift.lock` is machine-generated and committed or copied beside the
 manifest:
 
 ```toml
@@ -510,42 +761,31 @@ behavior. Those are checked prerequisites or external state. Thus the feature
 is flake-like and reproducible inside Sift's declared boundary, not a NixOS
 system derivation or a bit-identical machine image.
 
+### Cross-platform contract
+
+The typed manifest and configuration digest are OS-independent. `sift.lock`
+may contain separate signed closure entries for each supported OS/architecture;
+the destination selects one exact entry and refuses apply when none matches.
+Symbolic bindings use typed platform adapters and record their resolved values
+in the generation. They never depend on shell syntax, path separators, home
+directory expansion, or ambient environment variables.
+
+A fixed absolute path or fixed bind address is intentionally topology-specific
+and copies exactly; the plan explains when it is invalid on the new platform.
+The config format can therefore move across Linux, macOS, and Windows, but a
+release only promises realization on targets for which Sift publishes and
+tests the complete locked closure. Unsupported providers/extensions fail
+before mutation rather than falling back to different bytes or behavior.
+
 ## Credential schemas
 
-The public manifest defines slot identity and derives type from its use. UI and
-`credentials template` may display or stream this generated shape, but it is
-not another required file:
-
-```toml
-format_version = 1
-manifest_id = "b654b918-b1f1-4d70-924d-e4c1014f482f"
-configuration_digest = "sha256:..."
-
-[credentials."instance/github-oauth-client-secret"]
-type = "oauth-client-secret"
-required = true
-
-[credentials."analytics/warehouse/shared"]
-type = "postgres-password"
-required = true
-fields = ["username", "password"]
-```
-
-Automation may stream an import-only plaintext document with the same header
-over stdin or a private IPC pipe:
-
-```toml
-format_version = 1
-manifest_id = "b654b918-b1f1-4d70-924d-e4c1014f482f"
-configuration_digest = "sha256:..."
-
-[credentials."instance/github-oauth-client-secret"]
-client_secret = "..."
-
-[credentials."analytics/warehouse/shared"]
-username = "sift_runtime"
-password = "..."
-```
+The public manifest defines slot identity and derives type from its use. The
+CLI reports that generated schema; it is not another required file. Import is
+one slot at a time from standard input or a private regular file. V1 accepts an
+exact typed JSON object: `{"client_secret":"..."}` for hosted GitHub OAuth or
+`{"password":"..."}` for PostgreSQL/SQL Server. Database usernames stay in
+the credential-free connection string, so changing one participates in the
+consumer digest and invalidates the old password.
 
 Provider schema decides field names, types, maximum sizes, and whether a value
 may be exported. Values are encoded into a versioned typed secret envelope
@@ -660,7 +900,9 @@ The public manifest is never served from an anonymous route.
 | View credential status/metadata | authenticated instance admin |
 | Reveal an existing credential value | unsupported |
 | Export value-bearing credentials | instance admin plus step-up; encrypted output only |
-| Prune managed resources | instance admin plus step-up and explicit delete approval |
+| Enroll, rotate, or revoke deployment key | instance admin plus step-up |
+| CI plan/apply | registered deployment key within configured risk scope |
+| Destroy omitted managed resources | instance admin plus step-up and explicit destroy approval |
 | Offline recovery/import/export | OS authority, stopped server, exclusive maintenance lock |
 
 V1 uses instance-admin authority for the entire feature. Delegated
@@ -674,7 +916,7 @@ does not mutate the server. Only an authorized apply changes live state.
 
 A normal bearer or cookie session is insufficient for secret changes,
 security-sensitive/restart-required/destructive configuration apply, rollback,
-network arming, or prune. Cosmetic standard-risk changes do not force repeated
+network arming, or destroy. Cosmetic standard-risk changes do not force repeated
 device proof.
 
 Step-up repeats a primary proof and issues a short-lived, one-use grant bound
@@ -692,7 +934,7 @@ proof for a high-risk step-up because an existing provider session may complete
 authorization without repeating the account's primary authentication. A
 GitHub-only bootstrap admin therefore registers a destination key before
 elevated configuration apply, credential mutation/export, rollback, network
-arming, or prune.
+arming, or destroy.
 Refresh-token rotation and API tokens cannot step up in v1.
 
 The apply/import request consumes the grant atomically. Changing the draft or
@@ -731,13 +973,14 @@ Plans classify realization:
 - **restart-required**: bind, transport, auth provider, secret backend,
   runtime, or executable extension changes; launcher switches under the
   exclusive maintenance lock; and
-- **destructive**: prune, ownership transfer, or final-admin-sensitive changes;
+- **destructive**: managed-resource deletion, ownership transfer, or
+  final-admin-sensitive changes;
   requires separate impact confirmation in addition to step-up.
 
 Lifecycle class and authorization risk are orthogonal. A membership or
 connection-policy change can be live-safe but elevated. A display-name or tag
 change can be live-safe and standard. Any auth/admin, network origin/bind, TLS
-downgrade, secret consumer, execution policy, extension code/grant, prune,
+downgrade, secret consumer, execution policy, extension code/grant, deletion,
 rollback, or restart-required change is elevated at minimum. Mixed plans take
 the strongest lifecycle and authorization class.
 
@@ -774,11 +1017,18 @@ the server sends an existing credential to the changed destination.
 
 - The manifest creates or updates resources it names.
 - Omitted unmanaged resources are preserved.
-- Omitted previously manifest-managed resources are preserved by default but
-  reported as drift.
-- `prune` targets only resources carrying the same manifest ownership id.
-- Deletions require a step-up grant and an explicit impact plan showing room,
-  workspace, schedule, and active-connection consequences.
+- Omission of a previously manifest-managed address is `Delete`, like
+  declarative IaC, but `apply` refuses that plan unless the actor separately
+  supplies `--allow-destroy` and elevated approval. A resource may set
+  `prevent_destroy = true`, which requires its own reviewed config change in an
+  earlier apply before deletion.
+- Deletion may target only resources carrying the same manifest ownership id.
+  Unmanaged resources and resources owned by another manifest are never
+  deletion candidates.
+- Deletions require an exact impact plan showing room, workspace, schedule,
+  active-connection, credential, and final-admin consequences. Runtime-created
+  dependent content is preserved or detached unless its own type explicitly
+  defines safe cascading behavior.
 - Import never replaces the destination instance id or copies source auth
   sessions.
 - Apply must prove at least one usable administrator remains after commit.
@@ -851,7 +1101,7 @@ the server sends an existing credential to the changed destination.
   revoked with their auth session.
 - Concurrent drafts use revision conflicts rather than last-writer-wins.
 - Every initialize, stage, apply, credential import/change, network arm,
-  export, prune, failure, and recovery action has a sanitized `Operation`.
+  export, destroy, failure, and recovery action has a sanitized `Operation`.
 - Audit records may contain slot ids and resource ids, never values, plaintext
   paths to secret input, password hashes, or secret equality fingerprints.
 
@@ -900,8 +1150,8 @@ and authorization contract is stable.
 ## Decisions locked for v1
 
 - One desktop app may host and connect to many servers concurrently.
-- Every actual server has one independent editable `sift.instance.toml` and
-  generated `sift.instance.lock`; desktop bookmarks are private app state.
+- Every actual server has one independent editable `sift.toml` and generated
+  `sift.lock`; desktop bookmarks are private app state.
 - One server process owns exactly one instance identity/state directory. A
   server manifest never defines multiple independent Sift servers.
 - Managed-local and remote servers use the same client API and workspace UI,
@@ -917,17 +1167,26 @@ and authorization contract is stable.
   anonymous setup API.
 - Claimed-instance mutation requires instance-admin plus destination-key
   step-up for the exact digest.
-- Apply is explicit, generation-based, non-pruning by default, and audited;
-  only restart-required plans restart.
+- Apply is explicit, generation-based, exact-plan authorized, and audited. It
+  never deletes without separate destroy approval; only restart-required plans
+  restart.
 - Instance admin and database execution authority remain separate.
 - Shared secrets may move only by manual input, ephemeral plaintext stdin/IPC,
   or an authenticated encrypted bundle. Plaintext export is absent.
+- Signed deployment keys may plan and apply standard-risk changes only.
+  Elevated and destructive changes always require a human admin and step-up.
+- V1 secret sources are interactive write-only entry, encrypted `.siftbundle`,
+  and encrypted authenticated CI submission. External secret-manager resolvers
+  are deferred.
+- Omission of a manifest-managed resource plans guarded deletion; execution
+  requires `--allow-destroy`, elevated human approval, ownership checks, and no
+  active `prevent_destroy` guard.
 
 ## Open decisions that block API freeze
 
 These are Phase 0 deliverables, not license for implementation to improvise:
 
-- exact classification and symbolic resolver for every current `Config` field;
+- exact new manifest field set and symbolic resolver contract;
 - exact canonical encoding and Unicode/name normalization rules;
 - destination key storage on desktop, browser, and headless clients, including
   revocation and recovery UX;
@@ -950,8 +1209,8 @@ These are Phase 0 deliverables, not license for implementation to improvise:
 - No plaintext credential export or secret reveal endpoint.
 - No API-token step-up or unattended online secret export.
 - No delegated configuration-admin role.
-- No per-user credential migration.
-- No automatic prune.
+- No legacy config, metadata, desktop-state, or credential migration.
+- No unreviewed deletion or broad automatic destroy.
 - No hidden direct-write path around managed desired state. Live-safe and
   restart-required changes both create generations.
 - No portable destination identity or active login/session state.
@@ -1072,9 +1331,13 @@ Offline/local commands:
 
 ```text
 sift instance new <server-root>
+sift instance fmt <server-root>
+sift instance validate <server-root>
 sift instance inspect <server-root|bundle>
 sift instance lock <server-root>
 sift instance lock <server-root> --update [input]
+sift instance plan <server-root>
+sift instance apply <server-root>
 sift instance vendor <server-root> --platform <target>
 sift instance up <server-root|bundle>
 sift instance verify
@@ -1120,11 +1383,16 @@ GET    /v1/admin/instance/generations/{id}/diff
 POST   /v1/admin/instance/generations/{id}/rollback
 POST   /v1/admin/instance/generations/{id}/pin
 POST   /v1/admin/instance/gc
+GET    /v1/admin/deployment-keys
+POST   /v1/admin/deployment-keys
+DELETE /v1/admin/deployment-keys/{id}
 GET    /v1/admin/credentials/readiness
 POST   /v1/admin/credentials/import
 PUT    /v1/admin/credentials/{slot}
 POST   /v1/admin/credentials/export
 POST   /v1/admin/instance/arm
+POST   /v1/deploy/plan
+POST   /v1/deploy/apply
 ```
 
 Claim-only API:
@@ -1198,6 +1466,7 @@ New metadata concepts:
 - configuration draft and pending-apply metadata;
 - credential slot metadata/readiness, never values;
 - destination public keys and revocation state;
+- deployment public keys, scopes, expiry/revocation, and consumed nonces;
 - one-use step-up grant digests; and
 - sanitized apply reports and journal correlation ids.
 
@@ -1239,9 +1508,10 @@ Resource actions are one of:
 Create | Update | Unchanged | PreserveDrift | Disable | Delete
 ```
 
-`Delete` can appear only when the operator requested prune and the resource has
-matching manifest ownership. V1 cannot rename implicitly or delete unmanaged
-resources.
+`Delete` appears when a previously managed address is omitted and has matching
+manifest ownership. It always requires a distinct destroy flag plus elevated,
+exact-plan human approval; `prevent_destroy` blocks it. V1 cannot rename
+implicitly or delete unmanaged resources.
 
 ## Activation rules
 
@@ -1388,9 +1658,11 @@ ArmInstance
 ImportCredentialSlots
 ReplaceCredentialSlot
 ExportEncryptedCredentials
-PruneManagedResources
+DestroyManagedResources
 RecoverInstanceAdmin
 ManageDesktopServerCatalog
+ManageDeploymentKey
+DeployInstanceConfig
 StartManagedInstance
 StopManagedInstance
 SwitchActiveInstance
@@ -1412,46 +1684,27 @@ class, and credential readiness counts. Logical names, paths, URLs, usernames,
 GitHub ids, hosts, and manifest digests are not metric labels. Logs use the
 same redaction types as API errors.
 
-## Compatibility and migration
+## Clean-break cutover
 
-V1 adoption must not reinterpret an existing installation as Virgin.
+There is no legacy server-config or desktop-state compatibility requirement.
+The implementation replaces the current layered runtime config and singular
+desktop-local model rather than teaching the new engine both behaviors:
 
-- Existing initialized metadata receives a Claimed marker during an explicit
-  migration/startup check only when its current admin invariant is valid.
-- Current `sift.toml` continues to start legacy/unmanaged installations during
-  a deprecation window. `instance adopt` produces a draft manifest and a plan;
-  it never silently takes ownership of existing resources.
-- Existing secret handles remain valid. Adoption maps them to credential slots
-  without reading/exporting their values.
-- Existing GitHub identities must be backfilled from a previously verified
-  immutable numeric id. If only a login exists, adoption blocks and asks for a
-  fresh authenticated verification; it never looks up a mutable login and
-  assumes continuity.
-- Existing offline `bootstrap-admin` remains recovery-only after trust-state
-  migration and acquires the maintenance lock. It cannot reset a claimed
-  instance merely because admins are disabled.
-- `sift.toml` environment secret fields remain accepted only as destination
-  bindings during transition. Export converts references to credential slots,
-  never their values.
+- `sift.toml` must contain `kind = "sift-instance"`; files without it fail with
+  a concise unsupported-format error;
+- `SIFT_*` variables cannot override manifest-managed settings. A launcher may
+  accept only a config-root locator and private destination bootstrap inputs;
+- old metadata databases, secret handles, desktop profiles, runtime state, and
+  config files are not adopted or migrated by this feature;
+- setup always creates a new destination identity and fresh generated state
+  from the config pair, then imports required secrets through supported
+  write-only channels; and
+- no automatic import runs merely because a file appears in the working
+  directory. `new`, `up`, or `apply` remains explicit.
 
-No automatic import runs merely because `sift.instance.toml` appears in the
-working directory.
-
-Desktop migration is also explicit and one-way:
-
-- The current singular local target becomes one internal catalog entry pointing
-  at its existing config root/state directory; files are not moved until a
-  separately recoverable migration is implemented.
-- Every current saved remote server becomes an internal catalog entry.
-- A saved remote token is rekeyed to `(catalog_id, observed_instance_id,
-  principal)` only after TLS and instance-id verification. Otherwise the entry
-  is created signed-out.
-- Presentation ids such as `local` and `hosted:<profile>` migrate to the new
-  profile/instance namespace. Stale workspace and connection selections are
-  cleared rather than guessed.
-- Command-line startup remote settings create an ephemeral bookmark unless the
-  user explicitly chooses Save; environment input never overwrites server
-  desired state.
+Development fixtures and documentation move to the new format in the same
+change. Removing the old loader is part of the initial implementation, so no
+deprecated parallel configuration path or precedence behavior survives.
 
 ## Test strategy and acceptance criteria
 
@@ -1498,11 +1751,24 @@ Desktop migration is also explicit and one-way:
   session and digest-bound step-up.
 - Read-only source mode rejects online apply; managed source mode switches only
   when the public pair and generation authenticate the same content.
+- Deployment signatures with wrong instance/base/plan/operation, expired or
+  replayed nonce, revoked key, excess scope/risk, or self-authority mutation
+  fail before staging. Deployment keys cannot call query or secret-export APIs.
+- A config copied from another destination grants no authority there;
+  deployment public-key fields are not part of the portable schema and cannot
+  enroll or elevate a key.
+- A malicious but validly signed standard-risk request cannot smuggle an
+  elevated field through unknown keys, defaults, alternate TOML encodings, or
+  a plan/apply classification mismatch.
 
 ### Reconciliation and crash tests
 
 - Same manifest apply is a no-op with stable ownership.
-- Omission preserves by default; prune affects only matching ownership.
+- Omission of a managed address plans deletion and requires the destroy flag
+  plus elevated human approval. It never affects unmanaged or differently
+  owned resources.
+- `prevent_destroy`, final-admin, ownership, active-dependency, and cascading
+  checks still block a validly signed deletion request when unsafe.
 - Stale revision and concurrent apply reject before secret mutation.
 - Equivalent portable configs resolve to the same configuration digest;
   different device bindings retain that digest but produce distinct realization
@@ -1552,8 +1818,8 @@ Desktop migration is also explicit and one-way:
 ### Deployment matrix
 
 Cover personal/team x loopback/network/ssh-proxy x in-process/daemon/container,
-including invalid combinations. Exercise new initialization, existing adoption,
-same-origin replacement, different-origin copy, GitHub outage, no network,
+including invalid combinations. Exercise new initialization, same-origin
+replacement, different-origin copy, GitHub outage, no network,
 read-only manifest mounts, key loss, and offline recovery. Repeat representative
 cases with several concurrent local servers plus HTTPS and SSH remote entries.
 
@@ -1576,6 +1842,10 @@ A release is complete only when:
   multiple remote servers, and switch/window them without cross-instance state;
 - every actual server has exactly one editable manifest plus generated lock;
   desktop bookkeeping adds no public config file;
+- removing, adding, or changing any manifest-managed address produces the same
+  redacted plan locally, in CI, and at apply for the same base generation;
+- a deployment key can automate only its enrolled destination and policy risk
+  ceiling, cannot self-elevate, and is safely revocable without editing config;
 - the CLI completes the same flow without a browser-hosted setup API;
 - all mutations require the documented authority and emit sanitized Operations;
 - interruption at every durable phase has tested recovery; and
@@ -1590,23 +1860,27 @@ A release is complete only when:
    immutable generations, artifact closure, multi-instance process isolation,
    trust state, GitHub subject, secret boundary, reconciliation, and apply
    classes into an ADR.
-2. Classify every current `Config` field as portable exact, portable symbolic,
-   generated private state, or unsupported; define every permitted resolver.
+2. Freeze the new manifest field set. Classify each field as portable exact or
+   portable symbolic, and define every permitted resolver; destination-private
+   implementation state is not represented in the manifest.
 3. Freeze v1 manifest, lock, generation, credential-stream, bundle, redacted
    plan, and apply-report fixtures.
 4. Decide generation retention/GC, platform closure format, lock-signature
-   encoding/trust roots, and distribution GitHub client lifecycle.
+   encoding/trust roots, and distribution GitHub client lifecycle; encode the
+   locked guarded-deletion, standard-risk deployment-key, and three-channel
+   secret-source policies in fixtures.
 5. Threat-model initialization, binding resolution, rollback, OAuth claim,
    connection redirection, artifact fetch, offline recovery, and bundle export.
 
-Exit: ADR accepted; examples parse against a written schema; no public DTO or
-metadata migration has landed first.
+Exit: ADR accepted and examples parse against a written schema; the old loader
+and fixtures have a documented replacement boundary before public DTO or
+metadata changes land.
 
 ### Phase 1 — two-file model, lock, and inspect tooling
 
 1. Add `instance-config` with strict serde models, normalization, validation,
-   symbolic binding types, canonical config digest, redaction, compatibility,
-   and lock verification.
+   symbolic binding types, canonical config digest, redaction, and lock
+   verification.
 2. Add provider config/credential schema adapters without coupling the pure
    crate to drivers or I/O.
 3. Implement exact platform closure resolution and content-addressed artifact
@@ -1623,8 +1897,7 @@ deterministically digested without server state; lock changes are explicit.
 1. Add durable destination identity, trust-state marker, private state layout,
    initialization/apply journal, immutable generation store, and atomic current
    pointer.
-2. Centralize exclusive maintenance-lock acquisition for every offline command,
-   including existing `sift-admin` mutations.
+2. Centralize exclusive maintenance-lock acquisition for every offline command.
 3. Add Virgin detection that cannot be recreated by deleting SQLite rows.
 4. Add content-addressed artifact fetch/verify/store, reachability, pinning, and
    safe GC primitives.
@@ -1652,14 +1925,13 @@ independent servers through the same API and two-file config roots.
 
 ### Phase 4 — metadata ownership and planning
 
-1. Add manifest revision/ownership and credential-slot metadata migrations.
-2. Project existing metadata into logical desired/current resource models.
+1. Add manifest revision/ownership and credential-slot metadata tables.
+2. Project destination metadata into logical desired/current resource models.
 3. Implement deterministic diff, live-safe/restart-required/destructive
    classification, drift, final-admin invariant, activation gates, and redacted
    apply report.
-4. Add `instance adopt` for legacy installations without taking ownership.
 
-Exit: Sift can plan create/update/preserve/prune accurately with zero live
+Exit: Sift can plan create/update/preserve/delete accurately with zero live
 mutation and no secret reads.
 
 ### Phase 5 — first `up` and GitHub claim
@@ -1681,15 +1953,19 @@ unauthenticated config upload/edit endpoint.
 1. Add admin config read/export, bounded drafts, ETags, validate, and plan APIs.
 2. Add destination-key challenge/registration/revocation and one-use,
    digest-scoped step-up grants.
-3. Realize live-safe generations transactionally and restart-required
+3. Add deployment-public-key enrollment/revocation, scoped nonces, signed
+   plan/apply endpoints, and a policy ceiling that cannot be changed by the
+   deployment key itself.
+4. Realize live-safe generations transactionally and restart-required
    generations under the maintenance lock; remove direct writes to managed
    resources.
-4. Complete generation list/diff/pin/rollback/GC with credential-version and
+5. Complete generation list/diff/pin/rollback/GC with credential-version and
    final-admin safety.
-5. Add status/apply-report/generation APIs and reference client SDK methods.
+6. Add status/apply-report/generation APIs and reference client SDK methods.
 
 Exit: authenticated admins can change the file-based desired state without
-stale apply, hidden drift, session-only authorization, or unsafe rollback.
+stale apply, hidden drift, session-only authorization, unsafe automation, or
+unsafe rollback.
 
 ### Phase 7 — typed credentials
 
@@ -1751,7 +2027,7 @@ configuration languages or remote automation.
 - Signed organization manifests and policy-as-code.
 - Delegated configuration operator roles and multi-party approval.
 - Multiple bootstrap identity providers.
-- Automatic GitOps reconciliation and carefully scoped prune policy.
+- Automatic GitOps reconciliation and carefully scoped deletion policy.
 - Portable per-user credentials with each user's own recipient keys.
 - Hardware-backed/WebAuthn step-up and managed recovery key escrow.
 
