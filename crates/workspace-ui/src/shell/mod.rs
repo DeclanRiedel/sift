@@ -5117,6 +5117,10 @@ fn dock_resize_handle(dock: DockId, accent: gpui::Hsla) -> gpui::AnyElement {
             .w(px(DOCK_RESIZE_HANDLE_SIZE))
             .child(
                 div()
+                    .debug_selector(|| "resize-left-dock-line".into())
+                    .absolute()
+                    .right(px(-1.))
+                    .top_0()
                     .h_full()
                     .w(px(1.))
                     .group_hover("dock-resize", move |line| line.bg(accent)),
@@ -5128,6 +5132,10 @@ fn dock_resize_handle(dock: DockId, accent: gpui::Hsla) -> gpui::AnyElement {
             .w(px(DOCK_RESIZE_HANDLE_SIZE))
             .child(
                 div()
+                    .debug_selector(|| "resize-right-dock-line".into())
+                    .absolute()
+                    .left(px(-1.))
+                    .top_0()
                     .h_full()
                     .w(px(1.))
                     .group_hover("dock-resize", move |line| line.bg(accent)),
@@ -5139,6 +5147,10 @@ fn dock_resize_handle(dock: DockId, accent: gpui::Hsla) -> gpui::AnyElement {
             .h(px(DOCK_RESIZE_HANDLE_SIZE))
             .child(
                 div()
+                    .debug_selector(|| "resize-bottom-dock-line".into())
+                    .absolute()
+                    .left_0()
+                    .top(px(-1.))
                     .h(px(1.))
                     .w_full()
                     .group_hover("dock-resize", move |line| line.bg(accent)),
@@ -6475,6 +6487,18 @@ mod tests {
         assert!(cx.debug_bounds("resize-left-dock").is_some());
         assert!(cx.debug_bounds("resize-right-dock").is_some());
         assert!(cx.debug_bounds("resize-bottom-dock").is_some());
+        let left_line = cx
+            .debug_bounds("resize-left-dock-line")
+            .expect("left resize indicator");
+        let right_line = cx
+            .debug_bounds("resize-right-dock-line")
+            .expect("right resize indicator");
+        let bottom_line = cx
+            .debug_bounds("resize-bottom-dock-line")
+            .expect("bottom resize indicator");
+        assert_eq!(left_line.right(), left.right());
+        assert_eq!(right_line.left(), right.left());
+        assert_eq!(bottom_line.top(), bottom.top());
     }
 
     #[gpui::test]
