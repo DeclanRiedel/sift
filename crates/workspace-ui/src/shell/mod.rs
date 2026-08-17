@@ -349,6 +349,14 @@ impl Focusable for Pane {
 
 impl EventEmitter<PaneEvent> for Pane {}
 
+fn pane_border_color(theme: &Theme, is_focused: bool) -> gpui::Hsla {
+    if is_focused {
+        theme.colors.accent
+    } else {
+        theme.colors.subtle_border
+    }
+}
+
 impl Pane {
     fn close_item(&mut self, index: usize, cx: &mut Context<Self>) {
         if index >= self.items.len() {
@@ -388,11 +396,7 @@ impl gpui::Render for Pane {
             .flex_1()
             .min_w_0()
             .border_t_1()
-            .border_color(if is_focused {
-                colors.strong_border
-            } else {
-                colors.subtle_border
-            })
+            .border_color(pane_border_color(&self.theme, is_focused))
             .bg(colors.background)
             .child(
                 div()
@@ -1819,16 +1823,23 @@ impl WorkspaceShell {
     fn split_pane(&mut self, _: &SplitPane, window: &mut Window, cx: &mut Context<Self>) {
         let id = self.next_id;
         self.next_id += 1;
+        let source_has_items = self
+            .panes
+            .get(self.active_pane)
+            .is_some_and(|pane| !pane.read(cx).items.is_empty());
         let pane = cx.new(|cx| {
             Pane::from_presentation(
                 PanePresentation {
                     id,
-                    items: vec![ItemPresentation {
-                        id,
-                        kind: ItemKind::Welcome,
-                        title: "New pane".into(),
-                        dirty: false,
-                    }],
+                    items: source_has_items
+                        .then(|| ItemPresentation {
+                            id,
+                            kind: ItemKind::Welcome,
+                            title: "New pane".into(),
+                            dirty: false,
+                        })
+                        .into_iter()
+                        .collect(),
                     active_item: 0,
                 },
                 self.theme,
@@ -5347,6 +5358,13 @@ mod tests {
         assert!(!edge_resize_enabled(true, true));
     }
 
+    #[test]
+    fn focused_pane_border_uses_the_primary_accent() {
+        let theme = Theme::dark();
+        assert_eq!(pane_border_color(&theme, true), theme.colors.accent);
+        assert_eq!(pane_border_color(&theme, false), theme.colors.subtle_border);
+    }
+
     #[gpui::test]
     fn split_and_focus_actions_route_to_the_workspace(cx: &mut TestAppContext) {
         let window = shell(cx);
@@ -5368,6 +5386,26 @@ mod tests {
             workspace.read_with(&cx, |workspace, _| workspace.active_pane()),
             0
         );
+    }
+
+    #[gpui::test]
+    fn splitting_an_empty_pane_does_not_create_an_asymmetric_tab(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        let focus = workspace.read_with(&cx, |shell, cx| shell.focus_handle(cx));
+
+        cx.update(|window, cx| focus.dispatch_action(&CloseActiveItem, window, cx));
+        cx.update(|window, cx| focus.dispatch_action(&SplitPane, window, cx));
+
+        let item_counts = workspace.read_with(&cx, |workspace, cx| {
+            workspace
+                .panes
+                .iter()
+                .map(|pane| pane.read(cx).items.len())
+                .collect::<Vec<_>>()
+        });
+        assert_eq!(item_counts, vec![0, 0]);
     }
 
     #[gpui::test]
