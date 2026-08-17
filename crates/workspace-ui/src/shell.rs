@@ -2745,6 +2745,7 @@ impl WorkspaceShell {
                     .children((!navigation_expanded).then(|| {
                         div()
                             .id("toolbar-server-picker")
+                            .debug_selector(|| "toolbar-server-picker".into())
                             .role(Role::Button)
                             .aria_label(format!(
                                 "Current Sift server: {server_name}, {status_label}"
@@ -2809,6 +2810,7 @@ impl WorkspaceShell {
                     .child(
                         div()
                             .id("toolbar-account")
+                            .debug_selector(|| "toolbar-account".into())
                             .role(Role::Button)
                             .aria_label(format!("Account: {account_label}"))
                             .h(px(26.))
@@ -3137,6 +3139,10 @@ impl WorkspaceShell {
         self.modal.as_ref().map(|modal| {
             let server_picker = matches!(modal, Modal::ServerPicker);
             let account = matches!(modal, Modal::Account);
+            let app_bar_modal = matches!(
+                modal,
+                Modal::ServerPicker | Modal::ServerConnection | Modal::Account
+            );
             let database_connection = matches!(modal, Modal::DatabaseConnection);
             let command_palette = matches!(modal, Modal::CommandPalette);
             let card_width = if server_picker {
@@ -4753,15 +4759,22 @@ impl WorkspaceShell {
                 .id("modal-layer")
                 .key_context("SiftModal")
                 .absolute()
-                .inset_0()
+                .top(if app_bar_modal {
+                    self.theme.metrics.toolbar_height
+                } else {
+                    px(0.)
+                })
+                .right_0()
+                .bottom_0()
+                .left_0()
                 .occlude()
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                 .flex()
                 .items_start()
                 .when(server_picker, |layer| {
-                    layer.justify_start().pt(px(38.)).pl(px(38.))
+                    layer.justify_start().pt_1().pl(px(38.))
                 })
-                .when(account, |layer| layer.justify_end().pt(px(38.)).pr_2())
+                .when(account, |layer| layer.justify_end().pt_1().pr_2())
                 .when(database_connection, |layer| {
                     layer
                         .items_center()
@@ -4772,7 +4785,16 @@ impl WorkspaceShell {
                 })
                 .when(
                     !server_picker && !account && !database_connection,
-                    |layer| layer.justify_center().pt(px(100.)).bg(colors.scrim),
+                    |layer| {
+                        layer
+                            .justify_center()
+                            .pt(if app_bar_modal {
+                                px(100.) - self.theme.metrics.toolbar_height
+                            } else {
+                                px(100.)
+                            })
+                            .bg(colors.scrim)
+                    },
                 )
                 .child(
                     div()
@@ -5947,6 +5969,33 @@ mod tests {
             Modifiers::default(),
         );
         assert!(workspace.read_with(&cx, |shell, _| shell.modal().is_none()));
+    }
+
+    #[gpui::test]
+    fn app_bar_buttons_replace_an_open_popover_with_one_click(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+
+        workspace.update(&mut cx, |shell, cx| shell.open_server_picker(cx));
+        cx.run_until_parked();
+        let account_bounds = cx
+            .debug_bounds("toolbar-account")
+            .expect("account button should be rendered");
+        cx.simulate_click(account_bounds.center(), Modifiers::default());
+        assert_eq!(
+            workspace.read_with(&cx, |shell, _| shell.modal().cloned()),
+            Some(Modal::Account)
+        );
+
+        let server_bounds = cx
+            .debug_bounds("toolbar-server-picker")
+            .expect("server picker button should be rendered");
+        cx.simulate_click(server_bounds.center(), Modifiers::default());
+        assert_eq!(
+            workspace.read_with(&cx, |shell, _| shell.modal().cloned()),
+            Some(Modal::ServerPicker)
+        );
     }
 
     #[gpui::test]
