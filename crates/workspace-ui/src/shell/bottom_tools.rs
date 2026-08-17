@@ -71,6 +71,6 @@ pub(super) fn render_bottom_panel(shell: &WorkspaceShell) -> gpui::AnyElement {
                         .child(body),
                 ),
         )
-        .child(dock_resize_handle(DockId::Bottom, colors.accent))
+        .child(dock_resize_handle(DockId::Bottom))
         .into_any_element()
 }

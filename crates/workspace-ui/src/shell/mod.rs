@@ -3281,7 +3281,7 @@ impl WorkspaceShell {
                         ),
                 )
             })
-            .child(dock_resize_handle(dock.id, colors.accent))
+            .child(dock_resize_handle(dock.id))
     }
 
     fn render_modal(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
@@ -5089,7 +5089,7 @@ fn edge_resize_enabled(is_maximized: bool, is_fullscreen: bool) -> bool {
     !is_maximized && !is_fullscreen
 }
 
-fn dock_resize_handle(dock: DockId, accent: gpui::Hsla) -> gpui::AnyElement {
+fn dock_resize_handle(dock: DockId) -> gpui::AnyElement {
     let (id, cursor) = match dock {
         DockId::Left => ("resize-left-dock", CursorStyle::ResizeLeftRight),
         DockId::Inspector => ("resize-right-dock", CursorStyle::ResizeLeftRight),
@@ -5099,10 +5099,6 @@ fn dock_resize_handle(dock: DockId, accent: gpui::Hsla) -> gpui::AnyElement {
         .id(id)
         .debug_selector(move || id.to_owned())
         .absolute()
-        .group("dock-resize")
-        .flex()
-        .items_center()
-        .justify_center()
         .cursor(cursor)
         .block_mouse_except_scroll()
         .on_drag(DockResizeDrag { dock }, |_, _, _, cx| {
@@ -5114,47 +5110,17 @@ fn dock_resize_handle(dock: DockId, accent: gpui::Hsla) -> gpui::AnyElement {
             .right_0()
             .top_0()
             .h_full()
-            .w(px(DOCK_RESIZE_HANDLE_SIZE))
-            .child(
-                div()
-                    .debug_selector(|| "resize-left-dock-line".into())
-                    .absolute()
-                    .right(px(-1.))
-                    .top_0()
-                    .h_full()
-                    .w(px(1.))
-                    .group_hover("dock-resize", move |line| line.bg(accent)),
-            ),
+            .w(px(DOCK_RESIZE_HANDLE_SIZE)),
         DockId::Inspector => handle
             .left_0()
             .top_0()
             .h_full()
-            .w(px(DOCK_RESIZE_HANDLE_SIZE))
-            .child(
-                div()
-                    .debug_selector(|| "resize-right-dock-line".into())
-                    .absolute()
-                    .left(px(-1.))
-                    .top_0()
-                    .h_full()
-                    .w(px(1.))
-                    .group_hover("dock-resize", move |line| line.bg(accent)),
-            ),
+            .w(px(DOCK_RESIZE_HANDLE_SIZE)),
         DockId::Bottom => handle
             .top_0()
             .left_0()
             .w_full()
-            .h(px(DOCK_RESIZE_HANDLE_SIZE))
-            .child(
-                div()
-                    .debug_selector(|| "resize-bottom-dock-line".into())
-                    .absolute()
-                    .left_0()
-                    .top(px(-1.))
-                    .h(px(1.))
-                    .w_full()
-                    .group_hover("dock-resize", move |line| line.bg(accent)),
-            ),
+            .h(px(DOCK_RESIZE_HANDLE_SIZE)),
     }
     .into_any_element()
 }
@@ -6487,18 +6453,6 @@ mod tests {
         assert!(cx.debug_bounds("resize-left-dock").is_some());
         assert!(cx.debug_bounds("resize-right-dock").is_some());
         assert!(cx.debug_bounds("resize-bottom-dock").is_some());
-        let left_line = cx
-            .debug_bounds("resize-left-dock-line")
-            .expect("left resize indicator");
-        let right_line = cx
-            .debug_bounds("resize-right-dock-line")
-            .expect("right resize indicator");
-        let bottom_line = cx
-            .debug_bounds("resize-bottom-dock-line")
-            .expect("bottom resize indicator");
-        assert_eq!(left_line.right(), left.right());
-        assert_eq!(right_line.left(), right.left());
-        assert_eq!(bottom_line.top(), bottom.top());
     }
 
     #[gpui::test]
