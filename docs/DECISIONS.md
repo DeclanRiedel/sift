@@ -1395,6 +1395,16 @@ Zed's entity ownership, emitted-event, action, pane, restore-before-I/O, and
 background-task patterns without importing Zed's `ui`, `editor`, `workspace`,
 or `project` crates.
 
+Desktop composition is host-owned and closed to extensions. Stable typed
+registries centralize built-in command, dock, and pane-item identity and
+metadata, but they are Rust registries rather than runtime plugin registries.
+Adding or replacing application chrome, panels, pane renderers, styling, or
+layout requires a reviewed first-party client change. Extensions may add
+server providers and governed operations through Phase I contracts; they do
+not register GPUI renderers or mutate the desktop entity tree. Existing public
+client-contribution descriptors remain wire-compatible for independent thin
+clients, but the first-party desktop does not use them to alter its UI.
+
 The desktop remains a thin client. A separately supervised local server uses
 the same public HTTP/WebSocket path as SSH and hosted servers; feature views
 cannot call server, driver, or metadata internals. One window presents one
@@ -1413,3 +1423,9 @@ window, input, dialog, credential, and packaging behavior lives behind one
 narrow native boundary. The complete milestone order, visual language,
 ownership model, performance rules, recovery requirements, and graduation
 gates are in `docs/PLANS/phase-m-gpui-desktop.md`.
+
+Host ownership trades third-party UI customization for predictable upgrades,
+accessibility, focus routing, theme coverage, restoration, and failure
+isolation. Built-in commands share one definition for menus and the command
+palette. Docks and pane items use typed identities rather than display strings;
+display labels are never dispatch keys.

@@ -971,6 +971,13 @@ execute arbitrary JavaScript, issue network requests, read local files, retain
 credentials, or mutate server state outside an operation. A client may decline
 an unsupported descriptor without affecting server behavior.
 
+The first-party GPUI desktop deliberately declines extension-driven UI
+composition. It does not register extension commands, panels, renderers,
+styles, or layout changes. These descriptors remain public for independent
+thin clients and protocol compatibility; Sift-maintained desktop chrome and
+pane content stay host-owned. Extensions reach users through governed core
+operations and provider-neutral results rather than injected UI.
+
 ## Extension management API
 
 Instance administrators can:

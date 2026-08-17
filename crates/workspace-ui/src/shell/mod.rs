@@ -15,13 +15,27 @@ use crate::editor::{EditorEvent, QueryDocument, QueryEditor};
 use crate::results::{ResultState, ResultsView};
 
 use crate::presentation::{
-    DockPresentation, ItemKind, ItemPresentation, PanePresentation, PresentationState,
-    PresentationStore, WindowPresentation, WorkspacePresentation,
+    ItemKind, ItemPresentation, PanePresentation, PresentationState, PresentationStore,
+    WindowPresentation, WorkspacePresentation,
 };
 use crate::{
     ConnectionNavEntry, LifecycleEvent, LifecycleProjection, PresenceEvent, RoomPresenceProjection,
     WorkspaceNavEntry,
 };
+
+mod app_bar;
+mod commands;
+mod docks;
+mod items;
+mod output_panel;
+mod status_bar;
+
+pub use commands::{CommandContext, CommandDefinition, CommandId, CommandRegistry, CommandSpec};
+pub use docks::{Dock, DockDefinition, DockId, DockPlacement, DockRegistry};
+pub use items::{ItemDefinition, ItemRegistry, ItemRuntimeKind};
+pub use status_bar::StatusBar;
+
+use app_bar::AppBarMenu;
 
 const PALETTE_VISIBLE_ROWS: usize = 10;
 const PALETTE_ROW_HEIGHT: f32 = 30.0;
@@ -76,26 +90,6 @@ actions!(
 );
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CommandSpec {
-    pub id: &'static str,
-    pub label: &'static str,
-    pub shortcut: &'static str,
-    pub disabled_reason: Option<&'static str>,
-}
-
-impl CommandSpec {
-    pub fn enabled(&self) -> bool {
-        self.disabled_reason.is_none()
-    }
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct Dock {
-    pub title: &'static str,
-    pub presentation: DockPresentation,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Modal {
     CommandPalette,
     ServerPicker,
@@ -103,45 +97,6 @@ pub enum Modal {
     Account,
     DatabaseConnection,
     ConfirmClose { title: String },
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum AppBarMenu {
-    Main,
-    File,
-    Edit,
-    Selection,
-    View,
-    Go,
-    Run,
-    Window,
-    Help,
-    Profile,
-}
-
-#[derive(Debug, Clone, Copy)]
-struct AppBarMenuItem {
-    label: &'static str,
-    shortcut: &'static str,
-    command: Option<&'static str>,
-}
-
-impl AppBarMenuItem {
-    const fn available(label: &'static str, shortcut: &'static str, command: &'static str) -> Self {
-        Self {
-            label,
-            shortcut,
-            command: Some(command),
-        }
-    }
-
-    const fn unimplemented(label: &'static str) -> Self {
-        Self {
-            label,
-            shortcut: "",
-            command: None,
-        }
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -204,27 +159,6 @@ pub struct Toast {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Tooltip {
     pub message: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct StatusBar {
-    pub connection: String,
-    pub database: String,
-    pub transaction: String,
-    pub room: String,
-    pub execution: String,
-}
-
-impl Default for StatusBar {
-    fn default() -> Self {
-        Self {
-            connection: "Offline".into(),
-            database: "No database".into(),
-            transaction: "No transaction".into(),
-            room: "Local workspace".into(),
-            execution: "Ready".into(),
-        }
-    }
 }
 
 /// Events a pane emits upward to the workspace. A pane never mutates sibling
@@ -310,7 +244,7 @@ impl Pane {
         for item in pane
             .items
             .iter()
-            .filter(|item| item.kind == ItemKind::Query)
+            .filter(|item| ItemRegistry::definition(&item.kind).runtime == ItemRuntimeKind::Query)
         {
             let id = item.id;
             let document = QueryDocument::with_random_peer("");
@@ -383,7 +317,7 @@ impl Pane {
     /// keeps the `SiftEditor` key context active so editing keys route.
     fn active_focus_handle(&self, cx: &App) -> FocusHandle {
         self.active_item()
-            .filter(|item| item.kind == ItemKind::Query)
+            .filter(|item| ItemRegistry::definition(&item.kind).runtime == ItemRuntimeKind::Query)
             .and_then(|item| self.editors.get(&item.id))
             .map(|editor| editor.focus_handle(cx))
             .unwrap_or_else(|| self.focus_handle.clone())
@@ -579,7 +513,10 @@ impl gpui::Render for Pane {
             .child({
                 let body = div().flex_1().min_h_0().flex().flex_col();
                 match active {
-                    Some(item) if item.kind == ItemKind::Query => {
+                    Some(item)
+                        if ItemRegistry::definition(&item.kind).runtime
+                            == ItemRuntimeKind::Query =>
+                    {
                         match (self.editors.get(&item.id), self.results.get(&item.id)) {
                             (Some(editor), Some(result)) => body
                                 .child(div().flex_1().min_h_0().child(editor.clone()))
@@ -603,28 +540,30 @@ impl gpui::Render for Pane {
                             ),
                         }
                     }
-                    Some(item) => body.child(
-                        div()
-                            .size_full()
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .p_4()
-                            .child(
-                                div()
-                                    .max_w(px(420.))
-                                    .min_w_0()
-                                    .text_center()
-                                    .text_color(colors.muted_text)
-                                    .whitespace_normal()
-                                    .child(match item.kind {
-                                        ItemKind::Schema => {
-                                            format!("Schema view · {}", item.title)
-                                        }
-                                        _ => "Open a connection or create a query to begin.".into(),
-                                    }),
-                            ),
-                    ),
+                    Some(item) => {
+                        let definition = ItemRegistry::definition(&item.kind);
+                        let message = definition.placeholder_prefix.map_or_else(
+                            || definition.empty_message.to_owned(),
+                            |prefix| format!("{prefix} · {}", item.title),
+                        );
+                        body.child(
+                            div()
+                                .size_full()
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .p_4()
+                                .child(
+                                    div()
+                                        .max_w(px(420.))
+                                        .min_w_0()
+                                        .text_center()
+                                        .text_color(colors.muted_text)
+                                        .whitespace_normal()
+                                        .child(message),
+                                ),
+                        )
+                    }
                     None => body.child(
                         div()
                             .size_full()
@@ -828,18 +767,9 @@ impl WorkspaceShell {
             active_pane,
             selected_workspace_id,
             selected_instance_id,
-            left_dock: Dock {
-                title: "Connections",
-                presentation: workspace.left_dock,
-            },
-            right_dock: Dock {
-                title: "Inspector",
-                presentation: workspace.right_dock,
-            },
-            bottom_dock: Dock {
-                title: "Results",
-                presentation: workspace.bottom_dock,
-            },
+            left_dock: DockRegistry::create(DockId::Connections, workspace.left_dock),
+            right_dock: DockRegistry::create(DockId::Inspector, workspace.right_dock),
+            bottom_dock: DockRegistry::create(DockId::Output, workspace.bottom_dock),
             modal: None,
             app_bar_expanded: false,
             app_bar_menu: None,
@@ -876,92 +806,18 @@ impl WorkspaceShell {
     }
 
     pub fn command_specs(&self, cx: &App) -> Vec<CommandSpec> {
+        CommandRegistry::palette(self.command_context(cx))
+    }
+
+    fn command_context(&self, cx: &App) -> CommandContext {
         let has_item = self
             .panes
             .get(self.active_pane)
             .is_some_and(|pane| pane.read(cx).active_item().is_some());
-        let has_extra_pane = self.panes.len() > 1;
-        let no_item = (!has_item).then_some("No active item");
-        vec![
-            CommandSpec {
-                id: "instance.connect-server",
-                label: "Connect to Server…",
-                shortcut: "",
-                disabled_reason: None,
-            },
-            CommandSpec {
-                id: "query.execute-statement",
-                label: "Run Query Statement",
-                shortcut: "Ctrl+Enter",
-                disabled_reason: no_item,
-            },
-            CommandSpec {
-                id: "query.execute-document",
-                label: "Run Query Document",
-                shortcut: "Ctrl+Shift+Enter",
-                disabled_reason: no_item,
-            },
-            CommandSpec {
-                id: "query.undo",
-                label: "Undo Query Edit",
-                shortcut: "Ctrl+Z",
-                disabled_reason: no_item,
-            },
-            CommandSpec {
-                id: "query.redo",
-                label: "Redo Query Edit",
-                shortcut: "Ctrl+Shift+Z",
-                disabled_reason: no_item,
-            },
-            CommandSpec {
-                id: "workspace.split-pane",
-                label: "Split Pane",
-                shortcut: "Ctrl+\\",
-                disabled_reason: None,
-            },
-            CommandSpec {
-                id: "workspace.focus-next-pane",
-                label: "Focus Next Pane",
-                shortcut: "Ctrl+K Ctrl+→",
-                disabled_reason: (!has_extra_pane).then_some("Only one pane"),
-            },
-            CommandSpec {
-                id: "workspace.close-pane",
-                label: "Close Pane",
-                shortcut: "Ctrl+Shift+W",
-                disabled_reason: (!has_extra_pane).then_some("Only one pane"),
-            },
-            CommandSpec {
-                id: "workspace.save-item",
-                label: "Save Active Item",
-                shortcut: "Ctrl+S",
-                disabled_reason: no_item,
-            },
-            CommandSpec {
-                id: "workspace.close-item",
-                label: "Close Active Item",
-                shortcut: "Ctrl+W",
-                disabled_reason: no_item,
-            },
-            CommandSpec {
-                id: "workspace.toggle-left-dock",
-                label: "Toggle Connections Dock",
-                shortcut: "Ctrl+Shift+B",
-                disabled_reason: None,
-            },
-            CommandSpec {
-                id: "workspace.toggle-right-dock",
-                label: "Toggle Inspector Dock",
-                shortcut: "Ctrl+Shift+I",
-                disabled_reason: None,
-            },
-            CommandSpec {
-                id: "workspace.toggle-bottom-dock",
-                label: "Toggle Results Dock",
-                shortcut: "Ctrl+J",
-                disabled_reason: None,
-            },
-        ]
+        CommandContext {
+            has_active_item: has_item,
+            pane_count: self.panes.len(),
+        }
     }
 
     pub fn pane_count(&self) -> usize {
@@ -2247,31 +2103,36 @@ impl WorkspaceShell {
 
     /// Run a command palette entry by its stable id: dismiss the palette, then
     /// dispatch the matching workspace action. Ids come from `command_specs`.
-    fn run_command(&mut self, id: &'static str, window: &mut Window, cx: &mut Context<Self>) {
+    fn run_command(&mut self, id: CommandId, window: &mut Window, cx: &mut Context<Self>) {
         self.dismiss_modal(&DismissModal, window, cx);
         match id {
-            "instance.connect-server" => {
+            CommandId::ConnectServer => {
                 self.open_server_connection(&OpenServerConnection, window, cx)
             }
-            "query.execute-statement" => {
+            CommandId::ExecuteStatement => {
                 self.dispatch_active_editor_action(&crate::editor::ExecuteStatement, window, cx)
             }
-            "query.execute-document" => {
+            CommandId::ExecuteDocument => {
                 self.dispatch_active_editor_action(&crate::editor::ExecuteDocument, window, cx)
             }
-            "query.undo" => self.dispatch_active_editor_action(&crate::editor::Undo, window, cx),
-            "query.redo" => self.dispatch_active_editor_action(&crate::editor::Redo, window, cx),
-            "workspace.split-pane" => self.split_pane(&SplitPane, window, cx),
-            "workspace.focus-next-pane" => self.focus_next_pane(&FocusNextPane, window, cx),
-            "workspace.close-pane" => self.close_active_pane(&CloseActivePane, window, cx),
-            "workspace.save-item" => self.save_active_item(&SaveActiveItem, window, cx),
-            "workspace.close-item" => self.close_active_item(&CloseActiveItem, window, cx),
-            "workspace.toggle-left-dock" => self.toggle_left_dock(&ToggleLeftDock, window, cx),
-            "workspace.toggle-right-dock" => self.toggle_right_dock(&ToggleRightDock, window, cx),
-            "workspace.toggle-bottom-dock" => {
-                self.toggle_bottom_dock(&ToggleBottomDock, window, cx)
+            CommandId::UndoQuery => {
+                self.dispatch_active_editor_action(&crate::editor::Undo, window, cx)
             }
-            _ => {}
+            CommandId::RedoQuery => {
+                self.dispatch_active_editor_action(&crate::editor::Redo, window, cx)
+            }
+            CommandId::SplitPane => self.split_pane(&SplitPane, window, cx),
+            CommandId::FocusNextPane => self.focus_next_pane(&FocusNextPane, window, cx),
+            CommandId::ClosePane => self.close_active_pane(&CloseActivePane, window, cx),
+            CommandId::SaveItem => self.save_active_item(&SaveActiveItem, window, cx),
+            CommandId::CloseItem => self.close_active_item(&CloseActiveItem, window, cx),
+            CommandId::ToggleConnectionsDock => self.toggle_left_dock(&ToggleLeftDock, window, cx),
+            CommandId::ToggleInspectorDock => self.toggle_right_dock(&ToggleRightDock, window, cx),
+            CommandId::ToggleOutputDock => self.toggle_bottom_dock(&ToggleBottomDock, window, cx),
+            CommandId::OpenCommandPalette => {
+                self.open_command_palette(&OpenCommandPalette, window, cx)
+            }
+            CommandId::Quit => window.remove_window(),
         }
     }
 
@@ -2385,110 +2246,15 @@ impl WorkspaceShell {
         }
     }
 
-    fn app_bar_menu_items(menu: AppBarMenu) -> Vec<AppBarMenuItem> {
-        use AppBarMenuItem as Item;
-        match menu {
-            AppBarMenu::Main => vec![
-                Item::unimplemented("About Sift"),
-                Item::unimplemented("Check for Updates…"),
-                Item::available("Quit Sift", "", "window.quit"),
-            ],
-            AppBarMenu::File => vec![
-                Item::unimplemented("New Query"),
-                Item::unimplemented("Open…"),
-                Item::available("Save Active Item", "Ctrl+S", "workspace.save-item"),
-                Item::available("Close Active Item", "Ctrl+W", "workspace.close-item"),
-            ],
-            AppBarMenu::Edit => vec![
-                Item::available("Undo", "Ctrl+Z", "query.undo"),
-                Item::available("Redo", "Ctrl+Shift+Z", "query.redo"),
-                Item::unimplemented("Cut"),
-                Item::unimplemented("Copy"),
-                Item::unimplemented("Paste"),
-            ],
-            AppBarMenu::Selection => vec![
-                Item::unimplemented("Select All"),
-                Item::unimplemented("Expand Selection"),
-                Item::unimplemented("Shrink Selection"),
-                Item::unimplemented("Add Cursor Above"),
-                Item::unimplemented("Add Cursor Below"),
-            ],
-            AppBarMenu::View => vec![
-                Item::available(
-                    "Connections Dock",
-                    "Ctrl+Shift+B",
-                    "workspace.toggle-left-dock",
-                ),
-                Item::available(
-                    "Inspector Dock",
-                    "Ctrl+Shift+I",
-                    "workspace.toggle-right-dock",
-                ),
-                Item::available("Results Dock", "Ctrl+J", "workspace.toggle-bottom-dock"),
-                Item::unimplemented("Appearance"),
-                Item::unimplemented("Full Screen"),
-            ],
-            AppBarMenu::Go => vec![
-                Item::available(
-                    "Focus Next Pane",
-                    "Ctrl+K Ctrl+→",
-                    "workspace.focus-next-pane",
-                ),
-                Item::unimplemented("Go to Query"),
-                Item::unimplemented("Go to Symbol"),
-                Item::unimplemented("Back"),
-                Item::unimplemented("Forward"),
-            ],
-            AppBarMenu::Run => vec![
-                Item::available(
-                    "Run Query Statement",
-                    "Ctrl+Enter",
-                    "query.execute-statement",
-                ),
-                Item::available(
-                    "Run Query Document",
-                    "Ctrl+Shift+Enter",
-                    "query.execute-document",
-                ),
-                Item::unimplemented("Run Configuration…"),
-                Item::unimplemented("Stop"),
-            ],
-            AppBarMenu::Window => vec![
-                Item::available("Split Pane", "Ctrl+\\", "workspace.split-pane"),
-                Item::available("Close Pane", "Ctrl+Shift+W", "workspace.close-pane"),
-                Item::unimplemented("New Window"),
-                Item::unimplemented("Previous Window"),
-                Item::unimplemented("Next Window"),
-            ],
-            AppBarMenu::Help => vec![
-                Item::available("Command Palette…", "Ctrl+Shift+P", "ui.command-palette"),
-                Item::unimplemented("Sift Documentation"),
-                Item::unimplemented("Keyboard Shortcuts"),
-                Item::unimplemented("Report Issue"),
-                Item::unimplemented("About Sift"),
-            ],
-            AppBarMenu::Profile => vec![
-                Item::unimplemented("Settings"),
-                Item::unimplemented("Keymaps"),
-                Item::unimplemented("Themes"),
-                Item::unimplemented("Server Configuration"),
-            ],
-        }
-    }
-
     fn activate_app_bar_item(
         &mut self,
-        command: &'static str,
+        command: CommandId,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         self.app_bar_menu = None;
         self.app_bar_expanded = false;
-        match command {
-            "ui.command-palette" => self.open_command_palette(&OpenCommandPalette, window, cx),
-            "window.quit" => window.remove_window(),
-            command => self.run_command(command, window, cx),
-        }
+        self.run_command(command, window, cx);
     }
 
     fn render_app_bar_dropdown(
@@ -2498,11 +2264,14 @@ impl WorkspaceShell {
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         let colors = self.theme.colors;
-        let rows = Self::app_bar_menu_items(menu)
+        let rows = app_bar::menu_items(menu)
             .into_iter()
             .enumerate()
             .map(|(index, item)| {
-                let available = item.command.is_some();
+                let disabled_reason = item.command.map_or(Some("Not implemented"), |command| {
+                    CommandRegistry::spec(command, self.command_context(cx)).disabled_reason
+                });
+                let available = disabled_reason.is_none();
                 let row = div()
                     .id(("app-bar-menu-item", index))
                     .role(Role::MenuItem)
@@ -2536,7 +2305,7 @@ impl WorkspaceShell {
                                 .child(item.shortcut),
                         )
                     })
-                    .when(!available, |row| {
+                    .when_some(disabled_reason, |row, reason| {
                         row.child(
                             div()
                                 .flex_none()
@@ -2544,16 +2313,16 @@ impl WorkspaceShell {
                                 .rounded(px(3.))
                                 .bg(colors.hovered_surface)
                                 .text_xs()
-                                .child("Not implemented"),
+                                .child(reason),
                         )
                     });
                 match item.command {
-                    Some(command) => row
+                    Some(command) if available => row
                         .on_click(cx.listener(move |shell, _, window, cx| {
                             shell.activate_app_bar_item(command, window, cx)
                         }))
                         .into_any_element(),
-                    None => row.into_any_element(),
+                    Some(_) | None => row.into_any_element(),
                 }
             })
             .collect::<Vec<_>>();
@@ -2946,8 +2715,9 @@ impl WorkspaceShell {
 
     fn render_dock(&self, dock: &Dock, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = self.theme.colors;
+        let definition = dock.definition();
         div()
-            .id(dock.title)
+            .id(definition.title)
             .key_context("SiftDock")
             .w(px(dock.presentation.size))
             .min_h_0()
@@ -2956,8 +2726,12 @@ impl WorkspaceShell {
             .overflow_hidden()
             .py_2()
             .border_color(colors.subtle_border)
-            .when(dock.title == "Connections", |dock| dock.border_r_1())
-            .when(dock.title == "Inspector", |dock| dock.border_l_1())
+            .when(definition.placement == DockPlacement::Left, |dock| {
+                dock.border_r_1()
+            })
+            .when(definition.placement == DockPlacement::Right, |dock| {
+                dock.border_l_1()
+            })
             .bg(colors.panel)
             .text_sm()
             .child(
@@ -2970,9 +2744,9 @@ impl WorkspaceShell {
                     .text_xs()
                     .text_color(colors.muted_text)
                     .font_weight(gpui::FontWeight::SEMIBOLD)
-                    .child(dock.title.to_uppercase()),
+                    .child(definition.title.to_uppercase()),
             )
-            .when(dock.title == "Connections", |dock_view| {
+            .when(dock.id == DockId::Connections, |dock_view| {
                 dock_view.child(
                     div()
                         .id("add-database-connection")
@@ -2993,7 +2767,7 @@ impl WorkspaceShell {
                         .child(div().min_w_0().truncate().child("Add database connection…")),
                 )
             })
-            .when(dock.title == "Connections", |dock_view| {
+            .when(dock.id == DockId::Connections, |dock_view| {
                 let selected = self.selected_workspace_id;
                 let mut rows: Vec<gpui::AnyElement> = Vec::new();
                 for tenant in &self.lifecycle.tenants {
@@ -3116,7 +2890,7 @@ impl WorkspaceShell {
                 )
             })
             .when(
-                dock.title == "Connections" && self.lifecycle.tenants.is_empty(),
+                dock.id == DockId::Connections && self.lifecycle.tenants.is_empty(),
                 |dock_view| {
                     dock_view.child(
                         div()
@@ -3127,7 +2901,7 @@ impl WorkspaceShell {
                     )
                 },
             )
-            .when(dock.title == "Inspector", |dock_view| {
+            .when(dock.id == DockId::Inspector, |dock_view| {
                 dock_view.child(
                     div()
                         .p_3()
@@ -3242,7 +3016,7 @@ impl WorkspaceShell {
                                                     .disabled_reason
                                                     .unwrap_or(command.shortcut);
                                                 let mut row = div()
-                                                    .id(id)
+                                                    .id(id.as_str())
                                                     .flex()
                                                     .items_center()
                                                     .justify_between()
@@ -5017,122 +4791,16 @@ impl gpui::Render for WorkspaceShell {
                     .children(right_dock),
             )
             .when(self.bottom_dock.presentation.open, |shell| {
-                shell.child(
-                    div()
-                        .h(px(self.bottom_dock.presentation.size.min(160.0)))
-                        .flex()
-                        .flex_col()
-                        .border_t_1()
-                        .border_color(colors.subtle_border)
-                        .bg(colors.panel)
-                        .text_sm()
-                        .text_color(colors.muted_text)
-                        .child(
-                            div()
-                                .h(px(28.))
-                                .flex_none()
-                                .flex()
-                                .items_center()
-                                .px_3()
-                                .border_b_1()
-                                .border_color(colors.subtle_border)
-                                .text_xs()
-                                .font_weight(gpui::FontWeight::SEMIBOLD)
-                                .child("OUTPUT"),
-                        )
-                        .child(
-                            div()
-                                .flex()
-                                .flex_1()
-                                .min_h_0()
-                                .items_center()
-                                .justify_center()
-                                .px_4()
-                                .child(
-                                    div()
-                                        .max_w(px(420.))
-                                        .min_w_0()
-                                        .text_center()
-                                        .whitespace_normal()
-                                        .child("Query results stay with their editor."),
-                                ),
-                        ),
-                )
+                shell.child(output_panel::render_output_panel(
+                    &self.bottom_dock,
+                    self.theme,
+                ))
             })
-            .child(
-                div()
-                    .id("status-bar")
-                    .role(Role::Toolbar)
-                    .aria_label("Workspace status")
-                    .tab_group()
-                    .h(self.theme.metrics.status_height)
-                    .w_full()
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .gap_2()
-                    .px_2()
-                    .border_t_1()
-                    .border_color(colors.subtle_border)
-                    .bg(colors.toolbar)
-                    .text_xs()
-                    .text_color(colors.muted_text)
-                    .child(
-                        div()
-                            .flex()
-                            .flex_1()
-                            .min_w_0()
-                            .overflow_x_hidden()
-                            .items_center()
-                            .gap_2()
-                            .child(
-                                div()
-                                    .flex_none()
-                                    .flex()
-                                    .items_center()
-                                    .gap_1()
-                                    .child(div().size(px(6.)).rounded_full().bg(
-                                        match &self.connection_status {
-                                            ConnectionStatus::Connected { .. } => colors.success,
-                                            ConnectionStatus::Connecting { .. } => colors.warning,
-                                            ConnectionStatus::Failed { .. } => colors.danger,
-                                            ConnectionStatus::Disconnected => colors.muted_text,
-                                        },
-                                    ))
-                                    .child(self.status.connection.clone()),
-                            )
-                            .child(
-                                div()
-                                    .min_w_0()
-                                    .truncate()
-                                    .child(self.status.database.clone()),
-                            )
-                            .child(div().flex_none().child(self.status.transaction.clone())),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .flex_shrink_0()
-                            .overflow_x_hidden()
-                            .items_center()
-                            .gap_2()
-                            .child(
-                                div()
-                                    .max_w(px(220.))
-                                    .min_w_0()
-                                    .truncate()
-                                    .child(self.status.room.clone()),
-                            )
-                            .child(
-                                div()
-                                    .flex_none()
-                                    .px_1()
-                                    .rounded(px(3.))
-                                    .bg(colors.hovered_surface)
-                                    .child(self.status.execution.clone()),
-                            ),
-                    ),
-            )
+            .child(status_bar::render_status_bar(
+                &self.status,
+                &self.connection_status,
+                self.theme,
+            ))
             .children(self.toasts.last().map(|toast| {
                 div()
                     .id("toast")
@@ -5542,15 +5210,15 @@ mod tests {
 
     #[test]
     fn app_bar_scaffold_marks_unimplemented_entries() {
-        let main = WorkspaceShell::app_bar_menu_items(AppBarMenu::Main);
+        let main = app_bar::menu_items(AppBarMenu::Main);
         assert_eq!(
             main.iter().map(|item| item.label).collect::<Vec<_>>(),
             vec!["About Sift", "Check for Updates…", "Quit Sift"]
         );
         assert!(main[..2].iter().all(|item| item.command.is_none()));
-        assert_eq!(main[2].command, Some("window.quit"));
+        assert_eq!(main[2].command, Some(CommandId::Quit));
 
-        let profile = WorkspaceShell::app_bar_menu_items(AppBarMenu::Profile);
+        let profile = app_bar::menu_items(AppBarMenu::Profile);
         assert_eq!(
             profile.iter().map(|item| item.label).collect::<Vec<_>>(),
             vec!["Settings", "Keymaps", "Themes", "Server Configuration"]
@@ -5568,7 +5236,7 @@ mod tests {
             AppBarMenu::Window,
             AppBarMenu::Help,
         ] {
-            assert!(!WorkspaceShell::app_bar_menu_items(menu).is_empty());
+            assert!(!app_bar::menu_items(menu).is_empty());
         }
     }
 
@@ -5615,10 +5283,10 @@ mod tests {
         assert!(commands.len() > PALETTE_VISIBLE_ROWS);
         assert!(commands
             .iter()
-            .any(|command| command.id == "query.execute-statement"));
+            .any(|command| command.id == CommandId::ExecuteStatement));
         assert!(commands
             .iter()
-            .any(|command| command.id == "query.execute-document"));
+            .any(|command| command.id == CommandId::ExecuteDocument));
     }
 
     #[gpui::test]
@@ -5964,7 +5632,7 @@ mod tests {
         assert!(workspace.read_with(&cx, |shell, _| shell.left_dock.presentation.open));
         workspace.update_in(&mut cx, |shell, window, cx| {
             shell.modal = Some(Modal::CommandPalette);
-            shell.run_command("workspace.toggle-left-dock", window, cx);
+            shell.run_command(CommandId::ToggleConnectionsDock, window, cx);
         });
         assert!(!workspace.read_with(&cx, |shell, _| shell.left_dock.presentation.open));
         assert!(workspace.read_with(&cx, |shell, _| shell.modal().is_none()));

@@ -115,6 +115,9 @@ sift-desktop (binary and composition root)
 - Feature modules begin inside `sift-workspace`. `sift-editor`,
   `sift-results`, or other crates are created only when they have a stable,
   independently testable API.
+- Application regions are modules and entities inside `sift-workspace-ui`, not
+  one crate per app bar, dock, or status surface. Split crates only when a
+  feature owns a stable API and independent test/performance boundary.
 - GPUI is pinned to an exact Git revision because it remains pre-1.0. Upgrades
   are intentional commits that run the full client test and performance suite.
 
@@ -122,6 +125,29 @@ CI enforces the dependency firewall. A desktop/UI crate depending directly or
 transitively on `sift-server`, a driver, or `sift-metadata` is a failure, except
 for an explicitly separated composition-only local-server entry point if the
 single-distribution launcher later requires it.
+
+## Host-owned UI extensibility
+
+Desktop extensibility supports first-party evolution, not extension-rendered
+UI. Three typed registries define compile-time surfaces:
+
+- `CommandRegistry` owns stable command ids, labels, shortcuts, palette
+  visibility, and contextual availability shared by menus and the palette;
+- `DockRegistry` owns stable dock ids, titles, and placements; and
+- `ItemRegistry` owns persisted item-kind to runtime-view metadata.
+
+Display strings never select behavior. `WorkspaceShell` coordinates state and
+dispatch, while focused modules render status and output chrome and dedicated
+entities own editors, results, and panes. New built-in surfaces enter through
+these typed registries and exhaustive dispatch.
+
+Extensions cannot register GPUI entities, commands, panels, item factories,
+styles, or layout slots. They continue to contribute server-side providers and
+governed operations through typed, audited Phase I contracts. Public
+declarative client-contribution descriptors remain compatible for independent
+thin clients; the first-party desktop does not consume them as UI mutation.
+This boundary keeps theme, accessibility, focus, restoration, and crash
+behavior under client ownership.
 
 ## Entity and ownership model
 
