@@ -30,7 +30,12 @@ what sift is and the five product goals; this file is the operational subset.
 ## Workflow
 
 - `cargo fmt`, `cargo clippy --workspace --all-targets -- -D warnings`,
-  `cargo test --workspace` stay green. CI enforces all three plus cargo-deny.
+  `cargo test --workspace` stay green. Run them locally; GitHub CI/CD is
+  disabled (manual dispatch only) and stays that way unless asked.
+- Keep smoke tests, test code, and CI config minimal. Cover real behaviour
+  changes and non-obvious logic; skip scaffolding tests, new smoke scripts,
+  and new workflows unless explicitly requested.
+- `CLAUDE.md` is a symlink to this file. Edit `AGENTS.md` only.
 - Design precedes Implement for tightly-coupled pairs; graduate stable
   decisions into `docs/DECISIONS.md` as ADRs.
 - Both real drivers (Postgres, SQL Server) pass through the `Driver` trait.

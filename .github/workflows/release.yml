@@ -1,8 +1,10 @@
 name: Signed release
 
+# Disabled for now: manual dispatch only. Re-enable the tag trigger below when
+# signed releases resume.
 on:
-  push:
-    tags: ["v*"]
+  # push:
+  #   tags: ["v*"]
   workflow_dispatch:
     inputs:
       channel:
