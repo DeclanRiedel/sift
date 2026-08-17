@@ -266,7 +266,13 @@ the daemon should not remain running.
 
 ## Client-local persistence
 
-The client has a separate local state store for presentation only:
+The client has one OS-account-local state store for presentation only. It is
+owned by the desktop installation, not a Sift server, tenant, room, or remote
+principal, and is never synchronized between collaborators. Two users opening
+the same server workspace from different desktops retain independent UI
+composition.
+
+The store contains:
 
 - window bounds and display identity with off-screen recovery;
 - workspace/window recents;
@@ -339,8 +345,9 @@ tolerance fail the relevant performance gate.
 - A crashed desktop restores presentation references and reconciles them with
   server state. It does not reconstruct authoritative state from a client
   snapshot.
-- Extension contributions remain declarative and are rendered through trusted
-  Sift components. They cannot instantiate GPUI views or run client code.
+- Public extension client descriptors remain wire-compatible for independent
+  thin clients. The first-party GPUI desktop declines them and does not allow
+  extensions to add commands, panels, views, styles, or layout.
 - Values, credentials, SQL bodies, and result cells are excluded from logs,
   action labels, analytics, crash context, and persisted presentation state.
 

@@ -77,8 +77,8 @@ and reviewed-registry patterns. It diverges where its workload requires it:
 - SQL grammar, formatter, analyzer, completion, refactor, and schema-diff
   contribution descriptors. Phase K owns their semantic contracts.
 - Workspace and VCS adapter descriptors. Phase L owns their state topology.
-- Themes, icon themes, and purely local presentation. The future client owns
-  their rendering and may follow Zed more directly.
+- Themes, icon themes, and purely local presentation. The first-party desktop
+  owns these surfaces and does not expose them to extensions.
 - A public marketplace service or registry index. Phase I supports local
   packages with package-level signatures and never makes server startup depend
   on a registry.

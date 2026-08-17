@@ -127,7 +127,9 @@ impl DesktopServer {
 }
 
 /// Process-wide desktop services. Product state remains behind the SDK; this
-/// object owns only platform and presentation concerns.
+/// object owns only platform and presentation concerns. Presentation state is
+/// local to this OS account/desktop installation and is never synchronized to
+/// a Sift server or keyed by a remote principal.
 pub struct SiftApp {
     pub platform: PlatformKind,
     pub presentation_store: Arc<PresentationStore>,

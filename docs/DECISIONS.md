@@ -1414,6 +1414,13 @@ promoted to independent items. Client persistence contains presentation state
 only. Results, schema, connections, operations, workspaces, and policy remain
 server-authoritative; only query text uses the existing Loro replica.
 
+Presentation persistence is local to the desktop installation's OS account.
+It is never uploaded to a Sift server, stored in a room, or synchronized
+between collaborators. Users attached to the same room may therefore keep
+independent windows, tabs, panes, dock widths, active items, and themes. Server
+identity and workspace references may appear in local restoration data, but
+they remain references and are re-authorized when restored.
+
 **Consequences.** ADR-010's deferral condition is satisfied and product UI
 work may begin. GPUI remains isolated to desktop/UI crates and may be upgraded
 only deliberately because it is pre-1.0. M0 must first remove the public SDK's

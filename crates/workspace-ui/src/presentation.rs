@@ -174,8 +174,10 @@ impl PresentationState {
     }
 }
 
-/// Small crash-safe store for presentation references only. Authoritative
-/// workspace, query, schema, and result data never enter this file.
+/// Small crash-safe client-local store for presentation references only.
+/// Authoritative workspace, query, schema, and result data never enter this
+/// file. Desktop composition chooses an OS-account-local path; no server or
+/// shared room reads or writes this store.
 #[derive(Debug, Clone)]
 pub struct PresentationStore {
     path: PathBuf,
