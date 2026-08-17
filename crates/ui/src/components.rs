@@ -12,7 +12,8 @@ pub enum ControlTone {
 }
 
 /// Small monochrome marks used throughout Sift's native chrome. They are
-/// intentionally application-owned rather than borrowed from another IDE.
+/// vendored from Qlementine Icons. Callers must choose `Fallback` when the
+/// upstream set has no semantically appropriate mark.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IconName {
     Activity,
@@ -24,6 +25,7 @@ pub enum IconName {
     Close,
     Copy,
     Database,
+    Fallback,
     Github,
     Info,
     Keyboard,
@@ -42,6 +44,34 @@ pub enum IconName {
 }
 
 impl IconName {
+    pub const ALL: [Self; 25] = [
+        Self::Activity,
+        Self::Add,
+        Self::Automations,
+        Self::Check,
+        Self::ChevronDown,
+        Self::ChevronRight,
+        Self::Close,
+        Self::Copy,
+        Self::Database,
+        Self::Fallback,
+        Self::Github,
+        Self::Info,
+        Self::Keyboard,
+        Self::Maximize,
+        Self::Menu,
+        Self::Minimize,
+        Self::Outline,
+        Self::Play,
+        Self::Search,
+        Self::Server,
+        Self::Terminal,
+        Self::User,
+        Self::Users,
+        Self::Warning,
+        Self::Workspace,
+    ];
+
     pub const fn path(self) -> &'static str {
         match self {
             Self::Activity => "icons/activity.svg",
@@ -53,6 +83,7 @@ impl IconName {
             Self::Close => "icons/close.svg",
             Self::Copy => "icons/copy.svg",
             Self::Database => "icons/database.svg",
+            Self::Fallback => "icons/fallback.svg",
             Self::Github => "icons/github.svg",
             Self::Info => "icons/info.svg",
             Self::Keyboard => "icons/keyboard.svg",
@@ -259,5 +290,6 @@ mod tests {
         assert_eq!(error.background, theme.colors.danger);
         assert_eq!(IconName::Play.path(), "icons/play.svg");
         assert_eq!(IconName::Terminal.path(), "icons/terminal.svg");
+        assert_eq!(IconName::Fallback.path(), "icons/fallback.svg");
     }
 }

@@ -140,6 +140,7 @@ pub(super) fn render_status_bar(
         .items_center()
         .gap_1()
         .px_1()
+        .pt(px(1.))
         .border_t_1()
         .border_color(colors.subtle_border)
         .bg(colors.toolbar)

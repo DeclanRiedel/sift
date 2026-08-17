@@ -23,7 +23,6 @@ pub struct CreateRoomRequest {
     pub name: String,
     pub kind: RoomKind,
 }
-
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct AddRoomMemberRequest {
     pub principal_id: i64,
