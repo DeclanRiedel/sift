@@ -373,7 +373,10 @@ impl EntityInputHandler for TextInput {
 }
 
 impl gpui::Render for TextInput {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let focused = self.focus_handle.is_focused(window);
+        let mut focus_tint = window.text_style().color;
+        focus_tint.a = 0.055;
         div()
             .id(("sift-text-input", self.id))
             .key_context("SiftTextInput")
@@ -407,6 +410,8 @@ impl gpui::Render for TextInput {
             .items_center()
             .overflow_hidden()
             .whitespace_nowrap()
+            .rounded_sm()
+            .when(focused, |input| input.bg(focus_tint))
             .px_2()
             .child(TextElement { input: cx.entity() })
     }

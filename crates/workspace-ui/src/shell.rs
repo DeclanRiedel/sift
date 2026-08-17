@@ -3,7 +3,7 @@ use std::ops::Range;
 use std::sync::Arc;
 
 use gpui::{
-    actions, div, img, prelude::*, px, uniform_list, App, Context, Entity, EventEmitter,
+    actions, deferred, div, img, prelude::*, px, uniform_list, App, Context, Entity, EventEmitter,
     FocusHandle, Focusable, IntoElement, MouseButton, Role, ScrollStrategy, Subscription, Task,
     UniformListScrollHandle, Window, WindowBounds,
 };
@@ -102,6 +102,45 @@ pub enum Modal {
     Account,
     DatabaseConnection,
     ConfirmClose { title: String },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AppBarMenu {
+    Main,
+    File,
+    Edit,
+    Selection,
+    View,
+    Go,
+    Run,
+    Window,
+    Help,
+    Profile,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct AppBarMenuItem {
+    label: &'static str,
+    shortcut: &'static str,
+    command: Option<&'static str>,
+}
+
+impl AppBarMenuItem {
+    const fn available(label: &'static str, shortcut: &'static str, command: &'static str) -> Self {
+        Self {
+            label,
+            shortcut,
+            command: Some(command),
+        }
+    }
+
+    const fn unimplemented(label: &'static str) -> Self {
+        Self {
+            label,
+            shortcut: "",
+            command: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -633,6 +672,7 @@ pub struct WorkspaceShell {
     right_dock: Dock,
     bottom_dock: Dock,
     modal: Option<Modal>,
+    app_bar_menu: Option<AppBarMenu>,
     toasts: Vec<Toast>,
     tooltip: Option<Tooltip>,
     status: StatusBar,
@@ -799,6 +839,7 @@ impl WorkspaceShell {
                 presentation: workspace.bottom_dock,
             },
             modal: None,
+            app_bar_menu: None,
             toasts: Vec::new(),
             tooltip: None,
             status: StatusBar::default(),
@@ -2265,20 +2306,323 @@ impl WorkspaceShell {
         cx.notify();
     }
 
+    fn toggle_app_bar_menu(&mut self, menu: AppBarMenu, cx: &mut Context<Self>) {
+        self.app_bar_menu = (self.app_bar_menu != Some(menu)).then_some(menu);
+        cx.notify();
+    }
+
+    fn app_bar_navigation_expanded(&self) -> bool {
+        matches!(
+            self.app_bar_menu,
+            Some(
+                AppBarMenu::Main
+                    | AppBarMenu::File
+                    | AppBarMenu::Edit
+                    | AppBarMenu::Selection
+                    | AppBarMenu::View
+                    | AppBarMenu::Go
+                    | AppBarMenu::Run
+                    | AppBarMenu::Window
+                    | AppBarMenu::Help
+            )
+        )
+    }
+
+    fn dismiss_app_bar_menu(&mut self, cx: &mut Context<Self>) {
+        if self.app_bar_menu.take().is_some() {
+            cx.notify();
+        }
+    }
+
+    fn app_bar_menu_items(menu: AppBarMenu) -> Vec<AppBarMenuItem> {
+        use AppBarMenuItem as Item;
+        match menu {
+            AppBarMenu::Main => vec![
+                Item::unimplemented("About Sift"),
+                Item::unimplemented("Check for Updates…"),
+                Item::available("Quit Sift", "", "window.quit"),
+            ],
+            AppBarMenu::File => vec![
+                Item::unimplemented("New Query"),
+                Item::unimplemented("Open…"),
+                Item::available("Save Active Item", "Ctrl+S", "workspace.save-item"),
+                Item::available("Close Active Item", "Ctrl+W", "workspace.close-item"),
+            ],
+            AppBarMenu::Edit => vec![
+                Item::available("Undo", "Ctrl+Z", "query.undo"),
+                Item::available("Redo", "Ctrl+Shift+Z", "query.redo"),
+                Item::unimplemented("Cut"),
+                Item::unimplemented("Copy"),
+                Item::unimplemented("Paste"),
+            ],
+            AppBarMenu::Selection => vec![
+                Item::unimplemented("Select All"),
+                Item::unimplemented("Expand Selection"),
+                Item::unimplemented("Shrink Selection"),
+                Item::unimplemented("Add Cursor Above"),
+                Item::unimplemented("Add Cursor Below"),
+            ],
+            AppBarMenu::View => vec![
+                Item::available(
+                    "Connections Dock",
+                    "Ctrl+Shift+B",
+                    "workspace.toggle-left-dock",
+                ),
+                Item::available(
+                    "Inspector Dock",
+                    "Ctrl+Shift+I",
+                    "workspace.toggle-right-dock",
+                ),
+                Item::available("Results Dock", "Ctrl+J", "workspace.toggle-bottom-dock"),
+                Item::unimplemented("Appearance"),
+                Item::unimplemented("Full Screen"),
+            ],
+            AppBarMenu::Go => vec![
+                Item::available(
+                    "Focus Next Pane",
+                    "Ctrl+K Ctrl+→",
+                    "workspace.focus-next-pane",
+                ),
+                Item::unimplemented("Go to Query"),
+                Item::unimplemented("Go to Symbol"),
+                Item::unimplemented("Back"),
+                Item::unimplemented("Forward"),
+            ],
+            AppBarMenu::Run => vec![
+                Item::available(
+                    "Run Query Statement",
+                    "Ctrl+Enter",
+                    "query.execute-statement",
+                ),
+                Item::available(
+                    "Run Query Document",
+                    "Ctrl+Shift+Enter",
+                    "query.execute-document",
+                ),
+                Item::unimplemented("Run Configuration…"),
+                Item::unimplemented("Stop"),
+            ],
+            AppBarMenu::Window => vec![
+                Item::available("Split Pane", "Ctrl+\\", "workspace.split-pane"),
+                Item::available("Close Pane", "Ctrl+Shift+W", "workspace.close-pane"),
+                Item::unimplemented("New Window"),
+                Item::unimplemented("Previous Window"),
+                Item::unimplemented("Next Window"),
+            ],
+            AppBarMenu::Help => vec![
+                Item::available("Command Palette…", "Ctrl+Shift+P", "ui.command-palette"),
+                Item::unimplemented("Sift Documentation"),
+                Item::unimplemented("Keyboard Shortcuts"),
+                Item::unimplemented("Report Issue"),
+                Item::unimplemented("About Sift"),
+            ],
+            AppBarMenu::Profile => vec![
+                Item::available("Account", "", "account.open"),
+                Item::unimplemented("Settings"),
+                Item::unimplemented("Keymaps"),
+                Item::unimplemented("Themes"),
+                Item::unimplemented("Server Configuration"),
+            ],
+        }
+    }
+
+    fn activate_app_bar_item(
+        &mut self,
+        command: &'static str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.app_bar_menu = None;
+        match command {
+            "ui.command-palette" => self.open_command_palette(&OpenCommandPalette, window, cx),
+            "account.open" => self.open_account(cx),
+            "window.quit" => window.remove_window(),
+            command => self.run_command(command, window, cx),
+        }
+    }
+
+    fn render_app_bar_dropdown(
+        &self,
+        menu: AppBarMenu,
+        align_right: bool,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let colors = self.theme.colors;
+        let rows = Self::app_bar_menu_items(menu)
+            .into_iter()
+            .enumerate()
+            .map(|(index, item)| {
+                let available = item.command.is_some();
+                let row = div()
+                    .id(("app-bar-menu-item", index))
+                    .role(Role::MenuItem)
+                    .aria_label(if available {
+                        item.label.to_string()
+                    } else {
+                        format!("{} (not implemented)", item.label)
+                    })
+                    .h(px(28.))
+                    .px_2()
+                    .flex()
+                    .items_center()
+                    .gap_3()
+                    .rounded_sm()
+                    .text_sm()
+                    .text_color(if available {
+                        colors.text
+                    } else {
+                        colors.disabled_text
+                    })
+                    .when(available, |row| {
+                        row.hover(|row| row.bg(colors.hovered_surface))
+                    })
+                    .child(div().flex_1().min_w_0().truncate().child(item.label))
+                    .when(!item.shortcut.is_empty(), |row| {
+                        row.child(
+                            div()
+                                .flex_none()
+                                .text_xs()
+                                .text_color(colors.muted_text)
+                                .child(item.shortcut),
+                        )
+                    })
+                    .when(!available, |row| {
+                        row.child(
+                            div()
+                                .flex_none()
+                                .px_1()
+                                .rounded(px(3.))
+                                .bg(colors.hovered_surface)
+                                .text_xs()
+                                .child("Not implemented"),
+                        )
+                    });
+                match item.command {
+                    Some(command) => row
+                        .on_click(cx.listener(move |shell, _, window, cx| {
+                            shell.activate_app_bar_item(command, window, cx)
+                        }))
+                        .into_any_element(),
+                    None => row.into_any_element(),
+                }
+            })
+            .collect::<Vec<_>>();
+
+        div()
+            .id("app-bar-dropdown")
+            .absolute()
+            .top(px(30.))
+            .when(align_right, |menu| menu.right_0())
+            .when(!align_right, |menu| menu.left_0())
+            .w(px(280.))
+            .p_1()
+            .flex()
+            .flex_col()
+            .rounded(self.theme.metrics.radius_large)
+            .border_1()
+            .border_color(colors.strong_border)
+            .bg(colors.elevated_surface)
+            .shadow_lg()
+            .occlude()
+            .on_mouse_down_out(cx.listener(|shell, _, _, cx| shell.dismiss_app_bar_menu(cx)))
+            .children(rows)
+            .into_any_element()
+    }
+
+    fn render_app_bar_menu_button(
+        &self,
+        menu: AppBarMenu,
+        label: &'static str,
+        align_right: bool,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let colors = self.theme.colors;
+        let open = self.app_bar_menu == Some(menu);
+        div()
+            .relative()
+            .flex_none()
+            .child(
+                div()
+                    .id(("app-bar-menu-button", menu as usize))
+                    .role(Role::Button)
+                    .aria_label(format!("Open {label} menu"))
+                    .h(px(26.))
+                    .px_1()
+                    .flex()
+                    .items_center()
+                    .rounded_sm()
+                    .text_sm()
+                    .text_color(if open { colors.text } else { colors.muted_text })
+                    .when(open, |button| button.bg(colors.active_surface))
+                    .hover(|button| button.bg(colors.hovered_surface).text_color(colors.text))
+                    .on_click(
+                        cx.listener(move |shell, _, _, cx| shell.toggle_app_bar_menu(menu, cx)),
+                    )
+                    .child(label),
+            )
+            .when(open, |button| {
+                button.child(deferred(self.render_app_bar_dropdown(
+                    menu,
+                    align_right,
+                    cx,
+                )))
+            })
+            .into_any_element()
+    }
+
     /// Global application context: commands, Sift instance, workspace, updates,
     /// and identity. Database profiles deliberately stay in the workspace dock.
     fn render_toolbar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = self.theme.colors;
         let workspace_label = self.workspace_context_label();
         let server_name = self.active_server_name();
-
         let status_label = self.lifecycle.status_label();
         let show_status = !matches!(self.lifecycle.phase, crate::ConnectionPhase::Ready);
+        let account_label = self
+            .lifecycle
+            .identity
+            .as_ref()
+            .map(|identity| identity.principal.display_name.clone())
+            .unwrap_or_else(|| "Sign in".into());
+        let main_menu_open = self.app_bar_menu == Some(AppBarMenu::Main);
+        let server_picker_active = matches!(
+            self.modal,
+            Some(Modal::ServerPicker | Modal::ServerConnection)
+        );
+        let account_active = self.modal == Some(Modal::Account);
+        let navigation_expanded = self.app_bar_navigation_expanded();
+        let launcher_content = if navigation_expanded {
+            div()
+                .px_1()
+                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .child("Sift")
+                .into_any_element()
+        } else {
+            icon(IconName::Menu, colors.muted_text, 15.)
+        };
+        let file_menu = navigation_expanded
+            .then(|| self.render_app_bar_menu_button(AppBarMenu::File, "File", false, cx));
+        let edit_menu = navigation_expanded
+            .then(|| self.render_app_bar_menu_button(AppBarMenu::Edit, "Edit", false, cx));
+        let selection_menu = navigation_expanded.then(|| {
+            self.render_app_bar_menu_button(AppBarMenu::Selection, "Selection", false, cx)
+        });
+        let view_menu = navigation_expanded
+            .then(|| self.render_app_bar_menu_button(AppBarMenu::View, "View", false, cx));
+        let go_menu = navigation_expanded
+            .then(|| self.render_app_bar_menu_button(AppBarMenu::Go, "Go", false, cx));
+        let run_menu = navigation_expanded
+            .then(|| self.render_app_bar_menu_button(AppBarMenu::Run, "Run", false, cx));
+        let window_menu = navigation_expanded
+            .then(|| self.render_app_bar_menu_button(AppBarMenu::Window, "Window", false, cx));
+        let help_menu = navigation_expanded
+            .then(|| self.render_app_bar_menu_button(AppBarMenu::Help, "Help", false, cx));
 
         div()
             .id("integrated-titlebar")
             .key_context("SiftWindow")
             .h(self.theme.metrics.toolbar_height)
+            .relative()
             .flex()
             .items_center()
             .justify_between()
@@ -2290,6 +2634,25 @@ impl WorkspaceShell {
             .bg(colors.toolbar)
             .child(
                 div()
+                    .absolute()
+                    .inset_0()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(
+                        div()
+                            .max_w(px(260.))
+                            .min_w_0()
+                            .px_3()
+                            .truncate()
+                            .text_center()
+                            .text_sm()
+                            .text_color(colors.muted_text)
+                            .child(workspace_label),
+                    ),
+            )
+            .child(
+                div()
                     .flex()
                     .flex_1()
                     .items_center()
@@ -2297,23 +2660,47 @@ impl WorkspaceShell {
                     .min_w_0()
                     .child(
                         div()
-                            .id("toolbar-menu")
-                            .role(Role::Button)
-                            .aria_label("Open command palette")
-                            .w(px(28.))
-                            .h(px(28.))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .rounded_sm()
-                            .text_color(colors.muted_text)
-                            .hover(|slot| slot.bg(colors.hovered_surface).text_color(colors.text))
-                            .on_click(cx.listener(|shell, _, window, cx| {
-                                shell.open_command_palette(&OpenCommandPalette, window, cx)
-                            }))
-                            .child(icon(IconName::Menu, colors.muted_text, 15.)),
+                            .relative()
+                            .flex_none()
+                            .child(
+                                div()
+                                    .id("toolbar-menu")
+                                    .role(Role::Button)
+                                    .aria_label(if navigation_expanded {
+                                        "Open Sift application menu"
+                                    } else {
+                                        "Expand Sift application menu"
+                                    })
+                                    .min_w(px(28.))
+                                    .h(px(28.))
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .rounded_sm()
+                                    .text_sm()
+                                    .text_color(if main_menu_open {
+                                        colors.text
+                                    } else {
+                                        colors.muted_text
+                                    })
+                                    .when(main_menu_open, |slot| slot.bg(colors.active_surface))
+                                    .hover(|slot| {
+                                        slot.bg(colors.hovered_surface).text_color(colors.text)
+                                    })
+                                    .on_click(cx.listener(|shell, _, _, cx| {
+                                        shell.toggle_app_bar_menu(AppBarMenu::Main, cx)
+                                    }))
+                                    .child(launcher_content),
+                            )
+                            .when(main_menu_open, |button| {
+                                button.child(deferred(self.render_app_bar_dropdown(
+                                    AppBarMenu::Main,
+                                    false,
+                                    cx,
+                                )))
+                            }),
                     )
-                    .child(
+                    .children((!navigation_expanded).then(|| {
                         div()
                             .id("toolbar-server-picker")
                             .role(Role::Button)
@@ -2330,6 +2717,9 @@ impl WorkspaceShell {
                             .border_1()
                             .border_color(colors.subtle_border)
                             .bg(colors.surface)
+                            .when(server_picker_active, |slot| {
+                                slot.bg(colors.active_surface).border_color(colors.accent)
+                            })
                             .hover(|slot| {
                                 slot.bg(colors.hovered_surface).border_color(colors.border)
                             })
@@ -2345,62 +2735,137 @@ impl WorkspaceShell {
                                         .child(status_label),
                                 )
                             })
-                            .child(icon(IconName::ChevronDown, colors.muted_text, 12.)),
-                    ),
+                            .child(icon(IconName::ChevronDown, colors.muted_text, 12.))
+                    }))
+                    .children(file_menu)
+                    .children(edit_menu)
+                    .children(selection_menu)
+                    .children(view_menu)
+                    .children(go_menu)
+                    .children(run_menu)
+                    .children(window_menu)
+                    .children(help_menu),
             )
             .child(
                 div()
-                    .flex_1()
-                    .min_w_0()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .px_3()
-                    .text_sm()
-                    .text_color(colors.muted_text)
-                    .child(
-                        div()
-                            .max_w(px(420.))
-                            .min_w_0()
-                            .px_2()
-                            .flex()
-                            .items_center()
-                            .gap_1()
-                            .child(div().truncate().child(workspace_label)),
-                    ),
-            )
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
+                    .flex_none()
                     .flex()
                     .items_center()
                     .justify_end()
                     .gap_1()
-                    // A download control belongs here once the desktop supplies
-                    // a verified available-update state. It stays absent while
-                    // current or unknown rather than presenting a dead button.
                     .child(
                         div()
                             .id("toolbar-account")
                             .role(Role::Button)
-                            .aria_label(
-                                self.lifecycle
-                                    .identity
-                                    .as_ref()
-                                    .map(|identity| {
-                                        format!("Account: {}", identity.principal.display_name)
-                                    })
-                                    .unwrap_or_else(|| "Account unavailable while offline".into()),
-                            )
-                            .size(px(24.))
+                            .aria_label(format!("Account: {account_label}"))
+                            .h(px(26.))
+                            .max_w(px(140.))
+                            .px_2()
                             .flex()
                             .items_center()
                             .justify_center()
                             .rounded(px(5.))
-                            .hover(|avatar| avatar.bg(colors.hovered_surface))
+                            .text_sm()
+                            .text_color(colors.muted_text)
+                            .when(account_active, |button| {
+                                button.bg(colors.active_surface).text_color(colors.text)
+                            })
+                            .hover(|button| {
+                                button.bg(colors.hovered_surface).text_color(colors.text)
+                            })
                             .on_click(cx.listener(|shell, _, _, cx| shell.open_account(cx)))
-                            .child(self.render_account_avatar(20.)),
+                            .child(div().truncate().child(account_label)),
+                    )
+                    .child(
+                        div()
+                            .relative()
+                            .flex_none()
+                            .child(
+                                div()
+                                    .id("toolbar-profile-menu")
+                                    .role(Role::Button)
+                                    .aria_label("Open settings and profile menu")
+                                    .size(px(26.))
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .rounded_sm()
+                                    .when(
+                                        self.app_bar_menu == Some(AppBarMenu::Profile),
+                                        |button| button.bg(colors.active_surface),
+                                    )
+                                    .hover(|button| button.bg(colors.hovered_surface))
+                                    .on_click(cx.listener(|shell, _, _, cx| {
+                                        shell.toggle_app_bar_menu(AppBarMenu::Profile, cx)
+                                    }))
+                                    .child(icon(IconName::ChevronDown, colors.muted_text, 12.)),
+                            )
+                            .when(self.app_bar_menu == Some(AppBarMenu::Profile), |button| {
+                                button.child(deferred(self.render_app_bar_dropdown(
+                                    AppBarMenu::Profile,
+                                    true,
+                                    cx,
+                                )))
+                            }),
+                    )
+                    .child(
+                        div()
+                            .ml_1()
+                            .pl_1()
+                            .flex()
+                            .items_center()
+                            .border_l_1()
+                            .border_color(colors.subtle_border)
+                            .child(
+                                div()
+                                    .id("window-minimize")
+                                    .role(Role::Button)
+                                    .aria_label("Minimize window")
+                                    .size(px(26.))
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .rounded_sm()
+                                    .text_sm()
+                                    .text_color(colors.muted_text)
+                                    .hover(|button| button.bg(colors.hovered_surface))
+                                    .on_click(|_, window, _| window.minimize_window())
+                                    .child("—"),
+                            )
+                            .child(
+                                div()
+                                    .id("window-size-toggle")
+                                    .role(Role::Button)
+                                    .aria_label("Maximize or restore window")
+                                    .size(px(26.))
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .rounded_sm()
+                                    .text_xs()
+                                    .text_color(colors.muted_text)
+                                    .hover(|button| button.bg(colors.hovered_surface))
+                                    .on_click(|_, window, _| window.zoom_window())
+                                    .child("□"),
+                            )
+                            .child(
+                                div()
+                                    .id("window-close")
+                                    .role(Role::Button)
+                                    .aria_label("Close window")
+                                    .size(px(26.))
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .rounded_sm()
+                                    .text_sm()
+                                    .text_color(colors.muted_text)
+                                    .hover(|button| {
+                                        button.bg(colors.danger_muted).text_color(colors.danger)
+                                    })
+                                    .on_click(|_, window, _| window.remove_window())
+                                    .child("×"),
+                            ),
                     ),
             )
     }
@@ -4692,6 +5157,85 @@ mod tests {
             workspace.read_with(&cx, |workspace, _| workspace.modal().cloned()),
             Some(Modal::CommandPalette)
         );
+    }
+
+    #[gpui::test]
+    fn app_bar_menus_toggle_without_opening_product_modals(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        assert!(!workspace.read_with(&cx, |shell, _| shell.app_bar_navigation_expanded()));
+
+        workspace.update(&mut cx, |shell, cx| {
+            shell.toggle_app_bar_menu(AppBarMenu::File, cx)
+        });
+        assert_eq!(
+            workspace.read_with(&cx, |shell, _| shell.app_bar_menu),
+            Some(AppBarMenu::File)
+        );
+        assert!(workspace.read_with(&cx, |shell, _| shell.app_bar_navigation_expanded()));
+        assert!(workspace.read_with(&cx, |shell, _| shell.modal().is_none()));
+
+        workspace.update(&mut cx, |shell, cx| {
+            shell.toggle_app_bar_menu(AppBarMenu::File, cx)
+        });
+        assert_eq!(
+            workspace.read_with(&cx, |shell, _| shell.app_bar_menu),
+            None
+        );
+        assert!(!workspace.read_with(&cx, |shell, _| shell.app_bar_navigation_expanded()));
+
+        workspace.update(&mut cx, |shell, cx| {
+            shell.toggle_app_bar_menu(AppBarMenu::Help, cx)
+        });
+        cx.simulate_mouse_down(
+            point(px(10.), px(500.)),
+            MouseButton::Left,
+            Modifiers::default(),
+        );
+        assert_eq!(
+            workspace.read_with(&cx, |shell, _| shell.app_bar_menu),
+            None
+        );
+    }
+
+    #[test]
+    fn app_bar_scaffold_marks_unimplemented_entries() {
+        let main = WorkspaceShell::app_bar_menu_items(AppBarMenu::Main);
+        assert_eq!(
+            main.iter().map(|item| item.label).collect::<Vec<_>>(),
+            vec!["About Sift", "Check for Updates…", "Quit Sift"]
+        );
+        assert!(main[..2].iter().all(|item| item.command.is_none()));
+        assert_eq!(main[2].command, Some("window.quit"));
+
+        let profile = WorkspaceShell::app_bar_menu_items(AppBarMenu::Profile);
+        assert_eq!(
+            profile.iter().map(|item| item.label).collect::<Vec<_>>(),
+            vec![
+                "Account",
+                "Settings",
+                "Keymaps",
+                "Themes",
+                "Server Configuration"
+            ]
+        );
+        assert!(profile[0].command.is_some());
+        assert!(profile[1..].iter().all(|item| item.command.is_none()));
+
+        for menu in [
+            AppBarMenu::Main,
+            AppBarMenu::File,
+            AppBarMenu::Edit,
+            AppBarMenu::Selection,
+            AppBarMenu::View,
+            AppBarMenu::Go,
+            AppBarMenu::Run,
+            AppBarMenu::Window,
+            AppBarMenu::Help,
+        ] {
+            assert!(!WorkspaceShell::app_bar_menu_items(menu).is_empty());
+        }
     }
 
     #[gpui::test]
