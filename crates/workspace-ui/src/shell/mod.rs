@@ -4,8 +4,8 @@ use std::sync::Arc;
 
 use gpui::{
     actions, deferred, div, img, prelude::*, px, uniform_list, App, Context, CursorStyle, Entity,
-    EventEmitter, FocusHandle, Focusable, IntoElement, MouseButton, ResizeEdge, Role,
-    ScrollStrategy, Subscription, Task, UniformListScrollHandle, Window, WindowBounds,
+    EventEmitter, FocusHandle, Focusable, IntoElement, MouseButton, PathPromptOptions, ResizeEdge,
+    Role, ScrollStrategy, Subscription, Task, UniformListScrollHandle, Window, WindowBounds,
     WindowControlArea,
 };
 use sift_api_types::RoomId;
@@ -101,6 +101,7 @@ pub enum Modal {
     CommandPalette,
     ServerPicker,
     ServerConnection,
+    InstanceSetup,
     Account,
     DatabaseConnection,
     ConfirmClose { title: String },
@@ -122,6 +123,61 @@ pub struct SavedServerProfile {
     pub has_saved_token: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct SavedInstanceRoot {
+    pub manifest_id: String,
+    pub name: String,
+    pub root: std::path::PathBuf,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InstanceCredentialKind {
+    GithubOauthClientSecret,
+    Postgres,
+    SqlServer,
+}
+
+impl InstanceCredentialKind {
+    fn label(self) -> &'static str {
+        match self {
+            Self::GithubOauthClientSecret => "GitHub OAuth client secret",
+            Self::Postgres => "PostgreSQL password",
+            Self::SqlServer => "SQL Server password",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InstanceCredentialPresentation {
+    pub slot: String,
+    pub consumer: String,
+    pub kind: InstanceCredentialKind,
+    pub readiness: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InstancePlanPresentation {
+    pub root: std::path::PathBuf,
+    pub manifest_id: String,
+    pub name: String,
+    pub deployment: String,
+    pub bind: String,
+    pub configuration_digest: String,
+    pub lock_digest: String,
+    pub principals: usize,
+    pub tenants: usize,
+    pub memberships: usize,
+    pub connections: usize,
+    pub extensions: usize,
+    pub warnings: Vec<String>,
+    pub credentials: Vec<InstanceCredentialPresentation>,
+    pub current_generation: Option<u64>,
+    pub generation_count: usize,
+    pub drifted: bool,
+    pub last_apply: Option<String>,
+    pub destroy_confirmation_required: bool,
+}
+
 #[derive(Clone)]
 pub enum InstanceCommand {
     UseLocal,
@@ -134,6 +190,22 @@ pub enum InstanceCommand {
     },
     Forget {
         profile_id: String,
+    },
+    InspectRoot {
+        root: std::path::PathBuf,
+    },
+    ApplyRoot {
+        root: std::path::PathBuf,
+        allow_destroy: bool,
+    },
+    ImportRootCredential {
+        root: std::path::PathBuf,
+        slot: String,
+        kind: InstanceCredentialKind,
+        secret: String,
+    },
+    StartRoot {
+        root: std::path::PathBuf,
     },
     SignInWithPassword {
         username: String,
@@ -148,6 +220,9 @@ pub enum InstanceCommand {
 #[derive(Debug, Clone)]
 pub enum InstanceManagerEvent {
     Profiles(Vec<SavedServerProfile>),
+    Roots(Vec<SavedInstanceRoot>),
+    InstancePlan(Box<InstancePlanPresentation>),
+    InstanceOperationPending { message: String },
     Testing,
     Connected { name: String },
     Failed { message: String },
@@ -623,6 +698,7 @@ pub struct WorkspaceShell {
     database_timeout_input: Entity<TextInput>,
     database_pool_min_input: Entity<TextInput>,
     database_pool_max_input: Entity<TextInput>,
+    instance_secret_input: Entity<TextInput>,
     palette_selected: usize,
     palette_scroll_handle: UniformListScrollHandle,
     theme: Theme,
@@ -653,6 +729,11 @@ pub struct WorkspaceShell {
     executor_sender: Option<tokio::sync::mpsc::UnboundedSender<ExecutorCommand>>,
     instance_sender: Option<tokio::sync::mpsc::UnboundedSender<InstanceCommand>>,
     saved_servers: Vec<SavedServerProfile>,
+    instance_roots: Vec<SavedInstanceRoot>,
+    instance_plan: Option<InstancePlanPresentation>,
+    selected_instance_credential: Option<String>,
+    instance_operation_pending: bool,
+    instance_operation_error: Option<String>,
     selected_server_profile: Option<String>,
     remember_server_token: bool,
     server_connection_pending: bool,
@@ -748,6 +829,11 @@ impl WorkspaceShell {
             cx.new(|cx| TextInput::new("", "0", cx).aria_label("Minimum pool size"));
         let database_pool_max_input =
             cx.new(|cx| TextInput::new("", "Server default", cx).aria_label("Maximum pool size"));
+        let instance_secret_input = cx.new(|cx| {
+            TextInput::new("", "Required secret", cx)
+                .aria_label("Instance credential value")
+                .masked()
+        });
         // Re-render the palette as the search text changes so its list filters.
         cx.observe(&query_input, |shell, _, cx| {
             shell.palette_selected = 0;
@@ -806,6 +892,7 @@ impl WorkspaceShell {
             database_timeout_input,
             database_pool_min_input,
             database_pool_max_input,
+            instance_secret_input,
             palette_selected: 0,
             palette_scroll_handle: UniformListScrollHandle::new(),
             theme,
@@ -836,6 +923,11 @@ impl WorkspaceShell {
             executor_sender: None,
             instance_sender: None,
             saved_servers: Vec::new(),
+            instance_roots: Vec::new(),
+            instance_plan: None,
+            selected_instance_credential: None,
+            instance_operation_pending: false,
+            instance_operation_error: None,
             selected_server_profile: None,
             remember_server_token: true,
             server_connection_pending: false,
@@ -1082,6 +1174,18 @@ impl WorkspaceShell {
     fn on_instance_manager_event(&mut self, event: InstanceManagerEvent, cx: &mut Context<Self>) {
         match event {
             InstanceManagerEvent::Profiles(profiles) => self.saved_servers = profiles,
+            InstanceManagerEvent::Roots(roots) => self.instance_roots = roots,
+            InstanceManagerEvent::InstancePlan(plan) => {
+                self.instance_operation_pending = false;
+                self.instance_operation_error = None;
+                self.instance_plan = Some(*plan);
+                self.modal = Some(Modal::InstanceSetup);
+            }
+            InstanceManagerEvent::InstanceOperationPending { message } => {
+                self.instance_operation_pending = true;
+                self.instance_operation_error = None;
+                self.show_toast(message, cx);
+            }
             InstanceManagerEvent::Testing => {
                 self.server_connection_pending = true;
                 self.server_connection_error = None;
@@ -1096,6 +1200,8 @@ impl WorkspaceShell {
             }
             InstanceManagerEvent::Failed { message } => {
                 self.server_connection_pending = false;
+                self.instance_operation_pending = false;
+                self.instance_operation_error = Some(message.clone());
                 self.server_connection_error = Some(message);
             }
             InstanceManagerEvent::AuthenticationPending => {
@@ -2046,6 +2152,130 @@ impl WorkspaceShell {
         self.server_connection_error = None;
         self.server_connection_pending = false;
         self.server_name_input.focus_handle(cx).focus(window, cx);
+        cx.notify();
+    }
+
+    fn prompt_for_instance_root(&mut self, cx: &mut Context<Self>) {
+        let prompt = cx.prompt_for_paths(PathPromptOptions {
+            files: false,
+            directories: true,
+            multiple: false,
+            prompt: Some("Import Sift Instance".into()),
+        });
+        self.instance_operation_pending = true;
+        self.instance_operation_error = None;
+        cx.spawn(async move |shell, cx| {
+            let result = prompt.await;
+            let _ = shell.update(cx, |shell, cx| match result {
+                Ok(Ok(Some(paths))) => {
+                    if let Some(root) = paths.into_iter().next() {
+                        shell.inspect_instance_root(root, cx);
+                    }
+                }
+                Ok(Ok(None)) | Err(_) => {
+                    shell.instance_operation_pending = false;
+                    cx.notify();
+                }
+                Ok(Err(error)) => {
+                    shell.instance_operation_pending = false;
+                    shell.instance_operation_error =
+                        Some(format!("opening folder picker: {error}"));
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    fn inspect_instance_root(&mut self, root: std::path::PathBuf, cx: &mut Context<Self>) {
+        let Some(sender) = &self.instance_sender else {
+            self.instance_operation_pending = false;
+            self.instance_operation_error = Some("Instance manager is unavailable".into());
+            cx.notify();
+            return;
+        };
+        self.instance_operation_pending = true;
+        self.instance_operation_error = None;
+        if sender.send(InstanceCommand::InspectRoot { root }).is_err() {
+            self.instance_operation_pending = false;
+            self.instance_operation_error = Some("Instance manager stopped".into());
+        }
+        cx.notify();
+    }
+
+    fn apply_instance_root(&mut self, allow_destroy: bool, cx: &mut Context<Self>) {
+        let (Some(sender), Some(plan)) = (&self.instance_sender, &self.instance_plan) else {
+            return;
+        };
+        self.instance_operation_pending = true;
+        self.instance_operation_error = None;
+        if sender
+            .send(InstanceCommand::ApplyRoot {
+                root: plan.root.clone(),
+                allow_destroy,
+            })
+            .is_err()
+        {
+            self.instance_operation_pending = false;
+            self.instance_operation_error = Some("Instance manager stopped".into());
+        }
+        cx.notify();
+    }
+
+    fn import_instance_credential(&mut self, cx: &mut Context<Self>) {
+        let Some(slot) = self.selected_instance_credential.clone() else {
+            return;
+        };
+        let Some(plan) = &self.instance_plan else {
+            return;
+        };
+        let Some(credential) = plan.credentials.iter().find(|item| item.slot == slot) else {
+            return;
+        };
+        let secret = self.instance_secret_input.read(cx).text().to_owned();
+        if secret.is_empty() {
+            self.instance_operation_error = Some("Credential value is required".into());
+            cx.notify();
+            return;
+        }
+        let Some(sender) = &self.instance_sender else {
+            return;
+        };
+        self.instance_operation_pending = true;
+        self.instance_operation_error = None;
+        if sender
+            .send(InstanceCommand::ImportRootCredential {
+                root: plan.root.clone(),
+                slot,
+                kind: credential.kind,
+                secret,
+            })
+            .is_err()
+        {
+            self.instance_operation_pending = false;
+            self.instance_operation_error = Some("Instance manager stopped".into());
+        } else {
+            self.instance_secret_input
+                .update(cx, |input, cx| input.set_text("", cx));
+        }
+        cx.notify();
+    }
+
+    fn start_instance_root(&mut self, cx: &mut Context<Self>) {
+        let (Some(sender), Some(plan)) = (&self.instance_sender, &self.instance_plan) else {
+            return;
+        };
+        self.instance_operation_pending = true;
+        self.instance_operation_error = None;
+        if sender
+            .send(InstanceCommand::StartRoot {
+                root: plan.root.clone(),
+            })
+            .is_err()
+        {
+            self.instance_operation_pending = false;
+            self.instance_operation_error = Some("Instance manager stopped".into());
+        }
         cx.notify();
     }
 
@@ -3295,8 +3525,11 @@ impl WorkspaceShell {
             );
             let database_connection = matches!(modal, Modal::DatabaseConnection);
             let command_palette = matches!(modal, Modal::CommandPalette);
+            let instance_setup = matches!(modal, Modal::InstanceSetup);
             let card_width = if server_picker || account {
                 360.0
+            } else if instance_setup {
+                720.0
             } else if database_connection {
                 match self.database_wizard_step {
                     DatabaseWizardStep::Provider => 760.0,
@@ -3527,6 +3760,54 @@ impl WorkspaceShell {
                                 .into_any_element(),
                         );
                     }
+                    for (index, instance) in self.instance_roots.iter().cloned().enumerate() {
+                        let root = instance.root.clone();
+                        let active = current_id.as_deref()
+                            == Some(format!("config:{}", instance.manifest_id).as_str());
+                        rows.push(
+                            div()
+                                .id(("picker-instance-root", index))
+                                .role(Role::Button)
+                                .flex()
+                                .items_center()
+                                .justify_between()
+                                .gap_3()
+                                .px_2()
+                                .py_2()
+                                .rounded_sm()
+                                .when(active, |row| row.bg(colors.active_surface))
+                                .when(!pending, |row| {
+                                    row.hover(|row| row.bg(colors.hovered_surface)).on_click(
+                                        cx.listener(move |shell, _, _, cx| {
+                                            shell.inspect_instance_root(root.clone(), cx)
+                                        }),
+                                    )
+                                })
+                                .child(
+                                    div()
+                                        .flex()
+                                        .flex_1()
+                                        .flex_col()
+                                        .min_w_0()
+                                        .child(instance.name)
+                                        .child(
+                                            div()
+                                                .text_xs()
+                                                .text_color(colors.muted_text)
+                                                .truncate()
+                                                .child(instance.root.display().to_string()),
+                                        ),
+                                )
+                                .child(
+                                    div()
+                                        .flex_none()
+                                        .text_xs()
+                                        .text_color(colors.muted_text)
+                                        .child(if active { "Current" } else { "Config root" }),
+                                )
+                                .into_any_element(),
+                        );
+                    }
                     div()
                         .flex()
                         .flex_col()
@@ -3561,6 +3842,29 @@ impl WorkspaceShell {
                         })
                         .child(
                             div()
+                                .id("picker-import-instance")
+                                .role(Role::Button)
+                                .px_2()
+                                .py_2()
+                                .rounded_sm()
+                                .text_color(colors.muted_text)
+                                .hover(|button| {
+                                    button.bg(colors.hovered_surface).text_color(colors.text)
+                                })
+                                .on_click(cx.listener(|shell, _, _, cx| {
+                                    shell.prompt_for_instance_root(cx)
+                                }))
+                                .child(
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .gap_2()
+                                        .child(icon(IconName::Workspace, colors.muted_text, 13.))
+                                        .child("Import Sift Instance…"),
+                                ),
+                        )
+                        .child(
+                            div()
                                 .id("picker-manage-servers")
                                 .role(Role::Button)
                                 .mt_1()
@@ -3590,6 +3894,334 @@ impl WorkspaceShell {
                                                 .truncate()
                                                 .child("Connect to or manage servers…"),
                                         ),
+                                ),
+                        )
+                        .into_any_element()
+                }
+                Modal::InstanceSetup => {
+                    let Some(plan) = self.instance_plan.clone() else {
+                        unreachable!("instance setup opens only after a plan is loaded")
+                    };
+                    let pending = self.instance_operation_pending;
+                    let selected_slot = self.selected_instance_credential.clone();
+                    let missing_credentials = plan
+                        .credentials
+                        .iter()
+                        .filter(|credential| credential.readiness != "ready")
+                        .count();
+                    let ready_to_start = plan.current_generation.is_some()
+                        && !plan.drifted
+                        && missing_credentials == 0;
+                    let manifest_path = plan.root.join("sift.toml");
+                    let lock_path = plan.root.join("sift.lock");
+                    let refresh_root = plan.root.clone();
+                    let configuration_digest = plan.configuration_digest.chars().take(12).collect::<String>();
+                    let lock_digest = plan.lock_digest.chars().take(12).collect::<String>();
+                    let credential_rows = plan
+                        .credentials
+                        .iter()
+                        .cloned()
+                        .enumerate()
+                        .map(|(credential_index, credential)| {
+                        let slot = credential.slot.clone();
+                        let selected = selected_slot.as_deref() == Some(slot.as_str());
+                        div()
+                            .id(("instance-credential", credential_index))
+                            .role(Role::Button)
+                            .px_2()
+                            .py_1()
+                            .rounded_sm()
+                            .when(selected, |row| row.bg(colors.active_surface))
+                            .hover(|row| row.bg(colors.hovered_surface))
+                            .on_click(cx.listener(move |shell, _, _, cx| {
+                                shell.selected_instance_credential = Some(slot.clone());
+                                cx.notify();
+                            }))
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .justify_between()
+                                    .gap_3()
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .flex_col()
+                                            .min_w_0()
+                                            .child(credential.kind.label())
+                                            .child(
+                                                div()
+                                                    .text_xs()
+                                                    .text_color(colors.muted_text)
+                                                    .truncate()
+                                                    .child(format!(
+                                                        "{} · {}",
+                                                        credential.slot, credential.consumer
+                                                    )),
+                                            ),
+                                    )
+                                    .child(
+                                        div()
+                                            .flex_none()
+                                            .text_xs()
+                                            .text_color(if credential.readiness == "ready" {
+                                                colors.success
+                                            } else {
+                                                colors.warning
+                                            })
+                                            .child(credential.readiness),
+                                    ),
+                            )
+                    });
+
+                    div()
+                        .id("instance-setup-scroll")
+                        .flex()
+                        .flex_col()
+                        .min_w_0()
+                        .max_h(px(680.))
+                        .overflow_y_scroll()
+                        .gap_3()
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .justify_between()
+                                .gap_3()
+                                .child(
+                                    div()
+                                        .flex()
+                                        .flex_col()
+                                        .min_w_0()
+                                        .child(
+                                            div()
+                                                .font_weight(gpui::FontWeight::SEMIBOLD)
+                                                .child(plan.name.clone()),
+                                        )
+                                        .child(
+                                            div()
+                                                .text_xs()
+                                                .text_color(colors.muted_text)
+                                                .truncate()
+                                                .child(plan.root.display().to_string()),
+                                        )
+                                        .child(
+                                            div()
+                                                .text_xs()
+                                                .text_color(colors.muted_text)
+                                                .child(format!(
+                                                    "Config {configuration_digest} · Lock {lock_digest}"
+                                                )),
+                                        ),
+                                )
+                                .child(
+                                    div()
+                                        .flex_none()
+                                        .text_xs()
+                                        .text_color(if plan.drifted {
+                                            colors.warning
+                                        } else {
+                                            colors.success
+                                        })
+                                        .child(if plan.drifted {
+                                            "Unapplied drift"
+                                        } else {
+                                            "Applied"
+                                        }),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .rounded_sm()
+                                .border_1()
+                                .border_color(colors.subtle_border)
+                                .p_2()
+                                .grid()
+                                .grid_cols(2)
+                                .gap_2()
+                                .text_sm()
+                                .child(format!("Deployment: {}", plan.deployment))
+                                .child(format!("Bind: {}", plan.bind))
+                                .child(format!(
+                                    "Generation: {}",
+                                    plan.current_generation.map_or_else(
+                                        || "not applied".into(),
+                                        |generation| generation.to_string()
+                                    )
+                                ))
+                                .child(format!("Generations: {}", plan.generation_count))
+                                .child(format!("Principals: {}", plan.principals))
+                                .child(format!("Tenants: {}", plan.tenants))
+                                .child(format!("Memberships: {}", plan.memberships))
+                                .child(format!("Connections: {}", plan.connections))
+                                .child(format!("Extensions: {}", plan.extensions)),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .gap_2()
+                                .child(
+                                    div()
+                                        .id("open-instance-manifest")
+                                        .role(Role::Button)
+                                        .px_2()
+                                        .py_1()
+                                        .rounded_sm()
+                                        .bg(colors.hovered_surface)
+                                        .on_click(move |_, _, cx| {
+                                            cx.open_with_system(&manifest_path)
+                                        })
+                                        .child("Open sift.toml"),
+                                )
+                                .child(
+                                    div()
+                                        .id("open-instance-lock")
+                                        .role(Role::Button)
+                                        .px_2()
+                                        .py_1()
+                                        .rounded_sm()
+                                        .bg(colors.hovered_surface)
+                                        .on_click(move |_, _, cx| cx.open_with_system(&lock_path))
+                                        .child("Open sift.lock"),
+                                )
+                                .child(
+                                    div()
+                                        .id("refresh-instance-plan")
+                                        .role(Role::Button)
+                                        .px_2()
+                                        .py_1()
+                                        .rounded_sm()
+                                        .bg(colors.hovered_surface)
+                                        .on_click(cx.listener(move |shell, _, _, cx| {
+                                            shell.inspect_instance_root(refresh_root.clone(), cx)
+                                        }))
+                                        .child("Refresh plan"),
+                                ),
+                        )
+                        .children((!plan.warnings.is_empty()).then(|| {
+                            div()
+                                .p_2()
+                                .rounded_sm()
+                                .bg(colors.warning_muted)
+                                .text_color(colors.warning)
+                                .children(plan.warnings.iter().cloned())
+                        }))
+                        .children(plan.last_apply.clone().map(|summary| {
+                            div()
+                                .p_2()
+                                .rounded_sm()
+                                .bg(colors.active_surface)
+                                .text_sm()
+                                .child(summary)
+                        }))
+                        .when(!plan.credentials.is_empty(), |view| {
+                            view.child(
+                                div()
+                                    .text_xs()
+                                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                                    .child("CREDENTIAL SLOTS"),
+                            )
+                            .child(div().flex().flex_col().gap_1().children(credential_rows))
+                        })
+                        .children(selected_slot.map(|_| {
+                            div()
+                                .flex()
+                                .gap_2()
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .rounded_sm()
+                                        .border_1()
+                                        .border_color(colors.subtle_border)
+                                        .child(self.instance_secret_input.clone()),
+                                )
+                                .child(
+                                    div()
+                                        .id("import-instance-credential")
+                                        .role(Role::Button)
+                                        .px_2()
+                                        .flex()
+                                        .items_center()
+                                        .rounded_sm()
+                                        .bg(colors.accent)
+                                        .text_color(colors.background)
+                                        .when(!pending, |button| {
+                                            button.on_click(cx.listener(|shell, _, _, cx| {
+                                                shell.import_instance_credential(cx)
+                                            }))
+                                        })
+                                        .child("Import"),
+                                )
+                        }))
+                        .children(self.instance_operation_error.as_ref().map(|error| {
+                            div()
+                                .p_2()
+                                .rounded_sm()
+                                .bg(colors.danger_muted)
+                                .text_color(colors.danger)
+                                .whitespace_normal()
+                                .child(error.clone())
+                        }))
+                        .when(pending, |view| {
+                            view.child(
+                                div()
+                                    .text_xs()
+                                    .text_color(colors.muted_text)
+                                    .child("Working…"),
+                            )
+                        })
+                        .child(
+                            div()
+                                .flex()
+                                .justify_end()
+                                .gap_2()
+                                .child(
+                                    div()
+                                        .id("apply-instance-plan")
+                                        .role(Role::Button)
+                                        .px_3()
+                                        .py_1()
+                                        .rounded_sm()
+                                        .bg(if plan.destroy_confirmation_required {
+                                            colors.danger
+                                        } else {
+                                            colors.accent
+                                        })
+                                        .text_color(colors.background)
+                                        .when(!pending, |button| {
+                                            let allow_destroy = plan.destroy_confirmation_required;
+                                            button.on_click(cx.listener(move |shell, _, _, cx| {
+                                                shell.apply_instance_root(allow_destroy, cx)
+                                            }))
+                                        })
+                                        .child(if plan.destroy_confirmation_required {
+                                            "Apply destructive changes"
+                                        } else {
+                                            "Apply"
+                                        }),
+                                )
+                                .child(
+                                    div()
+                                        .id("start-instance-root")
+                                        .role(Role::Button)
+                                        .px_3()
+                                        .py_1()
+                                        .rounded_sm()
+                                        .border_1()
+                                        .border_color(colors.subtle_border)
+                                        .when(ready_to_start && !pending, |button| {
+                                            button
+                                                .bg(colors.success)
+                                                .text_color(colors.background)
+                                                .on_click(cx.listener(|shell, _, _, cx| {
+                                                    shell.start_instance_root(cx)
+                                                }))
+                                        })
+                                        .when(!ready_to_start || pending, |button| {
+                                            button.text_color(colors.muted_text)
+                                        })
+                                        .child("Start & Connect"),
                                 ),
                         )
                         .into_any_element()
@@ -6088,6 +6720,26 @@ mod tests {
             .advance_clock(std::time::Duration::from_secs(5));
         cx.run_until_parked();
         assert!(workspace.read_with(&cx, |shell, _| shell.toasts.is_empty()));
+    }
+
+    #[gpui::test]
+    fn instance_root_selection_dispatches_a_typed_inspection(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let (_event_sender, event_receiver) = tokio::sync::mpsc::unbounded_channel();
+        let root = std::path::PathBuf::from("/tmp/sift-instance");
+
+        workspace.update(&mut cx, |shell, cx| {
+            shell.attach_instance_manager(sender, event_receiver, Vec::new(), cx);
+            shell.inspect_instance_root(root.clone(), cx);
+        });
+
+        match receiver.try_recv().unwrap() {
+            InstanceCommand::InspectRoot { root: dispatched } => assert_eq!(dispatched, root),
+            _ => panic!("expected instance-root inspection command"),
+        }
     }
 
     #[gpui::test]

@@ -5,7 +5,10 @@ use std::sync::{Arc, Mutex};
 use keyring::{Entry, Error as KeyringError};
 use sift_client_sdk::SessionTokenProvider;
 use sift_protocol::{AuthClientKind, AuthTokensResponse, PasswordLoginRequest};
-use sift_workspace_ui::{InstanceCommand, InstanceManagerEvent, SavedServerProfile};
+use sift_workspace_ui::{
+    InstanceCommand, InstanceCredentialKind, InstanceCredentialPresentation, InstanceManagerEvent,
+    InstancePlanPresentation, SavedInstanceRoot, SavedServerProfile,
+};
 
 use crate::app::DesktopServer;
 use crate::config::{validate_base_url, validate_token};
@@ -23,6 +26,8 @@ pub struct InstanceStore {
 struct StoredInstances {
     version: u32,
     profiles: Vec<SavedServerProfile>,
+    #[serde(default)]
+    roots: Vec<SavedInstanceRoot>,
 }
 
 impl InstanceStore {
@@ -34,20 +39,39 @@ impl InstanceStore {
     }
 
     pub fn load(&self) -> Vec<SavedServerProfile> {
-        std::fs::read(&self.path)
+        self.load_stored().profiles
+    }
+
+    pub fn load_roots(&self) -> Vec<SavedInstanceRoot> {
+        self.load_stored().roots
+    }
+
+    fn load_stored(&self) -> StoredInstances {
+        let mut stored = std::fs::read(&self.path)
             .ok()
             .and_then(|bytes| serde_json::from_slice::<StoredInstances>(&bytes).ok())
             .filter(|stored| stored.version == PROFILE_VERSION)
-            .map(|mut stored| {
-                for profile in &mut stored.profiles {
-                    profile.has_saved_token = false;
-                }
-                stored.profiles
-            })
-            .unwrap_or_default()
+            .unwrap_or(StoredInstances {
+                version: PROFILE_VERSION,
+                profiles: Vec::new(),
+                roots: Vec::new(),
+            });
+        for profile in &mut stored.profiles {
+            profile.has_saved_token = false;
+        }
+        stored
     }
 
     pub fn save(&self, profiles: &[SavedServerProfile]) -> Result<(), String> {
+        let roots = self.load_stored().roots;
+        self.save_inventory(profiles, &roots)
+    }
+
+    fn save_inventory(
+        &self,
+        profiles: &[SavedServerProfile],
+        roots: &[SavedInstanceRoot],
+    ) -> Result<(), String> {
         let _guard = self
             .write_lock
             .lock()
@@ -59,6 +83,7 @@ impl InstanceStore {
         let bytes = serde_json::to_vec_pretty(&StoredInstances {
             version: PROFILE_VERSION,
             profiles: profiles.to_vec(),
+            roots: roots.to_vec(),
         })
         .map_err(|error| format!("encoding instance profiles: {error}"))?;
         let temporary = self.path.with_extension("json.tmp");
@@ -83,6 +108,14 @@ impl InstanceStore {
         }
         std::fs::rename(&temporary, &self.path)
             .map_err(|error| format!("committing instance profiles: {error}"))
+    }
+
+    pub(crate) fn save_roots(
+        &self,
+        profiles: &[SavedServerProfile],
+        roots: &[SavedInstanceRoot],
+    ) -> Result<(), String> {
+        self.save_inventory(profiles, roots)
     }
 
     #[cfg(test)]
@@ -206,10 +239,15 @@ pub async fn run_instance_manager(
     store: InstanceStore,
     credentials: DesktopCredentialStore,
     mut profiles: Vec<SavedServerProfile>,
+    mut roots: Vec<SavedInstanceRoot>,
     mut channels: InstanceManagerChannels,
     local_target: DesktopServer,
     restored_profile_id: Option<String>,
 ) {
+    // Started configured roots remain alive independently of which one the
+    // window is currently connected to. This lets one desktop supervise
+    // several isolated auto-loopback instances without conflating UI state.
+    let mut configured_targets = std::collections::HashMap::new();
     annotate_saved_tokens(&mut profiles, &credentials).await;
     if let Some(profile) = restored_profile_id
         .as_deref()
@@ -236,6 +274,9 @@ pub async fn run_instance_manager(
     {
         return;
     }
+    let _ = channels
+        .events
+        .send(InstanceManagerEvent::Roots(roots.clone()));
     while let Some(command) = channels.commands.recv().await {
         let (authentication, result) = match command {
             InstanceCommand::UseLocal => {
@@ -269,6 +310,78 @@ pub async fn run_instance_manager(
                 false,
                 forget(&store, &credentials, &mut profiles, &profile_id).await,
             ),
+            InstanceCommand::InspectRoot { root } => {
+                let _ = channels
+                    .events
+                    .send(InstanceManagerEvent::InstanceOperationPending {
+                        message: "Validating instance configuration…".into(),
+                    });
+                let result = inspect_root(&root, None).await.and_then(|plan| {
+                    remember_root(&store, &profiles, &mut roots, &plan)?;
+                    channels
+                        .events
+                        .send(InstanceManagerEvent::Roots(roots.clone()))
+                        .map_err(|_| "desktop window closed".to_string())?;
+                    channels
+                        .events
+                        .send(InstanceManagerEvent::InstancePlan(Box::new(plan)))
+                        .map_err(|_| "desktop window closed".to_string())?;
+                    Ok(ManagerOutcome::None)
+                });
+                (false, result)
+            }
+            InstanceCommand::ApplyRoot {
+                root,
+                allow_destroy,
+            } => {
+                let _ = channels
+                    .events
+                    .send(InstanceManagerEvent::InstanceOperationPending {
+                        message: "Applying instance generation…".into(),
+                    });
+                let result = apply_root(&root, allow_destroy).await.and_then(|plan| {
+                    remember_root(&store, &profiles, &mut roots, &plan)?;
+                    channels
+                        .events
+                        .send(InstanceManagerEvent::Roots(roots.clone()))
+                        .map_err(|_| "desktop window closed".to_string())?;
+                    channels
+                        .events
+                        .send(InstanceManagerEvent::InstancePlan(Box::new(plan)))
+                        .map_err(|_| "desktop window closed".to_string())?;
+                    Ok(ManagerOutcome::None)
+                });
+                (false, result)
+            }
+            InstanceCommand::ImportRootCredential {
+                root,
+                slot,
+                kind,
+                secret,
+            } => {
+                let _ = channels
+                    .events
+                    .send(InstanceManagerEvent::InstanceOperationPending {
+                        message: format!("Importing credential slot {slot}…"),
+                    });
+                let result = match import_root_credential(&root, &slot, kind, secret).await {
+                    Ok(()) => inspect_root(&root, Some("Credential imported".into())).await,
+                    Err(error) => Err(error),
+                }
+                .and_then(|plan| {
+                    channels
+                        .events
+                        .send(InstanceManagerEvent::InstancePlan(Box::new(plan)))
+                        .map_err(|_| "desktop window closed".to_string())?;
+                    Ok(ManagerOutcome::None)
+                });
+                (false, result)
+            }
+            InstanceCommand::StartRoot { root } => {
+                let _ = channels.events.send(InstanceManagerEvent::Testing);
+                let result = connect_root(&channels.targets, &mut configured_targets, &root).await;
+                (false, result)
+            }
             InstanceCommand::SignInWithPassword { username, password } => {
                 let _ = channels
                     .events
@@ -320,6 +433,7 @@ pub async fn run_instance_manager(
             Ok(ManagerOutcome::SignedOut) => {
                 let _ = channels.events.send(InstanceManagerEvent::SignedOut);
             }
+            Ok(ManagerOutcome::None) => {}
             Err(message) => {
                 let event = if authentication {
                     InstanceManagerEvent::AuthenticationFailed { message }
@@ -349,6 +463,208 @@ enum ManagerOutcome {
     ProfilesChanged,
     Authenticated(String),
     SignedOut,
+    None,
+}
+
+fn remember_root(
+    store: &InstanceStore,
+    profiles: &[SavedServerProfile],
+    roots: &mut Vec<SavedInstanceRoot>,
+    plan: &InstancePlanPresentation,
+) -> Result<(), String> {
+    let saved = SavedInstanceRoot {
+        manifest_id: plan.manifest_id.clone(),
+        name: plan.name.clone(),
+        root: plan.root.clone(),
+    };
+    if let Some(index) = roots
+        .iter()
+        .position(|root| root.manifest_id == saved.manifest_id)
+    {
+        roots[index] = saved;
+    } else {
+        roots.push(saved);
+    }
+    roots.sort_by(|left, right| left.name.cmp(&right.name));
+    store.save_roots(profiles, roots)
+}
+
+fn credential_kind(kind: sift_instance_config::CredentialKind) -> InstanceCredentialKind {
+    match kind {
+        sift_instance_config::CredentialKind::GithubOauthClientSecret => {
+            InstanceCredentialKind::GithubOauthClientSecret
+        }
+        sift_instance_config::CredentialKind::Postgres => InstanceCredentialKind::Postgres,
+        sift_instance_config::CredentialKind::SqlServer => InstanceCredentialKind::SqlServer,
+    }
+}
+
+async fn inspect_root(
+    root: &std::path::Path,
+    last_apply: Option<String>,
+) -> Result<InstancePlanPresentation, String> {
+    let instance = sift_server::instance_runtime::InstanceRoot::open(root)
+        .map_err(|error| format!("validating instance root failed: {error:#}"))?;
+    let static_plan = instance
+        .static_plan()
+        .map_err(|error| format!("planning instance failed: {error:#}"))?;
+    let state_dir = instance.default_state_dir();
+    let generations = instance
+        .generations(&state_dir)
+        .map_err(|error| format!("reading instance generations failed: {error:#}"))?;
+    let current = generations.iter().find(|generation| generation.current);
+    let drifted = current.is_none_or(|generation| {
+        generation.record.configuration_digest != static_plan.configuration_digest
+            || generation.record.lock_digest != static_plan.lock_digest
+    });
+
+    let credentials = if current.is_some() && !drifted {
+        let (_, _, config) = sift_server::instance_runtime::load_current_config(root, None)
+            .map_err(|error| format!("loading applied instance failed: {error:#}"))?;
+        sift_server::instance_runtime::ensure_file_secret_key(&config)
+            .map_err(|error| format!("preparing instance secret store failed: {error:#}"))?;
+        let store = sift_server::metadata_runtime::build_metadata_store(&config)
+            .map_err(|error| format!("opening instance metadata failed: {error:#}"))?
+            .ok_or_else(|| "instance metadata is disabled".to_string())?;
+        store
+            .verified_instance_credential_status()
+            .await
+            .map_err(|error| format!("checking instance credentials failed: {error}"))?
+            .into_iter()
+            .map(|credential| InstanceCredentialPresentation {
+                slot: credential.slot,
+                consumer: credential.consumers.join(", "),
+                kind: credential_kind(credential.kind),
+                readiness: match credential.readiness {
+                    sift_metadata::CredentialReadiness::Missing => "missing",
+                    sift_metadata::CredentialReadiness::Ready => "ready",
+                    sift_metadata::CredentialReadiness::Invalid => "invalid",
+                }
+                .into(),
+            })
+            .collect()
+    } else {
+        static_plan
+            .required_credentials
+            .iter()
+            .map(|credential| InstanceCredentialPresentation {
+                slot: credential.slot.clone(),
+                consumer: credential.consumer.clone(),
+                kind: credential_kind(credential.kind),
+                readiness: "apply first".into(),
+            })
+            .collect()
+    };
+
+    Ok(InstancePlanPresentation {
+        root: instance.root,
+        manifest_id: instance.manifest.manifest_id.to_string(),
+        name: instance.manifest.name,
+        deployment: format!("{:?}", instance.manifest.server.deployment).to_lowercase(),
+        bind: instance.manifest.server.bind,
+        configuration_digest: static_plan.configuration_digest,
+        lock_digest: static_plan.lock_digest,
+        principals: static_plan.resources.principals,
+        tenants: static_plan.resources.tenants,
+        memberships: static_plan.resources.memberships,
+        connections: static_plan.resources.connections,
+        extensions: static_plan.resources.extensions,
+        warnings: static_plan.warnings,
+        credentials,
+        current_generation: current.map(|generation| generation.record.generation),
+        generation_count: generations.len(),
+        drifted,
+        last_apply,
+        destroy_confirmation_required: false,
+    })
+}
+
+async fn apply_root(
+    root: &std::path::Path,
+    allow_destroy: bool,
+) -> Result<InstancePlanPresentation, String> {
+    let instance = sift_server::instance_runtime::InstanceRoot::open(root)
+        .map_err(|error| format!("validating instance root failed: {error:#}"))?;
+    let state_dir = instance.default_state_dir();
+    match instance.apply(&state_dir, allow_destroy).await {
+        Ok(report) => {
+            let metadata = report.metadata.as_ref();
+            let summary = format!(
+                "Generation {} · {} created · {} updated · {} deleted",
+                report.generation,
+                metadata.map_or(0, |summary| summary.created),
+                metadata.map_or(0, |summary| summary.updated),
+                metadata.map_or(0, |summary| summary.deleted),
+            );
+            inspect_root(root, Some(summary)).await
+        }
+        Err(error) => {
+            let message = format!("{error:#}");
+            if message.contains("destroy approval") || message.contains("allow-destroy") {
+                let mut plan = inspect_root(root, Some(message)).await?;
+                plan.destroy_confirmation_required = true;
+                Ok(plan)
+            } else {
+                Err(format!("applying instance failed: {message}"))
+            }
+        }
+    }
+}
+
+async fn import_root_credential(
+    root: &std::path::Path,
+    slot: &str,
+    kind: InstanceCredentialKind,
+    secret: String,
+) -> Result<(), String> {
+    let (_, _, config) = sift_server::instance_runtime::load_current_config(root, None)
+        .map_err(|error| format!("loading applied instance failed: {error:#}"))?;
+    sift_server::instance_runtime::ensure_file_secret_key(&config)
+        .map_err(|error| format!("preparing instance secret store failed: {error:#}"))?;
+    let _maintenance = sift_server::runtime::acquire_maintenance_exclusive(&config)
+        .map_err(|error| format!("stop the instance before importing credentials: {error:#}"))?;
+    let store = sift_server::metadata_runtime::build_metadata_store(&config)
+        .map_err(|error| format!("opening instance metadata failed: {error:#}"))?
+        .ok_or_else(|| "instance metadata is disabled".to_string())?;
+    let field = match kind {
+        InstanceCredentialKind::GithubOauthClientSecret => "client_secret",
+        InstanceCredentialKind::Postgres | InstanceCredentialKind::SqlServer => "password",
+    };
+    let mut credential = serde_json::Map::new();
+    credential.insert(field.into(), serde_json::Value::String(secret));
+    store
+        .import_instance_credential(slot, &serde_json::Value::Object(credential))
+        .await
+        .map_err(|error| format!("importing credential failed: {error}"))
+}
+
+async fn connect_root(
+    targets: &tokio::sync::watch::Sender<DesktopServer>,
+    configured_targets: &mut std::collections::HashMap<
+        PathBuf,
+        (DesktopServer, crate::local_server::LocalServerLease),
+    >,
+    root: &std::path::Path,
+) -> Result<ManagerOutcome, String> {
+    let root = std::fs::canonicalize(root)
+        .map_err(|error| format!("canonicalizing instance root failed: {error}"))?;
+    let target = match configured_targets.get(&root) {
+        Some((target, _lease)) => target.clone(),
+        None => DesktopServer::configured(root.clone())?,
+    };
+    let name = target.instance().name;
+    let client = target.client().await?;
+    test_client(&client, "configured instance").await?;
+    if let std::collections::hash_map::Entry::Vacant(entry) = configured_targets.entry(root) {
+        let lease = target
+            .acquire_local_lease()
+            .ok_or_else(|| "configured instance did not provide a process lease".to_string())?;
+        entry.insert((target.clone(), lease));
+    }
+    targets
+        .send(target)
+        .map_err(|_| "desktop server supervisor stopped".to_string())?;
+    Ok(ManagerOutcome::Connected(name))
 }
 
 async fn sign_in_with_password(
@@ -577,5 +893,31 @@ mod tests {
         let loaded = store.load();
         assert_eq!(loaded.len(), 1);
         assert!(!loaded[0].has_saved_token);
+    }
+
+    #[test]
+    fn profile_and_instance_root_updates_preserve_each_other() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = InstanceStore::new(directory.path().join("instances.json"));
+        let profile = SavedServerProfile {
+            id: "one".into(),
+            name: "LAN".into(),
+            base_url: "https://sift.lan".into(),
+            has_saved_token: false,
+        };
+        let root = SavedInstanceRoot {
+            manifest_id: "manifest-one".into(),
+            name: "Local config".into(),
+            root: directory.path().join("root"),
+        };
+
+        store.save(std::slice::from_ref(&profile)).unwrap();
+        store
+            .save_roots(std::slice::from_ref(&profile), std::slice::from_ref(&root))
+            .unwrap();
+        store.save(std::slice::from_ref(&profile)).unwrap();
+
+        assert_eq!(store.load(), vec![profile]);
+        assert_eq!(store.load_roots(), vec![root]);
     }
 }

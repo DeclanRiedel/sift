@@ -412,12 +412,11 @@
         };
 
         # Seeded end-to-end desktop demo: local Postgres with `lab.people`, a
-        # real (non-mock) sift-server, a registered connection profile, and the
-        # GPUI client attached to that server. This is the loop for working on
-        # desktop UI against real query results instead of an empty shell.
+        # reproducible Sift instance root, and the GPUI client supervising the
+        # real (non-mock) server from that root.
         desktopDemo = pkgs.writeShellApplication {
           name = "sift-desktop-demo";
-          runtimeInputs = with pkgs; [ curl jq nix postgresql util-linux ];
+          runtimeInputs = with pkgs; [ gnused jq nix openssl postgresql ];
           text = ''
             set -euo pipefail
 
@@ -429,9 +428,7 @@
 
             pgdata="''${SIFT_DEMO_PGDATA:-/tmp/sift-demo-pg}"
             pglog="''${SIFT_DEMO_PG_LOG:-/tmp/sift-demo-pg.log}"
-            backend_log="''${SIFT_DESKTOP_DEMO_BACKEND_LOG:-/tmp/sift-desktop-demo-backend.log}"
-            bind="''${SIFT_BIND:-127.0.0.1:7474}"
-            base_url="http://$bind"
+            instance_root="''${SIFT_DESKTOP_DEMO_INSTANCE_ROOT:-/tmp/sift-desktop-demo-instance-$UID}"
 
             run_in_dev() {
               if [ -n "''${IN_NIX_SHELL:-}" ]; then
@@ -445,62 +442,45 @@
 
             cd "$repo"
             # Build first, in the foreground: a cold GPUI build takes minutes,
-            # and a background build makes the readiness loop look like a hang.
+            # and the desktop must be able to resolve its sibling server binary.
             run_in_dev cargo build -p sift-server -p sift-desktop
 
-            # A fresh metadata database refuses to serve until migrations are
-            # applied; the mock-backend demos never hit this, a real one always does.
-            run_in_dev cargo run -q -p sift-server -- migrate apply
-
-            # Own process group: killing cargo alone orphans the sift-server it
-            # spawned, which then holds SIFT_BIND against the next run.
-            if [ -n "''${IN_NIX_SHELL:-}" ]; then
-              setsid env SIFT_BIND="$bind" cargo run -q -p sift-server -- >"$backend_log" 2>&1 &
-            else
-              setsid nix develop "$repo" --command \
-                env SIFT_BIND="$bind" cargo run -q -p sift-server -- >"$backend_log" 2>&1 &
-            fi
-            backend_pid=$!
             cleanup() {
-              kill -TERM "-$backend_pid" >/dev/null 2>&1 || kill "$backend_pid" >/dev/null 2>&1 || true
-              wait "$backend_pid" >/dev/null 2>&1 || true
               if [ "''${SIFT_DEMO_KEEP_POSTGRES:-0}" != "1" ]; then
                 pg_ctl -D "$pgdata" -m fast -w stop >/dev/null 2>&1 || true
               fi
             }
             trap cleanup EXIT
 
-            ready=0
-            for _ in $(seq 1 "''${SIFT_DESKTOP_DEMO_READY_TRIES:-480}"); do
-              if curl -fsS "$base_url/v1/health" >/dev/null 2>&1; then
-                ready=1
-                break
-              fi
-              if ! kill -0 "$backend_pid" >/dev/null 2>&1; then
-                echo "sift backend exited before becoming ready. Log follows:" >&2
-                sed -n '1,240p' "$backend_log" >&2
-                exit 1
-              fi
-              sleep 0.25
-            done
-            if [ "$ready" != 1 ]; then
-              echo "sift backend was not ready before timeout. Log follows:" >&2
-              sed -n '1,240p' "$backend_log" >&2
-              exit 1
-            fi
+            mkdir -p "$instance_root"
+            cp "$repo/examples/reproducible-instance/sift.toml" "$instance_root/sift.toml"
+            sed -i \
+              -e 's/b654b918-b1f1-4d70-924d-e4c1014f482f/85f995d3-36bd-4df7-bbf2-4a868ef18b59/' \
+              -e 's/name = "demo-sift"/name = "desktop-demo"/' \
+              -e "s|127.0.0.1:5432/postgres|127.0.0.1:$pgport/sifttest|" \
+              "$instance_root/sift.toml"
 
-            profile_id="$(sh "$repo/scripts/dev-register-demo-connection.sh" "$base_url" "$pgport")"
+            # The demo credential is random and destination-local. It never
+            # enters sift.toml, sift.lock, process arguments, or repository state.
+            db_password="$(openssl rand -hex 24)"
+            printf "ALTER ROLE sift PASSWORD '%s';\n" "$db_password" | \
+              psql -q -h 127.0.0.1 -p "$pgport" -U sift -d sifttest
 
-            echo "Postgres: host=127.0.0.1 port=$pgport db=sifttest user=sift password=<empty> ssl=disable"
-            echo "Sift connection: Demo Postgres (profile $profile_id)"
+            run_in_dev cargo run -q -p sift-server --bin sift -- instance lock "$instance_root"
+            run_in_dev cargo run -q -p sift-server --bin sift -- instance apply "$instance_root"
+            printf '%s\n' "$db_password" | jq -cnR '{password: input}' | \
+              run_in_dev cargo run -q -p sift-server --bin sift -- \
+                instance credentials import "$instance_root" \
+                --slot credential:demo/postgres/shared --stdin
+
+            echo "Postgres: host=127.0.0.1 port=$pgport db=sifttest user=sift credential=<destination-local> ssl=prefer"
+            echo "Sift instance root: $instance_root"
+            echo "Sift connection: demo/postgres (managed by sift.toml)"
             echo "Seeded query: SELECT * FROM lab.people;"
-            echo "Backend log: $backend_log"
             echo "Postgres log: $pglog"
-            echo "Desktop: attaching to $base_url"
+            echo "Desktop: supervising the applied auto-loopback instance"
 
-            run_in_dev cargo run -p sift-desktop -- \
-              --server-url "$base_url" \
-              --server-name "Demo Sift" "$@"
+            run_in_dev cargo run -p sift-desktop -- --instance-root "$instance_root" "$@"
           '';
         };
 
@@ -559,6 +539,8 @@
               SIFT_REPO=/path/to/sift      Override checkout path for commands that need it.
               SIFT_BIND=127.0.0.1:3000     Override backend bind address where supported.
               SIFT_DEMO_PG_PORT=5433       Port for the seeded demo Postgres.
+              SIFT_DESKTOP_DEMO_INSTANCE_ROOT=/path
+                                            Override the reproducible demo root.
               SIFT_DEMO_KEEP_POSTGRES=1    Leave the demo cluster running after the desktop exits.
               .env.example                 Template for local env vars; never commit .env.
               sift.example.toml            Template for local sift.toml; never commit sift.toml.

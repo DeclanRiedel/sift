@@ -20,6 +20,7 @@ pub struct LocalServerManager {
     launcher: PathBuf,
     runtime_state_dir: PathBuf,
     base_url: String,
+    instance_root: Option<PathBuf>,
 }
 
 impl LocalServerManager {
@@ -45,7 +46,29 @@ impl LocalServerManager {
             launcher,
             runtime_state_dir,
             base_url,
+            instance_root: None,
         }
+    }
+
+    pub fn configured(root: PathBuf) -> Result<Self, String> {
+        let server = std::env::current_exe()
+            .map_err(|error| format!("resolving desktop executable: {error}"))?
+            .parent()
+            .ok_or_else(|| "desktop executable has no parent directory".to_string())?
+            .join(if cfg!(windows) {
+                "sift-server.exe"
+            } else {
+                "sift-server"
+            });
+        let instance = sift_server::instance_runtime::InstanceRoot::open(&root)
+            .map_err(|error| format!("validating instance root failed: {error:#}"))?;
+        Ok(Self {
+            state: Arc::new(Mutex::new(LocalServerState::default())),
+            launcher: server,
+            runtime_state_dir: instance.default_state_dir(),
+            base_url: "auto-loopback".into(),
+            instance_root: Some(instance.root),
+        })
     }
 
     pub fn acquire(&self) -> LocalServerLease {
@@ -59,9 +82,14 @@ impl LocalServerManager {
     }
 
     pub async fn ensure_ready(&self) -> Result<Client, String> {
-        let client = Client::new(&self.base_url);
-        if client.connect().await.is_ok() {
+        if let Some(client) = self.discover_configured_client().await? {
             return Ok(client);
+        }
+        if self.instance_root.is_none() {
+            let client = Client::new(&self.base_url);
+            if client.connect().await.is_ok() {
+                return Ok(client);
+            }
         }
         {
             let mut state = self
@@ -75,9 +103,15 @@ impl LocalServerManager {
                         self.launcher.display()
                     ));
                 }
-                let child = Command::new(&self.launcher)
-                    .args(["--mode", "daemon"])
-                    .env("SIFT_RUNTIME__STATE_DIR", &self.runtime_state_dir)
+                let mut command = Command::new(&self.launcher);
+                if let Some(root) = &self.instance_root {
+                    command.arg("--instance-root").arg(root);
+                } else {
+                    command
+                        .args(["--mode", "daemon"])
+                        .env("SIFT_RUNTIME__STATE_DIR", &self.runtime_state_dir);
+                }
+                let child = command
                     .stdin(Stdio::null())
                     .stdout(Stdio::inherit())
                     .stderr(Stdio::inherit())
@@ -103,13 +137,43 @@ impl LocalServerManager {
                     }
                 }
             }
-            let candidate = Client::new(&self.base_url);
-            if candidate.connect().await.is_ok() {
+            if let Some(candidate) = self.discover_configured_client().await? {
                 return Ok(candidate);
+            }
+            if self.instance_root.is_none() {
+                let candidate = Client::new(&self.base_url);
+                if candidate.connect().await.is_ok() {
+                    return Ok(candidate);
+                }
             }
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
         Err("local Sift server missed the 10-second readiness deadline".into())
+    }
+
+    async fn discover_configured_client(&self) -> Result<Option<Client>, String> {
+        let Some(root) = &self.instance_root else {
+            return Ok(None);
+        };
+        let (_, _, config) = match sift_server::instance_runtime::load_current_config(root, None) {
+            Ok(current) => current,
+            Err(error) => return Err(format!("loading applied instance failed: {error:#}")),
+        };
+        let descriptor =
+            match sift_server::runtime::read_daemon_descriptor(&config.runtime_state_dir()) {
+                Ok(descriptor) => descriptor,
+                Err(_) => return Ok(None),
+            };
+        let candidate = Client::new(format!("http://{}", descriptor.endpoint));
+        match candidate.connect().await {
+            Ok(handshake)
+                if handshake.instance_id == descriptor.instance_id
+                    && handshake.daemon_generation == descriptor.daemon_generation =>
+            {
+                Ok(Some(candidate))
+            }
+            _ => Ok(None),
+        }
     }
 
     #[cfg(test)]

@@ -23,10 +23,11 @@ pub use shell::{
     CloseActiveItem, CloseActivePane, CommandDefinition, CommandId, CommandRegistry, CommandSpec,
     ConfirmCloseWithoutSaving, ConnectionStatus, DismissModal, Dock, DockDefinition, DockId,
     DockPlacement, DockRegistry, ExecutorCommand, ExecutorEvent, FocusNextPane, InstanceCommand,
-    InstanceManagerEvent, ItemDefinition, ItemRegistry, ItemRuntimeKind, Modal, OpenCommandPalette,
-    OpenServerConnection, PaletteConfirm, PaletteDown, PaletteUp, Pane, PaneEvent, SaveActiveItem,
-    SavedServerProfile, SplitPane, StatusBar, Toast, ToggleBottomDock, ToggleLeftDock,
-    ToggleRightDock, Tooltip, WorkspaceShell,
+    InstanceCredentialKind, InstanceCredentialPresentation, InstanceManagerEvent,
+    InstancePlanPresentation, ItemDefinition, ItemRegistry, ItemRuntimeKind, Modal,
+    OpenCommandPalette, OpenServerConnection, PaletteConfirm, PaletteDown, PaletteUp, Pane,
+    PaneEvent, SaveActiveItem, SavedInstanceRoot, SavedServerProfile, SplitPane, StatusBar, Toast,
+    ToggleBottomDock, ToggleLeftDock, ToggleRightDock, Tooltip, WorkspaceShell,
 };
 
 use std::{ops::Range, time::Duration};

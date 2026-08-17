@@ -23,6 +23,10 @@ use crate::platform::{
 #[derive(Clone)]
 pub enum DesktopServer {
     Local(LocalServerManager),
+    Configured {
+        local: LocalServerManager,
+        instance: sift_workspace_ui::InstanceSpec,
+    },
     Remote {
         client: Client,
         instance: sift_workspace_ui::InstanceSpec,
@@ -37,8 +41,10 @@ impl DesktopServer {
     }
 
     fn from_config(config: DesktopConfig, runtime_state_dir: std::path::PathBuf) -> Self {
-        match config.remote {
-            Some(remote) => {
+        match (config.instance_root, config.remote) {
+            (Some(root), None) => Self::configured(root)
+                .expect("desktop configuration validated the Sift instance root"),
+            (None, Some(remote)) => {
                 let mut client = Client::new(&remote.base_url);
                 if let Some(token) = remote.bearer_token() {
                     client = client.with_bearer_token(token);
@@ -53,7 +59,8 @@ impl DesktopServer {
                     },
                 }
             }
-            None => Self::local(runtime_state_dir),
+            (None, None) => Self::local(runtime_state_dir),
+            (Some(_), Some(_)) => unreachable!("desktop configuration targets are exclusive"),
         }
     }
 
@@ -76,9 +83,25 @@ impl DesktopServer {
         }
     }
 
+    pub(crate) fn configured(root: std::path::PathBuf) -> Result<Self, String> {
+        let configured = sift_server::instance_runtime::InstanceRoot::open(&root)
+            .map_err(|error| format!("validating instance root failed: {error:#}"))?;
+        let instance = sift_workspace_ui::InstanceSpec {
+            id: format!("config:{}", configured.manifest.manifest_id),
+            name: configured.manifest.name.clone(),
+            base_url: configured.manifest.server.bind.clone(),
+            kind: sift_workspace_ui::InstanceKind::Local,
+        };
+        Ok(Self::Configured {
+            local: LocalServerManager::configured(configured.root)?,
+            instance,
+        })
+    }
+
     pub(crate) async fn client(&self) -> Result<Client, String> {
         match self {
             Self::Local(local) => local.ensure_ready().await,
+            Self::Configured { local, .. } => local.ensure_ready().await,
             Self::Remote { client, .. } => Ok(client.clone()),
         }
     }
@@ -88,7 +111,9 @@ impl DesktopServer {
         session_tokens: SessionTokenProvider,
     ) -> Result<Self, String> {
         match self {
-            Self::Local(_) => Err("Local Sift uses its built-in identity".into()),
+            Self::Local(_) | Self::Configured { .. } => {
+                Err("Local Sift uses its built-in identity".into())
+            }
             Self::Remote { instance, .. } => Ok(Self::Remote {
                 client: Client::new(&instance.base_url).with_session_tokens(session_tokens),
                 instance: instance.clone(),
@@ -98,7 +123,9 @@ impl DesktopServer {
 
     pub(crate) fn without_authentication(&self) -> Result<Self, String> {
         match self {
-            Self::Local(_) => Err("Local Sift uses its built-in identity".into()),
+            Self::Local(_) | Self::Configured { .. } => {
+                Err("Local Sift uses its built-in identity".into())
+            }
             Self::Remote { instance, .. } => Ok(Self::Remote {
                 client: Client::new(&instance.base_url),
                 instance: instance.clone(),
@@ -114,13 +141,15 @@ impl DesktopServer {
                 base_url: "http://127.0.0.1:7474".into(),
                 kind: sift_workspace_ui::InstanceKind::Local,
             },
+            Self::Configured { instance, .. } => instance.clone(),
             Self::Remote { instance, .. } => instance.clone(),
         }
     }
 
-    fn acquire_local_lease(&self) -> Option<crate::local_server::LocalServerLease> {
+    pub(crate) fn acquire_local_lease(&self) -> Option<crate::local_server::LocalServerLease> {
         match self {
             Self::Local(local) => Some(local.acquire()),
+            Self::Configured { local, .. } => Some(local.acquire()),
             Self::Remote { .. } => None,
         }
     }
@@ -138,6 +167,7 @@ pub struct SiftApp {
     pub instance_store: InstanceStore,
     pub credentials: DesktopCredentialStore,
     pub saved_servers: Vec<sift_workspace_ui::SavedServerProfile>,
+    pub instance_roots: Vec<sift_workspace_ui::SavedInstanceRoot>,
     pub local_target: DesktopServer,
     startup_remote: bool,
 }
@@ -150,6 +180,7 @@ pub struct WindowServices {
     instance_store: InstanceStore,
     credentials: DesktopCredentialStore,
     saved_servers: Vec<sift_workspace_ui::SavedServerProfile>,
+    instance_roots: Vec<sift_workspace_ui::SavedInstanceRoot>,
     local_target: DesktopServer,
     restored_profile_id: Option<String>,
 }
@@ -163,13 +194,34 @@ impl SiftApp {
             .join("runtime");
         let instance_store = InstanceStore::new(instance_state_path());
         let saved_servers = instance_store.load();
+        let mut instance_roots = instance_store.load_roots();
         let local_target = DesktopServer::local(runtime_state_dir.clone());
-        let startup_remote = config.remote.is_some();
+        let configured_root = config.instance_root.clone();
+        let startup_remote = config.remote.is_some() || configured_root.is_some();
         let server = if startup_remote {
             DesktopServer::from_config(config, runtime_state_dir)
         } else {
             local_target.clone()
         };
+        if let Some(root) = configured_root {
+            if let DesktopServer::Configured { instance, .. } = &server {
+                let saved = sift_workspace_ui::SavedInstanceRoot {
+                    manifest_id: instance.id.trim_start_matches("config:").to_owned(),
+                    name: instance.name.clone(),
+                    root,
+                };
+                if let Some(index) = instance_roots
+                    .iter()
+                    .position(|candidate| candidate.manifest_id == saved.manifest_id)
+                {
+                    instance_roots[index] = saved;
+                } else {
+                    instance_roots.push(saved);
+                }
+                instance_roots.sort_by(|left, right| left.name.cmp(&right.name));
+                let _ = instance_store.save_roots(&saved_servers, &instance_roots);
+            }
+        }
         Self {
             platform: current_platform(),
             presentation_store: Arc::new(PresentationStore::new(state_path)),
@@ -178,6 +230,7 @@ impl SiftApp {
             instance_store,
             credentials: DesktopCredentialStore,
             saved_servers,
+            instance_roots,
             local_target,
             startup_remote,
         }
@@ -205,6 +258,7 @@ impl SiftApp {
             instance_store: self.instance_store.clone(),
             credentials: self.credentials.clone(),
             saved_servers: self.saved_servers.clone(),
+            instance_roots: self.instance_roots.clone(),
             local_target: self.local_target.clone(),
             restored_profile_id: restored_profile.map(|profile| profile.id),
         }
@@ -250,6 +304,7 @@ impl SiftWindow {
             instance_store,
             credentials,
             saved_servers,
+            instance_roots,
             local_target,
             restored_profile_id,
         } = services;
@@ -290,6 +345,7 @@ impl SiftWindow {
             instance_store,
             credentials,
             saved_servers,
+            instance_roots,
             InstanceManagerChannels {
                 commands: instance_receiver,
                 events: instance_event_sender,

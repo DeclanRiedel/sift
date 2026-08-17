@@ -2,12 +2,14 @@ use std::path::{Path, PathBuf};
 
 const SERVER_URL_ENV: &str = "SIFT_DESKTOP__SERVER_URL";
 const SERVER_NAME_ENV: &str = "SIFT_DESKTOP__SERVER_NAME";
+const INSTANCE_ROOT_ENV: &str = "SIFT_DESKTOP__INSTANCE_ROOT";
 const BEARER_TOKEN_ENV: &str = "SIFT_DESKTOP__BEARER_TOKEN";
 const BEARER_TOKEN_FILE_ENV: &str = "SIFT_DESKTOP__BEARER_TOKEN_FILE";
 
 #[derive(Clone, Default)]
 pub struct DesktopConfig {
     pub remote: Option<RemoteServerConfig>,
+    pub instance_root: Option<PathBuf>,
 }
 
 #[derive(Clone)]
@@ -27,6 +29,7 @@ impl RemoteServerConfig {
 struct RawOptions {
     server_url: Option<String>,
     server_name: Option<String>,
+    instance_root: Option<PathBuf>,
     bearer_token: Option<String>,
     bearer_token_file: Option<PathBuf>,
 }
@@ -37,6 +40,7 @@ impl DesktopConfig {
         let environment = EnvironmentOptions {
             server_url: std::env::var(SERVER_URL_ENV).ok(),
             server_name: std::env::var(SERVER_NAME_ENV).ok(),
+            instance_root: std::env::var_os(INSTANCE_ROOT_ENV).map(PathBuf::from),
             bearer_token: std::env::var(BEARER_TOKEN_ENV).ok(),
             bearer_token_file: std::env::var_os(BEARER_TOKEN_FILE_ENV).map(PathBuf::from),
         };
@@ -45,13 +49,34 @@ impl DesktopConfig {
 
     fn from_options(args: &[String], environment: EnvironmentOptions) -> Result<Self, String> {
         let command_line = parse_args(args)?;
+        let command_line_instance = command_line.instance_root.is_some();
+        let command_line_remote = command_line.server_url.is_some();
         let raw = RawOptions {
-            server_url: command_line.server_url.or(environment.server_url),
-            server_name: command_line.server_name.or(environment.server_name),
-            bearer_token: command_line.bearer_token.or(environment.bearer_token),
-            bearer_token_file: command_line
-                .bearer_token_file
-                .or(environment.bearer_token_file),
+            server_url: command_line.server_url.or_else(|| {
+                (!command_line_instance)
+                    .then_some(environment.server_url)
+                    .flatten()
+            }),
+            server_name: command_line.server_name.or_else(|| {
+                (!command_line_instance)
+                    .then_some(environment.server_name)
+                    .flatten()
+            }),
+            instance_root: command_line.instance_root.or_else(|| {
+                (!command_line_remote)
+                    .then_some(environment.instance_root)
+                    .flatten()
+            }),
+            bearer_token: command_line.bearer_token.or_else(|| {
+                (!command_line_instance)
+                    .then_some(environment.bearer_token)
+                    .flatten()
+            }),
+            bearer_token_file: command_line.bearer_token_file.or_else(|| {
+                (!command_line_instance)
+                    .then_some(environment.bearer_token_file)
+                    .flatten()
+            }),
         };
         build(raw)
     }
@@ -61,6 +86,7 @@ impl DesktopConfig {
 struct EnvironmentOptions {
     server_url: Option<String>,
     server_name: Option<String>,
+    instance_root: Option<PathBuf>,
     bearer_token: Option<String>,
     bearer_token_file: Option<PathBuf>,
 }
@@ -75,10 +101,12 @@ fn parse_args(args: &[String]) -> Result<RawOptions, String> {
                 (name, Some(value))
             });
         let value = match name {
-            "--server-url" | "--server-name" | "--bearer-token-file" => inline_value
-                .map(str::to_owned)
-                .or_else(|| arguments.next().cloned())
-                .ok_or_else(|| format!("{name} requires a value"))?,
+            "--server-url" | "--server-name" | "--instance-root" | "--bearer-token-file" => {
+                inline_value
+                    .map(str::to_owned)
+                    .or_else(|| arguments.next().cloned())
+                    .ok_or_else(|| format!("{name} requires a value"))?
+            }
             "--help" | "-h" => return Err(usage().into()),
             _ => {
                 return Err(format!(
@@ -90,6 +118,15 @@ fn parse_args(args: &[String]) -> Result<RawOptions, String> {
         match name {
             "--server-url" => set_once(&mut options.server_url, value, name)?,
             "--server-name" => set_once(&mut options.server_name, value, name)?,
+            "--instance-root" => {
+                if options
+                    .instance_root
+                    .replace(PathBuf::from(value))
+                    .is_some()
+                {
+                    return Err(format!("{name} may be specified only once"));
+                }
+            }
             "--bearer-token-file" => {
                 if options
                     .bearer_token_file
@@ -113,6 +150,23 @@ fn set_once(slot: &mut Option<String>, value: String, name: &str) -> Result<(), 
 }
 
 fn build(raw: RawOptions) -> Result<DesktopConfig, String> {
+    if raw.instance_root.is_some() && raw.server_url.is_some() {
+        return Err("set only one of --instance-root and --server-url".into());
+    }
+    if let Some(root) = raw.instance_root {
+        if raw.server_name.is_some()
+            || raw.bearer_token.is_some()
+            || raw.bearer_token_file.is_some()
+        {
+            return Err("server name or credentials cannot be used with an instance root".into());
+        }
+        let instance = sift_server::instance_runtime::InstanceRoot::open(&root)
+            .map_err(|error| format!("invalid Sift instance root: {error:#}"))?;
+        return Ok(DesktopConfig {
+            remote: None,
+            instance_root: Some(instance.root),
+        });
+    }
     let Some(base_url) = raw.server_url else {
         if raw.server_name.is_some()
             || raw.bearer_token.is_some()
@@ -144,6 +198,7 @@ fn build(raw: RawOptions) -> Result<DesktopConfig, String> {
             name,
             bearer_token,
         }),
+        instance_root: None,
     })
 }
 
@@ -187,7 +242,7 @@ pub(crate) fn validate_token(token: String) -> Result<String, String> {
 }
 
 pub fn usage() -> &'static str {
-    "Usage: sift-desktop [--server-url <http(s)://host:port>] [--server-name <name>] [--bearer-token-file <path>]"
+    "Usage: sift-desktop [--instance-root <folder> | --server-url <http(s)://host:port> [--server-name <name>] [--bearer-token-file <path>]]"
 }
 
 #[cfg(test)]
@@ -202,6 +257,7 @@ mod tests {
     fn no_remote_options_preserve_local_default() {
         let config = DesktopConfig::from_options(&[], EnvironmentOptions::default()).unwrap();
         assert!(config.remote.is_none());
+        assert!(config.instance_root.is_none());
     }
 
     #[test]
@@ -238,6 +294,27 @@ mod tests {
     }
 
     #[test]
+    fn command_line_instance_root_is_validated_and_canonicalized() {
+        let root =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/reproducible-instance");
+        let config = DesktopConfig::from_options(
+            &args(&["--instance-root", root.to_str().unwrap()]),
+            EnvironmentOptions {
+                server_url: Some("https://ignored.example".into()),
+                bearer_token: Some("ignored".into()),
+                ..EnvironmentOptions::default()
+            },
+        )
+        .unwrap();
+
+        assert!(config.remote.is_none());
+        assert_eq!(
+            config.instance_root,
+            Some(std::fs::canonicalize(root).unwrap())
+        );
+    }
+
+    #[test]
     fn rejects_unsafe_or_ambiguous_remote_options() {
         for url in [
             "ftp://sift.lan",
@@ -257,6 +334,16 @@ mod tests {
                 bearer_token: Some("secret".into()),
                 ..EnvironmentOptions::default()
             }
+        )
+        .is_err());
+        assert!(DesktopConfig::from_options(
+            &args(&[
+                "--instance-root",
+                "/tmp/unused",
+                "--server-url",
+                "https://sift.lan",
+            ]),
+            EnvironmentOptions::default(),
         )
         .is_err());
     }

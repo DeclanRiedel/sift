@@ -73,11 +73,12 @@ sift-desktop-demo
 ```
 
 That command starts a throwaway Postgres cluster (default `/tmp/sift-demo-pg`,
-port 5433) seeded with `lab.people`, applies metadata migrations, starts a real
-`sift-server` on `SIFT_BIND` (default `127.0.0.1:7474`), registers a **Demo
-Postgres** connection profile, and launches `sift-desktop` attached to that
-server. The profile appears in the Connections dock; `SELECT * FROM lab.people;`
-returns three rows.
+port 5433) seeded with `lab.people`, creates and applies a reproducible instance
+root (default `/tmp/sift-desktop-demo-instance-$UID`), imports a generated
+destination-local database credential, and launches `sift-desktop` with that
+root. The desktop supervises the real server through its discovered
+auto-loopback endpoint. The manifest-managed `demo/postgres` profile appears in
+the Connections dock; `SELECT * FROM lab.people;` returns three rows.
 
 Both helper steps are also usable on their own:
 
@@ -86,7 +87,8 @@ scripts/dev-seed-postgres.sh                                   # prints the port
 scripts/dev-register-demo-connection.sh http://127.0.0.1:7474  # prints profile id
 ```
 
-Both are idempotent — rerunning reuses the existing cluster and profile.
+The seed helper and desktop demo are idempotent. Rerunning reuses the existing
+cluster and applies a fresh instance generation only when configuration changed.
 
 Useful overrides:
 
