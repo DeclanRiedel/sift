@@ -2976,9 +2976,18 @@ async fn whoami(
     State(state): State<AppState>,
     Extension(auth): Extension<AuthContext>,
 ) -> ApiResult<Json<WhoAmIResponse>> {
-    let principal = metadata_store(&state)?
+    let metadata = metadata_store(&state)?;
+    let principal = metadata
         .principal_by_id(auth.principal_id)?
         .ok_or(ApiError::Unauthorized)?;
+    let github_login = metadata
+        .list_auth_identities(auth.principal_id)?
+        .into_iter()
+        .find(|identity| {
+            identity.method == sift_metadata::AuthIdentityMethod::Github
+                && identity.disabled_at.is_none()
+        })
+        .and_then(|identity| identity.provider_login);
     let memberships = auth
         .tenants
         .iter()
@@ -3003,6 +3012,7 @@ async fn whoami(
             is_instance_admin: principal.is_instance_admin,
         },
         memberships,
+        github_login,
         auth_session_id: auth.auth_session_id,
     }))
 }

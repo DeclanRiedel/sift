@@ -138,6 +138,9 @@ pub struct AuthTenantMembership {
 pub struct WhoAmIResponse {
     pub principal: AuthPrincipal,
     pub memberships: Vec<AuthTenantMembership>,
+    /// Login for an active linked GitHub identity, when one exists.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub github_login: Option<String>,
     /// Present for interactive sessions; absent for API tokens and local
     /// bypass identities.
     pub auth_session_id: Option<String>,

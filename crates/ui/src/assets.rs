@@ -47,6 +47,7 @@ impl AssetSource for SiftAssets {
             "icons/close.svg" => Some(include_bytes!("../assets/icons/close.svg")),
             "icons/copy.svg" => Some(include_bytes!("../assets/icons/copy.svg")),
             "icons/database.svg" => Some(include_bytes!("../assets/icons/database.svg")),
+            "icons/github.svg" => Some(include_bytes!("../assets/icons/github.svg")),
             "icons/info.svg" => Some(include_bytes!("../assets/icons/info.svg")),
             "icons/menu.svg" => Some(include_bytes!("../assets/icons/menu.svg")),
             "icons/play.svg" => Some(include_bytes!("../assets/icons/play.svg")),
@@ -71,6 +72,7 @@ impl AssetSource for SiftAssets {
                 "close.svg".into(),
                 "copy.svg".into(),
                 "database.svg".into(),
+                "github.svg".into(),
                 "info.svg".into(),
                 "menu.svg".into(),
                 "play.svg".into(),
@@ -95,6 +97,7 @@ mod tests {
         for path in [
             "databases/postgres.svg",
             "databases/sql-server.svg",
+            "icons/github.svg",
             "icons/menu.svg",
             "icons/play.svg",
         ] {

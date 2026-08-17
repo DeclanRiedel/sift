@@ -1025,23 +1025,20 @@ impl WorkspaceShell {
         }
     }
 
-    fn render_account_avatar(&self, size: f32) -> gpui::AnyElement {
+    fn render_account_icon(&self, size: f32) -> gpui::AnyElement {
         let colors = self.theme.colors;
-        let avatar = div()
-            .relative()
-            .size(px(size))
-            .flex()
-            .items_center()
-            .justify_center()
-            .overflow_hidden()
-            .rounded(px(4.))
-            .border_1()
-            .border_color(colors.strong_border)
-            .bg(colors.accent_muted)
-            .text_xs()
-            .font_weight(gpui::FontWeight::SEMIBOLD);
         match &self.lifecycle.identity {
-            Some(identity) => avatar
+            Some(identity) => div()
+                .relative()
+                .size(px(size))
+                .flex()
+                .items_center()
+                .justify_center()
+                .overflow_hidden()
+                .rounded_full()
+                .bg(colors.accent_muted)
+                .text_xs()
+                .font_weight(gpui::FontWeight::SEMIBOLD)
                 .child(self.account_initials())
                 .children(identity.principal.avatar_url.clone().map(|url| {
                     img(url)
@@ -1051,9 +1048,7 @@ impl WorkspaceShell {
                         .object_fit(gpui::ObjectFit::Cover)
                 }))
                 .into_any_element(),
-            None => avatar
-                .child(icon(IconName::User, colors.muted_text, size * 0.55))
-                .into_any_element(),
+            None => icon(IconName::User, colors.muted_text, size * 0.72),
         }
     }
 
@@ -1979,14 +1974,18 @@ impl WorkspaceShell {
         cx.notify();
     }
 
-    fn open_server_picker(&mut self, cx: &mut Context<Self>) {
-        self.open_app_bar_modal(Modal::ServerPicker, cx);
-        self.server_connection_error = None;
-    }
-
-    fn open_account(&mut self, cx: &mut Context<Self>) {
-        self.open_app_bar_modal(Modal::Account, cx);
-        self.account_error = None;
+    fn toggle_app_bar_modal(&mut self, modal: Modal, cx: &mut Context<Self>) {
+        if self.modal.as_ref() == Some(&modal) {
+            self.close_app_bar_modal(cx);
+            cx.notify();
+        } else {
+            match &modal {
+                Modal::ServerPicker => self.server_connection_error = None,
+                Modal::Account => self.account_error = None,
+                _ => {}
+            }
+            self.open_app_bar_modal(modal, cx);
+        }
     }
 
     fn sign_in_with_password(&mut self, cx: &mut Context<Self>) {
@@ -2449,7 +2448,6 @@ impl WorkspaceShell {
                 Item::unimplemented("About Sift"),
             ],
             AppBarMenu::Profile => vec![
-                Item::available("Account", "", "account.open"),
                 Item::unimplemented("Settings"),
                 Item::unimplemented("Keymaps"),
                 Item::unimplemented("Themes"),
@@ -2468,7 +2466,6 @@ impl WorkspaceShell {
         self.app_bar_expanded = false;
         match command {
             "ui.command-palette" => self.open_command_palette(&OpenCommandPalette, window, cx),
-            "account.open" => self.open_account(cx),
             "window.quit" => window.remove_window(),
             command => self.run_command(command, window, cx),
         }
@@ -2766,7 +2763,9 @@ impl WorkspaceShell {
                             .hover(|slot| {
                                 slot.bg(colors.hovered_surface).border_color(colors.border)
                             })
-                            .on_click(cx.listener(|shell, _, _, cx| shell.open_server_picker(cx)))
+                            .on_click(cx.listener(|shell, _, _, cx| {
+                                shell.toggle_app_bar_modal(Modal::ServerPicker, cx)
+                            }))
                             .min_w_0()
                             .text_sm()
                             .child(div().min_w_0().truncate().child(server_name))
@@ -2813,23 +2812,17 @@ impl WorkspaceShell {
                             .debug_selector(|| "toolbar-account".into())
                             .role(Role::Button)
                             .aria_label(format!("Account: {account_label}"))
-                            .h(px(26.))
-                            .max_w(px(140.))
-                            .px_2()
+                            .size(px(26.))
                             .flex()
                             .items_center()
                             .justify_center()
-                            .rounded(px(5.))
-                            .text_sm()
-                            .text_color(colors.muted_text)
-                            .when(account_active, |button| {
-                                button.bg(colors.active_surface).text_color(colors.text)
-                            })
-                            .hover(|button| {
-                                button.bg(colors.hovered_surface).text_color(colors.text)
-                            })
-                            .on_click(cx.listener(|shell, _, _, cx| shell.open_account(cx)))
-                            .child(div().truncate().child(account_label)),
+                            .rounded_sm()
+                            .when(account_active, |button| button.bg(colors.active_surface))
+                            .hover(|button| button.bg(colors.hovered_surface))
+                            .on_click(cx.listener(|shell, _, _, cx| {
+                                shell.toggle_app_bar_modal(Modal::Account, cx)
+                            }))
+                            .child(self.render_account_icon(18.)),
                     )
                     .child(
                         div()
@@ -3145,10 +3138,8 @@ impl WorkspaceShell {
             );
             let database_connection = matches!(modal, Modal::DatabaseConnection);
             let command_palette = matches!(modal, Modal::CommandPalette);
-            let card_width = if server_picker {
+            let card_width = if server_picker || account {
                 360.0
-            } else if account {
-                320.0
             } else if database_connection {
                 match self.database_wizard_step {
                     DatabaseWizardStep::Provider => 760.0,
@@ -3784,17 +3775,44 @@ impl WorkspaceShell {
                 }
                 Modal::Account => {
                     let server_name = self.active_server_name();
+                    let identity = self.lifecycle.identity.as_ref();
                     let is_local = self
                         .lifecycle
                         .selected_instance
                         .as_ref()
                         .is_some_and(|instance| instance.kind == crate::InstanceKind::Local);
-                    let interactive = self
-                        .lifecycle
-                        .identity
-                        .as_ref()
+                    let interactive = identity
                         .is_some_and(|identity| identity.auth_session_id.is_some());
                     let pending = self.account_pending;
+                    let username = identity.map(|identity| {
+                        identity
+                            .github_login
+                            .as_ref()
+                            .map(|login| format!("@{login}"))
+                            .unwrap_or_else(|| identity.principal.display_name.clone())
+                    });
+                    let github_link = identity
+                        .and_then(|identity| identity.github_login.as_ref())
+                        .map(|login| {
+                            let github_url = format!("https://github.com/{login}");
+                            div()
+                                .id("account-github-profile")
+                                .debug_selector(|| "account-github-profile".into())
+                                .role(Role::Link)
+                                .aria_label(format!("Open @{login} on GitHub"))
+                                .size(px(24.))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .rounded_sm()
+                                .text_color(colors.muted_text)
+                                .cursor(CursorStyle::PointingHand)
+                                .hover(|link| {
+                                    link.bg(colors.hovered_surface).text_color(colors.text)
+                                })
+                                .on_click(move |_, _, cx| cx.open_url(&github_url))
+                                .child(icon(IconName::Github, colors.muted_text, 14.))
+                        });
                     let field = |label: &'static str, input: Entity<TextInput>| {
                         div()
                             .flex()
@@ -3808,95 +3826,72 @@ impl WorkspaceShell {
                             )
                             .child(input)
                     };
+
                     div()
                         .flex()
                         .flex_col()
                         .min_w_0()
-                        .gap_3()
-                        .when_some(self.lifecycle.identity.as_ref(), |account, identity| {
-                            account
-                                .child(
-                                    div()
-                                        .flex()
-                                        .items_center()
-                                        .min_w_0()
-                                        .gap_3()
-                                        .child(self.render_account_avatar(40.))
-                                        .child(
-                                            div()
-                                                .flex()
-                                                .flex_col()
-                                                .min_w_0()
-                                                .child(
-                                                    div()
-                                                        .truncate()
-                                                        .child(identity.principal.display_name.clone()),
-                                                )
-                                                .children(identity.principal.email.clone().map(
-                                                    |email| {
-                                                        div()
-                                                            .truncate()
-                                                            .text_sm()
-                                                            .text_color(colors.muted_text)
-                                                            .child(email)
-                                                    },
-                                                )),
-                                        ),
-                                )
-                                .child(
-                                    div()
-                                        .text_sm()
-                                        .text_color(colors.muted_text)
-                                        .child(format!("Signed in on {server_name}")),
-                                )
-                                .child(
-                                    div()
-                                        .text_xs()
-                                        .text_color(colors.muted_text)
-                                        .whitespace_normal()
-                                        .child(format!(
-                                            "{} tenant membership(s){}",
-                                            identity.memberships.len(),
-                                            if identity.principal.is_instance_admin {
-                                                " · Instance administrator"
-                                            } else {
-                                                ""
-                                            }
-                                        )),
-                                )
+                        .when_some(username, |account, username| {
+                            account.child(
+                                div()
+                                    .min_h(px(48.))
+                                    .px_3()
+                                    .py_2()
+                                    .flex()
+                                    .items_center()
+                                    .gap_1()
+                                    .child(
+                                        div()
+                                            .min_w_0()
+                                            .truncate()
+                                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                                            .child(username),
+                                    )
+                                    .children(github_link),
+                            )
                         })
-                        .when(self.lifecycle.identity.is_none(), |account| {
-                            account
-                                .child(
-                                    div()
-                                        .font_weight(gpui::FontWeight::SEMIBOLD)
-                                        .child(format!("Sign in to {server_name}")),
-                                )
-                                .child(
-                                    div()
-                                        .text_sm()
-                                        .text_color(colors.muted_text)
-                                        .whitespace_normal()
-                                        .child("Use the account your Sift administrator has enabled."),
-                                )
+                        .when(identity.is_none(), |account| {
+                            account.child(
+                                div()
+                                    .px_3()
+                                    .py_3()
+                                    .flex()
+                                    .flex_col()
+                                    .gap_1()
+                                    .child(
+                                        div()
+                                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                                            .child("Sign in to Sift"),
+                                    )
+                                    .child(
+                                        div()
+                                            .truncate()
+                                            .text_sm()
+                                            .text_color(colors.muted_text)
+                                            .child(server_name),
+                                    ),
+                            )
                         })
                         .when(is_local, |account| {
                             account.child(
                                 div()
-                                    .pt_2()
                                     .border_t_1()
                                     .border_color(colors.subtle_border)
+                                    .px_3()
+                                    .py_3()
                                     .text_sm()
                                     .text_color(colors.muted_text)
-                                    .child("Local Sift uses its built-in local identity."),
+                                    .whitespace_normal()
+                                    .child("This local instance manages its built-in identity."),
                             )
                         })
-                        .when(!is_local && !interactive, |account| {
+                        .when(!is_local && identity.is_none(), |account| {
                             account.child(
                                 div()
-                                    .pt_3()
                                     .border_t_1()
                                     .border_color(colors.subtle_border)
+                                    .px_3()
+                                    .py_3()
                                     .flex()
                                     .flex_col()
                                     .gap_3()
@@ -3909,6 +3904,7 @@ impl WorkspaceShell {
                                             .flex()
                                             .items_center()
                                             .justify_center()
+                                            .gap_2()
                                             .rounded_sm()
                                             .bg(if pending {
                                                 colors.hovered_surface
@@ -3922,6 +3918,7 @@ impl WorkspaceShell {
                                                         shell.sign_in_with_github(cx)
                                                     }))
                                             })
+                                            .child(icon(IconName::Github, colors.text, 14.))
                                             .child(if pending {
                                                 "Waiting for sign in…"
                                             } else {
@@ -3952,8 +3949,8 @@ impl WorkspaceShell {
                                                     .border_color(colors.subtle_border),
                                             ),
                                     )
-                                    .child(field("USERNAME", self.account_username_input.clone()))
-                                    .child(field("PASSWORD", self.account_password_input.clone()))
+                                    .child(field("Username", self.account_username_input.clone()))
+                                    .child(field("Password", self.account_password_input.clone()))
                                     .child(
                                         div()
                                             .id("account-password-sign-in")
@@ -3969,7 +3966,9 @@ impl WorkspaceShell {
                                             .bg(colors.surface)
                                             .when(!pending, |button| {
                                                 button
-                                                    .hover(|button| button.bg(colors.hovered_surface))
+                                                    .hover(|button| {
+                                                        button.bg(colors.hovered_surface)
+                                                    })
                                                     .on_click(cx.listener(|shell, _, _, cx| {
                                                         shell.sign_in_with_password(cx)
                                                     }))
@@ -3978,12 +3977,26 @@ impl WorkspaceShell {
                                     ),
                             )
                         })
+                        .when(!is_local && identity.is_some() && !interactive, |account| {
+                            account.child(
+                                div()
+                                    .border_t_1()
+                                    .border_color(colors.subtle_border)
+                                    .px_3()
+                                    .py_3()
+                                    .text_sm()
+                                    .text_color(colors.muted_text)
+                                    .whitespace_normal()
+                                    .child("This identity is managed by the current instance."),
+                            )
+                        })
                         .when(!is_local && interactive, |account| {
                             account.child(
                                 div()
-                                    .pt_3()
                                     .border_t_1()
                                     .border_color(colors.subtle_border)
+                                    .px_3()
+                                    .py_2()
                                     .flex()
                                     .items_center()
                                     .justify_between()
@@ -4000,7 +4013,9 @@ impl WorkspaceShell {
                                             .text_color(colors.muted_text)
                                             .when(!pending, |button| {
                                                 button
-                                                    .hover(|button| button.text_color(colors.danger))
+                                                    .hover(|button| {
+                                                        button.text_color(colors.danger)
+                                                    })
                                                     .on_click(cx.listener(|shell, _, _, cx| {
                                                         shell.sign_out(true, cx)
                                                     }))
@@ -4021,21 +4036,27 @@ impl WorkspaceShell {
                                             .bg(colors.surface)
                                             .when(!pending, |button| {
                                                 button
-                                                    .hover(|button| button.bg(colors.hovered_surface))
+                                                    .hover(|button| {
+                                                        button.bg(colors.hovered_surface)
+                                                    })
                                                     .on_click(cx.listener(|shell, _, _, cx| {
                                                         shell.sign_out(false, cx)
                                                     }))
                                             })
-                                            .child(if pending { "Signing out…" } else { "Sign out" }),
+                                            .child(if pending {
+                                                "Signing out…"
+                                            } else {
+                                                "Sign out"
+                                            }),
                                     ),
                             )
                         })
                         .children(self.account_error.as_ref().map(|message| {
                             div()
-                                .p_2()
-                                .rounded_sm()
-                                .border_1()
+                                .border_t_1()
                                 .border_color(colors.danger)
+                                .px_3()
+                                .py_2()
                                 .bg(colors.danger_muted)
                                 .text_sm()
                                 .text_color(colors.danger)
@@ -4768,7 +4789,17 @@ impl WorkspaceShell {
                 .bottom_0()
                 .left_0()
                 .occlude()
-                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .when(server_picker || account, |layer| {
+                    layer.on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|shell, _, window, cx| {
+                            shell.dismiss_modal(&DismissModal, window, cx)
+                        }),
+                    )
+                })
+                .when(!server_picker && !account, |layer| {
+                    layer.on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                })
                 .flex()
                 .items_start()
                 .when(server_picker, |layer| {
@@ -4806,12 +4837,9 @@ impl WorkspaceShell {
                         .max_h(gpui::relative(0.92))
                         .flex()
                         .flex_col()
-                        .when(server_picker || account, |card| {
-                            card.on_mouse_down_out(cx.listener(|shell, _, window, cx| {
-                                shell.dismiss_modal(&DismissModal, window, cx)
-                            }))
+                        .when(!database_connection && !command_palette && !account, |card| {
+                            card.p_3()
                         })
-                        .when(!database_connection && !command_palette, |card| card.p_3())
                         .overflow_hidden()
                         .rounded(self.theme.metrics.radius_large)
                         .border_1()
@@ -5399,7 +5427,9 @@ mod tests {
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         let workspace = window.root(&mut cx).unwrap();
 
-        workspace.update(&mut cx, |shell, cx| shell.open_account(cx));
+        workspace.update(&mut cx, |shell, cx| {
+            shell.open_app_bar_modal(Modal::Account, cx)
+        });
         assert_eq!(
             workspace.read_with(&cx, |shell, _| shell.modal().cloned()),
             Some(Modal::Account)
@@ -5414,7 +5444,9 @@ mod tests {
             Some(AppBarMenu::Profile)
         );
 
-        workspace.update(&mut cx, |shell, cx| shell.open_server_picker(cx));
+        workspace.update(&mut cx, |shell, cx| {
+            shell.open_app_bar_modal(Modal::ServerPicker, cx)
+        });
         assert_eq!(
             workspace.read_with(&cx, |shell, _| shell.modal().cloned()),
             Some(Modal::ServerPicker)
@@ -5445,16 +5477,9 @@ mod tests {
         let profile = WorkspaceShell::app_bar_menu_items(AppBarMenu::Profile);
         assert_eq!(
             profile.iter().map(|item| item.label).collect::<Vec<_>>(),
-            vec![
-                "Account",
-                "Settings",
-                "Keymaps",
-                "Themes",
-                "Server Configuration"
-            ]
+            vec!["Settings", "Keymaps", "Themes", "Server Configuration"]
         );
-        assert!(profile[0].command.is_some());
-        assert!(profile[1..].iter().all(|item| item.command.is_none()));
+        assert!(profile.iter().all(|item| item.command.is_none()));
 
         for menu in [
             AppBarMenu::Main,
@@ -5923,7 +5948,7 @@ mod tests {
         };
         workspace.update(&mut cx, |shell, cx| {
             shell.attach_instance_manager(sender, event_receiver, vec![profile.clone()], cx);
-            shell.open_server_picker(cx);
+            shell.open_app_bar_modal(Modal::ServerPicker, cx);
             shell.connect_saved_server(&profile, cx);
         });
         assert_eq!(
@@ -5954,7 +5979,9 @@ mod tests {
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         let workspace = window.root(&mut cx).unwrap();
 
-        workspace.update(&mut cx, |shell, cx| shell.open_server_picker(cx));
+        workspace.update(&mut cx, |shell, cx| {
+            shell.open_app_bar_modal(Modal::ServerPicker, cx)
+        });
         cx.simulate_mouse_down(
             point(px(10.), px(500.)),
             MouseButton::Left,
@@ -5962,7 +5989,9 @@ mod tests {
         );
         assert!(workspace.read_with(&cx, |shell, _| shell.modal().is_none()));
 
-        workspace.update(&mut cx, |shell, cx| shell.open_account(cx));
+        workspace.update(&mut cx, |shell, cx| {
+            shell.open_app_bar_modal(Modal::Account, cx)
+        });
         cx.simulate_mouse_down(
             point(px(10.), px(500.)),
             MouseButton::Left,
@@ -5977,11 +6006,22 @@ mod tests {
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         let workspace = window.root(&mut cx).unwrap();
 
-        workspace.update(&mut cx, |shell, cx| shell.open_server_picker(cx));
+        workspace.update(&mut cx, |shell, cx| {
+            shell.open_app_bar_modal(Modal::ServerPicker, cx)
+        });
         cx.run_until_parked();
         let account_bounds = cx
             .debug_bounds("toolbar-account")
             .expect("account button should be rendered");
+        cx.simulate_click(account_bounds.center(), Modifiers::default());
+        assert_eq!(
+            workspace.read_with(&cx, |shell, _| shell.modal().cloned()),
+            Some(Modal::Account)
+        );
+
+        cx.simulate_click(account_bounds.center(), Modifiers::default());
+        assert!(workspace.read_with(&cx, |shell, _| shell.modal().is_none()));
+
         cx.simulate_click(account_bounds.center(), Modifiers::default());
         assert_eq!(
             workspace.read_with(&cx, |shell, _| shell.modal().cloned()),
@@ -6022,7 +6062,12 @@ mod tests {
                         avatar_url: None,
                         is_instance_admin: false,
                     },
-                    memberships: Vec::new(),
+                    memberships: vec![sift_protocol::AuthTenantMembership {
+                        tenant_id: 1,
+                        tenant_name: "Analytical Engine".into(),
+                        role: "owner".into(),
+                    }],
+                    github_login: Some("ada-lovelace".into()),
                     auth_session_id: Some("session".into()),
                 },
             ));
@@ -6058,6 +6103,11 @@ mod tests {
             workspace.read_with(&cx, |shell, _| shell.account_initials()),
             "AL"
         );
+        workspace.update(&mut cx, |shell, cx| {
+            shell.open_app_bar_modal(Modal::Account, cx)
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("account-github-profile").is_some());
     }
 
     #[gpui::test]
