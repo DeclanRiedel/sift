@@ -17,7 +17,9 @@ use sift_server::{
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let command = parse_command(std::env::args().skip(1))?;
-    let cfg = match command {
+    let mut instance_github = None;
+    let mut instance_selection = None;
+    let mut cfg = match command {
         ServerCommand::BackupCreate { output, key_file } => {
             let config = load_config().context("loading config")?;
             config.validate().context("validating config")?;
@@ -79,12 +81,34 @@ async fn main() -> anyhow::Result<()> {
             );
             return Ok(());
         }
-        ServerCommand::Serve { mode } => {
-            let mut config = load_config().context("loading config")?;
-            if let Some(mode) = mode {
-                config.mode = mode;
+        ServerCommand::Serve {
+            mode,
+            instance_root,
+            state_dir,
+        } => {
+            if let Some(instance_root) = instance_root {
+                if mode.is_some() {
+                    anyhow::bail!(
+                        "--mode cannot override locked instance configuration; edit sift.toml and re-lock"
+                    );
+                }
+                let (instance, generation, config) =
+                    sift_server::instance_runtime::load_current_config(
+                        &instance_root,
+                        state_dir.as_deref(),
+                    )
+                    .context("loading applied instance")?;
+                instance_github = Some(instance.manifest.auth.github.clone());
+                instance_selection =
+                    Some((instance.manifest, instance.lock, generation.generation));
+                config
+            } else {
+                let mut config = load_config().context("loading config")?;
+                if let Some(mode) = mode {
+                    config.mode = mode;
+                }
+                config
             }
-            config
         }
         ServerCommand::RemoteDaemon { state_dir } => {
             sift_server::remote_agent::prepare_remote_config(&state_dir)?
@@ -208,6 +232,53 @@ async fn main() -> anyhow::Result<()> {
         });
     }
     let metadata = build_metadata_store(&cfg)?;
+    if let Some((manifest, lock, generation)) = &instance_selection {
+        let store = metadata
+            .as_ref()
+            .context("applied instance unexpectedly disabled metadata")?;
+        store
+            .verify_instance_manifest_state(manifest, lock, *generation)
+            .context("verifying applied instance metadata")?;
+        let unready = store
+            .verified_instance_credential_status()
+            .await?
+            .into_iter()
+            .filter(|slot| slot.readiness != sift_metadata::CredentialReadiness::Ready)
+            .map(|slot| slot.slot)
+            .collect::<Vec<_>>();
+        if !unready.is_empty() {
+            anyhow::bail!(
+                "instance has unready credential slots; import them before startup: {}",
+                unready.join(", ")
+            );
+        }
+    }
+    if let Some(github) = instance_github {
+        match github.flow {
+            sift_instance_config::GithubFlow::HostedCode => {
+                let store = metadata
+                    .as_ref()
+                    .context("hosted GitHub auth requires instance metadata")?;
+                let slot = github
+                    .client_secret
+                    .as_deref()
+                    .context("hosted GitHub auth has no credential slot")?;
+                let secret = store
+                    .instance_credential_value(slot)
+                    .await?
+                    .context("GitHub OAuth credential is missing; import it before startup")?;
+                let client_secret = secret
+                    .get("client_secret")
+                    .and_then(serde_json::Value::as_str)
+                    .context("GitHub OAuth credential has an invalid typed value")?;
+                cfg.auth.github_client_id = github.client_id;
+                cfg.auth.github_client_secret = Some(client_secret.to_owned());
+                cfg.validate()
+                    .context("validating realized GitHub authentication")?;
+            }
+            sift_instance_config::GithubFlow::LocalDevice => {}
+        }
+    }
     sessions.set_resource_manager(sift_server::resources::ResourceManager::new(
         &cfg.tenant_limits,
         metadata.clone(),
@@ -336,6 +407,8 @@ enum ServerCommand {
     },
     Serve {
         mode: Option<RuntimeMode>,
+        instance_root: Option<std::path::PathBuf>,
+        state_dir: Option<std::path::PathBuf>,
     },
     RemoteDaemon {
         state_dir: std::path::PathBuf,
@@ -370,7 +443,11 @@ struct RemoteProof {
 fn parse_command(args: impl IntoIterator<Item = String>) -> anyhow::Result<ServerCommand> {
     let mut args = args.into_iter();
     let Some(first) = args.next() else {
-        return Ok(ServerCommand::Serve { mode: None });
+        return Ok(ServerCommand::Serve {
+            mode: None,
+            instance_root: None,
+            state_dir: None,
+        });
     };
     if first == "backup" {
         let action = args
@@ -458,26 +535,58 @@ fn parse_command(args: impl IntoIterator<Item = String>) -> anyhow::Result<Serve
     }
     if first != "remote" {
         let mut mode = None;
+        let mut instance_root = None;
+        let mut state_dir = None;
         let mut arguments = std::iter::once(first).chain(args);
         while let Some(argument) = arguments.next() {
-            let value = if argument == "--mode" {
-                Some(
-                    arguments
+            match argument.as_str() {
+                "--mode" => {
+                    let value = arguments
                         .next()
-                        .context("--mode requires in-process, daemon, or container")?,
-                )
-            } else {
-                argument.strip_prefix("--mode=").map(str::to_owned)
-            };
-            let Some(value) = value else {
-                anyhow::bail!("unknown sift-server argument `{argument}`");
-            };
-            if mode.is_some() {
-                anyhow::bail!("--mode may be specified only once");
+                        .context("--mode requires in-process, daemon, or container")?;
+                    if mode
+                        .replace(value.parse().map_err(anyhow::Error::msg)?)
+                        .is_some()
+                    {
+                        anyhow::bail!("--mode may be specified only once");
+                    }
+                }
+                "--instance-root" | "--state-dir" => {
+                    let value = arguments
+                        .next()
+                        .with_context(|| format!("{argument} requires a path"))?;
+                    let target = if argument == "--instance-root" {
+                        &mut instance_root
+                    } else {
+                        &mut state_dir
+                    };
+                    if target.replace(value.into()).is_some() {
+                        anyhow::bail!("{argument} may be specified only once");
+                    }
+                }
+                _ if argument.starts_with("--mode=") => {
+                    if mode
+                        .replace(
+                            argument["--mode=".len()..]
+                                .parse()
+                                .map_err(anyhow::Error::msg)?,
+                        )
+                        .is_some()
+                    {
+                        anyhow::bail!("--mode may be specified only once");
+                    }
+                }
+                _ => anyhow::bail!("unknown sift-server argument `{argument}`"),
             }
-            mode = Some(value.parse().map_err(anyhow::Error::msg)?);
         }
-        return Ok(ServerCommand::Serve { mode });
+        if state_dir.is_some() && instance_root.is_none() {
+            anyhow::bail!("--state-dir requires --instance-root");
+        }
+        return Ok(ServerCommand::Serve {
+            mode,
+            instance_root,
+            state_dir,
+        });
     }
 
     let action = args
@@ -672,7 +781,17 @@ mod command_tests {
         assert_eq!(
             parse_command(args(&["--mode=container"])).unwrap(),
             ServerCommand::Serve {
-                mode: Some(RuntimeMode::Container)
+                mode: Some(RuntimeMode::Container),
+                instance_root: None,
+                state_dir: None,
+            }
+        );
+        assert_eq!(
+            parse_command(args(&["--instance-root", "server", "--state-dir", "state"])).unwrap(),
+            ServerCommand::Serve {
+                mode: None,
+                instance_root: Some("server".into()),
+                state_dir: Some("state".into()),
             }
         );
         assert_eq!(

@@ -3172,6 +3172,7 @@ fn resolve_auth_context(state: &AppState, headers: &HeaderMap) -> ApiResult<Auth
 fn local_auth_context(metadata: &MetadataStore, trusted_local: bool) -> ApiResult<AuthContext> {
     let principal = metadata
         .resolve_principal_by_external_id("local:1")?
+        .or(metadata.local_instance_admin()?)
         .ok_or(ApiError::Unauthorized)?;
     let tenants = metadata.list_principal_tenants(principal.id)?;
     Ok(AuthContext {

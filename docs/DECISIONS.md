@@ -1375,6 +1375,44 @@ and measured budget evidence is recorded in
 
 ---
 
+## ADR-041 — Two-File Reproducible Server Instances
+
+**Context.** Server settings, identities, allowlists, tenants, and connection
+profiles previously depended on ambient process configuration and mutable
+SQLite state. Copying a local Sift installation therefore could not reproduce
+the same server safely. Putting passwords in an editable portable manifest
+would make that workflow easy to leak, while mixing host bindings into the
+portable source would make it platform-specific.
+
+**Decision.** A server root is exactly one operator-edited `sift.toml` and one
+generated `sift.lock`. The manifest is strict desired state and contains
+credential-free connection strings plus logical credential-slot references.
+The lock binds its canonical digest to exact Sift, protocol, provider schema,
+extension, and artifact identities. Secret bytes live only in the
+destination's `SecretStore`; SQLite stores opaque handles. Apply records
+manifest ownership, reconciles in one transaction, requires explicit destroy
+approval, honors `prevent_destroy`, and invalidates credentials when their
+consumer identity changes. Destination-private immutable generations hold
+resolved bindings, and startup accepts only the applied generation matching
+both portable files.
+
+The initial personal/loopback bootstrap trusts the local OS account, private
+state permissions, and verified loopback peer. Team/network deployments never
+receive that bypass. Hosted OAuth resolves its client secret from a typed slot
+at runtime. Client presentation preferences and database contents are outside
+the manifest.
+
+**Consequences.** The same root is portable across Linux, macOS, and Windows
+when its selected providers/artifacts support the target. Reproduction covers
+declared Sift behavior, not host provisioning, DNS/TLS, database data, or
+secret values. Failed reconciliation never advances the current-generation
+pointer, unmanaged rows cannot be adopted or deleted, and stale/edited roots
+cannot start. The operator guide is `docs/INSTANCE-CONFIG.md`; the full design
+and deferred package/remote automation work are in
+`docs/PLANS/reproducible-instances.md`.
+
+---
+
 ## ADR-040 — GPUI Desktop Client With A Server-Only Product Boundary
 
 **Context.** ADR-010 deferred the product UI until the headless server,

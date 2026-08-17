@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/instance-config",
     "crates/protocol",
     "crates/api-types",
     "crates/extension-protocol",
@@ -30,6 +31,7 @@ repository = "https://github.com/declan/sift"
 [workspace.dependencies]
 # Internal crates
 sift-protocol = { path = "crates/protocol", version = "0.1.0" }
+sift-instance-config = { path = "crates/instance-config", version = "0.1.0" }
 sift-api-types = { path = "crates/api-types", version = "0.1.0" }
 sift-extension-protocol = { path = "crates/extension-protocol", version = "0.1.0" }
 sift-plugin-host = { path = "crates/plugin-host", version = "0.1.0" }
@@ -105,6 +107,7 @@ http-body-util = "0.1"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
 semver = "1"
 toml = "0.8"
+url = "2"
 zip = { version = "2", default-features = false, features = ["aes-crypto", "deflate"] }
 rustls = { version = "0.23", default-features = false, features = ["ring"] }
 tiberius = { version = "0.12", default-features = false, features = ["rustls", "tds73", "chrono"] }

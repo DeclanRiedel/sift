@@ -7275,6 +7275,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "sift-instance-config"
+version = "0.1.0"
+dependencies = [
+ "semver",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "thiserror 1.0.69",
+ "toml 0.8.23",
+ "url",
+ "uuid",
+]
+
+[[package]]
 name = "sift-metadata"
 version = "0.1.0"
 dependencies = [
@@ -7295,6 +7310,7 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "sift-api-types",
+ "sift-instance-config",
  "sift-protocol",
  "tempfile",
  "thiserror 1.0.69",
@@ -7397,6 +7413,7 @@ dependencies = [
  "sift-driver-postgres",
  "sift-driver-sqlserver",
  "sift-extension-protocol",
+ "sift-instance-config",
  "sift-metadata",
  "sift-plugin-host",
  "sift-protocol",

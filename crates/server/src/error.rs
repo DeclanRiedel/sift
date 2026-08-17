@@ -170,6 +170,9 @@ impl ApiError {
                 | MetadataError::ExtensionStorageNamespaceNotFound => {
                     (StatusCode::NOT_FOUND, "not_found")
                 }
+                MetadataError::InstanceCredentialSlotNotFound(_) => {
+                    (StatusCode::NOT_FOUND, "instance_credential_not_found")
+                }
                 MetadataError::ConnectionProfileLimitReached(_) => {
                     (StatusCode::CONFLICT, "tenant_resource_exhausted")
                 }
@@ -179,7 +182,10 @@ impl ApiError {
                 }
                 MetadataError::FinalInstanceAdmin
                 | MetadataError::FinalAuthIdentity
-                | MetadataError::FinalRoomOwner(_) => (StatusCode::CONFLICT, "conflict"),
+                | MetadataError::FinalRoomOwner(_)
+                | MetadataError::InstanceManifestConflict(_)
+                | MetadataError::InstanceDestroyApprovalRequired(_)
+                | MetadataError::InstancePreventDestroy(_) => (StatusCode::CONFLICT, "conflict"),
                 MetadataError::PolicyRevisionConflict { .. } => {
                     (StatusCode::CONFLICT, "policy_revision_conflict")
                 }
@@ -282,6 +288,8 @@ impl ApiError {
                 | MetadataError::InvalidRunConfiguration
                 | MetadataError::InvalidRunSchedule
                 | MetadataError::InvalidTransferRecipe
+                | MetadataError::InstanceConfig(_)
+                | MetadataError::InstanceCredentialInvalid { .. }
                 | MetadataError::Json(_) => (StatusCode::BAD_REQUEST, "bad_request"),
                 MetadataError::ExtensionStorageValueTooLarge { .. }
                 | MetadataError::CatalogSnapshotTooLarge { .. }

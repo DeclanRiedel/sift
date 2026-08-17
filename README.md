@@ -30,6 +30,11 @@ is still active. For the code-grounded backlog and verified gaps, see
 `docs/DECISIONS.md`. Remote SSH operation, lifecycle modes, and signed release
 staging are covered in `docs/REMOTE-AND-UPDATES.md`.
 
+Reproducible server roots use one editable `sift.toml` plus a generated
+`sift.lock`, with destination-private generations and typed secret slots. See
+`docs/INSTANCE-CONFIG.md` for the short operator workflow and security
+boundary.
+
 Installed local and daemon releases start through `sift-launcher`, which
 health-checks staged updates, commits healthy candidates, and rolls back failed
 candidates before handing the server lifecycle to the caller.
