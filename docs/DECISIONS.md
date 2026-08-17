@@ -1421,6 +1421,10 @@ independent windows, tabs, panes, dock widths, active items, and themes. Server
 identity and workspace references may appear in local restoration data, but
 they remain references and are re-authorized when restored.
 
+Footer panel selection follows the same rule: the active left panel and bottom
+tool are client-local presentation state. The host owns the fixed SQL-oriented
+set; extensions cannot insert controls or mutate the desktop entity tree.
+
 **Consequences.** ADR-010's deferral condition is satisfied and product UI
 work may begin. GPUI remains isolated to desktop/UI crates and may be upgraded
 only deliberately because it is pre-1.0. M0 must first remove the public SDK's

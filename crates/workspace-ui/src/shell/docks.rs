@@ -4,9 +4,9 @@ use crate::presentation::DockPresentation;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum DockId {
-    Connections,
+    Left,
     Inspector,
-    Output,
+    Bottom,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -56,8 +56,8 @@ impl DockRegistry {
 
 const DEFINITIONS: &[DockDefinition] = &[
     DockDefinition {
-        id: DockId::Connections,
-        title: "Connections",
+        id: DockId::Left,
+        title: "Workspace",
         placement: DockPlacement::Left,
     },
     DockDefinition {
@@ -66,8 +66,8 @@ const DEFINITIONS: &[DockDefinition] = &[
         placement: DockPlacement::Right,
     },
     DockDefinition {
-        id: DockId::Output,
-        title: "Output",
+        id: DockId::Bottom,
+        title: "Tools",
         placement: DockPlacement::Bottom,
     },
 ];

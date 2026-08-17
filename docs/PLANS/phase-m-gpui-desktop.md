@@ -223,7 +223,8 @@ The default composition is:
 | Git / Runs  +--------------------------------------------+ Changes         |
 |             | Data / Messages / Explain / History        |                 |
 +-------------+--------------------------------------------+-----------------+
-| connection - database - transaction - room - execution status             |
+| Connections Git Collab Outline | Search Problems Error                    |
+| target - transaction - execution       Mode | Console Monitor Automations |
 +---------------------------------------------------------------------------+
 ```
 
@@ -232,6 +233,18 @@ clear focus, integrated tabs, contextual actions, and no permanent ribbon.
 Database density comes from resizable/collapsible docks, tree filtering,
 column-aware grids, inspector sections, and progressive detail—not from tiny
 hit targets or unlabeled icon walls.
+
+The footer is host-owned SQL chrome. Its left selectors share one left dock:
+Connections, capability-gated Git, Collaboration, and Query Outline. Its
+middle actions expose project search, diagnostics, a copyable current error,
+the active target, transaction state, and execution state. Its right controls
+hold the editor keymap plus one bottom tool at a time: Console, Monitor, or
+Automations. Selecting the active panel closes that dock; selecting another
+panel swaps it in place. Debugger and generic agent controls are deliberately
+absent because they do not describe Sift's database workflow.
+Footer actions use compact application-owned icons, accessible names, and
+hover tooltips; live target, transaction, and execution state remains textual
+because those values must be directly scannable.
 
 Component completion requires all of:
 
@@ -277,6 +290,7 @@ The store contains:
 - window bounds and display identity with off-screen recovery;
 - workspace/window recents;
 - pane and dock layout;
+- active left panel and bottom tool;
 - open item references and selected result tabs;
 - column widths, sort presentation, scroll anchors, and expansion state;
 - theme, keymap, text zoom, and accessibility preferences; and

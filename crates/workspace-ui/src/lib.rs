@@ -16,8 +16,8 @@ pub use lifecycle::{
     TenantNavEntry, WorkspaceNavEntry,
 };
 pub use presentation::{
-    DockPresentation, ItemKind, ItemPresentation, PanePresentation, PresentationState,
-    PresentationStore, Rect, WindowPresentation, WorkspacePresentation,
+    BottomTool, DockPresentation, ItemKind, ItemPresentation, LeftPanel, PanePresentation,
+    PresentationState, PresentationStore, Rect, WindowPresentation, WorkspacePresentation,
 };
 pub use shell::{
     CloseActiveItem, CloseActivePane, CommandDefinition, CommandId, CommandRegistry, CommandSpec,

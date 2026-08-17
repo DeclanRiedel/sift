@@ -71,9 +71,9 @@ pub(super) fn menu_items(menu: AppBarMenu) -> Vec<AppBarMenuItem> {
             Item::unimplemented("Add Cursor Below"),
         ],
         AppBarMenu::View => vec![
-            Item::available(CommandId::ToggleConnectionsDock),
+            Item::available(CommandId::ToggleLeftDock),
             Item::available(CommandId::ToggleInspectorDock),
-            Item::available(CommandId::ToggleOutputDock),
+            Item::available(CommandId::ToggleBottomDock),
             Item::unimplemented("Appearance"),
             Item::unimplemented("Full Screen"),
         ],

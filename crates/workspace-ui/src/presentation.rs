@@ -45,6 +45,46 @@ pub struct DockPresentation {
     pub size: f32,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LeftPanel {
+    #[default]
+    Connections,
+    Git,
+    Collaboration,
+    QueryOutline,
+}
+
+impl LeftPanel {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Connections => "Connections",
+            Self::Git => "Git",
+            Self::Collaboration => "Collab",
+            Self::QueryOutline => "Query Outline",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BottomTool {
+    #[default]
+    Console,
+    Monitor,
+    Automations,
+}
+
+impl BottomTool {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Console => "Console",
+            Self::Monitor => "Monitor",
+            Self::Automations => "Automations",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ItemKind {
     Query,
@@ -72,6 +112,10 @@ pub struct WorkspacePresentation {
     pub left_dock: DockPresentation,
     pub right_dock: DockPresentation,
     pub bottom_dock: DockPresentation,
+    #[serde(default)]
+    pub left_panel: LeftPanel,
+    #[serde(default)]
+    pub bottom_tool: BottomTool,
     pub panes: Vec<PanePresentation>,
     pub active_pane: usize,
     #[serde(default)]
@@ -112,9 +156,11 @@ impl Default for PresentationState {
                     size: 224.0,
                 },
                 bottom_dock: DockPresentation {
-                    open: true,
+                    open: false,
                     size: 260.0,
                 },
+                left_panel: LeftPanel::Connections,
+                bottom_tool: BottomTool::Console,
                 panes: vec![PanePresentation {
                     id: 1,
                     items: vec![ItemPresentation {
@@ -249,6 +295,22 @@ mod tests {
         for forbidden in ["password", "result_rows", "query_text", "credential"] {
             assert!(!json.contains(forbidden));
         }
+    }
+
+    #[test]
+    fn older_presentation_defaults_new_footer_selections() {
+        let state = PresentationState::default();
+        let mut json = serde_json::to_value(state).unwrap();
+        let workspace = json
+            .get_mut("workspace")
+            .and_then(serde_json::Value::as_object_mut)
+            .unwrap();
+        workspace.remove("left_panel");
+        workspace.remove("bottom_tool");
+
+        let decoded = PresentationState::decode(&serde_json::to_vec(&json).unwrap());
+        assert_eq!(decoded.workspace.left_panel, LeftPanel::Connections);
+        assert_eq!(decoded.workspace.bottom_tool, BottomTool::Console);
     }
 
     #[test]

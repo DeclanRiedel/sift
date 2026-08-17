@@ -38,7 +38,9 @@ surfaces, then admin/platform. Within P0, the connection experience comes first.
 - [ ] `open_connection` (explicit spec) — ad-hoc connection dialog (M4)
 - [ ] `ping_connection` — live connection health chip (M4)
 - [ ] `close_connection`, `disconnect_connection_profile` — finer-grained disconnect (M4)
-- [~] **status bar** — `database` now reflects the connected connection; transaction/execution still hardcoded (M3)
+- [~] **footer/status bar** — connection target and execution outcome are live;
+  transaction remains a placeholder. Exclusive, client-local left-panel and
+  bottom-tool selection is landed; semantic search/diagnostics remain M3 work.
 
 ### Sign-in enough to connect — sign-in modal, account state
 

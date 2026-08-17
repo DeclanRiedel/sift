@@ -15,7 +15,9 @@ pub enum ControlTone {
 /// intentionally application-owned rather than borrowed from another IDE.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IconName {
+    Activity,
     Add,
+    Automations,
     Check,
     ChevronDown,
     ChevronRight,
@@ -24,13 +26,17 @@ pub enum IconName {
     Database,
     Github,
     Info,
+    Keyboard,
     Maximize,
     Menu,
     Minimize,
+    Outline,
     Play,
     Search,
     Server,
+    Terminal,
     User,
+    Users,
     Warning,
     Workspace,
 }
@@ -38,7 +44,9 @@ pub enum IconName {
 impl IconName {
     pub const fn path(self) -> &'static str {
         match self {
+            Self::Activity => "icons/activity.svg",
             Self::Add => "icons/add.svg",
+            Self::Automations => "icons/automations.svg",
             Self::Check => "icons/check.svg",
             Self::ChevronDown => "icons/chevron-down.svg",
             Self::ChevronRight => "icons/chevron-right.svg",
@@ -47,13 +55,17 @@ impl IconName {
             Self::Database => "icons/database.svg",
             Self::Github => "icons/github.svg",
             Self::Info => "icons/info.svg",
+            Self::Keyboard => "icons/keyboard.svg",
             Self::Maximize => "icons/maximize.svg",
             Self::Menu => "icons/menu.svg",
             Self::Minimize => "icons/minimize.svg",
+            Self::Outline => "icons/outline.svg",
             Self::Play => "icons/play.svg",
             Self::Search => "icons/search.svg",
             Self::Server => "icons/server.svg",
+            Self::Terminal => "icons/terminal.svg",
             Self::User => "icons/user.svg",
+            Self::Users => "icons/users.svg",
             Self::Warning => "icons/warning.svg",
             Self::Workspace => "icons/workspace.svg",
         }
@@ -246,5 +258,6 @@ mod tests {
         assert!(disabled.opacity < rest.opacity);
         assert_eq!(error.background, theme.colors.danger);
         assert_eq!(IconName::Play.path(), "icons/play.svg");
+        assert_eq!(IconName::Terminal.path(), "icons/terminal.svg");
     }
 }

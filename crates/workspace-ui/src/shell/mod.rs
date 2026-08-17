@@ -15,8 +15,8 @@ use crate::editor::{EditorEvent, QueryDocument, QueryEditor};
 use crate::results::{ResultState, ResultsView};
 
 use crate::presentation::{
-    ItemKind, ItemPresentation, PanePresentation, PresentationState, PresentationStore,
-    WindowPresentation, WorkspacePresentation,
+    BottomTool, ItemKind, ItemPresentation, LeftPanel, PanePresentation, PresentationState,
+    PresentationStore, WindowPresentation, WorkspacePresentation,
 };
 use crate::{
     ConnectionNavEntry, LifecycleEvent, LifecycleProjection, PresenceEvent, RoomPresenceProjection,
@@ -24,10 +24,10 @@ use crate::{
 };
 
 mod app_bar;
+mod bottom_tools;
 mod commands;
 mod docks;
 mod items;
-mod output_panel;
 mod status_bar;
 
 pub use commands::{CommandContext, CommandDefinition, CommandId, CommandRegistry, CommandSpec};
@@ -611,6 +611,8 @@ pub struct WorkspaceShell {
     left_dock: Dock,
     right_dock: Dock,
     bottom_dock: Dock,
+    active_left_panel: LeftPanel,
+    active_bottom_tool: BottomTool,
     modal: Option<Modal>,
     app_bar_expanded: bool,
     app_bar_menu: Option<AppBarMenu>,
@@ -767,9 +769,11 @@ impl WorkspaceShell {
             active_pane,
             selected_workspace_id,
             selected_instance_id,
-            left_dock: DockRegistry::create(DockId::Connections, workspace.left_dock),
+            left_dock: DockRegistry::create(DockId::Left, workspace.left_dock),
             right_dock: DockRegistry::create(DockId::Inspector, workspace.right_dock),
-            bottom_dock: DockRegistry::create(DockId::Output, workspace.bottom_dock),
+            bottom_dock: DockRegistry::create(DockId::Bottom, workspace.bottom_dock),
+            active_left_panel: workspace.left_panel,
+            active_bottom_tool: workspace.bottom_tool,
             modal: None,
             app_bar_expanded: false,
             app_bar_menu: None,
@@ -1087,6 +1091,11 @@ impl WorkspaceShell {
                     ConnectionStatus::Failed { .. } => "Connection failed".into(),
                     ConnectionStatus::Disconnected => "No database".into(),
                 };
+                self.status.current_error = match &status {
+                    ConnectionStatus::Failed { reason, .. } => Some(reason.clone()),
+                    _ => None,
+                };
+                self.status.diagnostic_count = usize::from(self.status.current_error.is_some());
                 self.connection_status = status;
                 cx.notify();
             }
@@ -1121,7 +1130,9 @@ impl WorkspaceShell {
             }
             ExecutorEvent::ProfileCreationFailed(message) => {
                 self.database_connection_pending = false;
-                self.database_connection_error = Some(message);
+                self.database_connection_error = Some(message.clone());
+                self.status.current_error = Some(message);
+                self.status.diagnostic_count = 1;
                 cx.notify();
             }
         }
@@ -1518,11 +1529,85 @@ impl WorkspaceShell {
 
     /// Deliver an execution outcome to whichever pane owns the query item.
     fn route_result(&mut self, item_id: u64, state: ResultState, cx: &mut Context<Self>) {
+        self.status.execution = state.status_label();
+        self.status.current_error = match &state {
+            ResultState::Unavailable(reason) | ResultState::Failed(reason) => Some(reason.clone()),
+            ResultState::TimedOut => Some("Query timed out".into()),
+            ResultState::OutcomeUnknown => Some("Query outcome is unknown".into()),
+            ResultState::Idle
+            | ResultState::Pending
+            | ResultState::Ready(_)
+            | ResultState::Cancelled => None,
+        };
+        self.status.diagnostic_count = match &state {
+            ResultState::Ready(data) => data.warnings.len(),
+            _ => usize::from(self.status.current_error.is_some()),
+        };
         for pane in &self.panes {
             if pane.update(cx, |pane, cx| pane.set_result(item_id, state.clone(), cx)) {
                 break;
             }
         }
+        cx.notify();
+    }
+
+    fn selected_workspace(&self) -> Option<&WorkspaceNavEntry> {
+        let selected = self.selected_workspace_id?;
+        self.lifecycle
+            .tenants
+            .iter()
+            .flat_map(|tenant| &tenant.rooms)
+            .flat_map(|room| &room.workspaces)
+            .find(|workspace| workspace.id == selected)
+    }
+
+    fn select_left_panel(&mut self, panel: LeftPanel, cx: &mut Context<Self>) {
+        if self.left_dock.presentation.open && self.active_left_panel == panel {
+            self.left_dock.presentation.open = false;
+        } else {
+            self.active_left_panel = panel;
+            self.left_dock.presentation.open = true;
+        }
+        self.persist(cx);
+        cx.notify();
+    }
+
+    fn select_bottom_tool(&mut self, tool: BottomTool, cx: &mut Context<Self>) {
+        if self.bottom_dock.presentation.open && self.active_bottom_tool == tool {
+            self.bottom_dock.presentation.open = false;
+        } else {
+            self.active_bottom_tool = tool;
+            self.bottom_dock.presentation.open = true;
+        }
+        self.persist(cx);
+        cx.notify();
+    }
+
+    fn show_project_search(&mut self, cx: &mut Context<Self>) {
+        self.show_toast("Project search is not wired to the desktop yet".into(), cx);
+    }
+
+    fn show_diagnostics(&mut self, cx: &mut Context<Self>) {
+        let message = self.status.current_error.as_ref().map_or_else(
+            || "No current SQL diagnostics".into(),
+            |error| format!("Current diagnostic: {error}"),
+        );
+        self.show_toast(message, cx);
+    }
+
+    fn copy_current_error(&mut self, cx: &mut Context<Self>) {
+        let Some(error) = self.status.current_error.clone() else {
+            return;
+        };
+        cx.write_to_clipboard(gpui::ClipboardItem::new_string(error));
+        self.show_toast("Copied current diagnostic".into(), cx);
+    }
+
+    fn show_editor_mode(&mut self, cx: &mut Context<Self>) {
+        self.show_toast(
+            "Standard keymap active; Vim and Helix modes are planned".into(),
+            cx,
+        );
     }
 
     pub fn open_workspace(&mut self, workspace: &WorkspaceNavEntry, cx: &mut Context<Self>) {
@@ -1579,6 +1664,8 @@ impl WorkspaceShell {
                 left_dock: self.left_dock.presentation.clone(),
                 right_dock: self.right_dock.presentation.clone(),
                 bottom_dock: self.bottom_dock.presentation.clone(),
+                left_panel: self.active_left_panel,
+                bottom_tool: self.active_bottom_tool,
                 panes: self
                     .panes
                     .iter()
@@ -1682,10 +1769,14 @@ impl WorkspaceShell {
             }
             PaneEvent::ExecuteRequested { item_id, sql } => match &self.executor_sender {
                 Some(sender) => {
+                    self.status.execution = "Running…".into();
+                    self.status.current_error = None;
+                    self.status.diagnostic_count = 0;
                     let _ = sender.send(ExecutorCommand::Execute {
                         item_id: *item_id,
                         sql: sql.clone(),
                     });
+                    cx.notify();
                 }
                 None => {
                     self.route_result(
@@ -2126,9 +2217,9 @@ impl WorkspaceShell {
             CommandId::ClosePane => self.close_active_pane(&CloseActivePane, window, cx),
             CommandId::SaveItem => self.save_active_item(&SaveActiveItem, window, cx),
             CommandId::CloseItem => self.close_active_item(&CloseActiveItem, window, cx),
-            CommandId::ToggleConnectionsDock => self.toggle_left_dock(&ToggleLeftDock, window, cx),
+            CommandId::ToggleLeftDock => self.toggle_left_dock(&ToggleLeftDock, window, cx),
             CommandId::ToggleInspectorDock => self.toggle_right_dock(&ToggleRightDock, window, cx),
-            CommandId::ToggleOutputDock => self.toggle_bottom_dock(&ToggleBottomDock, window, cx),
+            CommandId::ToggleBottomDock => self.toggle_bottom_dock(&ToggleBottomDock, window, cx),
             CommandId::OpenCommandPalette => {
                 self.open_command_palette(&OpenCommandPalette, window, cx)
             }
@@ -2716,8 +2807,12 @@ impl WorkspaceShell {
     fn render_dock(&self, dock: &Dock, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = self.theme.colors;
         let definition = dock.definition();
+        let title = match dock.id {
+            DockId::Left => self.active_left_panel.label(),
+            DockId::Inspector | DockId::Bottom => definition.title,
+        };
         div()
-            .id(definition.title)
+            .id(title)
             .key_context("SiftDock")
             .w(px(dock.presentation.size))
             .min_h_0()
@@ -2744,9 +2839,11 @@ impl WorkspaceShell {
                     .text_xs()
                     .text_color(colors.muted_text)
                     .font_weight(gpui::FontWeight::SEMIBOLD)
-                    .child(definition.title.to_uppercase()),
+                    .child(title.to_uppercase()),
             )
-            .when(dock.id == DockId::Connections, |dock_view| {
+            .when(
+                dock.id == DockId::Left && self.active_left_panel == LeftPanel::Connections,
+                |dock_view| {
                 dock_view.child(
                     div()
                         .id("add-database-connection")
@@ -2766,8 +2863,11 @@ impl WorkspaceShell {
                         .child(icon(IconName::Add, colors.muted_text, 14.))
                         .child(div().min_w_0().truncate().child("Add database connection…")),
                 )
-            })
-            .when(dock.id == DockId::Connections, |dock_view| {
+                },
+            )
+            .when(
+                dock.id == DockId::Left && self.active_left_panel == LeftPanel::Connections,
+                |dock_view| {
                 let selected = self.selected_workspace_id;
                 let mut rows: Vec<gpui::AnyElement> = Vec::new();
                 for tenant in &self.lifecycle.tenants {
@@ -2888,9 +2988,12 @@ impl WorkspaceShell {
                         .overflow_y_scroll()
                         .children(rows),
                 )
-            })
+                },
+            )
             .when(
-                dock.id == DockId::Connections && self.lifecycle.tenants.is_empty(),
+                dock.id == DockId::Left
+                    && self.active_left_panel == LeftPanel::Connections
+                    && self.lifecycle.tenants.is_empty(),
                 |dock_view| {
                     dock_view.child(
                         div()
@@ -2898,6 +3001,100 @@ impl WorkspaceShell {
                             .py_2()
                             .text_color(colors.muted_text)
                             .child(self.lifecycle.status_label()),
+                    )
+                },
+            )
+            .when(
+                dock.id == DockId::Left && self.active_left_panel == LeftPanel::Git,
+                |dock_view| {
+                    let content = self.selected_workspace().map_or_else(
+                        || "Select a Git-enabled workspace to inspect changes.".into(),
+                        |workspace| {
+                            if workspace.git_enabled {
+                                format!(
+                                    "Git projection enabled for {}. Change-list rendering arrives with desktop VCS integration.",
+                                    workspace.name
+                                )
+                            } else {
+                                format!("Git is disabled for {}.", workspace.name)
+                            }
+                        },
+                    );
+                    dock_view.child(
+                        div()
+                            .p_3()
+                            .whitespace_normal()
+                            .text_color(colors.muted_text)
+                            .child(content),
+                    )
+                },
+            )
+            .when(
+                dock.id == DockId::Left
+                    && self.active_left_panel == LeftPanel::Collaboration,
+                |dock_view| {
+                    let rows = self.presence.participants.iter().map(|participant| {
+                        let followed = self.presence.followed_attachment
+                            == Some(participant.attachment_id);
+                        div()
+                            .id(("collaborator", participant.attachment_id as usize))
+                            .mx_2()
+                            .h(self.theme.metrics.row_height)
+                            .px_2()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .rounded_sm()
+                            .when(followed, |row| row.bg(colors.active_surface))
+                            .child(div().size(px(7.)).rounded_full().bg(colors.success))
+                            .child(format!("Participant {}", participant.principal_id))
+                    });
+                    dock_view
+                        .child(
+                            div()
+                                .px_3()
+                                .pb_2()
+                                .text_color(colors.muted_text)
+                                .child(format!(
+                                    "{} participant(s) in this room",
+                                    self.presence.participants.len()
+                                )),
+                        )
+                        .child(
+                            div()
+                                .id("collaboration-scroll")
+                                .flex_1()
+                                .min_h_0()
+                                .overflow_y_scroll()
+                                .children(rows),
+                        )
+                },
+            )
+            .when(
+                dock.id == DockId::Left && self.active_left_panel == LeftPanel::QueryOutline,
+                |dock_view| {
+                    let active = self
+                        .panes
+                        .get(self.active_pane)
+                        .and_then(|pane| pane.read(cx).active_item())
+                        .cloned();
+                    dock_view.child(
+                        div()
+                            .p_3()
+                            .flex()
+                            .flex_col()
+                            .gap_2()
+                            .whitespace_normal()
+                            .children(active.map(|item| {
+                                div()
+                                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                                    .child(item.title)
+                            }))
+                            .child(
+                                div()
+                                    .text_color(colors.muted_text)
+                                    .child("Statements, CTEs, parameters, and referenced objects appear here when desktop semantic diagnostics land."),
+                            ),
                     )
                 },
             )
@@ -4728,8 +4925,12 @@ fn window_resize_handles() -> Vec<gpui::AnyElement> {
     ]
 }
 
+fn edge_resize_enabled(is_maximized: bool, is_fullscreen: bool) -> bool {
+    !is_maximized && !is_fullscreen
+}
+
 impl gpui::Render for WorkspaceShell {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = self.theme.colors;
         // Docks are built before the element chain so each borrows `cx`
         // sequentially rather than two `when` closures capturing it at once.
@@ -4791,16 +4992,9 @@ impl gpui::Render for WorkspaceShell {
                     .children(right_dock),
             )
             .when(self.bottom_dock.presentation.open, |shell| {
-                shell.child(output_panel::render_output_panel(
-                    &self.bottom_dock,
-                    self.theme,
-                ))
+                shell.child(bottom_tools::render_bottom_panel(self))
             })
-            .child(status_bar::render_status_bar(
-                &self.status,
-                &self.connection_status,
-                self.theme,
-            ))
+            .child(status_bar::render_status_bar(self, cx))
             .children(self.toasts.last().map(|toast| {
                 div()
                     .id("toast")
@@ -4862,7 +5056,12 @@ impl gpui::Render for WorkspaceShell {
                     .child(tooltip.message.clone())
             }))
             .children(self.render_modal(cx))
-            .children(window_resize_handles())
+            .children(
+                edge_resize_enabled(window.is_maximized(), window.is_fullscreen())
+                    .then(window_resize_handles)
+                    .into_iter()
+                    .flatten(),
+            )
     }
 }
 
@@ -4918,6 +5117,14 @@ mod tests {
             })
             .unwrap()
         })
+    }
+
+    #[test]
+    fn edge_resize_handles_are_disabled_when_window_fills_the_screen() {
+        assert!(edge_resize_enabled(false, false));
+        assert!(!edge_resize_enabled(true, false));
+        assert!(!edge_resize_enabled(false, true));
+        assert!(!edge_resize_enabled(true, true));
     }
 
     #[gpui::test]
@@ -5632,7 +5839,7 @@ mod tests {
         assert!(workspace.read_with(&cx, |shell, _| shell.left_dock.presentation.open));
         workspace.update_in(&mut cx, |shell, window, cx| {
             shell.modal = Some(Modal::CommandPalette);
-            shell.run_command(CommandId::ToggleConnectionsDock, window, cx);
+            shell.run_command(CommandId::ToggleLeftDock, window, cx);
         });
         assert!(!workspace.read_with(&cx, |shell, _| shell.left_dock.presentation.open));
         assert!(workspace.read_with(&cx, |shell, _| shell.modal().is_none()));
@@ -5923,5 +6130,61 @@ mod tests {
             workspace.read_with(&cx, |workspace, _| workspace.presence.followed_attachment),
             Some(41)
         );
+    }
+
+    #[gpui::test]
+    fn footer_panel_switches_are_exclusive_and_persisted(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+
+        workspace.update(&mut cx, |shell, cx| {
+            shell.select_left_panel(LeftPanel::Collaboration, cx);
+            assert!(shell.left_dock.presentation.open);
+            assert_eq!(shell.active_left_panel, LeftPanel::Collaboration);
+
+            shell.select_left_panel(LeftPanel::QueryOutline, cx);
+            assert!(shell.left_dock.presentation.open);
+            assert_eq!(shell.active_left_panel, LeftPanel::QueryOutline);
+
+            shell.select_left_panel(LeftPanel::QueryOutline, cx);
+            assert!(!shell.left_dock.presentation.open);
+
+            shell.select_bottom_tool(BottomTool::Monitor, cx);
+            assert!(shell.bottom_dock.presentation.open);
+            assert_eq!(shell.active_bottom_tool, BottomTool::Monitor);
+
+            shell.select_bottom_tool(BottomTool::Automations, cx);
+            assert!(shell.bottom_dock.presentation.open);
+            assert_eq!(shell.active_bottom_tool, BottomTool::Automations);
+
+            shell.select_bottom_tool(BottomTool::Automations, cx);
+            assert!(!shell.bottom_dock.presentation.open);
+
+            let snapshot = shell.snapshot(cx);
+            assert_eq!(snapshot.workspace.left_panel, LeftPanel::QueryOutline);
+            assert_eq!(snapshot.workspace.bottom_tool, BottomTool::Automations);
+            assert!(!snapshot.workspace.left_dock.open);
+            assert!(!snapshot.workspace.bottom_dock.open);
+        });
+    }
+
+    #[gpui::test]
+    fn footer_copies_the_current_query_error(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+
+        workspace.update(&mut cx, |shell, cx| {
+            shell.route_result(1, ResultState::Failed("syntax error near FROM".into()), cx);
+            assert_eq!(shell.status.diagnostic_count, 1);
+            assert_eq!(
+                shell.status.current_error.as_deref(),
+                Some("syntax error near FROM")
+            );
+            shell.copy_current_error(cx);
+            let copied = cx.read_from_clipboard().and_then(|item| item.text());
+            assert_eq!(copied.as_deref(), Some("syntax error near FROM"));
+        });
     }
 }

@@ -2,6 +2,30 @@
 
 use super::*;
 
+struct StatusTooltip {
+    message: String,
+    theme: Theme,
+}
+
+impl gpui::Render for StatusTooltip {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        let colors = self.theme.colors;
+        div()
+            .max_w(px(360.))
+            .px_2()
+            .py_1()
+            .rounded_sm()
+            .border_1()
+            .border_color(colors.strong_border)
+            .bg(colors.elevated_surface)
+            .shadow_md()
+            .text_xs()
+            .text_color(colors.text)
+            .whitespace_normal()
+            .child(self.message.clone())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StatusBar {
     pub connection: String,
@@ -9,6 +33,8 @@ pub struct StatusBar {
     pub transaction: String,
     pub room: String,
     pub execution: String,
+    pub diagnostic_count: usize,
+    pub current_error: Option<String>,
 }
 
 impl Default for StatusBar {
@@ -16,19 +42,93 @@ impl Default for StatusBar {
         Self {
             connection: "Offline".into(),
             database: "No database".into(),
-            transaction: "No transaction".into(),
+            transaction: "TX: None".into(),
             room: "Local workspace".into(),
             execution: "Ready".into(),
+            diagnostic_count: 0,
+            current_error: None,
         }
     }
 }
 
 pub(super) fn render_status_bar(
-    status: &StatusBar,
-    connection_status: &ConnectionStatus,
-    theme: Theme,
+    shell: &WorkspaceShell,
+    cx: &mut Context<WorkspaceShell>,
 ) -> gpui::AnyElement {
+    let theme = shell.theme;
     let colors = theme.colors;
+    let button = |id: &'static str,
+                  icon_name: IconName,
+                  tooltip: String,
+                  selected: bool,
+                  badge: Option<usize>,
+                  danger: bool| {
+        let foreground = if danger {
+            colors.danger
+        } else if selected {
+            colors.text
+        } else {
+            colors.muted_text
+        };
+        let tooltip_message = tooltip.clone();
+        div()
+            .id(id)
+            .role(Role::Button)
+            .aria_label(tooltip)
+            .h(theme.metrics.compact_control_height)
+            .min_w(theme.metrics.compact_control_height)
+            .flex_none()
+            .flex()
+            .items_center()
+            .justify_center()
+            .gap_1()
+            .px_1()
+            .rounded_sm()
+            .text_color(foreground)
+            .when(selected, |button| button.bg(colors.active_surface))
+            .hover(|button| button.bg(colors.hovered_surface).text_color(colors.text))
+            .child(icon(icon_name, foreground, 14.))
+            .children(badge.filter(|count| *count > 0).map(|count| {
+                div()
+                    .min_w(px(12.))
+                    .h(px(12.))
+                    .px(px(3.))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded_full()
+                    .bg(if danger {
+                        colors.danger_muted
+                    } else {
+                        colors.active_surface
+                    })
+                    .text_color(foreground)
+                    .text_size(px(9.))
+                    .child(count.to_string())
+            }))
+            .tooltip(move |_, cx| {
+                cx.new(|_| StatusTooltip {
+                    message: tooltip_message.clone(),
+                    theme,
+                })
+                .into()
+            })
+    };
+    let separator = || {
+        div()
+            .flex_none()
+            .w(px(1.))
+            .h(px(14.))
+            .mx_1()
+            .bg(colors.border)
+    };
+    let target_label = match &shell.connection_status {
+        ConnectionStatus::Connected { .. } => {
+            format!("{} · {}", shell.status.database, shell.status.room)
+        }
+        _ => shell.status.database.clone(),
+    };
+
     div()
         .id("status-bar")
         .role(Role::Toolbar)
@@ -38,9 +138,8 @@ pub(super) fn render_status_bar(
         .w_full()
         .flex()
         .items_center()
-        .justify_between()
-        .gap_2()
-        .px_2()
+        .gap_1()
+        .px_1()
         .border_t_1()
         .border_color(colors.subtle_border)
         .bg(colors.toolbar)
@@ -49,55 +148,221 @@ pub(super) fn render_status_bar(
         .child(
             div()
                 .flex()
+                .items_center()
+                .gap_1()
+                .child(
+                    button(
+                        "footer-connections",
+                        IconName::Database,
+                        "Connections".into(),
+                        shell.left_dock.presentation.open
+                            && shell.active_left_panel == LeftPanel::Connections,
+                        None,
+                        false,
+                    )
+                    .on_click(cx.listener(|shell, _, _, cx| {
+                        shell.select_left_panel(LeftPanel::Connections, cx)
+                    })),
+                )
+                .child(
+                    button(
+                        "footer-git",
+                        IconName::Github,
+                        "Git workspace".into(),
+                        shell.left_dock.presentation.open
+                            && shell.active_left_panel == LeftPanel::Git,
+                        None,
+                        false,
+                    )
+                    .on_click(
+                        cx.listener(|shell, _, _, cx| shell.select_left_panel(LeftPanel::Git, cx)),
+                    ),
+                )
+                .child(
+                    button(
+                        "footer-collaboration",
+                        IconName::Users,
+                        format!(
+                            "Collaboration ({} participants)",
+                            shell.presence.participants.len()
+                        ),
+                        shell.left_dock.presentation.open
+                            && shell.active_left_panel == LeftPanel::Collaboration,
+                        Some(shell.presence.participants.len()),
+                        false,
+                    )
+                    .on_click(cx.listener(|shell, _, _, cx| {
+                        shell.select_left_panel(LeftPanel::Collaboration, cx)
+                    })),
+                )
+                .child(
+                    button(
+                        "footer-query-outline",
+                        IconName::Outline,
+                        "Query outline".into(),
+                        shell.left_dock.presentation.open
+                            && shell.active_left_panel == LeftPanel::QueryOutline,
+                        None,
+                        false,
+                    )
+                    .on_click(cx.listener(|shell, _, _, cx| {
+                        shell.select_left_panel(LeftPanel::QueryOutline, cx)
+                    })),
+                ),
+        )
+        .child(separator())
+        .child(
+            div()
+                .flex()
                 .flex_1()
                 .min_w_0()
                 .overflow_x_hidden()
                 .items_center()
-                .gap_2()
+                .gap_1()
+                .child(
+                    button(
+                        "footer-project-search",
+                        IconName::Search,
+                        "Search project".into(),
+                        false,
+                        None,
+                        false,
+                    )
+                    .on_click(cx.listener(|shell, _, _, cx| shell.show_project_search(cx))),
+                )
+                .child(
+                    button(
+                        "footer-diagnostics",
+                        IconName::Warning,
+                        format!("Problems ({})", shell.status.diagnostic_count),
+                        false,
+                        Some(shell.status.diagnostic_count),
+                        shell.status.diagnostic_count > 0,
+                    )
+                    .on_click(cx.listener(|shell, _, _, cx| shell.show_diagnostics(cx))),
+                )
+                .children(shell.status.current_error.as_ref().map(|error| {
+                    button(
+                        "footer-current-error",
+                        IconName::Copy,
+                        format!("Copy current error: {}", compact_error(error)),
+                        false,
+                        None,
+                        true,
+                    )
+                    .on_click(cx.listener(|shell, _, _, cx| shell.copy_current_error(cx)))
+                }))
+                .child(separator())
                 .child(
                     div()
-                        .flex_none()
                         .flex()
+                        .min_w_0()
+                        .overflow_hidden()
                         .items_center()
                         .gap_1()
-                        .child(
-                            div()
-                                .size(px(6.))
-                                .rounded_full()
-                                .bg(match connection_status {
-                                    ConnectionStatus::Connected { .. } => colors.success,
-                                    ConnectionStatus::Connecting { .. } => colors.warning,
-                                    ConnectionStatus::Failed { .. } => colors.danger,
-                                    ConnectionStatus::Disconnected => colors.muted_text,
-                                }),
-                        )
-                        .child(status.connection.clone()),
+                        .child(div().size(px(6.)).flex_none().rounded_full().bg(
+                            match &shell.connection_status {
+                                ConnectionStatus::Connected { .. } => colors.success,
+                                ConnectionStatus::Connecting { .. } => colors.warning,
+                                ConnectionStatus::Failed { .. } => colors.danger,
+                                ConnectionStatus::Disconnected => colors.muted_text,
+                            },
+                        ))
+                        .child(div().min_w_0().truncate().child(target_label)),
                 )
-                .child(div().min_w_0().truncate().child(status.database.clone()))
-                .child(div().flex_none().child(status.transaction.clone())),
-        )
-        .child(
-            div()
-                .flex()
-                .flex_shrink_0()
-                .overflow_x_hidden()
-                .items_center()
-                .gap_2()
-                .child(
-                    div()
-                        .max_w(px(220.))
-                        .min_w_0()
-                        .truncate()
-                        .child(status.room.clone()),
-                )
+                .child(div().flex_none().child(shell.status.transaction.clone()))
                 .child(
                     div()
                         .flex_none()
                         .px_1()
                         .rounded(px(3.))
                         .bg(colors.hovered_surface)
-                        .child(status.execution.clone()),
+                        .child(shell.status.execution.clone()),
+                ),
+        )
+        .child(separator())
+        .child(
+            div()
+                .flex()
+                .flex_none()
+                .items_center()
+                .gap_1()
+                .child(
+                    button(
+                        "footer-editor-mode",
+                        IconName::Keyboard,
+                        "Editor mode: Standard".into(),
+                        false,
+                        None,
+                        false,
+                    )
+                    .on_click(cx.listener(|shell, _, _, cx| shell.show_editor_mode(cx))),
+                )
+                .child(
+                    button(
+                        "footer-console",
+                        IconName::Terminal,
+                        "Query console".into(),
+                        shell.bottom_dock.presentation.open
+                            && shell.active_bottom_tool == BottomTool::Console,
+                        None,
+                        false,
+                    )
+                    .on_click(cx.listener(|shell, _, _, cx| {
+                        shell.select_bottom_tool(BottomTool::Console, cx)
+                    })),
+                )
+                .child(
+                    button(
+                        "footer-monitor",
+                        IconName::Activity,
+                        "Connection and execution monitor".into(),
+                        shell.bottom_dock.presentation.open
+                            && shell.active_bottom_tool == BottomTool::Monitor,
+                        None,
+                        false,
+                    )
+                    .on_click(cx.listener(|shell, _, _, cx| {
+                        shell.select_bottom_tool(BottomTool::Monitor, cx)
+                    })),
+                )
+                .child(
+                    button(
+                        "footer-automations",
+                        IconName::Automations,
+                        "Automations".into(),
+                        shell.bottom_dock.presentation.open
+                            && shell.active_bottom_tool == BottomTool::Automations,
+                        None,
+                        false,
+                    )
+                    .on_click(cx.listener(|shell, _, _, cx| {
+                        shell.select_bottom_tool(BottomTool::Automations, cx)
+                    })),
                 ),
         )
         .into_any_element()
+}
+
+fn compact_error(error: &str) -> String {
+    const MAX_CHARS: usize = 34;
+    let mut compact = error.split_whitespace().collect::<Vec<_>>().join(" ");
+    if compact.chars().count() > MAX_CHARS {
+        compact = compact.chars().take(MAX_CHARS - 1).collect::<String>() + "…";
+    }
+    compact
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn compact_error_is_single_line_and_unicode_safe() {
+        assert_eq!(compact_error("bad\n query"), "bad query");
+        let compact =
+            compact_error("数据库错误数据库错误数据库错误数据库错误数据库错误数据库错误数据库错误");
+        assert!(compact.chars().count() <= 34);
+        assert!(compact.ends_with('…'));
+    }
 }
