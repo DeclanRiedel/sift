@@ -1035,7 +1035,7 @@ impl WorkspaceShell {
                 .items_center()
                 .justify_center()
                 .overflow_hidden()
-                .rounded_full()
+                .rounded(px(4.))
                 .bg(colors.accent_muted)
                 .text_xs()
                 .font_weight(gpui::FontWeight::SEMIBOLD)
@@ -2874,11 +2874,9 @@ impl WorkspaceShell {
                                     .items_center()
                                     .justify_center()
                                     .rounded_sm()
-                                    .text_sm()
-                                    .text_color(colors.muted_text)
                                     .hover(|button| button.bg(colors.hovered_surface))
                                     .on_click(|_, window, _| window.minimize_window())
-                                    .child("—"),
+                                    .child(icon(IconName::Minimize, colors.muted_text, 16.)),
                             )
                             .child(
                                 div()
@@ -2890,11 +2888,9 @@ impl WorkspaceShell {
                                     .items_center()
                                     .justify_center()
                                     .rounded_sm()
-                                    .text_xs()
-                                    .text_color(colors.muted_text)
                                     .hover(|button| button.bg(colors.hovered_surface))
                                     .on_click(|_, window, _| window.zoom_window())
-                                    .child("□"),
+                                    .child(icon(IconName::Maximize, colors.muted_text, 16.)),
                             )
                             .child(
                                 div()
@@ -2906,13 +2902,9 @@ impl WorkspaceShell {
                                     .items_center()
                                     .justify_center()
                                     .rounded_sm()
-                                    .text_sm()
-                                    .text_color(colors.muted_text)
-                                    .hover(|button| {
-                                        button.bg(colors.danger_muted).text_color(colors.danger)
-                                    })
+                                    .hover(|button| button.bg(colors.danger_muted))
                                     .on_click(|_, window, _| window.remove_window())
-                                    .child("×"),
+                                    .child(icon(IconName::Close, colors.muted_text, 16.)),
                             ),
                     ),
             )
