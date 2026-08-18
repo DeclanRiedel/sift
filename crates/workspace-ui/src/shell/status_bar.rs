@@ -137,32 +137,39 @@ pub(super) fn render_status_bar(
             )
         },
     );
-    let (mode_label, mode_tooltip) = match shell.active_editor_mode(cx) {
-        Some((EditorKeymap::Vim, VimMode::Normal)) => (
+    let (mode_label, mode_tooltip, vim_entered) = match shell.active_editor_mode(cx) {
+        Some((EditorKeymap::Vim, VimMode::Normal, entered)) => (
             "VIM NORMAL",
             "Vim normal mode; click to use the standard keymap",
+            Some(entered),
         ),
-        Some((EditorKeymap::Vim, VimMode::Insert)) => (
+        Some((EditorKeymap::Vim, VimMode::Insert, entered)) => (
             "VIM INSERT",
             "Vim insert mode; Escape returns to normal mode",
+            Some(entered),
         ),
-        Some((EditorKeymap::Vim, VimMode::Visual)) => (
+        Some((EditorKeymap::Vim, VimMode::Visual, entered)) => (
             "VIM VISUAL",
             "Vim visual mode; Escape returns to normal mode",
+            Some(entered),
         ),
-        Some((EditorKeymap::Vim, VimMode::Select)) => (
+        Some((EditorKeymap::Vim, VimMode::Select, entered)) => (
             "VIM SELECT",
             "Vim select mode; Escape returns to normal mode",
+            Some(entered),
         ),
-        Some((EditorKeymap::Vim, VimMode::OperatorPending)) => {
-            ("VIM OPERATOR", "Vim operator-pending mode")
+        Some((EditorKeymap::Vim, VimMode::OperatorPending, entered)) => {
+            ("VIM OPERATOR", "Vim operator-pending mode", Some(entered))
         }
-        Some((EditorKeymap::Vim, VimMode::Command)) => ("VIM COMMAND", "Vim command mode"),
-        Some((EditorKeymap::Standard, _)) => (
+        Some((EditorKeymap::Vim, VimMode::Command, entered)) => {
+            ("VIM COMMAND", "Vim command mode", Some(entered))
+        }
+        Some((EditorKeymap::Standard, _, _)) => (
             "STANDARD",
             "Standard editor keymap; click to enable Vim mode",
+            None,
         ),
-        None => ("-", "No active editor"),
+        None => ("-", "No active editor", None),
     };
 
     div()
@@ -370,6 +377,31 @@ pub(super) fn render_status_bar(
                             .into()
                         })
                 })
+                .children(vim_entered.map(|entered| {
+                    div()
+                        .id("footer-vim-entered")
+                        .aria_label(if entered.is_empty() {
+                            "No pending Vim keys".to_owned()
+                        } else {
+                            format!("Pending Vim keys: {entered}")
+                        })
+                        .h(theme.metrics.compact_control_height)
+                        .min_w(px(28.))
+                        .px_1()
+                        .flex()
+                        .items_center()
+                        .justify_end()
+                        .font_family("monospace")
+                        .text_color(colors.accent)
+                        .child(entered)
+                        .tooltip(move |_, cx| {
+                            cx.new(|_| StatusTooltip {
+                                message: "Pending Vim key sequence".into(),
+                                theme,
+                            })
+                            .into()
+                        })
+                }))
                 .child(separator())
                 .child(
                     button(

@@ -541,6 +541,10 @@ pub enum EditorEvent {
     DocumentChanged,
     /// Cursor or modal state changed; parent chrome may refresh lazily.
     CursorChanged,
+    /// Pending Vim keys or mode changed; status chrome should refresh now.
+    VimStateChanged,
+    /// Vim's command prefix requested the workspace command palette.
+    OpenCommandPalette,
     /// Run this SQL (the statement under the caret, or the whole document).
     Execute { sql: String },
 }
@@ -675,6 +679,7 @@ pub struct QueryEditor {
     language: EditorLanguage,
     keymap: EditorKeymap,
     vim_mode: VimMode,
+    vim_entered: String,
     vim: Option<VimEngine>,
     cursor_blink: Entity<CursorBlink>,
     cursor_event_pending: bool,
@@ -700,6 +705,7 @@ impl QueryEditor {
             language: EditorLanguage::Sql,
             keymap: EditorKeymap::Standard,
             vim_mode: VimMode::Insert,
+            vim_entered: String::new(),
             vim: None,
             cursor_blink,
             cursor_event_pending: false,
@@ -728,6 +734,10 @@ impl QueryEditor {
         self.vim_mode
     }
 
+    pub fn vim_entered(&self) -> &str {
+        &self.vim_entered
+    }
+
     pub fn toggle_keymap(&mut self, cx: &mut Context<Self>) {
         self.keymap = match self.keymap {
             EditorKeymap::Standard => EditorKeymap::Vim,
@@ -737,8 +747,10 @@ impl QueryEditor {
             EditorKeymap::Standard => VimMode::Insert,
             EditorKeymap::Vim => VimMode::Normal,
         };
+        self.vim_entered.clear();
         self.vim = (self.keymap == EditorKeymap::Vim)
             .then(|| VimEngine::new(self.document.text(), self.document.cursor()));
+        cx.emit(EditorEvent::VimStateChanged);
         self.selection_changed(cx);
     }
 
@@ -819,6 +831,10 @@ impl QueryEditor {
     }
 
     fn apply_vim_snapshot(&mut self, snapshot: VimSnapshot, cx: &mut Context<Self>) {
+        let open_command_palette = snapshot.open_command_palette;
+        let vim_state_changed =
+            self.vim_mode != snapshot.mode || self.vim_entered != snapshot.entered;
+        self.vim_entered = snapshot.entered;
         let mut document_changed = false;
         if let Some(snapshot_text) = snapshot.text.filter(|text| text != self.document.text()) {
             let old = self.document.text();
@@ -868,6 +884,12 @@ impl QueryEditor {
             self.document.set_selection(cursor..cursor, false);
         }
         self.vim_mode = snapshot.mode;
+        if vim_state_changed {
+            cx.emit(EditorEvent::VimStateChanged);
+        }
+        if open_command_palette {
+            cx.emit(EditorEvent::OpenCommandPalette);
+        }
         if document_changed {
             self.edited(cx);
         } else {

@@ -28,6 +28,8 @@ pub(super) struct VimSnapshot {
     pub cursor: (usize, usize),
     pub selection: Option<((usize, usize), (usize, usize))>,
     pub mode: VimMode,
+    pub entered: String,
+    pub open_command_palette: bool,
 }
 
 /// A complete Vim keybinding machine plus ModalKit's editing buffer. Sift
@@ -38,6 +40,7 @@ pub(super) struct VimEngine {
     cursor_group: CursorGroupId,
     store: Store<EmptyInfo>,
     viewport: ViewportContext<Cursor>,
+    entered: String,
 }
 
 impl VimEngine {
@@ -54,6 +57,7 @@ impl VimEngine {
             cursor_group,
             store: Store::default(),
             viewport: ViewportContext::default(),
+            entered: String::new(),
         }
     }
 
@@ -68,22 +72,42 @@ impl VimEngine {
 
     pub fn input_text(&mut self, text: &str) -> VimSnapshot {
         let mut text_changed = false;
+        let mut open_command_palette = false;
         for character in text.chars() {
+            if character == ':' && self.bindings.mode() == ModalVimMode::Normal {
+                self.entered.clear();
+                open_command_palette = true;
+                break;
+            }
             text_changed |=
                 self.input_key_event(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE));
         }
-        self.snapshot(text_changed)
+        self.snapshot(text_changed, open_command_palette)
     }
 
     pub fn input_key(&mut self, code: KeyCode) -> VimSnapshot {
+        if code == KeyCode::Char(':') && self.bindings.mode() == ModalVimMode::Normal {
+            self.entered.clear();
+            return self.snapshot(false, true);
+        }
         let text_changed = self.input_key_event(KeyEvent::new(code, KeyModifiers::NONE));
-        self.snapshot(text_changed)
+        self.snapshot(text_changed, false)
     }
 
     fn input_key_event(&mut self, event: KeyEvent) -> bool {
         let mut text_changed = false;
+        let entered_key = entered_key(&event);
+        if let Some(key) = entered_key.as_deref() {
+            if self.bindings.mode() != ModalVimMode::Insert {
+                self.entered.push_str(key);
+            }
+        } else {
+            self.entered.clear();
+        }
         self.bindings.input_key(event.into());
+        let mut action_completed = false;
         while let Some((action, context)) = self.bindings.pop() {
+            action_completed = true;
             match action {
                 Action::Editor(action) => {
                     text_changed |= editor_action_changes_text(&action, &context);
@@ -108,6 +132,9 @@ impl VimEngine {
                 Action::Repeat(sequence) => self.bindings.repeat(sequence, Some(context)),
                 _ => {}
             }
+        }
+        if action_completed && self.bindings.mode() != ModalVimMode::OperationPending {
+            self.entered.clear();
         }
         text_changed
     }
@@ -141,7 +168,7 @@ impl VimEngine {
         true
     }
 
-    fn snapshot(&mut self, text_changed: bool) -> VimSnapshot {
+    fn snapshot(&mut self, text_changed: bool, open_command_palette: bool) -> VimSnapshot {
         let text = text_changed.then(|| {
             let mut text = self.buffer.get_text();
             // Remove only the sentinel newline introduced in `new`.
@@ -167,7 +194,18 @@ impl VimEngine {
             cursor,
             selection,
             mode,
+            entered: self.entered.clone(),
+            open_command_palette,
         }
+    }
+}
+
+fn entered_key(event: &KeyEvent) -> Option<String> {
+    match event.code {
+        KeyCode::Char(character) if !event.modifiers.contains(KeyModifiers::CONTROL) => {
+            Some(character.to_string())
+        }
+        _ => None,
     }
 }
 
@@ -273,5 +311,24 @@ mod tests {
     fn sentinel_preserves_user_trailing_newline() {
         let mut vim = VimEngine::new("select 1;\n", 0);
         assert_eq!(vim.input_text("l").text, None);
+    }
+
+    #[test]
+    fn reports_incomplete_key_sequences() {
+        let mut vim = VimEngine::new("one\ntwo\nthree", 0);
+        assert_eq!(vim.input_text("g").entered, "g");
+        assert_eq!(vim.input_text("g").entered, "");
+
+        assert_eq!(vim.input_text("2d").entered, "2d");
+        assert_eq!(vim.input_text("d").entered, "");
+    }
+
+    #[test]
+    fn colon_requests_sift_command_palette_without_entering_ex_mode() {
+        let mut vim = VimEngine::new("select 1;", 0);
+        let snapshot = vim.input_text(":");
+        assert!(snapshot.open_command_palette);
+        assert_eq!(snapshot.mode, VimMode::Normal);
+        assert_eq!(snapshot.entered, "");
     }
 }

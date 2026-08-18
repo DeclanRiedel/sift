@@ -288,6 +288,8 @@ pub enum PaneEvent {
         item_id: u64,
         document_changed: bool,
     },
+    /// An editor requested the workspace-level command palette.
+    OpenCommandPaletteRequested,
     /// A query item asked to run SQL; the workspace dispatches it to execution.
     ExecuteRequested { item_id: u64, sql: String },
 }
@@ -412,10 +414,13 @@ impl Pane {
                 item_id,
                 document_changed: true,
             }),
-            EditorEvent::CursorChanged => cx.emit(PaneEvent::EditorStateChanged {
-                item_id,
-                document_changed: false,
-            }),
+            EditorEvent::CursorChanged | EditorEvent::VimStateChanged => {
+                cx.emit(PaneEvent::EditorStateChanged {
+                    item_id,
+                    document_changed: false,
+                })
+            }
+            EditorEvent::OpenCommandPalette => cx.emit(PaneEvent::OpenCommandPaletteRequested),
             EditorEvent::Execute { sql } => {
                 // Show the pending state immediately, then ask the workspace to
                 // dispatch the run. The workspace owns the executor channel.
@@ -486,11 +491,15 @@ impl Pane {
             .map(|editor| editor.read(cx).cursor_position())
     }
 
-    fn active_editor_mode(&self, cx: &App) -> Option<(EditorKeymap, VimMode)> {
+    fn active_editor_mode(&self, cx: &App) -> Option<(EditorKeymap, VimMode, String)> {
         let item = self.active_item()?;
         self.editors.get(&item.id).map(|editor| {
             let editor = editor.read(cx);
-            (editor.keymap(), editor.vim_mode())
+            (
+                editor.keymap(),
+                editor.vim_mode(),
+                editor.vim_entered().to_owned(),
+            )
         })
     }
 
@@ -2151,7 +2160,7 @@ impl WorkspaceShell {
             .and_then(|pane| pane.read(cx).active_cursor_position(cx))
     }
 
-    fn active_editor_mode(&self, cx: &App) -> Option<(EditorKeymap, VimMode)> {
+    fn active_editor_mode(&self, cx: &App) -> Option<(EditorKeymap, VimMode, String)> {
         self.panes
             .get(self.active_pane)
             .and_then(|pane| pane.read(cx).active_editor_mode(cx))
@@ -2421,6 +2430,10 @@ impl WorkspaceShell {
                     });
                 }
                 cx.notify();
+            }
+            PaneEvent::OpenCommandPaletteRequested => {
+                self.active_pane = index;
+                self.open_command_palette(&OpenCommandPalette, window, cx);
             }
             PaneEvent::ExecuteRequested { item_id, sql } => match &self.executor_sender {
                 Some(sender) => {
@@ -6686,7 +6699,7 @@ fn highlight_match(label: &'static str, query: &str, accent: gpui::Hsla) -> impl
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gpui::{point, Modifiers, TestAppContext, VisualTestContext};
+    use gpui::{point, EntityInputHandler, Modifiers, TestAppContext, VisualTestContext};
 
     fn shell(cx: &mut TestAppContext) -> gpui::WindowHandle<WorkspaceShell> {
         cx.update(|cx| {
@@ -6910,6 +6923,32 @@ mod tests {
             workspace.read_with(&cx, |workspace, _| workspace.modal().cloned()),
             Some(Modal::CommandPalette)
         );
+    }
+
+    #[gpui::test]
+    fn vim_colon_opens_workspace_command_palette(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        let editor = workspace.read_with(&cx, |workspace, cx| {
+            let pane = workspace.panes[workspace.active_pane].read(cx);
+            let item_id = pane.active_item().expect("active query item").id;
+            pane.editor(item_id).expect("active query editor")
+        });
+
+        editor.update_in(&mut cx, |editor, window, cx| {
+            editor.toggle_keymap(cx);
+            editor.replace_text_in_range(None, ":", window, cx);
+        });
+
+        assert_eq!(
+            workspace.read_with(&cx, |workspace, _| workspace.modal().cloned()),
+            Some(Modal::CommandPalette)
+        );
+        editor.read_with(&cx, |editor, _| {
+            assert_eq!(editor.vim_mode(), VimMode::Normal);
+            assert_eq!(editor.document().text(), "");
+        });
     }
 
     #[gpui::test]
