@@ -12,7 +12,7 @@ use gpui::{
     Role, ScrollHandle, ShapedLine, Style, TextRun, UTF16Selection, Window,
 };
 use sift_doc::{random_peer_id, TextReplica};
-use sift_ui::Theme;
+use sift_ui::{ActiveTheme, Theme};
 
 mod vim;
 use self::vim::{VimEngine, VimSnapshot};
@@ -676,7 +676,6 @@ struct LineLayoutCache {
 pub struct QueryEditor {
     focus_handle: FocusHandle,
     document: QueryDocument,
-    theme: Theme,
     language: EditorLanguage,
     keymap: EditorKeymap,
     vim_mode: VimMode,
@@ -696,13 +695,12 @@ pub struct QueryEditor {
 }
 
 impl QueryEditor {
-    pub fn new(document: QueryDocument, theme: Theme, cx: &mut Context<Self>) -> Self {
+    pub fn new(document: QueryDocument, cx: &mut Context<Self>) -> Self {
         let cursor_blink = cx.new(|_| CursorBlink::new());
         cx.observe(&cursor_blink, |_, _, cx| cx.notify()).detach();
         Self {
             focus_handle: cx.focus_handle(),
             document,
-            theme,
             language: EditorLanguage::Sql,
             keymap: EditorKeymap::Standard,
             vim_mode: VimMode::Insert,
@@ -771,12 +769,6 @@ impl QueryEditor {
 
     pub fn cursor_position(&self) -> (usize, usize) {
         self.document.cursor_position()
-    }
-
-    pub fn set_theme(&mut self, theme: Theme, cx: &mut Context<Self>) {
-        self.theme = theme;
-        self.line_cache.borrow_mut().lines.clear();
-        cx.notify();
     }
 
     fn edited(&mut self, cx: &mut Context<Self>) {
@@ -1100,6 +1092,7 @@ impl QueryEditor {
     fn byte_index_for_point(
         &self,
         position: gpui::Point<Pixels>,
+        theme: Theme,
         window: &mut Window,
     ) -> Option<usize> {
         let viewport = self.scroll_handle.bounds();
@@ -1134,8 +1127,8 @@ impl QueryEditor {
         let style = window.text_style();
         let font_size = style.font_size.to_pixels(window.rem_size());
         let runs = match self.language {
-            EditorLanguage::Sql => sql_text_runs(line_text, style.font(), self.theme),
-            EditorLanguage::Toml => toml_text_runs(line_text, style.font(), self.theme),
+            EditorLanguage::Sql => sql_text_runs(line_text, style.font(), theme),
+            EditorLanguage::Toml => toml_text_runs(line_text, style.font(), theme),
         };
         let layout =
             window
@@ -1285,16 +1278,16 @@ impl EntityInputHandler for QueryEditor {
         &mut self,
         point: gpui::Point<Pixels>,
         window: &mut Window,
-        _: &mut Context<Self>,
+        cx: &mut Context<Self>,
     ) -> Option<usize> {
-        self.byte_index_for_point(point, window)
+        self.byte_index_for_point(point, cx.theme(), window)
             .map(|offset| self.offset_to_utf16(offset))
     }
 }
 
 impl gpui::Render for QueryEditor {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let colors = self.theme.colors;
+        let colors = cx.theme().colors;
         let focused = self.focus_handle.is_focused(window);
         let blink_enabled = self.cursor_blink.read(cx).enabled;
         if focused != blink_enabled {
@@ -1327,7 +1320,9 @@ impl gpui::Render for QueryEditor {
                 MouseButton::Left,
                 cx.listener(|editor, event: &gpui::MouseDownEvent, window, cx| {
                     editor.focus_handle.clone().focus(window, cx);
-                    let Some(cursor) = editor.byte_index_for_point(event.position, window) else {
+                    let Some(cursor) =
+                        editor.byte_index_for_point(event.position, cx.theme(), window)
+                    else {
                         return;
                     };
                     editor.document.set_selection(cursor..cursor, false);
@@ -1456,7 +1451,7 @@ impl Element for QueryEditorElement {
         let text = editor.document.text();
         let selection = editor.document.selection();
         let cursor = editor.document.cursor();
-        let theme = editor.theme;
+        let theme = cx.theme();
         let language = editor.language;
         let block_cursor = editor.keymap == EditorKeymap::Vim && editor.vim_mode == VimMode::Normal;
         let cursor_visible = editor.cursor_blink.read(cx).visible;
@@ -1638,7 +1633,7 @@ impl Element for QueryEditorElement {
             cursor: cursor_quad,
             gutter: fill(
                 Bounds::new(bounds.origin, size(EDITOR_GUTTER_WIDTH, bounds.size.height)),
-                theme.colors.background,
+                theme.colors.editor_gutter,
             ),
             text_bounds,
             line_height,
@@ -1942,7 +1937,7 @@ mod tests {
         let window = cx
             .update(|cx| {
                 cx.open_window(Default::default(), |_window, cx| {
-                    cx.new(|cx| QueryEditor::new(doc("select"), Theme::dark(), cx))
+                    cx.new(|cx| QueryEditor::new(doc("select"), cx))
                 })
             })
             .unwrap();
@@ -1987,7 +1982,7 @@ mod tests {
         let window = cx
             .update(|cx| {
                 cx.open_window(Default::default(), |_window, cx| {
-                    cx.new(|cx| QueryEditor::new(doc(&text), Theme::dark(), cx))
+                    cx.new(|cx| QueryEditor::new(doc(&text), cx))
                 })
             })
             .unwrap();
@@ -2022,7 +2017,7 @@ mod tests {
         let window = cx
             .update(|cx| {
                 cx.open_window(Default::default(), |_window, cx| {
-                    cx.new(|cx| QueryEditor::new(doc(&text), Theme::dark(), cx))
+                    cx.new(|cx| QueryEditor::new(doc(&text), cx))
                 })
             })
             .unwrap();
@@ -2062,9 +2057,7 @@ mod tests {
         let window = cx
             .update(|cx| {
                 cx.open_window(Default::default(), |_window, cx| {
-                    cx.new(|cx| {
-                        QueryEditor::new(doc("select 1;\n   \nselect 3;"), Theme::dark(), cx)
-                    })
+                    cx.new(|cx| QueryEditor::new(doc("select 1;\n   \nselect 3;"), cx))
                 })
             })
             .unwrap();
@@ -2093,7 +2086,7 @@ mod tests {
         let window = cx
             .update(|cx| {
                 cx.open_window(Default::default(), |_window, cx| {
-                    cx.new(|cx| QueryEditor::new(doc("select 1;\nselect 2;"), Theme::dark(), cx))
+                    cx.new(|cx| QueryEditor::new(doc("select 1;\nselect 2;"), cx))
                 })
             })
             .unwrap();
@@ -2135,7 +2128,7 @@ mod tests {
         let window = cx
             .update(|cx| {
                 cx.open_window(Default::default(), |_window, cx| {
-                    cx.new(|cx| QueryEditor::new(doc(&text), Theme::dark(), cx))
+                    cx.new(|cx| QueryEditor::new(doc(&text), cx))
                 })
             })
             .unwrap();
@@ -2160,7 +2153,7 @@ mod tests {
         let window = cx
             .update(|cx| {
                 cx.open_window(Default::default(), |_window, cx| {
-                    cx.new(|cx| QueryEditor::new(doc("abc"), Theme::dark(), cx))
+                    cx.new(|cx| QueryEditor::new(doc("abc"), cx))
                 })
             })
             .unwrap();
@@ -2186,13 +2179,7 @@ mod tests {
         let window = cx
             .update(|cx| {
                 cx.open_window(Default::default(), |_window, cx| {
-                    cx.new(|cx| {
-                        QueryEditor::new(
-                            doc("select 1;\n\nselect 2;\n\nselect 3;"),
-                            Theme::dark(),
-                            cx,
-                        )
-                    })
+                    cx.new(|cx| QueryEditor::new(doc("select 1;\n\nselect 2;\n\nselect 3;"), cx))
                 })
             })
             .unwrap();
@@ -2234,7 +2221,7 @@ mod tests {
         let window = cx
             .update(|cx| {
                 cx.open_window(Default::default(), |_window, cx| {
-                    cx.new(|cx| QueryEditor::new(doc(&text), Theme::dark(), cx))
+                    cx.new(|cx| QueryEditor::new(doc(&text), cx))
                 })
             })
             .unwrap();

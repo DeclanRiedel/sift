@@ -85,12 +85,19 @@ pub fn settings_path() -> PathBuf {
     std::env::temp_dir().join("sift-settings.toml")
 }
 
-pub fn shell_key_bindings() -> Vec<KeyBinding> {
-    let primary = if current_platform() == PlatformKind::MacOS {
+/// The platform's primary modifier: `cmd` on macOS, `ctrl` elsewhere. Every
+/// chord-style binding builds its keystroke from this so keymaps stay
+/// platform-native instead of binding both families unconditionally.
+pub fn primary_modifier() -> &'static str {
+    if current_platform() == PlatformKind::MacOS {
         "cmd"
     } else {
         "ctrl"
-    };
+    }
+}
+
+pub fn shell_key_bindings() -> Vec<KeyBinding> {
+    let primary = primary_modifier();
     let context = Some("SiftWorkspace");
     vec![
         KeyBinding::new(&format!("{primary}-shift-p"), OpenCommandPalette, context),

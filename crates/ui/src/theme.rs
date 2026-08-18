@@ -1,4 +1,4 @@
-use gpui::{hsla, px, Hsla, Pixels};
+use gpui::{hsla, px, App, Hsla, Pixels};
 
 /// Semantic colors consumed by Sift components.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -21,6 +21,8 @@ pub struct ThemeColors {
     pub accent: Hsla,
     pub accent_muted: Hsla,
     pub accent_hover: Hsla,
+    /// Foreground that stays legible on accent/danger/success fills.
+    pub on_accent: Hsla,
     pub focus_ring: Hsla,
     pub danger: Hsla,
     pub danger_muted: Hsla,
@@ -80,6 +82,7 @@ impl Theme {
                 accent: hsla(0.55, 0.62, 0.56, 1.0),
                 accent_muted: hsla(0.55, 0.55, 0.52, 0.16),
                 accent_hover: hsla(0.55, 0.68, 0.64, 1.0),
+                on_accent: hsla(0.60, 0.10, 0.98, 1.0),
                 focus_ring: hsla(0.55, 0.72, 0.62, 1.0),
                 danger: hsla(0.005, 0.68, 0.58, 1.0),
                 danger_muted: hsla(0.005, 0.60, 0.52, 0.16),
@@ -120,6 +123,7 @@ impl Theme {
                 accent: hsla(0.55, 0.68, 0.43, 1.0),
                 accent_muted: hsla(0.55, 0.58, 0.43, 0.12),
                 accent_hover: hsla(0.55, 0.72, 0.36, 1.0),
+                on_accent: hsla(0.60, 0.10, 0.99, 1.0),
                 focus_ring: hsla(0.55, 0.72, 0.43, 1.0),
                 danger: hsla(0.005, 0.72, 0.48, 1.0),
                 danger_muted: hsla(0.005, 0.62, 0.48, 0.12),
@@ -155,6 +159,43 @@ impl Default for ThemeMetrics {
     }
 }
 
+/// Process-wide active theme. Views read it through [`ActiveTheme`] instead of
+/// holding their own copy, so swapping the global re-themes every window.
+pub struct GlobalTheme(pub Theme);
+
+impl gpui::Global for GlobalTheme {}
+
+impl Default for GlobalTheme {
+    fn default() -> Self {
+        Self(Theme::dark())
+    }
+}
+
+/// Install the active theme. Safe to call again to switch appearance at
+/// runtime; call sites then refresh their views.
+pub fn init_theme(theme: Theme, cx: &mut App) {
+    cx.set_global(GlobalTheme(theme));
+}
+
+/// Replace the active theme at runtime and re-render every window.
+pub fn set_theme(theme: Theme, cx: &mut App) {
+    cx.set_global(GlobalTheme(theme));
+    cx.refresh_windows();
+}
+
+/// Read the active theme from any context. Falls back to the dark palette
+/// when no global was installed (for example in isolated tests).
+pub trait ActiveTheme {
+    fn theme(&self) -> Theme;
+}
+
+impl ActiveTheme for App {
+    fn theme(&self) -> Theme {
+        self.try_global::<GlobalTheme>()
+            .map_or_else(Theme::dark, |global| global.0)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -164,5 +205,11 @@ mod tests {
         assert_ne!(Theme::light(), Theme::dark());
         assert_eq!(Theme::dark().colors.background.a, 1.0);
         assert_eq!(Theme::light().colors.background.a, 1.0);
+        // The on-accent foreground must contrast with its fill in both modes.
+        assert_ne!(Theme::dark().colors.on_accent, Theme::dark().colors.accent);
+        assert_ne!(
+            Theme::light().colors.on_accent,
+            Theme::light().colors.accent
+        );
     }
 }

@@ -7,10 +7,12 @@ mod theme;
 
 pub use assets::{database_logo, SiftAssets};
 pub use components::{
-    badge, button, icon, icon_button, section_label, ControlState, ControlTone, ControlVisual,
-    IconName,
+    icon, keybinding_chords, Badge, Button, ButtonTone, ClickHandler, Clickable, Disableable,
+    ErrorBanner, Field, IconButton, IconName, KeyBinding, SectionLabel, Toggleable, Tone, Tooltip,
 };
 pub use text_input::{
     Backspace, Backtab, Copy, Cut, Delete, End, Home, Left, Paste, Right, SelectAll, Tab, TextInput,
 };
-pub use theme::{Theme, ThemeColors, ThemeMetrics};
+pub use theme::{
+    init_theme, set_theme, ActiveTheme, GlobalTheme, Theme, ThemeColors, ThemeMetrics,
+};

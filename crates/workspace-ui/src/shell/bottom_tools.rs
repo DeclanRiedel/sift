@@ -2,10 +2,14 @@
 
 use super::*;
 
-pub(super) fn render_bottom_panel(shell: &WorkspaceShell) -> gpui::AnyElement {
+pub(super) fn render_bottom_panel(
+    shell: &WorkspaceShell,
+    cx: &mut Context<WorkspaceShell>,
+) -> gpui::AnyElement {
     let dock = &shell.bottom_dock;
     debug_assert_eq!(dock.id, DockId::Bottom);
-    let colors = shell.theme.colors;
+    let theme = cx.theme();
+    let colors = theme.colors;
     let body = match shell.active_bottom_tool {
         BottomTool::Console => {
             "Query editors are Sift consoles. Dedicated scratch-console creation arrives with restored query documents."
@@ -43,16 +47,13 @@ pub(super) fn render_bottom_panel(shell: &WorkspaceShell) -> gpui::AnyElement {
         .text_color(colors.muted_text)
         .child(
             div()
-                .h(px(28.))
                 .flex_none()
-                .flex()
-                .items_center()
-                .px_3()
                 .border_b_1()
                 .border_color(colors.subtle_border)
-                .text_xs()
-                .font_weight(gpui::FontWeight::SEMIBOLD)
-                .child(shell.active_bottom_tool.label().to_uppercase()),
+                .pl_3()
+                .child(SectionLabel::new(
+                    shell.active_bottom_tool.label().to_uppercase(),
+                )),
         )
         .child(
             div()

@@ -20,6 +20,7 @@ pub enum CommandId {
     ToggleBottomDock,
     OpenSettings,
     OpenCommandPalette,
+    ToggleTheme,
     Quit,
 }
 
@@ -41,6 +42,7 @@ impl CommandId {
             Self::ToggleBottomDock => "workspace.toggle-bottom-dock",
             Self::OpenSettings => "ui.open-settings",
             Self::OpenCommandPalette => "ui.command-palette",
+            Self::ToggleTheme => "ui.toggle-theme",
             Self::Quit => "window.quit",
         }
     }
@@ -220,6 +222,13 @@ const DEFINITIONS: &[CommandDefinition] = &[
         "Command Palette…",
         "Ctrl+Shift+P",
         false,
+        AvailabilityRule::Always,
+    ),
+    command(
+        CommandId::ToggleTheme,
+        "Toggle Light/Dark Theme",
+        "",
+        true,
         AvailabilityRule::Always,
     ),
     command(

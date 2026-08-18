@@ -2,30 +2,6 @@
 
 use super::*;
 
-struct StatusTooltip {
-    message: String,
-    theme: Theme,
-}
-
-impl gpui::Render for StatusTooltip {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        let colors = self.theme.colors;
-        div()
-            .max_w(px(360.))
-            .px_2()
-            .py_1()
-            .rounded_sm()
-            .border_1()
-            .border_color(colors.strong_border)
-            .bg(colors.elevated_surface)
-            .shadow_md()
-            .text_xs()
-            .text_color(colors.text)
-            .whitespace_normal()
-            .child(self.message.clone())
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StatusBar {
     pub connection: String,
@@ -55,7 +31,7 @@ pub(super) fn render_status_bar(
     shell: &WorkspaceShell,
     cx: &mut Context<WorkspaceShell>,
 ) -> gpui::AnyElement {
-    let theme = shell.theme;
+    let theme = cx.theme();
     let colors = theme.colors;
     let button = |id: &'static str,
                   icon_name: IconName,
@@ -63,56 +39,11 @@ pub(super) fn render_status_bar(
                   selected: bool,
                   badge: Option<usize>,
                   danger: bool| {
-        let foreground = if danger {
-            colors.danger
-        } else if selected {
-            colors.text
-        } else {
-            colors.muted_text
-        };
-        let tooltip_message = tooltip.clone();
-        div()
-            .id(id)
-            .role(Role::Button)
-            .aria_label(tooltip)
-            .h(theme.metrics.compact_control_height)
-            .min_w(theme.metrics.compact_control_height)
-            .flex_none()
-            .flex()
-            .items_center()
-            .justify_center()
-            .gap_1()
-            .px_1()
-            .rounded_sm()
-            .text_color(foreground)
-            .when(selected, |button| button.bg(colors.active_surface))
-            .hover(|button| button.bg(colors.hovered_surface).text_color(colors.text))
-            .child(icon(icon_name, foreground, 14.))
-            .children(badge.filter(|count| *count > 0).map(|count| {
-                div()
-                    .min_w(px(12.))
-                    .h(px(12.))
-                    .px(px(3.))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .rounded_full()
-                    .bg(if danger {
-                        colors.danger_muted
-                    } else {
-                        colors.active_surface
-                    })
-                    .text_color(foreground)
-                    .text_size(px(9.))
-                    .child(count.to_string())
-            }))
-            .tooltip(move |_, cx| {
-                cx.new(|_| StatusTooltip {
-                    message: tooltip_message.clone(),
-                    theme,
-                })
-                .into()
-            })
+        IconButton::new(id, icon_name, tooltip.clone())
+            .toggle_state(selected)
+            .danger(danger)
+            .badge(badge)
+            .tooltip(tooltip)
     };
     let separator = || {
         div()
@@ -319,7 +250,7 @@ pub(super) fn render_status_bar(
                     div()
                         .flex_none()
                         .px_1()
-                        .rounded(px(3.))
+                        .rounded(theme.metrics.radius)
                         .bg(colors.hovered_surface)
                         .child(shell.status.execution.clone()),
                 ),
@@ -332,10 +263,9 @@ pub(super) fn render_status_bar(
                 .items_center()
                 .gap_1()
                 .child({
-                    let tooltip = cursor_tooltip.clone();
                     div()
                         .id("footer-cursor-position")
-                        .aria_label(cursor_tooltip)
+                        .aria_label(cursor_tooltip.clone())
                         .h(theme.metrics.compact_control_height)
                         .min_w(px(30.))
                         .px_1()
@@ -346,19 +276,14 @@ pub(super) fn render_status_bar(
                         .text_color(colors.muted_text)
                         .child(cursor_label)
                         .tooltip(move |_, cx| {
-                            cx.new(|_| StatusTooltip {
-                                message: tooltip.clone(),
-                                theme,
-                            })
-                            .into()
+                            cx.new(|_| Tooltip::new(cursor_tooltip.clone())).into()
                         })
                 })
                 .child({
-                    let tooltip = mode_tooltip.to_string();
                     div()
                         .id("footer-editor-mode")
                         .role(Role::Button)
-                        .aria_label(tooltip.clone())
+                        .aria_label(mode_tooltip)
                         .h(theme.metrics.compact_control_height)
                         .px_1()
                         .flex()
@@ -369,13 +294,7 @@ pub(super) fn render_status_bar(
                             cx.listener(|shell, _, _, cx| shell.toggle_active_editor_keymap(cx)),
                         )
                         .child(mode_label)
-                        .tooltip(move |_, cx| {
-                            cx.new(|_| StatusTooltip {
-                                message: tooltip.clone(),
-                                theme,
-                            })
-                            .into()
-                        })
+                        .tooltip(move |_, cx| cx.new(|_| Tooltip::new(mode_tooltip)).into())
                 })
                 .children(vim_entered.map(|entered| {
                     div()
@@ -394,12 +313,9 @@ pub(super) fn render_status_bar(
                         .font_family("monospace")
                         .text_color(colors.accent)
                         .child(entered)
-                        .tooltip(move |_, cx| {
-                            cx.new(|_| StatusTooltip {
-                                message: "Pending Vim key sequence".into(),
-                                theme,
-                            })
-                            .into()
+                        .tooltip({
+                            let message: SharedString = "Pending Vim key sequence".into();
+                            move |_, cx| cx.new(|_| Tooltip::new(message.clone())).into()
                         })
                 }))
                 .child(separator())

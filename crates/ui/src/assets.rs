@@ -135,7 +135,8 @@ mod tests {
             .load("icons/fallback.svg")
             .unwrap()
             .expect("fallback icon");
-        assert!(fallback.windows(7).any(|bytes| bytes == b"#e5484d"));
+        assert!(fallback.windows(12).any(|bytes| bytes == b"currentColor"));
+        assert!(!fallback.windows(7).any(|bytes| bytes == b"#e5484d"));
         let license = assets
             .load("icons/LICENSE.qlementine-icons")
             .unwrap()

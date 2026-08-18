@@ -2,12 +2,14 @@ use std::ops::Range;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use gpui::{
-    actions, div, fill, hsla, point, prelude::*, px, relative, rgba, size, App, Bounds,
-    ClipboardItem, Context, CursorStyle, Element, ElementId, ElementInputHandler, Entity,
-    EntityInputHandler, FocusHandle, Focusable, GlobalElementId, IntoElement, LayoutId, PaintQuad,
-    Pixels, Role, ShapedLine, SharedString, Style, TextRun, UTF16Selection, UnderlineStyle, Window,
+    actions, div, fill, point, prelude::*, px, relative, size, App, Bounds, ClipboardItem, Context,
+    CursorStyle, Element, ElementId, ElementInputHandler, Entity, EntityInputHandler, FocusHandle,
+    Focusable, GlobalElementId, IntoElement, LayoutId, PaintQuad, Pixels, Role, ShapedLine,
+    SharedString, Style, TextRun, UTF16Selection, UnderlineStyle, Window,
 };
 use unicode_segmentation::UnicodeSegmentation as _;
+
+use crate::ActiveTheme;
 
 actions!(
     sift_text_input,
@@ -375,8 +377,7 @@ impl EntityInputHandler for TextInput {
 impl gpui::Render for TextInput {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let focused = self.focus_handle.is_focused(window);
-        let mut focus_tint = window.text_style().color;
-        focus_tint.a = 0.055;
+        let focus_surface = cx.theme().colors.selected_surface;
         div()
             .id(("sift-text-input", self.id))
             .key_context("SiftTextInput")
@@ -411,7 +412,7 @@ impl gpui::Render for TextInput {
             .overflow_hidden()
             .whitespace_nowrap()
             .rounded_sm()
-            .when(focused, |input| input.bg(focus_tint))
+            .when(focused, |input| input.bg(focus_surface))
             .px_2()
             .child(TextElement { input: cx.entity() })
     }
@@ -476,8 +477,10 @@ impl Element for TextElement {
         let selected_range = input.selected_range.clone();
         let cursor = input.cursor_offset();
         let style = window.text_style();
+        let placeholder_color = cx.theme().colors.muted_text;
+        let selection_color = cx.theme().colors.selected_surface;
         let (display_text, color) = if content.is_empty() {
-            (input.placeholder.clone(), hsla(0., 0., 0.55, 1.))
+            (input.placeholder.clone(), placeholder_color)
         } else if input.masked {
             ("*".repeat(content.len()).into(), style.color)
         } else {
@@ -546,7 +549,7 @@ impl Element for TextElement {
                             bounds.bottom(),
                         ),
                     ),
-                    rgba(0x3b82f640),
+                    selection_color,
                 )),
                 None,
             )

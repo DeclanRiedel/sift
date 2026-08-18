@@ -12,7 +12,7 @@ use sift_ui::{
 
 use crate::app::{display_rects, SiftApp, SiftWindow};
 use crate::config::DesktopConfig;
-use crate::platform::shell_key_bindings;
+use crate::platform::{primary_modifier, shell_key_bindings};
 use sift_workspace_ui::{
     editor as ed, results as res, CloseActiveItem, CloseActivePane, FocusNextPane,
     OpenCommandPalette, OpenServerConnection, SaveActiveItem, SplitPane, ToggleBottomDock,
@@ -24,6 +24,7 @@ use sift_workspace_ui::{
 /// input arrive through the editor's input handler, not these bindings.
 fn editor_key_bindings() -> Vec<gpui::KeyBinding> {
     let ctx = Some("SiftEditor");
+    let primary = primary_modifier();
     vec![
         gpui::KeyBinding::new("backspace", ed::Backspace, ctx),
         gpui::KeyBinding::new("delete", ed::DeleteForward, ctx),
@@ -40,24 +41,19 @@ fn editor_key_bindings() -> Vec<gpui::KeyBinding> {
         gpui::KeyBinding::new("home", ed::LineStart, ctx),
         gpui::KeyBinding::new("end", ed::LineEnd, ctx),
         gpui::KeyBinding::new("ctrl-a", ed::SelectAll, ctx),
-        gpui::KeyBinding::new("cmd-a", ed::SelectAll, ctx),
-        gpui::KeyBinding::new("ctrl-c", ed::Copy, ctx),
-        gpui::KeyBinding::new("cmd-c", ed::Copy, ctx),
-        gpui::KeyBinding::new("ctrl-x", ed::Cut, ctx),
-        gpui::KeyBinding::new("cmd-x", ed::Cut, ctx),
-        gpui::KeyBinding::new("ctrl-v", ed::Paste, ctx),
-        gpui::KeyBinding::new("cmd-v", ed::Paste, ctx),
-        gpui::KeyBinding::new("ctrl-z", ed::Undo, ctx),
-        gpui::KeyBinding::new("cmd-z", ed::Undo, ctx),
-        gpui::KeyBinding::new("ctrl-shift-z", ed::Redo, ctx),
-        gpui::KeyBinding::new("cmd-shift-z", ed::Redo, ctx),
+        gpui::KeyBinding::new(&format!("{primary}-c"), ed::Copy, ctx),
+        gpui::KeyBinding::new(&format!("{primary}-x"), ed::Cut, ctx),
+        gpui::KeyBinding::new(&format!("{primary}-v"), ed::Paste, ctx),
+        gpui::KeyBinding::new(&format!("{primary}-z"), ed::Undo, ctx),
+        gpui::KeyBinding::new(&format!("{primary}-shift-z"), ed::Redo, ctx),
         gpui::KeyBinding::new("escape", ed::ExitInsertMode, ctx),
-        gpui::KeyBinding::new("ctrl-enter", ed::ExecuteStatement, ctx),
-        gpui::KeyBinding::new("cmd-enter", ed::ExecuteStatement, ctx),
-        gpui::KeyBinding::new("ctrl-shift-enter", ed::ExecuteDocument, ctx),
-        gpui::KeyBinding::new("cmd-shift-enter", ed::ExecuteDocument, ctx),
-        gpui::KeyBinding::new("ctrl-c", res::CopySelectedCell, Some("SiftResults")),
-        gpui::KeyBinding::new("cmd-c", res::CopySelectedCell, Some("SiftResults")),
+        gpui::KeyBinding::new(&format!("{primary}-enter"), ed::ExecuteStatement, ctx),
+        gpui::KeyBinding::new(&format!("{primary}-shift-enter"), ed::ExecuteDocument, ctx),
+        gpui::KeyBinding::new(
+            &format!("{primary}-c"),
+            res::CopySelectedCell,
+            Some("SiftResults"),
+        ),
         gpui::KeyBinding::new("left", res::MoveCellLeft, Some("SiftResults")),
         gpui::KeyBinding::new("right", res::MoveCellRight, Some("SiftResults")),
         gpui::KeyBinding::new("up", res::MoveCellUp, Some("SiftResults")),
@@ -99,6 +95,7 @@ fn main() {
                 ]),
             ]);
             let text = Some("SiftTextInput");
+            let primary = primary_modifier();
             cx.bind_keys([
                 gpui::KeyBinding::new("backspace", Backspace, text),
                 gpui::KeyBinding::new("delete", Delete, text),
@@ -106,14 +103,10 @@ fn main() {
                 gpui::KeyBinding::new("right", Right, text),
                 gpui::KeyBinding::new("home", Home, text),
                 gpui::KeyBinding::new("end", End, text),
-                gpui::KeyBinding::new("ctrl-c", Copy, text),
-                gpui::KeyBinding::new("ctrl-x", Cut, text),
-                gpui::KeyBinding::new("ctrl-v", Paste, text),
+                gpui::KeyBinding::new(&format!("{primary}-c"), Copy, text),
+                gpui::KeyBinding::new(&format!("{primary}-x"), Cut, text),
+                gpui::KeyBinding::new(&format!("{primary}-v"), Paste, text),
                 gpui::KeyBinding::new("ctrl-a", SelectAll, text),
-                gpui::KeyBinding::new("cmd-c", Copy, text),
-                gpui::KeyBinding::new("cmd-x", Cut, text),
-                gpui::KeyBinding::new("cmd-v", Paste, text),
-                gpui::KeyBinding::new("cmd-a", SelectAll, text),
                 gpui::KeyBinding::new("tab", Tab, text),
                 gpui::KeyBinding::new("shift-tab", Backtab, text),
             ]);
