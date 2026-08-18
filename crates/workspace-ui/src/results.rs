@@ -276,6 +276,26 @@ pub struct ResultsView {
     right_width: f32,
 }
 
+struct ResultsTooltip {
+    message: &'static str,
+    theme: Theme,
+}
+
+impl gpui::Render for ResultsTooltip {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .px_2()
+            .py_1()
+            .rounded_sm()
+            .border_1()
+            .border_color(self.theme.colors.strong_border)
+            .bg(self.theme.colors.elevated_surface)
+            .text_xs()
+            .text_color(self.theme.colors.text)
+            .child(self.message)
+    }
+}
+
 impl ResultsView {
     pub fn new(theme: Theme, cx: &mut Context<Self>) -> Self {
         Self {
@@ -318,6 +338,7 @@ impl ResultsView {
         cx.notify();
     }
 
+    #[cfg(test)]
     pub(crate) fn toggle_placement(&mut self, cx: &mut Context<Self>) {
         self.placement = match self.placement {
             ResultPlacement::Bottom => ResultPlacement::Right,
@@ -421,6 +442,7 @@ impl ResultsView {
 
     fn render_tab_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = self.theme.colors;
+        let theme = self.theme;
         div()
             .h(px(30.))
             .flex_none()
@@ -497,21 +519,6 @@ impl ResultsView {
                     )
                     .child(
                         div()
-                            .id("move-results-right")
-                            .flex_none()
-                            .role(gpui::Role::Button)
-                            .aria_label("Move results to the right")
-                            .size(px(24.))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .rounded(px(4.))
-                            .hover(|button| button.bg(colors.hovered_surface))
-                            .on_click(cx.listener(|view, _, _, cx| view.toggle_placement(cx)))
-                            .child(icon(IconName::ChevronRight, colors.muted_text, 13.)),
-                    )
-                    .child(
-                        div()
                             .id("copy-result-cell")
                             .flex_none()
                             .role(gpui::Role::Button)
@@ -525,13 +532,21 @@ impl ResultsView {
                             .on_click(cx.listener(|view, _, window, cx| {
                                 view.copy_selected_cell(&CopySelectedCell, window, cx)
                             }))
-                            .child(icon(IconName::Copy, colors.muted_text, 13.)),
+                            .child(icon(IconName::Copy, colors.muted_text, 13.))
+                            .tooltip(move |_, cx| {
+                                cx.new(|_| ResultsTooltip {
+                                    message: "Copy selected result cell",
+                                    theme,
+                                })
+                                .into()
+                            }),
                     ),
             )
     }
 
     fn render_vertical_tab_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = self.theme.colors;
+        let theme = self.theme;
         div()
             .w(px(92.))
             .h_full()
@@ -580,22 +595,6 @@ impl ResultsView {
                     .child(div().truncate().child(self.state.status_label()))
                     .child(
                         div()
-                            .id("move-results-below")
-                            .role(gpui::Role::Button)
-                            .aria_label("Move results below the editor")
-                            .h(px(24.))
-                            .px_1()
-                            .flex()
-                            .items_center()
-                            .gap_1()
-                            .rounded(px(4.))
-                            .hover(|button| button.bg(colors.hovered_surface))
-                            .on_click(cx.listener(|view, _, _, cx| view.toggle_placement(cx)))
-                            .child(icon(IconName::ChevronDown, colors.muted_text, 13.))
-                            .child("Move below"),
-                    )
-                    .child(
-                        div()
                             .id("copy-result-cell-vertical")
                             .role(gpui::Role::Button)
                             .aria_label("Copy selected result cell")
@@ -610,7 +609,14 @@ impl ResultsView {
                                 view.copy_selected_cell(&CopySelectedCell, window, cx)
                             }))
                             .child(icon(IconName::Copy, colors.muted_text, 13.))
-                            .child("Copy"),
+                            .child("Copy")
+                            .tooltip(move |_, cx| {
+                                cx.new(|_| ResultsTooltip {
+                                    message: "Copy selected result cell",
+                                    theme,
+                                })
+                                .into()
+                            }),
                     ),
             )
     }
