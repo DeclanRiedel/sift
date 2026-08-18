@@ -145,6 +145,41 @@ struct TabTransfer {
     clean_text: String,
 }
 
+/// Cursor-following preview shown while a tab drag is in flight. Created by
+/// the tab's `on_drag` and rendered by GPUI under the pointer.
+struct TabDragGhost {
+    title: SharedString,
+}
+
+impl gpui::Render for TabDragGhost {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme();
+        let colors = theme.colors;
+        div()
+            .id("tab-drag-ghost")
+            .debug_selector(|| "tab-drag-ghost".into())
+            .flex()
+            .items_center()
+            .gap_1()
+            .h(theme.metrics.tab_height - px(6.))
+            .max_w(px(240.))
+            .px_2()
+            .rounded(theme.metrics.radius)
+            .border_1()
+            .border_color(colors.strong_border)
+            .bg(colors.elevated_surface)
+            .shadow_lg()
+            .text_sm()
+            .text_color(colors.text)
+            .child(
+                div()
+                    .min_w_0()
+                    .truncate()
+                    .child(self.title.clone()),
+            )
+    }
+}
+
 fn optional_u32_field(
     input: &Entity<TextInput>,
     label: &str,
@@ -504,6 +539,9 @@ pub struct Pane {
     live_result_extents: HashMap<u64, f32>,
     /// Insertion index a dragged tab would land at, if a drag is hovering.
     tab_drop_index: Option<usize>,
+    /// Item whose tab is currently being dragged from this pane. Used to dim
+    /// the source tab; cleared lazily when no drag is active anymore.
+    dragging_item: Option<u64>,
     /// Dirty-close confirmation belongs to its tab and is rendered inline.
     pending_close_item: Option<u64>,
 }
@@ -573,6 +611,7 @@ impl Pane {
             results,
             live_result_extents: HashMap::new(),
             tab_drop_index: None,
+            dragging_item: None,
             pending_close_item: None,
         }
     }
@@ -871,6 +910,12 @@ impl Pane {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // `on_drag_move` fires on every listener, hovered or not, so the tab
+        // under the pointer has to claim the drop itself. Without this the
+        // last-painted tab always wins and tabs only ever move rightwards.
+        if !event.bounds.contains(&event.event.position) {
+            return;
+        }
         let pointer_x = event.event.position.x - event.bounds.left();
         let drop_index = if pointer_x > event.bounds.size.width / 2. {
             index + 1
@@ -883,9 +928,29 @@ impl Pane {
         }
     }
 
+    /// Pointer moved over the tab strip but not over any tab: park the drop at
+    /// the end of the strip. Registered on the strip itself, so it runs before
+    /// the per-tab listeners and any hovered tab overrides it.
+    fn tab_strip_drag_hover(
+        &mut self,
+        event: &gpui::DragMoveEvent<TabDrag>,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let drop_index = event
+            .bounds
+            .contains(&event.event.position)
+            .then_some(self.items.len());
+        if self.tab_drop_index != drop_index {
+            self.tab_drop_index = drop_index;
+            cx.notify();
+        }
+    }
+
     /// A dragged tab was released over this pane: reorder locally, or ask the
     /// workspace to move it here from its originating pane.
     fn finish_tab_drag(&mut self, drag: &TabDrag, _: &mut Window, cx: &mut Context<Self>) {
+        self.dragging_item = None;
         let to = self.tab_drop_index.take().unwrap_or(self.items.len());
         if drag.pane_id != self.id {
             cx.emit(PaneEvent::MoveItemRequested {
