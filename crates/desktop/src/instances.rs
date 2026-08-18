@@ -6,8 +6,9 @@ use keyring::{Entry, Error as KeyringError};
 use sift_client_sdk::SessionTokenProvider;
 use sift_protocol::{AuthClientKind, AuthTokensResponse, PasswordLoginRequest};
 use sift_workspace_ui::{
-    InstanceCommand, InstanceCredentialKind, InstanceCredentialPresentation, InstanceManagerEvent,
-    InstancePlanPresentation, SavedInstanceRoot, SavedServerProfile,
+    InstanceCommand, InstanceConfigurationPresentation, InstanceCredentialKind,
+    InstanceCredentialPresentation, InstanceManagerEvent, InstancePlanPresentation,
+    SavedInstanceRoot, SavedServerProfile,
 };
 
 use crate::app::DesktopServer;
@@ -310,6 +311,25 @@ pub async fn run_instance_manager(
                 false,
                 forget(&store, &credentials, &mut profiles, &profile_id).await,
             ),
+            InstanceCommand::ForgetRoot { root } => {
+                let result = forget_root(
+                    &store,
+                    &profiles,
+                    &mut roots,
+                    &mut configured_targets,
+                    &channels.targets,
+                    &local_target,
+                    &root,
+                )
+                .and_then(|outcome| {
+                    channels
+                        .events
+                        .send(InstanceManagerEvent::Roots(roots.clone()))
+                        .map_err(|_| "desktop window closed".to_string())?;
+                    Ok(outcome)
+                });
+                (false, result)
+            }
             InstanceCommand::InspectRoot { root } => {
                 let _ = channels
                     .events
@@ -380,6 +400,73 @@ pub async fn run_instance_manager(
             InstanceCommand::StartRoot { root } => {
                 let _ = channels.events.send(InstanceManagerEvent::Testing);
                 let result = connect_root(&channels.targets, &mut configured_targets, &root).await;
+                (false, result)
+            }
+            InstanceCommand::PrepareRootConfiguration { root } => {
+                let result = prepare_root_configuration(&root).and_then(|configuration| {
+                    channels
+                        .events
+                        .send(InstanceManagerEvent::InstanceConfiguration(Box::new(
+                            configuration,
+                        )))
+                        .map_err(|_| "desktop window closed".to_string())?;
+                    Ok(ManagerOutcome::None)
+                });
+                (false, result)
+            }
+            InstanceCommand::OpenRootConfiguration { root } => {
+                let result = open_root_configuration(&root).and_then(|configuration| {
+                    channels
+                        .events
+                        .send(InstanceManagerEvent::InstanceConfiguration(Box::new(
+                            configuration,
+                        )))
+                        .map_err(|_| "desktop window closed".to_string())?;
+                    Ok(ManagerOutcome::None)
+                });
+                (false, result)
+            }
+            InstanceCommand::OpenCurrentConfiguration => {
+                let result = open_current_configuration(&channels.targets)
+                    .await
+                    .and_then(|configuration| {
+                        channels
+                            .events
+                            .send(InstanceManagerEvent::InstanceConfiguration(Box::new(
+                                configuration,
+                            )))
+                            .map_err(|_| "desktop window closed".to_string())?;
+                        Ok(ManagerOutcome::None)
+                    });
+                (false, result)
+            }
+            InstanceCommand::SaveConfiguration {
+                root,
+                manifest,
+                expected_source_revision,
+                is_new,
+            } => {
+                let result = match save_configuration(
+                    &channels.targets,
+                    root.as_deref(),
+                    manifest,
+                    expected_source_revision,
+                    is_new,
+                )
+                .await
+                {
+                    Ok(configuration) => {
+                        publish_saved_configuration(
+                            &store,
+                            &profiles,
+                            &mut roots,
+                            &channels.events,
+                            configuration,
+                        )
+                        .await
+                    }
+                    Err(error) => Err(error),
+                };
                 (false, result)
             }
             InstanceCommand::SignInWithPassword { username, password } => {
@@ -489,6 +576,46 @@ fn remember_root(
     store.save_roots(profiles, roots)
 }
 
+fn forget_root(
+    store: &InstanceStore,
+    profiles: &[SavedServerProfile],
+    roots: &mut Vec<SavedInstanceRoot>,
+    configured_targets: &mut std::collections::HashMap<
+        PathBuf,
+        (DesktopServer, crate::local_server::LocalServerLease),
+    >,
+    targets: &tokio::sync::watch::Sender<DesktopServer>,
+    local_target: &DesktopServer,
+    root: &std::path::Path,
+) -> Result<ManagerOutcome, String> {
+    let canonical = std::fs::canonicalize(root).ok();
+    roots.retain(|saved| {
+        saved.root != root
+            && match &canonical {
+                Some(canonical) => std::fs::canonicalize(&saved.root)
+                    .map(|saved| saved != *canonical)
+                    .unwrap_or(true),
+                None => true,
+            }
+    });
+    store.save_roots(profiles, roots)?;
+    if let Some(canonical) = &canonical {
+        configured_targets.remove(canonical);
+    }
+    let active_is_removed = targets
+        .borrow()
+        .configured_root()
+        .is_some_and(|active| active == root || canonical.as_deref() == Some(active));
+    if active_is_removed {
+        targets
+            .send(local_target.clone())
+            .map_err(|_| "desktop server supervisor stopped".to_string())?;
+        Ok(ManagerOutcome::Connected("Local Sift".into()))
+    } else {
+        Ok(ManagerOutcome::None)
+    }
+}
+
 fn credential_kind(kind: sift_instance_config::CredentialKind) -> InstanceCredentialKind {
     match kind {
         sift_instance_config::CredentialKind::GithubOauthClientSecret => {
@@ -497,6 +624,146 @@ fn credential_kind(kind: sift_instance_config::CredentialKind) -> InstanceCreden
         sift_instance_config::CredentialKind::Postgres => InstanceCredentialKind::Postgres,
         sift_instance_config::CredentialKind::SqlServer => InstanceCredentialKind::SqlServer,
     }
+}
+
+fn prepare_root_configuration(
+    root: &std::path::Path,
+) -> Result<InstanceConfigurationPresentation, String> {
+    for name in ["sift.toml", "sift.lock"] {
+        if root
+            .join(name)
+            .try_exists()
+            .map_err(|error| format!("checking instance folder failed: {error}"))?
+        {
+            return Err(format!(
+                "{} already exists; open that instance instead",
+                root.join(name).display()
+            ));
+        }
+    }
+    let source = include_str!("../../../examples/reproducible-instance/sift.toml")
+        .replace(
+            "b654b918-b1f1-4d70-924d-e4c1014f482f",
+            &uuid::Uuid::new_v4().to_string(),
+        )
+        .replace("name = \"demo-sift\"", "name = \"new-sift\"");
+    Ok(InstanceConfigurationPresentation {
+        root: Some(root.to_path_buf()),
+        manifest: source,
+        source_revision: None,
+        name: "New Sift Instance".into(),
+        is_new: true,
+    })
+}
+
+fn open_root_configuration(
+    root: &std::path::Path,
+) -> Result<InstanceConfigurationPresentation, String> {
+    let document = sift_server::instance_configuration::read(root)
+        .map_err(|error| format!("opening sift.toml failed: {error:#}"))?;
+    Ok(configuration_presentation(
+        Some(root.to_path_buf()),
+        document,
+        false,
+    ))
+}
+
+async fn open_current_configuration(
+    targets: &tokio::sync::watch::Sender<DesktopServer>,
+) -> Result<InstanceConfigurationPresentation, String> {
+    let target = { targets.borrow().clone() };
+    if matches!(target, DesktopServer::Local(_)) {
+        return Err(
+            "Bundled Local Sift has no sift.toml. Create a new instance or open an existing instance root instead."
+                .into(),
+        );
+    }
+    let document = target
+        .client()
+        .await?
+        .instance_configuration()
+        .await
+        .map_err(|error| format!("opening current instance sift.toml failed: {error}"))?;
+    Ok(configuration_presentation(None, document, false))
+}
+
+async fn save_configuration(
+    targets: &tokio::sync::watch::Sender<DesktopServer>,
+    root: Option<&std::path::Path>,
+    manifest: String,
+    expected_source_revision: Option<String>,
+    is_new: bool,
+) -> Result<InstanceConfigurationPresentation, String> {
+    let document = if let Some(root) = root {
+        if is_new {
+            sift_server::instance_configuration::create(root, &manifest)
+                .map_err(|error| format!("creating instance failed: {error:#}"))?
+        } else {
+            sift_server::instance_configuration::update(
+                root,
+                &manifest,
+                expected_source_revision.as_deref(),
+            )
+            .map_err(|error| format!("saving sift.toml failed: {error:#}"))?
+        }
+    } else {
+        let expected_source_revision = expected_source_revision
+            .ok_or_else(|| "current instance configuration has no source revision".to_string())?;
+        let target = { targets.borrow().clone() };
+        target
+            .client()
+            .await?
+            .update_instance_configuration(sift_client_sdk::UpdateInstanceConfigurationRequest {
+                manifest,
+                expected_source_revision,
+            })
+            .await
+            .map_err(|error| format!("saving current instance sift.toml failed: {error}"))?
+    };
+    Ok(configuration_presentation(
+        root.map(std::path::Path::to_path_buf),
+        document,
+        false,
+    ))
+}
+
+fn configuration_presentation(
+    root: Option<PathBuf>,
+    document: sift_client_sdk::InstanceConfigurationDocument,
+    is_new: bool,
+) -> InstanceConfigurationPresentation {
+    InstanceConfigurationPresentation {
+        root,
+        manifest: document.manifest,
+        source_revision: Some(document.source_revision),
+        name: document.name,
+        is_new,
+    }
+}
+
+async fn publish_saved_configuration(
+    store: &InstanceStore,
+    profiles: &[SavedServerProfile],
+    roots: &mut Vec<SavedInstanceRoot>,
+    events: &tokio::sync::mpsc::UnboundedSender<InstanceManagerEvent>,
+    configuration: InstanceConfigurationPresentation,
+) -> Result<ManagerOutcome, String> {
+    if let Some(root) = configuration.root.as_deref() {
+        let plan = inspect_root(
+            root,
+            Some("sift.toml saved; apply the plan to activate it".into()),
+        )
+        .await?;
+        remember_root(store, profiles, roots, &plan)?;
+        let _ = events.send(InstanceManagerEvent::Roots(roots.clone()));
+        let _ = events.send(InstanceManagerEvent::InstancePlan(Box::new(plan)));
+    }
+    events
+        .send(InstanceManagerEvent::InstanceConfiguration(Box::new(
+            configuration,
+        )))
+        .map_err(|_| "desktop window closed".to_string())?;
+    Ok(ManagerOutcome::None)
 }
 
 async fn inspect_root(
@@ -919,5 +1186,44 @@ mod tests {
 
         assert_eq!(store.load(), vec![profile]);
         assert_eq!(store.load_roots(), vec![root]);
+    }
+
+    #[test]
+    fn forgetting_a_missing_instance_root_removes_only_inventory() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = InstanceStore::new(directory.path().join("instances.json"));
+        let stale = SavedInstanceRoot {
+            manifest_id: "missing".into(),
+            name: "Missing root".into(),
+            root: directory.path().join("already-deleted"),
+        };
+        let mut roots = vec![stale.clone()];
+        store.save_roots(&[], &roots).unwrap();
+        let target = DesktopServer::remote(
+            SavedServerProfile {
+                id: "remote".into(),
+                name: "Remote".into(),
+                base_url: "https://sift.invalid".into(),
+                has_saved_token: false,
+            },
+            None,
+        );
+        let (targets, _) = tokio::sync::watch::channel(target.clone());
+        let mut configured = std::collections::HashMap::new();
+
+        assert!(matches!(
+            forget_root(
+                &store,
+                &[],
+                &mut roots,
+                &mut configured,
+                &targets,
+                &target,
+                &stale.root,
+            ),
+            Ok(ManagerOutcome::None)
+        ));
+        assert!(roots.is_empty());
+        assert!(store.load_roots().is_empty());
     }
 }

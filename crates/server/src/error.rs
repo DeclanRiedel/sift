@@ -22,6 +22,9 @@ pub enum ApiError {
     #[error("bad request: {0}")]
     BadRequest(String),
 
+    #[error("conflict: {0}")]
+    Conflict(String),
+
     #[error("unauthorized")]
     Unauthorized,
 
@@ -116,6 +119,7 @@ impl ApiError {
                 (StatusCode::NOT_FOUND, "not_found")
             }
             ApiError::BadRequest(_) => (StatusCode::BAD_REQUEST, "bad_request"),
+            ApiError::Conflict(_) => (StatusCode::CONFLICT, "conflict"),
             ApiError::Unauthorized => (StatusCode::UNAUTHORIZED, "unauthorized"),
             ApiError::Forbidden(_) => (StatusCode::FORBIDDEN, "forbidden"),
             ApiError::TooManyAuthAttempts => {
@@ -183,6 +187,7 @@ impl ApiError {
                 MetadataError::FinalInstanceAdmin
                 | MetadataError::FinalAuthIdentity
                 | MetadataError::FinalRoomOwner(_)
+                | MetadataError::ConnectionProfileManaged(_)
                 | MetadataError::InstanceManifestConflict(_)
                 | MetadataError::InstanceDestroyApprovalRequired(_)
                 | MetadataError::InstancePreventDestroy(_) => (StatusCode::CONFLICT, "conflict"),

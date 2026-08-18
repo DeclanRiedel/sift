@@ -1256,6 +1256,7 @@ fn postgres_provider_configuration(value: &str) -> Result<serde_json::Value, Con
         "port": parsed.port().unwrap_or(5432),
         "database": parsed.path().trim_start_matches('/'),
         "user": parsed.username(),
+        "password": null,
         "ssl_mode": ssl_mode,
         "engine_specific": {
             "engine": "postgres",
@@ -1315,6 +1316,7 @@ fn sql_server_provider_configuration(value: &str) -> Result<serde_json::Value, C
         "port": port.unwrap_or(1433),
         "database": fields.get("database").or_else(|| fields.get("initialcatalog")),
         "user": fields.get("userid").or_else(|| fields.get("uid")).expect("validated SQL Server user"),
+        "password": null,
         "ssl_mode": null,
         "engine_specific": {
             "engine": "sql_server",
@@ -1597,5 +1599,26 @@ prevent_destroy = true
         let encoded = serde_json::to_string(&plan).unwrap();
         assert!(!encoded.contains("password"));
         assert!(!encoded.contains("warehouse.internal"));
+    }
+
+    #[test]
+    fn bundled_provider_configuration_matches_runtime_contract() {
+        let manifest = Manifest::parse(VALID).unwrap();
+        let postgres = manifest.connections[0].provider_configuration().unwrap();
+        let spec = serde_json::from_value::<sift_protocol::ConnectionSpec>(postgres).unwrap();
+        assert!(matches!(
+            spec.engine_specific,
+            Some(sift_protocol::EngineConnectionSpec::Postgres(_))
+        ));
+
+        let sql_server = sql_server_provider_configuration(
+            "Server=db.internal,1433;Database=analytics;User ID=sift;Encrypt=true",
+        )
+        .unwrap();
+        let spec = serde_json::from_value::<sift_protocol::ConnectionSpec>(sql_server).unwrap();
+        assert!(matches!(
+            spec.engine_specific,
+            Some(sift_protocol::EngineConnectionSpec::SqlServer(_))
+        ));
     }
 }

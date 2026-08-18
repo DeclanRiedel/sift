@@ -11,7 +11,7 @@ use gpui::{
 use sift_api_types::RoomId;
 use sift_ui::{database_logo, icon, IconName, TextInput, Theme};
 
-use crate::editor::{EditorEvent, QueryDocument, QueryEditor};
+use crate::editor::{EditorEvent, EditorLanguage, QueryDocument, QueryEditor};
 use crate::results::{ResultState, ResultsView};
 
 use crate::presentation::{
@@ -104,6 +104,7 @@ pub enum Modal {
     InstanceSetup,
     Account,
     DatabaseConnection,
+    ConfirmDeleteConnection(ConnectionNavEntry),
     ConfirmClose { title: String },
 }
 
@@ -178,6 +179,15 @@ pub struct InstancePlanPresentation {
     pub destroy_confirmation_required: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InstanceConfigurationPresentation {
+    pub root: Option<std::path::PathBuf>,
+    pub manifest: String,
+    pub source_revision: Option<String>,
+    pub name: String,
+    pub is_new: bool,
+}
+
 #[derive(Clone)]
 pub enum InstanceCommand {
     UseLocal,
@@ -190,6 +200,9 @@ pub enum InstanceCommand {
     },
     Forget {
         profile_id: String,
+    },
+    ForgetRoot {
+        root: std::path::PathBuf,
     },
     InspectRoot {
         root: std::path::PathBuf,
@@ -207,6 +220,19 @@ pub enum InstanceCommand {
     StartRoot {
         root: std::path::PathBuf,
     },
+    PrepareRootConfiguration {
+        root: std::path::PathBuf,
+    },
+    OpenRootConfiguration {
+        root: std::path::PathBuf,
+    },
+    OpenCurrentConfiguration,
+    SaveConfiguration {
+        root: Option<std::path::PathBuf>,
+        manifest: String,
+        expected_source_revision: Option<String>,
+        is_new: bool,
+    },
     SignInWithPassword {
         username: String,
         password: String,
@@ -222,6 +248,7 @@ pub enum InstanceManagerEvent {
     Profiles(Vec<SavedServerProfile>),
     Roots(Vec<SavedInstanceRoot>),
     InstancePlan(Box<InstancePlanPresentation>),
+    InstanceConfiguration(Box<InstanceConfigurationPresentation>),
     InstanceOperationPending { message: String },
     Testing,
     Connected { name: String },
@@ -252,9 +279,20 @@ pub enum PaneEvent {
     /// The pane should be removed (its close control was used, or it emptied).
     CloseRequested,
     /// Active editor cursor or input state changed.
-    EditorStateChanged,
+    EditorStateChanged {
+        item_id: u64,
+    },
     /// A query item asked to run SQL; the workspace dispatches it to execution.
-    ExecuteRequested { item_id: u64, sql: String },
+    ExecuteRequested {
+        item_id: u64,
+        sql: String,
+    },
+    SaveConfigurationRequested {
+        item_id: u64,
+    },
+    CancelConfigurationRequested {
+        item_id: u64,
+    },
 }
 
 /// Live state of the desktop's database connection. Owned by the shell,
@@ -288,6 +326,10 @@ pub enum ExecutorCommand {
         configuration: serde_json::Value,
         credentials: Option<serde_json::Value>,
     },
+    DeleteConnectionProfile {
+        tenant_id: i64,
+        profile_id: i64,
+    },
 }
 
 /// Executor → shell. Connection-state changes and query outcomes share one
@@ -304,6 +346,11 @@ pub enum ExecutorEvent {
         connection_error: Option<String>,
     },
     ProfileCreationFailed(String),
+    ProfileDeleted {
+        tenant_id: i64,
+        profile_id: i64,
+    },
+    ProfileDeletionFailed(String),
 }
 
 /// A pane owns its ordered items and focus handle. The workspace owns panes;
@@ -314,8 +361,8 @@ pub struct Pane {
     active_item: usize,
     focus_handle: FocusHandle,
     theme: Theme,
-    /// Live editor per query item. Not persisted — the document is server/Loro
-    /// backed and rehydrated by reference, so the client stores no query text.
+    /// Live editor per SQL or configuration item. Editor contents are not
+    /// persisted in the local layout; their owning service rehydrates them.
     editors: HashMap<u64, Entity<QueryEditor>>,
     /// The Data/Messages/Explain/History surface owned by each query item.
     results: HashMap<u64, Entity<ResultsView>>,
@@ -328,18 +375,24 @@ impl Pane {
         for item in pane
             .items
             .iter()
-            .filter(|item| ItemRegistry::definition(&item.kind).runtime == ItemRuntimeKind::Query)
+            .filter(|item| ItemRegistry::definition(&item.kind).runtime.is_editor())
         {
             let id = item.id;
             let document = QueryDocument::with_random_peer("");
-            let editor = cx.new(|cx| QueryEditor::new(document, theme, cx));
-            let result = cx.new(|cx| ResultsView::new(theme, cx));
+            let language = if item.kind == ItemKind::Configuration {
+                EditorLanguage::Toml
+            } else {
+                EditorLanguage::Sql
+            };
+            let editor = cx.new(|cx| QueryEditor::new(document, theme, cx).with_language(language));
             cx.subscribe(&editor, move |pane, _, event, cx| {
                 pane.on_editor_event(id, event, cx);
             })
             .detach();
             editors.insert(id, editor);
-            results.insert(id, result);
+            if item.kind == ItemKind::Query {
+                results.insert(id, cx.new(|cx| ResultsView::new(theme, cx)));
+            }
         }
         Self {
             id: pane.id,
@@ -354,7 +407,7 @@ impl Pane {
 
     fn on_editor_event(&mut self, item_id: u64, event: &EditorEvent, cx: &mut Context<Self>) {
         match event {
-            EditorEvent::StateChanged => cx.emit(PaneEvent::EditorStateChanged),
+            EditorEvent::StateChanged => cx.emit(PaneEvent::EditorStateChanged { item_id }),
             EditorEvent::Execute { sql } => {
                 // Show the pending state immediately, then ask the workspace to
                 // dispatch the run. The workspace owns the executor channel.
@@ -382,10 +435,20 @@ impl Pane {
     }
 
     fn snapshot(&self) -> PanePresentation {
+        let items = self
+            .items
+            .iter()
+            .filter(|item| item.kind != ItemKind::Configuration)
+            .cloned()
+            .collect::<Vec<_>>();
+        let active_id = self.active_item().map(|item| item.id);
+        let active_item = active_id
+            .and_then(|active| items.iter().position(|item| item.id == active))
+            .unwrap_or_else(|| items.len().saturating_sub(1));
         PanePresentation {
             id: self.id,
-            items: self.items.clone(),
-            active_item: self.active_item.min(self.items.len().saturating_sub(1)),
+            items,
+            active_item,
         }
     }
 
@@ -402,7 +465,7 @@ impl Pane {
     /// keeps the `SiftEditor` key context active so editing keys route.
     fn active_focus_handle(&self, cx: &App) -> FocusHandle {
         self.active_item()
-            .filter(|item| ItemRegistry::definition(&item.kind).runtime == ItemRuntimeKind::Query)
+            .filter(|item| ItemRegistry::definition(&item.kind).runtime.is_editor())
             .and_then(|item| self.editors.get(&item.id))
             .map(|editor| editor.focus_handle(cx))
             .unwrap_or_else(|| self.focus_handle.clone())
@@ -413,6 +476,47 @@ impl Pane {
         self.editors
             .get(&item.id)
             .map(|editor| editor.read(cx).cursor_position())
+    }
+
+    fn contains_item(&self, item_id: u64) -> bool {
+        self.items.iter().any(|item| item.id == item_id)
+    }
+
+    fn editor(&self, item_id: u64) -> Option<Entity<QueryEditor>> {
+        self.editors.get(&item_id).cloned()
+    }
+
+    fn open_configuration(
+        &mut self,
+        item: ItemPresentation,
+        editor: Entity<QueryEditor>,
+        cx: &mut Context<Self>,
+    ) {
+        let item_id = item.id;
+        if let Some(index) = self
+            .items
+            .iter()
+            .position(|candidate| candidate.id == item_id)
+        {
+            self.items[index] = item;
+            self.active_item = index;
+        } else {
+            self.items.push(item);
+            self.active_item = self.items.len() - 1;
+        }
+        cx.subscribe(&editor, move |pane, _, event, cx| {
+            pane.on_editor_event(item_id, event, cx);
+        })
+        .detach();
+        self.editors.insert(item_id, editor);
+        self.results.remove(&item_id);
+        cx.notify();
+    }
+
+    fn close_item_by_id(&mut self, item_id: u64, cx: &mut Context<Self>) {
+        if let Some(index) = self.items.iter().position(|item| item.id == item_id) {
+            self.close_item(index, cx);
+        }
     }
 }
 
@@ -612,6 +716,77 @@ impl gpui::Render for Pane {
             .child({
                 let body = div().flex_1().min_h_0().flex().flex_col();
                 match active {
+                    Some(item) if item.kind == ItemKind::Configuration => {
+                        match self.editors.get(&item.id) {
+                            Some(editor) => {
+                                let item_id = item.id;
+                                body.child(div().flex_1().min_h_0().child(editor.clone()))
+                                    .child(
+                                        div()
+                                            .h(px(42.))
+                                            .flex_none()
+                                            .flex()
+                                            .items_center()
+                                            .justify_between()
+                                            .px_3()
+                                            .border_t_1()
+                                            .border_color(colors.subtle_border)
+                                            .bg(colors.toolbar)
+                                            .child(
+                                                div()
+                                                    .text_xs()
+                                                    .text_color(colors.muted_text)
+                                                    .child("Save regenerates sift.lock; apply remains explicit."),
+                                            )
+                                            .child(
+                                                div()
+                                                    .flex()
+                                                    .items_center()
+                                                    .gap_2()
+                                                    .child(
+                                                        div()
+                                                            .id(("cancel-configuration-item", item_id as usize))
+                                                            .role(Role::Button)
+                                                            .px_3()
+                                                            .py_1()
+                                                            .rounded_sm()
+                                                            .border_1()
+                                                            .border_color(colors.subtle_border)
+                                                            .hover(|button| button.bg(colors.hovered_surface))
+                                                            .on_click(cx.listener(move |_, _, _, cx| {
+                                                                cx.emit(PaneEvent::CancelConfigurationRequested { item_id })
+                                                            }))
+                                                            .child("Cancel"),
+                                                    )
+                                                    .child(
+                                                        div()
+                                                            .id(("save-configuration-item", item_id as usize))
+                                                            .role(Role::Button)
+                                                            .px_3()
+                                                            .py_1()
+                                                            .rounded_sm()
+                                                            .bg(colors.accent)
+                                                            .text_color(colors.background)
+                                                            .hover(|button| button.bg(colors.accent_hover))
+                                                            .on_click(cx.listener(move |_, _, _, cx| {
+                                                                cx.emit(PaneEvent::SaveConfigurationRequested { item_id })
+                                                            }))
+                                                            .child("Save"),
+                                                    ),
+                                            ),
+                                    )
+                            }
+                            None => body.child(
+                                div()
+                                    .size_full()
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .text_color(colors.muted_text)
+                                    .child("Configuration editor is unavailable"),
+                            ),
+                        }
+                    }
                     Some(item)
                         if ItemRegistry::definition(&item.kind).runtime
                             == ItemRuntimeKind::Query =>
@@ -699,6 +874,7 @@ pub struct WorkspaceShell {
     database_pool_min_input: Entity<TextInput>,
     database_pool_max_input: Entity<TextInput>,
     instance_secret_input: Entity<TextInput>,
+    instance_configuration_editor: Entity<QueryEditor>,
     palette_selected: usize,
     palette_scroll_handle: UniformListScrollHandle,
     theme: Theme,
@@ -731,6 +907,8 @@ pub struct WorkspaceShell {
     saved_servers: Vec<SavedServerProfile>,
     instance_roots: Vec<SavedInstanceRoot>,
     instance_plan: Option<InstancePlanPresentation>,
+    instance_configuration: Option<InstanceConfigurationPresentation>,
+    instance_configuration_item: Option<u64>,
     selected_instance_credential: Option<String>,
     instance_operation_pending: bool,
     instance_operation_error: Option<String>,
@@ -834,6 +1012,10 @@ impl WorkspaceShell {
                 .aria_label("Instance credential value")
                 .masked()
         });
+        let instance_configuration_editor = cx.new(|cx| {
+            QueryEditor::new(QueryDocument::with_random_peer(""), theme, cx)
+                .with_language(EditorLanguage::Toml)
+        });
         // Re-render the palette as the search text changes so its list filters.
         cx.observe(&query_input, |shell, _, cx| {
             shell.palette_selected = 0;
@@ -893,6 +1075,7 @@ impl WorkspaceShell {
             database_pool_min_input,
             database_pool_max_input,
             instance_secret_input,
+            instance_configuration_editor,
             palette_selected: 0,
             palette_scroll_handle: UniformListScrollHandle::new(),
             theme,
@@ -925,6 +1108,8 @@ impl WorkspaceShell {
             saved_servers: Vec::new(),
             instance_roots: Vec::new(),
             instance_plan: None,
+            instance_configuration: None,
+            instance_configuration_item: None,
             selected_instance_credential: None,
             instance_operation_pending: false,
             instance_operation_error: None,
@@ -1174,12 +1359,57 @@ impl WorkspaceShell {
     fn on_instance_manager_event(&mut self, event: InstanceManagerEvent, cx: &mut Context<Self>) {
         match event {
             InstanceManagerEvent::Profiles(profiles) => self.saved_servers = profiles,
-            InstanceManagerEvent::Roots(roots) => self.instance_roots = roots,
+            InstanceManagerEvent::Roots(roots) => {
+                self.instance_roots = roots;
+                self.instance_operation_pending = false;
+                self.instance_operation_error = None;
+            }
             InstanceManagerEvent::InstancePlan(plan) => {
                 self.instance_operation_pending = false;
                 self.instance_operation_error = None;
                 self.instance_plan = Some(*plan);
                 self.modal = Some(Modal::InstanceSetup);
+            }
+            InstanceManagerEvent::InstanceConfiguration(configuration) => {
+                self.instance_operation_pending = false;
+                self.instance_operation_error = None;
+                let editor = cx.new(|cx| {
+                    QueryEditor::new(
+                        QueryDocument::with_random_peer(&configuration.manifest),
+                        self.theme,
+                        cx,
+                    )
+                    .with_language(EditorLanguage::Toml)
+                });
+                self.instance_configuration_editor = editor.clone();
+                let item_id = self.instance_configuration_item.unwrap_or_else(|| {
+                    let item_id = self.next_id;
+                    self.next_id += 1;
+                    item_id
+                });
+                let pane_index = self
+                    .panes
+                    .iter()
+                    .position(|pane| pane.read(cx).contains_item(item_id))
+                    .unwrap_or(self.active_pane);
+                if let Some(pane) = self.panes.get(pane_index) {
+                    pane.update(cx, |pane, cx| {
+                        pane.open_configuration(
+                            ItemPresentation {
+                                id: item_id,
+                                kind: ItemKind::Configuration,
+                                title: "sift.toml".into(),
+                                dirty: false,
+                            },
+                            editor,
+                            cx,
+                        )
+                    });
+                    self.active_pane = pane_index;
+                }
+                self.instance_configuration_item = Some(item_id);
+                self.instance_configuration = Some(*configuration);
+                self.modal = None;
             }
             InstanceManagerEvent::InstanceOperationPending { message } => {
                 self.instance_operation_pending = true;
@@ -1287,6 +1517,35 @@ impl WorkspaceShell {
                 self.status.diagnostic_count = 1;
                 cx.notify();
             }
+            ExecutorEvent::ProfileDeleted {
+                tenant_id,
+                profile_id,
+            } => {
+                if let Some(tenant) = self
+                    .lifecycle
+                    .tenants
+                    .iter_mut()
+                    .find(|tenant| tenant.id.0 == tenant_id)
+                {
+                    tenant.connections.retain(|entry| entry.id != profile_id);
+                }
+                if matches!(
+                    self.connection_status,
+                    ConnectionStatus::Connected { profile_id: current, .. }
+                        | ConnectionStatus::Connecting { profile_id: current }
+                        | ConnectionStatus::Failed { profile_id: current, .. }
+                        if current == profile_id
+                ) {
+                    self.connection_status = ConnectionStatus::Disconnected;
+                    self.status.database = "No database".into();
+                }
+                self.show_toast("Connection deleted".into(), cx);
+            }
+            ExecutorEvent::ProfileDeletionFailed(message) => {
+                self.status.current_error = Some(message.clone());
+                self.status.diagnostic_count = 1;
+                self.show_toast(message, cx);
+            }
         }
     }
 
@@ -1350,6 +1609,30 @@ impl WorkspaceShell {
         self.connection_status = ConnectionStatus::Disconnected;
         self.status.database = "No database".into();
         cx.notify();
+    }
+
+    fn request_delete_connection(&mut self, entry: &ConnectionNavEntry, cx: &mut Context<Self>) {
+        self.modal = Some(Modal::ConfirmDeleteConnection(entry.clone()));
+        cx.notify();
+    }
+
+    fn confirm_delete_connection(&mut self, entry: &ConnectionNavEntry, cx: &mut Context<Self>) {
+        let Some(sender) = &self.executor_sender else {
+            self.show_toast("Database connection manager is unavailable".into(), cx);
+            return;
+        };
+        if sender
+            .send(ExecutorCommand::DeleteConnectionProfile {
+                tenant_id: entry.tenant_id,
+                profile_id: entry.id,
+            })
+            .is_err()
+        {
+            self.show_toast("Database connection manager stopped".into(), cx);
+        } else {
+            self.modal = None;
+            cx.notify();
+        }
     }
 
     fn open_database_connection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1572,6 +1855,7 @@ impl WorkspaceShell {
         let mut configuration = serde_json::Map::from_iter([
             ("host".into(), serde_json::Value::String(host)),
             ("user".into(), serde_json::Value::String(user)),
+            ("password".into(), serde_json::Value::Null),
         ]);
         if let Some(port) = port {
             configuration.insert("port".into(), serde_json::json!(port));
@@ -1587,6 +1871,8 @@ impl WorkspaceShell {
                     _ => (true, false),
                 };
                 let mut engine = serde_json::Map::from_iter([
+                    ("engine".into(), serde_json::json!("sql_server")),
+                    ("mars".into(), serde_json::json!(false)),
                     ("encrypt".into(), serde_json::json!(encrypt)),
                     (
                         "trust_server_certificate".into(),
@@ -1610,7 +1896,8 @@ impl WorkspaceShell {
                     "ssl_mode".into(),
                     serde_json::Value::String(security_mode.clone()),
                 );
-                let mut engine = serde_json::Map::new();
+                let mut engine =
+                    serde_json::Map::from_iter([("engine".into(), serde_json::json!("postgres"))]);
                 let search_path = self.database_search_path_input.read(cx).text().trim();
                 if !search_path.is_empty() {
                     engine.insert(
@@ -1655,9 +1942,7 @@ impl WorkspaceShell {
                 {
                     engine.insert("pool_min_size".into(), serde_json::json!(pool_min));
                 }
-                if !engine.is_empty() {
-                    configuration.insert("engine_specific".into(), engine.into());
-                }
+                configuration.insert("engine_specific".into(), engine.into());
             }
         }
         let credentials = (!password.is_empty()).then(|| serde_json::json!({"password": password}));
@@ -2000,7 +2285,14 @@ impl WorkspaceShell {
                 self.active_pane = index;
                 self.close_pane_at(index, window, cx);
             }
-            PaneEvent::EditorStateChanged => cx.notify(),
+            PaneEvent::EditorStateChanged { item_id } => {
+                emitter.update(cx, |pane, _| {
+                    if let Some(item) = pane.items.iter_mut().find(|item| item.id == *item_id) {
+                        item.dirty = true;
+                    }
+                });
+                cx.notify();
+            }
             PaneEvent::ExecuteRequested { item_id, sql } => match &self.executor_sender {
                 Some(sender) => {
                     self.status.execution = "Running…".into();
@@ -2020,6 +2312,24 @@ impl WorkspaceShell {
                     );
                 }
             },
+            PaneEvent::SaveConfigurationRequested { item_id } => {
+                if self.instance_configuration_item == Some(*item_id) {
+                    if let Some(editor) = emitter.read(cx).editor(*item_id) {
+                        self.instance_configuration_editor = editor;
+                        self.save_instance_configuration(cx);
+                    }
+                }
+            }
+            PaneEvent::CancelConfigurationRequested { item_id } => {
+                emitter.update(cx, |pane, cx| pane.close_item_by_id(*item_id, cx));
+                if self.instance_configuration_item == Some(*item_id) {
+                    self.instance_configuration_item = None;
+                    self.instance_configuration = None;
+                    self.instance_operation_error = None;
+                }
+                self.persist(cx);
+                cx.notify();
+            }
         }
     }
 
@@ -2107,6 +2417,18 @@ impl WorkspaceShell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let active_configuration = self.panes.get(self.active_pane).and_then(|pane| {
+            let pane = pane.read(cx);
+            pane.active_item()
+                .filter(|item| item.kind == ItemKind::Configuration)
+                .and_then(|item| pane.editor(item.id))
+        });
+        if let Some(editor) = active_configuration {
+            self.modal = None;
+            self.instance_configuration_editor = editor;
+            self.save_instance_configuration(cx);
+            return;
+        }
         let close_after_save = matches!(self.modal, Some(Modal::ConfirmClose { .. }));
         self.mark_active_item_dirty(false, cx);
         self.show_toast("Presentation saved".into(), cx);
@@ -2160,7 +2482,7 @@ impl WorkspaceShell {
             files: false,
             directories: true,
             multiple: false,
-            prompt: Some("Import Sift Instance".into()),
+            prompt: Some("Open Existing Sift Instance".into()),
         });
         self.instance_operation_pending = true;
         self.instance_operation_error = None;
@@ -2185,6 +2507,90 @@ impl WorkspaceShell {
             });
         })
         .detach();
+    }
+
+    fn prompt_for_new_instance_root(&mut self, cx: &mut Context<Self>) {
+        let prompt = cx.prompt_for_paths(PathPromptOptions {
+            files: false,
+            directories: true,
+            multiple: false,
+            prompt: Some("Choose an empty folder for the Sift instance".into()),
+        });
+        self.instance_operation_pending = true;
+        self.instance_operation_error = None;
+        cx.spawn(async move |shell, cx| {
+            let result = prompt.await;
+            let _ = shell.update(cx, |shell, cx| match result {
+                Ok(Ok(Some(paths))) => {
+                    if let Some(root) = paths.into_iter().next() {
+                        shell.send_instance_command(
+                            InstanceCommand::PrepareRootConfiguration { root },
+                            cx,
+                        );
+                    }
+                }
+                Ok(Ok(None)) | Err(_) => {
+                    shell.instance_operation_pending = false;
+                    cx.notify();
+                }
+                Ok(Err(error)) => {
+                    shell.instance_operation_pending = false;
+                    shell.instance_operation_error =
+                        Some(format!("opening folder picker: {error}"));
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    fn send_instance_command(&mut self, command: InstanceCommand, cx: &mut Context<Self>) {
+        let Some(sender) = &self.instance_sender else {
+            self.instance_operation_pending = false;
+            self.instance_operation_error = Some("Instance manager is unavailable".into());
+            cx.notify();
+            return;
+        };
+        self.instance_operation_pending = true;
+        self.instance_operation_error = None;
+        if sender.send(command).is_err() {
+            self.instance_operation_pending = false;
+            self.instance_operation_error = Some("Instance manager stopped".into());
+        }
+        cx.notify();
+    }
+
+    fn open_root_configuration(&mut self, root: std::path::PathBuf, cx: &mut Context<Self>) {
+        self.send_instance_command(InstanceCommand::OpenRootConfiguration { root }, cx);
+    }
+
+    fn open_current_configuration(&mut self, cx: &mut Context<Self>) {
+        self.send_instance_command(InstanceCommand::OpenCurrentConfiguration, cx);
+    }
+
+    fn forget_instance_root(&mut self, root: std::path::PathBuf, cx: &mut Context<Self>) {
+        self.send_instance_command(InstanceCommand::ForgetRoot { root }, cx);
+    }
+
+    fn save_instance_configuration(&mut self, cx: &mut Context<Self>) {
+        let Some(configuration) = self.instance_configuration.clone() else {
+            return;
+        };
+        let manifest = self
+            .instance_configuration_editor
+            .read(cx)
+            .document()
+            .text()
+            .to_owned();
+        self.send_instance_command(
+            InstanceCommand::SaveConfiguration {
+                root: configuration.root,
+                manifest,
+                expected_source_revision: configuration.source_revision,
+                is_new: configuration.is_new,
+            },
+            cx,
+        );
     }
 
     fn inspect_instance_root(&mut self, root: std::path::PathBuf, cx: &mut Context<Self>) {
@@ -2459,7 +2865,7 @@ impl WorkspaceShell {
             .lifecycle
             .selected_instance
             .as_ref()
-            .is_some_and(|instance| instance.kind == crate::InstanceKind::Local)
+            .is_some_and(|instance| instance.id == "local")
         {
             return;
         }
@@ -3275,6 +3681,7 @@ impl WorkspaceShell {
                             .into_any_element(),
                     );
                     for conn in &tenant.connections {
+                        let entry_for_delete = conn.clone();
                         let (dot, connected) = match &self.connection_status {
                             ConnectionStatus::Connected { profile_id, .. }
                                 if *profile_id == conn.id =>
@@ -3330,6 +3737,29 @@ impl WorkspaceShell {
                                 cx.listener(move |shell, _, _, cx| shell.connect(&entry, cx)),
                             );
                         }
+                        row = row.child(
+                            div()
+                                .id(("delete-connection", conn.id as usize))
+                                .flex_none()
+                                .role(Role::Button)
+                                .aria_label(format!("Delete connection {}", conn.name))
+                                .p_1()
+                                .rounded_sm()
+                                .text_color(colors.muted_text)
+                                .hover(|button| {
+                                    button
+                                        .bg(colors.danger_muted)
+                                        .text_color(colors.danger)
+                                })
+                                .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                                    cx.stop_propagation()
+                                })
+                                .on_click(cx.listener(move |shell, _, _, cx| {
+                                    cx.stop_propagation();
+                                    shell.request_delete_connection(&entry_for_delete, cx)
+                                }))
+                                .child(icon(IconName::Close, colors.danger, 11.)),
+                        );
                         rows.push(row.into_any_element());
                     }
                     for room in &tenant.rooms {
@@ -3689,7 +4119,12 @@ impl WorkspaceShell {
                                     .min_w_0()
                                     .items_center()
                                     .gap_2()
-                                    .child(div().min_w_0().truncate().child("Local Sift")),
+                                    .child(
+                                        div()
+                                            .min_w_0()
+                                            .truncate()
+                                            .child("Bundled Local Sift"),
+                                    ),
                             )
                             .child(
                                 div()
@@ -3699,7 +4134,11 @@ impl WorkspaceShell {
                                     .px_1()
                                     .rounded(px(3.))
                                     .bg(colors.hovered_surface)
-                                    .child(if local_active { "Current" } else { "Bundled" }),
+                                    .child(if local_active {
+                                        "Current · no TOML"
+                                    } else {
+                                        "No TOML"
+                                    }),
                             )
                             .into_any_element(),
                     );
@@ -3762,6 +4201,7 @@ impl WorkspaceShell {
                     }
                     for (index, instance) in self.instance_roots.iter().cloned().enumerate() {
                         let root = instance.root.clone();
+                        let root_for_remove = instance.root.clone();
                         let active = current_id.as_deref()
                             == Some(format!("config:{}", instance.manifest_id).as_str());
                         rows.push(
@@ -3789,7 +4229,7 @@ impl WorkspaceShell {
                                         .flex_1()
                                         .flex_col()
                                         .min_w_0()
-                                        .child(instance.name)
+                                        .child(instance.name.clone())
                                         .child(
                                             div()
                                                 .text_xs()
@@ -3800,10 +4240,55 @@ impl WorkspaceShell {
                                 )
                                 .child(
                                     div()
+                                        .flex()
                                         .flex_none()
-                                        .text_xs()
-                                        .text_color(colors.muted_text)
-                                        .child(if active { "Current" } else { "Config root" }),
+                                        .items_center()
+                                        .gap_2()
+                                        .child(
+                                            div()
+                                                .text_xs()
+                                                .text_color(colors.muted_text)
+                                                .child(if active {
+                                                    "Current"
+                                                } else {
+                                                    "Config root"
+                                                }),
+                                        )
+                                        .child(
+                                            div()
+                                                .id(("forget-instance-root", index))
+                                                .role(Role::Button)
+                                                .aria_label(format!(
+                                                    "Remove {} from Sift; keep files",
+                                                    instance.name
+                                                ))
+                                                .p_1()
+                                                .rounded_sm()
+                                                .text_color(colors.muted_text)
+                                                .hover(|button| {
+                                                    button
+                                                        .bg(colors.danger_muted)
+                                                        .text_color(colors.danger)
+                                                })
+                                                .on_mouse_down(
+                                                    MouseButton::Left,
+                                                    |_, _, cx| cx.stop_propagation(),
+                                                )
+                                                .on_click(cx.listener(
+                                                    move |shell, _, _, cx| {
+                                                        cx.stop_propagation();
+                                                        shell.forget_instance_root(
+                                                            root_for_remove.clone(),
+                                                            cx,
+                                                        )
+                                                    },
+                                                ))
+                                                .child(icon(
+                                                    IconName::Close,
+                                                    colors.danger,
+                                                    12.,
+                                                )),
+                                        ),
                                 )
                                 .into_any_element(),
                         );
@@ -3840,6 +4325,65 @@ impl WorkspaceShell {
                                     .child("Testing connection…"),
                             )
                         })
+                        .when(
+                            current_id
+                                .as_deref()
+                                .is_some_and(|id| id.starts_with("config:")),
+                            |picker| {
+                                picker.child(
+                                    div()
+                                        .id("picker-edit-current-instance")
+                                        .role(Role::Button)
+                                        .px_2()
+                                        .py_2()
+                                        .rounded_sm()
+                                        .text_color(colors.muted_text)
+                                        .hover(|button| {
+                                            button
+                                                .bg(colors.hovered_surface)
+                                                .text_color(colors.text)
+                                        })
+                                        .on_click(cx.listener(|shell, _, _, cx| {
+                                            shell.open_current_configuration(cx)
+                                        }))
+                                        .child(
+                                            div()
+                                                .flex()
+                                                .items_center()
+                                                .gap_2()
+                                                .child(icon(
+                                                    IconName::Fallback,
+                                                    colors.danger,
+                                                    13.,
+                                                ))
+                                                .child("Edit current sift.toml…"),
+                                        ),
+                                )
+                            },
+                        )
+                        .child(
+                            div()
+                                .id("picker-new-instance")
+                                .role(Role::Button)
+                                .px_2()
+                                .py_2()
+                                .rounded_sm()
+                                .text_color(colors.muted_text)
+                                .hover(|button| {
+                                    button.bg(colors.hovered_surface).text_color(colors.text)
+                                })
+                                .on_click(cx.listener(|shell, _, _, cx| {
+                                    shell.prompt_for_new_instance_root(cx)
+                                }))
+                                .child(
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .gap_2()
+                                        .child(icon(IconName::Add, colors.muted_text, 13.))
+                                        .child("Create Sift Instance…"),
+                                ),
+                        )
                         .child(
                             div()
                                 .id("picker-import-instance")
@@ -3860,7 +4404,7 @@ impl WorkspaceShell {
                                         .items_center()
                                         .gap_2()
                                         .child(icon(IconName::Workspace, colors.muted_text, 13.))
-                                        .child("Import Sift Instance…"),
+                                        .child("Open Existing Sift Instance…"),
                                 ),
                         )
                         .child(
@@ -3913,6 +4457,7 @@ impl WorkspaceShell {
                         && !plan.drifted
                         && missing_credentials == 0;
                     let manifest_path = plan.root.join("sift.toml");
+                    let edit_manifest_root = plan.root.clone();
                     let lock_path = plan.root.join("sift.lock");
                     let refresh_root = plan.root.clone();
                     let configuration_digest = plan.configuration_digest.chars().take(12).collect::<String>();
@@ -4062,6 +4607,23 @@ impl WorkspaceShell {
                                 .gap_2()
                                 .child(
                                     div()
+                                        .id("edit-instance-manifest")
+                                        .role(Role::Button)
+                                        .px_2()
+                                        .py_1()
+                                        .rounded_sm()
+                                        .bg(colors.accent)
+                                        .text_color(colors.background)
+                                        .on_click(cx.listener(move |shell, _, _, cx| {
+                                            shell.open_root_configuration(
+                                                edit_manifest_root.clone(),
+                                                cx,
+                                            )
+                                        }))
+                                        .child("Edit sift.toml"),
+                                )
+                                .child(
+                                    div()
                                         .id("open-instance-manifest")
                                         .role(Role::Button)
                                         .px_2()
@@ -4071,7 +4633,7 @@ impl WorkspaceShell {
                                         .on_click(move |_, _, cx| {
                                             cx.open_with_system(&manifest_path)
                                         })
-                                        .child("Open sift.toml"),
+                                        .child("Open externally"),
                                 )
                                 .child(
                                     div()
@@ -5481,6 +6043,77 @@ impl WorkspaceShell {
                         )
                         .into_any_element()
                 }
+                Modal::ConfirmDeleteConnection(entry) => {
+                    let entry = entry.clone();
+                    let entry_for_delete = entry.clone();
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_4()
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .font_weight(gpui::FontWeight::SEMIBOLD)
+                                .child(icon(IconName::Warning, colors.danger, 16.))
+                                .child(format!("Delete {}?", entry.name)),
+                        )
+                        .child(
+                            div()
+                                .text_sm()
+                                .text_color(colors.muted_text)
+                                .whitespace_normal()
+                                .child("This removes the connection and its stored credentials. Connections managed by sift.toml must be removed from the manifest instead."),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .justify_end()
+                                .gap_2()
+                                .child(
+                                    div()
+                                        .id("cancel-delete-connection")
+                                        .role(Role::Button)
+                                        .h(self.theme.metrics.control_height)
+                                        .px_3()
+                                        .flex()
+                                        .items_center()
+                                        .rounded_sm()
+                                        .border_1()
+                                        .border_color(colors.subtle_border)
+                                        .hover(|button| button.bg(colors.hovered_surface))
+                                        .on_click(cx.listener(|shell, _, window, cx| {
+                                            shell.dismiss_modal(&DismissModal, window, cx)
+                                        }))
+                                        .child("Cancel"),
+                                )
+                                .child(
+                                    div()
+                                        .id("confirm-delete-connection")
+                                        .role(Role::Button)
+                                        .h(self.theme.metrics.control_height)
+                                        .px_3()
+                                        .flex()
+                                        .items_center()
+                                        .rounded_sm()
+                                        .bg(colors.danger_muted)
+                                        .text_color(colors.danger)
+                                        .hover(|button| {
+                                            button.bg(colors.danger).text_color(gpui::white())
+                                        })
+                                        .on_click(cx.listener(move |shell, _, _, cx| {
+                                            shell.confirm_delete_connection(
+                                                &entry_for_delete,
+                                                cx,
+                                            )
+                                        }))
+                                        .child("Delete"),
+                                ),
+                        )
+                        .into_any_element()
+                }
                 Modal::ConfirmClose { title } => div()
                     .flex()
                     .flex_col()
@@ -6556,6 +7189,7 @@ mod tests {
                 assert_eq!(configuration["engine_specific"]["connect_timeout_secs"], 15);
                 assert_eq!(configuration["engine_specific"]["pool_min_size"], 2);
                 assert_eq!(configuration["engine_specific"]["pool_max_size"], 12);
+                serde_json::from_value::<sift_protocol::ConnectionSpec>(configuration).unwrap();
                 assert_eq!(credentials.unwrap()["password"], "top-secret");
             }
             _ => panic!("expected profile creation command"),
@@ -6685,17 +7319,19 @@ mod tests {
                 assert_eq!(configuration["port"], 1433);
                 assert!(configuration.get("ssl_mode").is_none());
                 assert_eq!(configuration["engine_specific"]["encrypt"], true);
+                assert_eq!(configuration["engine_specific"]["engine"], "sql_server");
                 assert_eq!(
                     configuration["engine_specific"]["trust_server_certificate"],
                     true
                 );
+                serde_json::from_value::<sift_protocol::ConnectionSpec>(configuration).unwrap();
             }
             _ => panic!("expected profile creation command"),
         }
     }
 
     #[gpui::test]
-    fn toast_expires_and_current_local_server_is_a_no_op(cx: &mut TestAppContext) {
+    fn bundled_local_is_a_no_op_but_configured_local_can_switch(cx: &mut TestAppContext) {
         let window = shell(cx);
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         let workspace = window.root(&mut cx).unwrap();
@@ -6715,6 +7351,18 @@ mod tests {
             shell.show_toast("Connected to Local Sift".into(), cx);
         });
         assert!(receiver.try_recv().is_err());
+        workspace.update(&mut cx, |shell, cx| {
+            shell
+                .lifecycle
+                .apply(LifecycleEvent::Selected(crate::InstanceSpec {
+                    id: "config:demo".into(),
+                    name: "Demo".into(),
+                    base_url: "auto-loopback".into(),
+                    kind: crate::InstanceKind::Local,
+                }));
+            shell.use_local_server(cx);
+        });
+        assert!(matches!(receiver.try_recv(), Ok(InstanceCommand::UseLocal)));
         assert!(workspace.read_with(&cx, |shell, _| !shell.toasts.is_empty()));
         cx.background_executor
             .advance_clock(std::time::Duration::from_secs(5));
@@ -6739,6 +7387,64 @@ mod tests {
         match receiver.try_recv().unwrap() {
             InstanceCommand::InspectRoot { root: dispatched } => assert_eq!(dispatched, root),
             _ => panic!("expected instance-root inspection command"),
+        }
+    }
+
+    #[gpui::test]
+    fn current_instance_configuration_opens_and_saves_through_typed_commands(
+        cx: &mut TestAppContext,
+    ) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let (_event_sender, event_receiver) = tokio::sync::mpsc::unbounded_channel();
+        workspace.update(&mut cx, |shell, cx| {
+            shell.attach_instance_manager(sender, event_receiver, Vec::new(), cx);
+            shell.open_current_configuration(cx);
+        });
+        assert!(matches!(
+            receiver.try_recv().unwrap(),
+            InstanceCommand::OpenCurrentConfiguration
+        ));
+
+        workspace.update(&mut cx, |shell, cx| {
+            shell.on_instance_manager_event(
+                InstanceManagerEvent::InstanceConfiguration(Box::new(
+                    InstanceConfigurationPresentation {
+                        root: None,
+                        manifest: "name = \"current\"\n".into(),
+                        source_revision: Some("sha256:one".into()),
+                        name: "current".into(),
+                        is_new: false,
+                    },
+                )),
+                cx,
+            );
+        });
+        workspace.read_with(&cx, |shell, cx| {
+            assert!(shell.modal().is_none());
+            let item_id = shell.instance_configuration_item.unwrap();
+            assert!(shell
+                .panes
+                .iter()
+                .any(|pane| pane.read(cx).contains_item(item_id)));
+        });
+        let focus = workspace.read_with(&cx, |shell, cx| shell.focus_handle(cx));
+        cx.update(|window, cx| focus.dispatch_action(&SaveActiveItem, window, cx));
+        match receiver.try_recv().unwrap() {
+            InstanceCommand::SaveConfiguration {
+                root,
+                manifest,
+                expected_source_revision,
+                is_new,
+            } => {
+                assert!(root.is_none());
+                assert_eq!(manifest, "name = \"current\"\n");
+                assert_eq!(expected_source_revision.as_deref(), Some("sha256:one"));
+                assert!(!is_new);
+            }
+            _ => panic!("expected current instance configuration save"),
         }
     }
 

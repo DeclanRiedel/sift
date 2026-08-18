@@ -416,7 +416,7 @@
         # real (non-mock) server from that root.
         desktopDemo = pkgs.writeShellApplication {
           name = "sift-desktop-demo";
-          runtimeInputs = with pkgs; [ gnused jq nix openssl postgresql ];
+          runtimeInputs = with pkgs; [ gnused jq nix openssl postgresql util-linux ];
           text = ''
             set -euo pipefail
 
@@ -428,7 +428,16 @@
 
             pgdata="''${SIFT_DEMO_PGDATA:-/tmp/sift-demo-pg}"
             pglog="''${SIFT_DEMO_PG_LOG:-/tmp/sift-demo-pg.log}"
-            instance_root="''${SIFT_DESKTOP_DEMO_INSTANCE_ROOT:-/tmp/sift-desktop-demo-instance-$UID}"
+            temporary_instance=0
+            if [ -n "''${SIFT_DESKTOP_DEMO_INSTANCE_ROOT:-}" ]; then
+              instance_root="$SIFT_DESKTOP_DEMO_INSTANCE_ROOT"
+              mkdir -p "$instance_root"
+            else
+              instance_root="$(mktemp -d "''${TMPDIR:-/tmp}/sift-desktop-demo-instance.XXXXXX")"
+              temporary_instance=1
+            fi
+            manifest_id="$(uuidgen)"
+            instance_state="''${XDG_STATE_HOME:-$HOME/.local/state}/sift/instances/$manifest_id"
 
             run_in_dev() {
               if [ -n "''${IN_NIX_SHELL:-}" ]; then
@@ -438,7 +447,7 @@
               fi
             }
 
-            pgport="$(sh "$repo/scripts/dev-seed-postgres.sh")"
+            pgport="$(SIFT_DEMO_RESET=1 sh "$repo/scripts/dev-seed-postgres.sh")"
 
             cd "$repo"
             # Build first, in the foreground: a cold GPUI build takes minutes,
@@ -449,13 +458,17 @@
               if [ "''${SIFT_DEMO_KEEP_POSTGRES:-0}" != "1" ]; then
                 pg_ctl -D "$pgdata" -m fast -w stop >/dev/null 2>&1 || true
               fi
+              rm -rf -- "$instance_state"
+              if [ "$temporary_instance" = "1" ]; then
+                rm -rf -- "$instance_root"
+              fi
             }
             trap cleanup EXIT
 
-            mkdir -p "$instance_root"
             cp "$repo/examples/reproducible-instance/sift.toml" "$instance_root/sift.toml"
+            rm -f -- "$instance_root/sift.lock"
             sed -i \
-              -e 's/b654b918-b1f1-4d70-924d-e4c1014f482f/85f995d3-36bd-4df7-bbf2-4a868ef18b59/' \
+              -e "s/b654b918-b1f1-4d70-924d-e4c1014f482f/$manifest_id/" \
               -e 's/name = "demo-sift"/name = "desktop-demo"/' \
               -e "s|127.0.0.1:5432/postgres|127.0.0.1:$pgport/sifttest|" \
               "$instance_root/sift.toml"
@@ -468,10 +481,12 @@
 
             run_in_dev cargo run -q -p sift-server --bin sift -- instance lock "$instance_root"
             run_in_dev cargo run -q -p sift-server --bin sift -- instance apply "$instance_root"
-            printf '%s\n' "$db_password" | jq -cnR '{password: input}' | \
-              run_in_dev cargo run -q -p sift-server --bin sift -- \
-                instance credentials import "$instance_root" \
-                --slot credential:demo/postgres/shared --stdin
+            if grep -q 'credential = "credential:demo/postgres/shared"' "$instance_root/sift.toml"; then
+              printf '%s\n' "$db_password" | jq -cnR '{password: input}' | \
+                run_in_dev cargo run -q -p sift-server --bin sift -- \
+                  instance credentials import "$instance_root" \
+                  --slot credential:demo/postgres/shared --stdin
+            fi
 
             echo "Postgres: host=127.0.0.1 port=$pgport db=sifttest user=sift credential=<destination-local> ssl=prefer"
             echo "Sift instance root: $instance_root"
@@ -479,6 +494,7 @@
             echo "Seeded query: SELECT * FROM lab.people;"
             echo "Postgres log: $pglog"
             echo "Desktop: supervising the applied auto-loopback instance"
+            echo "The desktop can edit this run's sift.toml through the current-instance API."
 
             run_in_dev cargo run -p sift-desktop -- --instance-root "$instance_root" "$@"
           '';

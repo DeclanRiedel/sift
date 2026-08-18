@@ -148,6 +148,13 @@ pub enum TransferRecipeAction {
     Execute,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum InstanceConfigurationAction {
+    Read,
+    Update,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum Operation {
@@ -196,6 +203,9 @@ pub enum Operation {
     ManageExtension {
         action: ExtensionAdminAction,
         extension_id: crate::ExtensionId,
+    },
+    ManageInstanceConfiguration {
+        action: InstanceConfigurationAction,
     },
     InvokeExtension {
         operation: crate::ExtensionOperation,
@@ -618,6 +628,7 @@ impl Operation {
             Self::ManageConnectionPolicy { .. } => OperationKind::ManageConnectionPolicy,
             Self::ManageTenantLimits { .. } => OperationKind::ManageTenantLimits,
             Self::ManageExtension { .. } => OperationKind::ManageExtension,
+            Self::ManageInstanceConfiguration { .. } => OperationKind::ManageInstanceConfiguration,
             Self::InvokeExtension { .. } => OperationKind::InvokeExtension,
             Self::ApproveOperation { .. } => OperationKind::ApproveOperation,
             Self::RateLimitRejected { .. } => OperationKind::Metadata,
@@ -832,6 +843,11 @@ impl Operation {
             } => summary(
                 &format!("extension_{action:?}").to_lowercase(),
                 extension_id.as_str(),
+                None,
+            ),
+            Operation::ManageInstanceConfiguration { action } => summary(
+                &format!("instance_configuration_{action:?}").to_lowercase(),
+                "instance_configuration",
                 None,
             ),
             Operation::InvokeExtension { operation } => summary(

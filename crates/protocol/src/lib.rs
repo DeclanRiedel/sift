@@ -92,9 +92,9 @@ pub use handshake::{
 };
 pub use migration::*;
 pub use operation::{
-    AuthenticationMethod, DdlSourceAction, ExtensionAdminAction, IdentityAdminAction, Operation,
-    OperationSummary, PolicyAdminAction, RunAction, RunConfigurationAction, ScheduleAction,
-    TransferRecipeAction, VcsAction, WorkspaceAction,
+    AuthenticationMethod, DdlSourceAction, ExtensionAdminAction, IdentityAdminAction,
+    InstanceConfigurationAction, Operation, OperationSummary, PolicyAdminAction, RunAction,
+    RunConfigurationAction, ScheduleAction, TransferRecipeAction, VcsAction, WorkspaceAction,
 };
 pub use pagination::CursorPage;
 pub use plan::*;

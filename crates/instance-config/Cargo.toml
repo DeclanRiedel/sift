@@ -17,4 +17,5 @@ url = { workspace = true }
 uuid = { workspace = true }
 
 [dev-dependencies]
+sift-protocol = { workspace = true }
 tempfile = { workspace = true }

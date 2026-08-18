@@ -252,6 +252,57 @@ async fn health_lists_registered_provider_ids() {
 }
 
 #[tokio::test]
+async fn configured_instance_toml_round_trips_with_optimistic_revision() {
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path().join("instance");
+    let source = include_str!("../../../examples/reproducible-instance/sift.toml");
+    sift_server::instance_configuration::create(&root, source).unwrap();
+    let mut state = test_state_with_metadata(true);
+    state.auth.instance_configuration = Some(sift_server::http::InstanceConfigurationState::new(
+        root.clone(),
+    ));
+    let app = app(state);
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::get("/v1/admin/instance/configuration")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = response.status();
+    let body = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+    let opened: sift_api_types::InstanceConfigurationDocument =
+        serde_json::from_slice(&body).unwrap();
+    let edited = opened
+        .manifest
+        .replace("name = \"demo-sift\"", "name = \"api-edited\"");
+    let request = sift_api_types::UpdateInstanceConfigurationRequest {
+        manifest: edited,
+        expected_source_revision: opened.source_revision.clone(),
+    };
+    let response = app
+        .clone()
+        .oneshot(put_json("/v1/admin/instance/configuration", &request))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let updated: sift_api_types::InstanceConfigurationDocument =
+        body_json(response.into_body()).await;
+    assert_eq!(updated.name, "api-edited");
+
+    let stale = app
+        .oneshot(put_json("/v1/admin/instance/configuration", &request))
+        .await
+        .unwrap();
+    assert_eq!(stale.status(), StatusCode::CONFLICT);
+    assert!(root.join("sift.lock").is_file());
+}
+
+#[tokio::test]
 async fn handshake_selects_protocol_and_identifies_server_generation() {
     let state = test_state();
     let expected_instance = state.auth.instance_id.clone();

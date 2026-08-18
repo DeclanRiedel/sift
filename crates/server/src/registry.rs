@@ -636,8 +636,10 @@ impl RuntimeDriver {
     ) -> Result<RuntimeConnectionHandle, DriverError> {
         match self {
             Self::Builtin { driver, .. } => {
-                let mut spec: sift_protocol::ConnectionSpec =
-                    serde_json::from_value(configuration.clone()).map_err(|error| {
+                let configuration =
+                    normalize_builtin_configuration(configuration.clone(), driver.engine());
+                let mut spec: sift_protocol::ConnectionSpec = serde_json::from_value(configuration)
+                    .map_err(|error| {
                         DriverError::new(
                             Code::InvalidParameterValue,
                             format!("invalid bundled provider configuration: {error}"),
@@ -786,6 +788,37 @@ impl RuntimeDriver {
     pub async fn rollback(&self, transaction: RuntimeTransactionHandle) -> Result<(), DriverError> {
         transaction.rollback().await
     }
+}
+
+/// Older desktop builds stored the engine-specific body before the tagged
+/// enum discriminator was added. Provider selection is already authoritative
+/// here, so repairing only a missing tag is unambiguous and keeps those saved
+/// profiles usable. Conflicting tags remain untouched and fail closed.
+fn normalize_builtin_configuration(
+    mut configuration: serde_json::Value,
+    engine: Engine,
+) -> serde_json::Value {
+    let Some(configuration) = configuration.as_object_mut() else {
+        return configuration;
+    };
+    configuration
+        .entry("password")
+        .or_insert(serde_json::Value::Null);
+    if let Some(engine_specific) = configuration
+        .get_mut("engine_specific")
+        .and_then(serde_json::Value::as_object_mut)
+    {
+        engine_specific.entry("engine").or_insert_with(|| {
+            serde_json::Value::String(
+                match engine {
+                    Engine::Postgres => "postgres",
+                    Engine::SqlServer => "sql_server",
+                }
+                .into(),
+            )
+        });
+    }
+    serde_json::Value::Object(std::mem::take(configuration))
 }
 
 impl RuntimeTransactionHandle {
@@ -1607,6 +1640,37 @@ mod tests {
     use sift_extension_protocol::DriverSchemaScope;
 
     use super::*;
+
+    #[test]
+    fn legacy_builtin_configuration_receives_only_missing_runtime_fields() {
+        let normalized = normalize_builtin_configuration(
+            serde_json::json!({
+                "host": "localhost",
+                "user": "sift",
+                "engine_specific": {"application_name": "sift"}
+            }),
+            Engine::Postgres,
+        );
+        let spec = serde_json::from_value::<sift_protocol::ConnectionSpec>(normalized).unwrap();
+        assert!(matches!(
+            spec.engine_specific,
+            Some(sift_protocol::EngineConnectionSpec::Postgres(_))
+        ));
+
+        let conflicting = normalize_builtin_configuration(
+            serde_json::json!({
+                "host": "localhost",
+                "user": "sift",
+                "password": null,
+                "engine_specific": {"engine": "sql_server"}
+            }),
+            Engine::Postgres,
+        );
+        assert_eq!(
+            conflicting["engine_specific"]["engine"],
+            serde_json::json!("sql_server")
+        );
+    }
 
     struct ExternalFixture {
         descriptor: ProviderDescriptor,

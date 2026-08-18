@@ -10,6 +10,7 @@
 #   SIFT_DEMO_PG_LOG           postmaster log      (default /tmp/sift-demo-pg.log)
 #   SIFT_DEMO_PG_PORT          TCP port            (default 5433)
 #   SIFT_DEMO_PG_SOCKET_DIR    unix socket dir     (default /tmp/sift-demo-pg-socket)
+#   SIFT_DEMO_RESET            recreate sifttest   (default 0)
 set -eu
 
 pgdata="${SIFT_DEMO_PGDATA:-/tmp/sift-demo-pg}"
@@ -39,6 +40,9 @@ if ! pg_ctl -D "$pgdata" status >/dev/null 2>&1; then
   pg_ctl -D "$pgdata" -l "$pglog" -w start >&2
 fi
 
+if [ "${SIFT_DEMO_RESET:-0}" = "1" ]; then
+  dropdb -h 127.0.0.1 -p "$pgport" -U sift --if-exists --force sifttest >&2
+fi
 createdb -h 127.0.0.1 -p "$pgport" -U sift sifttest 2>/dev/null || true
 psql -q -h 127.0.0.1 -p "$pgport" -U sift -d sifttest >&2 <<'SQL'
 SET client_min_messages = warning;

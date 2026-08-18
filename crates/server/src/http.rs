@@ -68,6 +68,21 @@ use crate::session::SessionStore;
 use crate::VERSION;
 
 #[derive(Clone)]
+pub struct InstanceConfigurationState {
+    pub root: std::path::PathBuf,
+    write_lock: Arc<tokio::sync::Mutex<()>>,
+}
+
+impl InstanceConfigurationState {
+    pub fn new(root: std::path::PathBuf) -> Self {
+        Self {
+            root,
+            write_lock: Arc::new(tokio::sync::Mutex::new(())),
+        }
+    }
+}
+
+#[derive(Clone)]
 pub struct AppState {
     pub sessions: SessionStore,
     pub rooms: RoomRuntime,
@@ -90,6 +105,8 @@ pub struct AuthState {
     pub instance_audience: String,
     pub instance_id: String,
     pub daemon_generation: String,
+    /// Present only when the process was launched from an applied instance root.
+    pub instance_configuration: Option<InstanceConfigurationState>,
     /// Transitional test/embed escape hatch. The production binary always
     /// requires a negotiated version on product routes.
     pub allow_legacy_unversioned: bool,
@@ -109,6 +126,7 @@ impl Default for AuthState {
             instance_audience: "sift:local".into(),
             instance_id: uuid::Uuid::new_v4().to_string(),
             daemon_generation: uuid::Uuid::new_v4().to_string(),
+            instance_configuration: None,
             allow_legacy_unversioned: true,
             rate_limiter: crate::rate_limit::RateLimiter::default(),
         }
@@ -148,6 +166,11 @@ pub fn app(state: AppState) -> Router {
         .api_route(
             "/v1/audit",
             get_with(list_audit, doc("listAudit", "List in-memory operation audit rows")),
+        )
+        .api_route(
+            "/v1/admin/instance/configuration",
+            get_with(get_instance_configuration, doc("getInstanceConfiguration", "Read the current instance desired-state TOML"))
+                .put_with(update_instance_configuration, doc("updateInstanceConfiguration", "Validate and replace instance desired-state TOML using an optimistic source revision")),
         )
         .api_route(
             "/v1/operations",
@@ -3864,6 +3887,93 @@ async fn health(State(state): State<AppState>) -> Json<Health> {
             .map(|descriptor| descriptor.provider.provider_id)
             .collect(),
     })
+}
+
+async fn get_instance_configuration(
+    State(state): State<AppState>,
+    auth: Option<Extension<AuthContext>>,
+) -> ApiResult<Json<sift_api_types::InstanceConfigurationDocument>> {
+    let auth = require_instance_admin(&state, auth.as_ref().map(|Extension(auth)| auth))?;
+    let configured = state.auth.instance_configuration.clone().ok_or_else(|| {
+        ApiError::BadRequest("server was not launched from an instance root".into())
+    })?;
+    let _guard = configured.write_lock.lock().await;
+    let root = configured.root.clone();
+    let result = tokio::task::spawn_blocking(move || crate::instance_configuration::read(&root))
+        .await
+        .map_err(|error| {
+            ApiError::Internal(format!("instance configuration task failed: {error}"))
+        })?
+        .map_err(|error| {
+            ApiError::BadRequest(format!("reading instance configuration failed: {error:#}"))
+        });
+    record_instance_configuration_operation(
+        &state,
+        auth,
+        sift_protocol::InstanceConfigurationAction::Read,
+        result.as_ref().err(),
+    );
+    result.map(Json)
+}
+
+async fn update_instance_configuration(
+    State(state): State<AppState>,
+    auth: Option<Extension<AuthContext>>,
+    Json(request): Json<sift_api_types::UpdateInstanceConfigurationRequest>,
+) -> ApiResult<Json<sift_api_types::InstanceConfigurationDocument>> {
+    let auth = require_instance_admin(&state, auth.as_ref().map(|Extension(auth)| auth))?;
+    let configured = state.auth.instance_configuration.clone().ok_or_else(|| {
+        ApiError::BadRequest("server was not launched from an instance root".into())
+    })?;
+    let _guard = configured.write_lock.lock().await;
+    let root = configured.root.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        crate::instance_configuration::update(
+            &root,
+            &request.manifest,
+            Some(&request.expected_source_revision),
+        )
+    })
+    .await
+    .map_err(|error| ApiError::Internal(format!("instance configuration task failed: {error}")))?
+    .map_err(|error| {
+        let message = format!("updating instance configuration failed: {error:#}");
+        if error
+            .chain()
+            .any(|cause| cause.to_string() == "sift.toml changed since it was opened")
+        {
+            ApiError::Conflict(message)
+        } else {
+            ApiError::BadRequest(message)
+        }
+    });
+    record_instance_configuration_operation(
+        &state,
+        auth,
+        sift_protocol::InstanceConfigurationAction::Update,
+        result.as_ref().err(),
+    );
+    result.map(Json)
+}
+
+fn record_instance_configuration_operation(
+    state: &AppState,
+    auth: &AuthContext,
+    action: sift_protocol::InstanceConfigurationAction,
+    error: Option<&ApiError>,
+) {
+    state.sessions.push_operation_full(
+        Operation::ManageInstanceConfiguration { action },
+        if error.is_some() {
+            OperationStatus::Failed
+        } else {
+            OperationStatus::Succeeded
+        },
+        Some(auth.principal_id.0),
+        error.map(|_| "instance_configuration_invalid".into()),
+        None,
+        error.map(ToString::to_string),
+    );
 }
 
 /// Readiness probe (ADR-018): `200` when the server should take traffic,

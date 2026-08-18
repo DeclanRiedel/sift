@@ -88,6 +88,7 @@ impl BottomTool {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ItemKind {
     Query,
+    Configuration,
     Schema,
     Welcome,
 }

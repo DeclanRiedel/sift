@@ -7285,6 +7285,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.10.9",
+ "sift-protocol",
  "tempfile",
  "thiserror 1.0.69",
  "toml 0.8.23",
@@ -7457,6 +7458,7 @@ dependencies = [
  "sift-ui",
  "tempfile",
  "tokio",
+ "toml 0.8.23",
 ]
 
 [[package]]

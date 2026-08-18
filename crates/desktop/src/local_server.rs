@@ -81,6 +81,10 @@ impl LocalServerManager {
         }
     }
 
+    pub fn instance_root(&self) -> Option<&std::path::Path> {
+        self.instance_root.as_deref()
+    }
+
     pub async fn ensure_ready(&self) -> Result<Client, String> {
         if let Some(client) = self.discover_configured_client().await? {
             return Ok(client);
@@ -155,12 +159,12 @@ impl LocalServerManager {
         let Some(root) = &self.instance_root else {
             return Ok(None);
         };
-        let (_, _, config) = match sift_server::instance_runtime::load_current_config(root, None) {
-            Ok(current) => current,
-            Err(error) => return Err(format!("loading applied instance failed: {error:#}")),
+        let instance = match sift_server::instance_runtime::InstanceRoot::open(root) {
+            Ok(instance) => instance,
+            Err(error) => return Err(format!("loading instance root failed: {error:#}")),
         };
         let descriptor =
-            match sift_server::runtime::read_daemon_descriptor(&config.runtime_state_dir()) {
+            match sift_server::runtime::read_daemon_descriptor(&instance.default_state_dir()) {
                 Ok(descriptor) => descriptor,
                 Err(_) => return Ok(None),
             };

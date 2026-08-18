@@ -23,9 +23,9 @@ pub use shell::{
     CloseActiveItem, CloseActivePane, CommandDefinition, CommandId, CommandRegistry, CommandSpec,
     ConfirmCloseWithoutSaving, ConnectionStatus, DismissModal, Dock, DockDefinition, DockId,
     DockPlacement, DockRegistry, ExecutorCommand, ExecutorEvent, FocusNextPane, InstanceCommand,
-    InstanceCredentialKind, InstanceCredentialPresentation, InstanceManagerEvent,
-    InstancePlanPresentation, ItemDefinition, ItemRegistry, ItemRuntimeKind, Modal,
-    OpenCommandPalette, OpenServerConnection, PaletteConfirm, PaletteDown, PaletteUp, Pane,
+    InstanceConfigurationPresentation, InstanceCredentialKind, InstanceCredentialPresentation,
+    InstanceManagerEvent, InstancePlanPresentation, ItemDefinition, ItemRegistry, ItemRuntimeKind,
+    Modal, OpenCommandPalette, OpenServerConnection, PaletteConfirm, PaletteDown, PaletteUp, Pane,
     PaneEvent, SaveActiveItem, SavedInstanceRoot, SavedServerProfile, SplitPane, StatusBar, Toast,
     ToggleBottomDock, ToggleLeftDock, ToggleRightDock, Tooltip, WorkspaceShell,
 };

@@ -14,7 +14,7 @@ use crate::{
     insert_operation_audit_row, now_text, MetadataError, MetadataStore, NewOperationAudit,
 };
 
-const INSTANCE_SECRET_NAMESPACE: &str = "sift.instance.credential.v1";
+pub(crate) const INSTANCE_SECRET_NAMESPACE: &str = "sift.instance.credential.v1";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InstanceApplySummary {
@@ -1136,7 +1136,7 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
-    use crate::MemorySecretStore;
+    use crate::{MemorySecretStore, PrincipalId, TenantId};
 
     fn fixture() -> (Manifest, LockFile) {
         let manifest = Manifest::parse(include_str!(
@@ -1172,6 +1172,20 @@ mod tests {
             store.instance_credential_status().unwrap()[0].readiness,
             CredentialReadiness::Ready
         );
+        let managed_profile = store
+            .list_connection_profiles(TenantId(1))
+            .unwrap()
+            .into_iter()
+            .next()
+            .unwrap();
+        let (_, credentials) = store
+            .resolve_provider_connection(TenantId(1), PrincipalId(1), managed_profile.id)
+            .await
+            .unwrap();
+        assert_eq!(
+            credentials.get("password").map(Vec::as_slice),
+            Some(b"portable-but-not-in-config".as_slice())
+        );
         let sqlite_dump = {
             let conn = store.conn().unwrap();
             let mut statement = conn
@@ -1190,6 +1204,27 @@ mod tests {
             .unwrap();
         assert!(!second.changed);
         assert!(second.missing_credentials.is_empty());
+        assert!(matches!(
+            store
+                .delete_connection_profile(
+                    TenantId(1),
+                    PrincipalId(1),
+                    managed_profile.id,
+                    NewOperationAudit {
+                        actor_principal_id: Some(PrincipalId(1)),
+                        action: "delete".into(),
+                        target: "connection_profile".into(),
+                        target_id: Some(managed_profile.id.0),
+                        status: "succeeded".into(),
+                        result_code: None,
+                        row_count: None,
+                        error_message: None,
+                        correlation_id: None,
+                    },
+                )
+                .await,
+            Err(MetadataError::ConnectionProfileManaged(_))
+        ));
         store
             .verify_instance_manifest_state(&manifest, &lock, 1)
             .unwrap();

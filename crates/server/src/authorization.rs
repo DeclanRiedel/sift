@@ -73,6 +73,7 @@ pub fn authorize(
             | ManageGithubAllowlist
             | ManagePrincipalKey
             | ManageTenantLimits
+            | ManageInstanceConfiguration
             | BackupState
             | RestoreState
     ) && !scope.instance_admin

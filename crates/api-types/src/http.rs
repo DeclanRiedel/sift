@@ -17,6 +17,25 @@ use sift_protocol::{
 
 use crate::{ApiTokenRow, CredentialMode, RoomKind, RoomRole};
 
+/// Editable desired-state document for a server launched from an instance root.
+/// Host filesystem paths are intentionally not part of the public response.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct InstanceConfigurationDocument {
+    pub manifest: String,
+    pub manifest_id: String,
+    pub name: String,
+    /// Digest of the exact source bytes, used for optimistic concurrency.
+    pub source_revision: String,
+    pub configuration_digest: String,
+    pub lock_digest: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct UpdateInstanceConfigurationRequest {
+    pub manifest: String,
+    pub expected_source_revision: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct CreateRoomRequest {
     pub tenant_id: i64,

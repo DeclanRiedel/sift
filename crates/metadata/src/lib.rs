@@ -133,6 +133,8 @@ pub enum MetadataError {
     },
     #[error("connection profile {0:?} not found")]
     ConnectionProfileNotFound(ConnectionProfileId),
+    #[error("connection profile {0:?} is managed by sift.toml; edit the manifest instead")]
+    ConnectionProfileManaged(ConnectionProfileId),
     #[error("connection profile limit reached for tenant {0:?}")]
     ConnectionProfileLimitReached(TenantId),
     #[error("connection profile {0:?} has no credential for principal {1:?}")]
@@ -3523,6 +3525,17 @@ impl MetadataStore {
             let tx = conn.transaction()?;
             ensure_tenant_admin_locked(&tx, tenant, actor)?;
             let mut handles = Vec::new();
+            let managed = tx.query_row(
+                "SELECT EXISTS(
+                    SELECT 1 FROM instance_managed_resource
+                    WHERE resource_kind = 'connection' AND row_id = ?1
+                )",
+                params![id.0],
+                |row| row.get::<_, bool>(0),
+            )?;
+            if managed {
+                return Err(MetadataError::ConnectionProfileManaged(id));
+            }
             if let Some(handle) = tx
                 .query_row(
                     "SELECT shared_secret_handle FROM connection_profile WHERE tenant_id = ?1 AND id = ?2",
@@ -3655,7 +3668,7 @@ impl MetadataStore {
         std::collections::HashMap<String, Vec<u8>>,
     )> {
         let backend = self.backend.clone();
-        let (profile, handle) = sqlite_blocking(move || {
+        let (profile, handle, instance_managed) = sqlite_blocking(move || {
             let conn = backend.conn()?;
             let profile = connection_profile_by_id_locked(&conn, id)?;
             if profile.tenant_id != tenant {
@@ -3677,14 +3690,29 @@ impl MetadataStore {
                     return Err(MetadataError::BrokerCredentialUnsupported(id))
                 }
             };
-            Ok((profile, handle))
+            let instance_managed = conn.query_row(
+                "SELECT EXISTS(
+                    SELECT 1 FROM instance_managed_resource
+                    WHERE resource_kind = 'connection' AND row_id = ?1
+                )",
+                params![id.0],
+                |row| row.get::<_, bool>(0),
+            )?;
+            Ok((profile, handle, instance_managed))
         })
         .await?;
         let mut credentials = std::collections::HashMap::new();
         if let Some(handle) = handle {
             let secret = self
                 .secrets
-                .get(SECRET_NAMESPACE, &handle)
+                .get(
+                    if instance_managed {
+                        instance_manifest::INSTANCE_SECRET_NAMESPACE
+                    } else {
+                        SECRET_NAMESPACE
+                    },
+                    &handle,
+                )
                 .await?
                 .ok_or(MetadataError::MissingCredential(id, principal))?;
             let object: serde_json::Value = serde_json::from_slice(&secret)?;

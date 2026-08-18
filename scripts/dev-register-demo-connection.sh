@@ -4,8 +4,8 @@
 #
 # Usage: dev-register-demo-connection.sh <base_url> [pgport] [profile_name]
 #
-# Idempotent: if a profile with the same name already exists on the server it
-# is reused instead of creating a duplicate.
+# Idempotent: the named profile is reconciled on every run, so runtime schema
+# changes repair an older demo profile instead of silently reusing stale JSON.
 set -eu
 
 base_url="${1:?usage: dev-register-demo-connection.sh <base_url> [pgport] [name]}"
@@ -24,18 +24,6 @@ protocol_version="$(
     | jq -er .selected_protocol
 )"
 
-existing="$(
-  curl -fsS "$base_url/v1/metadata/connections?tenant=$tenant_id" \
-    -H "x-sift-protocol-version: $protocol_version" 2>/dev/null \
-    | jq -r --arg name "$name" 'if type == "array" then . else (.items // []) end
-        | map(select(.name == $name)) | first | .id // empty' \
-    || true
-)"
-if [ -n "$existing" ]; then
-  printf '%s\n' "$existing"
-  exit 0
-fi
-
 profile_payload="$(
   jq -n --argjson port "$pgport" --argjson tenant "$tenant_id" --arg name "$name" '{
     tenant_id: $tenant,
@@ -46,8 +34,10 @@ profile_payload="$(
       port: $port,
       database: "sifttest",
       user: "sift",
+      password: null,
       ssl_mode: "disable",
       engine_specific: {
+        engine: "postgres",
         search_path: ["lab"],
         application_name: "sift-demo"
       }

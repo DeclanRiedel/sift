@@ -81,6 +81,7 @@ pub const SUPPORTED_HTTP_OPERATION_IDS: &[&str] = &[
     "getComparison",
     "getDurableMigrationRun",
     "getExtension",
+    "getInstanceConfiguration",
     "getMetadataConnectionPolicy",
     "getMetadataSavedQuery",
     "getMigrationRun",
@@ -198,6 +199,7 @@ pub const SUPPORTED_HTTP_OPERATION_IDS: &[&str] = &[
     "updateExtensionGrants",
     "updateExtensionSelection",
     "updateExtensionTenant",
+    "updateInstanceConfiguration",
     "updateMetadataConnectionPolicy",
     "updateMetadataDocument",
     "updateMetadataSavedQuery",
@@ -252,15 +254,15 @@ pub use sift_api_types::{
     ExecuteTransferRecipeRequest, ExpectedDdlSourceRevisionRequest,
     ExpectedProjectionRevisionRequest, ExpectedRepositoryRevisionRequest,
     ExpectedRunConfigurationRevisionRequest, ExpectedTransferRecipeRevisionRequest,
-    ExpectedWorkspaceRevisionRequest, IssueTokenRequest, IssueTokenResponse,
-    MoveWorkspaceNodeRequest, OpenConnectionFromProfileRequest, ProjectionResolutionRequest,
-    RestoreWorkspaceCheckpointRequest, RunLogQuery, ScheduleOccurrenceQuery, SetCredentialRequest,
-    SetVcsCredentialRequest, StartRunRequest, UpdateDdlSourceRequest,
-    UpdateDocumentSnapshotRequest, UpdateRunConfigurationRequest, UpdateRunScheduleRequest,
-    UpdateSavedQueryRequest, UpdateTransferRecipeRequest, UpdateWorkspaceRequest,
-    UpsertConnectionProfileRequest, VcsCommitRequest, VcsDiffQuery, VcsPathsRequest,
-    VcsRemoteRequest, WorkspaceBatchMutationItem, WorkspaceBatchMutationRequest,
-    WorkspaceTreeResponse,
+    ExpectedWorkspaceRevisionRequest, InstanceConfigurationDocument, IssueTokenRequest,
+    IssueTokenResponse, MoveWorkspaceNodeRequest, OpenConnectionFromProfileRequest,
+    ProjectionResolutionRequest, RestoreWorkspaceCheckpointRequest, RunLogQuery,
+    ScheduleOccurrenceQuery, SetCredentialRequest, SetVcsCredentialRequest, StartRunRequest,
+    UpdateDdlSourceRequest, UpdateDocumentSnapshotRequest, UpdateInstanceConfigurationRequest,
+    UpdateRunConfigurationRequest, UpdateRunScheduleRequest, UpdateSavedQueryRequest,
+    UpdateTransferRecipeRequest, UpdateWorkspaceRequest, UpsertConnectionProfileRequest,
+    VcsCommitRequest, VcsDiffQuery, VcsPathsRequest, VcsRemoteRequest, WorkspaceBatchMutationItem,
+    WorkspaceBatchMutationRequest, WorkspaceTreeResponse,
 };
 use sift_api_types::{
     ApiTokenId, ApiTokenRow, ConnectionProfile, ConnectionProfileId, Document, DocumentId,
@@ -1119,6 +1121,17 @@ impl Client {
 
     pub async fn health(&self) -> Result<Health> {
         self.get("/v1/health").await
+    }
+
+    pub async fn instance_configuration(&self) -> Result<InstanceConfigurationDocument> {
+        self.get("/v1/admin/instance/configuration").await
+    }
+
+    pub async fn update_instance_configuration(
+        &self,
+        request: UpdateInstanceConfigurationRequest,
+    ) -> Result<InstanceConfigurationDocument> {
+        self.put("/v1/admin/instance/configuration", &request).await
     }
 
     /// Readiness probe. Returns the parsed [`Readiness`] on both `200` (ready)

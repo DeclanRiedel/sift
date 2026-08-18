@@ -506,6 +506,12 @@ pub enum EditorEvent {
     Execute { sql: String },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EditorLanguage {
+    Sql,
+    Toml,
+}
+
 actions!(
     sift_editor,
     [
@@ -541,6 +547,7 @@ pub struct QueryEditor {
     focus_handle: FocusHandle,
     document: QueryDocument,
     theme: Theme,
+    language: EditorLanguage,
     marked_range: Option<Range<usize>>,
     line_layouts: Vec<ShapedLine>,
     line_starts: Vec<usize>,
@@ -554,12 +561,18 @@ impl QueryEditor {
             focus_handle: cx.focus_handle(),
             document,
             theme,
+            language: EditorLanguage::Sql,
             marked_range: None,
             line_layouts: Vec::new(),
             line_starts: Vec::new(),
             line_height: px(20.),
             last_bounds: None,
         }
+    }
+
+    pub fn with_language(mut self, language: EditorLanguage) -> Self {
+        self.language = language;
+        self
     }
 
     pub fn document(&self) -> &QueryDocument {
@@ -872,7 +885,10 @@ impl gpui::Render for QueryEditor {
             .id("sift-query-editor")
             .key_context("SiftEditor")
             .role(Role::TextInput)
-            .aria_label("SQL query editor")
+            .aria_label(match self.language {
+                EditorLanguage::Sql => "SQL query editor",
+                EditorLanguage::Toml => "TOML configuration editor",
+            })
             .track_focus(&self.focus_handle)
             .cursor(CursorStyle::IBeam)
             .size_full()
@@ -933,41 +949,65 @@ impl gpui::Render for QueryEditor {
                             .gap_2()
                             .text_xs()
                             .text_color(colors.muted_text)
-                            .child("SQL")
-                            .child(div().size(px(3.)).rounded_full().bg(colors.strong_border))
-                            .child(div().min_w_0().truncate().child("Collaborative query")),
-                    )
-                    .child(
-                        div()
-                            .id("editor-run-statement")
-                            .flex_none()
-                            .role(Role::Button)
-                            .aria_label("Run current SQL statement")
-                            .h(px(24.))
-                            .px_2()
-                            .flex()
-                            .items_center()
-                            .gap_1()
-                            .rounded(px(5.))
-                            .bg(colors.accent_muted)
-                            .text_xs()
-                            .text_color(colors.accent_hover)
-                            .hover(|button| {
-                                button.bg(colors.active_surface).text_color(colors.text)
+                            .child(match self.language {
+                                EditorLanguage::Sql => "SQL",
+                                EditorLanguage::Toml => "TOML",
                             })
-                            .on_click(cx.listener(|editor, _, window, cx| {
-                                editor.execute_statement(&ExecuteStatement, window, cx)
-                            }))
-                            .child(icon(IconName::Play, colors.accent_hover, 12.))
-                            .child("Run")
-                            .child(
-                                div()
-                                    .flex_none()
-                                    .ml_1()
-                                    .text_color(colors.muted_text)
-                                    .child("Ctrl ↵"),
-                            ),
-                    ),
+                            .child(div().size(px(3.)).rounded_full().bg(colors.strong_border))
+                            .child(div().min_w_0().truncate().child(match self.language {
+                                EditorLanguage::Sql => "Collaborative query",
+                                EditorLanguage::Toml => "Instance configuration",
+                            })),
+                    )
+                    .when(self.language == EditorLanguage::Sql, |toolbar| {
+                        toolbar.child(
+                            div()
+                                .id("editor-run-statement")
+                                .flex_none()
+                                .role(Role::Button)
+                                .aria_label("Run current SQL statement")
+                                .h(px(24.))
+                                .px_2()
+                                .flex()
+                                .items_center()
+                                .gap_1()
+                                .rounded(px(5.))
+                                .bg(colors.accent_muted)
+                                .text_xs()
+                                .text_color(colors.accent_hover)
+                                .hover(|button| {
+                                    button.bg(colors.active_surface).text_color(colors.text)
+                                })
+                                .on_click(cx.listener(|editor, _, window, cx| {
+                                    editor.execute_statement(&ExecuteStatement, window, cx)
+                                }))
+                                .child(icon(IconName::Play, colors.accent_hover, 12.))
+                                .child("Run")
+                                .child(
+                                    div()
+                                        .flex_none()
+                                        .ml_1()
+                                        .text_color(colors.muted_text)
+                                        .child("Ctrl ↵"),
+                                ),
+                        )
+                    }),
+            )
+            .children(
+                (self.language == EditorLanguage::Toml)
+                    .then(|| toml_diagnostic(self.document.text()))
+                    .flatten()
+                    .map(|diagnostic| {
+                        div()
+                            .px_3()
+                            .py_1()
+                            .border_b_1()
+                            .border_color(colors.danger)
+                            .bg(colors.danger_muted)
+                            .text_xs()
+                            .text_color(colors.danger)
+                            .child(diagnostic)
+                    }),
             )
             .child(
                 div()
@@ -1074,6 +1114,7 @@ impl Element for QueryEditorElement {
         let selection = editor.document.selection();
         let cursor = editor.document.cursor();
         let theme = editor.theme;
+        let language = editor.language;
         let style = window.text_style();
         let font_size = style.font_size.to_pixels(window.rem_size());
         let line_height = window.line_height();
@@ -1088,7 +1129,10 @@ impl Element for QueryEditorElement {
         for (line_index, line) in text.split('\n').enumerate() {
             line_starts.push(offset);
             let line_end = offset + line.len();
-            let runs = sql_text_runs(line, style.font(), theme);
+            let runs = match language {
+                EditorLanguage::Sql => sql_text_runs(line, style.font(), theme),
+                EditorLanguage::Toml => toml_text_runs(line, style.font(), theme),
+            };
             let shaped =
                 window
                     .text_system()
@@ -1232,6 +1276,71 @@ fn sql_text_runs(line: &str, font: gpui::Font, theme: Theme) -> Vec<TextRun> {
                 theme.colors.text
             };
             (end, color)
+        } else {
+            (
+                start + line[start..].chars().next().map_or(1, char::len_utf8),
+                theme.colors.text,
+            )
+        };
+        runs.push(TextRun {
+            len: end - start,
+            font: font.clone(),
+            color,
+            background_color: None,
+            underline: None,
+            strikethrough: None,
+        });
+        start = end;
+    }
+    runs
+}
+
+fn toml_diagnostic(source: &str) -> Option<String> {
+    toml::from_str::<toml::Value>(source).err().map(|error| {
+        let line = error.span().map_or(1, |span| {
+            source[..span.start.min(source.len())]
+                .bytes()
+                .filter(|byte| *byte == b'\n')
+                .count()
+                + 1
+        });
+        format!("Invalid TOML near line {line}")
+    })
+}
+
+fn toml_text_runs(line: &str, font: gpui::Font, theme: Theme) -> Vec<TextRun> {
+    let mut runs = Vec::new();
+    let bytes = line.as_bytes();
+    let equals = line.find('=');
+    let mut start = 0;
+    while start < bytes.len() {
+        let (end, color) = if bytes[start] == b'#' {
+            (bytes.len(), theme.colors.syntax_comment)
+        } else if matches!(bytes[start], b'\'' | b'"') {
+            let quote = bytes[start];
+            let mut end = start + 1;
+            while end < bytes.len() {
+                if bytes[end] == quote && (quote == b'\'' || end == 0 || bytes[end - 1] != b'\\') {
+                    end += 1;
+                    break;
+                }
+                end += line[end..].chars().next().map_or(1, char::len_utf8);
+            }
+            (end, theme.colors.syntax_string)
+        } else if bytes[start].is_ascii_digit()
+            || bytes[start..].starts_with(b"true")
+            || bytes[start..].starts_with(b"false")
+        {
+            let end = bytes[start..]
+                .iter()
+                .position(|byte| byte.is_ascii_whitespace() || matches!(*byte, b',' | b']' | b'#'))
+                .map_or(bytes.len(), |offset| start + offset);
+            (end, theme.colors.syntax_number)
+        } else if equals.is_some_and(|equals| start < equals)
+            || (line.trim_start().starts_with('[') && !line.trim_start().starts_with("[]"))
+        {
+            let end = equals.unwrap_or(bytes.len());
+            (end.max(start + 1), theme.colors.syntax_keyword)
         } else {
             (
                 start + line[start..].chars().next().map_or(1, char::len_utf8),
@@ -1512,4 +1621,22 @@ fn sql_presentation_runs_cover_text_and_classify_keywords() {
     assert!(runs
         .iter()
         .any(|run| run.color == theme.colors.syntax_comment));
+}
+
+#[test]
+fn toml_presentation_and_diagnostics_are_lightweight_and_source_safe() {
+    let theme = Theme::dark();
+    let text = "name = \"demo\" # instance";
+    let runs = toml_text_runs(text, gpui::font("monospace"), theme);
+    assert_eq!(runs.iter().map(|run| run.len).sum::<usize>(), text.len());
+    assert_eq!(runs[0].color, theme.colors.syntax_keyword);
+    assert!(runs
+        .iter()
+        .any(|run| run.color == theme.colors.syntax_comment));
+    assert!(
+        toml_diagnostic("name = \"unterminated-secret").is_some_and(|message| {
+            message.contains("line 1") && !message.contains("unterminated-secret")
+        })
+    );
+    assert!(toml_diagnostic("name = \"demo\"").is_none());
 }

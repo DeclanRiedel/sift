@@ -19,6 +19,7 @@ async fn main() -> anyhow::Result<()> {
     let command = parse_command(std::env::args().skip(1))?;
     let mut instance_github = None;
     let mut instance_selection = None;
+    let mut configured_instance_root = None;
     let mut cfg = match command {
         ServerCommand::BackupCreate { output, key_file } => {
             let config = load_config().context("loading config")?;
@@ -99,6 +100,7 @@ async fn main() -> anyhow::Result<()> {
                     )
                     .context("loading applied instance")?;
                 instance_github = Some(instance.manifest.auth.github.clone());
+                configured_instance_root = Some(instance.root.clone());
                 instance_selection =
                     Some((instance.manifest, instance.lock, generation.generation));
                 config
@@ -333,6 +335,8 @@ async fn main() -> anyhow::Result<()> {
                 .unwrap_or_else(|| format!("sift:instance:{}", runtime.instance_id)),
             instance_id: runtime.instance_id.clone(),
             daemon_generation: runtime.daemon_generation.clone(),
+            instance_configuration: configured_instance_root
+                .map(sift_server::http::InstanceConfigurationState::new),
             allow_legacy_unversioned: false,
             rate_limiter: sift_server::rate_limit::RateLimiter::from_config(&cfg.rate_limits),
             github: match (

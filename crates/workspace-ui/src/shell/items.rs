@@ -9,7 +9,14 @@ use crate::presentation::ItemKind;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ItemRuntimeKind {
     Query,
+    Configuration,
     Placeholder,
+}
+
+impl ItemRuntimeKind {
+    pub const fn is_editor(self) -> bool {
+        matches!(self, Self::Query | Self::Configuration)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -26,6 +33,7 @@ impl ItemRegistry {
     pub fn definition(kind: &ItemKind) -> &'static ItemDefinition {
         match kind {
             ItemKind::Query => &QUERY,
+            ItemKind::Configuration => &CONFIGURATION,
             ItemKind::Schema => &SCHEMA,
             ItemKind::Welcome => &WELCOME,
         }
@@ -43,6 +51,13 @@ const QUERY: ItemDefinition = ItemDefinition {
     empty_message: "Query editor is unavailable",
 };
 
+const CONFIGURATION: ItemDefinition = ItemDefinition {
+    kind: ItemKind::Configuration,
+    runtime: ItemRuntimeKind::Configuration,
+    placeholder_prefix: Some("TOML editor"),
+    empty_message: "Configuration editor is unavailable",
+};
+
 const SCHEMA: ItemDefinition = ItemDefinition {
     kind: ItemKind::Schema,
     runtime: ItemRuntimeKind::Placeholder,
@@ -57,7 +72,7 @@ const WELCOME: ItemDefinition = ItemDefinition {
     empty_message: "Open a connection or create a query to begin.",
 };
 
-const DEFINITIONS: [ItemDefinition; 3] = [QUERY, SCHEMA, WELCOME];
+const DEFINITIONS: [ItemDefinition; 4] = [QUERY, CONFIGURATION, SCHEMA, WELCOME];
 
 #[cfg(test)]
 mod tests {
@@ -65,9 +80,14 @@ mod tests {
 
     #[test]
     fn every_persisted_item_kind_has_runtime_metadata() {
-        for kind in [ItemKind::Query, ItemKind::Schema, ItemKind::Welcome] {
+        for kind in [
+            ItemKind::Query,
+            ItemKind::Configuration,
+            ItemKind::Schema,
+            ItemKind::Welcome,
+        ] {
             assert_eq!(ItemRegistry::definition(&kind).kind, kind);
         }
-        assert_eq!(ItemRegistry::definitions().len(), 3);
+        assert_eq!(ItemRegistry::definitions().len(), 4);
     }
 }

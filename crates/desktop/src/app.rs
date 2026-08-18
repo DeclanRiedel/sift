@@ -1,7 +1,9 @@
 use std::sync::Arc;
 
 use gpui::{prelude::*, App, Context, Entity, IntoElement, Window};
-use sift_api_types::{CredentialMode, UpsertConnectionProfileRequest};
+use sift_api_types::{
+    ConnectionProfileId, CredentialMode, TenantId, UpsertConnectionProfileRequest,
+};
 use sift_client_sdk::{
     Client, Error as ClientError, OpenConnectionFromProfileRequest, SessionTokenProvider,
 };
@@ -151,6 +153,13 @@ impl DesktopServer {
             Self::Local(local) => Some(local.acquire()),
             Self::Configured { local, .. } => Some(local.acquire()),
             Self::Remote { .. } => None,
+        }
+    }
+
+    pub(crate) fn configured_root(&self) -> Option<&std::path::Path> {
+        match self {
+            Self::Configured { local, .. } => local.instance_root(),
+            Self::Local(_) | Self::Remote { .. } => None,
         }
     }
 }
@@ -377,6 +386,7 @@ struct QueryContext {
     client: Client,
     session: SessionId,
     connection: ConnectionId,
+    profile_id: i64,
 }
 
 /// Owns the SDK client and the current session/connection. Connection is
@@ -512,8 +522,46 @@ async fn run_query_executor(
                     }
                 }
             }
+            ExecutorCommand::DeleteConnectionProfile {
+                tenant_id,
+                profile_id,
+            } => {
+                if context
+                    .as_ref()
+                    .is_some_and(|opened| opened.profile_id == profile_id)
+                {
+                    if let Some(opened) = context.take() {
+                        let _ = opened.client.close_session(opened.session).await;
+                    }
+                }
+                let server = targets.borrow().clone();
+                let result = delete_connection_profile(&server, tenant_id, profile_id).await;
+                let event = match result {
+                    Ok(()) => ExecutorEvent::ProfileDeleted {
+                        tenant_id,
+                        profile_id,
+                    },
+                    Err(error) => ExecutorEvent::ProfileDeletionFailed(error),
+                };
+                if events.send(event).is_err() {
+                    return;
+                }
+            }
         }
     }
+}
+
+async fn delete_connection_profile(
+    server: &DesktopServer,
+    tenant_id: i64,
+    profile_id: i64,
+) -> Result<(), String> {
+    server
+        .client()
+        .await?
+        .delete_connection_profile(TenantId(tenant_id), ConnectionProfileId(profile_id))
+        .await
+        .map_err(|error| format!("deleting connection profile failed: {error}"))
 }
 
 async fn create_connection_profile(
@@ -601,6 +649,7 @@ async fn open_query_context(
         client,
         session,
         connection,
+        profile_id,
     })
 }
 

@@ -102,6 +102,7 @@ fn unavailable_reason(
         | ManageConnectionPolicy
         | ManageTenantLimits
         | ManageExtension
+        | ManageInstanceConfiguration
         | BackupState
         | RestoreState => Some("administrator context required"),
         RefreshAuthSession
