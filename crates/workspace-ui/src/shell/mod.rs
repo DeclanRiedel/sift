@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 use std::sync::Arc;
 
@@ -44,6 +44,42 @@ use app_bar::AppBarMenu;
 const PALETTE_VISIBLE_ROWS: usize = 10;
 const PALETTE_ROW_HEIGHT: f32 = 30.0;
 const DOCK_RESIZE_HANDLE_SIZE: f32 = 7.0;
+
+fn quote_identifier(identifier: &str) -> String {
+    format!("\"{}\"", identifier.replace('"', "\"\""))
+}
+
+fn table_preview_sql(
+    provider_id: &sift_protocol::ProviderId,
+    schema: &str,
+    object: &str,
+) -> String {
+    let qualified = format!("{}.{}", quote_identifier(schema), quote_identifier(object));
+    if provider_id.as_str() == "sift/sql-server" {
+        format!("SELECT TOP (100) * FROM {qualified};")
+    } else {
+        format!("SELECT * FROM {qualified} LIMIT 100;")
+    }
+}
+
+fn schema_object_kind_label(kind: sift_protocol::ObjectKind) -> &'static str {
+    use sift_protocol::ObjectKind;
+    match kind {
+        ObjectKind::Table => "table",
+        ObjectKind::View => "view",
+        ObjectKind::MaterializedView => "materialized",
+        ObjectKind::ForeignTable => "foreign",
+        ObjectKind::PartitionedTable => "partitioned",
+        ObjectKind::TableValuedFunction => "table function",
+        ObjectKind::ScalarFunction => "function",
+        ObjectKind::Procedure => "procedure",
+        ObjectKind::Synonym => "synonym",
+        ObjectKind::Sequence => "sequence",
+        ObjectKind::Trigger => "trigger",
+        ObjectKind::Type => "type",
+        ObjectKind::Extension => "extension",
+    }
+}
 
 #[derive(Debug, Clone, Copy)]
 struct DockResizeDrag {
@@ -304,6 +340,22 @@ pub enum ConnectionStatus {
     Failed { profile_id: i64, reason: String },
 }
 
+#[derive(Debug, Clone)]
+enum ConnectionSchemaState {
+    Unavailable,
+    Loading {
+        profile_id: i64,
+    },
+    Ready {
+        profile_id: i64,
+        snapshot: Box<sift_protocol::SchemaSnapshot>,
+    },
+    Failed {
+        profile_id: i64,
+        message: String,
+    },
+}
+
 /// Shell → executor. The executor owns the SDK client, session, and
 /// connection; the shell only reports intent (connect / disconnect / run).
 #[derive(Clone)]
@@ -314,6 +366,7 @@ pub enum ExecutorCommand {
         name: String,
     },
     Disconnect,
+    RefreshSchema,
     Execute {
         item_id: u64,
         sql: String,
@@ -336,6 +389,14 @@ pub enum ExecutorCommand {
 #[derive(Debug, Clone)]
 pub enum ExecutorEvent {
     Connection(ConnectionStatus),
+    SchemaLoaded {
+        profile_id: i64,
+        snapshot: Box<sift_protocol::SchemaSnapshot>,
+    },
+    SchemaLoadFailed {
+        profile_id: i64,
+        message: String,
+    },
     Execution {
         item_id: u64,
         state: ResultState,
@@ -595,6 +656,29 @@ impl Pane {
         .detach();
         self.editors.insert(item_id, editor);
         self.results.remove(&item_id);
+        cx.notify();
+    }
+
+    fn open_query(
+        &mut self,
+        item: ItemPresentation,
+        editor: Entity<QueryEditor>,
+        results: Entity<ResultsView>,
+        cx: &mut Context<Self>,
+    ) {
+        let item_id = item.id;
+        if let Some(current) = self.active_item().map(|item| item.id) {
+            self.backward_items.push(current);
+            self.forward_items.clear();
+        }
+        self.items.push(item);
+        self.active_item = self.items.len() - 1;
+        cx.subscribe(&editor, move |pane, _, event, cx| {
+            pane.on_editor_event(item_id, event, cx);
+        })
+        .detach();
+        self.editors.insert(item_id, editor);
+        self.results.insert(item_id, results);
         cx.notify();
     }
 }
@@ -1026,6 +1110,9 @@ pub struct WorkspaceShell {
     account_pending: bool,
     account_error: Option<String>,
     connection_status: ConnectionStatus,
+    connection_schema: ConnectionSchemaState,
+    expanded_catalogs: HashSet<(i64, String)>,
+    expanded_schemas: HashSet<(i64, String, String)>,
     selected_database_tenant: Option<i64>,
     selected_database_provider: Option<String>,
     selected_database_ssl_mode: Option<String>,
@@ -1227,6 +1314,9 @@ impl WorkspaceShell {
             account_pending: false,
             account_error: None,
             connection_status: ConnectionStatus::Disconnected,
+            connection_schema: ConnectionSchemaState::Unavailable,
+            expanded_catalogs: HashSet::new(),
+            expanded_schemas: HashSet::new(),
             selected_database_tenant: None,
             selected_database_provider: None,
             selected_database_ssl_mode: Some("prefer".into()),
@@ -1585,7 +1675,66 @@ impl WorkspaceShell {
                     _ => None,
                 };
                 self.status.diagnostic_count = usize::from(self.status.current_error.is_some());
+                if matches!(
+                    status,
+                    ConnectionStatus::Disconnected | ConnectionStatus::Failed { .. }
+                ) {
+                    self.connection_schema = ConnectionSchemaState::Unavailable;
+                }
                 self.connection_status = status;
+                cx.notify();
+            }
+            ExecutorEvent::SchemaLoaded {
+                profile_id,
+                snapshot,
+            } => {
+                if matches!(
+                    self.connection_schema,
+                    ConnectionSchemaState::Failed {
+                        profile_id: failed,
+                        ..
+                    } if failed == profile_id
+                ) {
+                    self.status.current_error = None;
+                    self.status.diagnostic_count = 0;
+                }
+                self.expanded_catalogs
+                    .retain(|(expanded_profile, _)| *expanded_profile != profile_id);
+                self.expanded_schemas
+                    .retain(|(expanded_profile, _, _)| *expanded_profile != profile_id);
+                if snapshot.trees.len() == 1 {
+                    self.expanded_catalogs
+                        .insert((profile_id, snapshot.trees[0].name.clone()));
+                }
+                for catalog in &snapshot.trees {
+                    for schema in &catalog.schemas {
+                        if catalog.schemas.len() == 1
+                            || matches!(schema.name.as_str(), "lab" | "public" | "dbo")
+                        {
+                            self.expanded_schemas.insert((
+                                profile_id,
+                                catalog.name.clone(),
+                                schema.name.clone(),
+                            ));
+                        }
+                    }
+                }
+                self.connection_schema = ConnectionSchemaState::Ready {
+                    profile_id,
+                    snapshot,
+                };
+                cx.notify();
+            }
+            ExecutorEvent::SchemaLoadFailed {
+                profile_id,
+                message,
+            } => {
+                self.connection_schema = ConnectionSchemaState::Failed {
+                    profile_id,
+                    message: message.clone(),
+                };
+                self.status.current_error = Some(message);
+                self.status.diagnostic_count = 1;
                 cx.notify();
             }
             ExecutorEvent::Execution { item_id, state } => self.route_result(item_id, state, cx),
@@ -1644,6 +1793,7 @@ impl WorkspaceShell {
                         if current == profile_id
                 ) {
                     self.connection_status = ConnectionStatus::Disconnected;
+                    self.connection_schema = ConnectionSchemaState::Unavailable;
                     self.status.database = "No database".into();
                 }
                 self.show_toast("Connection deleted".into(), cx);
@@ -1705,6 +1855,23 @@ impl WorkspaceShell {
             self.connection_status = ConnectionStatus::Connecting {
                 profile_id: entry.id,
             };
+            self.connection_schema = ConnectionSchemaState::Loading {
+                profile_id: entry.id,
+            };
+            cx.notify();
+        }
+    }
+
+    fn refresh_connection_schema(&mut self, cx: &mut Context<Self>) {
+        let ConnectionStatus::Connected { profile_id, .. } = &self.connection_status else {
+            return;
+        };
+        let profile_id = *profile_id;
+        let Some(sender) = &self.executor_sender else {
+            return;
+        };
+        if sender.send(ExecutorCommand::RefreshSchema).is_ok() {
+            self.connection_schema = ConnectionSchemaState::Loading { profile_id };
             cx.notify();
         }
     }
@@ -1714,7 +1881,76 @@ impl WorkspaceShell {
             let _ = sender.send(ExecutorCommand::Disconnect);
         }
         self.connection_status = ConnectionStatus::Disconnected;
+        self.connection_schema = ConnectionSchemaState::Unavailable;
         self.status.database = "No database".into();
+        cx.notify();
+    }
+
+    fn toggle_catalog_schema(&mut self, profile_id: i64, catalog: String, cx: &mut Context<Self>) {
+        let key = (profile_id, catalog);
+        if !self.expanded_catalogs.remove(&key) {
+            self.expanded_catalogs.insert(key);
+        }
+        cx.notify();
+    }
+
+    fn toggle_database_schema(
+        &mut self,
+        profile_id: i64,
+        catalog: String,
+        schema: String,
+        cx: &mut Context<Self>,
+    ) {
+        let key = (profile_id, catalog, schema);
+        if !self.expanded_schemas.remove(&key) {
+            self.expanded_schemas.insert(key);
+        }
+        cx.notify();
+    }
+
+    fn open_table_preview(
+        &mut self,
+        provider_id: sift_protocol::ProviderId,
+        schema: String,
+        object: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let item_id = self.next_id;
+        self.next_id += 1;
+        let sql = table_preview_sql(&provider_id, &schema, &object);
+        let editor =
+            cx.new(|cx| QueryEditor::new(QueryDocument::with_random_peer(&sql), self.theme, cx));
+        let results = cx.new(|cx| ResultsView::new(self.theme, cx));
+        results.update(cx, |results, cx| results.set_pending(cx));
+        if let Some(pane) = self.panes.get(self.active_pane) {
+            pane.update(cx, |pane, cx| {
+                pane.open_query(
+                    ItemPresentation {
+                        id: item_id,
+                        kind: ItemKind::Query,
+                        title: format!("{schema}.{object}"),
+                        dirty: false,
+                    },
+                    editor,
+                    results,
+                    cx,
+                )
+            });
+        }
+        match &self.executor_sender {
+            Some(sender) => {
+                let _ = sender.send(ExecutorCommand::Execute { item_id, sql });
+                self.status.execution = "Running…".into();
+            }
+            None => self.route_result(
+                item_id,
+                ResultState::Unavailable("Not connected to a database.".into()),
+                cx,
+            ),
+        }
+        self.focus_active_pane(window, cx);
+        self.persist(cx);
         cx.notify();
     }
 
@@ -3719,6 +3955,221 @@ impl WorkspaceShell {
             )
     }
 
+    fn connection_schema_rows(
+        &self,
+        connection: &ConnectionNavEntry,
+        colors: sift_ui::ThemeColors,
+        cx: &mut Context<Self>,
+    ) -> Vec<gpui::AnyElement> {
+        let profile_id = connection.id;
+        match &self.connection_schema {
+            ConnectionSchemaState::Loading {
+                profile_id: loading,
+            } if *loading == profile_id => vec![div()
+                .ml_6()
+                .h(self.theme.metrics.row_height)
+                .flex()
+                .items_center()
+                .text_xs()
+                .text_color(colors.muted_text)
+                .child("Loading schema…")
+                .into_any_element()],
+            ConnectionSchemaState::Failed {
+                profile_id: failed,
+                message,
+            } if *failed == profile_id => vec![div()
+                .ml_6()
+                .mr_2()
+                .py_1()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .text_xs()
+                .text_color(colors.danger)
+                .child("Schema unavailable")
+                .child(
+                    div()
+                        .truncate()
+                        .text_color(colors.muted_text)
+                        .child(message.clone()),
+                )
+                .into_any_element()],
+            ConnectionSchemaState::Ready {
+                profile_id: ready,
+                snapshot,
+            } if *ready == profile_id => {
+                let mut rows = Vec::new();
+                for (catalog_index, catalog) in snapshot.trees.iter().enumerate() {
+                    let catalog_key = (profile_id, catalog.name.clone());
+                    let catalog_open = self.expanded_catalogs.contains(&catalog_key);
+                    let catalog_name = catalog.name.clone();
+                    rows.push(
+                        div()
+                            .id(("schema-catalog", catalog_index + profile_id as usize * 1000))
+                            .mx_2()
+                            .h(self.theme.metrics.row_height)
+                            .pl_4()
+                            .pr_2()
+                            .flex()
+                            .items_center()
+                            .gap_1()
+                            .rounded_sm()
+                            .text_color(colors.muted_text)
+                            .hover(|row| row.bg(colors.hovered_surface).text_color(colors.text))
+                            .on_click(cx.listener(move |shell, _, _, cx| {
+                                shell.toggle_catalog_schema(profile_id, catalog_name.clone(), cx)
+                            }))
+                            .child(icon(
+                                if catalog_open {
+                                    IconName::ChevronDown
+                                } else {
+                                    IconName::ChevronRight
+                                },
+                                colors.muted_text,
+                                11.,
+                            ))
+                            .child(icon(IconName::Database, colors.muted_text, 12.))
+                            .child(div().min_w_0().truncate().child(catalog.name.clone()))
+                            .into_any_element(),
+                    );
+                    if !catalog_open {
+                        continue;
+                    }
+                    for (schema_index, schema) in catalog.schemas.iter().enumerate() {
+                        let schema_key = (profile_id, catalog.name.clone(), schema.name.clone());
+                        let schema_open = self.expanded_schemas.contains(&schema_key);
+                        let catalog_name = catalog.name.clone();
+                        let schema_name = schema.name.clone();
+                        rows.push(
+                            div()
+                                .id((
+                                    "schema-namespace",
+                                    schema_index
+                                        + catalog_index * 100
+                                        + profile_id as usize * 100_000,
+                                ))
+                                .mx_2()
+                                .h(self.theme.metrics.row_height)
+                                .pl_6()
+                                .pr_2()
+                                .flex()
+                                .items_center()
+                                .gap_1()
+                                .rounded_sm()
+                                .text_color(colors.muted_text)
+                                .hover(|row| row.bg(colors.hovered_surface).text_color(colors.text))
+                                .on_click(cx.listener(move |shell, _, _, cx| {
+                                    shell.toggle_database_schema(
+                                        profile_id,
+                                        catalog_name.clone(),
+                                        schema_name.clone(),
+                                        cx,
+                                    )
+                                }))
+                                .child(icon(
+                                    if schema_open {
+                                        IconName::ChevronDown
+                                    } else {
+                                        IconName::ChevronRight
+                                    },
+                                    colors.muted_text,
+                                    11.,
+                                ))
+                                .child(div().min_w_0().truncate().child(schema.name.clone()))
+                                .child(
+                                    div()
+                                        .ml_auto()
+                                        .text_xs()
+                                        .text_color(colors.disabled_text)
+                                        .child(schema.objects.len().to_string()),
+                                )
+                                .into_any_element(),
+                        );
+                        if !schema_open {
+                            continue;
+                        }
+                        for (object_index, object) in schema.objects.iter().enumerate() {
+                            let can_preview = matches!(
+                                object.kind,
+                                sift_protocol::ObjectKind::Table
+                                    | sift_protocol::ObjectKind::View
+                                    | sift_protocol::ObjectKind::MaterializedView
+                                    | sift_protocol::ObjectKind::ForeignTable
+                                    | sift_protocol::ObjectKind::PartitionedTable
+                            );
+                            let provider_id = connection.provider_id.clone();
+                            let schema_name = schema.name.clone();
+                            let object_name = object.name.clone();
+                            let row = div()
+                                .id((
+                                    "schema-object",
+                                    object_index
+                                        + schema_index * 1000
+                                        + catalog_index * 100_000
+                                        + profile_id as usize * 10_000_000,
+                                ))
+                                .mx_2()
+                                .h(self.theme.metrics.row_height)
+                                .pl_8()
+                                .pr_2()
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .rounded_sm()
+                                .text_color(if can_preview {
+                                    colors.text
+                                } else {
+                                    colors.muted_text
+                                })
+                                .when(can_preview, |row| {
+                                    row.hover(|row| row.bg(colors.hovered_surface)).on_click(
+                                        cx.listener(move |shell, _, window, cx| {
+                                            shell.open_table_preview(
+                                                provider_id.clone(),
+                                                schema_name.clone(),
+                                                object_name.clone(),
+                                                window,
+                                                cx,
+                                            )
+                                        }),
+                                    )
+                                })
+                                .child(
+                                    div()
+                                        .min_w_0()
+                                        .flex_1()
+                                        .truncate()
+                                        .child(object.name.clone()),
+                                )
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(colors.disabled_text)
+                                        .child(schema_object_kind_label(object.kind)),
+                                );
+                            rows.push(row.into_any_element());
+                        }
+                    }
+                }
+                if rows.is_empty() {
+                    rows.push(
+                        div()
+                            .ml_6()
+                            .h(self.theme.metrics.row_height)
+                            .flex()
+                            .items_center()
+                            .text_xs()
+                            .text_color(colors.muted_text)
+                            .child("No schema objects found")
+                            .into_any_element(),
+                    );
+                }
+                rows
+            }
+            _ => Vec::new(),
+        }
+    }
+
     fn render_dock(&self, dock: &Dock, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = self.theme.colors;
         let definition = dock.definition();
@@ -3768,22 +4219,58 @@ impl WorkspaceShell {
                 |dock_view| {
                 dock_view.child(
                     div()
-                        .id("add-database-connection")
-                        .role(Role::Button)
                         .mx_2()
                         .h(self.theme.metrics.row_height)
-                        .px_2()
                         .flex()
                         .items_center()
-                        .gap_2()
-                        .rounded_sm()
-                        .text_color(colors.muted_text)
-                        .hover(|button| button.bg(colors.hovered_surface).text_color(colors.text))
-                        .on_click(cx.listener(|shell, _, window, cx| {
-                            shell.open_database_connection(window, cx)
-                        }))
-                        .child(icon(IconName::Add, colors.muted_text, 14.))
-                        .child(div().min_w_0().truncate().child("Add database connection…")),
+                        .justify_between()
+                        .child(
+                            div()
+                                .id("add-database-connection")
+                                .role(Role::Button)
+                                .h_full()
+                                .px_2()
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .rounded_sm()
+                                .text_color(colors.muted_text)
+                                .hover(|button| {
+                                    button.bg(colors.hovered_surface).text_color(colors.text)
+                                })
+                                .on_click(cx.listener(|shell, _, window, cx| {
+                                    shell.open_database_connection(window, cx)
+                                }))
+                                .child(icon(IconName::Add, colors.muted_text, 14.))
+                                .child(div().min_w_0().truncate().child("Add connection…")),
+                        )
+                        .when(
+                            matches!(self.connection_status, ConnectionStatus::Connected { .. }),
+                            |toolbar| {
+                                toolbar.child(
+                                    div()
+                                        .id("refresh-connection-schema")
+                                        .role(Role::Button)
+                                        .aria_label("Refresh database schema")
+                                        .h_full()
+                                        .px_2()
+                                        .flex()
+                                        .items_center()
+                                        .rounded_sm()
+                                        .text_xs()
+                                        .text_color(colors.muted_text)
+                                        .hover(|button| {
+                                            button
+                                                .bg(colors.hovered_surface)
+                                                .text_color(colors.text)
+                                        })
+                                        .on_click(cx.listener(|shell, _, _, cx| {
+                                            shell.refresh_connection_schema(cx)
+                                        }))
+                                        .child("Refresh"),
+                                )
+                            },
+                        ),
                 )
                 },
             )
@@ -3807,6 +4294,19 @@ impl WorkspaceShell {
                             .child(div().min_w_0().truncate().child(tenant.name.clone()))
                             .into_any_element(),
                     );
+                    if !tenant.connections.is_empty() {
+                        rows.push(
+                            div()
+                                .h(px(20.))
+                                .px_4()
+                                .flex()
+                                .items_end()
+                                .text_xs()
+                                .text_color(colors.disabled_text)
+                                .child("DATABASES")
+                                .into_any_element(),
+                        );
+                    }
                     for conn in &tenant.connections {
                         let entry_for_delete = conn.clone();
                         let (dot, connected) = match &self.connection_status {
@@ -3888,6 +4388,26 @@ impl WorkspaceShell {
                                 .child(icon(IconName::Close, colors.danger, 11.)),
                         );
                         rows.push(row.into_any_element());
+                        if connected {
+                            rows.extend(self.connection_schema_rows(conn, colors, cx));
+                        }
+                    }
+                    if tenant
+                        .rooms
+                        .iter()
+                        .any(|room| !room.workspaces.is_empty())
+                    {
+                        rows.push(
+                            div()
+                                .h(px(20.))
+                                .px_4()
+                                .flex()
+                                .items_end()
+                                .text_xs()
+                                .text_color(colors.disabled_text)
+                                .child("WORKSPACES")
+                                .into_any_element(),
+                        );
                     }
                     for room in &tenant.rooms {
                         for workspace in &room.workspaces {
@@ -6735,6 +7255,93 @@ mod tests {
         let theme = Theme::dark();
         assert_eq!(pane_border_color(&theme, true), theme.colors.accent);
         assert_eq!(pane_border_color(&theme, false), theme.colors.subtle_border);
+    }
+
+    #[test]
+    fn table_previews_are_bounded_and_quote_identifiers() {
+        let postgres = sift_protocol::ProviderId::new("sift/postgres").unwrap();
+        assert_eq!(
+            table_preview_sql(&postgres, "lab", "odd\"table"),
+            "SELECT * FROM \"lab\".\"odd\"\"table\" LIMIT 100;"
+        );
+        let sql_server = sift_protocol::ProviderId::new("sift/sql-server").unwrap();
+        assert_eq!(
+            table_preview_sql(&sql_server, "dbo", "people"),
+            "SELECT TOP (100) * FROM \"dbo\".\"people\";"
+        );
+    }
+
+    #[gpui::test]
+    fn loaded_schema_expands_the_demo_catalog_and_lab_schema(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        let mut snapshot =
+            sift_protocol::SchemaSnapshot::empty(sift_protocol::SchemaScope::shallow());
+        snapshot.trees.push(sift_protocol::CatalogTree {
+            name: "sifttest".into(),
+            schemas: vec![sift_protocol::SchemaTree {
+                name: "lab".into(),
+                objects: vec![sift_protocol::ObjectInfo::new(
+                    "people",
+                    sift_protocol::ObjectKind::Table,
+                )],
+            }],
+        });
+
+        workspace.update(&mut cx, |shell, cx| {
+            shell.on_executor_event(
+                ExecutorEvent::SchemaLoaded {
+                    profile_id: 7,
+                    snapshot: Box::new(snapshot),
+                },
+                cx,
+            )
+        });
+
+        workspace.read_with(&cx, |shell, _| {
+            assert!(shell.expanded_catalogs.contains(&(7, "sifttest".into())));
+            assert!(shell
+                .expanded_schemas
+                .contains(&(7, "sifttest".into(), "lab".into())));
+        });
+    }
+
+    #[gpui::test]
+    fn schema_object_opens_and_runs_a_preview_query(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+
+        workspace.update_in(&mut cx, |shell, window, cx| {
+            shell.executor_sender = Some(sender);
+            shell.open_table_preview(
+                sift_protocol::ProviderId::new("sift/postgres").unwrap(),
+                "lab".into(),
+                "people".into(),
+                window,
+                cx,
+            );
+        });
+
+        let (item_id, sql) = match receiver.try_recv().unwrap() {
+            ExecutorCommand::Execute { item_id, sql } => (item_id, sql),
+            _ => panic!("expected preview execution"),
+        };
+        assert_eq!(sql, "SELECT * FROM \"lab\".\"people\" LIMIT 100;");
+        workspace.read_with(&cx, |shell, cx| {
+            let pane = shell.panes[shell.active_pane].read(cx);
+            assert_eq!(pane.active_item().map(|item| item.id), Some(item_id));
+            assert_eq!(
+                pane.active_item().map(|item| item.title.as_str()),
+                Some("lab.people")
+            );
+            assert_eq!(
+                pane.editor(item_id).unwrap().read(cx).document().text(),
+                sql
+            );
+        });
     }
 
     #[gpui::test]

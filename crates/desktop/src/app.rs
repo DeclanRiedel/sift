@@ -427,15 +427,34 @@ async fn run_query_executor(
                     let _ = previous.client.close_session(previous.session).await;
                 }
                 let server = targets.borrow().clone();
-                let status = match open_query_context(&server, tenant_id, profile_id).await {
+                match open_query_context(&server, tenant_id, profile_id).await {
                     Ok(opened) => {
+                        if events
+                            .send(ExecutorEvent::Connection(ConnectionStatus::Connected {
+                                profile_id,
+                                name,
+                            }))
+                            .is_err()
+                        {
+                            return;
+                        }
+                        let schema_event = load_schema(&opened).await;
                         context = Some(opened);
-                        ConnectionStatus::Connected { profile_id, name }
+                        if events.send(schema_event).is_err() {
+                            return;
+                        }
                     }
-                    Err(reason) => ConnectionStatus::Failed { profile_id, reason },
-                };
-                if events.send(ExecutorEvent::Connection(status)).is_err() {
-                    return;
+                    Err(reason) => {
+                        if events
+                            .send(ExecutorEvent::Connection(ConnectionStatus::Failed {
+                                profile_id,
+                                reason,
+                            }))
+                            .is_err()
+                        {
+                            return;
+                        }
+                    }
                 }
             }
             ExecutorCommand::Disconnect => {
@@ -446,6 +465,14 @@ async fn run_query_executor(
                     .send(ExecutorEvent::Connection(ConnectionStatus::Disconnected))
                     .is_err()
                 {
+                    return;
+                }
+            }
+            ExecutorCommand::RefreshSchema => {
+                let Some(opened) = context.as_ref() else {
+                    continue;
+                };
+                if events.send(load_schema(opened).await).is_err() {
                     return;
                 }
             }
@@ -483,13 +510,15 @@ async fn run_query_executor(
                         let connection_error =
                             match open_query_context(&server, tenant_id, entry.id).await {
                                 Ok(opened) => {
-                                    context = Some(opened);
                                     let _ = events.send(ExecutorEvent::Connection(
                                         ConnectionStatus::Connected {
                                             profile_id: entry.id,
                                             name: entry.name.clone(),
                                         },
                                     ));
+                                    let schema_event = load_schema(&opened).await;
+                                    context = Some(opened);
+                                    let _ = events.send(schema_event);
                                     None
                                 }
                                 Err(reason) => {
@@ -564,6 +593,23 @@ async fn delete_connection_profile(
         .map_err(|error| format!("deleting connection profile failed: {error}"))
 }
 
+async fn load_schema(context: &QueryContext) -> ExecutorEvent {
+    match context
+        .client
+        .schema(context.session, context.connection)
+        .await
+    {
+        Ok(snapshot) => ExecutorEvent::SchemaLoaded {
+            profile_id: context.profile_id,
+            snapshot: Box::new(snapshot),
+        },
+        Err(error) => ExecutorEvent::SchemaLoadFailed {
+            profile_id: context.profile_id,
+            message: format!("loading database schema failed: {error}"),
+        },
+    }
+}
+
 async fn create_connection_profile(
     server: &DesktopServer,
     tenant_id: i64,
@@ -589,6 +635,7 @@ async fn create_connection_profile(
         id: profile.id.0,
         tenant_id,
         name,
+        provider_id: profile.provider_id,
     })
 }
 

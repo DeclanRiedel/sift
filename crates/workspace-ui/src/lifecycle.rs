@@ -102,6 +102,7 @@ pub struct ConnectionNavEntry {
     pub id: i64,
     pub tenant_id: i64,
     pub name: String,
+    pub provider_id: sift_protocol::ProviderId,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -303,6 +304,7 @@ pub async fn load_instance(
                     id: profile.id.0,
                     tenant_id: tenant_id.0,
                     name: profile.name,
+                    provider_id: profile.provider_id,
                 })
                 .collect(),
             Err(error) => return Err(fail(&sender, &error)),
@@ -500,6 +502,7 @@ mod tests {
                 id: 5,
                 tenant_id: 1,
                 name: "Local PG".into(),
+                provider_id: sift_protocol::ProviderId::new("sift/postgres").unwrap(),
             }],
         }));
         assert_eq!(projection.tenants.len(), 1);
