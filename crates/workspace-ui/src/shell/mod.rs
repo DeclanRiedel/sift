@@ -1186,13 +1186,13 @@ impl gpui::Render for Pane {
                                         handle
                                             .w_full()
                                             .h(px(RESULT_RESIZE_HANDLE_SIZE))
-                                            .border_t_1()
+                                            .border_b_1()
                                     })
                                     .when(placement == ResultPlacement::Right, |handle| {
                                         handle
                                             .h_full()
                                             .w(px(RESULT_RESIZE_HANDLE_SIZE))
-                                            .border_l_1()
+                                            .border_r_1()
                                     })
                                     .on_drag(
                                         ResultResizeDrag { item_id, placement },
