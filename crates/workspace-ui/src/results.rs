@@ -564,6 +564,7 @@ impl ResultsView {
         }
         let grid_min_width = px(ROW_NUMBER_WIDTH + MIN_COLUMN_WIDTH * data.columns.len() as f32);
         let header = div()
+            .debug_selector(|| "result-header".into())
             .flex()
             .h(px(ROW_HEIGHT + 4.0))
             .w_full()
@@ -671,6 +672,7 @@ impl ResultsView {
                             })
                             .collect::<Vec<_>>();
                         div()
+                            .debug_selector(move || format!("result-row-{row_index}"))
                             .flex()
                             .w_full()
                             .min_w(grid_min_width)
@@ -699,10 +701,8 @@ impl ResultsView {
                     .collect()
             }),
         )
-        .w_full()
-        .min_w(grid_min_width)
-        .flex_1()
-        .min_h_0();
+        .size_full()
+        .min_w(grid_min_width);
 
         div()
             .id("result-hscroll")
@@ -717,7 +717,17 @@ impl ResultsView {
                     .flex_col()
                     .min_h_0()
                     .child(header)
-                    .child(list),
+                    // A uniform list needs a definite, clipped viewport. Keep
+                    // that viewport as the flex child and let the list fill it.
+                    .child(
+                        div()
+                            .debug_selector(|| "result-row-viewport".into())
+                            .relative()
+                            .flex_1()
+                            .min_h_0()
+                            .overflow_hidden()
+                            .child(list),
+                    ),
             )
             .into_any_element()
     }
@@ -818,6 +828,7 @@ impl gpui::Render for ResultsView {
             })
             .when(self.placement == ResultPlacement::Right, |view| view.flex())
             .size_full()
+            .flex_1()
             .min_h_0()
             .bg(colors.background)
             .text_color(colors.text)
@@ -827,15 +838,23 @@ impl gpui::Render for ResultsView {
             .when(self.placement == ResultPlacement::Right, |view| {
                 view.child(self.render_vertical_tab_bar(cx))
             })
-            .child(div().flex_1().min_w_0().min_h_0().child(body))
+            .child(div().flex().flex_1().min_w_0().min_h_0().child(body))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gpui::{TestAppContext, VisualTestContext};
+    use gpui::{Entity, TestAppContext, VisualTestContext};
     use sift_protocol::{Code, DriverError, PrimitiveType};
+
+    struct ResultsHost(Entity<ResultsView>);
+
+    impl gpui::Render for ResultsHost {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div().w(px(800.)).h(px(400.)).flex().child(self.0.clone())
+        }
+    }
 
     fn column(name: &str, primitive: PrimitiveType, nullable: Nullability) -> ColumnMetadata {
         let mut column = ColumnMetadata::new(name, TypeRef::Primitive(primitive));
@@ -924,12 +943,14 @@ mod tests {
         let window = cx
             .update(|cx| {
                 cx.open_window(Default::default(), |_window, cx| {
-                    cx.new(|cx| ResultsView::new(Theme::dark(), cx))
+                    let view = cx.new(|cx| ResultsView::new(Theme::dark(), cx));
+                    cx.new(|_| ResultsHost(view))
                 })
             })
             .unwrap();
         let mut cx = VisualTestContext::from_window(window.into(), cx);
-        let view = window.root(&mut cx).unwrap();
+        let host = window.root(&mut cx).unwrap();
+        let view = host.read_with(&cx, |host, _| host.0.clone());
 
         let response = ExecuteResponse {
             cursor_id: sift_protocol::CursorId(1),
@@ -943,6 +964,14 @@ mod tests {
         view.update(&mut cx, |view, cx| {
             view.set_state(ResultState::from_execute(response), cx);
             assert_eq!(view.active_tab(), ResultTab::Data);
+        });
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("result-row-0")
+                .is_some_and(|bounds| bounds.size.height > px(0.)),
+            "ready result rows should receive a visible layout"
+        );
+        view.update(&mut cx, |view, cx| {
             view.select_tab(ResultTab::Messages, cx);
             assert_eq!(view.active_tab(), ResultTab::Messages);
             view.select_cell(0, 0, cx);
