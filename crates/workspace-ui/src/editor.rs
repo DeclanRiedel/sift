@@ -18,6 +18,7 @@ mod vim;
 use self::vim::{VimEngine, VimSnapshot};
 
 const EDITOR_LINE_HEIGHT: Pixels = px(20.);
+const BLOCK_CURSOR_FALLBACK_WIDTH: Pixels = px(7.);
 pub(crate) const EDITOR_GUTTER_WIDTH: Pixels = px(48.);
 const EDITOR_TEXT_INSET: Pixels = px(12.);
 const EDITOR_VERTICAL_INSET: Pixels = px(8.);
@@ -1639,12 +1640,22 @@ impl Element for QueryEditorElement {
             }
 
             if selection.is_empty() && cursor_visible && cursor >= offset && cursor <= line_end {
-                let x = shaped.x_for_index(cursor - offset);
+                let cursor_in_line = cursor - offset;
+                let x = shaped.x_for_index(cursor_in_line);
+                let cursor_width = if block_cursor {
+                    line[cursor_in_line..]
+                        .chars()
+                        .next()
+                        .map(|character| {
+                            let next_x = shaped.x_for_index(cursor_in_line + character.len_utf8());
+                            (next_x - x).max(BLOCK_CURSOR_FALLBACK_WIDTH)
+                        })
+                        .unwrap_or(BLOCK_CURSOR_FALLBACK_WIDTH)
+                } else {
+                    px(1.5)
+                };
                 cursor_quad = Some(fill(
-                    Bounds::new(
-                        point(text_left + x, top),
-                        size(if block_cursor { px(7.) } else { px(1.5) }, line_height),
-                    ),
+                    Bounds::new(point(text_left + x, top), size(cursor_width, line_height)),
                     theme.colors.accent,
                 ));
             }
