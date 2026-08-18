@@ -5,11 +5,15 @@ use std::sync::Arc;
 use gpui::{
     actions, deferred, div, img, prelude::*, px, uniform_list, App, Context, CursorStyle,
     DefiniteLength, Entity, EventEmitter, FocusHandle, Focusable, IntoElement, MouseButton,
-    PathPromptOptions, ResizeEdge, Role, ScrollStrategy, Subscription, Task,
+    PathPromptOptions, ResizeEdge, Role, ScrollStrategy, SharedString, Subscription, Task,
     UniformListScrollHandle, Window, WindowBounds, WindowControlArea,
 };
 use sift_api_types::RoomId;
-use sift_ui::{database_logo, icon, IconName, TextInput, Theme};
+use sift_ui::{
+    database_logo, icon, ActiveTheme, Badge, Button, ButtonTone, Clickable, Disableable,
+    ErrorBanner, Field, IconButton, IconName, KeyBinding, SectionLabel, TextInput, Theme,
+    ThemeMetrics, Toggleable, Tone, Tooltip,
+};
 
 use crate::editor::{
     EditorEvent, EditorKeymap, EditorLanguage, QueryDocument, QueryEditor, VimMode,
@@ -336,14 +340,19 @@ pub enum InstanceManagerEvent {
     AuthenticationFailed { message: String },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Toast {
-    pub message: String,
+/// Intent carried by a toast so outcomes read at a glance.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToastTone {
+    Info,
+    Success,
+    Error,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Tooltip {
+pub struct Toast {
+    pub id: u64,
     pub message: String,
+    pub tone: ToastTone,
 }
 
 /// Events a pane emits upward to the workspace. A pane never mutates sibling
@@ -460,7 +469,6 @@ pub struct Pane {
     backward_items: Vec<u64>,
     forward_items: Vec<u64>,
     focus_handle: FocusHandle,
-    theme: Theme,
     /// Live editor per SQL or configuration item. Editor contents are not
     /// persisted in the local layout; their owning service rehydrates them.
     editors: HashMap<u64, Entity<QueryEditor>>,
@@ -479,7 +487,6 @@ pub struct Pane {
 impl Pane {
     fn from_presentation(
         pane: PanePresentation,
-        theme: Theme,
         vim_mode_default: bool,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -512,7 +519,7 @@ impl Pane {
                 EditorKeymap::Standard
             };
             let editor = cx.new(|cx| {
-                QueryEditor::new(document, theme, cx)
+                QueryEditor::new(document, cx)
                     .with_language(language)
                     .with_keymap(keymap)
             });
@@ -523,7 +530,7 @@ impl Pane {
             editors.insert(id, editor);
             clean_documents.insert(id, String::new());
             if item.kind == ItemKind::Query {
-                results.insert(id, cx.new(|cx| ResultsView::new(theme, cx)));
+                results.insert(id, cx.new(ResultsView::new));
             }
         }
         Self {
@@ -533,7 +540,6 @@ impl Pane {
             backward_items: Vec::new(),
             forward_items: Vec::new(),
             focus_handle: cx.focus_handle(),
-            theme,
             editors,
             clean_documents,
             results,
@@ -841,29 +847,10 @@ fn pane_border_color(theme: &Theme, is_focused: bool) -> gpui::Hsla {
 
 impl Pane {}
 
-struct PaneTooltip {
-    label: &'static str,
-    theme: Theme,
-}
-
-impl gpui::Render for PaneTooltip {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        div()
-            .px_2()
-            .py_1()
-            .rounded_sm()
-            .border_1()
-            .border_color(self.theme.colors.strong_border)
-            .bg(self.theme.colors.elevated_surface)
-            .text_xs()
-            .text_color(self.theme.colors.text)
-            .child(self.label)
-    }
-}
-
 impl gpui::Render for Pane {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let colors = self.theme.colors;
+        let theme = cx.theme();
+        let colors = theme.colors;
         let is_focused = self.active_focus_handle(cx).is_focused(window)
             || self.focus_handle.contains_focused(window, cx);
         let active = self.active_item().cloned();
@@ -875,7 +862,6 @@ impl gpui::Render for Pane {
         let can_go_back = self.can_navigate_backward();
         let can_go_forward = self.can_navigate_forward();
         let pane_id = self.id;
-        let theme = self.theme;
         div()
             .id(("pane", self.id as usize))
             .key_context("SiftPane")
@@ -893,12 +879,12 @@ impl gpui::Render for Pane {
             .flex_1()
             .min_w_0()
             .border_t_1()
-            .border_color(pane_border_color(&self.theme, is_focused))
+            .border_color(pane_border_color(&theme, is_focused))
             .bg(colors.background)
             .children(has_items.then(|| {
                 div()
                     .debug_selector(|| "pane-tab-bar".into())
-                    .h(self.theme.metrics.tab_height)
+                    .h(theme.metrics.tab_height)
                     .flex_none()
                     .flex()
                     .items_stretch()
@@ -979,7 +965,7 @@ impl gpui::Render for Pane {
                                                 12.,
                                             ))
                                             .tooltip(move |_, cx| {
-                                                cx.new(|_| PaneTooltip { label, theme }).into()
+                                                cx.new(|_| Tooltip::new(label)).into()
                                             })
                                     },
                                 ),
@@ -1069,36 +1055,19 @@ impl gpui::Render for Pane {
                                                         ),
                                                 )
                                                 .child(
-                                                    div()
-                                                        .id(("tab-close", item.id as usize))
-                                                        .flex_none()
-                                                        .flex()
-                                                        .items_center()
-                                                        .justify_center()
-                                                        .h(px(22.))
-                                                        .w(px(22.))
-                                                        .mr_1()
-                                                        .rounded_sm()
-                                                        .text_color(colors.muted_text)
-                                                        .hover(|close| {
-                                                            close
-                                                                .bg(colors.hovered_surface)
-                                                                .text_color(colors.text)
-                                                        })
-                                                        .on_click(cx.listener(
-                                                            move |_, _, _, cx| {
-                                                                cx.emit(
-                                                                    PaneEvent::CloseItemRequested {
-                                                                        item_id,
-                                                                    },
-                                                                );
-                                                            },
-                                                        ))
-                                                        .child(icon(
-                                                            IconName::Close,
-                                                            colors.muted_text,
-                                                            12.,
-                                                        )),
+                                                    IconButton::new(
+                                                        ("tab-close", item.id as usize),
+                                                        IconName::Close,
+                                                        format!("Close tab {}", item.title),
+                                                    )
+                                                    .square(px(22.))
+                                                    .icon_size(12.)
+                                                    .tooltip(format!("Close tab {}", item.title))
+                                                    .on_click(cx.listener(move |_, _, _, cx| {
+                                                        cx.emit(PaneEvent::CloseItemRequested {
+                                                            item_id,
+                                                        });
+                                                    })),
                                                 )
                                         },
                                     )),
@@ -1110,7 +1079,7 @@ impl gpui::Render for Pane {
                 let is_configuration = item.kind == ItemKind::Configuration;
                 div()
                     .id(("dirty-close-strip", item_id as usize))
-                    .h(px(34.))
+                    .h(theme.metrics.toolbar_height)
                     .flex_none()
                     .flex()
                     .items_center()
@@ -1129,53 +1098,27 @@ impl gpui::Render for Pane {
                             .child(format!("Discard changes to {}?", item.title)),
                     )
                     .child(
-                        div()
-                            .id(("keep-editing", item_id as usize))
-                            .role(Role::Button)
-                            .h(px(24.))
-                            .px_2()
-                            .flex()
-                            .items_center()
-                            .rounded_sm()
-                            .hover(|button| button.bg(colors.hovered_surface))
+                        Button::new(("keep-editing", item_id as usize), "Keep editing")
+                            .tone(ButtonTone::Ghost)
                             .on_click(cx.listener(move |pane, _, window, cx| {
                                 pane.pending_close_item = None;
                                 pane.active_focus_handle(cx).focus(window, cx);
                                 cx.notify();
-                            }))
-                            .child("Keep editing"),
+                            })),
                     )
                     .children(is_configuration.then(|| {
-                        div()
-                            .id(("save-dirty-item", item_id as usize))
-                            .role(Role::Button)
-                            .h(px(24.))
-                            .px_2()
-                            .flex()
-                            .items_center()
-                            .rounded_sm()
-                            .bg(colors.accent)
-                            .hover(|button| button.bg(colors.accent_hover))
+                        Button::new(("save-dirty-item", item_id as usize), "Save")
+                            .tone(ButtonTone::Accent)
                             .on_click(cx.listener(move |_, _, _, cx| {
                                 cx.emit(PaneEvent::SaveItemRequested { item_id });
                             }))
-                            .child("Save")
                     }))
                     .child(
-                        div()
-                            .id(("discard-dirty-item", item_id as usize))
-                            .role(Role::Button)
-                            .h(px(24.))
-                            .px_2()
-                            .flex()
-                            .items_center()
-                            .rounded_sm()
-                            .text_color(colors.danger)
-                            .hover(|button| button.bg(colors.danger_muted))
+                        Button::new(("discard-dirty-item", item_id as usize), "Discard")
+                            .tone(ButtonTone::DangerGhost)
                             .on_click(cx.listener(move |_, _, _, cx| {
                                 cx.emit(PaneEvent::DiscardItemRequested { item_id });
-                            }))
-                            .child("Discard"),
+                            })),
                     )
             }))
             .child({
@@ -1241,11 +1184,7 @@ impl gpui::Render for Pane {
                                         |_, _, _, cx| cx.new(|_| gpui::Empty),
                                     )
                                     .tooltip(move |_, cx| {
-                                        cx.new(|_| PaneTooltip {
-                                            label: "Drag to resize results",
-                                            theme,
-                                        })
-                                        .into()
+                                        cx.new(|_| Tooltip::new("Drag to resize results")).into()
                                     });
                                 let handle = div()
                                     .id(("query-results-separator", item_id as usize))
@@ -1372,7 +1311,6 @@ pub struct WorkspaceShell {
     instance_configuration_editor: Entity<QueryEditor>,
     palette_selected: usize,
     palette_scroll_handle: UniformListScrollHandle,
-    theme: Theme,
     dark_theme: bool,
     settings: UserSettings,
     settings_store: Option<Arc<SettingsStore>>,
@@ -1392,7 +1330,7 @@ pub struct WorkspaceShell {
     app_bar_expanded: bool,
     app_bar_menu: Option<AppBarMenu>,
     toasts: Vec<Toast>,
-    tooltip: Option<Tooltip>,
+    next_toast_id: u64,
     status: StatusBar,
     lifecycle: LifecycleProjection,
     presence: RoomPresenceProjection,
@@ -1446,11 +1384,14 @@ impl WorkspaceShell {
     ) -> Self {
         let window_presentation = state.window.clone();
         let vim_mode_default = settings.editor.default_mode == EditorMode::Vim;
+        // Install the process-wide theme first so every child entity reads the
+        // same palette through `ActiveTheme` during construction and render.
         let theme = if state.dark_theme {
             Theme::dark()
         } else {
             Theme::light()
         };
+        sift_ui::init_theme(theme, cx);
         let workspace = if state.workspace.panes.is_empty() {
             PresentationState::default().workspace
         } else {
@@ -1461,7 +1402,7 @@ impl WorkspaceShell {
         let panes = workspace
             .panes
             .into_iter()
-            .map(|pane| cx.new(|cx| Pane::from_presentation(pane, theme, vim_mode_default, cx)))
+            .map(|pane| cx.new(|cx| Pane::from_presentation(pane, vim_mode_default, cx)))
             .collect::<Vec<_>>();
         for pane in &panes {
             cx.subscribe_in(pane, window, Self::on_pane_event).detach();
@@ -1521,7 +1462,7 @@ impl WorkspaceShell {
                 .masked()
         });
         let instance_configuration_editor = cx.new(|cx| {
-            QueryEditor::new(QueryDocument::with_random_peer(""), theme, cx)
+            QueryEditor::new(QueryDocument::with_random_peer(""), cx)
                 .with_language(EditorLanguage::Toml)
                 .with_keymap(if vim_mode_default {
                     EditorKeymap::Vim
@@ -1592,8 +1533,8 @@ impl WorkspaceShell {
             instance_configuration_editor,
             palette_selected: 0,
             palette_scroll_handle: UniformListScrollHandle::new(),
-            theme,
             dark_theme: state.dark_theme,
+            next_toast_id: 1,
             settings,
             settings_store,
             settings_item: None,
@@ -1612,7 +1553,6 @@ impl WorkspaceShell {
             app_bar_expanded: false,
             app_bar_menu: None,
             toasts: Vec::new(),
-            tooltip: None,
             status: StatusBar::default(),
             lifecycle: LifecycleProjection::default(),
             presence: RoomPresenceProjection::default(),
@@ -1732,8 +1672,8 @@ impl WorkspaceShell {
         }
     }
 
-    fn render_account_icon(&self, size: f32) -> gpui::AnyElement {
-        let colors = self.theme.colors;
+    fn render_account_icon(&self, size: f32, cx: &App) -> gpui::AnyElement {
+        let colors = cx.theme().colors;
         match &self.lifecycle.identity {
             Some(identity) => div()
                 .relative()
@@ -1742,7 +1682,7 @@ impl WorkspaceShell {
                 .items_center()
                 .justify_center()
                 .overflow_hidden()
-                .rounded(px(4.))
+                .rounded_sm()
                 .bg(colors.accent_muted)
                 .text_xs()
                 .font_weight(gpui::FontWeight::SEMIBOLD)
@@ -1909,17 +1849,13 @@ impl WorkspaceShell {
                 self.instance_operation_pending = false;
                 self.instance_operation_error = None;
                 let editor = cx.new(|cx| {
-                    QueryEditor::new(
-                        QueryDocument::with_random_peer(&configuration.manifest),
-                        self.theme,
-                        cx,
-                    )
-                    .with_language(EditorLanguage::Toml)
-                    .with_keymap(if self.vim_mode_default() {
-                        EditorKeymap::Vim
-                    } else {
-                        EditorKeymap::Standard
-                    })
+                    QueryEditor::new(QueryDocument::with_random_peer(&configuration.manifest), cx)
+                        .with_language(EditorLanguage::Toml)
+                        .with_keymap(if self.vim_mode_default() {
+                            EditorKeymap::Vim
+                        } else {
+                            EditorKeymap::Standard
+                        })
                 });
                 self.instance_configuration_editor = editor.clone();
                 let item_id = self.instance_configuration_item.unwrap_or_else(|| {
@@ -1966,7 +1902,7 @@ impl WorkspaceShell {
                 self.modal = None;
                 self.server_token_input
                     .update(cx, |input, cx| input.set_text("", cx));
-                self.show_toast(format!("Connected to {name}"), cx);
+                self.show_success_toast(format!("Connected to {name}"), cx);
             }
             InstanceManagerEvent::Failed { message } => {
                 self.server_connection_pending = false;
@@ -1988,7 +1924,7 @@ impl WorkspaceShell {
                 self.modal = None;
                 self.account_password_input
                     .update(cx, |input, cx| input.set_text("", cx));
-                self.show_toast(format!("Signed in as {display_name}"), cx);
+                self.show_success_toast(format!("Signed in as {display_name}"), cx);
             }
             InstanceManagerEvent::SignedOut => {
                 self.account_pending = false;
@@ -2105,13 +2041,20 @@ impl WorkspaceShell {
                 self.modal = None;
                 self.database_password_input
                     .update(cx, |input, cx| input.set_text("", cx));
-                self.show_toast(
-                    connection_error.map_or_else(
-                        || format!("Added and connected to {}", entry.name),
-                        |error| format!("Added {}, but connection failed: {error}", entry.name),
-                    ),
-                    cx,
-                );
+                match connection_error {
+                    Some(error) => {
+                        self.show_error_toast(
+                            format!("Added {}, but connection failed: {error}", entry.name),
+                            cx,
+                        );
+                    }
+                    None => {
+                        self.show_success_toast(
+                            format!("Added and connected to {}", entry.name),
+                            cx,
+                        );
+                    }
+                }
             }
             ExecutorEvent::ProfileCreationFailed(message) => {
                 self.database_connection_pending = false;
@@ -2148,29 +2091,39 @@ impl WorkspaceShell {
             ExecutorEvent::ProfileDeletionFailed(message) => {
                 self.status.current_error = Some(message.clone());
                 self.status.diagnostic_count = 1;
-                self.show_toast(message, cx);
+                self.show_error_toast(message, cx);
             }
         }
     }
 
     fn show_toast(&mut self, message: String, cx: &mut Context<Self>) {
-        self.toasts.clear();
-        self.toasts.push(Toast {
-            message: message.clone(),
-        });
+        self.push_toast(message, ToastTone::Info, cx);
+    }
+
+    fn show_success_toast(&mut self, message: String, cx: &mut Context<Self>) {
+        self.push_toast(message, ToastTone::Success, cx);
+    }
+
+    fn show_error_toast(&mut self, message: String, cx: &mut Context<Self>) {
+        self.push_toast(message, ToastTone::Error, cx);
+    }
+
+    /// Queue a toast. The newest toast replaces the oldest beyond three
+    /// visible at once, and each auto-dismisses independently.
+    fn push_toast(&mut self, message: String, tone: ToastTone, cx: &mut Context<Self>) {
+        let id = self.next_toast_id;
+        self.next_toast_id += 1;
+        if self.toasts.len() >= 3 {
+            self.toasts.remove(0);
+        }
+        self.toasts.push(Toast { id, message, tone });
         self._toast_task = Some(cx.spawn(async move |shell, cx| {
             cx.background_executor()
                 .timer(std::time::Duration::from_secs(4))
                 .await;
             let _ = shell.update(cx, |shell, cx| {
-                if shell
-                    .toasts
-                    .last()
-                    .is_some_and(|toast| toast.message == message)
-                {
-                    shell.toasts.clear();
-                    cx.notify();
-                }
+                shell.toasts.retain(|toast| toast.id != id);
+                cx.notify();
             });
         }));
         cx.notify();
@@ -2297,10 +2250,9 @@ impl WorkspaceShell {
             EditorKeymap::Standard
         };
         let editor = cx.new(|cx| {
-            QueryEditor::new(QueryDocument::with_random_peer(&sql), self.theme, cx)
-                .with_keymap(keymap)
+            QueryEditor::new(QueryDocument::with_random_peer(&sql), cx).with_keymap(keymap)
         });
-        let results = cx.new(|cx| ResultsView::new(self.theme, cx));
+        let results = cx.new(ResultsView::new);
         results.update(cx, |results, cx| results.set_pending(cx));
         if let Some(pane) = self.panes.get(self.active_pane) {
             pane.update(cx, |pane, cx| {
@@ -2393,7 +2345,7 @@ impl WorkspaceShell {
             EditorKeymap::Standard
         };
         let editor = cx.new(|cx| {
-            QueryEditor::new(QueryDocument::with_random_peer(&source), self.theme, cx)
+            QueryEditor::new(QueryDocument::with_random_peer(&source), cx)
                 .with_language(EditorLanguage::Toml)
                 .with_keymap(keymap)
         });
@@ -2881,6 +2833,20 @@ impl WorkspaceShell {
         self.settings.editor.default_mode == EditorMode::Vim
     }
 
+    /// Swap the process-wide theme and persist the preference. Views read the
+    /// palette through `ActiveTheme`, so the refresh is automatic.
+    fn toggle_theme(&mut self, cx: &mut Context<Self>) {
+        self.dark_theme = !self.dark_theme;
+        let theme = if self.dark_theme {
+            Theme::dark()
+        } else {
+            Theme::light()
+        };
+        sift_ui::set_theme(theme, cx);
+        self.persist(cx);
+        cx.notify();
+    }
+
     fn toggle_vim_mode_default(&mut self, cx: &mut Context<Self>) {
         let settings_is_open = self.settings_item.is_some_and(|item_id| {
             self.panes
@@ -3010,7 +2976,7 @@ impl WorkspaceShell {
         self.fit_side_docks_to_width(width);
 
         let vertical_chrome: f32 =
-            (self.theme.metrics.toolbar_height + self.theme.metrics.status_height).into();
+            (ThemeMetrics::default().toolbar_height + ThemeMetrics::default().status_height).into();
         self.bottom_dock.presentation.size = dock_layout::fit_bottom_dock(
             (height - vertical_chrome).max(0.0),
             self.bottom_dock.presentation.size,
@@ -3117,7 +3083,6 @@ impl WorkspaceShell {
                         .collect(),
                     active_item: 0,
                 },
-                self.theme,
                 self.vim_mode_default(),
                 cx,
             )
@@ -3937,6 +3902,7 @@ impl WorkspaceShell {
                 self.modal = Some(Modal::Settings);
                 cx.notify();
             }
+            CommandId::ToggleTheme => self.toggle_theme(cx),
             CommandId::OpenCommandPalette => {
                 self.open_command_palette(&OpenCommandPalette, window, cx)
             }
@@ -3990,7 +3956,7 @@ impl WorkspaceShell {
         self.bottom_dock.presentation.open = !self.bottom_dock.presentation.open;
         let viewport = window.window_bounds().get_bounds().size;
         let vertical_chrome: f32 =
-            (self.theme.metrics.toolbar_height + self.theme.metrics.status_height).into();
+            (cx.theme().metrics.toolbar_height + cx.theme().metrics.status_height).into();
         self.bottom_dock.presentation.size = dock_layout::fit_bottom_dock(
             f32::from(viewport.height) - vertical_chrome,
             self.bottom_dock.presentation.size,
@@ -4095,7 +4061,9 @@ impl WorkspaceShell {
         align_right: bool,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
-        let colors = self.theme.colors;
+        let theme = cx.theme();
+        let colors = theme.colors;
+        let row_height = theme.metrics.row_height;
         let rows = app_bar::menu_items(menu)
             .into_iter()
             .enumerate()
@@ -4112,7 +4080,7 @@ impl WorkspaceShell {
                     } else {
                         format!("{} (not implemented)", item.label)
                     })
-                    .h(px(28.))
+                    .h(row_height)
                     .px_2()
                     .flex()
                     .items_center()
@@ -4129,20 +4097,14 @@ impl WorkspaceShell {
                     })
                     .child(div().flex_1().min_w_0().truncate().child(item.label))
                     .when(!item.shortcut.is_empty(), |row| {
-                        row.child(
-                            div()
-                                .flex_none()
-                                .text_xs()
-                                .text_color(colors.muted_text)
-                                .child(item.shortcut),
-                        )
+                        row.child(KeyBinding::new(item.shortcut))
                     })
                     .when_some(disabled_reason, |row, reason| {
                         row.child(
                             div()
                                 .flex_none()
                                 .px_1()
-                                .rounded(px(3.))
+                                .rounded_sm()
                                 .bg(colors.hovered_surface)
                                 .text_xs()
                                 .child(reason),
@@ -4162,14 +4124,14 @@ impl WorkspaceShell {
         div()
             .id("app-bar-dropdown")
             .absolute()
-            .top(px(30.))
+            .top(theme.metrics.toolbar_height - px(4.))
             .when(align_right, |menu| menu.right_0())
             .when(!align_right, |menu| menu.left_0())
             .w(px(280.))
             .p_1()
             .flex()
             .flex_col()
-            .rounded(self.theme.metrics.radius_large)
+            .rounded(theme.metrics.radius_large)
             .border_1()
             .border_color(colors.strong_border)
             .bg(colors.elevated_surface)
@@ -4186,7 +4148,7 @@ impl WorkspaceShell {
         align_right: bool,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
-        let colors = self.theme.colors;
+        let colors = cx.theme().colors;
         let open = self.app_bar_menu == Some(menu);
         div()
             .relative()
@@ -4226,7 +4188,7 @@ impl WorkspaceShell {
     /// Global application context: commands, Sift instance, workspace, updates,
     /// and identity. Database profiles deliberately stay in the workspace dock.
     fn render_toolbar(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let colors = self.theme.colors;
+        let colors = cx.theme().colors;
         let workspace_label = self.workspace_context_label();
         let server_name = self.active_server_name();
         let status_label = self.lifecycle.status_label();
@@ -4275,7 +4237,7 @@ impl WorkspaceShell {
             .id("integrated-titlebar")
             .debug_selector(|| "integrated-titlebar".into())
             .key_context("SiftWindow")
-            .h(self.theme.metrics.toolbar_height)
+            .h(cx.theme().metrics.toolbar_height)
             .relative()
             .flex()
             .items_center()
@@ -4456,7 +4418,7 @@ impl WorkspaceShell {
                             .on_click(cx.listener(|shell, _, _, cx| {
                                 shell.toggle_app_bar_modal(Modal::Account, cx)
                             }))
-                            .child(self.render_account_icon(18.)),
+                            .child(self.render_account_icon(18., cx)),
                     )
                     .child(
                         div()
@@ -4499,46 +4461,31 @@ impl WorkspaceShell {
                             .border_l_1()
                             .border_color(colors.subtle_border)
                             .child(
-                                div()
-                                    .id("window-minimize")
-                                    .role(Role::Button)
-                                    .aria_label("Minimize window")
-                                    .size(px(26.))
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .rounded_sm()
-                                    .hover(|button| button.bg(colors.hovered_surface))
-                                    .on_click(|_, window, _| window.minimize_window())
-                                    .child(icon(IconName::Minimize, colors.muted_text, 16.)),
+                                IconButton::new(
+                                    "window-minimize",
+                                    IconName::Minimize,
+                                    "Minimize window",
+                                )
+                                .square(px(26.))
+                                .icon_size(16.)
+                                .on_click(|_, window, _| window.minimize_window()),
                             )
                             .child(
-                                div()
-                                    .id("window-size-toggle")
-                                    .role(Role::Button)
-                                    .aria_label("Maximize or restore window")
-                                    .size(px(26.))
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .rounded_sm()
-                                    .hover(|button| button.bg(colors.hovered_surface))
-                                    .on_click(|_, window, _| window.zoom_window())
-                                    .child(icon(IconName::Maximize, colors.muted_text, 16.)),
+                                IconButton::new(
+                                    "window-size-toggle",
+                                    IconName::Maximize,
+                                    "Maximize or restore window",
+                                )
+                                .square(px(26.))
+                                .icon_size(16.)
+                                .on_click(|_, window, _| window.zoom_window()),
                             )
                             .child(
-                                div()
-                                    .id("window-close")
-                                    .role(Role::Button)
-                                    .aria_label("Close window")
-                                    .size(px(26.))
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .rounded_sm()
-                                    .hover(|button| button.bg(colors.danger_muted))
-                                    .on_click(|_, window, _| window.remove_window())
-                                    .child(icon(IconName::Close, colors.muted_text, 16.)),
+                                IconButton::new("window-close", IconName::Close, "Close window")
+                                    .square(px(26.))
+                                    .icon_size(16.)
+                                    .danger(true)
+                                    .on_click(|_, window, _| window.remove_window()),
                             ),
                     ),
             )
@@ -4556,7 +4503,7 @@ impl WorkspaceShell {
                 profile_id: loading,
             } if *loading == profile_id => vec![div()
                 .ml_6()
-                .h(self.theme.metrics.row_height)
+                .h(cx.theme().metrics.row_height)
                 .flex()
                 .items_center()
                 .text_xs()
@@ -4596,7 +4543,7 @@ impl WorkspaceShell {
                         div()
                             .id(("schema-catalog", catalog_index + profile_id as usize * 1000))
                             .mx_2()
-                            .h(self.theme.metrics.row_height)
+                            .h(cx.theme().metrics.row_height)
                             .pl_4()
                             .pr_2()
                             .flex()
@@ -4638,7 +4585,7 @@ impl WorkspaceShell {
                                         + profile_id as usize * 100_000,
                                 ))
                                 .mx_2()
-                                .h(self.theme.metrics.row_height)
+                                .h(cx.theme().metrics.row_height)
                                 .pl_6()
                                 .pr_2()
                                 .flex()
@@ -4698,7 +4645,7 @@ impl WorkspaceShell {
                                         + profile_id as usize * 10_000_000,
                                 ))
                                 .mx_2()
-                                .h(self.theme.metrics.row_height)
+                                .h(cx.theme().metrics.row_height)
                                 .pl_8()
                                 .pr_2()
                                 .flex()
@@ -4744,7 +4691,7 @@ impl WorkspaceShell {
                     rows.push(
                         div()
                             .ml_6()
-                            .h(self.theme.metrics.row_height)
+                            .h(cx.theme().metrics.row_height)
                             .flex()
                             .items_center()
                             .text_xs()
@@ -4760,7 +4707,8 @@ impl WorkspaceShell {
     }
 
     fn render_dock(&self, dock: &Dock, cx: &mut Context<Self>) -> impl IntoElement {
-        let colors = self.theme.colors;
+        let theme = cx.theme();
+        let colors = theme.colors;
         let definition = dock.definition();
         let title = match dock.id {
             DockId::Left => self.active_left_panel.label(),
@@ -4792,72 +4740,34 @@ impl WorkspaceShell {
             })
             .bg(colors.panel)
             .text_sm()
-            .child(
-                div()
-                    .h(px(26.))
-                    .px_3()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .text_xs()
-                    .text_color(colors.muted_text)
-                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                    .child(title.to_uppercase()),
-            )
+            .child(div().pl_3().child(SectionLabel::new(title.to_uppercase())))
             .when(
                 dock.id == DockId::Left && self.active_left_panel == LeftPanel::Connections,
                 |dock_view| {
                 dock_view.child(
                     div()
                         .mx_2()
-                        .h(self.theme.metrics.row_height)
+                        .h(cx.theme().metrics.row_height)
                         .flex()
                         .items_center()
                         .justify_between()
                         .child(
-                            div()
-                                .id("add-database-connection")
-                                .role(Role::Button)
-                                .h_full()
-                                .px_2()
-                                .flex()
-                                .items_center()
-                                .gap_2()
-                                .rounded_sm()
-                                .text_color(colors.muted_text)
-                                .hover(|button| {
-                                    button.bg(colors.hovered_surface).text_color(colors.text)
-                                })
+                            Button::new("add-database-connection", "Add connection…")
+                                .tone(ButtonTone::Ghost)
+                                .start_icon(IconName::Add)
                                 .on_click(cx.listener(|shell, _, window, cx| {
                                     shell.open_database_connection(window, cx)
-                                }))
-                                .child(icon(IconName::Add, colors.muted_text, 14.))
-                                .child(div().min_w_0().truncate().child("Add connection…")),
+                                })),
                         )
                         .when(
                             matches!(self.connection_status, ConnectionStatus::Connected { .. }),
                             |toolbar| {
                                 toolbar.child(
-                                    div()
-                                        .id("refresh-connection-schema")
-                                        .role(Role::Button)
-                                        .aria_label("Refresh database schema")
-                                        .h_full()
-                                        .px_2()
-                                        .flex()
-                                        .items_center()
-                                        .rounded_sm()
-                                        .text_xs()
-                                        .text_color(colors.muted_text)
-                                        .hover(|button| {
-                                            button
-                                                .bg(colors.hovered_surface)
-                                                .text_color(colors.text)
-                                        })
+                                    Button::new("refresh-connection-schema", "Refresh")
+                                        .tone(ButtonTone::Ghost)
                                         .on_click(cx.listener(|shell, _, _, cx| {
                                             shell.refresh_connection_schema(cx)
-                                        }))
-                                        .child("Refresh"),
+                                        })),
                                 )
                             },
                         ),
@@ -4980,7 +4890,7 @@ impl WorkspaceShell {
                             .items_center()
                             .gap_2()
                             .mx_2()
-                            .h(self.theme.metrics.row_height)
+                            .h(cx.theme().metrics.row_height)
                             .px_2()
                             .rounded_sm()
                             .when(connected, |row| row.bg(colors.active_surface))
@@ -4989,14 +4899,11 @@ impl WorkspaceShell {
                             .child(div().flex_1().min_w_0().truncate().child(conn.name.clone()));
                         if connected {
                             row = row.child(
-                                div()
-                                    .id(("disconnect", conn.id as usize))
-                                    .flex_none()
-                                    .text_xs()
-                                    .text_color(colors.muted_text)
-                                    .hover(|d| d.text_color(colors.danger))
-                                    .on_click(cx.listener(|shell, _, _, cx| shell.disconnect(cx)))
-                                    .child("Disconnect"),
+                                Button::new(("disconnect", conn.id as usize), "Disconnect")
+                                    .tone(ButtonTone::DangerGhost)
+                                    .on_click(
+                                        cx.listener(|shell, _, _, cx| shell.disconnect(cx)),
+                                    ),
                             );
                         } else {
                             let entry = conn.clone();
@@ -5056,7 +4963,7 @@ impl WorkspaceShell {
                             div()
                                 .id(("connection-room", room_id as usize))
                                 .mx_2()
-                                .h(self.theme.metrics.row_height)
+                                .h(cx.theme().metrics.row_height)
                                 .pl_4()
                                 .pr_2()
                                 .flex()
@@ -5099,7 +5006,7 @@ impl WorkspaceShell {
                                 div()
                                     .id(("workspace", workspace.id as usize))
                                     .mx_2()
-                                    .h(self.theme.metrics.row_height)
+                                    .h(cx.theme().metrics.row_height)
                                     .pl_8()
                                     .pr_2()
                                     .flex()
@@ -5183,7 +5090,7 @@ impl WorkspaceShell {
                         div()
                             .id(("collaborator", participant.attachment_id as usize))
                             .mx_2()
-                            .h(self.theme.metrics.row_height)
+                            .h(cx.theme().metrics.row_height)
                             .px_2()
                             .flex()
                             .items_center()
@@ -5270,7 +5177,7 @@ impl WorkspaceShell {
     }
 
     fn render_modal(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
-        let colors = self.theme.colors;
+        let colors = cx.theme().colors;
         self.modal.as_ref().map(|modal| {
             let server_picker = matches!(modal, Modal::ServerPicker);
             let account = matches!(modal, Modal::Account);
@@ -5383,14 +5290,25 @@ impl WorkspaceShell {
                                                         &query,
                                                         colors.accent,
                                                     ))
-                                                    .child(
-                                                        div()
-                                                            .flex_none()
-                                                            .max_w(px(220.))
-                                                            .truncate()
-                                                            .text_xs()
-                                                            .text_color(colors.muted_text)
-                                                            .child(right),
+                                                    .when_some(
+                                                        (!right.is_empty()).then_some(right),
+                                                        |row, right| {
+                                                            if enabled {
+                                                                row.child(KeyBinding::new(right))
+                                                            } else {
+                                                                row.child(
+                                                                    div()
+                                                                        .flex_none()
+                                                                        .max_w(px(220.))
+                                                                        .truncate()
+                                                                        .text_xs()
+                                                                        .text_color(
+                                                                            colors.muted_text,
+                                                                        )
+                                                                        .child(right),
+                                                                )
+                                                            }
+                                                        },
                                                     );
                                                 if enabled {
                                                     row = row
@@ -5421,110 +5339,127 @@ impl WorkspaceShell {
                         .as_ref()
                         .map(|instance| instance.id.clone());
                     let pending = self.server_connection_pending;
-                    let mut rows = Vec::new();
                     let local_active = current_id.as_deref() == Some("local");
-                    rows.push(
-                        div()
-                            .id("picker-local-sift")
-                            .role(Role::Button)
-                            .flex()
+                    let status_label = self.lifecycle.status_label();
+                    // One row shape for every switchable target: leading icon
+                    // chip, title + subtitle, and a current-state slot.
+                    let picker_row = |row: gpui::Stateful<gpui::Div>,
+                                      name: SharedString,
+                                      subtitle: SharedString,
+                                      current: bool| {
+                        row.flex()
                             .items_center()
-                            .justify_between()
-                            .px_2()
-                            .py_2()
                             .gap_2()
+                            .px_2()
+                            .py_1()
+                            .min_h(px(38.))
                             .rounded_sm()
-                            .when(local_active, |row| row.bg(colors.active_surface))
-                            .when(!pending && !local_active, |row| {
-                                row.hover(|row| row.bg(colors.hovered_surface)).on_click(
-                                    cx.listener(|shell, _, _, cx| shell.use_local_server(cx)),
-                                )
-                            })
+                            .child(
+                                div()
+                                    .flex_none()
+                                    .size(px(22.))
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .rounded_sm()
+                                    .bg(colors.active_surface)
+                                    .child(icon(
+                                        if current {
+                                            IconName::Check
+                                        } else {
+                                            IconName::Server
+                                        },
+                                        if current {
+                                            colors.accent
+                                        } else {
+                                            colors.muted_text
+                                        },
+                                        12.,
+                                    )),
+                            )
                             .child(
                                 div()
                                     .flex()
                                     .flex_1()
+                                    .flex_col()
                                     .min_w_0()
-                                    .items_center()
-                                    .gap_2()
                                     .child(
                                         div()
                                             .min_w_0()
                                             .truncate()
-                                            .child("Bundled Local Sift"),
+                                            .text_sm()
+                                            .child(name),
+                                    )
+                                    .child(
+                                        div()
+                                            .min_w_0()
+                                            .truncate()
+                                            .text_xs()
+                                            .text_color(colors.muted_text)
+                                            .child(subtitle),
                                     ),
                             )
-                            .child(
-                                div()
-                                    .flex_none()
-                                    .text_xs()
-                                    .text_color(colors.muted_text)
-                                    .px_1()
-                                    .rounded(px(3.))
-                                    .bg(colors.hovered_surface)
-                                    .child(if local_active {
-                                        "Current · no TOML"
-                                    } else {
-                                        "No TOML"
-                                    }),
-                            )
-                            .into_any_element(),
+                    };
+                    let mut rows = Vec::new();
+                    rows.push(
+                        picker_row(
+                            div()
+                                .id("picker-local-sift")
+                                .role(Role::Button)
+                                .aria_label("Bundled Local Sift")
+                                .when(local_active, |row| row.bg(colors.active_surface))
+                                .when(!pending && !local_active, |row| {
+                                    row.hover(|row| row.bg(colors.hovered_surface)).on_click(
+                                        cx.listener(|shell, _, _, cx| {
+                                            shell.use_local_server(cx)
+                                        }),
+                                    )
+                                }),
+                            "Bundled Local Sift".into(),
+                            "Built into this app · no TOML".into(),
+                            local_active,
+                        )
+                        .child(
+                            Badge::new(if local_active { "Current" } else { "Built-in" })
+                                .tone(if local_active {
+                                    Tone::Success
+                                } else {
+                                    Tone::Neutral
+                                }),
+                        )
+                        .into_any_element(),
                     );
                     for (index, profile) in self.saved_servers.iter().cloned().enumerate() {
                         let active = current_id.as_deref()
                             == Some(format!("hosted:{}", profile.id).as_str());
                         let profile_for_click = profile.clone();
                         rows.push(
-                            div()
-                                .id(("picker-saved-server", index))
-                                .role(Role::Button)
-                                .flex()
-                                .items_center()
-                                .justify_between()
-                                .gap_3()
-                                .px_2()
-                                .py_2()
-                                .rounded_sm()
-                                .when(active, |row| row.bg(colors.active_surface))
-                                .when(!pending && !active, |row| {
-                                    row.hover(|row| row.bg(colors.hovered_surface)).on_click(
-                                        cx.listener(move |shell, _, _, cx| {
-                                            shell.connect_saved_server(&profile_for_click, cx)
-                                        }),
-                                    )
-                                })
-                                .child(
-                                    div()
-                                        .flex()
-                                        .flex_1()
-                                        .items_center()
-                                        .gap_2()
-                                        .min_w_0()
-                                        .child(
-                                        div()
-                                            .flex()
-                                            .flex_col()
-                                            .min_w_0()
-                                            .child(profile.name)
-                                            .child(
-                                                div()
-                                                    .text_xs()
-                                                    .text_color(colors.muted_text)
-                                                    .truncate()
-                                                    .child(profile.base_url),
-                                            ),
-                                        ),
-                                )
-                                .when(active, |row| {
-                                    row.child(
-                                        div()
-                                            .flex_none()
-                                            .text_xs()
-                                            .text_color(colors.muted_text)
-                                            .child("Current"),
-                                    )
-                                })
-                                .into_any_element(),
+                            picker_row(
+                                div()
+                                    .id(("picker-saved-server", index))
+                                    .role(Role::Button)
+                                    .aria_label(profile.name.clone())
+                                    .when(active, |row| row.bg(colors.active_surface))
+                                    .when(!pending && !active, |row| {
+                                        row.hover(|row| row.bg(colors.hovered_surface)).on_click(
+                                            cx.listener(move |shell, _, _, cx| {
+                                                shell.connect_saved_server(
+                                                    &profile_for_click,
+                                                    cx,
+                                                )
+                                            }),
+                                        )
+                                    }),
+                                profile.name.clone().into(),
+                                profile.base_url.clone().into(),
+                                active,
+                            )
+                            .child(if profile.has_saved_token {
+                                Badge::new("Token saved").tone(Tone::Neutral)
+                            } else {
+                                Badge::new("Saved").tone(Tone::Neutral)
+                            })
+                            .into_any_element(),
                         );
                     }
                     for (index, instance) in self.instance_roots.iter().cloned().enumerate() {
@@ -5533,239 +5468,177 @@ impl WorkspaceShell {
                         let active = current_id.as_deref()
                             == Some(format!("config:{}", instance.manifest_id).as_str());
                         rows.push(
+                            picker_row(
+                                div()
+                                    .id(("picker-instance-root", index))
+                                    .role(Role::Button)
+                                    .aria_label(instance.name.clone())
+                                    .when(active, |row| row.bg(colors.active_surface))
+                                    .when(!pending, |row| {
+                                        row.hover(|row| row.bg(colors.hovered_surface)).on_click(
+                                            cx.listener(move |shell, _, _, cx| {
+                                                shell.inspect_instance_root(root.clone(), cx)
+                                            }),
+                                        )
+                                    }),
+                                instance.name.clone().into(),
+                                instance.root.display().to_string().into(),
+                                active,
+                            )
+                            .child(
+                                Badge::new(if active { "Current" } else { "sift.toml" })
+                                    .tone(if active {
+                                        Tone::Success
+                                    } else {
+                                        Tone::Neutral
+                                    }),
+                            )
+                            .child(
+                                div()
+                                    .id(("forget-instance-root", index))
+                                    .role(Role::Button)
+                                    .aria_label(format!(
+                                        "Remove {} from Sift; keep files",
+                                        instance.name
+                                    ))
+                                    .flex_none()
+                                    .p_1()
+                                    .rounded_sm()
+                                    .text_color(colors.muted_text)
+                                    .hover(|button| {
+                                        button
+                                            .bg(colors.danger_muted)
+                                            .text_color(colors.danger)
+                                    })
+                                    .on_mouse_down(
+                                        MouseButton::Left,
+                                        |_, _, cx| cx.stop_propagation(),
+                                    )
+                                    .on_click(cx.listener(move |shell, _, _, cx| {
+                                        cx.stop_propagation();
+                                        shell.forget_instance_root(
+                                            root_for_remove.clone(),
+                                            cx,
+                                        )
+                                    }))
+                                    .child(icon(IconName::Close, colors.danger, 12.)),
+                            )
+                            .into_any_element(),
+                        );
+                    }
+                    div()
+                        .id("server-picker-menu")
+                        .flex()
+                        .flex_col()
+                        .min_w_0()
+                        .p_1()
+                        .gap_0p5()
+                        .child(
                             div()
-                                .id(("picker-instance-root", index))
-                                .role(Role::Button)
+                                .px_2()
+                                .py_1()
                                 .flex()
                                 .items_center()
-                                .justify_between()
-                                .gap_3()
-                                .px_2()
-                                .py_2()
-                                .rounded_sm()
-                                .when(active, |row| row.bg(colors.active_surface))
-                                .when(!pending, |row| {
-                                    row.hover(|row| row.bg(colors.hovered_surface)).on_click(
-                                        cx.listener(move |shell, _, _, cx| {
-                                            shell.inspect_instance_root(root.clone(), cx)
-                                        }),
-                                    )
-                                })
+                                .gap_2()
+                                .child(icon(IconName::Server, colors.muted_text, 14.))
                                 .child(
                                     div()
                                         .flex()
                                         .flex_1()
                                         .flex_col()
                                         .min_w_0()
-                                        .child(instance.name.clone())
                                         .child(
                                             div()
-                                                .text_xs()
-                                                .text_color(colors.muted_text)
                                                 .truncate()
-                                                .child(instance.root.display().to_string()),
-                                        ),
-                                )
-                                .child(
-                                    div()
-                                        .flex()
-                                        .flex_none()
-                                        .items_center()
-                                        .gap_2()
-                                        .child(
-                                            div()
-                                                .text_xs()
-                                                .text_color(colors.muted_text)
-                                                .child(if active {
-                                                    "Current"
-                                                } else {
-                                                    "Config root"
-                                                }),
+                                                .text_sm()
+                                                .font_weight(gpui::FontWeight::SEMIBOLD)
+                                                .child("Sift Server"),
                                         )
                                         .child(
                                             div()
-                                                .id(("forget-instance-root", index))
-                                                .role(Role::Button)
-                                                .aria_label(format!(
-                                                    "Remove {} from Sift; keep files",
-                                                    instance.name
-                                                ))
-                                                .p_1()
-                                                .rounded_sm()
+                                                .truncate()
+                                                .text_xs()
                                                 .text_color(colors.muted_text)
-                                                .hover(|button| {
-                                                    button
-                                                        .bg(colors.danger_muted)
-                                                        .text_color(colors.danger)
-                                                })
-                                                .on_mouse_down(
-                                                    MouseButton::Left,
-                                                    |_, _, cx| cx.stop_propagation(),
-                                                )
-                                                .on_click(cx.listener(
-                                                    move |shell, _, _, cx| {
-                                                        cx.stop_propagation();
-                                                        shell.forget_instance_root(
-                                                            root_for_remove.clone(),
-                                                            cx,
-                                                        )
-                                                    },
-                                                ))
-                                                .child(icon(
-                                                    IconName::Close,
-                                                    colors.danger,
-                                                    12.,
+                                                .child(format!(
+                                                    "{} · {}",
+                                                    self.active_server_name(),
+                                                    status_label
                                                 )),
                                         ),
-                                )
-                                .into_any_element(),
-                        );
-                    }
-                    div()
-                        .flex()
-                        .flex_col()
-                        .min_w_0()
-                        .gap_2()
-                        .child(
-                            div()
-                                .h(px(28.))
-                                .flex()
-                                .items_center()
-                                .gap_2()
-                                .font_weight(gpui::FontWeight::SEMIBOLD)
-                                .child("Sift Server"),
+                                ),
                         )
-                        .child(div().flex().flex_col().gap_1().children(rows))
+                        .child(div().flex().flex_col().gap_0p5().py_1().children(rows))
                         .children(self.server_connection_error.as_ref().map(|message| {
-                            div()
-                                .min_w_0()
-                                .whitespace_normal()
-                                .text_sm()
-                                .text_color(colors.danger)
-                                .child(message.clone())
+                            ErrorBanner::new(message.clone())
                         }))
                         .when(pending, |picker| {
                             picker.child(
                                 div()
                                     .px_2()
+                                    .py_1()
                                     .text_xs()
                                     .text_color(colors.muted_text)
                                     .child("Testing connection…"),
                             )
                         })
-                        .when(
-                            current_id
-                                .as_deref()
-                                .is_some_and(|id| id.starts_with("config:")),
-                            |picker| {
-                                picker.child(
-                                    div()
-                                        .id("picker-edit-current-instance")
-                                        .role(Role::Button)
-                                        .px_2()
-                                        .py_2()
-                                        .rounded_sm()
-                                        .text_color(colors.muted_text)
-                                        .hover(|button| {
-                                            button
-                                                .bg(colors.hovered_surface)
-                                                .text_color(colors.text)
-                                        })
-                                        .on_click(cx.listener(|shell, _, _, cx| {
-                                            shell.open_current_configuration(cx)
-                                        }))
-                                        .child(
-                                            div()
-                                                .flex()
-                                                .items_center()
-                                                .gap_2()
-                                                .child(icon(
-                                                    IconName::Fallback,
-                                                    colors.danger,
-                                                    13.,
-                                                ))
-                                                .child("Edit current sift.toml…"),
-                                        ),
-                                )
-                            },
-                        )
                         .child(
                             div()
-                                .id("picker-new-instance")
-                                .role(Role::Button)
-                                .px_2()
-                                .py_2()
-                                .rounded_sm()
-                                .text_color(colors.muted_text)
-                                .hover(|button| {
-                                    button.bg(colors.hovered_surface).text_color(colors.text)
-                                })
-                                .on_click(cx.listener(|shell, _, _, cx| {
-                                    shell.prompt_for_new_instance_root(cx)
-                                }))
-                                .child(
-                                    div()
-                                        .flex()
-                                        .items_center()
-                                        .gap_2()
-                                        .child(icon(IconName::Add, colors.muted_text, 13.))
-                                        .child("Create Sift Instance…"),
-                                ),
-                        )
-                        .child(
-                            div()
-                                .id("picker-import-instance")
-                                .role(Role::Button)
-                                .px_2()
-                                .py_2()
-                                .rounded_sm()
-                                .text_color(colors.muted_text)
-                                .hover(|button| {
-                                    button.bg(colors.hovered_surface).text_color(colors.text)
-                                })
-                                .on_click(cx.listener(|shell, _, _, cx| {
-                                    shell.prompt_for_instance_root(cx)
-                                }))
-                                .child(
-                                    div()
-                                        .flex()
-                                        .items_center()
-                                        .gap_2()
-                                        .child(icon(IconName::Workspace, colors.muted_text, 13.))
-                                        .child("Open Existing Sift Instance…"),
-                                ),
-                        )
-                        .child(
-                            div()
-                                .id("picker-manage-servers")
-                                .role(Role::Button)
                                 .mt_1()
-                                .pt_2()
-                                .px_2()
+                                .pt_1()
                                 .border_t_1()
                                 .border_color(colors.subtle_border)
-                                .text_color(colors.muted_text)
-                                .hover(|button| {
-                                    button
-                                        .bg(colors.hovered_surface)
-                                        .text_color(colors.text)
-                                })
-                                .on_click(cx.listener(|shell, _, window, cx| {
-                                    shell.open_server_connection(&OpenServerConnection, window, cx)
-                                }))
+                                .flex()
+                                .flex_col()
+                                .gap_0p5()
+                                .children(
+                                    current_id
+                                        .as_deref()
+                                        .is_some_and(|id| id.starts_with("config:"))
+                                        .then(|| {
+                                            Button::new(
+                                                "picker-edit-current-instance",
+                                                "Edit current sift.toml…",
+                                            )
+                                            .tone(ButtonTone::Ghost)
+                                            .start_icon(IconName::Fallback)
+                                            .on_click(cx.listener(|shell, _, _, cx| {
+                                                shell.open_current_configuration(cx)
+                                            }))
+                                        }),
+                                )
                                 .child(
-                                    div()
-                                        .flex()
-                                        .min_w_0()
-                                        .items_center()
-                                        .gap_2()
-                                        .child(icon(IconName::Add, colors.muted_text, 13.))
-                                        .child(
-                                            div()
-                                                .min_w_0()
-                                                .truncate()
-                                                .child("Connect to or manage servers…"),
-                                        ),
+                                    Button::new("picker-new-instance", "Create Sift Instance…")
+                                        .tone(ButtonTone::Ghost)
+                                        .start_icon(IconName::Add)
+                                        .on_click(cx.listener(|shell, _, _, cx| {
+                                            shell.prompt_for_new_instance_root(cx)
+                                        })),
+                                )
+                                .child(
+                                    Button::new(
+                                        "picker-import-instance",
+                                        "Open Existing Sift Instance…",
+                                    )
+                                    .tone(ButtonTone::Ghost)
+                                    .start_icon(IconName::Workspace)
+                                    .on_click(cx.listener(|shell, _, _, cx| {
+                                        shell.prompt_for_instance_root(cx)
+                                    })),
+                                )
+                                .child(
+                                    Button::new(
+                                        "picker-manage-servers",
+                                        "Connect to or manage servers…",
+                                    )
+                                    .tone(ButtonTone::Ghost)
+                                    .start_icon(IconName::Server)
+                                    .on_click(cx.listener(|shell, _, window, cx| {
+                                        shell.open_server_connection(
+                                            &OpenServerConnection,
+                                            window,
+                                            cx,
+                                        )
+                                    })),
                                 ),
                         )
                         .into_any_element()
@@ -5784,6 +5657,7 @@ impl WorkspaceShell {
                     let ready_to_start = plan.current_generation.is_some()
                         && !plan.drifted
                         && missing_credentials == 0;
+                    let allow_destroy = plan.destroy_confirmation_required;
                     let manifest_path = plan.root.join("sift.toml");
                     let edit_manifest_root = plan.root.clone();
                     let lock_path = plan.root.join("sift.lock");
@@ -5833,17 +5707,16 @@ impl WorkspaceShell {
                                                     )),
                                             ),
                                     )
-                                    .child(
-                                        div()
-                                            .flex_none()
-                                            .text_xs()
-                                            .text_color(if credential.readiness == "ready" {
-                                                colors.success
+                                    .child({
+                                        let readiness = credential.readiness.clone();
+                                        Badge::new(readiness).tone(
+                                            if credential.readiness == "ready" {
+                                                Tone::Success
                                             } else {
-                                                colors.warning
-                                            })
-                                            .child(credential.readiness),
-                                    ),
+                                                Tone::Warning
+                                            },
+                                        )
+                                    }),
                             )
                     });
 
@@ -5888,19 +5761,16 @@ impl WorkspaceShell {
                                         ),
                                 )
                                 .child(
-                                    div()
-                                        .flex_none()
-                                        .text_xs()
-                                        .text_color(if plan.drifted {
-                                            colors.warning
-                                        } else {
-                                            colors.success
-                                        })
-                                        .child(if plan.drifted {
-                                            "Unapplied drift"
-                                        } else {
-                                            "Applied"
-                                        }),
+                                    Badge::new(if plan.drifted {
+                                        "Unapplied drift"
+                                    } else {
+                                        "Applied"
+                                    })
+                                    .tone(if plan.drifted {
+                                        Tone::Warning
+                                    } else {
+                                        Tone::Success
+                                    }),
                                 ),
                         )
                         .child(
@@ -5934,58 +5804,47 @@ impl WorkspaceShell {
                                 .flex()
                                 .gap_2()
                                 .child(
-                                    div()
-                                        .id("edit-instance-manifest")
-                                        .role(Role::Button)
-                                        .px_2()
-                                        .py_1()
-                                        .rounded_sm()
-                                        .bg(colors.accent)
-                                        .text_color(colors.background)
-                                        .on_click(cx.listener(move |shell, _, _, cx| {
-                                            shell.open_root_configuration(
-                                                edit_manifest_root.clone(),
-                                                cx,
-                                            )
-                                        }))
-                                        .child("Edit sift.toml"),
+                                    Button::new(
+                                        "edit-instance-manifest",
+                                        "Edit sift.toml",
+                                    )
+                                    .tone(ButtonTone::Accent)
+                                    .on_click(cx.listener(move |shell, _, _, cx| {
+                                        shell.open_root_configuration(
+                                            edit_manifest_root.clone(),
+                                            cx,
+                                        )
+                                    })),
                                 )
                                 .child(
-                                    div()
-                                        .id("open-instance-manifest")
-                                        .role(Role::Button)
-                                        .px_2()
-                                        .py_1()
-                                        .rounded_sm()
-                                        .bg(colors.hovered_surface)
-                                        .on_click(move |_, _, cx| {
-                                            cx.open_with_system(&manifest_path)
-                                        })
-                                        .child("Open externally"),
+                                    Button::new(
+                                        "open-instance-manifest",
+                                        "Open externally",
+                                    )
+                                    .tone(ButtonTone::Neutral)
+                                    .on_click(move |_, _, cx| {
+                                        cx.open_with_system(&manifest_path)
+                                    }),
                                 )
                                 .child(
-                                    div()
-                                        .id("open-instance-lock")
-                                        .role(Role::Button)
-                                        .px_2()
-                                        .py_1()
-                                        .rounded_sm()
-                                        .bg(colors.hovered_surface)
-                                        .on_click(move |_, _, cx| cx.open_with_system(&lock_path))
-                                        .child("Open sift.lock"),
+                                    Button::new(
+                                        "open-instance-lock",
+                                        "Open sift.lock",
+                                    )
+                                    .tone(ButtonTone::Neutral)
+                                    .on_click(move |_, _, cx| {
+                                        cx.open_with_system(&lock_path)
+                                    }),
                                 )
                                 .child(
-                                    div()
-                                        .id("refresh-instance-plan")
-                                        .role(Role::Button)
-                                        .px_2()
-                                        .py_1()
-                                        .rounded_sm()
-                                        .bg(colors.hovered_surface)
-                                        .on_click(cx.listener(move |shell, _, _, cx| {
-                                            shell.inspect_instance_root(refresh_root.clone(), cx)
-                                        }))
-                                        .child("Refresh plan"),
+                                    Button::new(
+                                        "refresh-instance-plan",
+                                        "Refresh plan",
+                                    )
+                                    .tone(ButtonTone::Neutral)
+                                    .on_click(cx.listener(move |shell, _, _, cx| {
+                                        shell.inspect_instance_root(refresh_root.clone(), cx)
+                                    })),
                                 ),
                         )
                         .children((!plan.warnings.is_empty()).then(|| {
@@ -6027,31 +5886,16 @@ impl WorkspaceShell {
                                         .child(self.instance_secret_input.clone()),
                                 )
                                 .child(
-                                    div()
-                                        .id("import-instance-credential")
-                                        .role(Role::Button)
-                                        .px_2()
-                                        .flex()
-                                        .items_center()
-                                        .rounded_sm()
-                                        .bg(colors.accent)
-                                        .text_color(colors.background)
-                                        .when(!pending, |button| {
-                                            button.on_click(cx.listener(|shell, _, _, cx| {
-                                                shell.import_instance_credential(cx)
-                                            }))
-                                        })
-                                        .child("Import"),
+                                    Button::new("import-instance-credential", "Import")
+                                        .tone(ButtonTone::Accent)
+                                        .loading(pending)
+                                        .on_click(cx.listener(|shell, _, _, cx| {
+                                            shell.import_instance_credential(cx)
+                                        })),
                                 )
                         }))
                         .children(self.instance_operation_error.as_ref().map(|error| {
-                            div()
-                                .p_2()
-                                .rounded_sm()
-                                .bg(colors.danger_muted)
-                                .text_color(colors.danger)
-                                .whitespace_normal()
-                                .child(error.clone())
+                            ErrorBanner::new(error.clone())
                         }))
                         .when(pending, |view| {
                             view.child(
@@ -6067,51 +5911,32 @@ impl WorkspaceShell {
                                 .justify_end()
                                 .gap_2()
                                 .child(
-                                    div()
-                                        .id("apply-instance-plan")
-                                        .role(Role::Button)
-                                        .px_3()
-                                        .py_1()
-                                        .rounded_sm()
-                                        .bg(if plan.destroy_confirmation_required {
-                                            colors.danger
-                                        } else {
-                                            colors.accent
-                                        })
-                                        .text_color(colors.background)
-                                        .when(!pending, |button| {
-                                            let allow_destroy = plan.destroy_confirmation_required;
-                                            button.on_click(cx.listener(move |shell, _, _, cx| {
-                                                shell.apply_instance_root(allow_destroy, cx)
-                                            }))
-                                        })
-                                        .child(if plan.destroy_confirmation_required {
+                                    Button::new(
+                                        "apply-instance-plan",
+                                        if plan.destroy_confirmation_required {
                                             "Apply destructive changes"
                                         } else {
                                             "Apply"
-                                        }),
+                                        },
+                                    )
+                                    .tone(if plan.destroy_confirmation_required {
+                                        ButtonTone::Danger
+                                    } else {
+                                        ButtonTone::Accent
+                                    })
+                                    .loading(pending)
+                                    .on_click(cx.listener(move |shell, _, _, cx| {
+                                        shell.apply_instance_root(allow_destroy, cx)
+                                    })),
                                 )
                                 .child(
-                                    div()
-                                        .id("start-instance-root")
-                                        .role(Role::Button)
-                                        .px_3()
-                                        .py_1()
-                                        .rounded_sm()
-                                        .border_1()
-                                        .border_color(colors.subtle_border)
-                                        .when(ready_to_start && !pending, |button| {
-                                            button
-                                                .bg(colors.success)
-                                                .text_color(colors.background)
-                                                .on_click(cx.listener(|shell, _, _, cx| {
-                                                    shell.start_instance_root(cx)
-                                                }))
-                                        })
-                                        .when(!ready_to_start || pending, |button| {
-                                            button.text_color(colors.muted_text)
-                                        })
-                                        .child("Start & Connect"),
+                                    Button::new("start-instance-root", "Start & Connect")
+                                        .tone(ButtonTone::Success)
+                                        .disabled(!ready_to_start)
+                                        .loading(pending)
+                                        .on_click(cx.listener(|shell, _, _, cx| {
+                                            shell.start_instance_root(cx)
+                                        })),
                                 ),
                         )
                         .into_any_element()
@@ -6160,12 +5985,7 @@ impl WorkspaceShell {
                                         ),
                                 )
                                 .when(profile.has_saved_token, |row| {
-                                    row.child(
-                                        div()
-                                            .text_xs()
-                                            .text_color(colors.success)
-                                            .child("Token saved"),
-                                    )
+                                    row.child(Badge::new("Token saved").tone(Tone::Success))
                                 })
                                 .into_any_element(),
                         );
@@ -6193,35 +6013,19 @@ impl WorkspaceShell {
                                         .child("Connect to Sift Server"),
                                 )
                                 .child(
-                                    div()
-                                        .id("new-server-profile")
-                                        .role(Role::Button)
-                                        .flex_none()
-                                        .whitespace_nowrap()
-                                        .h(self.theme.metrics.control_height)
-                                        .px_2()
-                                        .flex()
-                                        .items_center()
-                                        .gap_1()
-                                        .rounded_sm()
-                                        .text_color(colors.muted_text)
-                                        .hover(|button| {
-                                            button
-                                                .bg(colors.hovered_surface)
-                                                .text_color(colors.text)
-                                        })
+                                    Button::new("new-server-profile", "New Server")
+                                        .tone(ButtonTone::Ghost)
+                                        .start_icon(IconName::Add)
                                         .on_click(cx.listener(|shell, _, window, cx| {
                                             shell.new_server_profile(window, cx)
-                                        }))
-                                        .child(icon(IconName::Add, colors.muted_text, 13.))
-                                        .child("New Server"),
+                                        })),
                                 ),
                         )
                         .child(
                             div()
                                 .id("use-local-sift")
                                 .role(Role::Button)
-                                .h(self.theme.metrics.row_height)
+                                .h(cx.theme().metrics.row_height)
                                 .flex()
                                 .items_center()
                                 .justify_between()
@@ -6264,68 +6068,25 @@ impl WorkspaceShell {
                             )
                         })
                         .child(
-                            div()
-                                .flex()
-                                .flex_col()
-                                .min_w_0()
-                                .gap_1()
-                                .child(div().text_xs().text_color(colors.muted_text).child("NAME"))
-                                .child(
-                                    div()
-                                        .min_w_0()
-                                        .overflow_hidden()
-                                        .border_1()
-                                        .border_color(colors.subtle_border)
-                                        .rounded_sm()
-                                        .bg(colors.background)
-                                        .child(self.server_name_input.clone()),
-                                ),
+                            Field::new(
+                                "NAME",
+                                Some(self.server_name_input.focus_handle(cx)),
+                                self.server_name_input.clone(),
+                            ),
                         )
                         .child(
-                            div()
-                                .flex()
-                                .flex_col()
-                                .min_w_0()
-                                .gap_1()
-                                .child(
-                                    div()
-                                        .text_xs()
-                                        .text_color(colors.muted_text)
-                                        .child("SERVER URL"),
-                                )
-                                .child(
-                                    div()
-                                        .min_w_0()
-                                        .overflow_hidden()
-                                        .border_1()
-                                        .border_color(colors.subtle_border)
-                                        .rounded_sm()
-                                        .bg(colors.background)
-                                        .child(self.server_url_input.clone()),
-                                ),
+                            Field::new(
+                                "SERVER URL",
+                                Some(self.server_url_input.focus_handle(cx)),
+                                self.server_url_input.clone(),
+                            ),
                         )
                         .child(
-                            div()
-                                .flex()
-                                .flex_col()
-                                .min_w_0()
-                                .gap_1()
-                                .child(
-                                    div()
-                                        .text_xs()
-                                        .text_color(colors.muted_text)
-                                        .child("BEARER TOKEN"),
-                                )
-                                .child(
-                                    div()
-                                        .min_w_0()
-                                        .overflow_hidden()
-                                        .border_1()
-                                        .border_color(colors.subtle_border)
-                                        .rounded_sm()
-                                        .bg(colors.background)
-                                        .child(self.server_token_input.clone()),
-                                ),
+                            Field::new(
+                                "BEARER TOKEN",
+                                Some(self.server_token_input.focus_handle(cx)),
+                                self.server_token_input.clone(),
+                            ),
                         )
                         .child(
                             div()
@@ -6352,7 +6113,7 @@ impl WorkspaceShell {
                                         .flex()
                                         .items_center()
                                         .justify_center()
-                                        .rounded(px(4.))
+                                        .rounded_sm()
                                         .border_1()
                                         .border_color(if remember {
                                             colors.accent
@@ -6362,7 +6123,11 @@ impl WorkspaceShell {
                                         .when(remember, |box_view| {
                                             box_view
                                                 .bg(colors.accent)
-                                                .child(icon(IconName::Check, gpui::white(), 11.))
+                                                .child(icon(
+                                                    IconName::Check,
+                                                    colors.on_accent,
+                                                    11.,
+                                                ))
                                         }),
                                 )
                                 .child(
@@ -6373,24 +6138,7 @@ impl WorkspaceShell {
                                 ),
                         )
                         .children(self.server_connection_error.as_ref().map(|message| {
-                            div()
-                                .p_3()
-                                .flex()
-                                .items_start()
-                                .gap_2()
-                                .rounded_sm()
-                                .border_1()
-                                .border_color(colors.danger)
-                                .bg(colors.danger_muted)
-                                .text_color(colors.danger)
-                                .child(icon(IconName::Warning, colors.danger, 14.))
-                                .child(
-                                    div()
-                                        .flex_1()
-                                        .min_w_0()
-                                        .whitespace_normal()
-                                        .child(message.clone()),
-                                )
+                            ErrorBanner::new(message.clone())
                         }))
                         .child(
                             div()
@@ -6399,61 +6147,91 @@ impl WorkspaceShell {
                                 .justify_between()
                                 .items_center()
                                 .gap_2()
+                                .children(selected.is_some().then(|| {
+                                    Button::new("forget-server", "Forget")
+                                        .tone(ButtonTone::DangerGhost)
+                                        .on_click(cx.listener(|shell, _, _, cx| {
+                                            shell.forget_selected_server(cx)
+                                        }))
+                                }))
                                 .child(
-                                    div()
-                                        .id("forget-server")
-                                        .role(Role::Button)
-                                        .h(self.theme.metrics.control_height)
-                                        .px_2()
-                                        .flex()
-                                        .items_center()
-                                        .rounded_sm()
-                                        .text_color(colors.muted_text)
-                                        .when(selected.is_some(), |button| {
-                                            button
-                                                .hover(|button| button.text_color(colors.danger))
-                                                .on_click(cx.listener(|shell, _, _, cx| {
-                                                    shell.forget_selected_server(cx)
-                                                }))
-                                        })
-                                        .child(if selected.is_some() { "Forget" } else { "" }),
-                                )
-                                .child(
-                                    div()
-                                        .id("connect-server")
-                                        .role(Role::Button)
-                                        .flex_none()
-                                        .whitespace_nowrap()
-                                        .h(self.theme.metrics.control_height)
-                                        .px_3()
-                                        .flex()
-                                        .items_center()
-                                        .gap_1()
-                                        .rounded_sm()
-                                        .bg(if pending {
-                                            colors.hovered_surface
-                                        } else {
-                                            colors.accent
-                                        })
-                                        .text_color(colors.text)
-                                        .when(!pending, |button| {
-                                            button
-                                                .hover(|button| button.bg(colors.accent_hover))
-                                                .on_click(cx.listener(|shell, _, _, cx| {
-                                                    shell.submit_server_connection(cx)
-                                                }))
-                                        })
-                                        .child(if pending {
+                                    Button::new(
+                                        "connect-server",
+                                        if pending {
                                             "Testing connection…"
                                         } else {
                                             "Test & Connect"
-                                        }),
+                                        },
+                                    )
+                                    .tone(ButtonTone::Accent)
+                                    .wide(true)
+                                    .loading(pending)
+                                    .on_click(cx.listener(|shell, _, _, cx| {
+                                        shell.submit_server_connection(cx)
+                                    })),
                                 ),
                         )
                         .into_any_element()
                 }
                 Modal::Settings => {
                     let vim_mode_default = self.vim_mode_default();
+                    let dark_theme = self.dark_theme;
+                    let toggle_row = |id: &'static str,
+                                      title: &'static str,
+                                      description: &'static str,
+                                      on: bool,
+                                      on_click: sift_ui::ClickHandler| {
+                        div()
+                            .id(id)
+                            .debug_selector(move || id.to_owned())
+                            .role(Role::Button)
+                            .aria_label(format!("{title}: {}", if on { "on" } else { "off" }))
+                            .min_h(px(54.))
+                            .px_2()
+                            .flex()
+                            .items_center()
+                            .gap_3()
+                            .rounded_sm()
+                            .hover(|row| row.bg(colors.hovered_surface))
+                            .on_click(on_click)
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .flex()
+                                    .flex_col()
+                                    .gap_1()
+                                    .child(title)
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(colors.muted_text)
+                                            .child(description),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .w(px(32.))
+                                    .h(px(18.))
+                                    .p(px(2.))
+                                    .flex_none()
+                                    .flex()
+                                    .items_center()
+                                    .rounded_full()
+                                    .bg(if on {
+                                        colors.accent
+                                    } else {
+                                        colors.strong_border
+                                    })
+                                    .when(on, |toggle| toggle.justify_end())
+                                    .child(
+                                        div()
+                                            .size(px(14.))
+                                            .rounded_full()
+                                            .bg(colors.text),
+                                    ),
+                            )
+                    };
                     div()
                         .flex()
                         .flex_col()
@@ -6473,67 +6251,29 @@ impl WorkspaceShell {
                                     div()
                                         .text_sm()
                                         .text_color(colors.muted_text)
-                                        .child("Editor preferences are stored on this device."),
+                                        .child("Preferences are stored on this device."),
                                 ),
                         )
-                        .child(
-                            div()
-                                .id("settings-vim-default")
-                                .debug_selector(|| "settings-vim-default".into())
-                                .role(Role::Button)
-                                .aria_label(if vim_mode_default {
-                                    "Vim mode by default: on"
-                                } else {
-                                    "Vim mode by default: off"
-                                })
-                                .min_h(px(54.))
-                                .px_2()
-                                .flex()
-                                .items_center()
-                                .gap_3()
-                                .rounded_sm()
-                                .hover(|row| row.bg(colors.hovered_surface))
-                                .on_click(cx.listener(|shell, _, _, cx| {
+                        .child(toggle_row(
+                            "settings-vim-default",
+                            "Vim mode by default",
+                            "New SQL and TOML editors start in Vim normal mode.",
+                            vim_mode_default,
+                            Box::new(cx.listener(
+                                |shell: &mut WorkspaceShell, _, _, cx| {
                                     shell.toggle_vim_mode_default(cx)
-                                }))
-                                .child(
-                                    div()
-                                        .flex_1()
-                                        .min_w_0()
-                                        .flex()
-                                        .flex_col()
-                                        .gap_1()
-                                        .child("Vim mode by default")
-                                        .child(
-                                            div()
-                                                .text_xs()
-                                                .text_color(colors.muted_text)
-                                                .child("New SQL and TOML editors start in Vim normal mode."),
-                                        ),
-                                )
-                                .child(
-                                    div()
-                                        .w(px(32.))
-                                        .h(px(18.))
-                                        .p(px(2.))
-                                        .flex_none()
-                                        .flex()
-                                        .items_center()
-                                        .rounded_full()
-                                        .bg(if vim_mode_default {
-                                            colors.accent
-                                        } else {
-                                            colors.strong_border
-                                        })
-                                        .when(vim_mode_default, |toggle| toggle.justify_end())
-                                        .child(
-                                            div()
-                                                .size(px(14.))
-                                                .rounded_full()
-                                                .bg(colors.text),
-                                        ),
-                                ),
-                        )
+                                },
+                            )) as sift_ui::ClickHandler,
+                        ))
+                        .child(toggle_row(
+                            "settings-theme",
+                            "Dark theme",
+                            "Switch between the dark and light appearance.",
+                            dark_theme,
+                            Box::new(cx.listener(
+                                |shell: &mut WorkspaceShell, _, _, cx| shell.toggle_theme(cx),
+                            )) as sift_ui::ClickHandler,
+                        ))
                         .child(
                             div()
                                 .pt_3()
@@ -6568,25 +6308,12 @@ impl WorkspaceShell {
                                         ),
                                 )
                                 .child(
-                                    div()
-                                        .id("open-settings-file")
-                                        .debug_selector(|| "open-settings-file".into())
-                                        .role(Role::Button)
-                                        .aria_label("Open settings.toml")
-                                        .h(self.theme.metrics.control_height)
-                                        .px_3()
-                                        .flex_none()
-                                        .flex()
-                                        .items_center()
-                                        .rounded_sm()
-                                        .border_1()
-                                        .border_color(colors.subtle_border)
-                                        .bg(colors.surface)
-                                        .hover(|button| button.bg(colors.hovered_surface))
+                                    Button::new("open-settings-file", "Open settings.toml")
+                                        .tone(ButtonTone::Neutral)
+                                        .debug_selector("open-settings-file")
                                         .on_click(cx.listener(|shell, _, window, cx| {
                                             shell.open_user_settings(window, cx)
-                                        }))
-                                        .child("Open settings.toml"),
+                                        })),
                                 ),
                         )
                         .into_any_element()
@@ -6632,17 +6359,7 @@ impl WorkspaceShell {
                                 .child(icon(IconName::Github, colors.muted_text, 14.))
                         });
                     let field = |label: &'static str, input: Entity<TextInput>| {
-                        div()
-                            .flex()
-                            .flex_col()
-                            .gap_1()
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .text_color(colors.muted_text)
-                                    .child(label),
-                            )
-                            .child(input)
+                        Field::new(label, Some(input.focus_handle(cx)), input.clone())
                     };
 
                     div()
@@ -6714,34 +6431,21 @@ impl WorkspaceShell {
                                     .flex_col()
                                     .gap_3()
                                     .child(
-                                        div()
-                                            .id("account-github-sign-in")
-                                            .role(Role::Button)
-                                            .h(self.theme.metrics.control_height)
-                                            .px_3()
-                                            .flex()
-                                            .items_center()
-                                            .justify_center()
-                                            .gap_2()
-                                            .rounded_sm()
-                                            .bg(if pending {
-                                                colors.hovered_surface
-                                            } else {
-                                                colors.accent
-                                            })
-                                            .when(!pending, |button| {
-                                                button
-                                                    .hover(|button| button.bg(colors.accent_hover))
-                                                    .on_click(cx.listener(|shell, _, _, cx| {
-                                                        shell.sign_in_with_github(cx)
-                                                    }))
-                                            })
-                                            .child(icon(IconName::Github, colors.text, 14.))
-                                            .child(if pending {
+                                        Button::new(
+                                            "account-github-sign-in",
+                                            if pending {
                                                 "Waiting for sign in…"
                                             } else {
                                                 "Continue with GitHub"
-                                            }),
+                                            },
+                                        )
+                                        .tone(ButtonTone::Accent)
+                                        .wide(true)
+                                        .start_icon(IconName::Github)
+                                        .loading(pending)
+                                        .on_click(cx.listener(|shell, _, _, cx| {
+                                            shell.sign_in_with_github(cx)
+                                        })),
                                     )
                                     .child(
                                         div()
@@ -6770,28 +6474,16 @@ impl WorkspaceShell {
                                     .child(field("Username", self.account_username_input.clone()))
                                     .child(field("Password", self.account_password_input.clone()))
                                     .child(
-                                        div()
-                                            .id("account-password-sign-in")
-                                            .role(Role::Button)
-                                            .h(self.theme.metrics.control_height)
-                                            .px_3()
-                                            .flex()
-                                            .items_center()
-                                            .justify_center()
-                                            .rounded_sm()
-                                            .border_1()
-                                            .border_color(colors.subtle_border)
-                                            .bg(colors.surface)
-                                            .when(!pending, |button| {
-                                                button
-                                                    .hover(|button| {
-                                                        button.bg(colors.hovered_surface)
-                                                    })
-                                                    .on_click(cx.listener(|shell, _, _, cx| {
-                                                        shell.sign_in_with_password(cx)
-                                                    }))
-                                            })
-                                            .child("Sign in with password"),
+                                        Button::new(
+                                            "account-password-sign-in",
+                                            "Sign in with password",
+                                        )
+                                        .tone(ButtonTone::Neutral)
+                                        .wide(true)
+                                        .loading(pending)
+                                        .on_click(cx.listener(|shell, _, _, cx| {
+                                            shell.sign_in_with_password(cx)
+                                        })),
                                     ),
                             )
                         })
@@ -6820,66 +6512,35 @@ impl WorkspaceShell {
                                     .justify_between()
                                     .gap_2()
                                     .child(
-                                        div()
-                                            .id("account-sign-out-all")
-                                            .role(Role::Button)
-                                            .h(self.theme.metrics.control_height)
-                                            .px_2()
-                                            .flex()
-                                            .items_center()
-                                            .rounded_sm()
-                                            .text_color(colors.muted_text)
-                                            .when(!pending, |button| {
-                                                button
-                                                    .hover(|button| {
-                                                        button.text_color(colors.danger)
-                                                    })
-                                                    .on_click(cx.listener(|shell, _, _, cx| {
-                                                        shell.sign_out(true, cx)
-                                                    }))
-                                            })
-                                            .child("Sign out everywhere"),
+                                        Button::new(
+                                            "account-sign-out-all",
+                                            "Sign out everywhere",
+                                        )
+                                        .tone(ButtonTone::DangerGhost)
+                                        .loading(pending)
+                                        .on_click(cx.listener(|shell, _, _, cx| {
+                                            shell.sign_out(true, cx)
+                                        })),
                                     )
                                     .child(
-                                        div()
-                                            .id("account-sign-out")
-                                            .role(Role::Button)
-                                            .h(self.theme.metrics.control_height)
-                                            .px_3()
-                                            .flex()
-                                            .items_center()
-                                            .rounded_sm()
-                                            .border_1()
-                                            .border_color(colors.subtle_border)
-                                            .bg(colors.surface)
-                                            .when(!pending, |button| {
-                                                button
-                                                    .hover(|button| {
-                                                        button.bg(colors.hovered_surface)
-                                                    })
-                                                    .on_click(cx.listener(|shell, _, _, cx| {
-                                                        shell.sign_out(false, cx)
-                                                    }))
-                                            })
-                                            .child(if pending {
+                                        Button::new(
+                                            "account-sign-out",
+                                            if pending {
                                                 "Signing out…"
                                             } else {
                                                 "Sign out"
-                                            }),
+                                            },
+                                        )
+                                        .tone(ButtonTone::Neutral)
+                                        .loading(pending)
+                                        .on_click(cx.listener(|shell, _, _, cx| {
+                                            shell.sign_out(false, cx)
+                                        })),
                                     ),
                             )
                         })
                         .children(self.account_error.as_ref().map(|message| {
-                            div()
-                                .border_t_1()
-                                .border_color(colors.danger)
-                                .px_3()
-                                .py_2()
-                                .bg(colors.danger_muted)
-                                .text_sm()
-                                .text_color(colors.danger)
-                                .whitespace_normal()
-                                .child(message.clone())
+                            ErrorBanner::new(message.clone())
                         }))
                         .into_any_element()
                 }
@@ -7017,9 +6678,9 @@ impl WorkspaceShell {
                                             .flex()
                                             .items_center()
                                             .justify_center()
-                                            .rounded_full()
-                                            .bg(colors.accent)
-                                            .child(icon(IconName::Check, gpui::white(), 13.)),
+                                             .rounded_full()
+                                             .bg(colors.accent)
+                                             .child(icon(IconName::Check, colors.on_accent, 13.)),
                                     )
                                 })
                         });
@@ -7072,39 +6733,11 @@ impl WorkspaceShell {
                         },
                     );
                     let field = |label: &'static str, input: Entity<TextInput>| {
-                        let focus_handle = input.focus_handle(cx);
-                        div()
-                            .debug_selector(move || label.to_owned())
-                            .flex()
-                            .flex_col()
-                            .min_w_0()
-                            .gap_1()
-                            .child(
-                                div()
-                                    .min_w_0()
-                                    .truncate()
-                                    .text_xs()
-                                    .text_color(colors.muted_text)
-                                    .child(label),
-                            )
-                            .child(
-                                div()
-                                    .min_w_0()
-                                    .overflow_hidden()
-                                    .border_1()
-                                    .border_color(colors.subtle_border)
-                                    .rounded_sm()
-                                    .bg(colors.background)
-                                    .cursor(gpui::CursorStyle::IBeam)
-                                    .on_mouse_down(
-                                        MouseButton::Left,
-                                        move |_, window, cx| {
-                                            cx.stop_propagation();
-                                            focus_handle.focus(window, cx);
-                                        },
-                                    )
-                                    .child(input),
-                            )
+                        Field::new(
+                            label,
+                            Some(input.focus_handle(cx)),
+                            input.clone(),
+                        )
                     };
                     let step_number = match step {
                         DatabaseWizardStep::Provider => 1,
@@ -7136,12 +6769,13 @@ impl WorkspaceShell {
                                             colors.strong_border
                                         })
                                         .when(active || complete, |circle| {
-                                            circle.bg(colors.accent).text_color(gpui::white())
+                                            circle.bg(colors.accent).text_color(colors.on_accent)
                                         })
                                         .text_xs()
                                         .font_weight(gpui::FontWeight::SEMIBOLD)
                                         .when(complete, |circle| {
-                                            circle.child(icon(IconName::Check, gpui::white(), 12.))
+                                            circle
+                                                .child(icon(IconName::Check, colors.on_accent, 12.))
                                         })
                                         .when(!complete, |circle| {
                                             circle.child(number.to_string())
@@ -7384,24 +7018,7 @@ impl WorkspaceShell {
                                         ))
                                 })
                                 .children(self.database_connection_error.as_ref().map(|message| {
-                                    div()
-                                        .p_3()
-                                        .flex()
-                                        .items_start()
-                                        .gap_2()
-                                        .rounded_sm()
-                                        .border_1()
-                                        .border_color(colors.danger)
-                                        .bg(colors.danger_muted)
-                                        .text_color(colors.danger)
-                                        .child(icon(IconName::Warning, colors.danger, 14.))
-                                        .child(
-                                            div()
-                                                .flex_1()
-                                                .min_w_0()
-                                                .whitespace_normal()
-                                                .child(message.clone()),
-                                        )
+                                    ErrorBanner::new(message.clone())
                                 })),
                         )
                         .child(
@@ -7419,92 +7036,58 @@ impl WorkspaceShell {
                                         .flex()
                                         .gap_2()
                                         .child(
-                                            div()
-                                                .id("database-wizard-secondary")
-                                                .role(Role::Button)
-                                                .h(self.theme.metrics.control_height)
-                                                .px_3()
-                                                .flex()
-                                                .items_center()
-                                                .rounded_sm()
-                                                .border_1()
-                                                .border_color(colors.subtle_border)
-                                                .bg(colors.surface)
-                                                .hover(|button| button.bg(colors.hovered_surface))
-                                                .when(!pending, |button| {
-                                                    button.on_click(cx.listener(
-                                                        move |shell, _, window, cx| {
-                                                            if step
-                                                                == DatabaseWizardStep::Provider
-                                                            {
-                                                                shell.dismiss_modal(
-                                                                    &DismissModal,
-                                                                    window,
-                                                                    cx,
-                                                                )
-                                                            } else {
-                                                                shell.database_wizard_back(
-                                                                    window, cx,
-                                                                )
-                                                            }
-                                                        },
-                                                    ))
-                                                })
-                                                .child(
+                                            Button::new(
+                                                "database-wizard-secondary",
+                                                if step == DatabaseWizardStep::Provider {
+                                                    "Cancel"
+                                                } else {
+                                                    "Back"
+                                                },
+                                            )
+                                            .tone(ButtonTone::Neutral)
+                                            .wide(true)
+                                            .loading(pending)
+                                            .on_click(cx.listener(
+                                                move |shell, _, window, cx| {
                                                     if step == DatabaseWizardStep::Provider {
-                                                        "Cancel"
+                                                        shell.dismiss_modal(
+                                                            &DismissModal,
+                                                            window,
+                                                            cx,
+                                                        )
                                                     } else {
-                                                        "Back"
-                                                    },
-                                                ),
+                                                        shell.database_wizard_back(window, cx)
+                                                    }
+                                                },
+                                            )),
                                         )
                                         .child(
-                                            div()
-                                                .id("database-wizard-primary")
-                                                .role(Role::Button)
-                                                .h(self.theme.metrics.control_height)
-                                                .px_3()
-                                                .flex()
-                                                .items_center()
-                                                .gap_1()
-                                                .rounded_sm()
-                                                .bg(if pending
-                                                    || (step == DatabaseWizardStep::Provider
-                                                        && selected_provider.is_none())
-                                                {
-                                                    colors.hovered_surface
-                                                } else {
-                                                    colors.accent
-                                                })
-                                                .when(
-                                                    !pending
-                                                        && (step != DatabaseWizardStep::Provider
-                                                            || selected_provider.is_some()),
-                                                    |button| {
-                                                        button
-                                                            .hover(|button| {
-                                                                button.bg(colors.accent_hover)
-                                                            })
-                                                            .on_click(cx.listener(
-                                                                move |shell, _, window, cx| {
-                                                                    if step
-                                                                        == DatabaseWizardStep::Review
-                                                                    {
-                                                                        shell.submit_database_connection(cx)
-                                                                    } else {
-                                                                        shell.database_wizard_next(window, cx)
-                                                                    }
-                                                                },
-                                                            ))
-                                                    },
-                                                )
-                                                .child(if pending {
+                                            Button::new(
+                                                "database-wizard-primary",
+                                                if pending {
                                                     "Saving & Testing…"
                                                 } else if step == DatabaseWizardStep::Review {
                                                     "Save & Connect"
                                                 } else {
                                                     "Continue"
-                                                }),
+                                                },
+                                            )
+                                            .tone(ButtonTone::Accent)
+                                            .wide(true)
+                                            .loading(
+                                                pending
+                                                    || (step == DatabaseWizardStep::Provider
+                                                        && selected_provider.is_none()),
+                                            )
+                                            .on_click(cx.listener(
+                                                move |shell, _, window, cx| {
+                                                    if step == DatabaseWizardStep::Review {
+                                                        shell.submit_database_connection(cx)
+                                                    } else {
+                                                        shell.database_wizard_next(window, cx)
+                                                    }
+                                                },
+                                            )),
                                         ),
                                 ),
                         )
@@ -7540,54 +7123,46 @@ impl WorkspaceShell {
                                 .justify_end()
                                 .gap_2()
                                 .child(
-                                    div()
-                                        .id("cancel-delete-connection")
-                                        .role(Role::Button)
-                                        .h(self.theme.metrics.control_height)
-                                        .px_3()
-                                        .flex()
-                                        .items_center()
-                                        .rounded_sm()
-                                        .border_1()
-                                        .border_color(colors.subtle_border)
-                                        .hover(|button| button.bg(colors.hovered_surface))
+                                    Button::new("cancel-delete-connection", "Cancel")
+                                        .tone(ButtonTone::Neutral)
+                                        .wide(true)
                                         .on_click(cx.listener(|shell, _, window, cx| {
                                             shell.dismiss_modal(&DismissModal, window, cx)
-                                        }))
-                                        .child("Cancel"),
+                                        })),
                                 )
                                 .child(
-                                    div()
-                                        .id("confirm-delete-connection")
-                                        .role(Role::Button)
-                                        .h(self.theme.metrics.control_height)
-                                        .px_3()
-                                        .flex()
-                                        .items_center()
-                                        .rounded_sm()
-                                        .bg(colors.danger_muted)
-                                        .text_color(colors.danger)
-                                        .hover(|button| {
-                                            button.bg(colors.danger).text_color(gpui::white())
-                                        })
+                                    Button::new("confirm-delete-connection", "Delete")
+                                        .tone(ButtonTone::DangerMuted)
+                                        .wide(true)
                                         .on_click(cx.listener(move |shell, _, _, cx| {
                                             shell.confirm_delete_connection(
                                                 &entry_for_delete,
                                                 cx,
                                             )
-                                        }))
-                                        .child("Delete"),
+                                        })),
                                 ),
                         )
                         .into_any_element()
                 }
             };
+            let toolbar_height = cx.theme().metrics.toolbar_height;
+            // Scrim-clicking dismisses transient surfaces. Long-form dialogs
+            // with typed-but-unsaved input keep their explicit cancel control.
+            let dismiss_on_scrim = matches!(
+                modal,
+                Modal::ServerPicker
+                    | Modal::Settings
+                    | Modal::Account
+                    | Modal::CommandPalette
+                    | Modal::DatabaseConnection
+                    | Modal::ConfirmDeleteConnection(_)
+            );
             div()
                 .id("modal-layer")
                 .key_context("SiftModal")
                 .absolute()
                 .top(if app_bar_modal {
-                    self.theme.metrics.toolbar_height
+                    toolbar_height
                 } else {
                     px(0.)
                 })
@@ -7595,7 +7170,7 @@ impl WorkspaceShell {
                 .bottom_0()
                 .left_0()
                 .occlude()
-                .when(server_picker || settings || account, |layer| {
+                .when(dismiss_on_scrim, |layer| {
                     layer.on_mouse_down(
                         MouseButton::Left,
                         cx.listener(|shell, _, window, cx| {
@@ -7603,7 +7178,7 @@ impl WorkspaceShell {
                         }),
                     )
                 })
-                .when(!server_picker && !settings && !account, |layer| {
+                .when(!dismiss_on_scrim, |layer| {
                     layer.on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                 })
                 .flex()
@@ -7626,7 +7201,7 @@ impl WorkspaceShell {
                         layer
                             .justify_center()
                             .pt(if app_bar_modal {
-                                px(100.) - self.theme.metrics.toolbar_height
+                                px(100.) - toolbar_height
                             } else {
                                 px(100.)
                             })
@@ -7643,11 +7218,12 @@ impl WorkspaceShell {
                         .max_h(gpui::relative(0.92))
                         .flex()
                         .flex_col()
-                        .when(!database_connection && !command_palette && !account, |card| {
-                            card.p_3()
-                        })
+                        .when(
+                            !database_connection && !command_palette && !account && !server_picker,
+                            |card| card.p_3(),
+                        )
                         .overflow_hidden()
-                        .rounded(self.theme.metrics.radius_large)
+                        .rounded(cx.theme().metrics.radius_large)
                         .border_1()
                         .border_color(colors.strong_border)
                         .bg(colors.panel)
@@ -7805,7 +7381,7 @@ fn pane_resize_handle(boundary: usize, border: gpui::Hsla) -> gpui::AnyElement {
 
 impl gpui::Render for WorkspaceShell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let colors = self.theme.colors;
+        let colors = cx.theme().colors;
         // Docks are built before the element chain so each borrows `cx`
         // sequentially rather than two `when` closures capturing it at once.
         let left_dock = self
@@ -7822,7 +7398,7 @@ impl gpui::Render for WorkspaceShell {
             .bottom_dock
             .presentation
             .open
-            .then(|| bottom_tools::render_bottom_panel(self));
+            .then(|| bottom_tools::render_bottom_panel(self, cx));
         let total_flex = self.pane_flexes.iter().sum::<f32>().max(f32::EPSILON);
         let mut pane_elements = Vec::with_capacity(self.panes.len().saturating_mul(2));
         for (index, pane) in self.panes.iter().enumerate() {
@@ -7908,65 +7484,66 @@ impl gpui::Render for WorkspaceShell {
                     .children(right_dock),
             )
             .child(status_bar::render_status_bar(self, cx))
-            .children(self.toasts.last().map(|toast| {
+            .children((!self.toasts.is_empty()).then(|| {
                 div()
-                    .id("toast")
-                    .role(Role::Button)
-                    .aria_label("Dismiss notification")
+                    .id("toast-stack")
                     .absolute()
                     .right_3()
                     .bottom(px(38.))
-                    .w(px(360.))
-                    .max_w(gpui::relative(0.8))
-                    .p_2()
                     .flex()
-                    .items_center()
+                    .flex_col()
+                    .items_end()
                     .gap_2()
-                    .rounded(self.theme.metrics.radius_large)
-                    .border_1()
-                    .border_color(colors.strong_border)
-                    .bg(colors.elevated_surface)
-                    .shadow_lg()
-                    .hover(|toast| toast.bg(colors.hovered_surface))
-                    .on_click(cx.listener(|shell, _, _, cx| shell.dismiss_toast(cx)))
-                    .child(
+                    .children(self.toasts.iter().map(|toast| {
+                        let (icon_name, icon_color, chip_bg) = match toast.tone {
+                            ToastTone::Info => {
+                                (IconName::Info, colors.accent_hover, colors.accent_muted)
+                            }
+                            ToastTone::Success => {
+                                (IconName::Check, colors.success, colors.success_muted)
+                            }
+                            ToastTone::Error => {
+                                (IconName::Warning, colors.danger, colors.danger_muted)
+                            }
+                        };
                         div()
-                            .flex_none()
-                            .size(px(24.))
+                            .id(("toast", toast.id as usize))
+                            .role(Role::Button)
+                            .aria_label(format!("Dismiss notification: {}", toast.message))
+                            .w(px(360.))
+                            .max_w(gpui::relative(0.8))
+                            .p_2()
                             .flex()
                             .items_center()
-                            .justify_center()
-                            .rounded(px(6.))
-                            .bg(colors.accent_muted)
-                            .child(icon(IconName::Info, colors.accent_hover, 14.)),
-                    )
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .whitespace_normal()
-                            .text_sm()
-                            .child(toast.message.clone()),
-                    )
-                    .child(icon(IconName::Close, colors.muted_text, 12.))
-            }))
-            .children(self.tooltip.as_ref().map(|tooltip| {
-                div()
-                    .id("tooltip")
-                    .absolute()
-                    .right_3()
-                    .top(px(44.))
-                    .max_w(px(320.))
-                    .px_2()
-                    .py_1()
-                    .rounded_sm()
-                    .border_1()
-                    .border_color(colors.strong_border)
-                    .bg(colors.elevated_surface)
-                    .shadow_md()
-                    .text_xs()
-                    .whitespace_normal()
-                    .child(tooltip.message.clone())
+                            .gap_2()
+                            .rounded(cx.theme().metrics.radius_large)
+                            .border_1()
+                            .border_color(colors.strong_border)
+                            .bg(colors.elevated_surface)
+                            .shadow_lg()
+                            .hover(|toast| toast.bg(colors.hovered_surface))
+                            .on_click(cx.listener(|shell, _, _, cx| shell.dismiss_toast(cx)))
+                            .child(
+                                div()
+                                    .flex_none()
+                                    .size(px(24.))
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .rounded(cx.theme().metrics.radius)
+                                    .bg(chip_bg)
+                                    .child(icon(icon_name, icon_color, 14.)),
+                            )
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .whitespace_normal()
+                                    .text_sm()
+                                    .child(toast.message.clone()),
+                            )
+                            .child(icon(IconName::Close, colors.muted_text, 12.))
+                    }))
             }))
             .children(self.render_modal(cx))
             .children(
@@ -8780,10 +8357,17 @@ mod tests {
         let profile = app_bar::menu_items(AppBarMenu::Profile);
         assert_eq!(
             profile.iter().map(|item| item.label).collect::<Vec<_>>(),
-            vec!["Settings", "Keymaps", "Themes", "Server Configuration"]
+            vec![
+                "Settings",
+                "Keymaps",
+                "Toggle Light/Dark Theme",
+                "Server Configuration"
+            ]
         );
         assert_eq!(profile[0].command, Some(CommandId::OpenSettings));
-        assert!(profile[1..].iter().all(|item| item.command.is_none()));
+        assert_eq!(profile[2].command, Some(CommandId::ToggleTheme));
+        assert!(profile[1].command.is_none());
+        assert!(profile[3].command.is_none());
 
         for menu in [
             AppBarMenu::Main,
@@ -9614,10 +9198,10 @@ mod tests {
             None
         );
         assert_eq!(
-            workspace.read_with(&cx, |workspace, _| workspace.toasts.last().cloned()),
-            Some(Toast {
-                message: "Restored workspace is no longer available".into()
-            })
+            workspace.read_with(&cx, |workspace, _| {
+                workspace.toasts.last().map(|toast| toast.message.clone())
+            }),
+            Some("Restored workspace is no longer available".into())
         );
     }
 
