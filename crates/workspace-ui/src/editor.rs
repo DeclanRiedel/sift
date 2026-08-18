@@ -12,7 +12,7 @@ use gpui::{
     Role, ScrollHandle, ShapedLine, Style, TextRun, UTF16Selection, Window,
 };
 use sift_doc::{random_peer_id, TextReplica};
-use sift_ui::{icon, IconName, Theme};
+use sift_ui::Theme;
 
 mod vim;
 use self::vim::{VimEngine, VimSnapshot};
@@ -1339,73 +1339,6 @@ impl gpui::Render for QueryEditor {
             .on_action(cx.listener(Self::exit_insert_mode))
             .on_action(cx.listener(Self::execute_statement))
             .on_action(cx.listener(Self::execute_document))
-            .when(self.language == EditorLanguage::Sql, |editor| {
-                editor.child(
-                    div()
-                        .h(px(30.))
-                        .flex()
-                        .items_center()
-                        .justify_between()
-                        .px_2()
-                        .border_b_1()
-                        .border_color(colors.subtle_border)
-                        .bg(colors.toolbar)
-                        .font_family(".SystemUIFont")
-                        .child(
-                            div()
-                                .flex()
-                                .flex_1()
-                                .min_w_0()
-                                .overflow_hidden()
-                                .items_center()
-                                .gap_2()
-                                .text_xs()
-                                .text_color(colors.muted_text)
-                                .child(match self.language {
-                                    EditorLanguage::Sql => "SQL",
-                                    EditorLanguage::Toml => "TOML",
-                                })
-                                .child(div().size(px(3.)).rounded_full().bg(colors.strong_border))
-                                .child(div().min_w_0().truncate().child(match self.language {
-                                    EditorLanguage::Sql => "Collaborative query",
-                                    EditorLanguage::Toml => "Instance configuration",
-                                })),
-                        )
-                        .when(self.language == EditorLanguage::Sql, |toolbar| {
-                            toolbar.child(
-                                div()
-                                    .id("editor-run-statement")
-                                    .flex_none()
-                                    .role(Role::Button)
-                                    .aria_label("Run current SQL statement")
-                                    .h(px(24.))
-                                    .px_2()
-                                    .flex()
-                                    .items_center()
-                                    .gap_1()
-                                    .rounded(px(5.))
-                                    .bg(colors.accent_muted)
-                                    .text_xs()
-                                    .text_color(colors.accent_hover)
-                                    .hover(|button| {
-                                        button.bg(colors.active_surface).text_color(colors.text)
-                                    })
-                                    .on_click(cx.listener(|editor, _, window, cx| {
-                                        editor.execute_statement(&ExecuteStatement, window, cx)
-                                    }))
-                                    .child(icon(IconName::Play, colors.accent_hover, 12.))
-                                    .child("Run")
-                                    .child(
-                                        div()
-                                            .flex_none()
-                                            .ml_1()
-                                            .text_color(colors.muted_text)
-                                            .child("Ctrl ↵"),
-                                    ),
-                            )
-                        }),
-                )
-            })
             .children(
                 (self.language == EditorLanguage::Toml)
                     .then(|| toml_diagnostic(self.document.text()))
