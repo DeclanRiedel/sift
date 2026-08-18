@@ -15,7 +15,7 @@ use sift_protocol::{
 };
 use sift_ui::{icon, IconName, Theme};
 
-const COLUMN_WIDTH: f32 = 184.0;
+const MIN_COLUMN_WIDTH: f32 = 144.0;
 const ROW_NUMBER_WIDTH: f32 = 46.0;
 const ROW_HEIGHT: f32 = 24.0;
 
@@ -454,11 +454,12 @@ impl ResultsView {
                 .child(self.state.status_label())
                 .into_any_element();
         }
-        let grid_width = px(ROW_NUMBER_WIDTH + COLUMN_WIDTH * data.columns.len() as f32);
+        let grid_min_width = px(ROW_NUMBER_WIDTH + MIN_COLUMN_WIDTH * data.columns.len() as f32);
         let header = div()
             .flex()
             .h(px(ROW_HEIGHT + 4.0))
-            .w(grid_width)
+            .w_full()
+            .min_w(grid_min_width)
             .border_b_1()
             .border_color(colors.subtle_border)
             .bg(colors.toolbar)
@@ -478,7 +479,8 @@ impl ResultsView {
             )
             .children(data.columns.iter().map(|column| {
                 div()
-                    .w(px(COLUMN_WIDTH))
+                    .flex_1()
+                    .min_w(px(MIN_COLUMN_WIDTH))
                     .px_2()
                     .flex()
                     .flex_col()
@@ -533,7 +535,8 @@ impl ResultsView {
                                 };
                                 div()
                                     .id(("cell", row_index * column_count + column_index))
-                                    .w(px(COLUMN_WIDTH))
+                                    .flex_1()
+                                    .min_w(px(MIN_COLUMN_WIDTH))
                                     .h(px(ROW_HEIGHT))
                                     .px_2()
                                     .flex()
@@ -561,6 +564,8 @@ impl ResultsView {
                             .collect::<Vec<_>>();
                         div()
                             .flex()
+                            .w_full()
+                            .min_w(grid_min_width)
                             .h(px(ROW_HEIGHT))
                             .when(row_index % 2 == 1, |el| el.bg(colors.grid_stripe))
                             .when(selected_row == Some(row_index), |el| {
@@ -586,7 +591,8 @@ impl ResultsView {
                     .collect()
             }),
         )
-        .w(grid_width)
+        .w_full()
+        .min_w(grid_min_width)
         .flex_1()
         .min_h_0();
 
@@ -595,7 +601,16 @@ impl ResultsView {
             .flex_1()
             .min_h_0()
             .overflow_x_scroll()
-            .child(div().flex().flex_col().min_h_0().child(header).child(list))
+            .child(
+                div()
+                    .size_full()
+                    .min_w(grid_min_width)
+                    .flex()
+                    .flex_col()
+                    .min_h_0()
+                    .child(header)
+                    .child(list),
+            )
             .into_any_element()
     }
 
