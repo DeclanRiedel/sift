@@ -41,6 +41,9 @@ pub(super) struct VimEngine {
     store: Store<EmptyInfo>,
     viewport: ViewportContext<Cursor>,
     entered: String,
+    /// Cursor after entering Insert. ModalKit moves left on an immediate Esc;
+    /// real editor UX should keep an empty insert session position-stable.
+    empty_insert_origin: Option<Cursor>,
 }
 
 impl VimEngine {
@@ -58,6 +61,7 @@ impl VimEngine {
             store: Store::default(),
             viewport: ViewportContext::default(),
             entered: String::new(),
+            empty_insert_origin: None,
         }
     }
 
@@ -96,6 +100,10 @@ impl VimEngine {
 
     fn input_key_event(&mut self, event: KeyEvent) -> bool {
         let mut text_changed = false;
+        let mode_before = self.bindings.mode();
+        if mode_before == ModalVimMode::Insert && event.code != KeyCode::Esc {
+            self.empty_insert_origin = None;
+        }
         let entered_key = entered_key(&event);
         if let Some(key) = entered_key.as_deref() {
             if self.bindings.mode() != ModalVimMode::Insert {
@@ -135,6 +143,14 @@ impl VimEngine {
         }
         if action_completed && self.bindings.mode() != ModalVimMode::OperationPending {
             self.entered.clear();
+        }
+        let mode_after = self.bindings.mode();
+        if mode_before != ModalVimMode::Insert && mode_after == ModalVimMode::Insert {
+            self.empty_insert_origin = Some(self.buffer.get_leader(self.cursor_group));
+        } else if mode_before == ModalVimMode::Insert && mode_after != ModalVimMode::Insert {
+            if let Some(origin) = self.empty_insert_origin.take() {
+                self.buffer.set_leader(self.cursor_group, origin);
+            }
         }
         text_changed
     }
@@ -287,6 +303,19 @@ mod tests {
         let snapshot = vim.input_key(KeyCode::Esc);
         assert_eq!(snapshot.mode, VimMode::Normal);
         assert_eq!(snapshot.text, None);
+    }
+
+    #[test]
+    fn empty_insert_mode_cycles_preserve_the_cursor() {
+        let mut vim = VimEngine::new("abcdef", 4);
+        for _ in 0..8 {
+            let snapshot = vim.input_text("i");
+            assert_eq!(snapshot.mode, VimMode::Insert);
+            let snapshot = vim.input_key(KeyCode::Esc);
+            assert_eq!(snapshot.mode, VimMode::Normal);
+            assert_eq!(snapshot.cursor, (0, 4));
+            assert_eq!(snapshot.text, None);
+        }
     }
 
     #[test]
