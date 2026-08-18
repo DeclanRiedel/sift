@@ -18,6 +18,7 @@ use sift_ui::{icon, IconName, Theme};
 const MIN_COLUMN_WIDTH: f32 = 144.0;
 const ROW_NUMBER_WIDTH: f32 = 46.0;
 const ROW_HEIGHT: f32 = 24.0;
+const HEADER_HEIGHT: f32 = 40.0;
 
 /// How a single cell's value should be classified for rendering. Keeps color
 /// and alignment decisions in the view while the model stays presentation-free.
@@ -566,7 +567,8 @@ impl ResultsView {
         let header = div()
             .debug_selector(|| "result-header".into())
             .flex()
-            .h(px(ROW_HEIGHT + 4.0))
+            .h(px(HEADER_HEIGHT))
+            .flex_none()
             .w_full()
             .min_w(grid_min_width)
             .border_b_1()
@@ -970,6 +972,12 @@ mod tests {
             cx.debug_bounds("result-row-0")
                 .is_some_and(|bounds| bounds.size.height > px(0.)),
             "ready result rows should receive a visible layout"
+        );
+        assert_eq!(
+            cx.debug_bounds("result-header")
+                .map(|bounds| bounds.size.height),
+            Some(px(HEADER_HEIGHT)),
+            "column names and types need a full two-line header"
         );
         view.update(&mut cx, |view, cx| {
             view.select_tab(ResultTab::Messages, cx);
