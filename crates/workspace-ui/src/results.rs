@@ -70,6 +70,25 @@ enum GridSelection {
     All,
 }
 
+impl GridSelection {
+    fn highlights_row(self, row: usize) -> bool {
+        matches!(
+            self,
+            Self::Cell { row: selected, .. } | Self::Row(selected) if selected == row
+        ) || self == Self::All
+    }
+
+    fn highlights_column(self, column: usize) -> bool {
+        matches!(
+            self,
+            Self::Cell {
+                column: selected,
+                ..
+            } | Self::Column(selected) if selected == column
+        ) || self == Self::All
+    }
+}
+
 impl ResultColumn {
     fn from_metadata(column: &ColumnMetadata) -> Self {
         let type_label = match &column.type_ref {
@@ -782,47 +801,49 @@ impl ResultsView {
                 .children(self.rendered_columns.iter().enumerate().map(
                     |(column_index, column)| {
                         div()
-                    .id(("result-column", column_index))
-                    .role(gpui::Role::Button)
-                    .aria_label(format!("Select column {}", column.name))
-                    .flex_1()
-                    .min_w(px(MIN_COLUMN_WIDTH))
-                    .px_2()
-                    .flex()
-                    .flex_col()
-                    .justify_center()
-                    .overflow_hidden()
-                    .border_r_1()
-                    .border_color(colors.subtle_border)
-                    .when(
-                        matches!(
-                            self.selected,
-                            Some(GridSelection::Column(selected)) if selected == column_index
-                        ) || self.selected == Some(GridSelection::All),
-                        |header| header.bg(colors.selected_surface),
-                    )
-                    .on_mouse_down(MouseButton::Left, cx.listener(move |view, _, window, cx| {
-                        view.focus_handle.focus(window, cx);
-                        view.select_column(column_index, cx);
-                    }))
-                    .child(
-                        div()
-                            .text_sm()
-                            .font_weight(gpui::FontWeight::SEMIBOLD)
-                            .truncate()
-                            .child(column.name.clone()),
-                    )
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(colors.muted_text)
-                            .truncate()
-                            .child(format!(
-                                "{}{}",
-                                column.type_label,
-                                if column.nullable { "?" } else { "" }
-                            )),
-                    )
+                            .id(("result-column", column_index))
+                            .role(gpui::Role::Button)
+                            .aria_label(format!("Select column {}", column.name))
+                            .flex_1()
+                            .min_w(px(MIN_COLUMN_WIDTH))
+                            .px_2()
+                            .flex()
+                            .flex_col()
+                            .justify_center()
+                            .overflow_hidden()
+                            .border_r_1()
+                            .border_color(colors.subtle_border)
+                            .when(
+                                self.selected.is_some_and(|selection| {
+                                    selection.highlights_column(column_index)
+                                }),
+                                |header| header.bg(colors.selected_surface).text_color(colors.text),
+                            )
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(move |view, _, window, cx| {
+                                    view.focus_handle.focus(window, cx);
+                                    view.select_column(column_index, cx);
+                                }),
+                            )
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                                    .truncate()
+                                    .child(column.name.clone()),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(colors.muted_text)
+                                    .truncate()
+                                    .child(format!(
+                                        "{}{}",
+                                        column.type_label,
+                                        if column.nullable { "?" } else { "" }
+                                    )),
+                            )
                     },
                 ));
 
@@ -909,12 +930,14 @@ impl ResultsView {
                                     .text_xs()
                                     .text_color(colors.disabled_text)
                                     .when(
-                                        matches!(
-                                            view.selected,
-                                            Some(GridSelection::Row(selected))
-                                                if selected == row_index
-                                        ) || view.selected == Some(GridSelection::All),
-                                        |header| header.bg(colors.selected_surface),
+                                        view.selected.is_some_and(|selection| {
+                                            selection.highlights_row(row_index)
+                                        }),
+                                        |header| {
+                                            header
+                                                .bg(colors.selected_surface)
+                                                .text_color(colors.text)
+                                        },
                                     )
                                     .on_mouse_down(
                                         MouseButton::Left,
@@ -1116,6 +1139,22 @@ mod tests {
             render_value(&Value::Text("hi".into())).class,
             CellClass::Text
         );
+    }
+
+    #[test]
+    fn cell_selection_highlights_its_row_and_column_coordinates() {
+        let selection = GridSelection::Cell { row: 2, column: 3 };
+        assert!(selection.highlights_row(2));
+        assert!(!selection.highlights_row(1));
+        assert!(selection.highlights_column(3));
+        assert!(!selection.highlights_column(2));
+
+        assert!(GridSelection::Row(4).highlights_row(4));
+        assert!(!GridSelection::Row(4).highlights_column(0));
+        assert!(GridSelection::Column(5).highlights_column(5));
+        assert!(!GridSelection::Column(5).highlights_row(0));
+        assert!(GridSelection::All.highlights_row(99));
+        assert!(GridSelection::All.highlights_column(99));
     }
 
     #[test]
