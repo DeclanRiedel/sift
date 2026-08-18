@@ -2198,6 +2198,10 @@ impl WorkspaceShell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let title = format!("{schema}.{object}");
+        if self.focus_open_item(ItemKind::Query, &title, window, cx) {
+            return;
+        }
         let item_id = self.next_id;
         self.next_id += 1;
         let sql = table_preview_sql(&provider_id, &schema, &object);
@@ -2211,7 +2215,7 @@ impl WorkspaceShell {
                     ItemPresentation {
                         id: item_id,
                         kind: ItemKind::Query,
-                        title: format!("{schema}.{object}"),
+                        title,
                         dirty: false,
                     },
                     editor,
@@ -2234,6 +2238,38 @@ impl WorkspaceShell {
         self.focus_active_pane(window, cx);
         self.persist(cx);
         cx.notify();
+    }
+
+    /// Focus an already-open semantic item instead of creating a duplicate.
+    /// Dynamic resources currently use their kind and stable display title as
+    /// identity; this can graduate to an explicit resource key when more query
+    /// item sources are introduced.
+    fn focus_open_item(
+        &mut self,
+        kind: ItemKind,
+        title: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let existing = self
+            .panes
+            .iter()
+            .enumerate()
+            .find_map(|(pane_index, pane)| {
+                pane.read(cx)
+                    .items
+                    .iter()
+                    .position(|item| item.kind == kind && item.title == title)
+                    .map(|item_index| (pane_index, item_index))
+            });
+        let Some((pane_index, item_index)) = existing else {
+            return false;
+        };
+        self.active_pane = pane_index;
+        self.panes[pane_index].update(cx, |pane, _| pane.activate_item(item_index, true));
+        self.focus_active_pane(window, cx);
+        cx.notify();
+        true
     }
 
     fn request_delete_connection(&mut self, entry: &ConnectionNavEntry, cx: &mut Context<Self>) {
@@ -7680,6 +7716,41 @@ mod tests {
             assert_eq!(
                 pane.editor(item_id).unwrap().read(cx).document().text(),
                 sql
+            );
+        });
+
+        workspace.update_in(&mut cx, |shell, window, cx| {
+            shell.open_table_preview(
+                sift_protocol::ProviderId::new("sift/postgres").unwrap(),
+                "lab".into(),
+                "people".into(),
+                window,
+                cx,
+            );
+        });
+        assert!(
+            receiver.try_recv().is_err(),
+            "focused previews must not rerun"
+        );
+        workspace.read_with(&cx, |shell, cx| {
+            let matching_tabs = shell
+                .panes
+                .iter()
+                .map(|pane| {
+                    pane.read(cx)
+                        .items
+                        .iter()
+                        .filter(|item| item.kind == ItemKind::Query && item.title == "lab.people")
+                        .count()
+                })
+                .sum::<usize>();
+            assert_eq!(matching_tabs, 1);
+            assert_eq!(
+                shell.panes[shell.active_pane]
+                    .read(cx)
+                    .active_item()
+                    .map(|item| item.id),
+                Some(item_id)
             );
         });
     }
