@@ -1112,6 +1112,12 @@ impl QueryEditor {
             .find('\n')
             .map_or(self.document.text().len(), |offset| line_start + offset);
         let line_text = &self.document.text()[line_start..line_end];
+        // Blank rows have no glyph target. Treating their full viewport width
+        // as a valid hit makes the caret appear to jump to an arbitrary byte
+        // boundary, especially after scrolling. Preserve the current caret.
+        if line_text.trim().is_empty() {
+            return None;
+        }
         let style = window.text_style();
         let font_size = style.font_size.to_pixels(window.rem_size());
         let runs = match self.language {
@@ -2033,6 +2039,37 @@ mod tests {
         assert_eq!(
             editor.read_with(&cx, |editor, _| editor.cursor_position().0),
             expected_line
+        );
+    }
+
+    #[gpui::test]
+    fn clicking_a_blank_row_preserves_the_caret(cx: &mut TestAppContext) {
+        let window = cx
+            .update(|cx| {
+                cx.open_window(Default::default(), |_window, cx| {
+                    cx.new(|cx| {
+                        QueryEditor::new(doc("select 1;\n   \nselect 3;"), Theme::dark(), cx)
+                    })
+                })
+            })
+            .unwrap();
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let editor = window.root(&mut cx).unwrap();
+        editor.update(&mut cx, |editor, _| {
+            editor.document.set_selection(4..4, false)
+        });
+        cx.run_until_parked();
+        let position = editor.read_with(&cx, |editor, _| {
+            let viewport = editor.scroll_handle.bounds();
+            point(
+                viewport.left() + EDITOR_GUTTER_WIDTH + EDITOR_TEXT_INSET + px(8.),
+                viewport.top() + EDITOR_VERTICAL_INSET + EDITOR_LINE_HEIGHT * 1.5,
+            )
+        });
+        cx.simulate_click(position, gpui::Modifiers::default());
+        assert_eq!(
+            editor.read_with(&cx, |editor, _| editor.document.cursor()),
+            4
         );
     }
 
