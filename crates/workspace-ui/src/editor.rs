@@ -1109,8 +1109,11 @@ impl QueryEditor {
         let offset = self.scroll_handle.offset();
         let content_y = position.y - viewport.top() - offset.y - EDITOR_VERTICAL_INSET;
         let line_count = self.document.text().split('\n').count().max(1);
-        let line = ((f32::from(content_y.max(px(0.))) / f32::from(EDITOR_LINE_HEIGHT)) as usize)
-            .min(line_count - 1);
+        let content_height = EDITOR_LINE_HEIGHT * line_count as f32;
+        if content_y < px(0.) || content_y >= content_height {
+            return None;
+        }
+        let line = (f32::from(content_y) / f32::from(EDITOR_LINE_HEIGHT)) as usize;
         let line_start = self
             .document
             .text()
@@ -1139,9 +1142,11 @@ impl QueryEditor {
                 .text_system()
                 .shape_line(line_text.to_string().into(), font_size, &runs, None);
         let text_left = viewport.left() + EDITOR_GUTTER_WIDTH + EDITOR_TEXT_INSET;
-        let within = layout
-            .index_for_x((position.x - text_left).max(px(0.)))
-            .unwrap_or(0);
+        let text_x = position.x - text_left;
+        if text_x < px(0.) || text_x > layout.width() {
+            return None;
+        }
+        let within = layout.index_for_x(text_x).unwrap_or(0);
         Some(line_start + within.min(line_text.len()))
     }
 
@@ -2077,6 +2082,44 @@ mod tests {
             )
         });
         cx.simulate_click(position, gpui::Modifiers::default());
+        assert_eq!(
+            editor.read_with(&cx, |editor, _| editor.document.cursor()),
+            4
+        );
+    }
+
+    #[gpui::test]
+    fn clicking_outside_document_text_preserves_the_caret(cx: &mut TestAppContext) {
+        let window = cx
+            .update(|cx| {
+                cx.open_window(Default::default(), |_window, cx| {
+                    cx.new(|cx| QueryEditor::new(doc("select 1;\nselect 2;"), Theme::dark(), cx))
+                })
+            })
+            .unwrap();
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let editor = window.root(&mut cx).unwrap();
+        editor.update(&mut cx, |editor, _| {
+            editor.document.set_selection(4..4, false)
+        });
+        cx.run_until_parked();
+        let (past_text, below_document) = editor.read_with(&cx, |editor, _| {
+            let viewport = editor.scroll_handle.bounds();
+            (
+                point(
+                    viewport.right() - px(8.),
+                    viewport.top() + EDITOR_VERTICAL_INSET + EDITOR_LINE_HEIGHT * 0.5,
+                ),
+                point(
+                    viewport.left() + EDITOR_GUTTER_WIDTH + EDITOR_TEXT_INSET + px(8.),
+                    viewport.top() + EDITOR_VERTICAL_INSET + EDITOR_LINE_HEIGHT * 3.5,
+                ),
+            )
+        });
+
+        cx.simulate_click(past_text, gpui::Modifiers::default());
+        cx.simulate_click(below_document, gpui::Modifiers::default());
+
         assert_eq!(
             editor.read_with(&cx, |editor, _| editor.document.cursor()),
             4
