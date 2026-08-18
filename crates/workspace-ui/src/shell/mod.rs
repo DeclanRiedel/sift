@@ -3,10 +3,10 @@ use std::ops::Range;
 use std::sync::Arc;
 
 use gpui::{
-    actions, deferred, div, img, prelude::*, px, uniform_list, App, Context, CursorStyle, Entity,
-    EventEmitter, FocusHandle, Focusable, IntoElement, MouseButton, PathPromptOptions, ResizeEdge,
-    Role, ScrollStrategy, Subscription, Task, UniformListScrollHandle, Window, WindowBounds,
-    WindowControlArea,
+    actions, deferred, div, img, prelude::*, px, uniform_list, App, Context, CursorStyle,
+    DefiniteLength, Entity, EventEmitter, FocusHandle, Focusable, IntoElement, MouseButton,
+    PathPromptOptions, ResizeEdge, Role, ScrollStrategy, Subscription, Task,
+    UniformListScrollHandle, Window, WindowBounds, WindowControlArea,
 };
 use sift_api_types::RoomId;
 use sift_ui::{database_logo, icon, IconName, TextInput, Theme};
@@ -45,6 +45,8 @@ use app_bar::AppBarMenu;
 const PALETTE_VISIBLE_ROWS: usize = 10;
 const PALETTE_ROW_HEIGHT: f32 = 30.0;
 const DOCK_RESIZE_HANDLE_SIZE: f32 = 7.0;
+const PANE_RESIZE_HANDLE_SIZE: f32 = 7.0;
+const PANE_MIN_WIDTH: f32 = 180.0;
 const RESULT_RESIZE_HANDLE_SIZE: f32 = 5.0;
 const RESULT_MIN_EXTENT: f32 = 140.0;
 const EDITOR_MIN_EXTENT: f32 = 160.0;
@@ -88,6 +90,32 @@ fn schema_object_kind_label(kind: sift_protocol::ObjectKind) -> &'static str {
 #[derive(Debug, Clone, Copy)]
 struct DockResizeDrag {
     dock: DockId,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PaneResizeDrag {
+    boundary: usize,
+}
+
+fn valid_pane_flexes(mut flexes: Vec<f32>, pane_count: usize) -> Vec<f32> {
+    if flexes.len() != pane_count || flexes.iter().any(|flex| !flex.is_finite() || *flex <= 0.0) {
+        flexes = vec![1.0; pane_count];
+    }
+    flexes
+}
+
+fn resize_pane_flexes(flexes: &mut [f32], boundary: usize, pointer_x: f32, available_width: f32) {
+    if boundary + 1 >= flexes.len() || available_width <= 0.0 {
+        return;
+    }
+    let total = flexes.iter().sum::<f32>();
+    let pair_total = flexes[boundary] + flexes[boundary + 1];
+    let prefix = flexes[..boundary].iter().sum::<f32>();
+    let minimum = (PANE_MIN_WIDTH / available_width * total).min(pair_total / 2.0);
+    let requested_left = pointer_x.clamp(0.0, available_width) / available_width * total - prefix;
+    let left = requested_left.clamp(minimum, pair_total - minimum);
+    flexes[boundary] = left;
+    flexes[boundary + 1] = pair_total - left;
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1331,6 +1359,7 @@ pub struct WorkspaceShell {
     settings_item: Option<u64>,
     window_presentation: WindowPresentation,
     panes: Vec<Entity<Pane>>,
+    pane_flexes: Vec<f32>,
     active_pane: usize,
     selected_workspace_id: Option<i64>,
     selected_instance_id: Option<String>,
@@ -1519,6 +1548,7 @@ impl WorkspaceShell {
             f32::from(viewport.height) - vertical_chrome,
             bottom_dock.presentation.size,
         );
+        let pane_flexes = valid_pane_flexes(workspace.pane_flexes, panes.len());
         Self {
             focus_handle: cx.focus_handle(),
             query_input,
@@ -1549,6 +1579,7 @@ impl WorkspaceShell {
             settings_item: None,
             window_presentation,
             panes,
+            pane_flexes,
             active_pane,
             selected_workspace_id,
             selected_instance_id,
@@ -2923,6 +2954,7 @@ impl WorkspaceShell {
                     .iter()
                     .map(|pane| pane.read(cx).snapshot())
                     .collect(),
+                pane_flexes: self.pane_flexes.clone(),
                 active_pane: self.active_pane,
                 workspace_id: self.selected_workspace_id,
                 instance_id: self.selected_instance_id.clone(),
@@ -3010,6 +3042,27 @@ impl WorkspaceShell {
         self.persist(cx);
     }
 
+    fn resize_panes(
+        &mut self,
+        event: &gpui::DragMoveEvent<PaneResizeDrag>,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let width: f32 = event.bounds.size.width.into();
+        let pointer_x: f32 = (event.event.position.x - event.bounds.left()).into();
+        resize_pane_flexes(
+            &mut self.pane_flexes,
+            event.drag(cx).boundary,
+            pointer_x,
+            width,
+        );
+        cx.notify();
+    }
+
+    fn finish_pane_resize(&mut self, _: &PaneResizeDrag, _: &mut Window, cx: &mut Context<Self>) {
+        self.persist(cx);
+    }
+
     fn capture_window_bounds(&mut self, window_bounds: WindowBounds) {
         let maximized = matches!(window_bounds, WindowBounds::Maximized(_));
         let bounds = window_bounds.get_bounds();
@@ -3050,7 +3103,16 @@ impl WorkspaceShell {
             )
         });
         cx.subscribe_in(&pane, window, Self::on_pane_event).detach();
+        let new_flex = self
+            .pane_flexes
+            .get_mut(self.active_pane)
+            .map(|source| {
+                *source /= 2.0;
+                *source
+            })
+            .unwrap_or(1.0);
         self.panes.push(pane);
+        self.pane_flexes.push(new_flex);
         self.active_pane = self.panes.len() - 1;
         self.focus_active_pane(window, cx);
         self.persist(cx);
@@ -3173,6 +3235,12 @@ impl WorkspaceShell {
             return;
         }
         self.panes.remove(index);
+        let removed_flex = self.pane_flexes.remove(index);
+        if index > 0 {
+            self.pane_flexes[index - 1] += removed_flex;
+        } else if let Some(first) = self.pane_flexes.first_mut() {
+            *first += removed_flex;
+        }
         self.active_pane = self.active_pane.min(self.panes.len() - 1);
         self.focus_active_pane(window, cx);
         self.persist(cx);
@@ -7673,6 +7741,32 @@ fn dock_resize_handle(dock: DockId) -> gpui::AnyElement {
     .into_any_element()
 }
 
+fn pane_resize_handle(boundary: usize, border: gpui::Hsla) -> gpui::AnyElement {
+    div()
+        .id(("pane-separator", boundary))
+        .relative()
+        .flex_none()
+        .w(px(1.0))
+        .h_full()
+        .bg(border)
+        .child(
+            div()
+                .id(("resize-pane", boundary))
+                .debug_selector(move || format!("resize-pane-{boundary}"))
+                .absolute()
+                .left(px(-(PANE_RESIZE_HANDLE_SIZE - 1.0) / 2.0))
+                .top_0()
+                .w(px(PANE_RESIZE_HANDLE_SIZE))
+                .h_full()
+                .cursor(CursorStyle::ResizeLeftRight)
+                .block_mouse_except_scroll()
+                .on_drag(PaneResizeDrag { boundary }, |_, _, _, cx| {
+                    cx.new(|_| gpui::Empty)
+                }),
+        )
+        .into_any_element()
+}
+
 impl gpui::Render for WorkspaceShell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = self.theme.colors;
@@ -7693,6 +7787,25 @@ impl gpui::Render for WorkspaceShell {
             .presentation
             .open
             .then(|| bottom_tools::render_bottom_panel(self));
+        let total_flex = self.pane_flexes.iter().sum::<f32>().max(f32::EPSILON);
+        let mut pane_elements = Vec::with_capacity(self.panes.len().saturating_mul(2));
+        for (index, pane) in self.panes.iter().enumerate() {
+            let fraction = self.pane_flexes.get(index).copied().unwrap_or(1.0) / total_flex;
+            pane_elements.push(
+                div()
+                    .id(("pane-slot", index))
+                    .h_full()
+                    .min_w_0()
+                    .flex_shrink_1()
+                    .flex_basis(DefiniteLength::Fraction(fraction))
+                    .overflow_hidden()
+                    .child(pane.clone())
+                    .into_any_element(),
+            );
+            if index + 1 < self.panes.len() {
+                pane_elements.push(pane_resize_handle(index, colors.subtle_border));
+            }
+        }
         div()
             .id("sift-shell")
             .key_context("SiftWorkspace")
@@ -7746,7 +7859,11 @@ impl gpui::Render for WorkspaceShell {
                                     .flex_1()
                                     .min_w_0()
                                     .min_h_0()
-                                    .children(self.panes.iter().cloned()),
+                                    .on_drag_move::<PaneResizeDrag>(cx.listener(Self::resize_panes))
+                                    .on_drop::<PaneResizeDrag>(
+                                        cx.listener(Self::finish_pane_resize),
+                                    )
+                                    .children(pane_elements),
                             )
                             .children(bottom_dock),
                     )
@@ -7892,6 +8009,22 @@ mod tests {
         assert!(!edge_resize_enabled(true, false));
         assert!(!edge_resize_enabled(false, true));
         assert!(!edge_resize_enabled(true, true));
+    }
+
+    #[test]
+    fn pane_resize_changes_only_the_adjacent_pair_and_preserves_total_flex() {
+        let mut flexes = vec![1.0, 1.0, 1.0];
+        resize_pane_flexes(&mut flexes, 1, 800.0, 1_000.0);
+
+        assert_eq!(flexes[0], 1.0);
+        assert!((flexes.iter().sum::<f32>() - 3.0).abs() < 0.001);
+        assert!(flexes[1] > flexes[2]);
+    }
+
+    #[test]
+    fn invalid_restored_pane_flexes_fall_back_to_equal_sizes() {
+        assert_eq!(valid_pane_flexes(vec![1.0], 2), vec![1.0, 1.0]);
+        assert_eq!(valid_pane_flexes(vec![1.0, -1.0], 2), vec![1.0, 1.0]);
     }
 
     #[test]

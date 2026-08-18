@@ -122,6 +122,10 @@ pub struct WorkspacePresentation {
     #[serde(default)]
     pub bottom_tool: BottomTool,
     pub panes: Vec<PanePresentation>,
+    /// Client-local horizontal pane proportions. They are presentation only:
+    /// shared workspaces and sessions never observe them.
+    #[serde(default)]
+    pub pane_flexes: Vec<f32>,
     pub active_pane: usize,
     #[serde(default)]
     pub workspace_id: Option<i64>,
@@ -179,6 +183,7 @@ impl Default for PresentationState {
                     }],
                     active_item: 0,
                 }],
+                pane_flexes: vec![1.0],
                 active_pane: 0,
                 workspace_id: None,
                 instance_id: Some("local".into()),
@@ -329,10 +334,12 @@ mod tests {
             .unwrap();
         workspace.remove("left_panel");
         workspace.remove("bottom_tool");
+        workspace.remove("pane_flexes");
 
         let decoded = PresentationState::decode(&serde_json::to_vec(&json).unwrap());
         assert_eq!(decoded.workspace.left_panel, LeftPanel::Connections);
         assert_eq!(decoded.workspace.bottom_tool, BottomTool::Console);
+        assert!(decoded.workspace.pane_flexes.is_empty());
         assert!(!decoded.legacy_vim_mode_default);
     }
 
