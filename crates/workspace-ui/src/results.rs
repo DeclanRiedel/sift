@@ -8,7 +8,7 @@ use std::ops::Range;
 
 use gpui::{
     actions, div, prelude::*, px, uniform_list, App, ClipboardItem, Context, FocusHandle,
-    Focusable, IntoElement, Window,
+    Focusable, IntoElement, ScrollStrategy, UniformListScrollHandle, Window,
 };
 use sift_protocol::{
     ColumnMetadata, DriverWarning, ExecuteResponse, Nullability, Page, Row, TypeRef, Value,
@@ -252,7 +252,16 @@ impl ResultTab {
     }
 }
 
-actions!(sift_results, [CopySelectedCell]);
+actions!(
+    sift_results,
+    [
+        CopySelectedCell,
+        MoveCellLeft,
+        MoveCellRight,
+        MoveCellUp,
+        MoveCellDown
+    ]
+);
 
 /// The query-owned results surface.
 pub struct ResultsView {
@@ -261,6 +270,7 @@ pub struct ResultsView {
     state: ResultState,
     tab: ResultTab,
     selected: Option<(usize, usize)>,
+    row_scroll_handle: UniformListScrollHandle,
     placement: ResultPlacement,
     bottom_height: f32,
     right_width: f32,
@@ -274,6 +284,7 @@ impl ResultsView {
             state: ResultState::Idle,
             tab: ResultTab::Data,
             selected: None,
+            row_scroll_handle: UniformListScrollHandle::new(),
             placement: ResultPlacement::Bottom,
             bottom_height: 240.0,
             right_width: 420.0,
@@ -344,6 +355,42 @@ impl ResultsView {
     fn select_cell(&mut self, row: usize, column: usize, cx: &mut Context<Self>) {
         self.selected = Some((row, column));
         cx.notify();
+    }
+
+    fn move_selection(&mut self, row_delta: isize, column_delta: isize, cx: &mut Context<Self>) {
+        let Some(data) = self.state.ready() else {
+            return;
+        };
+        if data.rows.is_empty() || data.columns.is_empty() {
+            return;
+        }
+        let (row, column) = self.selected.unwrap_or((0, 0));
+        let row = row
+            .saturating_add_signed(row_delta)
+            .min(data.rows.len() - 1);
+        let column = column
+            .saturating_add_signed(column_delta)
+            .min(data.columns.len() - 1);
+        self.selected = Some((row, column));
+        self.row_scroll_handle
+            .scroll_to_item(row, ScrollStrategy::Nearest);
+        cx.notify();
+    }
+
+    fn move_cell_left(&mut self, _: &MoveCellLeft, _: &mut Window, cx: &mut Context<Self>) {
+        self.move_selection(0, -1, cx);
+    }
+
+    fn move_cell_right(&mut self, _: &MoveCellRight, _: &mut Window, cx: &mut Context<Self>) {
+        self.move_selection(0, 1, cx);
+    }
+
+    fn move_cell_up(&mut self, _: &MoveCellUp, _: &mut Window, cx: &mut Context<Self>) {
+        self.move_selection(-1, 0, cx);
+    }
+
+    fn move_cell_down(&mut self, _: &MoveCellDown, _: &mut Window, cx: &mut Context<Self>) {
+        self.move_selection(1, 0, cx);
     }
 
     fn copy_selected_cell(&mut self, _: &CopySelectedCell, _: &mut Window, cx: &mut Context<Self>) {
@@ -667,7 +714,8 @@ impl ResultsView {
                                             .border_1()
                                             .border_color(colors.accent)
                                     })
-                                    .on_click(cx.listener(move |view, _, _, cx| {
+                                    .on_click(cx.listener(move |view, _, window, cx| {
+                                        view.focus_handle.focus(window, cx);
                                         view.select_cell(row_index, column_index, cx)
                                     }))
                                     .child(div().truncate().child(text))
@@ -704,7 +752,8 @@ impl ResultsView {
             }),
         )
         .size_full()
-        .min_w(grid_min_width);
+        .min_w(grid_min_width)
+        .track_scroll(&self.row_scroll_handle);
 
         div()
             .id("result-hscroll")
@@ -824,6 +873,10 @@ impl gpui::Render for ResultsView {
             .key_context("SiftResults")
             .track_focus(&self.focus_handle)
             .on_action(cx.listener(Self::copy_selected_cell))
+            .on_action(cx.listener(Self::move_cell_left))
+            .on_action(cx.listener(Self::move_cell_right))
+            .on_action(cx.listener(Self::move_cell_up))
+            .on_action(cx.listener(Self::move_cell_down))
             .flex()
             .when(self.placement == ResultPlacement::Bottom, |view| {
                 view.flex_col()
@@ -956,9 +1009,15 @@ mod tests {
 
         let response = ExecuteResponse {
             cursor_id: sift_protocol::CursorId(1),
-            columns: vec![column("name", PrimitiveType::Text, Nullability::Nullable)],
+            columns: vec![
+                column("name", PrimitiveType::Text, Nullability::Nullable),
+                column("rank", PrimitiveType::Int32, Nullability::NotNullable),
+            ],
             schema_digest: "d".into(),
-            rows: vec![Row::new(vec![Value::Text("neo".into())])],
+            rows: vec![
+                Row::new(vec![Value::Text("neo".into()), Value::Int32(1)]),
+                Row::new(vec![Value::Text("trinity".into()), Value::Int32(2)]),
+            ],
             affected_rows: None,
             warnings: Vec::new(),
             has_more: false,
@@ -984,6 +1043,12 @@ mod tests {
             assert_eq!(view.active_tab(), ResultTab::Messages);
             view.select_cell(0, 0, cx);
             assert_eq!(view.selected_cell_text().as_deref(), Some("neo"));
+            view.move_selection(0, 1, cx);
+            assert_eq!(view.selected_cell_text().as_deref(), Some("1"));
+            view.move_selection(1, 0, cx);
+            assert_eq!(view.selected_cell_text().as_deref(), Some("2"));
+            view.move_selection(0, -1, cx);
+            assert_eq!(view.selected_cell_text().as_deref(), Some("trinity"));
             assert_eq!(view.placement(), ResultPlacement::Bottom);
             view.set_extent(300.0, cx);
             assert_eq!(view.extent(), 300.0);

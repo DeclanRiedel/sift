@@ -58,6 +58,10 @@ fn editor_key_bindings() -> Vec<gpui::KeyBinding> {
         gpui::KeyBinding::new("cmd-shift-enter", ed::ExecuteDocument, ctx),
         gpui::KeyBinding::new("ctrl-c", res::CopySelectedCell, Some("SiftResults")),
         gpui::KeyBinding::new("cmd-c", res::CopySelectedCell, Some("SiftResults")),
+        gpui::KeyBinding::new("left", res::MoveCellLeft, Some("SiftResults")),
+        gpui::KeyBinding::new("right", res::MoveCellRight, Some("SiftResults")),
+        gpui::KeyBinding::new("up", res::MoveCellUp, Some("SiftResults")),
+        gpui::KeyBinding::new("down", res::MoveCellDown, Some("SiftResults")),
     ]
 }
 
