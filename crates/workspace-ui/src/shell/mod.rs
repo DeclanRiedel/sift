@@ -1111,6 +1111,9 @@ pub struct WorkspaceShell {
     account_error: Option<String>,
     connection_status: ConnectionStatus,
     connection_schema: ConnectionSchemaState,
+    expanded_tenants: HashSet<i64>,
+    expanded_connections: HashSet<i64>,
+    expanded_rooms: HashSet<i64>,
     expanded_catalogs: HashSet<(i64, String)>,
     expanded_schemas: HashSet<(i64, String, String)>,
     selected_database_tenant: Option<i64>,
@@ -1315,6 +1318,9 @@ impl WorkspaceShell {
             account_error: None,
             connection_status: ConnectionStatus::Disconnected,
             connection_schema: ConnectionSchemaState::Unavailable,
+            expanded_tenants: HashSet::new(),
+            expanded_connections: HashSet::new(),
+            expanded_rooms: HashSet::new(),
             expanded_catalogs: HashSet::new(),
             expanded_schemas: HashSet::new(),
             selected_database_tenant: None,
@@ -1466,12 +1472,23 @@ impl WorkspaceShell {
                 if shell
                     .update(cx, |shell, cx| {
                         let mut instance_changed = false;
+                        if let LifecycleEvent::TenantLoaded(tenant) = &event {
+                            shell.expanded_tenants.insert(tenant.id.0);
+                            shell
+                                .expanded_rooms
+                                .extend(tenant.rooms.iter().map(|room| room.id.0));
+                        }
                         if let LifecycleEvent::Selected(instance) = &event {
                             instance_changed =
                                 shell.selected_instance_id.as_deref() != Some(instance.id.as_str());
                             shell.selected_instance_id = Some(instance.id.clone());
                             if instance_changed {
                                 shell.selected_workspace_id = None;
+                                shell.expanded_tenants.clear();
+                                shell.expanded_connections.clear();
+                                shell.expanded_rooms.clear();
+                                shell.expanded_catalogs.clear();
+                                shell.expanded_schemas.clear();
                             }
                         }
                         shell.lifecycle.apply(event);
@@ -1664,6 +1681,9 @@ impl WorkspaceShell {
     fn on_executor_event(&mut self, event: ExecutorEvent, cx: &mut Context<Self>) {
         match event {
             ExecutorEvent::Connection(status) => {
+                if let ConnectionStatus::Connected { profile_id, .. } = &status {
+                    self.expanded_connections.insert(*profile_id);
+                }
                 self.status.database = match &status {
                     ConnectionStatus::Connected { name, .. } => name.clone(),
                     ConnectionStatus::Connecting { .. } => "Connecting…".into(),
@@ -1688,6 +1708,7 @@ impl WorkspaceShell {
                 profile_id,
                 snapshot,
             } => {
+                self.expanded_connections.insert(profile_id);
                 if matches!(
                     self.connection_schema,
                     ConnectionSchemaState::Failed {
@@ -1890,6 +1911,27 @@ impl WorkspaceShell {
         let key = (profile_id, catalog);
         if !self.expanded_catalogs.remove(&key) {
             self.expanded_catalogs.insert(key);
+        }
+        cx.notify();
+    }
+
+    fn toggle_tenant(&mut self, tenant_id: i64, cx: &mut Context<Self>) {
+        if !self.expanded_tenants.remove(&tenant_id) {
+            self.expanded_tenants.insert(tenant_id);
+        }
+        cx.notify();
+    }
+
+    fn toggle_connection(&mut self, profile_id: i64, cx: &mut Context<Self>) {
+        if !self.expanded_connections.remove(&profile_id) {
+            self.expanded_connections.insert(profile_id);
+        }
+        cx.notify();
+    }
+
+    fn toggle_room(&mut self, room_id: i64, cx: &mut Context<Self>) {
+        if !self.expanded_rooms.remove(&room_id) {
+            self.expanded_rooms.insert(room_id);
         }
         cx.notify();
     }
@@ -4280,20 +4322,39 @@ impl WorkspaceShell {
                 let selected = self.selected_workspace_id;
                 let mut rows: Vec<gpui::AnyElement> = Vec::new();
                 for tenant in &self.lifecycle.tenants {
+                    let tenant_id = tenant.id.0;
+                    let tenant_open = self.expanded_tenants.contains(&tenant_id);
                     rows.push(
                         div()
+                            .id(("connection-tenant", tenant_id as usize))
                             .mt_2()
                             .h(px(24.))
                             .px_3()
                             .flex()
                             .items_center()
                             .gap_1()
+                            .rounded_sm()
                             .text_xs()
                             .text_color(colors.muted_text)
-                            .child(icon(IconName::ChevronDown, colors.muted_text, 11.))
+                            .hover(|row| row.bg(colors.hovered_surface).text_color(colors.text))
+                            .on_click(cx.listener(move |shell, _, _, cx| {
+                                shell.toggle_tenant(tenant_id, cx)
+                            }))
+                            .child(icon(
+                                if tenant_open {
+                                    IconName::ChevronDown
+                                } else {
+                                    IconName::ChevronRight
+                                },
+                                colors.muted_text,
+                                11.,
+                            ))
                             .child(div().min_w_0().truncate().child(tenant.name.clone()))
                             .into_any_element(),
                     );
+                    if !tenant_open {
+                        continue;
+                    }
                     if !tenant.connections.is_empty() {
                         rows.push(
                             div()
@@ -4308,8 +4369,9 @@ impl WorkspaceShell {
                         );
                     }
                     for conn in &tenant.connections {
+                        let connection_id = conn.id;
                         let entry_for_delete = conn.clone();
-                        let (dot, connected) = match &self.connection_status {
+                        let (connection_color, connected) = match &self.connection_status {
                             ConnectionStatus::Connected { profile_id, .. }
                                 if *profile_id == conn.id =>
                             {
@@ -4327,6 +4389,43 @@ impl WorkspaceShell {
                             }
                             _ => (colors.muted_text, false),
                         };
+                        let connection_open = self.expanded_connections.contains(&connection_id);
+                        let leading = if connected {
+                            div()
+                                .id(("toggle-connection", connection_id as usize))
+                                .role(Role::Button)
+                                .flex_none()
+                                .size(px(16.))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                                    cx.stop_propagation()
+                                })
+                                .on_click(cx.listener(move |shell, _, _, cx| {
+                                    cx.stop_propagation();
+                                    shell.toggle_connection(connection_id, cx)
+                                }))
+                                .child(icon(
+                                    if connection_open {
+                                        IconName::ChevronDown
+                                    } else {
+                                        IconName::ChevronRight
+                                    },
+                                    colors.muted_text,
+                                    11.,
+                                ))
+                                .into_any_element()
+                        } else {
+                            div()
+                                .flex_none()
+                                .size(px(16.))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .child(icon(IconName::Database, connection_color, 13.))
+                                .into_any_element()
+                        };
                         let mut row = div()
                             .id(("conn", conn.id as usize))
                             .flex()
@@ -4338,14 +4437,7 @@ impl WorkspaceShell {
                             .rounded_sm()
                             .when(connected, |row| row.bg(colors.active_surface))
                             .hover(|row| row.bg(colors.hovered_surface))
-                            .child(
-                                div()
-                                    .size(px(7.))
-                                    .rounded_full()
-                                    .bg(dot)
-                                    .border_1()
-                                    .border_color(colors.panel),
-                            )
+                            .child(leading)
                             .child(div().flex_1().min_w_0().truncate().child(conn.name.clone()));
                         if connected {
                             row = row.child(
@@ -4388,7 +4480,7 @@ impl WorkspaceShell {
                                 .child(icon(IconName::Close, colors.danger, 11.)),
                         );
                         rows.push(row.into_any_element());
-                        if connected {
+                        if connected && connection_open {
                             rows.extend(self.connection_schema_rows(conn, colors, cx));
                         }
                     }
@@ -4410,6 +4502,41 @@ impl WorkspaceShell {
                         );
                     }
                     for room in &tenant.rooms {
+                        let room_id = room.id.0;
+                        let room_open = self.expanded_rooms.contains(&room_id);
+                        rows.push(
+                            div()
+                                .id(("connection-room", room_id as usize))
+                                .mx_2()
+                                .h(self.theme.metrics.row_height)
+                                .pl_4()
+                                .pr_2()
+                                .flex()
+                                .items_center()
+                                .gap_1()
+                                .rounded_sm()
+                                .text_color(colors.muted_text)
+                                .hover(|row| {
+                                    row.bg(colors.hovered_surface).text_color(colors.text)
+                                })
+                                .on_click(cx.listener(move |shell, _, _, cx| {
+                                    shell.toggle_room(room_id, cx)
+                                }))
+                                .child(icon(
+                                    if room_open {
+                                        IconName::ChevronDown
+                                    } else {
+                                        IconName::ChevronRight
+                                    },
+                                    colors.muted_text,
+                                    11.,
+                                ))
+                                .child(div().min_w_0().truncate().child(room.name.clone()))
+                                .into_any_element(),
+                        );
+                        if !room_open {
+                            continue;
+                        }
                         for workspace in &room.workspaces {
                             let features =
                                 match (workspace.git_enabled, workspace.scheduling_enabled) {
@@ -4425,7 +4552,8 @@ impl WorkspaceShell {
                                     .id(("workspace", workspace.id as usize))
                                     .mx_2()
                                     .h(self.theme.metrics.row_height)
-                                    .px_2()
+                                    .pl_8()
+                                    .pr_2()
                                     .flex()
                                     .items_center()
                                     .gap_2()
@@ -4437,10 +4565,12 @@ impl WorkspaceShell {
                                     .on_click(cx.listener(move |shell, _, _, cx| {
                                         shell.open_workspace(&entry, cx)
                                     }))
-                                    .child(div().min_w_0().truncate().child(format!(
-                                        "{} / {}{features}",
-                                        room.name, workspace.name
-                                    )))
+                                    .child(
+                                        div()
+                                            .min_w_0()
+                                            .truncate()
+                                            .child(format!("{}{features}", workspace.name)),
+                                    )
                                     .into_any_element(),
                             );
                         }
@@ -7304,6 +7434,45 @@ mod tests {
             assert!(shell
                 .expanded_schemas
                 .contains(&(7, "sifttest".into(), "lab".into())));
+        });
+    }
+
+    #[gpui::test]
+    fn every_connections_tree_container_can_collapse_and_expand(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+
+        workspace.update(&mut cx, |shell, cx| {
+            shell.toggle_tenant(1, cx);
+            shell.toggle_connection(2, cx);
+            shell.toggle_room(3, cx);
+            shell.toggle_catalog_schema(2, "sifttest".into(), cx);
+            shell.toggle_database_schema(2, "sifttest".into(), "lab".into(), cx);
+        });
+        workspace.read_with(&cx, |shell, _| {
+            assert!(shell.expanded_tenants.contains(&1));
+            assert!(shell.expanded_connections.contains(&2));
+            assert!(shell.expanded_rooms.contains(&3));
+            assert!(shell.expanded_catalogs.contains(&(2, "sifttest".into())));
+            assert!(shell
+                .expanded_schemas
+                .contains(&(2, "sifttest".into(), "lab".into())));
+        });
+
+        workspace.update(&mut cx, |shell, cx| {
+            shell.toggle_tenant(1, cx);
+            shell.toggle_connection(2, cx);
+            shell.toggle_room(3, cx);
+            shell.toggle_catalog_schema(2, "sifttest".into(), cx);
+            shell.toggle_database_schema(2, "sifttest".into(), "lab".into(), cx);
+        });
+        workspace.read_with(&cx, |shell, _| {
+            assert!(shell.expanded_tenants.is_empty());
+            assert!(shell.expanded_connections.is_empty());
+            assert!(shell.expanded_rooms.is_empty());
+            assert!(shell.expanded_catalogs.is_empty());
+            assert!(shell.expanded_schemas.is_empty());
         });
     }
 
