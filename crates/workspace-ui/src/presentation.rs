@@ -129,6 +129,8 @@ pub struct WorkspacePresentation {
 pub struct PresentationState {
     pub version: u32,
     pub dark_theme: bool,
+    #[serde(default)]
+    pub vim_mode_default: bool,
     pub window: WindowPresentation,
     pub workspace: WorkspacePresentation,
 }
@@ -138,6 +140,7 @@ impl Default for PresentationState {
         Self {
             version: PRESENTATION_VERSION,
             dark_theme: true,
+            vim_mode_default: false,
             window: WindowPresentation {
                 bounds: Rect {
                     x: 100.0,
@@ -299,9 +302,10 @@ mod tests {
     }
 
     #[test]
-    fn older_presentation_defaults_new_footer_selections() {
+    fn older_presentation_defaults_new_local_preferences() {
         let state = PresentationState::default();
         let mut json = serde_json::to_value(state).unwrap();
+        json.as_object_mut().unwrap().remove("vim_mode_default");
         let workspace = json
             .get_mut("workspace")
             .and_then(serde_json::Value::as_object_mut)
@@ -312,6 +316,7 @@ mod tests {
         let decoded = PresentationState::decode(&serde_json::to_vec(&json).unwrap());
         assert_eq!(decoded.workspace.left_panel, LeftPanel::Connections);
         assert_eq!(decoded.workspace.bottom_tool, BottomTool::Console);
+        assert!(!decoded.vim_mode_default);
     }
 
     #[test]

@@ -149,6 +149,7 @@ pub enum Modal {
     ServerPicker,
     ServerConnection,
     InstanceSetup,
+    Settings,
     Account,
     DatabaseConnection,
     ConfirmDeleteConnection(ConnectionNavEntry),
@@ -447,7 +448,12 @@ pub struct Pane {
 }
 
 impl Pane {
-    fn from_presentation(pane: PanePresentation, theme: Theme, cx: &mut Context<Self>) -> Self {
+    fn from_presentation(
+        pane: PanePresentation,
+        theme: Theme,
+        vim_mode_default: bool,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let PanePresentation {
             id,
             mut items,
@@ -471,7 +477,16 @@ impl Pane {
             } else {
                 EditorLanguage::Sql
             };
-            let editor = cx.new(|cx| QueryEditor::new(document, theme, cx).with_language(language));
+            let keymap = if vim_mode_default {
+                EditorKeymap::Vim
+            } else {
+                EditorKeymap::Standard
+            };
+            let editor = cx.new(|cx| {
+                QueryEditor::new(document, theme, cx)
+                    .with_language(language)
+                    .with_keymap(keymap)
+            });
             cx.subscribe(&editor, move |pane, _, event, cx| {
                 pane.on_editor_event(id, event, cx);
             })
@@ -1310,6 +1325,7 @@ pub struct WorkspaceShell {
     palette_scroll_handle: UniformListScrollHandle,
     theme: Theme,
     dark_theme: bool,
+    vim_mode_default: bool,
     window_presentation: WindowPresentation,
     panes: Vec<Entity<Pane>>,
     active_pane: usize,
@@ -1375,6 +1391,7 @@ impl WorkspaceShell {
         cx: &mut Context<Self>,
     ) -> Self {
         let window_presentation = state.window.clone();
+        let vim_mode_default = state.vim_mode_default;
         let theme = if state.dark_theme {
             Theme::dark()
         } else {
@@ -1390,7 +1407,7 @@ impl WorkspaceShell {
         let panes = workspace
             .panes
             .into_iter()
-            .map(|pane| cx.new(|cx| Pane::from_presentation(pane, theme, cx)))
+            .map(|pane| cx.new(|cx| Pane::from_presentation(pane, theme, vim_mode_default, cx)))
             .collect::<Vec<_>>();
         for pane in &panes {
             cx.subscribe_in(pane, window, Self::on_pane_event).detach();
@@ -1452,6 +1469,11 @@ impl WorkspaceShell {
         let instance_configuration_editor = cx.new(|cx| {
             QueryEditor::new(QueryDocument::with_random_peer(""), theme, cx)
                 .with_language(EditorLanguage::Toml)
+                .with_keymap(if vim_mode_default {
+                    EditorKeymap::Vim
+                } else {
+                    EditorKeymap::Standard
+                })
         });
         // Re-render the palette as the search text changes so its list filters.
         cx.observe(&query_input, |shell, _, cx| {
@@ -1517,6 +1539,7 @@ impl WorkspaceShell {
             palette_scroll_handle: UniformListScrollHandle::new(),
             theme,
             dark_theme: state.dark_theme,
+            vim_mode_default,
             window_presentation,
             panes,
             active_pane,
@@ -1834,6 +1857,11 @@ impl WorkspaceShell {
                         cx,
                     )
                     .with_language(EditorLanguage::Toml)
+                    .with_keymap(if self.vim_mode_default {
+                        EditorKeymap::Vim
+                    } else {
+                        EditorKeymap::Standard
+                    })
                 });
                 self.instance_configuration_editor = editor.clone();
                 let item_id = self.instance_configuration_item.unwrap_or_else(|| {
@@ -2205,8 +2233,15 @@ impl WorkspaceShell {
         let item_id = self.next_id;
         self.next_id += 1;
         let sql = table_preview_sql(&provider_id, &schema, &object);
-        let editor =
-            cx.new(|cx| QueryEditor::new(QueryDocument::with_random_peer(&sql), self.theme, cx));
+        let keymap = if self.vim_mode_default {
+            EditorKeymap::Vim
+        } else {
+            EditorKeymap::Standard
+        };
+        let editor = cx.new(|cx| {
+            QueryEditor::new(QueryDocument::with_random_peer(&sql), self.theme, cx)
+                .with_keymap(keymap)
+        });
         let results = cx.new(|cx| ResultsView::new(self.theme, cx));
         results.update(cx, |results, cx| results.set_pending(cx));
         if let Some(pane) = self.panes.get(self.active_pane) {
@@ -2733,6 +2768,12 @@ impl WorkspaceShell {
         }
     }
 
+    fn toggle_vim_mode_default(&mut self, cx: &mut Context<Self>) {
+        self.vim_mode_default = !self.vim_mode_default;
+        self.persist(cx);
+        cx.notify();
+    }
+
     pub fn open_workspace(&mut self, workspace: &WorkspaceNavEntry, cx: &mut Context<Self>) {
         self.selected_workspace_id = Some(workspace.id);
         self.presence.join(RoomId(workspace.room_id));
@@ -2782,6 +2823,7 @@ impl WorkspaceShell {
     pub fn snapshot(&self, cx: &App) -> PresentationState {
         PresentationState {
             dark_theme: self.dark_theme,
+            vim_mode_default: self.vim_mode_default,
             window: self.window_presentation.clone(),
             workspace: WorkspacePresentation {
                 left_dock: self.left_dock.presentation.clone(),
@@ -2916,6 +2958,7 @@ impl WorkspaceShell {
                     active_item: 0,
                 },
                 self.theme,
+                self.vim_mode_default,
                 cx,
             )
         });
@@ -3767,7 +3810,7 @@ impl WorkspaceShell {
     fn app_bar_modal_is_open(&self) -> bool {
         matches!(
             self.modal,
-            Some(Modal::ServerPicker | Modal::ServerConnection | Modal::Account)
+            Some(Modal::ServerPicker | Modal::ServerConnection | Modal::Settings | Modal::Account)
         )
     }
 
@@ -3789,7 +3832,7 @@ impl WorkspaceShell {
     fn open_app_bar_modal(&mut self, modal: Modal, cx: &mut Context<Self>) {
         debug_assert!(matches!(
             &modal,
-            Modal::ServerPicker | Modal::ServerConnection | Modal::Account
+            Modal::ServerPicker | Modal::ServerConnection | Modal::Settings | Modal::Account
         ));
         self.close_app_bar_modal(cx);
         self.app_bar_menu = None;
@@ -3970,6 +4013,7 @@ impl WorkspaceShell {
     /// and identity. Database profiles deliberately stay in the workspace dock.
     fn render_toolbar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = self.theme.colors;
+        let theme = self.theme;
         let workspace_label = self.workspace_context_label();
         let server_name = self.active_server_name();
         let status_label = self.lifecycle.status_label();
@@ -3986,6 +4030,7 @@ impl WorkspaceShell {
             Some(Modal::ServerPicker | Modal::ServerConnection)
         );
         let account_active = self.modal == Some(Modal::Account);
+        let settings_active = self.modal == Some(Modal::Settings);
         let navigation_expanded = self.app_bar_navigation_expanded();
         let launcher_content = if navigation_expanded {
             div()
@@ -4184,6 +4229,31 @@ impl WorkspaceShell {
                     .items_center()
                     .justify_end()
                     .gap_1()
+                    .child(
+                        div()
+                            .id("toolbar-settings")
+                            .debug_selector(|| "toolbar-settings".into())
+                            .role(Role::Button)
+                            .aria_label("Settings")
+                            .size(px(26.))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded_sm()
+                            .when(settings_active, |button| button.bg(colors.active_surface))
+                            .hover(|button| button.bg(colors.hovered_surface))
+                            .on_click(cx.listener(|shell, _, _, cx| {
+                                shell.toggle_app_bar_modal(Modal::Settings, cx)
+                            }))
+                            .tooltip(move |_, cx| {
+                                cx.new(|_| PaneTooltip {
+                                    label: "Settings",
+                                    theme,
+                                })
+                                .into()
+                            })
+                            .child(icon(IconName::Fallback, colors.danger, 14.)),
+                    )
                     .child(
                         div()
                             .id("toolbar-account")
@@ -5017,14 +5087,15 @@ impl WorkspaceShell {
         self.modal.as_ref().map(|modal| {
             let server_picker = matches!(modal, Modal::ServerPicker);
             let account = matches!(modal, Modal::Account);
+            let settings = matches!(modal, Modal::Settings);
             let app_bar_modal = matches!(
                 modal,
-                Modal::ServerPicker | Modal::ServerConnection | Modal::Account
+                Modal::ServerPicker | Modal::ServerConnection | Modal::Settings | Modal::Account
             );
             let database_connection = matches!(modal, Modal::DatabaseConnection);
             let command_palette = matches!(modal, Modal::CommandPalette);
             let instance_setup = matches!(modal, Modal::InstanceSetup);
-            let card_width = if server_picker || account {
+            let card_width = if server_picker || settings || account {
                 360.0
             } else if instance_setup {
                 720.0
@@ -6192,6 +6263,90 @@ impl WorkspaceShell {
                         )
                         .into_any_element()
                 }
+                Modal::Settings => {
+                    let vim_mode_default = self.vim_mode_default;
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_3()
+                        .child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .gap_1()
+                                .child(
+                                    div()
+                                        .text_lg()
+                                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                                        .child("Settings"),
+                                )
+                                .child(
+                                    div()
+                                        .text_sm()
+                                        .text_color(colors.muted_text)
+                                        .child("Editor preferences are stored on this device."),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .id("settings-vim-default")
+                                .debug_selector(|| "settings-vim-default".into())
+                                .role(Role::Button)
+                                .aria_label(if vim_mode_default {
+                                    "Vim mode by default: on"
+                                } else {
+                                    "Vim mode by default: off"
+                                })
+                                .min_h(px(54.))
+                                .px_2()
+                                .flex()
+                                .items_center()
+                                .gap_3()
+                                .rounded_sm()
+                                .hover(|row| row.bg(colors.hovered_surface))
+                                .on_click(cx.listener(|shell, _, _, cx| {
+                                    shell.toggle_vim_mode_default(cx)
+                                }))
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .flex()
+                                        .flex_col()
+                                        .gap_1()
+                                        .child("Vim mode by default")
+                                        .child(
+                                            div()
+                                                .text_xs()
+                                                .text_color(colors.muted_text)
+                                                .child("New SQL and TOML editors start in Vim normal mode."),
+                                        ),
+                                )
+                                .child(
+                                    div()
+                                        .w(px(32.))
+                                        .h(px(18.))
+                                        .p(px(2.))
+                                        .flex_none()
+                                        .flex()
+                                        .items_center()
+                                        .rounded_full()
+                                        .bg(if vim_mode_default {
+                                            colors.accent
+                                        } else {
+                                            colors.strong_border
+                                        })
+                                        .when(vim_mode_default, |toggle| toggle.justify_end())
+                                        .child(
+                                            div()
+                                                .size(px(14.))
+                                                .rounded_full()
+                                                .bg(colors.text),
+                                        ),
+                                ),
+                        )
+                        .into_any_element()
+                }
                 Modal::Account => {
                     let server_name = self.active_server_name();
                     let identity = self.lifecycle.identity.as_ref();
@@ -7196,7 +7351,7 @@ impl WorkspaceShell {
                 .bottom_0()
                 .left_0()
                 .occlude()
-                .when(server_picker || account, |layer| {
+                .when(server_picker || settings || account, |layer| {
                     layer.on_mouse_down(
                         MouseButton::Left,
                         cx.listener(|shell, _, window, cx| {
@@ -7204,7 +7359,7 @@ impl WorkspaceShell {
                         }),
                     )
                 })
-                .when(!server_picker && !account, |layer| {
+                .when(!server_picker && !settings && !account, |layer| {
                     layer.on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                 })
                 .flex()
@@ -7212,7 +7367,7 @@ impl WorkspaceShell {
                 .when(server_picker, |layer| {
                     layer.justify_start().pt_1().pl(px(38.))
                 })
-                .when(account, |layer| layer.justify_end().pt_1().pr_2())
+                .when(settings || account, |layer| layer.justify_end().pt_1().pr_2())
                 .when(database_connection, |layer| {
                     layer
                         .items_center()
@@ -7222,7 +7377,7 @@ impl WorkspaceShell {
                         .bg(colors.scrim)
                 })
                 .when(
-                    !server_picker && !account && !database_connection,
+                    !server_picker && !settings && !account && !database_connection,
                     |layer| {
                         layer
                             .justify_center()
@@ -7996,6 +8151,36 @@ mod tests {
         editor.read_with(&cx, |editor, _| {
             assert_eq!(editor.vim_mode(), VimMode::Normal);
             assert_eq!(editor.document().text(), "");
+        });
+    }
+
+    #[gpui::test]
+    fn settings_controls_the_default_keymap_for_new_editors(cx: &mut TestAppContext) {
+        let mut state = PresentationState {
+            vim_mode_default: true,
+            ..PresentationState::default()
+        };
+        state.workspace.panes[0].items[0].kind = ItemKind::Configuration;
+        let window = shell_with_state(state, cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+
+        let editor = workspace.read_with(&cx, |workspace, cx| {
+            let pane = workspace.panes[workspace.active_pane].read(cx);
+            pane.editor(pane.active_item().unwrap().id).unwrap()
+        });
+        editor.read_with(&cx, |editor, _| {
+            assert_eq!(editor.keymap(), EditorKeymap::Vim);
+            assert_eq!(editor.vim_mode(), VimMode::Normal);
+        });
+
+        workspace.update(&mut cx, |workspace, cx| {
+            workspace.open_app_bar_modal(Modal::Settings, cx);
+            workspace.toggle_vim_mode_default(cx);
+        });
+        workspace.read_with(&cx, |workspace, cx| {
+            assert_eq!(workspace.modal(), Some(&Modal::Settings));
+            assert!(!workspace.snapshot(cx).vim_mode_default);
         });
     }
 

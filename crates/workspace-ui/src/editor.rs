@@ -727,6 +727,11 @@ impl QueryEditor {
         self
     }
 
+    pub fn with_keymap(mut self, keymap: EditorKeymap) -> Self {
+        self.apply_keymap(keymap);
+        self
+    }
+
     pub fn keymap(&self) -> EditorKeymap {
         self.keymap
     }
@@ -740,10 +745,17 @@ impl QueryEditor {
     }
 
     pub fn toggle_keymap(&mut self, cx: &mut Context<Self>) {
-        self.keymap = match self.keymap {
+        let keymap = match self.keymap {
             EditorKeymap::Standard => EditorKeymap::Vim,
             EditorKeymap::Vim => EditorKeymap::Standard,
         };
+        self.apply_keymap(keymap);
+        cx.emit(EditorEvent::VimStateChanged);
+        self.selection_changed(cx);
+    }
+
+    fn apply_keymap(&mut self, keymap: EditorKeymap) {
+        self.keymap = keymap;
         self.vim_mode = match self.keymap {
             EditorKeymap::Standard => VimMode::Insert,
             EditorKeymap::Vim => VimMode::Normal,
@@ -751,8 +763,6 @@ impl QueryEditor {
         self.vim_entered.clear();
         self.vim = (self.keymap == EditorKeymap::Vim)
             .then(|| VimEngine::new(self.document.text(), self.document.cursor()));
-        cx.emit(EditorEvent::VimStateChanged);
-        self.selection_changed(cx);
     }
 
     pub fn document(&self) -> &QueryDocument {
