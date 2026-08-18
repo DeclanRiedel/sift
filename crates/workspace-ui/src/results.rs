@@ -7,14 +7,14 @@
 use std::ops::Range;
 
 use gpui::{
-    actions, div, prelude::*, px, uniform_list, App, ClipboardItem, Context, FocusHandle,
-    Focusable, IntoElement, MouseButton, ScrollStrategy, SharedString, UniformListScrollHandle,
-    Window,
+    actions, div, prelude::*, px, uniform_list, App, ClipboardItem, Context, Div, FocusHandle,
+    Focusable, IntoElement, MouseButton, ScrollStrategy, SharedString, Stateful,
+    UniformListScrollHandle, Window,
 };
 use sift_protocol::{
     ColumnMetadata, DriverWarning, ExecuteResponse, Nullability, Page, Row, TypeRef, Value,
 };
-use sift_ui::{icon, IconName, Theme};
+use sift_ui::{ActiveTheme, Badge, Clickable, IconButton, IconName, ThemeColors};
 
 const MIN_COLUMN_WIDTH: f32 = 144.0;
 pub(crate) const ROW_NUMBER_WIDTH: f32 = 46.0;
@@ -307,7 +307,6 @@ actions!(
 /// The query-owned results surface.
 pub struct ResultsView {
     focus_handle: FocusHandle,
-    theme: Theme,
     state: ResultState,
     /// Display-ready values are built once per result update, not repeatedly
     /// for every visible row during scroll and selection paints.
@@ -321,31 +320,10 @@ pub struct ResultsView {
     right_width: f32,
 }
 
-struct ResultsTooltip {
-    message: &'static str,
-    theme: Theme,
-}
-
-impl gpui::Render for ResultsTooltip {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        div()
-            .px_2()
-            .py_1()
-            .rounded_sm()
-            .border_1()
-            .border_color(self.theme.colors.strong_border)
-            .bg(self.theme.colors.elevated_surface)
-            .text_xs()
-            .text_color(self.theme.colors.text)
-            .child(self.message)
-    }
-}
-
 impl ResultsView {
-    pub fn new(theme: Theme, cx: &mut Context<Self>) -> Self {
+    pub fn new(cx: &mut Context<Self>) -> Self {
         Self {
             focus_handle: cx.focus_handle(),
-            theme,
             state: ResultState::Idle,
             rendered_columns: Vec::new(),
             rendered_rows: Vec::new(),
@@ -399,11 +377,6 @@ impl ResultsView {
             ResultPlacement::Bottom => ResultPlacement::Right,
             ResultPlacement::Right => ResultPlacement::Bottom,
         };
-        cx.notify();
-    }
-
-    pub fn set_theme(&mut self, theme: Theme, cx: &mut Context<Self>) {
-        self.theme = theme;
         cx.notify();
     }
 
@@ -538,8 +511,7 @@ impl ResultsView {
             .map(|cell| cell.text.to_string())
     }
 
-    fn cell_color(&self, class: CellClass) -> gpui::Hsla {
-        let colors = self.theme.colors;
+    fn cell_color(colors: ThemeColors, class: CellClass) -> gpui::Hsla {
         match class {
             CellClass::Null => colors.muted_text,
             CellClass::Number => colors.syntax_number,
@@ -551,11 +523,39 @@ impl ResultsView {
         }
     }
 
-    fn render_tab_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let colors = self.theme.colors;
-        let theme = self.theme;
+    /// One tab row shared by the horizontal and vertical result tab bars.
+    fn tab_row(tab: ResultTab, selected: bool, colors: ThemeColors) -> Stateful<Div> {
         div()
-            .h(px(30.))
+            .id(("result-tab", tab as usize))
+            .flex_none()
+            .flex()
+            .items_center()
+            .h_full()
+            .px_2()
+            .relative()
+            .text_sm()
+            .when(selected, |el| el.text_color(colors.text))
+            .when(selected, |el| {
+                el.child(
+                    div()
+                        .absolute()
+                        .left_1()
+                        .right_1()
+                        .bottom_0()
+                        .h(px(1.))
+                        .bg(colors.accent),
+                )
+            })
+            .when(!selected, |el| el.text_color(colors.muted_text))
+            .hover(|el| el.text_color(colors.text))
+            .child(tab.label())
+    }
+
+    fn render_tab_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let colors = cx.theme().colors;
+        let tab_height = cx.theme().metrics.tab_height;
+        div()
+            .h(tab_height)
             .flex_none()
             .flex()
             .items_stretch()
@@ -576,34 +576,9 @@ impl ResultsView {
                             .h_full()
                             .overflow_x_scroll()
                             .children(ResultTab::ALL.into_iter().map(|tab| {
-                                let selected = tab == self.tab;
-                                div()
-                                    .id(("result-tab", tab as usize))
-                                    .flex_none()
-                                    .flex()
-                                    .items_center()
-                                    .h_full()
-                                    .px_3()
-                                    .relative()
-                                    .text_sm()
-                                    .when(selected, |el| el.text_color(colors.text))
-                                    .when(selected, |el| {
-                                        el.child(
-                                            div()
-                                                .absolute()
-                                                .left_2()
-                                                .right_2()
-                                                .bottom_0()
-                                                .h(px(1.))
-                                                .bg(colors.accent),
-                                        )
-                                    })
-                                    .when(!selected, |el| el.text_color(colors.muted_text))
-                                    .hover(|el| el.text_color(colors.text))
-                                    .on_click(
-                                        cx.listener(move |view, _, _, cx| view.select_tab(tab, cx)),
-                                    )
-                                    .child(tab.label())
+                                Self::tab_row(tab, tab == self.tab, colors).on_click(
+                                    cx.listener(move |view, _, _, cx| view.select_tab(tab, cx)),
+                                )
                             })),
                     ),
             )
@@ -619,45 +594,26 @@ impl ResultsView {
                     .px_2()
                     .text_xs()
                     .text_color(colors.muted_text)
+                    .child(Badge::new(self.state.status_label()))
                     .child(
-                        div()
-                            .min_w_0()
-                            .truncate()
-                            .px_1()
-                            .rounded(px(3.))
-                            .bg(colors.hovered_surface)
-                            .child(self.state.status_label()),
-                    )
-                    .child(
-                        div()
-                            .id("copy-result-cell")
-                            .flex_none()
-                            .role(gpui::Role::Button)
-                            .aria_label("Copy selected result cell")
-                            .size(px(24.))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .rounded(px(4.))
-                            .hover(|button| button.bg(colors.hovered_surface))
-                            .on_click(cx.listener(|view, _, window, cx| {
-                                view.copy_selected_cell(&CopySelectedCell, window, cx)
-                            }))
-                            .child(icon(IconName::Copy, colors.muted_text, 13.))
-                            .tooltip(move |_, cx| {
-                                cx.new(|_| ResultsTooltip {
-                                    message: "Copy selected result cell",
-                                    theme,
-                                })
-                                .into()
-                            }),
+                        IconButton::new(
+                            "copy-result-cell",
+                            IconName::Copy,
+                            "Copy selected result cell",
+                        )
+                        .square(px(24.))
+                        .icon_size(13.)
+                        .tooltip("Copy selected result cell")
+                        .on_click(cx.listener(|view, _, window, cx| {
+                            view.copy_selected_cell(&CopySelectedCell, window, cx)
+                        })),
                     ),
             )
     }
 
     fn render_vertical_tab_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let colors = self.theme.colors;
-        let theme = self.theme;
+        let colors = cx.theme().colors;
+        let tab_height = cx.theme().metrics.tab_height;
         div()
             .w(px(92.))
             .h_full()
@@ -672,7 +628,7 @@ impl ResultsView {
                 div()
                     .id(("result-tab-vertical", tab as usize))
                     .relative()
-                    .h(px(30.))
+                    .h(tab_height)
                     .px_2()
                     .flex_none()
                     .flex()
@@ -705,35 +661,23 @@ impl ResultsView {
                     .text_color(colors.muted_text)
                     .child(div().truncate().child(self.state.status_label()))
                     .child(
-                        div()
-                            .id("copy-result-cell-vertical")
-                            .role(gpui::Role::Button)
-                            .aria_label("Copy selected result cell")
-                            .h(px(24.))
-                            .px_1()
-                            .flex()
-                            .items_center()
-                            .gap_1()
-                            .rounded(px(4.))
-                            .hover(|button| button.bg(colors.hovered_surface))
-                            .on_click(cx.listener(|view, _, window, cx| {
-                                view.copy_selected_cell(&CopySelectedCell, window, cx)
-                            }))
-                            .child(icon(IconName::Copy, colors.muted_text, 13.))
-                            .child("Copy")
-                            .tooltip(move |_, cx| {
-                                cx.new(|_| ResultsTooltip {
-                                    message: "Copy selected result cell",
-                                    theme,
-                                })
-                                .into()
-                            }),
+                        IconButton::new(
+                            "copy-result-cell-vertical",
+                            IconName::Copy,
+                            "Copy selected result cell",
+                        )
+                        .icon_size(13.)
+                        .text("Copy")
+                        .tooltip("Copy selected result cell")
+                        .on_click(cx.listener(|view, _, window, cx| {
+                            view.copy_selected_cell(&CopySelectedCell, window, cx)
+                        })),
                     ),
             )
     }
 
     fn render_grid(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
-        let colors = self.theme.colors;
+        let colors = cx.theme().colors;
         let Some(data) = self.state.ready() else {
             return div()
                 .size_full()
@@ -852,7 +796,7 @@ impl ResultsView {
             "result-rows",
             row_count,
             cx.processor(move |view, range: Range<usize>, _, cx| {
-                let colors = view.theme.colors;
+                let colors = cx.theme().colors;
                 if view.state.ready().is_none() {
                     return Vec::new();
                 }
@@ -875,7 +819,9 @@ impl ResultsView {
                                     None => false,
                                 };
                                 let (text, color) = match rendered {
-                                    Some(cell) => (cell.text.clone(), view.cell_color(cell.class)),
+                                    Some(cell) => {
+                                        (cell.text.clone(), Self::cell_color(colors, cell.class))
+                                    }
                                     None => (SharedString::default(), colors.muted_text),
                                 };
                                 div()
@@ -927,17 +873,14 @@ impl ResultsView {
                                     .pr_2()
                                     .border_r_1()
                                     .border_color(colors.subtle_border)
+                                    .bg(colors.editor_gutter)
                                     .text_xs()
                                     .text_color(colors.disabled_text)
                                     .when(
                                         view.selected.is_some_and(|selection| {
                                             selection.highlights_row(row_index)
                                         }),
-                                        |header| {
-                                            header
-                                                .bg(colors.selected_surface)
-                                                .text_color(colors.text)
-                                        },
+                                        |header| header.text_color(colors.text),
                                     )
                                     .on_mouse_down(
                                         MouseButton::Left,
@@ -985,8 +928,8 @@ impl ResultsView {
             .into_any_element()
     }
 
-    fn render_messages(&self) -> impl IntoElement {
-        let colors = self.theme.colors;
+    fn render_messages(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let colors = cx.theme().colors;
         let body = div().p_3().flex().flex_col().gap_1().text_sm();
         match &self.state {
             ResultState::Ready(data) => {
@@ -1044,10 +987,10 @@ impl Focusable for ResultsView {
 
 impl gpui::Render for ResultsView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let colors = self.theme.colors;
+        let colors = cx.theme().colors;
         let body = match self.tab {
             ResultTab::Data => self.render_grid(cx),
-            ResultTab::Messages => self.render_messages().into_any_element(),
+            ResultTab::Messages => self.render_messages(cx).into_any_element(),
             ResultTab::Explain => div()
                 .size_full()
                 .flex()
@@ -1220,7 +1163,7 @@ mod tests {
         let window = cx
             .update(|cx| {
                 cx.open_window(Default::default(), |_window, cx| {
-                    let view = cx.new(|cx| ResultsView::new(Theme::dark(), cx));
+                    let view = cx.new(ResultsView::new);
                     cx.new(|_| ResultsHost(view))
                 })
             })
