@@ -48,6 +48,14 @@ pub struct ResultColumn {
     pub nullable: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GridSelection {
+    Cell { row: usize, column: usize },
+    Row(usize),
+    Column(usize),
+    All,
+}
+
 impl ResultColumn {
     fn from_metadata(column: &ColumnMetadata) -> Self {
         let type_label = match &column.type_ref {
@@ -269,7 +277,7 @@ pub struct ResultsView {
     theme: Theme,
     state: ResultState,
     tab: ResultTab,
-    selected: Option<(usize, usize)>,
+    selected: Option<GridSelection>,
     row_scroll_handle: UniformListScrollHandle,
     placement: ResultPlacement,
     bottom_height: f32,
@@ -374,7 +382,22 @@ impl ResultsView {
     }
 
     fn select_cell(&mut self, row: usize, column: usize, cx: &mut Context<Self>) {
-        self.selected = Some((row, column));
+        self.selected = Some(GridSelection::Cell { row, column });
+        cx.notify();
+    }
+
+    fn select_row(&mut self, row: usize, cx: &mut Context<Self>) {
+        self.selected = Some(GridSelection::Row(row));
+        cx.notify();
+    }
+
+    fn select_column(&mut self, column: usize, cx: &mut Context<Self>) {
+        self.selected = Some(GridSelection::Column(column));
+        cx.notify();
+    }
+
+    fn select_all(&mut self, cx: &mut Context<Self>) {
+        self.selected = Some(GridSelection::All);
         cx.notify();
     }
 
@@ -385,14 +408,19 @@ impl ResultsView {
         if data.rows.is_empty() || data.columns.is_empty() {
             return;
         }
-        let (row, column) = self.selected.unwrap_or((0, 0));
+        let (row, column) = match self.selected {
+            Some(GridSelection::Cell { row, column }) => (row, column),
+            Some(GridSelection::Row(row)) => (row, 0),
+            Some(GridSelection::Column(column)) => (0, column),
+            Some(GridSelection::All) | None => (0, 0),
+        };
         let row = row
             .saturating_add_signed(row_delta)
             .min(data.rows.len() - 1);
         let column = column
             .saturating_add_signed(column_delta)
             .min(data.columns.len() - 1);
-        self.selected = Some((row, column));
+        self.selected = Some(GridSelection::Cell { row, column });
         self.row_scroll_handle
             .scroll_to_item(row, ScrollStrategy::Nearest);
         cx.notify();
@@ -421,7 +449,9 @@ impl ResultsView {
     }
 
     fn selected_cell_text(&self) -> Option<String> {
-        let (row, column) = self.selected?;
+        let GridSelection::Cell { row, column } = self.selected? else {
+            return None;
+        };
         let data = self.state.ready()?;
         let value = data.rows.get(row)?.values.get(column)?;
         Some(render_value(value).text)
@@ -660,6 +690,9 @@ impl ResultsView {
             .bg(colors.toolbar)
             .child(
                 div()
+                    .id("result-select-all")
+                    .role(gpui::Role::Button)
+                    .aria_label("Select all result cells")
                     .w(px(ROW_NUMBER_WIDTH))
                     .h_full()
                     .flex()
@@ -670,10 +703,25 @@ impl ResultsView {
                     .border_color(colors.subtle_border)
                     .text_xs()
                     .text_color(colors.disabled_text)
+                    .when(self.selected == Some(GridSelection::All), |header| {
+                        header.bg(colors.selected_surface)
+                    })
+                    .hover(|header| header.bg(colors.hovered_surface))
+                    .on_click(cx.listener(|view, _, window, cx| {
+                        view.focus_handle.focus(window, cx);
+                        view.select_all(cx);
+                    }))
                     .child("#"),
             )
-            .children(data.columns.iter().map(|column| {
-                div()
+            .children(
+                data.columns
+                    .iter()
+                    .enumerate()
+                    .map(|(column_index, column)| {
+                        div()
+                    .id(("result-column", column_index))
+                    .role(gpui::Role::Button)
+                    .aria_label(format!("Select column {}", column.name))
                     .flex_1()
                     .min_w(px(MIN_COLUMN_WIDTH))
                     .px_2()
@@ -683,6 +731,18 @@ impl ResultsView {
                     .overflow_hidden()
                     .border_r_1()
                     .border_color(colors.subtle_border)
+                    .when(
+                        matches!(
+                            self.selected,
+                            Some(GridSelection::Column(selected)) if selected == column_index
+                        ) || self.selected == Some(GridSelection::All),
+                        |header| header.bg(colors.selected_surface),
+                    )
+                    .hover(|header| header.bg(colors.hovered_surface))
+                    .on_click(cx.listener(move |view, _, window, cx| {
+                        view.focus_handle.focus(window, cx);
+                        view.select_column(column_index, cx);
+                    }))
                     .child(
                         div()
                             .text_sm()
@@ -701,7 +761,8 @@ impl ResultsView {
                                 if column.nullable { "?" } else { "" }
                             )),
                     )
-            }));
+                    }),
+            );
 
         let row_count = data.rows.len();
         let list = uniform_list(
@@ -715,7 +776,6 @@ impl ResultsView {
                 let column_count = data.columns.len();
                 range
                     .map(|row_index| {
-                        let selected_row = view.selected.map(|(r, _)| r);
                         let cells = (0..column_count)
                             .map(|column_index| {
                                 let rendered = data
@@ -723,7 +783,15 @@ impl ResultsView {
                                     .get(row_index)
                                     .and_then(|row| row.values.get(column_index))
                                     .map(render_value);
-                                let is_selected = view.selected == Some((row_index, column_index));
+                                let is_selected = match view.selected {
+                                    Some(GridSelection::Cell { row, column }) => {
+                                        row == row_index && column == column_index
+                                    }
+                                    Some(GridSelection::Row(row)) => row == row_index,
+                                    Some(GridSelection::Column(column)) => column == column_index,
+                                    Some(GridSelection::All) => true,
+                                    None => false,
+                                };
                                 let (text, color) = match &rendered {
                                     Some(cell) => (cell.text.clone(), view.cell_color(cell.class)),
                                     None => (String::new(), colors.muted_text),
@@ -740,17 +808,14 @@ impl ResultsView {
                                     .border_r_1()
                                     .border_color(colors.subtle_border)
                                     .text_color(color)
+                                    .hover(|cell| cell.bg(colors.hovered_surface))
                                     .when(
                                         rendered.as_ref().is_some_and(|cell| {
                                             matches!(cell.class, CellClass::Number)
                                         }),
                                         |el| el.justify_end(),
                                     )
-                                    .when(is_selected, |el| {
-                                        el.bg(colors.active_surface)
-                                            .border_1()
-                                            .border_color(colors.accent)
-                                    })
+                                    .when(is_selected, |el| el.bg(colors.selected_surface))
                                     .on_click(cx.listener(move |view, _, window, cx| {
                                         view.focus_handle.focus(window, cx);
                                         view.select_cell(row_index, column_index, cx)
@@ -765,12 +830,11 @@ impl ResultsView {
                             .min_w(grid_min_width)
                             .h(px(ROW_HEIGHT))
                             .when(row_index % 2 == 1, |el| el.bg(colors.grid_stripe))
-                            .when(selected_row == Some(row_index), |el| {
-                                el.bg(colors.selected_surface)
-                            })
-                            .hover(|el| el.bg(colors.hovered_surface))
                             .child(
                                 div()
+                                    .id(("result-row-number", row_index))
+                                    .role(gpui::Role::Button)
+                                    .aria_label(format!("Select row {}", row_index + 1))
                                     .w(px(ROW_NUMBER_WIDTH))
                                     .h_full()
                                     .flex()
@@ -781,6 +845,19 @@ impl ResultsView {
                                     .border_color(colors.subtle_border)
                                     .text_xs()
                                     .text_color(colors.disabled_text)
+                                    .when(
+                                        matches!(
+                                            view.selected,
+                                            Some(GridSelection::Row(selected))
+                                                if selected == row_index
+                                        ) || view.selected == Some(GridSelection::All),
+                                        |header| header.bg(colors.selected_surface),
+                                    )
+                                    .hover(|header| header.bg(colors.hovered_surface))
+                                    .on_click(cx.listener(move |view, _, window, cx| {
+                                        view.focus_handle.focus(window, cx);
+                                        view.select_row(row_index, cx);
+                                    }))
                                     .child((row_index + 1).to_string()),
                             )
                             .children(cells)
@@ -1086,6 +1163,13 @@ mod tests {
             assert_eq!(view.selected_cell_text().as_deref(), Some("2"));
             view.move_selection(0, -1, cx);
             assert_eq!(view.selected_cell_text().as_deref(), Some("trinity"));
+            view.select_row(0, cx);
+            assert_eq!(view.selected, Some(GridSelection::Row(0)));
+            assert!(view.selected_cell_text().is_none());
+            view.select_column(1, cx);
+            assert_eq!(view.selected, Some(GridSelection::Column(1)));
+            view.select_all(cx);
+            assert_eq!(view.selected, Some(GridSelection::All));
             assert_eq!(view.placement(), ResultPlacement::Bottom);
             view.set_extent(300.0, cx);
             assert_eq!(view.extent(), 300.0);
