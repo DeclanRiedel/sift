@@ -8336,7 +8336,14 @@ mod tests {
 
         workspace.update_in(&mut cx, |workspace, window, cx| {
             workspace.run_command(CommandId::OpenSettings, window, cx);
-            workspace.toggle_vim_mode_default(cx);
+        });
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("open-settings-file").is_some(),
+            "centered settings modal must expose manual settings.toml editing"
+        );
+        workspace.update(&mut cx, |workspace, cx| {
+            workspace.toggle_vim_mode_default(cx)
         });
         workspace.read_with(&cx, |workspace, cx| {
             assert_eq!(workspace.modal(), Some(&Modal::Settings));
