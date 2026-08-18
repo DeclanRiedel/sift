@@ -137,7 +137,6 @@ actions!(
         CloseActivePane,
         CloseActiveItem,
         SaveActiveItem,
-        ConfirmCloseWithoutSaving,
         ToggleLeftDock,
         ToggleRightDock,
         ToggleBottomDock
@@ -153,7 +152,6 @@ pub enum Modal {
     Account,
     DatabaseConnection,
     ConfirmDeleteConnection(ConnectionNavEntry),
-    ConfirmClose { title: String },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -328,11 +326,12 @@ pub enum PaneEvent {
     CloseRequested,
     /// A tab-local close control was used; the workspace owns dirty handling.
     CloseItemRequested { item_id: u64 },
+    /// A tab-local dirty prompt chose to discard the item.
+    DiscardItemRequested { item_id: u64 },
+    /// A configuration tab's dirty prompt requested a save.
+    SaveItemRequested { item_id: u64 },
     /// Active editor state changed. Cursor-only changes do not dirty the tab.
-    EditorStateChanged {
-        item_id: u64,
-        document_changed: bool,
-    },
+    EditorStateChanged { item_id: u64, dirty: Option<bool> },
     /// An editor requested the workspace-level command palette.
     OpenCommandPaletteRequested,
     /// A query item asked to run SQL; the workspace dispatches it to execution.
@@ -435,19 +434,33 @@ pub struct Pane {
     /// Live editor per SQL or configuration item. Editor contents are not
     /// persisted in the local layout; their owning service rehydrates them.
     editors: HashMap<u64, Entity<QueryEditor>>,
+    /// Text at the last clean point for each editor. Comparing content rather
+    /// than latching a boolean means undoing back to the clean text is clean.
+    clean_documents: HashMap<u64, String>,
     /// The Data/Messages/Explain/History surface owned by each query item.
     results: HashMap<u64, Entity<ResultsView>>,
+    /// Dirty-close confirmation belongs to its tab and is rendered inline.
+    pending_close_item: Option<u64>,
 }
 
 impl Pane {
     fn from_presentation(pane: PanePresentation, theme: Theme, cx: &mut Context<Self>) -> Self {
+        let PanePresentation {
+            id,
+            mut items,
+            active_item,
+        } = pane;
         let mut editors = HashMap::new();
+        let mut clean_documents = HashMap::new();
         let mut results = HashMap::new();
-        for item in pane
-            .items
-            .iter()
+        for item in items
+            .iter_mut()
             .filter(|item| ItemRegistry::definition(&item.kind).runtime.is_editor())
         {
+            // Editor text is rehydrated independently of presentation state.
+            // A persisted dirty bit without its document would create a false
+            // close warning for an unchanged, empty editor.
+            item.dirty = false;
             let id = item.id;
             let document = QueryDocument::with_random_peer("");
             let language = if item.kind == ItemKind::Configuration {
@@ -461,33 +474,43 @@ impl Pane {
             })
             .detach();
             editors.insert(id, editor);
+            clean_documents.insert(id, String::new());
             if item.kind == ItemKind::Query {
                 results.insert(id, cx.new(|cx| ResultsView::new(theme, cx)));
             }
         }
         Self {
-            id: pane.id,
-            items: pane.items,
-            active_item: pane.active_item,
+            id,
+            items,
+            active_item,
             backward_items: Vec::new(),
             forward_items: Vec::new(),
             focus_handle: cx.focus_handle(),
             theme,
             editors,
+            clean_documents,
             results,
+            pending_close_item: None,
         }
     }
 
     fn on_editor_event(&mut self, item_id: u64, event: &EditorEvent, cx: &mut Context<Self>) {
         match event {
-            EditorEvent::DocumentChanged => cx.emit(PaneEvent::EditorStateChanged {
-                item_id,
-                document_changed: true,
-            }),
+            EditorEvent::DocumentChanged => {
+                let dirty = self.editors.get(&item_id).is_some_and(|editor| {
+                    self.clean_documents
+                        .get(&item_id)
+                        .is_none_or(|clean| editor.read(cx).document().text() != clean)
+                });
+                cx.emit(PaneEvent::EditorStateChanged {
+                    item_id,
+                    dirty: Some(dirty),
+                });
+            }
             EditorEvent::CursorChanged | EditorEvent::VimStateChanged => {
                 cx.emit(PaneEvent::EditorStateChanged {
                     item_id,
-                    document_changed: false,
+                    dirty: None,
                 })
             }
             EditorEvent::OpenCommandPalette => cx.emit(PaneEvent::OpenCommandPaletteRequested),
@@ -635,6 +658,20 @@ impl Pane {
     fn forget_item(&mut self, item_id: u64) {
         self.backward_items.retain(|id| *id != item_id);
         self.forward_items.retain(|id| *id != item_id);
+        self.clean_documents.remove(&item_id);
+        if self.pending_close_item == Some(item_id) {
+            self.pending_close_item = None;
+        }
+    }
+
+    fn mark_clean(&mut self, item_id: u64, cx: &App) {
+        if let Some(editor) = self.editors.get(&item_id) {
+            self.clean_documents
+                .insert(item_id, editor.read(cx).document().text().to_owned());
+        }
+        if let Some(item) = self.items.iter_mut().find(|item| item.id == item_id) {
+            item.dirty = false;
+        }
     }
 
     fn open_configuration(
@@ -663,8 +700,11 @@ impl Pane {
             pane.on_editor_event(item_id, event, cx);
         })
         .detach();
+        self.clean_documents
+            .insert(item_id, editor.read(cx).document().text().to_owned());
         self.editors.insert(item_id, editor);
         self.results.remove(&item_id);
+        self.pending_close_item = None;
         cx.notify();
     }
 
@@ -686,6 +726,8 @@ impl Pane {
             pane.on_editor_event(item_id, event, cx);
         })
         .detach();
+        self.clean_documents
+            .insert(item_id, editor.read(cx).document().text().to_owned());
         self.editors.insert(item_id, editor);
         self.results.insert(item_id, results);
         cx.notify();
@@ -767,6 +809,10 @@ impl gpui::Render for Pane {
         let is_focused = self.active_focus_handle(cx).is_focused(window)
             || self.focus_handle.contains_focused(window, cx);
         let active = self.active_item().cloned();
+        let pending_close = active
+            .as_ref()
+            .filter(|item| self.pending_close_item == Some(item.id))
+            .cloned();
         let has_items = !self.items.is_empty();
         let can_go_back = self.can_navigate_backward();
         let can_go_forward = self.can_navigate_forward();
@@ -1000,6 +1046,79 @@ impl gpui::Render for Pane {
                             ),
                     )
             }))
+            .children(pending_close.map(|item| {
+                let item_id = item.id;
+                let is_configuration = item.kind == ItemKind::Configuration;
+                div()
+                    .id(("dirty-close-strip", item_id as usize))
+                    .h(px(34.))
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .px_3()
+                    .border_b_1()
+                    .border_color(colors.warning)
+                    .bg(colors.warning_muted)
+                    .text_sm()
+                    .child(icon(IconName::Warning, colors.warning, 14.))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .child(format!("Discard changes to {}?", item.title)),
+                    )
+                    .child(
+                        div()
+                            .id(("keep-editing", item_id as usize))
+                            .role(Role::Button)
+                            .h(px(24.))
+                            .px_2()
+                            .flex()
+                            .items_center()
+                            .rounded_sm()
+                            .hover(|button| button.bg(colors.hovered_surface))
+                            .on_click(cx.listener(move |pane, _, window, cx| {
+                                pane.pending_close_item = None;
+                                pane.active_focus_handle(cx).focus(window, cx);
+                                cx.notify();
+                            }))
+                            .child("Keep editing"),
+                    )
+                    .children(is_configuration.then(|| {
+                        div()
+                            .id(("save-dirty-item", item_id as usize))
+                            .role(Role::Button)
+                            .h(px(24.))
+                            .px_2()
+                            .flex()
+                            .items_center()
+                            .rounded_sm()
+                            .bg(colors.accent)
+                            .hover(|button| button.bg(colors.accent_hover))
+                            .on_click(cx.listener(move |_, _, _, cx| {
+                                cx.emit(PaneEvent::SaveItemRequested { item_id });
+                            }))
+                            .child("Save")
+                    }))
+                    .child(
+                        div()
+                            .id(("discard-dirty-item", item_id as usize))
+                            .role(Role::Button)
+                            .h(px(24.))
+                            .px_2()
+                            .flex()
+                            .items_center()
+                            .rounded_sm()
+                            .text_color(colors.danger)
+                            .hover(|button| button.bg(colors.danger_muted))
+                            .on_click(cx.listener(move |_, _, _, cx| {
+                                cx.emit(PaneEvent::DiscardItemRequested { item_id });
+                            }))
+                            .child("Discard"),
+                    )
+            }))
             .child({
                 let body = div().flex_1().min_h_0().flex().flex_col();
                 match active {
@@ -1082,6 +1201,7 @@ impl gpui::Render for Pane {
                                             div()
                                                 .h(px(extent))
                                                 .flex_none()
+                                                .flex()
                                                 .min_h_0()
                                                 .child(result.clone()),
                                         )
@@ -1096,6 +1216,7 @@ impl gpui::Render for Pane {
                                             div()
                                                 .w(px(extent))
                                                 .flex_none()
+                                                .flex()
                                                 .min_w_0()
                                                 .child(result.clone()),
                                         )
@@ -2461,7 +2582,10 @@ impl WorkspaceShell {
 
     /// Deliver an execution outcome to whichever pane owns the query item.
     fn route_result(&mut self, item_id: u64, state: ResultState, cx: &mut Context<Self>) {
-        self.status.execution = state.status_label();
+        self.status.execution = match &state {
+            ResultState::Ready(_) | ResultState::Idle => "Ready".into(),
+            _ => state.status_label(),
+        };
         self.status.current_error = match &state {
             ResultState::Unavailable(reason) | ResultState::Failed(reason) => Some(reason.clone()),
             ResultState::TimedOut => Some("Query timed out".into()),
@@ -2806,14 +2930,34 @@ impl WorkspaceShell {
                 });
                 self.close_active_item(&CloseActiveItem, window, cx);
             }
-            PaneEvent::EditorStateChanged {
-                item_id,
-                document_changed,
-            } => {
-                if *document_changed {
+            PaneEvent::DiscardItemRequested { item_id } => {
+                self.active_pane = index;
+                emitter.update(cx, |pane, _| {
+                    if let Some(item_index) = pane.items.iter().position(|item| item.id == *item_id)
+                    {
+                        pane.activate_item(item_index, false);
+                    }
+                });
+                self.remove_active_item(window, cx);
+            }
+            PaneEvent::SaveItemRequested { item_id } => {
+                self.active_pane = index;
+                emitter.update(cx, |pane, _| {
+                    if let Some(item_index) = pane.items.iter().position(|item| item.id == *item_id)
+                    {
+                        pane.activate_item(item_index, false);
+                    }
+                });
+                self.save_active_item(&SaveActiveItem, window, cx);
+            }
+            PaneEvent::EditorStateChanged { item_id, dirty } => {
+                if let Some(dirty) = dirty {
                     emitter.update(cx, |pane, _| {
                         if let Some(item) = pane.items.iter_mut().find(|item| item.id == *item_id) {
-                            item.dirty = true;
+                            item.dirty = *dirty;
+                        }
+                        if !*dirty && pane.pending_close_item == Some(*item_id) {
+                            pane.pending_close_item = None;
                         }
                     });
                 }
@@ -2886,8 +3030,9 @@ impl WorkspaceShell {
         };
         if let Some(item) = pane.read(cx).active_item() {
             if item.dirty {
-                self.modal = Some(Modal::ConfirmClose {
-                    title: item.title.clone(),
+                let item_id = item.id;
+                pane.update(cx, |pane, _| {
+                    pane.pending_close_item = Some(item_id);
                 });
                 cx.notify();
                 return;
@@ -2906,7 +3051,6 @@ impl WorkspaceShell {
                 }
             });
         }
-        self.modal = None;
         // A pane emptied by its last close collapses so panes never accumulate
         // as un-closeable ghosts. The final pane always survives.
         let emptied = self
@@ -2937,30 +3081,22 @@ impl WorkspaceShell {
                 .and_then(|item| pane.editor(item.id))
         });
         if let Some(editor) = active_configuration {
-            self.modal = None;
             self.instance_configuration_editor = editor;
             self.save_instance_configuration(cx);
             return;
         }
-        let close_after_save = matches!(self.modal, Some(Modal::ConfirmClose { .. }));
-        self.mark_active_item_dirty(false, cx);
-        self.show_toast("Presentation saved".into(), cx);
-        if close_after_save {
-            self.remove_active_item(window, cx);
-        } else {
-            self.modal = None;
-            self.persist(cx);
-            cx.notify();
+        if let Some(pane) = self.panes.get(self.active_pane) {
+            pane.update(cx, |pane, cx| {
+                if let Some(item_id) = pane.active_item().map(|item| item.id) {
+                    pane.mark_clean(item_id, cx);
+                    pane.pending_close_item = None;
+                }
+            });
         }
-    }
-
-    fn confirm_close_without_saving(
-        &mut self,
-        _: &ConfirmCloseWithoutSaving,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.remove_active_item(window, cx);
+        self.show_toast("Presentation saved".into(), cx);
+        self.persist(cx);
+        self.focus_active_pane(window, cx);
+        cx.notify();
     }
 
     fn open_command_palette(
@@ -7001,89 +7137,6 @@ impl WorkspaceShell {
                         )
                         .into_any_element()
                 }
-                Modal::ConfirmClose { title } => div()
-                    .flex()
-                    .flex_col()
-                    .gap_4()
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_2()
-                            .font_weight(gpui::FontWeight::SEMIBOLD)
-                            .child(icon(IconName::Warning, colors.warning, 16.))
-                            .child(format!("Save changes to {title}?")),
-                    )
-                    .child(
-                        div()
-                            .text_sm()
-                            .text_color(colors.muted_text)
-                            .child("Your edits have not been saved."),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .justify_end()
-                            .gap_2()
-                            .child(
-                                div()
-                                    .id("cancel-close-item")
-                                    .role(Role::Button)
-                                    .h(self.theme.metrics.control_height)
-                                    .px_3()
-                                    .flex()
-                                    .items_center()
-                                    .rounded_sm()
-                                    .border_1()
-                                    .border_color(colors.subtle_border)
-                                    .hover(|button| button.bg(colors.hovered_surface))
-                                    .on_click(cx.listener(|shell, _, window, cx| {
-                                        shell.dismiss_modal(&DismissModal, window, cx)
-                                    }))
-                                    .child("Cancel"),
-                            )
-                            .child(
-                                div()
-                                    .id("close-item-without-saving")
-                                    .role(Role::Button)
-                                    .h(self.theme.metrics.control_height)
-                                    .px_3()
-                                    .flex()
-                                    .items_center()
-                                    .rounded_sm()
-                                    .bg(colors.danger_muted)
-                                    .text_color(colors.danger)
-                                    .hover(|button| {
-                                        button.bg(colors.danger).text_color(gpui::white())
-                                    })
-                                    .on_click(cx.listener(|shell, _, window, cx| {
-                                        shell.confirm_close_without_saving(
-                                            &ConfirmCloseWithoutSaving,
-                                            window,
-                                            cx,
-                                        )
-                                    }))
-                                    .child("Discard"),
-                            )
-                            .child(
-                                div()
-                                    .id("save-and-close-item")
-                                    .role(Role::Button)
-                                    .h(self.theme.metrics.control_height)
-                                    .px_3()
-                                    .flex()
-                                    .items_center()
-                                    .rounded_sm()
-                                    .bg(colors.accent)
-                                    .hover(|button| button.bg(colors.accent_hover))
-                                    .on_click(cx.listener(|shell, _, window, cx| {
-                                        shell.save_active_item(&SaveActiveItem, window, cx)
-                                    }))
-                                    .child("Save"),
-                            ),
-                    )
-                    .into_any_element(),
             };
             div()
                 .id("modal-layer")
@@ -7318,7 +7371,6 @@ impl gpui::Render for WorkspaceShell {
             .on_action(cx.listener(Self::close_active_pane))
             .on_action(cx.listener(Self::close_active_item))
             .on_action(cx.listener(Self::save_active_item))
-            .on_action(cx.listener(Self::confirm_close_without_saving))
             .on_action(cx.listener(Self::toggle_left_dock))
             .on_action(cx.listener(Self::toggle_right_dock))
             .on_action(cx.listener(Self::toggle_bottom_dock))
@@ -7800,7 +7852,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn dirty_item_close_and_save_require_explicit_choice(cx: &mut TestAppContext) {
+    fn dirty_item_close_is_inline_and_clean_item_closes_immediately(cx: &mut TestAppContext) {
         let window = shell(cx);
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         let workspace = window.root(&mut cx).unwrap();
@@ -7809,15 +7861,17 @@ mod tests {
         });
         let focus = workspace.read_with(&cx, |shell, cx| shell.focus_handle(cx));
         cx.update(|window, cx| focus.dispatch_action(&CloseActiveItem, window, cx));
-        assert!(matches!(
-            workspace.read_with(&cx, |workspace, _| workspace.modal().cloned()),
-            Some(Modal::ConfirmClose { .. })
-        ));
-        cx.update(|window, cx| focus.dispatch_action(&SaveActiveItem, window, cx));
+        assert!(workspace.read_with(&cx, |workspace, _| workspace.modal().is_none()));
         assert_eq!(
-            workspace.read_with(&cx, |workspace, cx| workspace.active_item_dirty(cx)),
-            None
+            workspace.read_with(&cx, |workspace, cx| workspace.panes[workspace.active_pane]
+                .read(cx)
+                .pending_close_item),
+            Some(1)
         );
+        workspace.update(&mut cx, |workspace, cx| {
+            workspace.mark_active_item_dirty(false, cx)
+        });
+        cx.update(|window, cx| focus.dispatch_action(&CloseActiveItem, window, cx));
         assert_eq!(
             workspace.read_with(&cx, |workspace, cx| workspace.active_item_count(cx)),
             0
@@ -8538,6 +8592,28 @@ mod tests {
                 .iter()
                 .any(|pane| pane.read(cx).contains_item(item_id)));
         });
+        let configuration_editor = workspace.read_with(&cx, |shell, cx| {
+            let item_id = shell.instance_configuration_item.unwrap();
+            shell.panes[shell.active_pane]
+                .read(cx)
+                .editor(item_id)
+                .unwrap()
+        });
+        configuration_editor.update_in(&mut cx, |editor, window, cx| {
+            editor.replace_text_in_range(None, "# changed\n", window, cx)
+        });
+        assert_eq!(
+            workspace.read_with(&cx, |workspace, cx| workspace.active_item_dirty(cx)),
+            Some(true)
+        );
+        let editor_focus =
+            configuration_editor.read_with(&cx, |editor, cx| editor.focus_handle(cx));
+        cx.update(|window, cx| editor_focus.dispatch_action(&crate::editor::Undo, window, cx));
+        assert_eq!(
+            workspace.read_with(&cx, |workspace, cx| workspace.active_item_dirty(cx)),
+            Some(false),
+            "undoing to the clean text must not prompt on close"
+        );
         let focus = workspace.read_with(&cx, |shell, cx| shell.focus_handle(cx));
         cx.update(|window, cx| focus.dispatch_action(&SaveActiveItem, window, cx));
         match receiver.try_recv().unwrap() {
@@ -8937,6 +9013,12 @@ mod tests {
             shell.copy_current_error(cx);
             let copied = cx.read_from_clipboard().and_then(|item| item.text());
             assert_eq!(copied.as_deref(), Some("syntax error near FROM"));
+            shell.route_result(
+                1,
+                ResultState::Ready(crate::results::ResultData::default()),
+                cx,
+            );
+            assert_eq!(shell.status.execution, "Ready");
         });
     }
 }

@@ -21,8 +21,8 @@ pub use presentation::{
 };
 pub use shell::{
     CloseActiveItem, CloseActivePane, CommandDefinition, CommandId, CommandRegistry, CommandSpec,
-    ConfirmCloseWithoutSaving, ConnectionStatus, DismissModal, Dock, DockDefinition, DockId,
-    DockPlacement, DockRegistry, ExecutorCommand, ExecutorEvent, FocusNextPane, InstanceCommand,
+    ConnectionStatus, DismissModal, Dock, DockDefinition, DockId, DockPlacement, DockRegistry,
+    ExecutorCommand, ExecutorEvent, FocusNextPane, InstanceCommand,
     InstanceConfigurationPresentation, InstanceCredentialKind, InstanceCredentialPresentation,
     InstanceManagerEvent, InstancePlanPresentation, ItemDefinition, ItemRegistry, ItemRuntimeKind,
     Modal, OpenCommandPalette, OpenServerConnection, PaletteConfirm, PaletteDown, PaletteUp, Pane,
