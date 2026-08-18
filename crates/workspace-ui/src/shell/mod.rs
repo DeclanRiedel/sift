@@ -3723,6 +3723,10 @@ impl WorkspaceShell {
             CommandId::ToggleLeftDock => self.toggle_left_dock(&ToggleLeftDock, window, cx),
             CommandId::ToggleInspectorDock => self.toggle_right_dock(&ToggleRightDock, window, cx),
             CommandId::ToggleBottomDock => self.toggle_bottom_dock(&ToggleBottomDock, window, cx),
+            CommandId::OpenSettings => {
+                self.modal = Some(Modal::Settings);
+                cx.notify();
+            }
             CommandId::OpenCommandPalette => {
                 self.open_command_palette(&OpenCommandPalette, window, cx)
             }
@@ -3810,7 +3814,7 @@ impl WorkspaceShell {
     fn app_bar_modal_is_open(&self) -> bool {
         matches!(
             self.modal,
-            Some(Modal::ServerPicker | Modal::ServerConnection | Modal::Settings | Modal::Account)
+            Some(Modal::ServerPicker | Modal::ServerConnection | Modal::Account)
         )
     }
 
@@ -3832,7 +3836,7 @@ impl WorkspaceShell {
     fn open_app_bar_modal(&mut self, modal: Modal, cx: &mut Context<Self>) {
         debug_assert!(matches!(
             &modal,
-            Modal::ServerPicker | Modal::ServerConnection | Modal::Settings | Modal::Account
+            Modal::ServerPicker | Modal::ServerConnection | Modal::Account
         ));
         self.close_app_bar_modal(cx);
         self.app_bar_menu = None;
@@ -4013,7 +4017,6 @@ impl WorkspaceShell {
     /// and identity. Database profiles deliberately stay in the workspace dock.
     fn render_toolbar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = self.theme.colors;
-        let theme = self.theme;
         let workspace_label = self.workspace_context_label();
         let server_name = self.active_server_name();
         let status_label = self.lifecycle.status_label();
@@ -4030,7 +4033,6 @@ impl WorkspaceShell {
             Some(Modal::ServerPicker | Modal::ServerConnection)
         );
         let account_active = self.modal == Some(Modal::Account);
-        let settings_active = self.modal == Some(Modal::Settings);
         let navigation_expanded = self.app_bar_navigation_expanded();
         let launcher_content = if navigation_expanded {
             div()
@@ -4229,31 +4231,6 @@ impl WorkspaceShell {
                     .items_center()
                     .justify_end()
                     .gap_1()
-                    .child(
-                        div()
-                            .id("toolbar-settings")
-                            .debug_selector(|| "toolbar-settings".into())
-                            .role(Role::Button)
-                            .aria_label("Settings")
-                            .size(px(26.))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .rounded_sm()
-                            .when(settings_active, |button| button.bg(colors.active_surface))
-                            .hover(|button| button.bg(colors.hovered_surface))
-                            .on_click(cx.listener(|shell, _, _, cx| {
-                                shell.toggle_app_bar_modal(Modal::Settings, cx)
-                            }))
-                            .tooltip(move |_, cx| {
-                                cx.new(|_| PaneTooltip {
-                                    label: "Settings",
-                                    theme,
-                                })
-                                .into()
-                            })
-                            .child(icon(IconName::Fallback, colors.danger, 14.)),
-                    )
                     .child(
                         div()
                             .id("toolbar-account")
@@ -5090,12 +5067,14 @@ impl WorkspaceShell {
             let settings = matches!(modal, Modal::Settings);
             let app_bar_modal = matches!(
                 modal,
-                Modal::ServerPicker | Modal::ServerConnection | Modal::Settings | Modal::Account
+                Modal::ServerPicker | Modal::ServerConnection | Modal::Account
             );
             let database_connection = matches!(modal, Modal::DatabaseConnection);
             let command_palette = matches!(modal, Modal::CommandPalette);
             let instance_setup = matches!(modal, Modal::InstanceSetup);
-            let card_width = if server_picker || settings || account {
+            let card_width = if settings {
+                720.0
+            } else if server_picker || account {
                 360.0
             } else if instance_setup {
                 720.0
@@ -7367,8 +7346,8 @@ impl WorkspaceShell {
                 .when(server_picker, |layer| {
                     layer.justify_start().pt_1().pl(px(38.))
                 })
-                .when(settings || account, |layer| layer.justify_end().pt_1().pr_2())
-                .when(database_connection, |layer| {
+                .when(account, |layer| layer.justify_end().pt_1().pr_2())
+                .when(settings || database_connection, |layer| {
                     layer
                         .items_center()
                         .justify_center()
@@ -8174,8 +8153,8 @@ mod tests {
             assert_eq!(editor.vim_mode(), VimMode::Normal);
         });
 
-        workspace.update(&mut cx, |workspace, cx| {
-            workspace.open_app_bar_modal(Modal::Settings, cx);
+        workspace.update_in(&mut cx, |workspace, window, cx| {
+            workspace.run_command(CommandId::OpenSettings, window, cx);
             workspace.toggle_vim_mode_default(cx);
         });
         workspace.read_with(&cx, |workspace, cx| {
@@ -8376,7 +8355,8 @@ mod tests {
             profile.iter().map(|item| item.label).collect::<Vec<_>>(),
             vec!["Settings", "Keymaps", "Themes", "Server Configuration"]
         );
-        assert!(profile.iter().all(|item| item.command.is_none()));
+        assert_eq!(profile[0].command, Some(CommandId::OpenSettings));
+        assert!(profile[1..].iter().all(|item| item.command.is_none()));
 
         for menu in [
             AppBarMenu::Main,

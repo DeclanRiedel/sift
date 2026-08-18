@@ -105,7 +105,7 @@ pub(super) fn menu_items(menu: AppBarMenu) -> Vec<AppBarMenuItem> {
             Item::unimplemented("About Sift"),
         ],
         AppBarMenu::Profile => vec![
-            Item::unimplemented("Settings"),
+            Item::available(CommandId::OpenSettings),
             Item::unimplemented("Keymaps"),
             Item::unimplemented("Themes"),
             Item::unimplemented("Server Configuration"),

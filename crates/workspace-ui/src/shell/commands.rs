@@ -18,6 +18,7 @@ pub enum CommandId {
     ToggleLeftDock,
     ToggleInspectorDock,
     ToggleBottomDock,
+    OpenSettings,
     OpenCommandPalette,
     Quit,
 }
@@ -38,6 +39,7 @@ impl CommandId {
             Self::ToggleLeftDock => "workspace.toggle-left-dock",
             Self::ToggleInspectorDock => "workspace.toggle-right-dock",
             Self::ToggleBottomDock => "workspace.toggle-bottom-dock",
+            Self::OpenSettings => "ui.open-settings",
             Self::OpenCommandPalette => "ui.command-palette",
             Self::Quit => "window.quit",
         }
@@ -204,6 +206,13 @@ const DEFINITIONS: &[CommandDefinition] = &[
         "Toggle Bottom Dock",
         "Ctrl+J",
         true,
+        AvailabilityRule::Always,
+    ),
+    command(
+        CommandId::OpenSettings,
+        "Settings",
+        "",
+        false,
         AvailabilityRule::Always,
     ),
     command(
