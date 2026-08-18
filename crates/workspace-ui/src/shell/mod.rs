@@ -15,7 +15,7 @@ use crate::editor::{
     EditorEvent, EditorKeymap, EditorLanguage, QueryDocument, QueryEditor, VimMode,
     EDITOR_GUTTER_WIDTH,
 };
-use crate::results::{ResultState, ResultsView};
+use crate::results::{ResultPlacement, ResultState, ResultsView};
 
 use crate::presentation::{
     BottomTool, ItemKind, ItemPresentation, LeftPanel, PanePresentation, PresentationState,
@@ -44,6 +44,9 @@ use app_bar::AppBarMenu;
 const PALETTE_VISIBLE_ROWS: usize = 10;
 const PALETTE_ROW_HEIGHT: f32 = 30.0;
 const DOCK_RESIZE_HANDLE_SIZE: f32 = 7.0;
+const RESULT_RESIZE_HANDLE_SIZE: f32 = 5.0;
+const RESULT_MIN_EXTENT: f32 = 140.0;
+const EDITOR_MIN_EXTENT: f32 = 160.0;
 
 fn quote_identifier(identifier: &str) -> String {
     format!("\"{}\"", identifier.replace('"', "\"\""))
@@ -84,6 +87,12 @@ fn schema_object_kind_label(kind: sift_protocol::ObjectKind) -> &'static str {
 #[derive(Debug, Clone, Copy)]
 struct DockResizeDrag {
     dock: DockId,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ResultResizeDrag {
+    item_id: u64,
+    placement: ResultPlacement,
 }
 
 fn optional_u32_field(
@@ -681,6 +690,37 @@ impl Pane {
         self.results.insert(item_id, results);
         cx.notify();
     }
+
+    fn resize_results(
+        &mut self,
+        event: &gpui::DragMoveEvent<ResultResizeDrag>,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let drag = *event.drag(cx);
+        let Some(results) = self.results.get(&drag.item_id) else {
+            return;
+        };
+        let width: f32 = event.bounds.size.width.into();
+        let height: f32 = event.bounds.size.height.into();
+        let pointer_x: f32 = (event.event.position.x - event.bounds.left()).into();
+        let pointer_y: f32 = (event.event.position.y - event.bounds.top()).into();
+        let extent = match drag.placement {
+            ResultPlacement::Bottom => (height - pointer_y)
+                .max(RESULT_MIN_EXTENT)
+                .min((height - EDITOR_MIN_EXTENT).max(RESULT_MIN_EXTENT)),
+            ResultPlacement::Right => (width - pointer_x)
+                .max(RESULT_MIN_EXTENT)
+                .min((width - EDITOR_MIN_EXTENT).max(RESULT_MIN_EXTENT)),
+        };
+        results.update(cx, |results, cx| results.set_extent(extent, cx));
+    }
+
+    fn toggle_results_placement(&mut self, item_id: u64, cx: &mut Context<Self>) {
+        if let Some(results) = self.results.get(&item_id) {
+            results.update(cx, ResultsView::toggle_placement);
+        }
+    }
 }
 
 impl Focusable for Pane {
@@ -742,6 +782,7 @@ impl gpui::Render for Pane {
                 MouseButton::Left,
                 cx.listener(|_, _, _, cx| cx.emit(PaneEvent::FocusRequested)),
             )
+            .on_drag_move::<ResultResizeDrag>(cx.listener(Self::resize_results))
             .flex()
             .flex_col()
             .flex_1()
@@ -983,16 +1024,85 @@ impl gpui::Render for Pane {
                             == ItemRuntimeKind::Query =>
                     {
                         match (self.editors.get(&item.id), self.results.get(&item.id)) {
-                            (Some(editor), Some(result)) => body
-                                .child(div().flex_1().min_h_0().child(editor.clone()))
-                                .child(
-                                    div()
-                                        .h(px(240.))
+                            (Some(editor), Some(result)) => {
+                                let placement = result.read(cx).placement();
+                                let extent = result.read(cx).extent();
+                                let item_id = item.id;
+                                let handle = div()
+                                    .id(("resize-query-results", item_id as usize))
+                                    .flex_none()
+                                    .cursor(match placement {
+                                        ResultPlacement::Bottom => CursorStyle::ResizeUpDown,
+                                        ResultPlacement::Right => CursorStyle::ResizeLeftRight,
+                                    })
+                                    .block_mouse_except_scroll()
+                                    .border_color(colors.subtle_border)
+                                    .when(placement == ResultPlacement::Bottom, |handle| {
+                                        handle
+                                            .w_full()
+                                            .h(px(RESULT_RESIZE_HANDLE_SIZE))
+                                            .border_t_1()
+                                    })
+                                    .when(placement == ResultPlacement::Right, |handle| {
+                                        handle
+                                            .h_full()
+                                            .w(px(RESULT_RESIZE_HANDLE_SIZE))
+                                            .border_l_1()
+                                    })
+                                    .on_drag(
+                                        ResultResizeDrag { item_id, placement },
+                                        |_, _, _, cx| cx.new(|_| gpui::Empty),
+                                    )
+                                    .on_click(cx.listener(move |pane, _, _, cx| {
+                                        pane.toggle_results_placement(item_id, cx)
+                                    }))
+                                    .tooltip(move |_, cx| {
+                                        cx.new(|_| PaneTooltip {
+                                            label: match placement {
+                                                ResultPlacement::Bottom => {
+                                                    "Drag to resize; click to move results right"
+                                                }
+                                                ResultPlacement::Right => {
+                                                    "Drag to resize; click to move results below"
+                                                }
+                                            },
+                                            theme,
+                                        })
+                                        .into()
+                                    });
+                                let split = match placement {
+                                    ResultPlacement::Bottom => div()
+                                        .size_full()
                                         .min_h_0()
-                                        .border_t_1()
-                                        .border_color(colors.subtle_border)
-                                        .child(result.clone()),
-                                ),
+                                        .flex()
+                                        .flex_col()
+                                        .child(div().flex_1().min_h_0().child(editor.clone()))
+                                        .child(handle)
+                                        .child(
+                                            div()
+                                                .h(px(extent))
+                                                .flex_none()
+                                                .min_h_0()
+                                                .child(result.clone()),
+                                        )
+                                        .into_any_element(),
+                                    ResultPlacement::Right => div()
+                                        .size_full()
+                                        .min_w_0()
+                                        .flex()
+                                        .child(div().flex_1().min_w_0().child(editor.clone()))
+                                        .child(handle)
+                                        .child(
+                                            div()
+                                                .w(px(extent))
+                                                .flex_none()
+                                                .min_w_0()
+                                                .child(result.clone()),
+                                        )
+                                        .into_any_element(),
+                                };
+                                body.child(split)
+                            }
                             _ => body.child(
                                 div()
                                     .size_full()
@@ -7546,6 +7656,33 @@ mod tests {
             pane.forget_item(2);
             assert!(!pane.backward_items.contains(&2));
             assert!(!pane.forward_items.contains(&2));
+        });
+    }
+
+    #[gpui::test]
+    fn results_layout_is_owned_by_each_query_tab(cx: &mut TestAppContext) {
+        let mut state = PresentationState::default();
+        state.workspace.panes[0].items.push(ItemPresentation {
+            id: 2,
+            kind: ItemKind::Query,
+            title: "second.sql".into(),
+            dirty: false,
+        });
+        let window = shell_with_state(state, cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        let pane = workspace.read_with(&cx, |shell, _| shell.panes[0].clone());
+
+        pane.update(&mut cx, |pane, cx| pane.toggle_results_placement(1, cx));
+        pane.read_with(&cx, |pane, cx| {
+            assert_eq!(
+                pane.results.get(&1).unwrap().read(cx).placement(),
+                ResultPlacement::Right
+            );
+            assert_eq!(
+                pane.results.get(&2).unwrap().read(cx).placement(),
+                ResultPlacement::Bottom
+            );
         });
     }
 

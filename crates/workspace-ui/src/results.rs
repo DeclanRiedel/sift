@@ -227,6 +227,12 @@ pub enum ResultTab {
     History,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ResultPlacement {
+    Bottom,
+    Right,
+}
+
 impl ResultTab {
     const ALL: [ResultTab; 4] = [
         ResultTab::Data,
@@ -254,6 +260,9 @@ pub struct ResultsView {
     state: ResultState,
     tab: ResultTab,
     selected: Option<(usize, usize)>,
+    placement: ResultPlacement,
+    bottom_height: f32,
+    right_width: f32,
 }
 
 impl ResultsView {
@@ -264,6 +273,9 @@ impl ResultsView {
             state: ResultState::Idle,
             tab: ResultTab::Data,
             selected: None,
+            placement: ResultPlacement::Bottom,
+            bottom_height: 240.0,
+            right_width: 420.0,
         }
     }
 
@@ -273,6 +285,33 @@ impl ResultsView {
 
     pub fn active_tab(&self) -> ResultTab {
         self.tab
+    }
+
+    pub(crate) fn placement(&self) -> ResultPlacement {
+        self.placement
+    }
+
+    pub(crate) fn extent(&self) -> f32 {
+        match self.placement {
+            ResultPlacement::Bottom => self.bottom_height,
+            ResultPlacement::Right => self.right_width,
+        }
+    }
+
+    pub(crate) fn set_extent(&mut self, extent: f32, cx: &mut Context<Self>) {
+        match self.placement {
+            ResultPlacement::Bottom => self.bottom_height = extent,
+            ResultPlacement::Right => self.right_width = extent,
+        }
+        cx.notify();
+    }
+
+    pub(crate) fn toggle_placement(&mut self, cx: &mut Context<Self>) {
+        self.placement = match self.placement {
+            ResultPlacement::Bottom => ResultPlacement::Right,
+            ResultPlacement::Right => ResultPlacement::Bottom,
+        };
+        cx.notify();
     }
 
     pub fn set_theme(&mut self, theme: Theme, cx: &mut Context<Self>) {
@@ -424,6 +463,75 @@ impl ResultsView {
                                 view.copy_selected_cell(&CopySelectedCell, window, cx)
                             }))
                             .child(icon(IconName::Copy, colors.muted_text, 13.)),
+                    ),
+            )
+    }
+
+    fn render_vertical_tab_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let colors = self.theme.colors;
+        div()
+            .w(px(92.))
+            .h_full()
+            .flex_none()
+            .flex()
+            .flex_col()
+            .border_r_1()
+            .border_color(colors.subtle_border)
+            .bg(colors.toolbar)
+            .children(ResultTab::ALL.into_iter().map(|tab| {
+                let selected = tab == self.tab;
+                div()
+                    .id(("result-tab-vertical", tab as usize))
+                    .relative()
+                    .h(px(30.))
+                    .px_2()
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .when(selected, |tab| {
+                        tab.bg(colors.background).text_color(colors.text).child(
+                            div()
+                                .absolute()
+                                .left_0()
+                                .top_1()
+                                .bottom_1()
+                                .w(px(1.))
+                                .bg(colors.accent),
+                        )
+                    })
+                    .when(!selected, |tab| tab.text_color(colors.muted_text))
+                    .hover(|tab| tab.bg(colors.hovered_surface).text_color(colors.text))
+                    .on_click(cx.listener(move |view, _, _, cx| view.select_tab(tab, cx)))
+                    .child(tab.label())
+            }))
+            .child(div().flex_1())
+            .child(
+                div()
+                    .px_2()
+                    .pb_2()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .text_xs()
+                    .text_color(colors.muted_text)
+                    .child(div().truncate().child(self.state.status_label()))
+                    .child(
+                        div()
+                            .id("copy-result-cell-vertical")
+                            .role(gpui::Role::Button)
+                            .aria_label("Copy selected result cell")
+                            .h(px(24.))
+                            .px_1()
+                            .flex()
+                            .items_center()
+                            .gap_1()
+                            .rounded(px(4.))
+                            .hover(|button| button.bg(colors.hovered_surface))
+                            .on_click(cx.listener(|view, _, window, cx| {
+                                view.copy_selected_cell(&CopySelectedCell, window, cx)
+                            }))
+                            .child(icon(IconName::Copy, colors.muted_text, 13.))
+                            .child("Copy"),
                     ),
             )
     }
@@ -705,13 +813,21 @@ impl gpui::Render for ResultsView {
             .track_focus(&self.focus_handle)
             .on_action(cx.listener(Self::copy_selected_cell))
             .flex()
-            .flex_col()
+            .when(self.placement == ResultPlacement::Bottom, |view| {
+                view.flex_col()
+            })
+            .when(self.placement == ResultPlacement::Right, |view| view.flex())
             .size_full()
             .min_h_0()
             .bg(colors.background)
             .text_color(colors.text)
-            .child(self.render_tab_bar(cx))
-            .child(div().flex_1().min_h_0().child(body))
+            .when(self.placement == ResultPlacement::Bottom, |view| {
+                view.child(self.render_tab_bar(cx))
+            })
+            .when(self.placement == ResultPlacement::Right, |view| {
+                view.child(self.render_vertical_tab_bar(cx))
+            })
+            .child(div().flex_1().min_w_0().min_h_0().child(body))
     }
 }
 
@@ -831,6 +947,15 @@ mod tests {
             assert_eq!(view.active_tab(), ResultTab::Messages);
             view.select_cell(0, 0, cx);
             assert_eq!(view.selected_cell_text().as_deref(), Some("neo"));
+            assert_eq!(view.placement(), ResultPlacement::Bottom);
+            view.set_extent(300.0, cx);
+            assert_eq!(view.extent(), 300.0);
+            view.toggle_placement(cx);
+            assert_eq!(view.placement(), ResultPlacement::Right);
+            assert_eq!(view.extent(), 420.0);
+            view.set_extent(360.0, cx);
+            view.toggle_placement(cx);
+            assert_eq!(view.extent(), 300.0);
         });
     }
 
