@@ -9,10 +9,15 @@ use gpui::{
     actions, div, fill, point, prelude::*, px, size, App, Bounds, ClipboardItem, Context,
     CursorStyle, Element, ElementId, ElementInputHandler, Entity, EntityInputHandler, EventEmitter,
     FocusHandle, Focusable, GlobalElementId, IntoElement, LayoutId, MouseButton, PaintQuad, Pixels,
-    Role, ShapedLine, Style, TextRun, UTF16Selection, Window,
+    Role, ScrollHandle, ShapedLine, Style, TextRun, UTF16Selection, Window,
 };
 use sift_doc::{random_peer_id, TextReplica};
 use sift_ui::{icon, IconName, Theme};
+
+const EDITOR_LINE_HEIGHT: Pixels = px(20.);
+const EDITOR_GUTTER_WIDTH: Pixels = px(48.);
+const EDITOR_TEXT_INSET: Pixels = px(12.);
+const EDITOR_VERTICAL_INSET: Pixels = px(8.);
 
 /// A single applied edit, retained so it can be inverted for undo/redo. Offsets
 /// are byte offsets into the materialized text at the time the edit applied.
@@ -512,6 +517,18 @@ pub enum EditorLanguage {
     Toml,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EditorKeymap {
+    Standard,
+    Vim,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VimMode {
+    Normal,
+    Insert,
+}
+
 actions!(
     sift_editor,
     [
@@ -536,7 +553,8 @@ actions!(
         Cut,
         Paste,
         Undo,
-        Redo
+        Redo,
+        ExitInsertMode
     ]
 );
 
@@ -548,11 +566,15 @@ pub struct QueryEditor {
     document: QueryDocument,
     theme: Theme,
     language: EditorLanguage,
+    keymap: EditorKeymap,
+    vim_mode: VimMode,
     marked_range: Option<Range<usize>>,
     line_layouts: Vec<ShapedLine>,
+    visible_line_start: usize,
     line_starts: Vec<usize>,
     line_height: Pixels,
     last_bounds: Option<Bounds<Pixels>>,
+    scroll_handle: ScrollHandle,
 }
 
 impl QueryEditor {
@@ -562,17 +584,41 @@ impl QueryEditor {
             document,
             theme,
             language: EditorLanguage::Sql,
+            keymap: EditorKeymap::Standard,
+            vim_mode: VimMode::Insert,
             marked_range: None,
             line_layouts: Vec::new(),
+            visible_line_start: 0,
             line_starts: Vec::new(),
-            line_height: px(20.),
+            line_height: EDITOR_LINE_HEIGHT,
             last_bounds: None,
+            scroll_handle: ScrollHandle::new(),
         }
     }
 
     pub fn with_language(mut self, language: EditorLanguage) -> Self {
         self.language = language;
         self
+    }
+
+    pub fn keymap(&self) -> EditorKeymap {
+        self.keymap
+    }
+
+    pub fn vim_mode(&self) -> VimMode {
+        self.vim_mode
+    }
+
+    pub fn toggle_keymap(&mut self, cx: &mut Context<Self>) {
+        self.keymap = match self.keymap {
+            EditorKeymap::Standard => EditorKeymap::Vim,
+            EditorKeymap::Vim => EditorKeymap::Standard,
+        };
+        self.vim_mode = match self.keymap {
+            EditorKeymap::Standard => VimMode::Insert,
+            EditorKeymap::Vim => VimMode::Normal,
+        };
+        self.selection_changed(cx);
     }
 
     pub fn document(&self) -> &QueryDocument {
@@ -590,13 +636,39 @@ impl QueryEditor {
 
     fn edited(&mut self, cx: &mut Context<Self>) {
         self.marked_range = None;
+        self.reveal_cursor();
         cx.emit(EditorEvent::StateChanged);
         cx.notify();
     }
 
     fn selection_changed(&mut self, cx: &mut Context<Self>) {
+        self.reveal_cursor();
         cx.emit(EditorEvent::StateChanged);
         cx.notify();
+    }
+
+    fn reveal_cursor(&self) {
+        let viewport = self.scroll_handle.bounds();
+        if viewport.size.height <= px(0.) {
+            return;
+        }
+        let line = self.document.text()[..self.document.cursor()]
+            .bytes()
+            .filter(|byte| *byte == b'\n')
+            .count();
+        let caret_top = EDITOR_VERTICAL_INSET + EDITOR_LINE_HEIGHT * line as f32;
+        let caret_bottom = caret_top + EDITOR_LINE_HEIGHT;
+        let mut offset = self.scroll_handle.offset();
+        let visible_top = -offset.y;
+        let visible_bottom = visible_top + viewport.size.height;
+        if caret_top < visible_top + EDITOR_VERTICAL_INSET {
+            offset.y = -(caret_top - EDITOR_VERTICAL_INSET).max(px(0.));
+        } else if caret_bottom > visible_bottom - EDITOR_VERTICAL_INSET {
+            offset.y = -(caret_bottom + EDITOR_VERTICAL_INSET - viewport.size.height);
+        }
+        let max_offset = self.scroll_handle.max_offset().y;
+        offset.y = offset.y.min(px(0.)).max(max_offset);
+        self.scroll_handle.set_offset(offset);
     }
 
     fn backspace(&mut self, _: &Backspace, _: &mut Window, cx: &mut Context<Self>) {
@@ -708,6 +780,41 @@ impl QueryEditor {
         }
     }
 
+    fn exit_insert_mode(&mut self, _: &ExitInsertMode, _: &mut Window, cx: &mut Context<Self>) {
+        if self.keymap == EditorKeymap::Vim {
+            self.vim_mode = VimMode::Normal;
+            self.selection_changed(cx);
+        }
+    }
+
+    fn handle_vim_normal_input(&mut self, text: &str, cx: &mut Context<Self>) -> bool {
+        if self.keymap != EditorKeymap::Vim || self.vim_mode != VimMode::Normal {
+            return false;
+        }
+        for command in text.chars() {
+            match command {
+                'h' => self.document.move_left(false),
+                'j' => self.document.move_down(false),
+                'k' => self.document.move_up(false),
+                'l' => self.document.move_right(false),
+                '0' => self.document.move_line_start(false),
+                '$' => self.document.move_line_end(false),
+                'i' => self.vim_mode = VimMode::Insert,
+                'a' => {
+                    self.document.move_right(false);
+                    self.vim_mode = VimMode::Insert;
+                }
+                'x' => self.document.delete_forward(),
+                'u' => {
+                    self.document.undo();
+                }
+                _ => {}
+            }
+        }
+        self.selection_changed(cx);
+        true
+    }
+
     fn execute_statement(&mut self, _: &ExecuteStatement, _: &mut Window, cx: &mut Context<Self>) {
         let sql = self
             .document
@@ -803,6 +910,9 @@ impl EntityInputHandler for QueryEditor {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.handle_vim_normal_input(new_text, cx) {
+            return;
+        }
         let range = range_utf16
             .as_ref()
             .map(|range| self.range_from_utf16(range))
@@ -848,7 +958,9 @@ impl EntityInputHandler for QueryEditor {
     ) -> Option<Bounds<Pixels>> {
         let range = self.range_from_utf16(&range_utf16);
         let (line, line_start) = self.line_of(range.start);
-        let layout = self.line_layouts.get(line)?;
+        let layout = self
+            .line_layouts
+            .get(line.checked_sub(self.visible_line_start)?)?;
         let x = layout.x_for_index(range.start - line_start);
         let top = bounds.top() + self.line_height * line as f32;
         Some(Bounds::from_corners(
@@ -868,7 +980,9 @@ impl EntityInputHandler for QueryEditor {
         let line = ((relative_y / f32::from(self.line_height)) as usize)
             .min(self.line_starts.len().saturating_sub(1));
         let line_start = *self.line_starts.get(line)?;
-        let layout = self.line_layouts.get(line)?;
+        let layout = self
+            .line_layouts
+            .get(line.checked_sub(self.visible_line_start)?)?;
         let within = layout.index_for_x(point.x - bounds.left()).unwrap_or(0);
         Some(self.offset_to_utf16(line_start + within))
     }
@@ -877,10 +991,6 @@ impl EntityInputHandler for QueryEditor {
 impl gpui::Render for QueryEditor {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = self.theme.colors;
-        let line_count = self.document.text().split('\n').count();
-        let active_line = self.document.text()[..self.document.cursor()]
-            .matches('\n')
-            .count();
         div()
             .id("sift-query-editor")
             .key_context("SiftEditor")
@@ -902,8 +1012,34 @@ impl gpui::Render for QueryEditor {
             // SiftEditor key context is active and editing keys route.
             .on_mouse_down(
                 MouseButton::Left,
-                cx.listener(|editor, _, window, cx| {
+                cx.listener(|editor, event: &gpui::MouseDownEvent, window, cx| {
                     editor.focus_handle.clone().focus(window, cx);
+                    let Some(bounds) = editor.last_bounds else {
+                        return;
+                    };
+                    if event.position.x < bounds.left()
+                        || event.position.x > bounds.right()
+                        || event.position.y < bounds.top()
+                        || event.position.y > bounds.bottom()
+                    {
+                        return;
+                    }
+                    let relative_y = f32::from(event.position.y - bounds.top()).max(0.0);
+                    let line = ((relative_y / f32::from(editor.line_height)) as usize)
+                        .min(editor.line_starts.len().saturating_sub(1));
+                    let Some((&line_start, layout)) = editor
+                        .line_starts
+                        .get(line)
+                        .zip(editor.line_layouts.get(line))
+                    else {
+                        return;
+                    };
+                    let within = layout
+                        .index_for_x(event.position.x - bounds.left())
+                        .unwrap_or(0);
+                    let cursor = line_start + within;
+                    editor.document.set_selection(cursor..cursor, false);
+                    editor.selection_changed(cx);
                 }),
             )
             .on_action(cx.listener(Self::backspace))
@@ -926,73 +1062,76 @@ impl gpui::Render for QueryEditor {
             .on_action(cx.listener(Self::paste))
             .on_action(cx.listener(Self::undo))
             .on_action(cx.listener(Self::redo))
+            .on_action(cx.listener(Self::exit_insert_mode))
             .on_action(cx.listener(Self::execute_statement))
             .on_action(cx.listener(Self::execute_document))
-            .child(
-                div()
-                    .h(px(30.))
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .px_2()
-                    .border_b_1()
-                    .border_color(colors.subtle_border)
-                    .bg(colors.toolbar)
-                    .font_family(".SystemUIFont")
-                    .child(
-                        div()
-                            .flex()
-                            .flex_1()
-                            .min_w_0()
-                            .overflow_hidden()
-                            .items_center()
-                            .gap_2()
-                            .text_xs()
-                            .text_color(colors.muted_text)
-                            .child(match self.language {
-                                EditorLanguage::Sql => "SQL",
-                                EditorLanguage::Toml => "TOML",
-                            })
-                            .child(div().size(px(3.)).rounded_full().bg(colors.strong_border))
-                            .child(div().min_w_0().truncate().child(match self.language {
-                                EditorLanguage::Sql => "Collaborative query",
-                                EditorLanguage::Toml => "Instance configuration",
-                            })),
-                    )
-                    .when(self.language == EditorLanguage::Sql, |toolbar| {
-                        toolbar.child(
+            .when(self.language == EditorLanguage::Sql, |editor| {
+                editor.child(
+                    div()
+                        .h(px(30.))
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .px_2()
+                        .border_b_1()
+                        .border_color(colors.subtle_border)
+                        .bg(colors.toolbar)
+                        .font_family(".SystemUIFont")
+                        .child(
                             div()
-                                .id("editor-run-statement")
-                                .flex_none()
-                                .role(Role::Button)
-                                .aria_label("Run current SQL statement")
-                                .h(px(24.))
-                                .px_2()
                                 .flex()
+                                .flex_1()
+                                .min_w_0()
+                                .overflow_hidden()
                                 .items_center()
-                                .gap_1()
-                                .rounded(px(5.))
-                                .bg(colors.accent_muted)
+                                .gap_2()
                                 .text_xs()
-                                .text_color(colors.accent_hover)
-                                .hover(|button| {
-                                    button.bg(colors.active_surface).text_color(colors.text)
+                                .text_color(colors.muted_text)
+                                .child(match self.language {
+                                    EditorLanguage::Sql => "SQL",
+                                    EditorLanguage::Toml => "TOML",
                                 })
-                                .on_click(cx.listener(|editor, _, window, cx| {
-                                    editor.execute_statement(&ExecuteStatement, window, cx)
-                                }))
-                                .child(icon(IconName::Play, colors.accent_hover, 12.))
-                                .child("Run")
-                                .child(
-                                    div()
-                                        .flex_none()
-                                        .ml_1()
-                                        .text_color(colors.muted_text)
-                                        .child("Ctrl ↵"),
-                                ),
+                                .child(div().size(px(3.)).rounded_full().bg(colors.strong_border))
+                                .child(div().min_w_0().truncate().child(match self.language {
+                                    EditorLanguage::Sql => "Collaborative query",
+                                    EditorLanguage::Toml => "Instance configuration",
+                                })),
                         )
-                    }),
-            )
+                        .when(self.language == EditorLanguage::Sql, |toolbar| {
+                            toolbar.child(
+                                div()
+                                    .id("editor-run-statement")
+                                    .flex_none()
+                                    .role(Role::Button)
+                                    .aria_label("Run current SQL statement")
+                                    .h(px(24.))
+                                    .px_2()
+                                    .flex()
+                                    .items_center()
+                                    .gap_1()
+                                    .rounded(px(5.))
+                                    .bg(colors.accent_muted)
+                                    .text_xs()
+                                    .text_color(colors.accent_hover)
+                                    .hover(|button| {
+                                        button.bg(colors.active_surface).text_color(colors.text)
+                                    })
+                                    .on_click(cx.listener(|editor, _, window, cx| {
+                                        editor.execute_statement(&ExecuteStatement, window, cx)
+                                    }))
+                                    .child(icon(IconName::Play, colors.accent_hover, 12.))
+                                    .child("Run")
+                                    .child(
+                                        div()
+                                            .flex_none()
+                                            .ml_1()
+                                            .text_color(colors.muted_text)
+                                            .child("Ctrl ↵"),
+                                    ),
+                            )
+                        }),
+                )
+            })
             .children(
                 (self.language == EditorLanguage::Toml)
                     .then(|| toml_diagnostic(self.document.text()))
@@ -1011,44 +1150,15 @@ impl gpui::Render for QueryEditor {
             )
             .child(
                 div()
-                    .flex()
+                    .id("editor-scroll")
                     .flex_1()
                     .min_h_0()
                     .bg(colors.background)
-                    .child(
-                        div()
-                            .w(px(44.))
-                            .flex_none()
-                            .pt_2()
-                            .pr_2()
-                            .border_r_1()
-                            .border_color(colors.subtle_border)
-                            .bg(colors.editor_gutter)
-                            .text_xs()
-                            .text_color(colors.disabled_text)
-                            .children((0..line_count).map(|line| {
-                                div()
-                                    .h(px(20.))
-                                    .flex()
-                                    .items_center()
-                                    .justify_end()
-                                    .when(line == active_line, |number| {
-                                        number.text_color(colors.muted_text)
-                                    })
-                                    .child((line + 1).to_string())
-                            })),
-                    )
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .overflow_hidden()
-                            .px_3()
-                            .py_2()
-                            .child(QueryEditorElement {
-                                editor: cx.entity(),
-                            }),
-                    ),
+                    .overflow_y_scroll()
+                    .track_scroll(&self.scroll_handle)
+                    .child(QueryEditorElement {
+                        editor: cx.entity(),
+                    }),
             )
     }
 }
@@ -1058,11 +1168,16 @@ struct QueryEditorElement {
 }
 
 struct EditorPrepaint {
-    lines: Vec<ShapedLine>,
+    lines: Vec<(usize, ShapedLine)>,
+    line_numbers: Vec<(usize, ShapedLine)>,
     line_starts: Vec<usize>,
+    visible_line_start: usize,
     active_line: Option<PaintQuad>,
     selections: Vec<PaintQuad>,
     cursor: Option<PaintQuad>,
+    gutter: PaintQuad,
+    gutter_border: PaintQuad,
+    text_bounds: Bounds<Pixels>,
     line_height: Pixels,
 }
 
@@ -1096,7 +1211,8 @@ impl Element for QueryEditorElement {
         let line_count = self.editor.read(cx).document.text().split('\n').count();
         let mut style = Style::default();
         style.size.width = gpui::relative(1.).into();
-        style.size.height = (window.line_height() * line_count.max(1) as f32).into();
+        style.size.height =
+            (EDITOR_VERTICAL_INSET * 2. + EDITOR_LINE_HEIGHT * line_count.max(1) as f32).into();
         (window.request_layout(style, [], cx), ())
     }
 
@@ -1110,24 +1226,60 @@ impl Element for QueryEditorElement {
         cx: &mut App,
     ) -> Self::PrepaintState {
         let editor = self.editor.read(cx);
-        let text = editor.document.text().to_string();
+        let text = editor.document.text();
         let selection = editor.document.selection();
         let cursor = editor.document.cursor();
         let theme = editor.theme;
         let language = editor.language;
+        let block_cursor = editor.keymap == EditorKeymap::Vim && editor.vim_mode == VimMode::Normal;
+        let viewport = editor.scroll_handle.bounds();
         let style = window.text_style();
         let font_size = style.font_size.to_pixels(window.rem_size());
-        let line_height = window.line_height();
+        let line_height = EDITOR_LINE_HEIGHT;
 
         let mut lines = Vec::new();
-        let mut line_starts = Vec::new();
+        let mut line_numbers = Vec::new();
+        let mut line_starts = vec![0];
+        line_starts.extend(
+            text.match_indices('\n')
+                .map(|(offset, _)| offset.saturating_add(1)),
+        );
         let mut selections = Vec::new();
         let mut cursor_quad = None;
         let mut active_line_quad = None;
+        let text_top = bounds.top() + EDITOR_VERTICAL_INSET;
+        let text_left = bounds.left() + EDITOR_GUTTER_WIDTH + EDITOR_TEXT_INSET;
+        let text_bounds = Bounds::new(
+            point(text_left, text_top),
+            size(
+                (bounds.size.width - EDITOR_GUTTER_WIDTH - EDITOR_TEXT_INSET).max(px(0.)),
+                EDITOR_LINE_HEIGHT * line_starts.len().max(1) as f32,
+            ),
+        );
+        let visible_start = if viewport.size.height > px(0.) {
+            ((f32::from(viewport.top() - text_top) / f32::from(line_height)).floor() as isize)
+                .max(0) as usize
+        } else {
+            0
+        }
+        .saturating_sub(2)
+        .min(line_starts.len().saturating_sub(1));
+        let visible_end = if viewport.size.height > px(0.) {
+            ((f32::from(viewport.bottom() - text_top) / f32::from(line_height)).ceil() as isize)
+                .max(0) as usize
+                + 2
+        } else {
+            100
+        }
+        .min(line_starts.len());
 
-        let mut offset = 0usize;
-        for (line_index, line) in text.split('\n').enumerate() {
-            line_starts.push(offset);
+        for (line_index, line) in text
+            .split('\n')
+            .enumerate()
+            .skip(visible_start)
+            .take(visible_end.saturating_sub(visible_start))
+        {
+            let offset = line_starts[line_index];
             let line_end = offset + line.len();
             let runs = match language {
                 EditorLanguage::Sql => sql_text_runs(line, style.font(), theme),
@@ -1137,7 +1289,27 @@ impl Element for QueryEditorElement {
                 window
                     .text_system()
                     .shape_line(line.to_string().into(), font_size, &runs, None);
-            let top = bounds.top() + line_height * line_index as f32;
+            let number_color = if cursor >= offset && cursor <= line_end {
+                theme.colors.muted_text
+            } else {
+                theme.colors.disabled_text
+            };
+            let number = (line_index + 1).to_string();
+            let number_runs = [TextRun {
+                len: number.len(),
+                font: style.font(),
+                color: number_color,
+                background_color: None,
+                underline: None,
+                strikethrough: None,
+            }];
+            line_numbers.push((
+                line_index,
+                window
+                    .text_system()
+                    .shape_line(number.into(), font_size, &number_runs, None),
+            ));
+            let top = text_top + line_height * line_index as f32;
 
             if cursor >= offset && cursor <= line_end {
                 active_line_quad = Some(fill(
@@ -1163,8 +1335,8 @@ impl Element for QueryEditorElement {
                     };
                     selections.push(fill(
                         Bounds::from_corners(
-                            point(bounds.left() + x0, top),
-                            point(bounds.left() + x1, top + line_height),
+                            point(text_left + x0, top),
+                            point(text_left + x1, top + line_height),
                         ),
                         theme.colors.selected_surface,
                     ));
@@ -1174,21 +1346,37 @@ impl Element for QueryEditorElement {
             if selection.is_empty() && cursor >= offset && cursor <= line_end {
                 let x = shaped.x_for_index(cursor - offset);
                 cursor_quad = Some(fill(
-                    Bounds::new(point(bounds.left() + x, top), size(px(1.5), line_height)),
+                    Bounds::new(
+                        point(text_left + x, top),
+                        size(if block_cursor { px(7.) } else { px(1.5) }, line_height),
+                    ),
                     theme.colors.accent,
                 ));
             }
 
-            lines.push(shaped);
-            offset = line_end + 1;
+            lines.push((line_index, shaped));
         }
 
         EditorPrepaint {
             lines,
+            line_numbers,
             line_starts,
+            visible_line_start: visible_start,
             active_line: active_line_quad,
             selections,
             cursor: cursor_quad,
+            gutter: fill(
+                Bounds::new(bounds.origin, size(EDITOR_GUTTER_WIDTH, bounds.size.height)),
+                theme.colors.editor_gutter,
+            ),
+            gutter_border: fill(
+                Bounds::new(
+                    point(bounds.left() + EDITOR_GUTTER_WIDTH - px(1.), bounds.top()),
+                    size(px(1.), bounds.size.height),
+                ),
+                theme.colors.subtle_border,
+            ),
+            text_bounds,
             line_height,
         }
     }
@@ -1206,33 +1394,51 @@ impl Element for QueryEditorElement {
         let focus_handle = self.editor.read(cx).focus_handle.clone();
         window.handle_input(
             &focus_handle,
-            ElementInputHandler::new(bounds, self.editor.clone()),
+            ElementInputHandler::new(prepaint.text_bounds, self.editor.clone()),
             cx,
         );
+        window.paint_quad(prepaint.gutter.clone());
         if let Some(active_line) = prepaint.active_line.take() {
             window.paint_quad(active_line);
         }
+        window.paint_quad(prepaint.gutter_border.clone());
         for selection in prepaint.selections.drain(..) {
             window.paint_quad(selection);
         }
         let line_height = prepaint.line_height;
-        for (index, line) in prepaint.lines.iter().enumerate() {
-            let origin = point(bounds.left(), bounds.top() + line_height * index as f32);
+        for (index, line) in &prepaint.lines {
+            let origin = point(
+                prepaint.text_bounds.left(),
+                prepaint.text_bounds.top() + line_height * *index as f32,
+            );
             line.paint(origin, line_height, gpui::TextAlign::Left, None, window, cx)
                 .expect("editor line paint succeeds");
+        }
+        for (index, number) in &prepaint.line_numbers {
+            let origin = point(
+                bounds.left() + EDITOR_GUTTER_WIDTH - px(8.) - number.width(),
+                prepaint.text_bounds.top() + line_height * *index as f32,
+            );
+            number
+                .paint(origin, line_height, gpui::TextAlign::Left, None, window, cx)
+                .expect("line number paint succeeds");
         }
         if focus_handle.is_focused(window) {
             if let Some(cursor) = prepaint.cursor.take() {
                 window.paint_quad(cursor);
             }
         }
-        let lines = std::mem::take(&mut prepaint.lines);
+        let lines = std::mem::take(&mut prepaint.lines)
+            .into_iter()
+            .map(|(_, line)| line)
+            .collect();
         let line_starts = std::mem::take(&mut prepaint.line_starts);
         self.editor.update(cx, |editor, _| {
             editor.line_layouts = lines;
+            editor.visible_line_start = prepaint.visible_line_start;
             editor.line_starts = line_starts;
             editor.line_height = line_height;
-            editor.last_bounds = Some(bounds);
+            editor.last_bounds = Some(prepaint.text_bounds);
         });
     }
 }
@@ -1489,6 +1695,67 @@ mod tests {
             editor.read_with(&cx, |editor, _| editor.document().text().to_string()),
             "select 1\n"
         );
+    }
+
+    #[gpui::test]
+    fn large_editor_virtualizes_rows_and_scrolls(cx: &mut TestAppContext) {
+        let text = (0..2_000)
+            .map(|line| format!("select {line};"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let window = cx
+            .update(|cx| {
+                cx.open_window(Default::default(), |_window, cx| {
+                    cx.new(|cx| QueryEditor::new(doc(&text), Theme::dark(), cx))
+                })
+            })
+            .unwrap();
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let editor = window.root(&mut cx).unwrap();
+        cx.run_until_parked();
+        editor.read_with(&cx, |editor, _| {
+            assert_eq!(editor.line_starts.len(), 2_000);
+            assert!(editor.line_layouts.len() < 100);
+        });
+
+        let viewport = editor.read_with(&cx, |editor, _| editor.scroll_handle.bounds());
+        cx.simulate_event(gpui::ScrollWheelEvent {
+            position: viewport.center(),
+            delta: gpui::ScrollDelta::Pixels(point(px(0.), px(-600.))),
+            ..Default::default()
+        });
+        cx.run_until_parked();
+        editor.read_with(&cx, |editor, _| {
+            assert!(editor.scroll_handle.offset().y < px(0.));
+            assert!(editor.visible_line_start > 0);
+            assert!(editor.line_layouts.len() < 100);
+        });
+    }
+
+    #[gpui::test]
+    fn vim_normal_mode_routes_commands_without_inserting_them(cx: &mut TestAppContext) {
+        let window = cx
+            .update(|cx| {
+                cx.open_window(Default::default(), |_window, cx| {
+                    cx.new(|cx| QueryEditor::new(doc("abc"), Theme::dark(), cx))
+                })
+            })
+            .unwrap();
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let editor = window.root(&mut cx).unwrap();
+        editor.update_in(&mut cx, |editor, window, cx| {
+            editor.toggle_keymap(cx);
+            editor.replace_text_in_range(None, "h", window, cx);
+            assert_eq!(editor.document.cursor(), 2);
+            assert_eq!(editor.document.text(), "abc");
+            editor.replace_text_in_range(None, "i", window, cx);
+            editor.replace_text_in_range(None, "Z", window, cx);
+        });
+        editor.read_with(&cx, |editor, _| {
+            assert_eq!(editor.keymap(), EditorKeymap::Vim);
+            assert_eq!(editor.vim_mode(), VimMode::Insert);
+            assert_eq!(editor.document.text(), "abZc");
+        });
     }
 
     #[test]
