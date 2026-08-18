@@ -439,6 +439,9 @@ pub struct Pane {
     clean_documents: HashMap<u64, String>,
     /// The Data/Messages/Explain/History surface owned by each query item.
     results: HashMap<u64, Entity<ResultsView>>,
+    /// Transient wrapper sizes while dragging. Keeping these on the pane avoids
+    /// invalidating and repainting the result grid for every pointer event.
+    live_result_extents: HashMap<u64, f32>,
     /// Dirty-close confirmation belongs to its tab and is rendered inline.
     pending_close_item: Option<u64>,
 }
@@ -490,6 +493,7 @@ impl Pane {
             editors,
             clean_documents,
             results,
+            live_result_extents: HashMap::new(),
             pending_close_item: None,
         }
     }
@@ -659,6 +663,7 @@ impl Pane {
         self.backward_items.retain(|id| *id != item_id);
         self.forward_items.retain(|id| *id != item_id);
         self.clean_documents.remove(&item_id);
+        self.live_result_extents.remove(&item_id);
         if self.pending_close_item == Some(item_id) {
             self.pending_close_item = None;
         }
@@ -740,9 +745,9 @@ impl Pane {
         cx: &mut Context<Self>,
     ) {
         let drag = *event.drag(cx);
-        let Some(results) = self.results.get(&drag.item_id) else {
+        if !self.results.contains_key(&drag.item_id) {
             return;
-        };
+        }
         let width: f32 = event.bounds.size.width.into();
         let height: f32 = event.bounds.size.height.into();
         let pointer_x: f32 = (event.event.position.x - event.bounds.left()).into();
@@ -755,11 +760,27 @@ impl Pane {
                 .max(RESULT_MIN_EXTENT)
                 .min((width - EDITOR_MIN_EXTENT).max(RESULT_MIN_EXTENT)),
         };
-        results.update(cx, |results, cx| results.set_extent(extent, cx));
+        self.live_result_extents.insert(drag.item_id, extent);
+        cx.notify();
+    }
+
+    fn finish_results_resize(
+        &mut self,
+        drag: &ResultResizeDrag,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(extent) = self.live_result_extents.remove(&drag.item_id) else {
+            return;
+        };
+        if let Some(results) = self.results.get(&drag.item_id) {
+            results.update(cx, |results, cx| results.set_extent(extent, cx));
+        }
     }
 
     fn toggle_results_placement(&mut self, item_id: u64, cx: &mut Context<Self>) {
         if let Some(results) = self.results.get(&item_id) {
+            self.live_result_extents.remove(&item_id);
             results.update(cx, ResultsView::toggle_placement);
         }
     }
@@ -829,6 +850,7 @@ impl gpui::Render for Pane {
                 cx.listener(|_, _, _, cx| cx.emit(PaneEvent::FocusRequested)),
             )
             .on_drag_move::<ResultResizeDrag>(cx.listener(Self::resize_results))
+            .on_drop::<ResultResizeDrag>(cx.listener(Self::finish_results_resize))
             .flex()
             .flex_col()
             .flex_1()
@@ -1145,7 +1167,11 @@ impl gpui::Render for Pane {
                         match (self.editors.get(&item.id), self.results.get(&item.id)) {
                             (Some(editor), Some(result)) => {
                                 let placement = result.read(cx).placement();
-                                let extent = result.read(cx).extent();
+                                let extent = self
+                                    .live_result_extents
+                                    .get(&item.id)
+                                    .copied()
+                                    .unwrap_or_else(|| result.read(cx).extent());
                                 let item_id = item.id;
                                 let handle = div()
                                     .id(("resize-query-results", item_id as usize))
