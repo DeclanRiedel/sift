@@ -1242,15 +1242,6 @@ impl gpui::Render for Pane {
                                                 .when(selected, |tab| {
                                                     tab.bg(colors.background)
                                                         .text_color(colors.text)
-                                                        .child(
-                                                            div()
-                                                                .absolute()
-                                                                .left_0()
-                                                                .right_0()
-                                                                .bottom_0()
-                                                                .h(px(1.))
-                                                                .bg(colors.accent),
-                                                        )
                                                 })
                                                 .child(
                                                     div()

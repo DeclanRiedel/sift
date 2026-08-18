@@ -873,7 +873,6 @@ impl ResultsView {
                                     .pr_2()
                                     .border_r_1()
                                     .border_color(colors.subtle_border)
-                                    .bg(colors.editor_gutter)
                                     .text_xs()
                                     .text_color(colors.disabled_text)
                                     .when(
