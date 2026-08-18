@@ -721,7 +721,6 @@ impl ResultsView {
                     .when(self.selected == Some(GridSelection::All), |header| {
                         header.bg(colors.selected_surface)
                     })
-                    .hover(|header| header.bg(colors.hovered_surface))
                     .on_click(cx.listener(|view, _, window, cx| {
                         view.focus_handle.focus(window, cx);
                         view.select_all(cx);
@@ -753,7 +752,6 @@ impl ResultsView {
                         ) || self.selected == Some(GridSelection::All),
                         |header| header.bg(colors.selected_surface),
                     )
-                    .hover(|header| header.bg(colors.hovered_surface))
                     .on_click(cx.listener(move |view, _, window, cx| {
                         view.focus_handle.focus(window, cx);
                         view.select_column(column_index, cx);
@@ -822,7 +820,6 @@ impl ResultsView {
                                     .border_r_1()
                                     .border_color(colors.subtle_border)
                                     .text_color(color)
-                                    .hover(|cell| cell.bg(colors.hovered_surface))
                                     .when(
                                         rendered.is_some_and(|cell| {
                                             matches!(cell.class, CellClass::Number)
@@ -867,7 +864,6 @@ impl ResultsView {
                                         ) || view.selected == Some(GridSelection::All),
                                         |header| header.bg(colors.selected_surface),
                                     )
-                                    .hover(|header| header.bg(colors.hovered_surface))
                                     .on_click(cx.listener(move |view, _, window, cx| {
                                         view.focus_handle.focus(window, cx);
                                         view.select_row(row_index, cx);
