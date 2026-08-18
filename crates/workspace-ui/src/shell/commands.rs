@@ -124,14 +124,14 @@ const DEFINITIONS: &[CommandDefinition] = &[
     ),
     command(
         CommandId::ExecuteStatement,
-        "Run Query Statement",
+        "Run Current Statement",
         "Ctrl+Enter",
         true,
         AvailabilityRule::ActiveItem,
     ),
     command(
         CommandId::ExecuteDocument,
-        "Run Query Document",
+        "Run Entire Query Tab",
         "Ctrl+Shift+Enter",
         true,
         AvailabilityRule::ActiveItem,
