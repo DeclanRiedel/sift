@@ -3135,6 +3135,16 @@ impl WorkspaceShell {
             .is_some_and(|pane| pane.read(cx).active_focus_handle(cx).is_focused(window))
     }
 
+    #[cfg(test)]
+    fn active_results_focused(&self, window: &Window, cx: &App) -> bool {
+        self.panes.get(self.active_pane).is_some_and(|pane| {
+            let pane = pane.read(cx);
+            pane.active_item()
+                .and_then(|item| pane.results.get(&item.id))
+                .is_some_and(|results| results.focus_handle(cx).is_focused(window))
+        })
+    }
+
     fn on_pane_event(
         &mut self,
         emitter: &Entity<Pane>,
@@ -3147,10 +3157,13 @@ impl WorkspaceShell {
         };
         match event {
             PaneEvent::FocusRequested => {
-                // Always (re)focus the clicked pane's editor — not just when the
-                // active pane changes — so a click after a modal restores focus.
                 self.active_pane = index;
-                self.focus_active_pane(window, cx);
+                // A child control may already have claimed focus while this
+                // bubbled. Preserve it (notably the result grid); otherwise a
+                // pane click restores the active editor after a modal.
+                if !emitter.read(cx).focus_handle.contains_focused(window, cx) {
+                    self.focus_active_pane(window, cx);
+                }
                 cx.notify();
             }
             PaneEvent::CloseRequested => {
@@ -8775,6 +8788,64 @@ mod tests {
         cx.update(|window, cx| focus.dispatch_action(&DismissModal, window, cx));
         let focused = cx.update(|window, cx| workspace.read(cx).active_editor_focused(window, cx));
         assert!(focused);
+    }
+
+    #[gpui::test]
+    fn clicking_results_releases_editor_focus_and_routes_grid_navigation(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        workspace.update(&mut cx, |shell, cx| {
+            shell.route_result(
+                1,
+                ResultState::Ready(crate::results::ResultData {
+                    columns: vec![
+                        crate::results::ResultColumn {
+                            name: "id".into(),
+                            type_label: "int64".into(),
+                            nullable: false,
+                        },
+                        crate::results::ResultColumn {
+                            name: "name".into(),
+                            type_label: "text".into(),
+                            nullable: false,
+                        },
+                    ],
+                    rows: vec![sift_protocol::Row::new(vec![
+                        sift_protocol::Value::Int64(1),
+                        sift_protocol::Value::Text("Ada".into()),
+                    ])],
+                    ..Default::default()
+                }),
+                cx,
+            );
+        });
+        cx.run_until_parked();
+
+        let row = cx.debug_bounds("result-row-0").expect("visible result row");
+        cx.simulate_mouse_down(
+            point(
+                row.left() + px(crate::results::ROW_NUMBER_WIDTH + 12.0),
+                row.top() + px(crate::results::ROW_HEIGHT / 2.0),
+            ),
+            MouseButton::Left,
+            Modifiers::default(),
+        );
+
+        assert!(cx.update(|window, cx| workspace.read(cx).active_results_focused(window, cx)));
+        assert!(!cx.update(|window, cx| workspace.read(cx).active_editor_focused(window, cx)));
+        let results = workspace.read_with(&cx, |shell, cx| {
+            let pane = shell.panes[shell.active_pane].read(cx);
+            pane.results.get(&1).unwrap().clone()
+        });
+        let result_focus = results.read_with(&cx, |results, cx| results.focus_handle(cx));
+        cx.update(|window, cx| {
+            result_focus.dispatch_action(&crate::results::MoveCellRight, window, cx)
+        });
+        assert_eq!(
+            results.read_with(&cx, |results, _| results.selected_cell()),
+            Some((0, 1))
+        );
     }
 
     #[gpui::test]

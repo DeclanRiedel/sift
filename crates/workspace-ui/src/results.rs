@@ -17,8 +17,8 @@ use sift_protocol::{
 use sift_ui::{icon, IconName, Theme};
 
 const MIN_COLUMN_WIDTH: f32 = 144.0;
-const ROW_NUMBER_WIDTH: f32 = 46.0;
-const ROW_HEIGHT: f32 = 24.0;
+pub(crate) const ROW_NUMBER_WIDTH: f32 = 46.0;
+pub(crate) const ROW_HEIGHT: f32 = 24.0;
 const HEADER_HEIGHT: f32 = 40.0;
 
 /// How a single cell's value should be classified for rendering. Keeps color
@@ -345,6 +345,14 @@ impl ResultsView {
 
     pub fn active_tab(&self) -> ResultTab {
         self.tab
+    }
+
+    #[cfg(test)]
+    pub(crate) fn selected_cell(&self) -> Option<(usize, usize)> {
+        match self.selected {
+            Some(GridSelection::Cell { row, column }) => Some((row, column)),
+            _ => None,
+        }
     }
 
     pub(crate) fn placement(&self) -> ResultPlacement {
@@ -1043,6 +1051,10 @@ impl gpui::Render for ResultsView {
             .id("sift-results")
             .key_context("SiftResults")
             .track_focus(&self.focus_handle)
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|view, _, window, cx| view.focus_handle.focus(window, cx)),
+            )
             .on_action(cx.listener(Self::copy_selected_cell))
             .on_action(cx.listener(Self::move_cell_left))
             .on_action(cx.listener(Self::move_cell_right))
