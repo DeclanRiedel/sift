@@ -278,21 +278,12 @@ pub enum PaneEvent {
     FocusRequested,
     /// The pane should be removed (its close control was used, or it emptied).
     CloseRequested,
+    /// A tab-local close control was used; the workspace owns dirty handling.
+    CloseItemRequested { item_id: u64 },
     /// Active editor cursor or input state changed.
-    EditorStateChanged {
-        item_id: u64,
-    },
+    EditorStateChanged { item_id: u64 },
     /// A query item asked to run SQL; the workspace dispatches it to execution.
-    ExecuteRequested {
-        item_id: u64,
-        sql: String,
-    },
-    SaveConfigurationRequested {
-        item_id: u64,
-    },
-    CancelConfigurationRequested {
-        item_id: u64,
-    },
+    ExecuteRequested { item_id: u64, sql: String },
 }
 
 /// Live state of the desktop's database connection. Owned by the shell,
@@ -512,12 +503,6 @@ impl Pane {
         self.results.remove(&item_id);
         cx.notify();
     }
-
-    fn close_item_by_id(&mut self, item_id: u64, cx: &mut Context<Self>) {
-        if let Some(index) = self.items.iter().position(|item| item.id == item_id) {
-            self.close_item(index, cx);
-        }
-    }
 }
 
 impl Focusable for Pane {
@@ -536,23 +521,7 @@ fn pane_border_color(theme: &Theme, is_focused: bool) -> gpui::Hsla {
     }
 }
 
-impl Pane {
-    fn close_item(&mut self, index: usize, cx: &mut Context<Self>) {
-        if index >= self.items.len() {
-            return;
-        }
-        let removed = self.items.remove(index);
-        self.editors.remove(&removed.id);
-        self.results.remove(&removed.id);
-        if self.active_item >= self.items.len() {
-            self.active_item = self.items.len().saturating_sub(1);
-        }
-        if self.items.is_empty() {
-            cx.emit(PaneEvent::CloseRequested);
-        }
-        cx.notify();
-    }
-}
+impl Pane {}
 
 impl gpui::Render for Pane {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -612,19 +581,30 @@ impl gpui::Render for Pane {
                                     .children(self.items.iter().enumerate().map(
                                         |(index, item)| {
                                             let selected = index == self.active_item;
+                                            let item_id = item.id;
                                             div()
                                                 .id(("tab", item.id as usize))
+                                                .relative()
                                                 .flex_none()
                                                 .flex()
                                                 .items_center()
                                                 .h_full()
-                                                .min_w(px(96.))
-                                                .max_w(px(220.))
+                                                .min_w(px(110.))
+                                                .max_w(px(240.))
+                                                .border_r_1()
+                                                .border_color(colors.subtle_border)
                                                 .when(selected, |tab| {
                                                     tab.bg(colors.background)
-                                                        .border_l_1()
-                                                        .border_r_1()
-                                                        .border_color(colors.subtle_border)
+                                                        .text_color(colors.text)
+                                                        .child(
+                                                            div()
+                                                                .absolute()
+                                                                .left_0()
+                                                                .right_0()
+                                                                .bottom_0()
+                                                                .h(px(1.))
+                                                                .bg(colors.accent),
+                                                        )
                                                 })
                                                 .child(
                                                     div()
@@ -643,8 +623,11 @@ impl gpui::Render for Pane {
                                                             label.text_color(colors.text)
                                                         })
                                                         .on_click(cx.listener(
-                                                            move |pane, _, _, cx| {
+                                                            move |pane, _, window, cx| {
                                                                 pane.active_item = index;
+                                                                pane.active_focus_handle(cx)
+                                                                    .focus(window, cx);
+                                                                cx.emit(PaneEvent::FocusRequested);
                                                                 cx.notify();
                                                             },
                                                         ))
@@ -654,17 +637,7 @@ impl gpui::Render for Pane {
                                                                 .min_w_0()
                                                                 .truncate()
                                                                 .child(item.title.clone()),
-                                                        )
-                                                        .when(item.dirty, |label| {
-                                                            label.child(
-                                                                div()
-                                                                    .flex_none()
-                                                                    .ml_1()
-                                                                    .size(px(5.))
-                                                                    .rounded_full()
-                                                                    .bg(colors.accent),
-                                                            )
-                                                        }),
+                                                        ),
                                                 )
                                                 .child(
                                                     div()
@@ -673,8 +646,10 @@ impl gpui::Render for Pane {
                                                         .flex()
                                                         .items_center()
                                                         .justify_center()
-                                                        .h_full()
+                                                        .h(px(22.))
                                                         .w(px(22.))
+                                                        .mr_1()
+                                                        .rounded_sm()
                                                         .text_color(colors.muted_text)
                                                         .hover(|close| {
                                                             close
@@ -682,8 +657,12 @@ impl gpui::Render for Pane {
                                                                 .text_color(colors.text)
                                                         })
                                                         .on_click(cx.listener(
-                                                            move |pane, _, _, cx| {
-                                                                pane.close_item(index, cx);
+                                                            move |_, _, _, cx| {
+                                                                cx.emit(
+                                                                    PaneEvent::CloseItemRequested {
+                                                                        item_id,
+                                                                    },
+                                                                );
                                                             },
                                                         ))
                                                         .child(icon(
@@ -696,22 +675,6 @@ impl gpui::Render for Pane {
                                     )),
                             ),
                     )
-                    .child(
-                        div()
-                            .id(("pane-close", self.id as usize))
-                            .debug_selector(|| "pane-close".into())
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .w(px(28.))
-                            .h_full()
-                            .border_l_1()
-                            .border_color(colors.subtle_border)
-                            .text_color(colors.muted_text)
-                            .hover(|close| close.bg(colors.hovered_surface).text_color(colors.text))
-                            .on_click(cx.listener(|_, _, _, cx| cx.emit(PaneEvent::CloseRequested)))
-                            .child(icon(IconName::Close, colors.muted_text, 14.)),
-                    )
             }))
             .child({
                 let body = div().flex_1().min_h_0().flex().flex_col();
@@ -719,62 +682,7 @@ impl gpui::Render for Pane {
                     Some(item) if item.kind == ItemKind::Configuration => {
                         match self.editors.get(&item.id) {
                             Some(editor) => {
-                                let item_id = item.id;
                                 body.child(div().flex_1().min_h_0().child(editor.clone()))
-                                    .child(
-                                        div()
-                                            .h(px(42.))
-                                            .flex_none()
-                                            .flex()
-                                            .items_center()
-                                            .justify_between()
-                                            .px_3()
-                                            .border_t_1()
-                                            .border_color(colors.subtle_border)
-                                            .bg(colors.toolbar)
-                                            .child(
-                                                div()
-                                                    .text_xs()
-                                                    .text_color(colors.muted_text)
-                                                    .child("Save regenerates sift.lock; apply remains explicit."),
-                                            )
-                                            .child(
-                                                div()
-                                                    .flex()
-                                                    .items_center()
-                                                    .gap_2()
-                                                    .child(
-                                                        div()
-                                                            .id(("cancel-configuration-item", item_id as usize))
-                                                            .role(Role::Button)
-                                                            .px_3()
-                                                            .py_1()
-                                                            .rounded_sm()
-                                                            .border_1()
-                                                            .border_color(colors.subtle_border)
-                                                            .hover(|button| button.bg(colors.hovered_surface))
-                                                            .on_click(cx.listener(move |_, _, _, cx| {
-                                                                cx.emit(PaneEvent::CancelConfigurationRequested { item_id })
-                                                            }))
-                                                            .child("Cancel"),
-                                                    )
-                                                    .child(
-                                                        div()
-                                                            .id(("save-configuration-item", item_id as usize))
-                                                            .role(Role::Button)
-                                                            .px_3()
-                                                            .py_1()
-                                                            .rounded_sm()
-                                                            .bg(colors.accent)
-                                                            .text_color(colors.background)
-                                                            .hover(|button| button.bg(colors.accent_hover))
-                                                            .on_click(cx.listener(move |_, _, _, cx| {
-                                                                cx.emit(PaneEvent::SaveConfigurationRequested { item_id })
-                                                            }))
-                                                            .child("Save"),
-                                                    ),
-                                            ),
-                                    )
                             }
                             None => body.child(
                                 div()
@@ -2285,6 +2193,16 @@ impl WorkspaceShell {
                 self.active_pane = index;
                 self.close_pane_at(index, window, cx);
             }
+            PaneEvent::CloseItemRequested { item_id } => {
+                self.active_pane = index;
+                emitter.update(cx, |pane, _| {
+                    if let Some(item_index) = pane.items.iter().position(|item| item.id == *item_id)
+                    {
+                        pane.active_item = item_index;
+                    }
+                });
+                self.close_active_item(&CloseActiveItem, window, cx);
+            }
             PaneEvent::EditorStateChanged { item_id } => {
                 emitter.update(cx, |pane, _| {
                     if let Some(item) = pane.items.iter_mut().find(|item| item.id == *item_id) {
@@ -2312,24 +2230,6 @@ impl WorkspaceShell {
                     );
                 }
             },
-            PaneEvent::SaveConfigurationRequested { item_id } => {
-                if self.instance_configuration_item == Some(*item_id) {
-                    if let Some(editor) = emitter.read(cx).editor(*item_id) {
-                        self.instance_configuration_editor = editor;
-                        self.save_instance_configuration(cx);
-                    }
-                }
-            }
-            PaneEvent::CancelConfigurationRequested { item_id } => {
-                emitter.update(cx, |pane, cx| pane.close_item_by_id(*item_id, cx));
-                if self.instance_configuration_item == Some(*item_id) {
-                    self.instance_configuration_item = None;
-                    self.instance_configuration = None;
-                    self.instance_operation_error = None;
-                }
-                self.persist(cx);
-                cx.notify();
-            }
         }
     }
 
@@ -2561,10 +2461,12 @@ impl WorkspaceShell {
     }
 
     fn open_root_configuration(&mut self, root: std::path::PathBuf, cx: &mut Context<Self>) {
+        self.dismiss_app_bar_overlays(cx);
         self.send_instance_command(InstanceCommand::OpenRootConfiguration { root }, cx);
     }
 
     fn open_current_configuration(&mut self, cx: &mut Context<Self>) {
+        self.dismiss_app_bar_overlays(cx);
         self.send_instance_command(InstanceCommand::OpenCurrentConfiguration, cx);
     }
 
@@ -6678,12 +6580,12 @@ mod tests {
     }
 
     #[gpui::test]
-    fn empty_pane_hides_its_tab_bar(cx: &mut TestAppContext) {
+    fn tabs_own_close_controls_and_empty_pane_hides_its_tab_bar(cx: &mut TestAppContext) {
         let window = shell(cx);
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         let workspace = window.root(&mut cx).unwrap();
         cx.run_until_parked();
-        assert!(cx.debug_bounds("pane-close").is_some());
+        assert!(cx.debug_bounds("pane-close").is_none());
         assert!(cx.debug_bounds("pane-tab-bar").is_some());
 
         let focus = workspace.read_with(&cx, |shell, cx| shell.focus_handle(cx));
@@ -7401,7 +7303,13 @@ mod tests {
         let (_event_sender, event_receiver) = tokio::sync::mpsc::unbounded_channel();
         workspace.update(&mut cx, |shell, cx| {
             shell.attach_instance_manager(sender, event_receiver, Vec::new(), cx);
+            shell.app_bar_expanded = true;
+            shell.app_bar_menu = Some(AppBarMenu::Profile);
             shell.open_current_configuration(cx);
+        });
+        workspace.read_with(&cx, |shell, _| {
+            assert!(!shell.app_bar_expanded);
+            assert!(shell.app_bar_menu.is_none());
         });
         assert!(matches!(
             receiver.try_recv().unwrap(),
