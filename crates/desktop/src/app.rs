@@ -9,8 +9,8 @@ use sift_client_sdk::{
 };
 use sift_protocol::{ConnectionId, SessionId};
 use sift_workspace_ui::{
-    ConnectionStatus, ExecutorCommand, ExecutorEvent, PresentationState, PresentationStore, Rect,
-    ResultState, WorkspaceShell,
+    ConnectionStatus, EditorMode, ExecutorCommand, ExecutorEvent, PresentationState,
+    PresentationStore, Rect, ResultState, SettingsStore, UserSettings, WorkspaceShell,
 };
 
 use crate::config::DesktopConfig;
@@ -19,7 +19,7 @@ use crate::instances::{
 };
 use crate::local_server::LocalServerManager;
 use crate::platform::{
-    current_platform, instance_state_path, presentation_state_path, PlatformKind,
+    current_platform, instance_state_path, presentation_state_path, settings_path, PlatformKind,
 };
 
 #[derive(Clone)]
@@ -171,6 +171,8 @@ impl DesktopServer {
 pub struct SiftApp {
     pub platform: PlatformKind,
     pub presentation_store: Arc<PresentationStore>,
+    pub settings_store: Arc<SettingsStore>,
+    pub settings: UserSettings,
     pub runtime: Arc<tokio::runtime::Runtime>,
     pub server: DesktopServer,
     pub instance_store: InstanceStore,
@@ -184,6 +186,8 @@ pub struct SiftApp {
 #[derive(Clone)]
 pub struct WindowServices {
     store: Arc<PresentationStore>,
+    settings_store: Arc<SettingsStore>,
+    settings: UserSettings,
     runtime: Arc<tokio::runtime::Runtime>,
     server: DesktopServer,
     instance_store: InstanceStore,
@@ -197,6 +201,9 @@ pub struct WindowServices {
 impl SiftApp {
     pub fn new(config: DesktopConfig) -> Self {
         let state_path = presentation_state_path();
+        let presentation_store = Arc::new(PresentationStore::new(&state_path));
+        let settings_store = Arc::new(SettingsStore::new(settings_path()));
+        let settings = load_user_settings(&settings_store, &presentation_store.load());
         let runtime_state_dir = state_path
             .parent()
             .unwrap_or_else(|| std::path::Path::new("."))
@@ -233,7 +240,9 @@ impl SiftApp {
         }
         Self {
             platform: current_platform(),
-            presentation_store: Arc::new(PresentationStore::new(state_path)),
+            presentation_store,
+            settings_store,
+            settings,
             runtime: Arc::new(tokio::runtime::Runtime::new().expect("creating client runtime")),
             server,
             instance_store,
@@ -259,6 +268,11 @@ impl SiftApp {
         );
         WindowServices {
             store: self.presentation_store.clone(),
+            settings_store: self.settings_store.clone(),
+            settings: self
+                .settings_store
+                .load()
+                .unwrap_or_else(|_| self.settings.clone()),
             runtime: self.runtime.clone(),
             server: restored_profile
                 .as_ref()
@@ -271,6 +285,21 @@ impl SiftApp {
             local_target: self.local_target.clone(),
             restored_profile_id: restored_profile.map(|profile| profile.id),
         }
+    }
+}
+
+fn load_user_settings(store: &SettingsStore, presentation: &PresentationState) -> UserSettings {
+    let mut fallback = UserSettings::default();
+    if presentation.legacy_vim_mode_default {
+        fallback.editor.default_mode = EditorMode::Vim;
+    }
+    match store.load() {
+        Ok(settings) => settings,
+        Err(_) if !store.path().exists() => {
+            let _ = store.save(&fallback);
+            fallback
+        }
+        Err(_) => fallback,
     }
 }
 
@@ -308,6 +337,8 @@ impl SiftWindow {
     ) -> Self {
         let WindowServices {
             store,
+            settings_store,
+            settings,
             runtime,
             server,
             instance_store,
@@ -319,7 +350,16 @@ impl SiftWindow {
         } = services;
         let state = prepare_state_for_instance(state, &server.instance());
         let restored_workspace_id = state.workspace.workspace_id;
-        let workspace = cx.new(|cx| WorkspaceShell::new(state, Some(store), window, cx));
+        let workspace = cx.new(|cx| {
+            WorkspaceShell::new(
+                state,
+                settings,
+                Some(store),
+                Some(settings_store),
+                window,
+                cx,
+            )
+        });
         let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
         let (presence_sender, presence_receiver) = tokio::sync::mpsc::unbounded_channel();
         let (command_sender, command_receiver) = tokio::sync::mpsc::unbounded_channel();
@@ -927,5 +967,20 @@ mod tests {
             restored_server_profile(Some("hosted:server-one"), &[profile], true),
             None
         );
+    }
+
+    #[test]
+    fn first_settings_file_migrates_the_legacy_vim_default() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = SettingsStore::new(directory.path().join("settings.toml"));
+        let presentation = PresentationState {
+            legacy_vim_mode_default: true,
+            ..PresentationState::default()
+        };
+
+        let settings = load_user_settings(&store, &presentation);
+
+        assert_eq!(settings.editor.default_mode, EditorMode::Vim);
+        assert_eq!(store.load().unwrap(), settings);
     }
 }

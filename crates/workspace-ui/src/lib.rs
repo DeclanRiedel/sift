@@ -4,6 +4,7 @@ pub mod editor;
 mod lifecycle;
 mod presentation;
 pub mod results;
+mod settings;
 mod shell;
 
 pub use editor::{QueryDocument, QueryEditor};
@@ -19,6 +20,7 @@ pub use presentation::{
     BottomTool, DockPresentation, ItemKind, ItemPresentation, LeftPanel, PanePresentation,
     PresentationState, PresentationStore, Rect, WindowPresentation, WorkspacePresentation,
 };
+pub use settings::{EditorMode, EditorSettings, SettingsStore, UserSettings};
 pub use shell::{
     CloseActiveItem, CloseActivePane, CommandDefinition, CommandId, CommandRegistry, CommandSpec,
     ConnectionStatus, DismissModal, Dock, DockDefinition, DockId, DockPlacement, DockRegistry,

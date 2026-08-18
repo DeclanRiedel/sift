@@ -8,6 +8,10 @@ const PRESENTATION_VERSION: u32 = 1;
 const MIN_WINDOW_WIDTH: f32 = 720.0;
 const MIN_WINDOW_HEIGHT: f32 = 480.0;
 
+const fn is_false(value: &bool) -> bool {
+    !*value
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct Rect {
     pub x: f32,
@@ -129,8 +133,8 @@ pub struct WorkspacePresentation {
 pub struct PresentationState {
     pub version: u32,
     pub dark_theme: bool,
-    #[serde(default)]
-    pub vim_mode_default: bool,
+    #[serde(default, rename = "vim_mode_default", skip_serializing_if = "is_false")]
+    pub legacy_vim_mode_default: bool,
     pub window: WindowPresentation,
     pub workspace: WorkspacePresentation,
 }
@@ -140,7 +144,7 @@ impl Default for PresentationState {
         Self {
             version: PRESENTATION_VERSION,
             dark_theme: true,
-            vim_mode_default: false,
+            legacy_vim_mode_default: false,
             window: WindowPresentation {
                 bounds: Rect {
                     x: 100.0,
@@ -296,9 +300,22 @@ mod tests {
         let bytes = state.encode().unwrap();
         assert_eq!(PresentationState::decode(&bytes), state);
         let json = String::from_utf8(bytes).unwrap();
+        assert!(!json.contains("vim_mode_default"));
         for forbidden in ["password", "result_rows", "query_text", "credential"] {
             assert!(!json.contains(forbidden));
         }
+    }
+
+    #[test]
+    fn legacy_vim_preference_remains_available_for_settings_migration() {
+        let state = PresentationState::default();
+        let mut json = serde_json::to_value(state).unwrap();
+        json.as_object_mut()
+            .unwrap()
+            .insert("vim_mode_default".into(), true.into());
+
+        let decoded = PresentationState::decode(&serde_json::to_vec(&json).unwrap());
+        assert!(decoded.legacy_vim_mode_default);
     }
 
     #[test]
@@ -316,7 +333,7 @@ mod tests {
         let decoded = PresentationState::decode(&serde_json::to_vec(&json).unwrap());
         assert_eq!(decoded.workspace.left_panel, LeftPanel::Connections);
         assert_eq!(decoded.workspace.bottom_tool, BottomTool::Console);
-        assert!(!decoded.vim_mode_default);
+        assert!(!decoded.legacy_vim_mode_default);
     }
 
     #[test]

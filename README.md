@@ -16,6 +16,10 @@ model with more members.
 CRDT is used _only_ for shared SQL editor text; results, schema, sessions, and
 connections stay server-authoritative.
 
+Desktop preferences use a separate, OS-account-local `settings.toml`; see
+[`docs/SETTINGS.md`](docs/SETTINGS.md). Ephemeral layout recovery remains
+internal presentation state and is never synchronized to the server.
+
 **The protocol is pure serde, public, and semver-stable from v0.1:** a third
 party should be able to build a working UI against the OpenAPI spec alone.
 

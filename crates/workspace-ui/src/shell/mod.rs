@@ -16,6 +16,7 @@ use crate::editor::{
     EDITOR_GUTTER_WIDTH,
 };
 use crate::results::{ResultPlacement, ResultState, ResultsView};
+use crate::settings::{EditorMode, SettingsStore, UserSettings};
 
 use crate::presentation::{
     BottomTool, ItemKind, ItemPresentation, LeftPanel, PanePresentation, PresentationState,
@@ -1325,7 +1326,9 @@ pub struct WorkspaceShell {
     palette_scroll_handle: UniformListScrollHandle,
     theme: Theme,
     dark_theme: bool,
-    vim_mode_default: bool,
+    settings: UserSettings,
+    settings_store: Option<Arc<SettingsStore>>,
+    settings_item: Option<u64>,
     window_presentation: WindowPresentation,
     panes: Vec<Entity<Pane>>,
     active_pane: usize,
@@ -1386,12 +1389,14 @@ pub struct WorkspaceShell {
 impl WorkspaceShell {
     pub fn new(
         state: PresentationState,
+        settings: UserSettings,
         store: Option<Arc<PresentationStore>>,
+        settings_store: Option<Arc<SettingsStore>>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
         let window_presentation = state.window.clone();
-        let vim_mode_default = state.vim_mode_default;
+        let vim_mode_default = settings.editor.default_mode == EditorMode::Vim;
         let theme = if state.dark_theme {
             Theme::dark()
         } else {
@@ -1539,7 +1544,9 @@ impl WorkspaceShell {
             palette_scroll_handle: UniformListScrollHandle::new(),
             theme,
             dark_theme: state.dark_theme,
-            vim_mode_default,
+            settings,
+            settings_store,
+            settings_item: None,
             window_presentation,
             panes,
             active_pane,
@@ -1857,7 +1864,7 @@ impl WorkspaceShell {
                         cx,
                     )
                     .with_language(EditorLanguage::Toml)
-                    .with_keymap(if self.vim_mode_default {
+                    .with_keymap(if self.vim_mode_default() {
                         EditorKeymap::Vim
                     } else {
                         EditorKeymap::Standard
@@ -2233,7 +2240,7 @@ impl WorkspaceShell {
         let item_id = self.next_id;
         self.next_id += 1;
         let sql = table_preview_sql(&provider_id, &schema, &object);
-        let keymap = if self.vim_mode_default {
+        let keymap = if self.vim_mode_default() {
             EditorKeymap::Vim
         } else {
             EditorKeymap::Standard
@@ -2305,6 +2312,57 @@ impl WorkspaceShell {
         self.focus_active_pane(window, cx);
         cx.notify();
         true
+    }
+
+    fn open_user_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(store) = self.settings_store.clone() else {
+            self.show_toast(
+                "The settings file is unavailable in this session".into(),
+                cx,
+            );
+            return;
+        };
+        let source = match store.read_text() {
+            Ok(source) => source,
+            Err(error) => {
+                self.show_toast(error, cx);
+                return;
+            }
+        };
+        self.modal = None;
+        if self.focus_open_item(ItemKind::Configuration, "settings.toml", window, cx) {
+            return;
+        }
+
+        let item_id = self.next_id;
+        self.next_id += 1;
+        let keymap = if self.vim_mode_default() {
+            EditorKeymap::Vim
+        } else {
+            EditorKeymap::Standard
+        };
+        let editor = cx.new(|cx| {
+            QueryEditor::new(QueryDocument::with_random_peer(&source), self.theme, cx)
+                .with_language(EditorLanguage::Toml)
+                .with_keymap(keymap)
+        });
+        if let Some(pane) = self.panes.get(self.active_pane) {
+            pane.update(cx, |pane, cx| {
+                pane.open_configuration(
+                    ItemPresentation {
+                        id: item_id,
+                        kind: ItemKind::Configuration,
+                        title: "settings.toml".into(),
+                        dirty: false,
+                    },
+                    editor,
+                    cx,
+                )
+            });
+        }
+        self.settings_item = Some(item_id);
+        self.focus_active_pane(window, cx);
+        cx.notify();
     }
 
     fn request_delete_connection(&mut self, entry: &ConnectionNavEntry, cx: &mut Context<Self>) {
@@ -2768,9 +2826,39 @@ impl WorkspaceShell {
         }
     }
 
+    fn vim_mode_default(&self) -> bool {
+        self.settings.editor.default_mode == EditorMode::Vim
+    }
+
     fn toggle_vim_mode_default(&mut self, cx: &mut Context<Self>) {
-        self.vim_mode_default = !self.vim_mode_default;
-        self.persist(cx);
+        let settings_is_open = self.settings_item.is_some_and(|item_id| {
+            self.panes
+                .iter()
+                .any(|pane| pane.read(cx).contains_item(item_id))
+        });
+        if settings_is_open {
+            self.show_toast(
+                "Save or close settings.toml before changing this preference here".into(),
+                cx,
+            );
+            return;
+        }
+        let mut settings = self.settings.clone();
+        settings.editor.default_mode = if self.vim_mode_default() {
+            EditorMode::Standard
+        } else {
+            EditorMode::Vim
+        };
+        if let Some(store) = &self.settings_store {
+            settings = match store.save_editor_mode(settings.editor.default_mode) {
+                Ok(settings) => settings,
+                Err(error) => {
+                    self.show_toast(error, cx);
+                    return;
+                }
+            };
+        }
+        self.settings = settings;
         cx.notify();
     }
 
@@ -2823,7 +2911,6 @@ impl WorkspaceShell {
     pub fn snapshot(&self, cx: &App) -> PresentationState {
         PresentationState {
             dark_theme: self.dark_theme,
-            vim_mode_default: self.vim_mode_default,
             window: self.window_presentation.clone(),
             workspace: WorkspacePresentation {
                 left_dock: self.left_dock.presentation.clone(),
@@ -2958,7 +3045,7 @@ impl WorkspaceShell {
                     active_item: 0,
                 },
                 self.theme,
-                self.vim_mode_default,
+                self.vim_mode_default(),
                 cx,
             )
         });
@@ -3166,9 +3253,31 @@ impl WorkspaceShell {
             let pane = pane.read(cx);
             pane.active_item()
                 .filter(|item| item.kind == ItemKind::Configuration)
-                .and_then(|item| pane.editor(item.id))
+                .and_then(|item| pane.editor(item.id).map(|editor| (item.id, editor)))
         });
-        if let Some(editor) = active_configuration {
+        if let Some((item_id, editor)) = active_configuration {
+            if self.settings_item == Some(item_id) {
+                let Some(store) = self.settings_store.clone() else {
+                    self.show_toast(
+                        "The settings file is unavailable in this session".into(),
+                        cx,
+                    );
+                    return;
+                };
+                match store.save_text(editor.read(cx).document().text()) {
+                    Ok(settings) => {
+                        self.settings = settings;
+                        if let Some(pane) = self.panes.get(self.active_pane) {
+                            pane.update(cx, |pane, cx| pane.mark_clean(item_id, cx));
+                        }
+                        self.show_toast("Saved settings.toml".into(), cx);
+                    }
+                    Err(error) => self.show_toast(error, cx),
+                }
+                self.focus_active_pane(window, cx);
+                cx.notify();
+                return;
+            }
             self.instance_configuration_editor = editor;
             self.save_instance_configuration(cx);
             return;
@@ -6243,7 +6352,7 @@ impl WorkspaceShell {
                         .into_any_element()
                 }
                 Modal::Settings => {
-                    let vim_mode_default = self.vim_mode_default;
+                    let vim_mode_default = self.vim_mode_default();
                     div()
                         .flex()
                         .flex_col()
@@ -6322,6 +6431,61 @@ impl WorkspaceShell {
                                                 .rounded_full()
                                                 .bg(colors.text),
                                         ),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .pt_3()
+                                .border_t_1()
+                                .border_color(colors.subtle_border)
+                                .flex()
+                                .items_center()
+                                .justify_between()
+                                .gap_3()
+                                .child(
+                                    div()
+                                        .min_w_0()
+                                        .flex()
+                                        .flex_col()
+                                        .gap_1()
+                                        .child("Advanced settings")
+                                        .child(
+                                            div()
+                                                .truncate()
+                                                .text_xs()
+                                                .text_color(colors.muted_text)
+                                                .child(
+                                                    self.settings_store
+                                                        .as_ref()
+                                                        .map(|store| {
+                                                            store.path().display().to_string()
+                                                        })
+                                                        .unwrap_or_else(|| {
+                                                            "settings.toml is unavailable".into()
+                                                        }),
+                                                ),
+                                        ),
+                                )
+                                .child(
+                                    div()
+                                        .id("open-settings-file")
+                                        .debug_selector(|| "open-settings-file".into())
+                                        .role(Role::Button)
+                                        .aria_label("Open settings.toml")
+                                        .h(self.theme.metrics.control_height)
+                                        .px_3()
+                                        .flex_none()
+                                        .flex()
+                                        .items_center()
+                                        .rounded_sm()
+                                        .border_1()
+                                        .border_color(colors.subtle_border)
+                                        .bg(colors.surface)
+                                        .hover(|button| button.bg(colors.hovered_surface))
+                                        .on_click(cx.listener(|shell, _, window, cx| {
+                                            shell.open_user_settings(window, cx)
+                                        }))
+                                        .child("Open settings.toml"),
                                 ),
                         )
                         .into_any_element()
@@ -7695,7 +7859,16 @@ mod tests {
     fn shell(cx: &mut TestAppContext) -> gpui::WindowHandle<WorkspaceShell> {
         cx.update(|cx| {
             cx.open_window(Default::default(), |window, cx| {
-                cx.new(|cx| WorkspaceShell::new(Default::default(), None, window, cx))
+                cx.new(|cx| {
+                    WorkspaceShell::new(
+                        Default::default(),
+                        Default::default(),
+                        None,
+                        None,
+                        window,
+                        cx,
+                    )
+                })
             })
             .unwrap()
         })
@@ -7707,7 +7880,7 @@ mod tests {
     ) -> gpui::WindowHandle<WorkspaceShell> {
         cx.update(|cx| {
             cx.open_window(Default::default(), |window, cx| {
-                cx.new(|cx| WorkspaceShell::new(state, None, window, cx))
+                cx.new(|cx| WorkspaceShell::new(state, Default::default(), None, None, window, cx))
             })
             .unwrap()
         })
@@ -8135,12 +8308,20 @@ mod tests {
 
     #[gpui::test]
     fn settings_controls_the_default_keymap_for_new_editors(cx: &mut TestAppContext) {
-        let mut state = PresentationState {
-            vim_mode_default: true,
-            ..PresentationState::default()
-        };
+        let mut state = PresentationState::default();
         state.workspace.panes[0].items[0].kind = ItemKind::Configuration;
-        let window = shell_with_state(state, cx);
+        let settings = UserSettings {
+            editor: crate::settings::EditorSettings {
+                default_mode: EditorMode::Vim,
+            },
+            ..UserSettings::default()
+        };
+        let window = cx.update(|cx| {
+            cx.open_window(Default::default(), |window, cx| {
+                cx.new(|cx| WorkspaceShell::new(state, settings, None, None, window, cx))
+            })
+            .unwrap()
+        });
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         let workspace = window.root(&mut cx).unwrap();
 
@@ -8159,7 +8340,75 @@ mod tests {
         });
         workspace.read_with(&cx, |workspace, cx| {
             assert_eq!(workspace.modal(), Some(&Modal::Settings));
-            assert!(!workspace.snapshot(cx).vim_mode_default);
+            assert!(!workspace.vim_mode_default());
+            assert!(!workspace.snapshot(cx).legacy_vim_mode_default);
+        });
+    }
+
+    #[gpui::test]
+    fn settings_toml_opens_once_and_validates_before_save(cx: &mut TestAppContext) {
+        let directory = tempfile::tempdir().unwrap();
+        let settings_store = Arc::new(SettingsStore::new(directory.path().join("settings.toml")));
+        settings_store.save(&UserSettings::default()).unwrap();
+        let store_for_window = settings_store.clone();
+        let window = cx.update(|cx| {
+            cx.open_window(Default::default(), |window, cx| {
+                cx.new(|cx| {
+                    WorkspaceShell::new(
+                        PresentationState::default(),
+                        UserSettings::default(),
+                        None,
+                        Some(store_for_window),
+                        window,
+                        cx,
+                    )
+                })
+            })
+            .unwrap()
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+
+        workspace.update_in(&mut cx, |workspace, window, cx| {
+            workspace.open_user_settings(window, cx);
+            workspace.open_user_settings(window, cx);
+        });
+        let (item_id, editor) = workspace.read_with(&cx, |workspace, cx| {
+            let pane = workspace.panes[workspace.active_pane].read(cx);
+            assert_eq!(
+                pane.items
+                    .iter()
+                    .filter(|item| item.title == "settings.toml")
+                    .count(),
+                1
+            );
+            let item = pane.active_item().unwrap();
+            (item.id, pane.editor(item.id).unwrap())
+        });
+        let updated = "version = 1\n\n[editor]\ndefault_mode = \"vim\"\n";
+        editor.update_in(&mut cx, |editor, window, cx| {
+            let end = editor.document().text().encode_utf16().count();
+            editor.replace_text_in_range(Some(0..end), updated, window, cx);
+        });
+        workspace.update_in(&mut cx, |workspace, window, cx| {
+            workspace.save_active_item(&SaveActiveItem, window, cx)
+        });
+
+        assert_eq!(
+            settings_store.load().unwrap().editor.default_mode,
+            EditorMode::Vim
+        );
+        workspace.read_with(&cx, |workspace, cx| {
+            assert!(workspace.vim_mode_default());
+            let pane = workspace.panes[workspace.active_pane].read(cx);
+            assert!(
+                !pane
+                    .items
+                    .iter()
+                    .find(|item| item.id == item_id)
+                    .unwrap()
+                    .dirty
+            );
         });
     }
 

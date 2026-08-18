@@ -57,6 +57,34 @@ pub fn instance_state_path() -> PathBuf {
     presentation_state_path().with_file_name("instances.json")
 }
 
+pub fn settings_path() -> PathBuf {
+    #[cfg(target_os = "windows")]
+    if let Some(root) = std::env::var_os("LOCALAPPDATA") {
+        return PathBuf::from(root).join("Sift").join("settings.toml");
+    }
+    #[cfg(target_os = "macos")]
+    if let Some(root) = std::env::var_os("HOME") {
+        return PathBuf::from(root)
+            .join("Library")
+            .join("Application Support")
+            .join("Sift")
+            .join("settings.toml");
+    }
+    #[cfg(target_os = "linux")]
+    {
+        if let Some(root) = std::env::var_os("XDG_CONFIG_HOME") {
+            return PathBuf::from(root).join("sift").join("settings.toml");
+        }
+        if let Some(root) = std::env::var_os("HOME") {
+            return PathBuf::from(root)
+                .join(".config")
+                .join("sift")
+                .join("settings.toml");
+        }
+    }
+    std::env::temp_dir().join("sift-settings.toml")
+}
+
 pub fn shell_key_bindings() -> Vec<KeyBinding> {
     let primary = if current_platform() == PlatformKind::MacOS {
         "cmd"
