@@ -11,7 +11,9 @@ use gpui::{
 use sift_api_types::RoomId;
 use sift_ui::{database_logo, icon, IconName, TextInput, Theme};
 
-use crate::editor::{EditorEvent, EditorLanguage, QueryDocument, QueryEditor};
+use crate::editor::{
+    EditorEvent, EditorKeymap, EditorLanguage, QueryDocument, QueryEditor, VimMode,
+};
 use crate::results::{ResultState, ResultsView};
 
 use crate::presentation::{
@@ -467,6 +469,14 @@ impl Pane {
         self.editors
             .get(&item.id)
             .map(|editor| editor.read(cx).cursor_position())
+    }
+
+    fn active_editor_mode(&self, cx: &App) -> Option<(EditorKeymap, VimMode)> {
+        let item = self.active_item()?;
+        self.editors.get(&item.id).map(|editor| {
+            let editor = editor.read(cx);
+            (editor.keymap(), editor.vim_mode())
+        })
     }
 
     fn contains_item(&self, item_id: u64) -> bool {
@@ -1959,6 +1969,22 @@ impl WorkspaceShell {
         self.panes
             .get(self.active_pane)
             .and_then(|pane| pane.read(cx).active_cursor_position(cx))
+    }
+
+    fn active_editor_mode(&self, cx: &App) -> Option<(EditorKeymap, VimMode)> {
+        self.panes
+            .get(self.active_pane)
+            .and_then(|pane| pane.read(cx).active_editor_mode(cx))
+    }
+
+    fn toggle_active_editor_keymap(&mut self, cx: &mut Context<Self>) {
+        let editor = self.panes.get(self.active_pane).and_then(|pane| {
+            let pane = pane.read(cx);
+            pane.active_item().and_then(|item| pane.editor(item.id))
+        });
+        if let Some(editor) = editor {
+            editor.update(cx, |editor, cx| editor.toggle_keymap(cx));
+        }
     }
 
     pub fn open_workspace(&mut self, workspace: &WorkspaceNavEntry, cx: &mut Context<Self>) {

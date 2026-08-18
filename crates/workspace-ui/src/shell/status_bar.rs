@@ -137,6 +137,21 @@ pub(super) fn render_status_bar(
             )
         },
     );
+    let (mode_label, mode_tooltip) = match shell.active_editor_mode(cx) {
+        Some((EditorKeymap::Vim, VimMode::Normal)) => (
+            "VIM NORMAL",
+            "Vim normal mode; click to use the standard keymap",
+        ),
+        Some((EditorKeymap::Vim, VimMode::Insert)) => (
+            "VIM INSERT",
+            "Vim insert mode; Escape returns to normal mode",
+        ),
+        Some((EditorKeymap::Standard, _)) => (
+            "STANDARD",
+            "Standard editor keymap; click to enable Vim mode",
+        ),
+        None => ("-", "No active editor"),
+    };
 
     div()
         .id("status-bar")
@@ -320,16 +335,21 @@ pub(super) fn render_status_bar(
                         })
                 })
                 .child({
-                    let tooltip = "Standard editor keymap".to_string();
+                    let tooltip = mode_tooltip.to_string();
                     div()
                         .id("footer-editor-mode")
+                        .role(Role::Button)
                         .aria_label(tooltip.clone())
                         .h(theme.metrics.compact_control_height)
                         .px_1()
                         .flex()
                         .items_center()
                         .text_color(colors.muted_text)
-                        .child("STANDARD")
+                        .hover(|button| button.bg(colors.hovered_surface).text_color(colors.text))
+                        .on_click(
+                            cx.listener(|shell, _, _, cx| shell.toggle_active_editor_keymap(cx)),
+                        )
+                        .child(mode_label)
                         .tooltip(move |_, cx| {
                             cx.new(|_| StatusTooltip {
                                 message: tooltip.clone(),

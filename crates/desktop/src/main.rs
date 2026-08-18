@@ -51,6 +51,7 @@ fn editor_key_bindings() -> Vec<gpui::KeyBinding> {
         gpui::KeyBinding::new("cmd-z", ed::Undo, ctx),
         gpui::KeyBinding::new("ctrl-shift-z", ed::Redo, ctx),
         gpui::KeyBinding::new("cmd-shift-z", ed::Redo, ctx),
+        gpui::KeyBinding::new("escape", ed::ExitInsertMode, ctx),
         gpui::KeyBinding::new("ctrl-enter", ed::ExecuteStatement, ctx),
         gpui::KeyBinding::new("cmd-enter", ed::ExecuteStatement, ctx),
         gpui::KeyBinding::new("ctrl-shift-enter", ed::ExecuteDocument, ctx),
