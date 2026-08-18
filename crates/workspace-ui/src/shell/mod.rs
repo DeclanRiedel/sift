@@ -283,8 +283,11 @@ pub enum PaneEvent {
     CloseRequested,
     /// A tab-local close control was used; the workspace owns dirty handling.
     CloseItemRequested { item_id: u64 },
-    /// Active editor cursor or input state changed.
-    EditorStateChanged { item_id: u64 },
+    /// Active editor state changed. Cursor-only changes do not dirty the tab.
+    EditorStateChanged {
+        item_id: u64,
+        document_changed: bool,
+    },
     /// A query item asked to run SQL; the workspace dispatches it to execution.
     ExecuteRequested { item_id: u64, sql: String },
 }
@@ -405,7 +408,14 @@ impl Pane {
 
     fn on_editor_event(&mut self, item_id: u64, event: &EditorEvent, cx: &mut Context<Self>) {
         match event {
-            EditorEvent::StateChanged => cx.emit(PaneEvent::EditorStateChanged { item_id }),
+            EditorEvent::DocumentChanged => cx.emit(PaneEvent::EditorStateChanged {
+                item_id,
+                document_changed: true,
+            }),
+            EditorEvent::CursorChanged => cx.emit(PaneEvent::EditorStateChanged {
+                item_id,
+                document_changed: false,
+            }),
             EditorEvent::Execute { sql } => {
                 // Show the pending state immediately, then ask the workspace to
                 // dispatch the run. The workspace owns the executor channel.
@@ -2399,12 +2409,17 @@ impl WorkspaceShell {
                 });
                 self.close_active_item(&CloseActiveItem, window, cx);
             }
-            PaneEvent::EditorStateChanged { item_id } => {
-                emitter.update(cx, |pane, _| {
-                    if let Some(item) = pane.items.iter_mut().find(|item| item.id == *item_id) {
-                        item.dirty = true;
-                    }
-                });
+            PaneEvent::EditorStateChanged {
+                item_id,
+                document_changed,
+            } => {
+                if *document_changed {
+                    emitter.update(cx, |pane, _| {
+                        if let Some(item) = pane.items.iter_mut().find(|item| item.id == *item_id) {
+                            item.dirty = true;
+                        }
+                    });
+                }
                 cx.notify();
             }
             PaneEvent::ExecuteRequested { item_id, sql } => match &self.executor_sender {

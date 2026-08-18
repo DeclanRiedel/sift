@@ -3,7 +3,7 @@
 //! undo/redo, statement targeting, and find — kept free of GPUI so it is fully
 //! unit-testable. The view renders it and bridges platform text/IME input.
 
-use std::ops::Range;
+use std::{cell::RefCell, collections::HashMap, ops::Range, sync::Arc, time::Duration};
 
 use gpui::{
     actions, div, fill, point, prelude::*, px, size, App, Bounds, ClipboardItem, Context,
@@ -33,6 +33,12 @@ struct Edit {
     reversed_before: bool,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct DocumentChange {
+    line: usize,
+    structural: bool,
+}
+
 /// A collaborative SQL document. Text lives in a Loro [`TextReplica`] so the
 /// same buffer can later sync with the server room; the model caches the
 /// materialized text and owns a byte-offset selection. Loro indexes by Unicode
@@ -47,6 +53,7 @@ pub struct QueryDocument {
     goal_column: Option<usize>,
     undo: Vec<Edit>,
     redo: Vec<Edit>,
+    last_change: Option<DocumentChange>,
 }
 
 impl QueryDocument {
@@ -66,6 +73,7 @@ impl QueryDocument {
             goal_column: None,
             undo: Vec::new(),
             redo: Vec::new(),
+            last_change: None,
         }
     }
 
@@ -147,6 +155,13 @@ impl QueryDocument {
         let start = range.start.min(self.text.len());
         let end = range.end.clamp(start, self.text.len());
         let removed = self.text[start..end].to_string();
+        self.last_change = Some(DocumentChange {
+            line: self.text[..start]
+                .bytes()
+                .filter(|byte| *byte == b'\n')
+                .count(),
+            structural: removed.contains('\n') || new_text.contains('\n'),
+        });
         let edit = Edit {
             at: start,
             removed,
@@ -202,6 +217,13 @@ impl QueryDocument {
         };
         let start = edit.at;
         let end = start + edit.inserted.len();
+        self.last_change = Some(DocumentChange {
+            line: self.text[..start]
+                .bytes()
+                .filter(|byte| *byte == b'\n')
+                .count(),
+            structural: edit.inserted.contains('\n') || edit.removed.contains('\n'),
+        });
         self.splice(start, end, &edit.removed);
         self.selection = edit.selection_before.clone();
         self.reversed = edit.reversed_before;
@@ -216,6 +238,13 @@ impl QueryDocument {
         };
         let start = edit.at;
         let end = start + edit.removed.len();
+        self.last_change = Some(DocumentChange {
+            line: self.text[..start]
+                .bytes()
+                .filter(|byte| *byte == b'\n')
+                .count(),
+            structural: edit.inserted.contains('\n') || edit.removed.contains('\n'),
+        });
         self.splice(start, end, &edit.inserted);
         let cursor = start + edit.inserted.len();
         self.selection = cursor..cursor;
@@ -508,8 +537,10 @@ fn find_ci(original: &str, lowered: &str, needle: &str) -> Vec<Range<usize>> {
 /// talks to the SDK directly; it reports intent and the workspace dispatches.
 #[derive(Debug, Clone)]
 pub enum EditorEvent {
-    /// Cursor or document state changed and parent projections must refresh.
-    StateChanged,
+    /// Document text changed and the owning tab must become dirty.
+    DocumentChanged,
+    /// Cursor or modal state changed; parent chrome may refresh lazily.
+    CursorChanged,
     /// Run this SQL (the statement under the caret, or the whole document).
     Execute { sql: String },
 }
@@ -565,6 +596,75 @@ actions!(
     ]
 );
 
+const CURSOR_BLINK_INTERVAL: Duration = Duration::from_millis(530);
+const CURSOR_BLINK_PAUSE: Duration = Duration::from_millis(500);
+
+struct CursorBlink {
+    epoch: usize,
+    visible: bool,
+    enabled: bool,
+}
+
+impl CursorBlink {
+    fn new() -> Self {
+        Self {
+            epoch: 0,
+            visible: true,
+            enabled: false,
+        }
+    }
+
+    fn enable(&mut self, cx: &mut Context<Self>) {
+        if self.enabled {
+            return;
+        }
+        self.enabled = true;
+        self.visible = true;
+        self.schedule(self.epoch, CURSOR_BLINK_INTERVAL, cx);
+    }
+
+    fn disable(&mut self, cx: &mut Context<Self>) {
+        self.enabled = false;
+        self.epoch = self.epoch.wrapping_add(1);
+        if !self.visible {
+            self.visible = true;
+            cx.notify();
+        }
+    }
+
+    fn pause(&mut self, cx: &mut Context<Self>) {
+        if !self.enabled {
+            return;
+        }
+        self.epoch = self.epoch.wrapping_add(1);
+        self.visible = true;
+        cx.notify();
+        self.schedule(self.epoch, CURSOR_BLINK_PAUSE, cx);
+    }
+
+    fn schedule(&self, epoch: usize, delay: Duration, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(delay).await;
+            let _ = this.update(cx, |this, cx| {
+                if this.enabled && this.epoch == epoch {
+                    this.visible = !this.visible;
+                    cx.notify();
+                    this.epoch = this.epoch.wrapping_add(1);
+                    this.schedule(this.epoch, CURSOR_BLINK_INTERVAL, cx);
+                }
+            });
+        })
+        .detach();
+    }
+}
+
+#[derive(Default)]
+struct LineLayoutCache {
+    revision: u64,
+    line_starts: Arc<Vec<usize>>,
+    lines: HashMap<usize, ShapedLine>,
+}
+
 /// Multi-line GPUI editor over a [`QueryDocument`]. Character and IME input flow
 /// through the platform via [`EntityInputHandler`]; editing commands arrive as
 /// typed actions the workspace keymap binds under the `SiftEditor` context.
@@ -576,10 +676,14 @@ pub struct QueryEditor {
     keymap: EditorKeymap,
     vim_mode: VimMode,
     vim: Option<VimEngine>,
+    cursor_blink: Entity<CursorBlink>,
+    cursor_event_pending: bool,
+    revision: u64,
+    line_cache: RefCell<LineLayoutCache>,
     marked_range: Option<Range<usize>>,
     line_layouts: Vec<ShapedLine>,
     visible_line_start: usize,
-    line_starts: Vec<usize>,
+    line_starts: Arc<Vec<usize>>,
     line_height: Pixels,
     last_bounds: Option<Bounds<Pixels>>,
     scroll_handle: ScrollHandle,
@@ -587,6 +691,8 @@ pub struct QueryEditor {
 
 impl QueryEditor {
     pub fn new(document: QueryDocument, theme: Theme, cx: &mut Context<Self>) -> Self {
+        let cursor_blink = cx.new(|_| CursorBlink::new());
+        cx.observe(&cursor_blink, |_, _, cx| cx.notify()).detach();
         Self {
             focus_handle: cx.focus_handle(),
             document,
@@ -595,10 +701,14 @@ impl QueryEditor {
             keymap: EditorKeymap::Standard,
             vim_mode: VimMode::Insert,
             vim: None,
+            cursor_blink,
+            cursor_event_pending: false,
+            revision: 1,
+            line_cache: RefCell::new(LineLayoutCache::default()),
             marked_range: None,
             line_layouts: Vec::new(),
             visible_line_start: 0,
-            line_starts: Vec::new(),
+            line_starts: Arc::default(),
             line_height: EDITOR_LINE_HEIGHT,
             last_bounds: None,
             scroll_handle: ScrollHandle::new(),
@@ -642,19 +752,43 @@ impl QueryEditor {
 
     pub fn set_theme(&mut self, theme: Theme, cx: &mut Context<Self>) {
         self.theme = theme;
+        self.line_cache.borrow_mut().lines.clear();
         cx.notify();
     }
 
     fn edited(&mut self, cx: &mut Context<Self>) {
         self.marked_range = None;
+        self.revision = self.revision.wrapping_add(1);
+        let mut cache = self.line_cache.borrow_mut();
+        match self.document.last_change {
+            Some(change) if !change.structural => {
+                cache.lines.remove(&change.line);
+            }
+            _ => cache.lines.clear(),
+        }
+        drop(cache);
         self.reveal_cursor();
-        cx.emit(EditorEvent::StateChanged);
+        self.cursor_blink.update(cx, CursorBlink::pause);
+        cx.emit(EditorEvent::DocumentChanged);
         cx.notify();
     }
 
     fn selection_changed(&mut self, cx: &mut Context<Self>) {
         self.reveal_cursor();
-        cx.emit(EditorEvent::StateChanged);
+        self.cursor_blink.update(cx, CursorBlink::pause);
+        if !self.cursor_event_pending {
+            self.cursor_event_pending = true;
+            cx.spawn(async move |this, cx| {
+                cx.background_executor()
+                    .timer(Duration::from_millis(33))
+                    .await;
+                let _ = this.update(cx, |editor, cx| {
+                    editor.cursor_event_pending = false;
+                    cx.emit(EditorEvent::CursorChanged);
+                });
+            })
+            .detach();
+        }
         cx.notify();
     }
 
@@ -685,6 +819,7 @@ impl QueryEditor {
     }
 
     fn apply_vim_snapshot(&mut self, snapshot: VimSnapshot, cx: &mut Context<Self>) {
+        let mut document_changed = false;
         if let Some(snapshot_text) = snapshot.text.filter(|text| text != self.document.text()) {
             let old = self.document.text();
             let prefix = old
@@ -721,6 +856,7 @@ impl QueryEditor {
             };
             self.document
                 .replace_range(prefix..old_suffix, &snapshot_text[prefix..new_suffix]);
+            document_changed = true;
         }
         let cursor = byte_from_line_column(self.document.text(), snapshot.cursor);
         if let Some((start, end)) = snapshot.selection {
@@ -732,7 +868,11 @@ impl QueryEditor {
             self.document.set_selection(cursor..cursor, false);
         }
         self.vim_mode = snapshot.mode;
-        self.edited(cx);
+        if document_changed {
+            self.edited(cx);
+        } else {
+            self.selection_changed(cx);
+        }
     }
 
     fn vim_key(
@@ -1050,7 +1190,7 @@ impl EntityInputHandler for QueryEditor {
             None => self.document.insert(new_text),
         }
         self.marked_range = None;
-        self.selection_changed(cx);
+        self.edited(cx);
     }
 
     fn replace_and_mark_text_in_range(
@@ -1074,7 +1214,7 @@ impl EntityInputHandler for QueryEditor {
             let end = offset_from_utf16(new_text, selection.end) + range.start;
             self.document.set_selection(start..end, false);
         }
-        self.selection_changed(cx);
+        self.edited(cx);
     }
 
     fn bounds_for_range(
@@ -1109,8 +1249,17 @@ impl EntityInputHandler for QueryEditor {
 }
 
 impl gpui::Render for QueryEditor {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = self.theme.colors;
+        let focused = self.focus_handle.is_focused(window);
+        let blink_enabled = self.cursor_blink.read(cx).enabled;
+        if focused != blink_enabled {
+            if focused {
+                self.cursor_blink.update(cx, CursorBlink::enable);
+            } else {
+                self.cursor_blink.update(cx, CursorBlink::disable);
+            }
+        }
         div()
             .id("sift-query-editor")
             .key_context("SiftEditor")
@@ -1272,7 +1421,7 @@ struct QueryEditorElement {
 struct EditorPrepaint {
     lines: Vec<(usize, ShapedLine)>,
     line_numbers: Vec<(usize, ShapedLine)>,
-    line_starts: Vec<usize>,
+    line_starts: Arc<Vec<usize>>,
     visible_line_start: usize,
     active_line: Option<PaintQuad>,
     selections: Vec<PaintQuad>,
@@ -1334,6 +1483,7 @@ impl Element for QueryEditorElement {
         let theme = editor.theme;
         let language = editor.language;
         let block_cursor = editor.keymap == EditorKeymap::Vim && editor.vim_mode == VimMode::Normal;
+        let cursor_visible = editor.cursor_blink.read(cx).visible;
         let viewport = editor.scroll_handle.bounds();
         let style = window.text_style();
         let font_size = style.font_size.to_pixels(window.rem_size());
@@ -1341,11 +1491,19 @@ impl Element for QueryEditorElement {
 
         let mut lines = Vec::new();
         let mut line_numbers = Vec::new();
-        let mut line_starts = vec![0];
-        line_starts.extend(
-            text.match_indices('\n')
-                .map(|(offset, _)| offset.saturating_add(1)),
-        );
+        let line_starts = {
+            let mut cache = editor.line_cache.borrow_mut();
+            if cache.revision != editor.revision || cache.line_starts.is_empty() {
+                cache.revision = editor.revision;
+                let mut line_starts = vec![0];
+                line_starts.extend(
+                    text.match_indices('\n')
+                        .map(|(offset, _)| offset.saturating_add(1)),
+                );
+                cache.line_starts = Arc::new(line_starts);
+            }
+            cache.line_starts.clone()
+        };
         let mut selections = Vec::new();
         let mut cursor_quad = None;
         let mut active_line_quad = None;
@@ -1377,22 +1535,33 @@ impl Element for QueryEditorElement {
         }
         .min(line_starts.len());
 
-        for (line_index, line) in text
-            .split('\n')
-            .enumerate()
-            .skip(visible_start)
-            .take(visible_end.saturating_sub(visible_start))
-        {
+        for line_index in visible_start..visible_end {
             let offset = line_starts[line_index];
-            let line_end = offset + line.len();
-            let runs = match language {
-                EditorLanguage::Sql => sql_text_runs(line, style.font(), theme),
-                EditorLanguage::Toml => toml_text_runs(line, style.font(), theme),
+            let line_end = line_starts
+                .get(line_index + 1)
+                .map_or(text.len(), |next| next.saturating_sub(1));
+            let line = &text[offset..line_end];
+            let cached = editor.line_cache.borrow().lines.get(&line_index).cloned();
+            let shaped = if let Some(line) = cached {
+                line
+            } else {
+                let runs = match language {
+                    EditorLanguage::Sql => sql_text_runs(line, style.font(), theme),
+                    EditorLanguage::Toml => toml_text_runs(line, style.font(), theme),
+                };
+                let shaped = window.text_system().shape_line(
+                    line.to_string().into(),
+                    font_size,
+                    &runs,
+                    None,
+                );
+                editor
+                    .line_cache
+                    .borrow_mut()
+                    .lines
+                    .insert(line_index, shaped.clone());
+                shaped
             };
-            let shaped =
-                window
-                    .text_system()
-                    .shape_line(line.to_string().into(), font_size, &runs, None);
             let number_color = if cursor >= offset && cursor <= line_end {
                 theme.colors.muted_text
             } else {
@@ -1447,7 +1616,7 @@ impl Element for QueryEditorElement {
                 }
             }
 
-            if selection.is_empty() && cursor >= offset && cursor <= line_end {
+            if selection.is_empty() && cursor_visible && cursor >= offset && cursor <= line_end {
                 let x = shaped.x_for_index(cursor - offset);
                 cursor_quad = Some(fill(
                     Bounds::new(
@@ -1459,6 +1628,17 @@ impl Element for QueryEditorElement {
             }
 
             lines.push((line_index, shaped));
+        }
+
+        {
+            let mut cache = editor.line_cache.borrow_mut();
+            if cache.lines.len() > 512 {
+                let keep_start = visible_start.saturating_sub(128);
+                let keep_end = (visible_end + 128).min(line_starts.len());
+                cache
+                    .lines
+                    .retain(|line, _| *line >= keep_start && *line < keep_end);
+            }
         }
 
         EditorPrepaint {
@@ -1950,6 +2130,80 @@ mod tests {
             assert_eq!(editor.keymap(), EditorKeymap::Vim);
             assert_eq!(editor.vim_mode(), VimMode::Insert);
             assert_eq!(editor.document.text(), "abZc");
+        });
+    }
+
+    #[gpui::test]
+    fn vim_braces_move_between_blank_line_paragraph_boundaries(cx: &mut TestAppContext) {
+        let window = cx
+            .update(|cx| {
+                cx.open_window(Default::default(), |_window, cx| {
+                    cx.new(|cx| {
+                        QueryEditor::new(
+                            doc("select 1;\n\nselect 2;\n\nselect 3;"),
+                            Theme::dark(),
+                            cx,
+                        )
+                    })
+                })
+            })
+            .unwrap();
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let editor = window.root(&mut cx).unwrap();
+        editor.update_in(&mut cx, |editor, window, cx| {
+            editor.document.set_selection(0..0, false);
+            editor.toggle_keymap(cx);
+            editor.replace_text_in_range(None, "}", window, cx);
+            assert_eq!(editor.cursor_position(), (2, 1));
+            editor.replace_text_in_range(None, "}", window, cx);
+            assert_eq!(editor.cursor_position(), (4, 1));
+            editor.replace_text_in_range(None, "{", window, cx);
+            assert_eq!(editor.cursor_position(), (2, 1));
+        });
+    }
+
+    #[gpui::test]
+    fn cursor_blink_pauses_after_input_and_resumes(cx: &mut TestAppContext) {
+        let blink = cx.update(|cx| cx.new(|_| CursorBlink::new()));
+        blink.update(cx, CursorBlink::enable);
+        assert!(blink.read_with(cx, |blink, _| blink.visible));
+        cx.executor().advance_clock(CURSOR_BLINK_INTERVAL);
+        cx.run_until_parked();
+        assert!(!blink.read_with(cx, |blink, _| blink.visible));
+        blink.update(cx, CursorBlink::pause);
+        assert!(blink.read_with(cx, |blink, _| blink.visible));
+        cx.executor().advance_clock(CURSOR_BLINK_PAUSE);
+        cx.run_until_parked();
+        assert!(!blink.read_with(cx, |blink, _| blink.visible));
+    }
+
+    #[gpui::test]
+    fn cursor_motion_reuses_cached_visible_line_layouts(cx: &mut TestAppContext) {
+        let text = (0..200)
+            .map(|line| format!("select {line};"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let window = cx
+            .update(|cx| {
+                cx.open_window(Default::default(), |_window, cx| {
+                    cx.new(|cx| QueryEditor::new(doc(&text), Theme::dark(), cx))
+                })
+            })
+            .unwrap();
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let editor = window.root(&mut cx).unwrap();
+        cx.run_until_parked();
+        let (cached_before, revision_before) = editor.read_with(&cx, |editor, _| {
+            (editor.line_cache.borrow().lines.len(), editor.revision)
+        });
+        editor.update_in(&mut cx, |editor, window, cx| {
+            editor.document.set_selection(0..0, false);
+            editor.move_down(&MoveDown, window, cx);
+        });
+        cx.run_until_parked();
+        editor.read_with(&cx, |editor, _| {
+            assert_eq!(editor.revision, revision_before);
+            assert_eq!(editor.line_cache.borrow().lines.len(), cached_before);
         });
     }
 
