@@ -276,6 +276,9 @@ pub struct ResultsView {
     focus_handle: FocusHandle,
     theme: Theme,
     state: ResultState,
+    /// Display-ready values are built once per result update, not repeatedly
+    /// for every visible row during scroll and selection paints.
+    rendered_rows: Vec<Vec<CellRender>>,
     tab: ResultTab,
     selected: Option<GridSelection>,
     row_scroll_handle: UniformListScrollHandle,
@@ -310,6 +313,7 @@ impl ResultsView {
             focus_handle: cx.focus_handle(),
             theme,
             state: ResultState::Idle,
+            rendered_rows: Vec::new(),
             tab: ResultTab::Data,
             selected: None,
             row_scroll_handle: UniformListScrollHandle::new(),
@@ -362,6 +366,14 @@ impl ResultsView {
 
     /// Adopt a new outcome, resetting selection and focusing the Data tab.
     pub fn set_state(&mut self, state: ResultState, cx: &mut Context<Self>) {
+        self.rendered_rows = match &state {
+            ResultState::Ready(data) => data
+                .rows
+                .iter()
+                .map(|row| row.values.iter().map(render_value).collect())
+                .collect(),
+            _ => Vec::new(),
+        };
         self.state = state;
         self.selected = None;
         self.tab = ResultTab::Data;
@@ -382,23 +394,26 @@ impl ResultsView {
     }
 
     fn select_cell(&mut self, row: usize, column: usize, cx: &mut Context<Self>) {
-        self.selected = Some(GridSelection::Cell { row, column });
-        cx.notify();
+        self.set_selection(GridSelection::Cell { row, column }, cx);
     }
 
     fn select_row(&mut self, row: usize, cx: &mut Context<Self>) {
-        self.selected = Some(GridSelection::Row(row));
-        cx.notify();
+        self.set_selection(GridSelection::Row(row), cx);
     }
 
     fn select_column(&mut self, column: usize, cx: &mut Context<Self>) {
-        self.selected = Some(GridSelection::Column(column));
-        cx.notify();
+        self.set_selection(GridSelection::Column(column), cx);
     }
 
     fn select_all(&mut self, cx: &mut Context<Self>) {
-        self.selected = Some(GridSelection::All);
-        cx.notify();
+        self.set_selection(GridSelection::All, cx);
+    }
+
+    fn set_selection(&mut self, selection: GridSelection, cx: &mut Context<Self>) {
+        if self.selected != Some(selection) {
+            self.selected = Some(selection);
+            cx.notify();
+        }
     }
 
     fn move_selection(&mut self, row_delta: isize, column_delta: isize, cx: &mut Context<Self>) {
@@ -420,10 +435,9 @@ impl ResultsView {
         let column = column
             .saturating_add_signed(column_delta)
             .min(data.columns.len() - 1);
-        self.selected = Some(GridSelection::Cell { row, column });
+        self.set_selection(GridSelection::Cell { row, column }, cx);
         self.row_scroll_handle
             .scroll_to_item(row, ScrollStrategy::Nearest);
-        cx.notify();
     }
 
     fn move_cell_left(&mut self, _: &MoveCellLeft, _: &mut Window, cx: &mut Context<Self>) {
@@ -452,9 +466,10 @@ impl ResultsView {
         let GridSelection::Cell { row, column } = self.selected? else {
             return None;
         };
-        let data = self.state.ready()?;
-        let value = data.rows.get(row)?.values.get(column)?;
-        Some(render_value(value).text)
+        self.rendered_rows
+            .get(row)?
+            .get(column)
+            .map(|cell| cell.text.clone())
     }
 
     fn cell_color(&self, class: CellClass) -> gpui::Hsla {
@@ -778,11 +793,10 @@ impl ResultsView {
                     .map(|row_index| {
                         let cells = (0..column_count)
                             .map(|column_index| {
-                                let rendered = data
-                                    .rows
+                                let rendered = view
+                                    .rendered_rows
                                     .get(row_index)
-                                    .and_then(|row| row.values.get(column_index))
-                                    .map(render_value);
+                                    .and_then(|row| row.get(column_index));
                                 let is_selected = match view.selected {
                                     Some(GridSelection::Cell { row, column }) => {
                                         row == row_index && column == column_index
@@ -792,7 +806,7 @@ impl ResultsView {
                                     Some(GridSelection::All) => true,
                                     None => false,
                                 };
-                                let (text, color) = match &rendered {
+                                let (text, color) = match rendered {
                                     Some(cell) => (cell.text.clone(), view.cell_color(cell.class)),
                                     None => (String::new(), colors.muted_text),
                                 };
@@ -810,7 +824,7 @@ impl ResultsView {
                                     .text_color(color)
                                     .hover(|cell| cell.bg(colors.hovered_surface))
                                     .when(
-                                        rendered.as_ref().is_some_and(|cell| {
+                                        rendered.is_some_and(|cell| {
                                             matches!(cell.class, CellClass::Number)
                                         }),
                                         |el| el.justify_end(),
@@ -1139,6 +1153,8 @@ mod tests {
         view.update(&mut cx, |view, cx| {
             view.set_state(ResultState::from_execute(response), cx);
             assert_eq!(view.active_tab(), ResultTab::Data);
+            assert_eq!(view.rendered_rows.len(), 2);
+            assert_eq!(view.rendered_rows[0][1].text, "1");
         });
         cx.run_until_parked();
         assert!(
