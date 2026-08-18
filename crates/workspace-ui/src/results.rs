@@ -8,7 +8,8 @@ use std::ops::Range;
 
 use gpui::{
     actions, div, prelude::*, px, uniform_list, App, ClipboardItem, Context, FocusHandle,
-    Focusable, IntoElement, ScrollStrategy, UniformListScrollHandle, Window,
+    Focusable, IntoElement, MouseButton, ScrollStrategy, SharedString, UniformListScrollHandle,
+    Window,
 };
 use sift_protocol::{
     ColumnMetadata, DriverWarning, ExecuteResponse, Nullability, Page, Row, TypeRef, Value,
@@ -38,6 +39,19 @@ pub enum CellClass {
 pub struct CellRender {
     pub text: String,
     pub class: CellClass,
+}
+
+#[derive(Debug, Clone)]
+struct CachedCellRender {
+    text: SharedString,
+    class: CellClass,
+}
+
+#[derive(Debug, Clone)]
+struct CachedColumnRender {
+    name: SharedString,
+    type_label: SharedString,
+    nullable: bool,
 }
 
 /// A result column's presentation projection.
@@ -278,7 +292,8 @@ pub struct ResultsView {
     state: ResultState,
     /// Display-ready values are built once per result update, not repeatedly
     /// for every visible row during scroll and selection paints.
-    rendered_rows: Vec<Vec<CellRender>>,
+    rendered_columns: Vec<CachedColumnRender>,
+    rendered_rows: Vec<Vec<CachedCellRender>>,
     tab: ResultTab,
     selected: Option<GridSelection>,
     row_scroll_handle: UniformListScrollHandle,
@@ -313,6 +328,7 @@ impl ResultsView {
             focus_handle: cx.focus_handle(),
             theme,
             state: ResultState::Idle,
+            rendered_columns: Vec::new(),
             rendered_rows: Vec::new(),
             tab: ResultTab::Data,
             selected: None,
@@ -366,11 +382,34 @@ impl ResultsView {
 
     /// Adopt a new outcome, resetting selection and focusing the Data tab.
     pub fn set_state(&mut self, state: ResultState, cx: &mut Context<Self>) {
+        self.rendered_columns = match &state {
+            ResultState::Ready(data) => data
+                .columns
+                .iter()
+                .map(|column| CachedColumnRender {
+                    name: column.name.clone().into(),
+                    type_label: column.type_label.clone().into(),
+                    nullable: column.nullable,
+                })
+                .collect(),
+            _ => Vec::new(),
+        };
         self.rendered_rows = match &state {
             ResultState::Ready(data) => data
                 .rows
                 .iter()
-                .map(|row| row.values.iter().map(render_value).collect())
+                .map(|row| {
+                    row.values
+                        .iter()
+                        .map(|value| {
+                            let rendered = render_value(value);
+                            CachedCellRender {
+                                text: rendered.text.into(),
+                                class: rendered.class,
+                            }
+                        })
+                        .collect()
+                })
                 .collect(),
             _ => Vec::new(),
         };
@@ -469,7 +508,7 @@ impl ResultsView {
         self.rendered_rows
             .get(row)?
             .get(column)
-            .map(|cell| cell.text.clone())
+            .map(|cell| cell.text.to_string())
     }
 
     fn cell_color(&self, class: CellClass) -> gpui::Hsla {
@@ -680,7 +719,7 @@ impl ResultsView {
                 .child(self.state.status_label())
                 .into_any_element();
         };
-        if data.columns.is_empty() {
+        if self.rendered_columns.is_empty() {
             return div()
                 .size_full()
                 .flex()
@@ -692,46 +731,48 @@ impl ResultsView {
                 .child(self.state.status_label())
                 .into_any_element();
         }
-        let grid_min_width = px(ROW_NUMBER_WIDTH + MIN_COLUMN_WIDTH * data.columns.len() as f32);
-        let header = div()
-            .debug_selector(|| "result-header".into())
-            .flex()
-            .h(px(HEADER_HEIGHT))
-            .flex_none()
-            .w_full()
-            .min_w(grid_min_width)
-            .border_b_1()
-            .border_color(colors.subtle_border)
-            .bg(colors.toolbar)
-            .child(
-                div()
-                    .id("result-select-all")
-                    .role(gpui::Role::Button)
-                    .aria_label("Select all result cells")
-                    .w(px(ROW_NUMBER_WIDTH))
-                    .h_full()
-                    .flex()
-                    .items_center()
-                    .justify_end()
-                    .pr_2()
-                    .border_r_1()
-                    .border_color(colors.subtle_border)
-                    .text_xs()
-                    .text_color(colors.disabled_text)
-                    .when(self.selected == Some(GridSelection::All), |header| {
-                        header.bg(colors.selected_surface)
-                    })
-                    .on_click(cx.listener(|view, _, window, cx| {
-                        view.focus_handle.focus(window, cx);
-                        view.select_all(cx);
-                    }))
-                    .child("#"),
-            )
-            .children(
-                data.columns
-                    .iter()
-                    .enumerate()
-                    .map(|(column_index, column)| {
+        let grid_min_width =
+            px(ROW_NUMBER_WIDTH + MIN_COLUMN_WIDTH * self.rendered_columns.len() as f32);
+        let header =
+            div()
+                .debug_selector(|| "result-header".into())
+                .flex()
+                .h(px(HEADER_HEIGHT))
+                .flex_none()
+                .w_full()
+                .min_w(grid_min_width)
+                .border_b_1()
+                .border_color(colors.subtle_border)
+                .bg(colors.toolbar)
+                .child(
+                    div()
+                        .id("result-select-all")
+                        .role(gpui::Role::Button)
+                        .aria_label("Select all result cells")
+                        .w(px(ROW_NUMBER_WIDTH))
+                        .h_full()
+                        .flex()
+                        .items_center()
+                        .justify_end()
+                        .pr_2()
+                        .border_r_1()
+                        .border_color(colors.subtle_border)
+                        .text_xs()
+                        .text_color(colors.disabled_text)
+                        .when(self.selected == Some(GridSelection::All), |header| {
+                            header.bg(colors.selected_surface)
+                        })
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|view, _, window, cx| {
+                                view.focus_handle.focus(window, cx);
+                                view.select_all(cx);
+                            }),
+                        )
+                        .child("#"),
+                )
+                .children(self.rendered_columns.iter().enumerate().map(
+                    |(column_index, column)| {
                         div()
                     .id(("result-column", column_index))
                     .role(gpui::Role::Button)
@@ -752,7 +793,7 @@ impl ResultsView {
                         ) || self.selected == Some(GridSelection::All),
                         |header| header.bg(colors.selected_surface),
                     )
-                    .on_click(cx.listener(move |view, _, window, cx| {
+                    .on_mouse_down(MouseButton::Left, cx.listener(move |view, _, window, cx| {
                         view.focus_handle.focus(window, cx);
                         view.select_column(column_index, cx);
                     }))
@@ -774,8 +815,8 @@ impl ResultsView {
                                 if column.nullable { "?" } else { "" }
                             )),
                     )
-                    }),
-            );
+                    },
+                ));
 
         let row_count = data.rows.len();
         let list = uniform_list(
@@ -783,10 +824,10 @@ impl ResultsView {
             row_count,
             cx.processor(move |view, range: Range<usize>, _, cx| {
                 let colors = view.theme.colors;
-                let Some(data) = view.state.ready() else {
+                if view.state.ready().is_none() {
                     return Vec::new();
-                };
-                let column_count = data.columns.len();
+                }
+                let column_count = view.rendered_columns.len();
                 range
                     .map(|row_index| {
                         let cells = (0..column_count)
@@ -806,7 +847,7 @@ impl ResultsView {
                                 };
                                 let (text, color) = match rendered {
                                     Some(cell) => (cell.text.clone(), view.cell_color(cell.class)),
-                                    None => (String::new(), colors.muted_text),
+                                    None => (SharedString::default(), colors.muted_text),
                                 };
                                 div()
                                     .id(("cell", row_index * column_count + column_index))
@@ -827,10 +868,13 @@ impl ResultsView {
                                         |el| el.justify_end(),
                                     )
                                     .when(is_selected, |el| el.bg(colors.selected_surface))
-                                    .on_click(cx.listener(move |view, _, window, cx| {
-                                        view.focus_handle.focus(window, cx);
-                                        view.select_cell(row_index, column_index, cx)
-                                    }))
+                                    .on_mouse_down(
+                                        MouseButton::Left,
+                                        cx.listener(move |view, _, window, cx| {
+                                            view.focus_handle.focus(window, cx);
+                                            view.select_cell(row_index, column_index, cx)
+                                        }),
+                                    )
                                     .child(div().truncate().child(text))
                             })
                             .collect::<Vec<_>>();
@@ -864,10 +908,13 @@ impl ResultsView {
                                         ) || view.selected == Some(GridSelection::All),
                                         |header| header.bg(colors.selected_surface),
                                     )
-                                    .on_click(cx.listener(move |view, _, window, cx| {
-                                        view.focus_handle.focus(window, cx);
-                                        view.select_row(row_index, cx);
-                                    }))
+                                    .on_mouse_down(
+                                        MouseButton::Left,
+                                        cx.listener(move |view, _, window, cx| {
+                                            view.focus_handle.focus(window, cx);
+                                            view.select_row(row_index, cx);
+                                        }),
+                                    )
                                     .child((row_index + 1).to_string()),
                             )
                             .children(cells)
@@ -1163,6 +1210,20 @@ mod tests {
                 .map(|bounds| bounds.size.height),
             Some(px(HEADER_HEIGHT)),
             "column names and types need a full two-line header"
+        );
+        let first_row = cx.debug_bounds("result-row-0").unwrap();
+        cx.simulate_mouse_down(
+            gpui::point(
+                first_row.left() + px(ROW_NUMBER_WIDTH + 12.),
+                first_row.top() + px(ROW_HEIGHT / 2.),
+            ),
+            MouseButton::Left,
+            gpui::Modifiers::default(),
+        );
+        assert_eq!(
+            view.read_with(&cx, |view, _| view.selected),
+            Some(GridSelection::Cell { row: 0, column: 0 }),
+            "selection feedback must occur on press, without waiting for mouse-up"
         );
         view.update(&mut cx, |view, cx| {
             view.select_tab(ResultTab::Messages, cx);
