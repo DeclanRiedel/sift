@@ -7,6 +7,7 @@ repository.workspace = true
 
 [dependencies]
 gpui = { workspace = true }
+modalkit = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 sift-api-types = { workspace = true }

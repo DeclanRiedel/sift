@@ -13,6 +13,7 @@ use sift_ui::{database_logo, icon, IconName, TextInput, Theme};
 
 use crate::editor::{
     EditorEvent, EditorKeymap, EditorLanguage, QueryDocument, QueryEditor, VimMode,
+    EDITOR_GUTTER_WIDTH,
 };
 use crate::results::{ResultState, ResultsView};
 
@@ -352,6 +353,8 @@ pub struct Pane {
     id: u64,
     items: Vec<ItemPresentation>,
     active_item: usize,
+    backward_items: Vec<u64>,
+    forward_items: Vec<u64>,
     focus_handle: FocusHandle,
     theme: Theme,
     /// Live editor per SQL or configuration item. Editor contents are not
@@ -391,6 +394,8 @@ impl Pane {
             id: pane.id,
             items: pane.items,
             active_item: pane.active_item,
+            backward_items: Vec::new(),
+            forward_items: Vec::new(),
             focus_handle: cx.focus_handle(),
             theme,
             editors,
@@ -487,6 +492,62 @@ impl Pane {
         self.editors.get(&item_id).cloned()
     }
 
+    fn can_navigate_backward(&self) -> bool {
+        self.backward_items
+            .iter()
+            .any(|id| self.items.iter().any(|item| item.id == *id))
+    }
+
+    fn can_navigate_forward(&self) -> bool {
+        self.forward_items
+            .iter()
+            .any(|id| self.items.iter().any(|item| item.id == *id))
+    }
+
+    fn activate_item(&mut self, index: usize, record_history: bool) {
+        if index >= self.items.len() || index == self.active_item {
+            return;
+        }
+        if record_history {
+            if let Some(current) = self.active_item().map(|item| item.id) {
+                self.backward_items.push(current);
+            }
+            self.forward_items.clear();
+        }
+        self.active_item = index;
+    }
+
+    fn navigate_backward(&mut self) {
+        while let Some(id) = self.backward_items.pop() {
+            let Some(index) = self.items.iter().position(|item| item.id == id) else {
+                continue;
+            };
+            if let Some(current) = self.active_item().map(|item| item.id) {
+                self.forward_items.push(current);
+            }
+            self.active_item = index;
+            break;
+        }
+    }
+
+    fn navigate_forward(&mut self) {
+        while let Some(id) = self.forward_items.pop() {
+            let Some(index) = self.items.iter().position(|item| item.id == id) else {
+                continue;
+            };
+            if let Some(current) = self.active_item().map(|item| item.id) {
+                self.backward_items.push(current);
+            }
+            self.active_item = index;
+            break;
+        }
+    }
+
+    fn forget_item(&mut self, item_id: u64) {
+        self.backward_items.retain(|id| *id != item_id);
+        self.forward_items.retain(|id| *id != item_id);
+    }
+
     fn open_configuration(
         &mut self,
         item: ItemPresentation,
@@ -500,8 +561,12 @@ impl Pane {
             .position(|candidate| candidate.id == item_id)
         {
             self.items[index] = item;
-            self.active_item = index;
+            self.activate_item(index, true);
         } else {
+            if let Some(current) = self.active_item().map(|item| item.id) {
+                self.backward_items.push(current);
+                self.forward_items.clear();
+            }
             self.items.push(item);
             self.active_item = self.items.len() - 1;
         }
@@ -533,6 +598,26 @@ fn pane_border_color(theme: &Theme, is_focused: bool) -> gpui::Hsla {
 
 impl Pane {}
 
+struct PaneTooltip {
+    label: &'static str,
+    theme: Theme,
+}
+
+impl gpui::Render for PaneTooltip {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .px_2()
+            .py_1()
+            .rounded_sm()
+            .border_1()
+            .border_color(self.theme.colors.strong_border)
+            .bg(self.theme.colors.elevated_surface)
+            .text_xs()
+            .text_color(self.theme.colors.text)
+            .child(self.label)
+    }
+}
+
 impl gpui::Render for Pane {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = self.theme.colors;
@@ -540,6 +625,10 @@ impl gpui::Render for Pane {
             || self.focus_handle.contains_focused(window, cx);
         let active = self.active_item().cloned();
         let has_items = !self.items.is_empty();
+        let can_go_back = self.can_navigate_backward();
+        let can_go_forward = self.can_navigate_forward();
+        let pane_id = self.id;
+        let theme = self.theme;
         div()
             .id(("pane", self.id as usize))
             .key_context("SiftPane")
@@ -566,6 +655,87 @@ impl gpui::Render for Pane {
                     .items_stretch()
                     .relative()
                     .bg(colors.toolbar)
+                    .child(
+                        div()
+                            .w(EDITOR_GUTTER_WIDTH)
+                            .h_full()
+                            .flex_none()
+                            .flex()
+                            .items_center()
+                            .border_r_1()
+                            .border_color(colors.subtle_border)
+                            .children(
+                                [
+                                    (
+                                        "pane-go-back",
+                                        IconName::ChevronLeft,
+                                        "Go back",
+                                        can_go_back,
+                                        true,
+                                    ),
+                                    (
+                                        "pane-go-forward",
+                                        IconName::ChevronRight,
+                                        "Go forward",
+                                        can_go_forward,
+                                        false,
+                                    ),
+                                ]
+                                .into_iter()
+                                .map(
+                                    |(id, icon_name, label, enabled, backward)| {
+                                        div()
+                                            .id((id, pane_id as usize))
+                                            .role(Role::Button)
+                                            .aria_label(label)
+                                            .w(EDITOR_GUTTER_WIDTH / 2.)
+                                            .h_full()
+                                            .flex_none()
+                                            .flex()
+                                            .items_center()
+                                            .justify_center()
+                                            .text_color(if enabled {
+                                                colors.muted_text
+                                            } else {
+                                                colors.disabled_text
+                                            })
+                                            .when(enabled, |button| {
+                                                button
+                                                    .hover(|button| {
+                                                        button
+                                                            .bg(colors.hovered_surface)
+                                                            .text_color(colors.text)
+                                                    })
+                                                    .on_click(cx.listener(
+                                                        move |pane, _, window, cx| {
+                                                            if backward {
+                                                                pane.navigate_backward();
+                                                            } else {
+                                                                pane.navigate_forward();
+                                                            }
+                                                            pane.active_focus_handle(cx)
+                                                                .focus(window, cx);
+                                                            cx.emit(PaneEvent::FocusRequested);
+                                                            cx.notify();
+                                                        },
+                                                    ))
+                                            })
+                                            .child(icon(
+                                                icon_name,
+                                                if enabled {
+                                                    colors.muted_text
+                                                } else {
+                                                    colors.disabled_text
+                                                },
+                                                12.,
+                                            ))
+                                            .tooltip(move |_, cx| {
+                                                cx.new(|_| PaneTooltip { label, theme }).into()
+                                            })
+                                    },
+                                ),
+                            ),
+                    )
                     .child(
                         div()
                             .absolute()
@@ -634,7 +804,7 @@ impl gpui::Render for Pane {
                                                         })
                                                         .on_click(cx.listener(
                                                             move |pane, _, window, cx| {
-                                                                pane.active_item = index;
+                                                                pane.activate_item(index, true);
                                                                 pane.active_focus_handle(cx)
                                                                     .focus(window, cx);
                                                                 cx.emit(PaneEvent::FocusRequested);
@@ -2224,7 +2394,7 @@ impl WorkspaceShell {
                 emitter.update(cx, |pane, _| {
                     if let Some(item_index) = pane.items.iter().position(|item| item.id == *item_id)
                     {
-                        pane.active_item = item_index;
+                        pane.activate_item(item_index, false);
                     }
                 });
                 self.close_active_item(&CloseActiveItem, window, cx);
@@ -2314,7 +2484,8 @@ impl WorkspaceShell {
         if let Some(pane) = self.panes.get(self.active_pane) {
             pane.update(cx, |pane, _| {
                 if !pane.items.is_empty() {
-                    pane.items.remove(pane.active_item);
+                    let removed = pane.items.remove(pane.active_item);
+                    pane.forget_item(removed.id);
                     pane.active_item = pane.active_item.min(pane.items.len().saturating_sub(1));
                 }
             });
@@ -6536,6 +6707,42 @@ mod tests {
         let theme = Theme::dark();
         assert_eq!(pane_border_color(&theme, true), theme.colors.accent);
         assert_eq!(pane_border_color(&theme, false), theme.colors.subtle_border);
+    }
+
+    #[gpui::test]
+    fn pane_navigation_history_tracks_tabs_and_skips_closed_items(cx: &mut TestAppContext) {
+        let mut state = PresentationState::default();
+        state.workspace.panes[0].items.extend([
+            ItemPresentation {
+                id: 2,
+                kind: ItemKind::Query,
+                title: "two.sql".into(),
+                dirty: false,
+            },
+            ItemPresentation {
+                id: 3,
+                kind: ItemKind::Query,
+                title: "three.sql".into(),
+                dirty: false,
+            },
+        ]);
+        let window = shell_with_state(state, cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        let pane = workspace.read_with(&cx, |workspace, _| workspace.panes[0].clone());
+
+        pane.update(&mut cx, |pane, _| {
+            pane.activate_item(1, true);
+            pane.activate_item(2, true);
+            assert!(pane.can_navigate_backward());
+            pane.navigate_backward();
+            assert_eq!(pane.active_item().map(|item| item.id), Some(2));
+            pane.navigate_forward();
+            assert_eq!(pane.active_item().map(|item| item.id), Some(3));
+            pane.forget_item(2);
+            assert!(!pane.backward_items.contains(&2));
+            assert!(!pane.forward_items.contains(&2));
+        });
     }
 
     #[gpui::test]

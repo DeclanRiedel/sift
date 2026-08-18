@@ -14,8 +14,11 @@ use gpui::{
 use sift_doc::{random_peer_id, TextReplica};
 use sift_ui::{icon, IconName, Theme};
 
+mod vim;
+use self::vim::{VimEngine, VimSnapshot};
+
 const EDITOR_LINE_HEIGHT: Pixels = px(20.);
-const EDITOR_GUTTER_WIDTH: Pixels = px(48.);
+pub(crate) const EDITOR_GUTTER_WIDTH: Pixels = px(48.);
 const EDITOR_TEXT_INSET: Pixels = px(12.);
 const EDITOR_VERTICAL_INSET: Pixels = px(8.);
 
@@ -527,6 +530,10 @@ pub enum EditorKeymap {
 pub enum VimMode {
     Normal,
     Insert,
+    Visual,
+    Select,
+    OperatorPending,
+    Command,
 }
 
 actions!(
@@ -568,6 +575,7 @@ pub struct QueryEditor {
     language: EditorLanguage,
     keymap: EditorKeymap,
     vim_mode: VimMode,
+    vim: Option<VimEngine>,
     marked_range: Option<Range<usize>>,
     line_layouts: Vec<ShapedLine>,
     visible_line_start: usize,
@@ -586,6 +594,7 @@ impl QueryEditor {
             language: EditorLanguage::Sql,
             keymap: EditorKeymap::Standard,
             vim_mode: VimMode::Insert,
+            vim: None,
             marked_range: None,
             line_layouts: Vec::new(),
             visible_line_start: 0,
@@ -618,6 +627,8 @@ impl QueryEditor {
             EditorKeymap::Standard => VimMode::Insert,
             EditorKeymap::Vim => VimMode::Normal,
         };
+        self.vim = (self.keymap == EditorKeymap::Vim)
+            .then(|| VimEngine::new(self.document.text(), self.document.cursor()));
         self.selection_changed(cx);
     }
 
@@ -666,47 +677,149 @@ impl QueryEditor {
         } else if caret_bottom > visible_bottom - EDITOR_VERTICAL_INSET {
             offset.y = -(caret_bottom + EDITOR_VERTICAL_INSET - viewport.size.height);
         }
-        let max_offset = self.scroll_handle.max_offset().y;
-        offset.y = offset.y.min(px(0.)).max(max_offset);
+        let line_count = self.document.text().split('\n').count().max(1);
+        let content_height = EDITOR_VERTICAL_INSET * 2. + EDITOR_LINE_HEIGHT * line_count as f32;
+        let max_scroll = (content_height - viewport.size.height).max(px(0.));
+        offset.y = offset.y.min(px(0.)).max(-max_scroll);
         self.scroll_handle.set_offset(offset);
     }
 
+    fn apply_vim_snapshot(&mut self, snapshot: VimSnapshot, cx: &mut Context<Self>) {
+        if let Some(snapshot_text) = snapshot.text.filter(|text| text != self.document.text()) {
+            let old = self.document.text();
+            let prefix = old
+                .char_indices()
+                .zip(snapshot_text.char_indices())
+                .take_while(|((_, left), (_, right))| left == right)
+                .last()
+                .map_or(0, |((offset, character), _)| offset + character.len_utf8());
+            let old_tail = &old[prefix..];
+            let new_tail = &snapshot_text[prefix..];
+            let suffix_chars = old_tail
+                .chars()
+                .rev()
+                .zip(new_tail.chars().rev())
+                .take_while(|(left, right)| left == right)
+                .count();
+            let old_suffix = if suffix_chars == 0 {
+                old.len()
+            } else {
+                old_tail
+                    .char_indices()
+                    .rev()
+                    .nth(suffix_chars - 1)
+                    .map_or(old.len(), |(offset, _)| prefix + offset)
+            };
+            let new_suffix = if suffix_chars == 0 {
+                snapshot_text.len()
+            } else {
+                new_tail
+                    .char_indices()
+                    .rev()
+                    .nth(suffix_chars - 1)
+                    .map_or(snapshot_text.len(), |(offset, _)| prefix + offset)
+            };
+            self.document
+                .replace_range(prefix..old_suffix, &snapshot_text[prefix..new_suffix]);
+        }
+        let cursor = byte_from_line_column(self.document.text(), snapshot.cursor);
+        if let Some((start, end)) = snapshot.selection {
+            let start = byte_from_line_column(self.document.text(), start);
+            let end = byte_from_line_column(self.document.text(), end);
+            self.document
+                .set_selection(start.min(end)..start.max(end), cursor == start.min(end));
+        } else {
+            self.document.set_selection(cursor..cursor, false);
+        }
+        self.vim_mode = snapshot.mode;
+        self.edited(cx);
+    }
+
+    fn vim_key(
+        &mut self,
+        code: modalkit::crossterm::event::KeyCode,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(vim) = self.vim.as_mut() else {
+            return false;
+        };
+        let rows = (f32::from(self.scroll_handle.bounds().size.height)
+            / f32::from(EDITOR_LINE_HEIGHT)) as usize;
+        vim.set_viewport_rows(rows);
+        let snapshot = vim.input_key(code);
+        self.apply_vim_snapshot(snapshot, cx);
+        true
+    }
+
+    fn vim_text(&mut self, text: &str, cx: &mut Context<Self>) -> bool {
+        let Some(vim) = self.vim.as_mut() else {
+            return false;
+        };
+        let snapshot = vim.input_text(text);
+        self.apply_vim_snapshot(snapshot, cx);
+        true
+    }
+
     fn backspace(&mut self, _: &Backspace, _: &mut Window, cx: &mut Context<Self>) {
+        if self.vim_key(modalkit::crossterm::event::KeyCode::Backspace, cx) {
+            return;
+        }
         self.document.backspace();
         self.edited(cx);
     }
 
     fn delete_forward(&mut self, _: &DeleteForward, _: &mut Window, cx: &mut Context<Self>) {
+        if self.vim_key(modalkit::crossterm::event::KeyCode::Delete, cx) {
+            return;
+        }
         self.document.delete_forward();
         self.edited(cx);
     }
 
     fn newline(&mut self, _: &Newline, _: &mut Window, cx: &mut Context<Self>) {
+        if self.vim_key(modalkit::crossterm::event::KeyCode::Enter, cx) {
+            return;
+        }
         self.document.insert("\n");
         self.edited(cx);
     }
 
     fn indent(&mut self, _: &Indent, _: &mut Window, cx: &mut Context<Self>) {
+        if self.vim_key(modalkit::crossterm::event::KeyCode::Tab, cx) {
+            return;
+        }
         self.document.insert("  ");
         self.edited(cx);
     }
 
     fn move_left(&mut self, _: &MoveLeft, _: &mut Window, cx: &mut Context<Self>) {
+        if self.vim_key(modalkit::crossterm::event::KeyCode::Left, cx) {
+            return;
+        }
         self.document.move_left(false);
         self.selection_changed(cx);
     }
 
     fn move_right(&mut self, _: &MoveRight, _: &mut Window, cx: &mut Context<Self>) {
+        if self.vim_key(modalkit::crossterm::event::KeyCode::Right, cx) {
+            return;
+        }
         self.document.move_right(false);
         self.selection_changed(cx);
     }
 
     fn move_up(&mut self, _: &MoveUp, _: &mut Window, cx: &mut Context<Self>) {
+        if self.vim_key(modalkit::crossterm::event::KeyCode::Up, cx) {
+            return;
+        }
         self.document.move_up(false);
         self.selection_changed(cx);
     }
 
     fn move_down(&mut self, _: &MoveDown, _: &mut Window, cx: &mut Context<Self>) {
+        if self.vim_key(modalkit::crossterm::event::KeyCode::Down, cx) {
+            return;
+        }
         self.document.move_down(false);
         self.selection_changed(cx);
     }
@@ -781,38 +894,7 @@ impl QueryEditor {
     }
 
     fn exit_insert_mode(&mut self, _: &ExitInsertMode, _: &mut Window, cx: &mut Context<Self>) {
-        if self.keymap == EditorKeymap::Vim {
-            self.vim_mode = VimMode::Normal;
-            self.selection_changed(cx);
-        }
-    }
-
-    fn handle_vim_normal_input(&mut self, text: &str, cx: &mut Context<Self>) -> bool {
-        if self.keymap != EditorKeymap::Vim || self.vim_mode != VimMode::Normal {
-            return false;
-        }
-        for command in text.chars() {
-            match command {
-                'h' => self.document.move_left(false),
-                'j' => self.document.move_down(false),
-                'k' => self.document.move_up(false),
-                'l' => self.document.move_right(false),
-                '0' => self.document.move_line_start(false),
-                '$' => self.document.move_line_end(false),
-                'i' => self.vim_mode = VimMode::Insert,
-                'a' => {
-                    self.document.move_right(false);
-                    self.vim_mode = VimMode::Insert;
-                }
-                'x' => self.document.delete_forward(),
-                'u' => {
-                    self.document.undo();
-                }
-                _ => {}
-            }
-        }
-        self.selection_changed(cx);
-        true
+        self.vim_key(modalkit::crossterm::event::KeyCode::Esc, cx);
     }
 
     fn execute_statement(&mut self, _: &ExecuteStatement, _: &mut Window, cx: &mut Context<Self>) {
@@ -836,6 +918,52 @@ impl QueryEditor {
 
     fn offset_from_utf16(&self, offset: usize) -> usize {
         offset_from_utf16(self.document.text(), offset)
+    }
+
+    /// Convert a viewport coordinate directly into a document byte offset.
+    /// This deliberately does not use the cached visible row layouts: scroll
+    /// events can move the viewport between frames, so cached rows are not a
+    /// reliable coordinate system for pointer input.
+    fn byte_index_for_point(
+        &self,
+        position: gpui::Point<Pixels>,
+        window: &mut Window,
+    ) -> Option<usize> {
+        let viewport = self.scroll_handle.bounds();
+        if !viewport.contains(&position) {
+            return None;
+        }
+        let offset = self.scroll_handle.offset();
+        let content_y = position.y - viewport.top() - offset.y - EDITOR_VERTICAL_INSET;
+        let line_count = self.document.text().split('\n').count().max(1);
+        let line = ((f32::from(content_y.max(px(0.))) / f32::from(EDITOR_LINE_HEIGHT)) as usize)
+            .min(line_count - 1);
+        let line_start = self
+            .document
+            .text()
+            .match_indices('\n')
+            .take(line)
+            .last()
+            .map_or(0, |(offset, _)| offset + 1);
+        let line_end = self.document.text()[line_start..]
+            .find('\n')
+            .map_or(self.document.text().len(), |offset| line_start + offset);
+        let line_text = &self.document.text()[line_start..line_end];
+        let style = window.text_style();
+        let font_size = style.font_size.to_pixels(window.rem_size());
+        let runs = match self.language {
+            EditorLanguage::Sql => sql_text_runs(line_text, style.font(), self.theme),
+            EditorLanguage::Toml => toml_text_runs(line_text, style.font(), self.theme),
+        };
+        let layout =
+            window
+                .text_system()
+                .shape_line(line_text.to_string().into(), font_size, &runs, None);
+        let text_left = viewport.left() + EDITOR_GUTTER_WIDTH + EDITOR_TEXT_INSET;
+        let within = layout
+            .index_for_x((position.x - text_left).max(px(0.)))
+            .unwrap_or(0);
+        Some(line_start + within.min(line_text.len()))
     }
 
     fn offset_to_utf16(&self, offset: usize) -> usize {
@@ -910,7 +1038,7 @@ impl EntityInputHandler for QueryEditor {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.handle_vim_normal_input(new_text, cx) {
+        if self.vim_text(new_text, cx) {
             return;
         }
         let range = range_utf16
@@ -972,19 +1100,11 @@ impl EntityInputHandler for QueryEditor {
     fn character_index_for_point(
         &mut self,
         point: gpui::Point<Pixels>,
-        _: &mut Window,
+        window: &mut Window,
         _: &mut Context<Self>,
     ) -> Option<usize> {
-        let bounds = self.last_bounds?;
-        let relative_y = f32::from(point.y - bounds.top()).max(0.0);
-        let line = ((relative_y / f32::from(self.line_height)) as usize)
-            .min(self.line_starts.len().saturating_sub(1));
-        let line_start = *self.line_starts.get(line)?;
-        let layout = self
-            .line_layouts
-            .get(line.checked_sub(self.visible_line_start)?)?;
-        let within = layout.index_for_x(point.x - bounds.left()).unwrap_or(0);
-        Some(self.offset_to_utf16(line_start + within))
+        self.byte_index_for_point(point, window)
+            .map(|offset| self.offset_to_utf16(offset))
     }
 }
 
@@ -1014,31 +1134,13 @@ impl gpui::Render for QueryEditor {
                 MouseButton::Left,
                 cx.listener(|editor, event: &gpui::MouseDownEvent, window, cx| {
                     editor.focus_handle.clone().focus(window, cx);
-                    let Some(bounds) = editor.last_bounds else {
+                    let Some(cursor) = editor.byte_index_for_point(event.position, window) else {
                         return;
                     };
-                    if event.position.x < bounds.left()
-                        || event.position.x > bounds.right()
-                        || event.position.y < bounds.top()
-                        || event.position.y > bounds.bottom()
-                    {
-                        return;
-                    }
-                    let relative_y = f32::from(event.position.y - bounds.top()).max(0.0);
-                    let line = ((relative_y / f32::from(editor.line_height)) as usize)
-                        .min(editor.line_starts.len().saturating_sub(1));
-                    let Some((&line_start, layout)) = editor
-                        .line_starts
-                        .get(line)
-                        .zip(editor.line_layouts.get(line))
-                    else {
-                        return;
-                    };
-                    let within = layout
-                        .index_for_x(event.position.x - bounds.left())
-                        .unwrap_or(0);
-                    let cursor = line_start + within;
                     editor.document.set_selection(cursor..cursor, false);
+                    if let Some(vim) = editor.vim.as_mut() {
+                        vim.set_cursor(editor.document.text(), cursor);
+                    }
                     editor.selection_changed(cx);
                 }),
             )
@@ -1256,17 +1358,19 @@ impl Element for QueryEditorElement {
                 EDITOR_LINE_HEIGHT * line_starts.len().max(1) as f32,
             ),
         );
+        let scroll_top = -editor.scroll_handle.offset().y;
         let visible_start = if viewport.size.height > px(0.) {
-            ((f32::from(viewport.top() - text_top) / f32::from(line_height)).floor() as isize)
-                .max(0) as usize
+            (f32::from((scroll_top - EDITOR_VERTICAL_INSET).max(px(0.))) / f32::from(line_height))
+                .floor() as usize
         } else {
             0
         }
         .saturating_sub(2)
         .min(line_starts.len().saturating_sub(1));
         let visible_end = if viewport.size.height > px(0.) {
-            ((f32::from(viewport.bottom() - text_top) / f32::from(line_height)).ceil() as isize)
-                .max(0) as usize
+            ((f32::from((scroll_top + viewport.size.height - EDITOR_VERTICAL_INSET).max(px(0.)))
+                / f32::from(line_height))
+            .ceil() as usize)
                 + 2
         } else {
             100
@@ -1634,6 +1738,24 @@ fn offset_from_utf16(text: &str, offset: usize) -> usize {
     utf8_offset
 }
 
+fn byte_from_line_column(text: &str, (line, column): (usize, usize)) -> usize {
+    let mut line_start = 0;
+    for _ in 0..line {
+        let Some(relative) = text[line_start..].find('\n') else {
+            return text.len();
+        };
+        line_start += relative + 1;
+    }
+    let line_end = text[line_start..]
+        .find('\n')
+        .map_or(text.len(), |relative| line_start + relative);
+    line_start
+        + text[line_start..line_end]
+            .char_indices()
+            .nth(column)
+            .map_or(line_end - line_start, |(offset, _)| offset)
+}
+
 fn offset_to_utf16(text: &str, offset: usize) -> usize {
     let mut utf16_offset = 0;
     let mut utf8_count = 0;
@@ -1729,6 +1851,79 @@ mod tests {
             assert!(editor.scroll_handle.offset().y < px(0.));
             assert!(editor.visible_line_start > 0);
             assert!(editor.line_layouts.len() < 100);
+        });
+    }
+
+    #[gpui::test]
+    fn clicking_after_scroll_maps_viewport_to_the_visible_document_row(cx: &mut TestAppContext) {
+        let text = (0..300)
+            .map(|line| format!("select {line};"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let window = cx
+            .update(|cx| {
+                cx.open_window(Default::default(), |_window, cx| {
+                    cx.new(|cx| QueryEditor::new(doc(&text), Theme::dark(), cx))
+                })
+            })
+            .unwrap();
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let editor = window.root(&mut cx).unwrap();
+        cx.run_until_parked();
+        let viewport = editor.read_with(&cx, |editor, _| editor.scroll_handle.bounds());
+        cx.simulate_event(gpui::ScrollWheelEvent {
+            position: viewport.center(),
+            delta: gpui::ScrollDelta::Pixels(point(px(0.), px(-720.))),
+            ..Default::default()
+        });
+        cx.run_until_parked();
+        let (position, expected_line) = editor.read_with(&cx, |editor, _| {
+            let viewport = editor.scroll_handle.bounds();
+            let y = viewport.top() + px(42.);
+            let content_y =
+                y - viewport.top() - editor.scroll_handle.offset().y - EDITOR_VERTICAL_INSET;
+            let line = (f32::from(content_y) / f32::from(EDITOR_LINE_HEIGHT)) as usize;
+            (
+                point(
+                    viewport.left() + EDITOR_GUTTER_WIDTH + EDITOR_TEXT_INSET + px(8.),
+                    y,
+                ),
+                line + 1,
+            )
+        });
+        cx.simulate_click(position, gpui::Modifiers::default());
+        assert_eq!(
+            editor.read_with(&cx, |editor, _| editor.cursor_position().0),
+            expected_line
+        );
+    }
+
+    #[gpui::test]
+    fn moving_down_reveals_the_caret_beyond_the_initial_viewport(cx: &mut TestAppContext) {
+        let text = (0..300)
+            .map(|line| format!("select {line};"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let window = cx
+            .update(|cx| {
+                cx.open_window(Default::default(), |_window, cx| {
+                    cx.new(|cx| QueryEditor::new(doc(&text), Theme::dark(), cx))
+                })
+            })
+            .unwrap();
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let editor = window.root(&mut cx).unwrap();
+        cx.run_until_parked();
+        editor.update_in(&mut cx, |editor, window, cx| {
+            editor.document.set_selection(0..0, false);
+            editor.selection_changed(cx);
+            for _ in 0..120 {
+                editor.move_down(&MoveDown, window, cx);
+            }
+        });
+        editor.read_with(&cx, |editor, _| {
+            assert_eq!(editor.cursor_position().0, 121);
+            assert!(editor.scroll_handle.offset().y < px(0.));
         });
     }
 

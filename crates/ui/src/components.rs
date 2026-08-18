@@ -21,6 +21,7 @@ pub enum IconName {
     Automations,
     Check,
     ChevronDown,
+    ChevronLeft,
     ChevronRight,
     Close,
     Copy,
@@ -45,12 +46,13 @@ pub enum IconName {
 }
 
 impl IconName {
-    pub const ALL: [Self; 26] = [
+    pub const ALL: [Self; 27] = [
         Self::Activity,
         Self::Add,
         Self::Automations,
         Self::Check,
         Self::ChevronDown,
+        Self::ChevronLeft,
         Self::ChevronRight,
         Self::Close,
         Self::Copy,
@@ -81,6 +83,7 @@ impl IconName {
             Self::Automations => "icons/automations.svg",
             Self::Check => "icons/check.svg",
             Self::ChevronDown => "icons/chevron-down.svg",
+            Self::ChevronLeft => "icons/chevron-left.svg",
             Self::ChevronRight => "icons/chevron-right.svg",
             Self::Close => "icons/close.svg",
             Self::Copy => "icons/copy.svg",

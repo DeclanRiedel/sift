@@ -146,6 +146,18 @@ pub(super) fn render_status_bar(
             "VIM INSERT",
             "Vim insert mode; Escape returns to normal mode",
         ),
+        Some((EditorKeymap::Vim, VimMode::Visual)) => (
+            "VIM VISUAL",
+            "Vim visual mode; Escape returns to normal mode",
+        ),
+        Some((EditorKeymap::Vim, VimMode::Select)) => (
+            "VIM SELECT",
+            "Vim select mode; Escape returns to normal mode",
+        ),
+        Some((EditorKeymap::Vim, VimMode::OperatorPending)) => {
+            ("VIM OPERATOR", "Vim operator-pending mode")
+        }
+        Some((EditorKeymap::Vim, VimMode::Command)) => ("VIM COMMAND", "Vim command mode"),
         Some((EditorKeymap::Standard, _)) => (
             "STANDARD",
             "Standard editor keymap; click to enable Vim mode",
