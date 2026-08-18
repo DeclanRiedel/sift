@@ -777,13 +777,6 @@ impl Pane {
             results.update(cx, |results, cx| results.set_extent(extent, cx));
         }
     }
-
-    fn toggle_results_placement(&mut self, item_id: u64, cx: &mut Context<Self>) {
-        if let Some(results) = self.results.get(&item_id) {
-            self.live_result_extents.remove(&item_id);
-            results.update(cx, ResultsView::toggle_placement);
-        }
-    }
 }
 
 impl Focusable for Pane {
@@ -1198,19 +1191,9 @@ impl gpui::Render for Pane {
                                         ResultResizeDrag { item_id, placement },
                                         |_, _, _, cx| cx.new(|_| gpui::Empty),
                                     )
-                                    .on_click(cx.listener(move |pane, _, _, cx| {
-                                        pane.toggle_results_placement(item_id, cx)
-                                    }))
                                     .tooltip(move |_, cx| {
                                         cx.new(|_| PaneTooltip {
-                                            label: match placement {
-                                                ResultPlacement::Bottom => {
-                                                    "Drag to resize; click to move results right"
-                                                }
-                                                ResultPlacement::Right => {
-                                                    "Drag to resize; click to move results below"
-                                                }
-                                            },
+                                            label: "Drag to resize results",
                                             theme,
                                         })
                                         .into()
@@ -7750,8 +7733,9 @@ mod tests {
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         let workspace = window.root(&mut cx).unwrap();
         let pane = workspace.read_with(&cx, |shell, _| shell.panes[0].clone());
+        let result = pane.read_with(&cx, |pane, _| pane.results.get(&1).unwrap().clone());
 
-        pane.update(&mut cx, |pane, cx| pane.toggle_results_placement(1, cx));
+        result.update(&mut cx, ResultsView::toggle_placement);
         pane.read_with(&cx, |pane, cx| {
             assert_eq!(
                 pane.results.get(&1).unwrap().read(cx).placement(),
