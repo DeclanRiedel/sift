@@ -1225,14 +1225,14 @@ impl gpui::Render for Pane {
                                     .when(placement == ResultPlacement::Bottom, |handle| {
                                         handle
                                             .left_0()
-                                            .top(px(-(RESULT_RESIZE_HANDLE_SIZE - 1.0) / 2.0))
+                                            .top(px(-(RESULT_RESIZE_HANDLE_SIZE - 1.0)))
                                             .w_full()
                                             .h(px(RESULT_RESIZE_HANDLE_SIZE))
                                     })
                                     .when(placement == ResultPlacement::Right, |handle| {
                                         handle
                                             .top_0()
-                                            .left(px(-(RESULT_RESIZE_HANDLE_SIZE - 1.0) / 2.0))
+                                            .left(px(-(RESULT_RESIZE_HANDLE_SIZE - 1.0)))
                                             .h_full()
                                             .w(px(RESULT_RESIZE_HANDLE_SIZE))
                                     })
@@ -7788,7 +7788,9 @@ fn pane_resize_handle(boundary: usize, border: gpui::Hsla) -> gpui::AnyElement {
                 .id(("resize-pane", boundary))
                 .debug_selector(move || format!("resize-pane-{boundary}"))
                 .absolute()
-                .left(px(-(PANE_RESIZE_HANDLE_SIZE - 1.0) / 2.0))
+                // Keep the whole hit target above the pane painted before the
+                // separator. The following pane cannot cover this overlap.
+                .left(px(-(PANE_RESIZE_HANDLE_SIZE - 1.0)))
                 .top_0()
                 .w(px(PANE_RESIZE_HANDLE_SIZE))
                 .h_full()
@@ -7829,6 +7831,7 @@ impl gpui::Render for WorkspaceShell {
                 div()
                     .id(("pane-slot", index))
                     .debug_selector(move || format!("pane-slot-{index}"))
+                    .flex()
                     .h_full()
                     .min_w_0()
                     .flex_shrink_1()
@@ -9740,7 +9743,17 @@ mod tests {
             .expect("pane resize hitbox");
         assert_eq!(pane_line.size.width, px(1.0));
         assert_eq!(pane_hitbox.size.width, px(PANE_RESIZE_HANDLE_SIZE));
-        assert_eq!(pane_line.left(), pane_hitbox.left() + px(3.0));
+        assert_eq!(
+            pane_line.left(),
+            pane_hitbox.left() + px(PANE_RESIZE_HANDLE_SIZE - 1.0)
+        );
+
+        let first_slot = cx.debug_bounds("pane-slot-0").expect("first pane slot");
+        let second_slot = cx.debug_bounds("pane-slot-1").expect("second pane slot");
+        assert!(first_slot.size.width > px(PANE_MIN_WIDTH));
+        assert!(second_slot.size.width > px(PANE_MIN_WIDTH));
+        assert_eq!(first_slot.right(), pane_line.left());
+        assert_eq!(pane_line.right(), second_slot.left());
 
         let result_line = cx
             .debug_bounds("query-results-separator-1")
@@ -9750,13 +9763,53 @@ mod tests {
             .expect("result resize hitbox");
         assert_eq!(result_line.size.height, px(1.0));
         assert_eq!(result_hitbox.size.height, px(RESULT_RESIZE_HANDLE_SIZE));
-        assert_eq!(result_line.top(), result_hitbox.top() + px(3.0));
+        assert_eq!(
+            result_line.top(),
+            result_hitbox.top() + px(RESULT_RESIZE_HANDLE_SIZE - 1.0)
+        );
 
         let titlebar = cx.debug_bounds("integrated-titlebar").expect("titlebar");
         let left_dock = cx.debug_bounds("left-dock").expect("left dock");
         let first_pane = cx.debug_bounds("pane-slot-0").expect("first pane");
         assert_eq!(titlebar.bottom(), left_dock.top());
         assert_eq!(left_dock.top(), first_pane.top());
+    }
+
+    #[gpui::test]
+    fn pane_resize_hitbox_drags_without_being_covered_by_a_sibling(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        let focus = workspace.read_with(&cx, |shell, cx| shell.focus_handle(cx));
+        cx.update(|window, cx| focus.dispatch_action(&SplitPane, window, cx));
+        cx.run_until_parked();
+
+        let before = cx.debug_bounds("pane-slot-0").unwrap().size.width;
+        let hitbox = cx.debug_bounds("resize-pane-0").unwrap();
+        let start = point(
+            hitbox.left() + px(2.0),
+            hitbox.top() + hitbox.size.height / 2.0,
+        );
+        cx.simulate_mouse_down(start, MouseButton::Left, Modifiers::default());
+        cx.simulate_mouse_move(
+            point(start.x + px(8.0), start.y),
+            MouseButton::Left,
+            Modifiers::default(),
+        );
+        cx.simulate_mouse_move(
+            point(start.x + px(80.0), start.y),
+            MouseButton::Left,
+            Modifiers::default(),
+        );
+        cx.simulate_mouse_up(
+            point(start.x + px(80.0), start.y),
+            MouseButton::Left,
+            Modifiers::default(),
+        );
+        cx.run_until_parked();
+
+        let after = cx.debug_bounds("pane-slot-0").unwrap().size.width;
+        assert!(after > before + px(40.0));
     }
 
     #[gpui::test]
