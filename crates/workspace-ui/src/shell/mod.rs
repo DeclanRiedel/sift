@@ -47,7 +47,7 @@ const PALETTE_ROW_HEIGHT: f32 = 30.0;
 const DOCK_RESIZE_HANDLE_SIZE: f32 = 7.0;
 const PANE_RESIZE_HANDLE_SIZE: f32 = 7.0;
 const PANE_MIN_WIDTH: f32 = 180.0;
-const RESULT_RESIZE_HANDLE_SIZE: f32 = 5.0;
+const RESULT_RESIZE_HANDLE_SIZE: f32 = 7.0;
 const RESULT_MIN_EXTENT: f32 = 140.0;
 const EDITOR_MIN_EXTENT: f32 = 160.0;
 
@@ -1210,26 +1210,31 @@ impl gpui::Render for Pane {
                                     .copied()
                                     .unwrap_or_else(|| result.read(cx).extent());
                                 let item_id = item.id;
-                                let handle = div()
+                                let resize_hitbox = div()
                                     .id(("resize-query-results", item_id as usize))
+                                    .debug_selector(move || {
+                                        format!("resize-query-results-{item_id}")
+                                    })
+                                    .absolute()
                                     .flex_none()
                                     .cursor(match placement {
                                         ResultPlacement::Bottom => CursorStyle::ResizeUpDown,
                                         ResultPlacement::Right => CursorStyle::ResizeLeftRight,
                                     })
                                     .block_mouse_except_scroll()
-                                    .border_color(colors.subtle_border)
                                     .when(placement == ResultPlacement::Bottom, |handle| {
                                         handle
+                                            .left_0()
+                                            .top(px(-(RESULT_RESIZE_HANDLE_SIZE - 1.0) / 2.0))
                                             .w_full()
                                             .h(px(RESULT_RESIZE_HANDLE_SIZE))
-                                            .border_b_1()
                                     })
                                     .when(placement == ResultPlacement::Right, |handle| {
                                         handle
+                                            .top_0()
+                                            .left(px(-(RESULT_RESIZE_HANDLE_SIZE - 1.0) / 2.0))
                                             .h_full()
                                             .w(px(RESULT_RESIZE_HANDLE_SIZE))
-                                            .border_r_1()
                                     })
                                     .on_drag(
                                         ResultResizeDrag { item_id, placement },
@@ -1242,6 +1247,21 @@ impl gpui::Render for Pane {
                                         })
                                         .into()
                                     });
+                                let handle = div()
+                                    .id(("query-results-separator", item_id as usize))
+                                    .debug_selector(move || {
+                                        format!("query-results-separator-{item_id}")
+                                    })
+                                    .relative()
+                                    .flex_none()
+                                    .bg(colors.subtle_border)
+                                    .when(placement == ResultPlacement::Bottom, |handle| {
+                                        handle.w_full().h(px(1.0))
+                                    })
+                                    .when(placement == ResultPlacement::Right, |handle| {
+                                        handle.h_full().w(px(1.0))
+                                    })
+                                    .child(resize_hitbox);
                                 let split = match placement {
                                     ResultPlacement::Bottom => div()
                                         .size_full()
@@ -4253,6 +4273,7 @@ impl WorkspaceShell {
 
         div()
             .id("integrated-titlebar")
+            .debug_selector(|| "integrated-titlebar".into())
             .key_context("SiftWindow")
             .h(self.theme.metrics.toolbar_height)
             .relative()
@@ -4262,8 +4283,6 @@ impl WorkspaceShell {
             .pl_2()
             .pr_2()
             .gap_2()
-            .border_b_1()
-            .border_color(colors.subtle_border)
             .bg(colors.toolbar)
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .child(
@@ -4764,6 +4783,7 @@ impl WorkspaceShell {
             .overflow_hidden()
             .py_2()
             .border_color(colors.subtle_border)
+            .border_t_1()
             .when(definition.placement == DockPlacement::Left, |dock| {
                 dock.border_r_1()
             })
@@ -7757,6 +7777,7 @@ fn dock_resize_handle(dock: DockId) -> gpui::AnyElement {
 fn pane_resize_handle(boundary: usize, border: gpui::Hsla) -> gpui::AnyElement {
     div()
         .id(("pane-separator", boundary))
+        .debug_selector(move || format!("pane-separator-{boundary}"))
         .relative()
         .flex_none()
         .w(px(1.0))
@@ -7807,6 +7828,7 @@ impl gpui::Render for WorkspaceShell {
             pane_elements.push(
                 div()
                     .id(("pane-slot", index))
+                    .debug_selector(move || format!("pane-slot-{index}"))
                     .h_full()
                     .min_w_0()
                     .flex_shrink_1()
@@ -9701,6 +9723,40 @@ mod tests {
         assert!(cx.debug_bounds("resize-left-dock").is_some());
         assert!(cx.debug_bounds("resize-right-dock").is_some());
         assert!(cx.debug_bounds("resize-bottom-dock").is_some());
+    }
+
+    #[gpui::test]
+    fn shared_pane_edges_render_as_single_pixel_separators(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        let focus = workspace.read_with(&cx, |shell, cx| shell.focus_handle(cx));
+        cx.update(|window, cx| focus.dispatch_action(&SplitPane, window, cx));
+        cx.run_until_parked();
+
+        let pane_line = cx.debug_bounds("pane-separator-0").expect("pane separator");
+        let pane_hitbox = cx
+            .debug_bounds("resize-pane-0")
+            .expect("pane resize hitbox");
+        assert_eq!(pane_line.size.width, px(1.0));
+        assert_eq!(pane_hitbox.size.width, px(PANE_RESIZE_HANDLE_SIZE));
+        assert_eq!(pane_line.left(), pane_hitbox.left() + px(3.0));
+
+        let result_line = cx
+            .debug_bounds("query-results-separator-1")
+            .expect("result separator");
+        let result_hitbox = cx
+            .debug_bounds("resize-query-results-1")
+            .expect("result resize hitbox");
+        assert_eq!(result_line.size.height, px(1.0));
+        assert_eq!(result_hitbox.size.height, px(RESULT_RESIZE_HANDLE_SIZE));
+        assert_eq!(result_line.top(), result_hitbox.top() + px(3.0));
+
+        let titlebar = cx.debug_bounds("integrated-titlebar").expect("titlebar");
+        let left_dock = cx.debug_bounds("left-dock").expect("left dock");
+        let first_pane = cx.debug_bounds("pane-slot-0").expect("first pane");
+        assert_eq!(titlebar.bottom(), left_dock.top());
+        assert_eq!(left_dock.top(), first_pane.top());
     }
 
     #[gpui::test]
