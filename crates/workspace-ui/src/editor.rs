@@ -1137,8 +1137,11 @@ impl QueryEditor {
                 .shape_line(line_text.to_string().into(), font_size, &runs, None);
         let text_left = viewport.left() + EDITOR_GUTTER_WIDTH + EDITOR_TEXT_INSET;
         let text_x = position.x - text_left;
-        if text_x < px(0.) || text_x > layout.width() {
+        if text_x < px(0.) {
             return None;
+        }
+        if text_x > layout.width() {
+            return Some(line_end);
         }
         let within = layout.index_for_x(text_x).unwrap_or(0);
         Some(line_start + within.min(line_text.len()))
@@ -2082,7 +2085,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn clicking_outside_document_text_preserves_the_caret(cx: &mut TestAppContext) {
+    fn clicking_past_text_moves_to_line_end_and_below_document_is_ignored(cx: &mut TestAppContext) {
         let window = cx
             .update(|cx| {
                 cx.open_window(Default::default(), |_window, cx| {
@@ -2111,11 +2114,15 @@ mod tests {
         });
 
         cx.simulate_click(past_text, gpui::Modifiers::default());
+        assert_eq!(
+            editor.read_with(&cx, |editor, _| editor.document.cursor()),
+            "select 1;".len()
+        );
         cx.simulate_click(below_document, gpui::Modifiers::default());
 
         assert_eq!(
             editor.read_with(&cx, |editor, _| editor.document.cursor()),
-            4
+            "select 1;".len()
         );
     }
 
