@@ -77,6 +77,7 @@ pub enum BottomTool {
     Console,
     Monitor,
     Automations,
+    Problems,
 }
 
 impl BottomTool {
@@ -85,6 +86,7 @@ impl BottomTool {
             Self::Console => "Console",
             Self::Monitor => "Monitor",
             Self::Automations => "Automations",
+            Self::Problems => "Problems",
         }
     }
 }

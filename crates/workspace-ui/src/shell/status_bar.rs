@@ -210,7 +210,8 @@ pub(super) fn render_status_bar(
                         "footer-diagnostics",
                         IconName::Warning,
                         format!("Problems ({})", shell.status.diagnostic_count),
-                        false,
+                        shell.bottom_dock.presentation.open
+                            && shell.active_bottom_tool == BottomTool::Problems,
                         Some(shell.status.diagnostic_count),
                         shell.status.diagnostic_count > 0,
                     )

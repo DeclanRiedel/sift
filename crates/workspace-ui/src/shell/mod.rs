@@ -55,6 +55,29 @@ const RESULT_RESIZE_HANDLE_SIZE: f32 = 7.0;
 const RESULT_MIN_EXTENT: f32 = 140.0;
 const EDITOR_MIN_EXTENT: f32 = 160.0;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SqlProblemSeverity {
+    Error,
+    Warning,
+}
+
+impl SqlProblemSeverity {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Error => "Error",
+            Self::Warning => "Warning",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SqlProblem {
+    item_id: Option<u64>,
+    title: String,
+    severity: SqlProblemSeverity,
+    message: String,
+}
+
 fn quote_identifier(identifier: &str) -> String {
     format!("\"{}\"", identifier.replace('"', "\"\""))
 }
@@ -143,41 +166,6 @@ struct TabTransfer {
     editor: Entity<QueryEditor>,
     results: Option<Entity<ResultsView>>,
     clean_text: String,
-}
-
-/// Cursor-following preview shown while a tab drag is in flight. Created by
-/// the tab's `on_drag` and rendered by GPUI under the pointer.
-struct TabDragGhost {
-    title: SharedString,
-}
-
-impl gpui::Render for TabDragGhost {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = cx.theme();
-        let colors = theme.colors;
-        div()
-            .id("tab-drag-ghost")
-            .debug_selector(|| "tab-drag-ghost".into())
-            .flex()
-            .items_center()
-            .gap_1()
-            .h(theme.metrics.tab_height - px(6.))
-            .max_w(px(240.))
-            .px_2()
-            .rounded(theme.metrics.radius)
-            .border_1()
-            .border_color(colors.strong_border)
-            .bg(colors.elevated_surface)
-            .shadow_lg()
-            .text_sm()
-            .text_color(colors.text)
-            .child(
-                div()
-                    .min_w_0()
-                    .truncate()
-                    .child(self.title.clone()),
-            )
-    }
 }
 
 fn optional_u32_field(
@@ -961,25 +949,6 @@ impl Pane {
         }
     }
 
-    /// Pointer moved over the tab strip but not over any tab: park the drop at
-    /// the end of the strip. Registered on the strip itself, so it runs before
-    /// the per-tab listeners and any hovered tab overrides it.
-    fn tab_strip_drag_hover(
-        &mut self,
-        event: &gpui::DragMoveEvent<TabDrag>,
-        _: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let drop_index = event
-            .bounds
-            .contains(&event.event.position)
-            .then_some(self.items.len());
-        if self.tab_drop_index != drop_index {
-            self.tab_drop_index = drop_index;
-            cx.notify();
-        }
-    }
-
     /// A dragged tab was released over this pane: reorder locally, or ask the
     /// workspace to move it here from its originating pane.
     fn finish_tab_drag(&mut self, drag: &TabDrag, _: &mut Window, cx: &mut Context<Self>) {
@@ -1587,6 +1556,7 @@ pub struct WorkspaceShell {
     toasts: Vec<Toast>,
     next_toast_id: u64,
     status: StatusBar,
+    sql_problems: Vec<SqlProblem>,
     lifecycle: LifecycleProjection,
     presence: RoomPresenceProjection,
     _lifecycle_task: Option<Task<()>>,
@@ -1809,6 +1779,7 @@ impl WorkspaceShell {
             app_bar_menu: None,
             toasts: Vec::new(),
             status: StatusBar::default(),
+            sql_problems: Vec::new(),
             lifecycle: LifecycleProjection::default(),
             presence: RoomPresenceProjection::default(),
             _lifecycle_task: None,
@@ -2982,25 +2953,121 @@ impl WorkspaceShell {
             ResultState::Ready(_) | ResultState::Idle => "Ready".into(),
             _ => state.status_label(),
         };
-        self.status.current_error = match &state {
-            ResultState::Unavailable(reason) | ResultState::Failed(reason) => Some(reason.clone()),
-            ResultState::TimedOut => Some("Query timed out".into()),
-            ResultState::OutcomeUnknown => Some("Query outcome is unknown".into()),
-            ResultState::Idle
-            | ResultState::Pending
-            | ResultState::Ready(_)
-            | ResultState::Cancelled => None,
-        };
-        self.status.diagnostic_count = match &state {
-            ResultState::Ready(data) => data.warnings.len(),
-            _ => usize::from(self.status.current_error.is_some()),
-        };
+        self.replace_sql_problems(item_id, &state, cx);
         for pane in &self.panes {
             if pane.update(cx, |pane, cx| pane.set_result(item_id, state.clone(), cx)) {
                 break;
             }
         }
         cx.notify();
+    }
+
+    fn query_item_title(&self, item_id: u64, cx: &App) -> String {
+        self.panes
+            .iter()
+            .find_map(|pane| {
+                pane.read(cx)
+                    .items
+                    .iter()
+                    .find(|item| item.id == item_id)
+                    .map(|item| item.title.clone())
+            })
+            .unwrap_or_else(|| format!("Query {item_id}"))
+    }
+
+    fn replace_sql_problems(&mut self, item_id: u64, state: &ResultState, cx: &App) {
+        self.sql_problems
+            .retain(|problem| problem.item_id != Some(item_id));
+        let title = self.query_item_title(item_id, cx);
+        let mut push = |severity, message: String| {
+            self.sql_problems.push(SqlProblem {
+                item_id: Some(item_id),
+                title: title.clone(),
+                severity,
+                message,
+            });
+        };
+        match state {
+            ResultState::Unavailable(message) | ResultState::Failed(message) => {
+                push(SqlProblemSeverity::Error, message.clone());
+            }
+            ResultState::TimedOut => {
+                push(SqlProblemSeverity::Error, "Query timed out".into());
+            }
+            ResultState::OutcomeUnknown => {
+                push(SqlProblemSeverity::Error, "Query outcome is unknown".into());
+            }
+            ResultState::Ready(data) => {
+                for warning in &data.warnings {
+                    push(SqlProblemSeverity::Warning, warning.message.clone());
+                }
+            }
+            ResultState::Idle | ResultState::Pending | ResultState::Cancelled => {}
+        }
+        self.sync_sql_problem_status();
+    }
+
+    fn clear_sql_problems(&mut self, item_id: u64) {
+        self.sql_problems
+            .retain(|problem| problem.item_id != Some(item_id));
+        self.sync_sql_problem_status();
+    }
+
+    fn sync_sql_problem_status(&mut self) {
+        self.status.diagnostic_count = self.sql_problems.len();
+        self.status.current_error = self
+            .sql_problems
+            .iter()
+            .rev()
+            .find(|problem| problem.severity == SqlProblemSeverity::Error)
+            .map(|problem| problem.message.clone());
+    }
+
+    fn visible_problems(&self) -> Vec<SqlProblem> {
+        if !self.sql_problems.is_empty() {
+            return self.sql_problems.clone();
+        }
+        self.status
+            .current_error
+            .as_ref()
+            .map(|message| {
+                vec![SqlProblem {
+                    item_id: None,
+                    title: "Workspace".into(),
+                    severity: SqlProblemSeverity::Error,
+                    message: message.clone(),
+                }]
+            })
+            .unwrap_or_default()
+    }
+
+    fn copy_problem(&mut self, index: usize, cx: &mut Context<Self>) {
+        let Some(problem) = self.visible_problems().get(index).cloned() else {
+            return;
+        };
+        cx.write_to_clipboard(gpui::ClipboardItem::new_string(problem.message));
+        self.show_toast("Copied problem".into(), cx);
+    }
+
+    fn copy_all_problems(&mut self, cx: &mut Context<Self>) {
+        let problems = self.visible_problems();
+        if problems.is_empty() {
+            return;
+        }
+        let text = problems
+            .iter()
+            .map(|problem| {
+                format!(
+                    "[{}] {}: {}",
+                    problem.severity.label(),
+                    problem.title,
+                    problem.message
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
+        self.show_toast("Copied all problems".into(), cx);
     }
 
     fn selected_workspace(&self) -> Option<&WorkspaceNavEntry> {
@@ -3047,11 +3114,7 @@ impl WorkspaceShell {
     }
 
     fn show_diagnostics(&mut self, cx: &mut Context<Self>) {
-        let message = self.status.current_error.as_ref().map_or_else(
-            || "No current SQL diagnostics".into(),
-            |error| format!("Current diagnostic: {error}"),
-        );
-        self.show_toast(message, cx);
+        self.select_bottom_tool(BottomTool::Problems, cx);
     }
 
     fn copy_current_error(&mut self, cx: &mut Context<Self>) {
@@ -3477,11 +3540,10 @@ impl WorkspaceShell {
                 self.active_pane = index;
                 self.open_command_palette(&OpenCommandPalette, window, cx);
             }
-            PaneEvent::ExecuteRequested { item_id, sql } => match &self.executor_sender {
+            PaneEvent::ExecuteRequested { item_id, sql } => match self.executor_sender.clone() {
                 Some(sender) => {
                     self.status.execution = "Running…".into();
-                    self.status.current_error = None;
-                    self.status.diagnostic_count = 0;
+                    self.clear_sql_problems(*item_id);
                     let _ = sender.send(ExecutorCommand::Execute {
                         item_id: *item_id,
                         sql: sql.clone(),
@@ -3507,7 +3569,19 @@ impl WorkspaceShell {
             cx.notify();
             return;
         }
+        let removed_item_ids = self.panes[index]
+            .read(cx)
+            .items
+            .iter()
+            .map(|item| item.id)
+            .collect::<HashSet<_>>();
         self.panes.remove(index);
+        self.sql_problems.retain(|problem| {
+            problem
+                .item_id
+                .is_none_or(|item_id| !removed_item_ids.contains(&item_id))
+        });
+        self.sync_sql_problem_status();
         let removed_flex = self.pane_flexes.remove(index);
         if index > 0 {
             self.pane_flexes[index - 1] += removed_flex;
@@ -3558,14 +3632,20 @@ impl WorkspaceShell {
     }
 
     fn remove_active_item(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(pane) = self.panes.get(self.active_pane) {
+        let removed_item_id = self.panes.get(self.active_pane).and_then(|pane| {
             pane.update(cx, |pane, _| {
                 if !pane.items.is_empty() {
                     let removed = pane.items.remove(pane.active_item);
                     pane.forget_item(removed.id);
                     pane.active_item = pane.active_item.min(pane.items.len().saturating_sub(1));
+                    Some(removed.id)
+                } else {
+                    None
                 }
-            });
+            })
+        });
+        if let Some(item_id) = removed_item_id {
+            self.clear_sql_problems(item_id);
         }
         // A pane emptied by its last close collapses so panes never accumulate
         // as un-closeable ghosts. The final pane always survives.
@@ -7533,7 +7613,7 @@ fn window_resize_handle(
         ResizeEdge::BottomRight => handle.bottom_0().right_0().size(px(CORNER_SIZE)),
         ResizeEdge::BottomLeft => handle.bottom_0().left_0().size(px(CORNER_SIZE)),
     }
-        .into_any_element()
+    .into_any_element()
 }
 
 fn window_resize_handles() -> Vec<gpui::AnyElement> {
@@ -7619,7 +7699,7 @@ fn dock_resize_separator(dock: DockId, border: gpui::Hsla) -> gpui::AnyElement {
                     cx.new(|_| gpui::Empty)
                 }),
         )
-    .into_any_element()
+        .into_any_element()
 }
 
 fn pane_resize_handle(boundary: usize, border: gpui::Hsla) -> gpui::AnyElement {
@@ -9847,6 +9927,59 @@ mod tests {
                 cx,
             );
             assert_eq!(shell.status.execution, "Ready");
+        });
+    }
+
+    #[gpui::test]
+    fn problems_footer_opens_panel_and_copies_entries(cx: &mut TestAppContext) {
+        let mut state = PresentationState::default();
+        state.workspace.panes[0].items.push(ItemPresentation {
+            id: 2,
+            kind: ItemKind::Query,
+            title: "report.sql".into(),
+            dirty: false,
+        });
+        let window = shell_with_state(state, cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+
+        workspace.update(&mut cx, |shell, cx| {
+            shell.route_result(1, ResultState::Failed("syntax error near FROM".into()), cx);
+            shell.route_result(2, ResultState::Failed("column total does not exist".into()), cx);
+            assert_eq!(shell.status.diagnostic_count, 2);
+            assert_eq!(shell.sql_problems.len(), 2);
+
+            shell.show_diagnostics(cx);
+            assert!(shell.bottom_dock.presentation.open);
+            assert_eq!(shell.active_bottom_tool, BottomTool::Problems);
+
+            shell.copy_problem(0, cx);
+            let copied = cx.read_from_clipboard().and_then(|item| item.text());
+            assert_eq!(copied.as_deref(), Some("syntax error near FROM"));
+
+            shell.copy_all_problems(cx);
+            let copied = cx.read_from_clipboard().and_then(|item| item.text());
+            assert_eq!(
+                copied.as_deref(),
+                Some(
+                    "[Error] query.sql: syntax error near FROM\n[Error] report.sql: column total does not exist"
+                )
+            );
+        });
+        cx.run_until_parked();
+
+        assert!(cx.debug_bounds("problem-row-0").is_some());
+        assert!(cx.debug_bounds("problem-row-1").is_some());
+        assert!(cx.debug_bounds("copy-all-problems").is_some());
+
+        workspace.update(&mut cx, |shell, cx| {
+            shell.route_result(
+                1,
+                ResultState::Ready(crate::results::ResultData::default()),
+                cx,
+            );
+            assert_eq!(shell.status.diagnostic_count, 1);
+            assert_eq!(shell.sql_problems[0].item_id, Some(2));
         });
     }
 }
