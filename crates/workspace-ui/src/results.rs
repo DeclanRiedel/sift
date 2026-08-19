@@ -501,13 +501,26 @@ impl ResultsView {
             .saturating_add_signed(column_delta)
             .min(data.columns.len() - 1);
         self.set_selection(GridSelection::Cell { row, column }, cx);
-        // Horizontal navigation cannot move outside the vertical viewport.
-        // Avoid leaving a deferred scroll request for the list to resolve on
-        // every left/right key press (and at the top/bottom row boundaries).
-        if row != previous_row {
+        // Most repeated arrow events stay inside the viewport. Do not make the
+        // uniform list resolve a deferred scroll request and relayout its rows
+        // until selection actually crosses a visible edge.
+        if row != previous_row && self.row_needs_reveal(row) {
             self.row_scroll_handle
                 .scroll_to_item(row, ScrollStrategy::Nearest);
         }
+    }
+
+    fn row_needs_reveal(&self, row: usize) -> bool {
+        let state = self.row_scroll_handle.0.borrow();
+        let viewport_height = state.base_handle.bounds().size.height;
+        if viewport_height <= px(0.) {
+            return true;
+        }
+        let visible_top = -state.base_handle.offset().y;
+        let visible_bottom = visible_top + viewport_height;
+        let row_top = px(ROW_HEIGHT * row as f32);
+        let row_bottom = row_top + px(ROW_HEIGHT);
+        row_top < visible_top || row_bottom > visible_bottom
     }
 
     fn move_cell_left(&mut self, _: &MoveCellLeft, _: &mut Window, cx: &mut Context<Self>) {
