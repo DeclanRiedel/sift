@@ -9,8 +9,8 @@ commit local state, credentials, logs, or machine-specific paths.
   your shell workflow loads env files.
 - `sift.example.toml` is the file-based config template. Copy it to
   `sift.toml` if you prefer TOML config.
-- `scripts/dev-secret-key.sh` creates the local key file used by the encrypted
-  file secret backend.
+- `examples/reproducible-instance/scripts/dev-secret-key.sh` creates the local
+  key file used by the encrypted file secret backend.
 
 ## Ignored Local Files
 
@@ -39,7 +39,7 @@ and exports `SIFT_METADATA__SECRET_KEY_FILE` to that path.
 To generate the key manually:
 
 ```sh
-scripts/dev-secret-key.sh
+examples/reproducible-instance/scripts/dev-secret-key.sh
 # or, inside the Nix dev shell:
 sift-dev-secret-key
 ```
@@ -85,8 +85,8 @@ view, a SQL function, indexes, foreign keys, JSON/array/network values, and over
 Both helper steps are also usable on their own:
 
 ```sh
-scripts/dev-seed-postgres.sh                                   # prints the port
-scripts/dev-register-demo-connection.sh http://127.0.0.1:7474  # prints profile id
+examples/reproducible-instance/scripts/dev-seed-postgres.sh                                   # prints the port
+examples/reproducible-instance/scripts/dev-register-demo-connection.sh http://127.0.0.1:7474  # prints profile id
 ```
 
 The seed helper and desktop demo are idempotent. Rerunning reuses the existing

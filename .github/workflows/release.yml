@@ -112,7 +112,7 @@ jobs:
           test -n "$protocol_version"
           published_at=$(date --utc +%Y-%m-%dT%H:%M:%SZ)
           expires_at=$(date --utc --date='+14 days' +%Y-%m-%dT%H:%M:%SZ)
-          scripts/build-release-manifest.sh \
+          examples/reproducible-instance/scripts/build-release-manifest.sh \
             dist "$channel" "$sequence" "$version" "$MINIMUM_UPDATER_VERSION" \
             "$protocol_version" "$RELEASE_ORIGIN" \
             "$published_at" "$expires_at"

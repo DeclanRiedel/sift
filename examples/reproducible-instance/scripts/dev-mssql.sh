@@ -11,11 +11,11 @@
 # it; use `reset` to nuke everything and start over.
 #
 # Usage:
-#   scripts/dev-mssql.sh start      # ensure pw + start container
-#   scripts/dev-mssql.sh stop       # stop + remove container (keep data)
-#   scripts/dev-mssql.sh reset      # stop + remove + wipe volume + start fresh
-#   scripts/dev-mssql.sh password   # print current SA password
-#   scripts/dev-mssql.sh status     # running | stopped | not created
+#   nix run .#dev-mssql start      # ensure pw + start container
+#   nix run .#dev-mssql stop       # stop + remove container (keep data)
+#   nix run .#dev-mssql reset      # stop + remove + wipe volume + start fresh
+#   nix run .#dev-mssql password   # print current SA password
+#   nix run .#dev-mssql status     # running | stopped | not created
 
 set -eu
 

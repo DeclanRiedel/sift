@@ -243,7 +243,7 @@
             bind="''${SIFT_BIND:-127.0.0.1:3000}"
             base_url="http://$bind"
 
-            pgport="$(sh "$repo/scripts/dev-seed-postgres.sh")"
+            pgport="$(sh "$repo/examples/reproducible-instance/scripts/dev-seed-postgres.sh")"
 
             cd "$repo"
             # Real (non-mock) backend: a fresh metadata database must be migrated first.
@@ -276,7 +276,7 @@
               exit 1
             fi
 
-            profile_id="$(sh "$repo/scripts/dev-register-demo-connection.sh" "$base_url" "$pgport")"
+            profile_id="$(sh "$repo/examples/reproducible-instance/scripts/dev-register-demo-connection.sh" "$base_url" "$pgport")"
 
             cd "$lab"
             if [ ! -d node_modules ]; then
@@ -447,7 +447,7 @@
               fi
             }
 
-            pgport="$(SIFT_DEMO_RESET=1 sh "$repo/scripts/dev-seed-postgres.sh")"
+            pgport="$(SIFT_DEMO_RESET=1 sh "$repo/examples/reproducible-instance/scripts/dev-seed-postgres.sh")"
 
             cd "$repo"
             # Build first, in the foreground: a cold GPUI build takes minutes,
@@ -503,7 +503,7 @@
         devSecretKey = pkgs.writeShellApplication {
           name = "sift-dev-secret-key";
           runtimeInputs = with pkgs; [ coreutils openssl ];
-          text = devCommand ''sh scripts/dev-secret-key.sh'';
+          text = devCommand ''sh examples/reproducible-instance/scripts/dev-secret-key.sh'';
         };
 
         devMssql = pkgs.writeShellApplication {
@@ -513,7 +513,7 @@
           # The script checks for docker on PATH and errors out cleanly
           # if it's missing.
           runtimeInputs = with pkgs; [ coreutils openssl gawk ];
-          text = devCommand ''sh scripts/dev-mssql.sh "$@"'';
+          text = devCommand ''sh examples/reproducible-instance/scripts/dev-mssql.sh "$@"'';
         };
 
         siftHelp = pkgs.writeShellApplication {
@@ -612,7 +612,7 @@
           # Generate a local dev keyfile for the encrypted-file secret backend
           # and export its path. Selecting the backend stays opt-in.
           shellHook = ''
-            keyfile="$(sh "$PWD/scripts/dev-secret-key.sh" "''${SIFT_METADATA__SECRET_KEY_FILE:-$PWD/.sift/dev-secret.key}")"
+            keyfile="$(sh "$PWD/examples/reproducible-instance/scripts/dev-secret-key.sh" "''${SIFT_METADATA__SECRET_KEY_FILE:-$PWD/.sift/dev-secret.key}")"
             export SIFT_METADATA__SECRET_KEY_FILE="$keyfile"
           '';
         };

@@ -23,7 +23,7 @@ jobs:
       - name: Clippy
         run: nix develop . --command cargo clippy --workspace --all-targets -- -D warnings
       - name: Client dependency firewall
-        run: nix develop . --command scripts/check-client-dependency-firewall.sh
+        run: nix develop . --command examples/reproducible-instance/scripts/check-client-dependency-firewall.sh
       - name: SQLite compatibility boundary fixtures
         run: nix develop . --command cargo test -p sift-metadata schema_compatibility_fixture_matrix
       - name: Backup and remote lifecycle fixtures
@@ -122,4 +122,4 @@ jobs:
       - name: SSH remote bootstrap, host-key, reconnect, and restart matrix
         env:
           SIFT_SSH_REMOTE_PROFILE: release
-        run: nix develop . --command scripts/test-ssh-remote.sh "$GITHUB_WORKSPACE"
+        run: nix develop . --command examples/reproducible-instance/scripts/test-ssh-remote.sh "$GITHUB_WORKSPACE"

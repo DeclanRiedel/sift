@@ -55,11 +55,11 @@ what sift is and the five product goals; this file is the operational subset.
 - Secret-shaped values in `.env`:
   - **`SIFT_METADATA__SECRET_KEY_FILE`** — 32-byte hex keyfile for the
     file secret backend. Auto-generated at `.sift/dev-secret.key` on
-    devshell entry via `scripts/dev-secret-key.sh` (invoked by the
-    flake `shellHook`). Do not set this manually in `.env`.
+    devshell entry via `examples/reproducible-instance/scripts/dev-secret-key.sh`
+    (invoked by the flake `shellHook`). Do not set this manually in `.env`.
   - **`SIFT_MSSQL_PASSWORD`** — SA password for the local MSSQL
-    docker container. Managed by `scripts/dev-mssql.sh` (or `nix run
-    .#dev-mssql <sub>`), which generates a policy-compliant random
+    docker container. Managed by `examples/reproducible-instance/scripts/dev-mssql.sh`
+    (or `nix run .#dev-mssql <sub>`), which generates a policy-compliant random
     password into `.env` on first `start` and boots the container
     with the same value. `.env` is authoritative; the container is
     rebuilt from it. Never edit either side by hand.

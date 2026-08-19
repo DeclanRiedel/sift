@@ -115,6 +115,41 @@ fn schema_object_kind_label(kind: sift_protocol::ObjectKind) -> &'static str {
     }
 }
 
+/// Full-colour vendor artwork for a connection's engine, when we carry it.
+fn provider_logo_asset(provider_id: &sift_protocol::ProviderId) -> Option<&'static str> {
+    match provider_id.as_str() {
+        "sift/postgres" => Some("databases/postgres.svg"),
+        "sift/sql-server" => Some("databases/sql-server.svg"),
+        _ => None,
+    }
+}
+
+/// Compact engine name shown next to connection names in the tree.
+fn provider_display_name(provider_id: &sift_protocol::ProviderId) -> Option<&'static str> {
+    match provider_id.as_str() {
+        "sift/postgres" => Some("PostgreSQL"),
+        "sift/sql-server" => Some("SQL Server"),
+        _ => None,
+    }
+}
+
+fn schema_object_kind_icon(kind: sift_protocol::ObjectKind) -> IconName {
+    use sift_protocol::ObjectKind;
+    match kind {
+        ObjectKind::Table | ObjectKind::ForeignTable | ObjectKind::PartitionedTable => {
+            IconName::Table
+        }
+        ObjectKind::View | ObjectKind::MaterializedView => IconName::View,
+        ObjectKind::ScalarFunction | ObjectKind::TableValuedFunction | ObjectKind::Procedure => {
+            IconName::Function
+        }
+        ObjectKind::Sequence => IconName::Sequence,
+        ObjectKind::Trigger | ObjectKind::Synonym | ObjectKind::Type | ObjectKind::Extension => {
+            IconName::Fallback
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 struct DockResizeDrag {
     dock: DockId,
@@ -5573,6 +5608,7 @@ impl WorkspaceShell {
                                     colors.muted_text,
                                     11.,
                                 ))
+                                .child(icon(IconName::Folder, colors.muted_text, 12.))
                                 .child(div().min_w_0().truncate().child(schema.name.clone()))
                                 .child(
                                     div()
@@ -5642,8 +5678,22 @@ impl WorkspaceShell {
                                     div()
                                         .min_w_0()
                                         .flex_1()
+                                        .flex()
+                                        .items_center()
+                                        .gap_1()
                                         .truncate()
-                                        .child(object.name.clone()),
+                                        .child(icon(
+                                            schema_object_kind_icon(object.kind),
+                                            if can_preview {
+                                                colors.muted_text
+                                            } else {
+                                                colors.disabled_text
+                                            },
+                                            12.,
+                                        ))
+                                        .child(
+                                            div().min_w_0().truncate().child(object.name.clone()),
+                                        ),
                                 )
                                 .child(
                                     div()
@@ -5769,7 +5819,13 @@ impl WorkspaceShell {
                                 colors.muted_text,
                                 11.,
                             ))
-                            .child(div().min_w_0().truncate().child(tenant.name.clone()))
+                            .child(
+                                div()
+                                    .min_w_0()
+                                    .truncate()
+                                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                                    .child(tenant.name.clone()),
+                            )
                             .into_any_element(),
                     );
                     if !tenant_open {
@@ -5809,6 +5865,24 @@ impl WorkspaceShell {
                             }
                             _ => (colors.muted_text, false),
                         };
+                        let (status_color, status_label) = match &self.connection_status {
+                            ConnectionStatus::Connected { profile_id, .. }
+                                if *profile_id == conn.id =>
+                            {
+                                (Some(colors.success), provider_display_name(&conn.provider_id))
+                            }
+                            ConnectionStatus::Connecting { profile_id }
+                                if *profile_id == conn.id =>
+                            {
+                                (Some(colors.warning), Some("Connecting…"))
+                            }
+                            ConnectionStatus::Failed { profile_id, .. }
+                                if *profile_id == conn.id =>
+                            {
+                                (Some(colors.danger), Some("Failed"))
+                            }
+                            _ => (None, provider_display_name(&conn.provider_id)),
+                        };
                         let connection_open = self.expanded_connections.contains(&connection_id);
                         let leading = if connected {
                             div()
@@ -5837,14 +5911,40 @@ impl WorkspaceShell {
                                 ))
                                 .into_any_element()
                         } else {
-                            div()
-                                .flex_none()
-                                .size(px(16.))
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .child(icon(IconName::Database, connection_color, 13.))
-                                .into_any_element()
+                            div().flex_none().size(px(16.)).into_any_element()
+                        };
+                        let logo = match provider_logo_asset(&conn.provider_id) {
+                            Some(asset) => {
+                                let dot_border = if connected {
+                                    colors.active_surface
+                                } else {
+                                    colors.panel
+                                };
+                                div()
+                                    .relative()
+                                    .flex_none()
+                                    .when(!connected, |logo| logo.opacity(0.6))
+                                    .child(
+                                        img(database_logo(asset))
+                                            .size(px(14.))
+                                            .object_fit(gpui::ObjectFit::Contain),
+                                    )
+                                    .when_some(status_color, |logo, dot| {
+                                        logo.child(
+                                            div()
+                                                .absolute()
+                                                .bottom_0()
+                                                .right_0()
+                                                .size(px(6.))
+                                                .rounded_full()
+                                                .bg(dot)
+                                                .border_1()
+                                                .border_color(dot_border),
+                                        )
+                                    })
+                                    .into_any_element()
+                            }
+                            None => icon(IconName::Database, connection_color, 13.),
                         };
                         let mut row = div()
                             .id(("conn", conn.id as usize))
@@ -5858,7 +5958,17 @@ impl WorkspaceShell {
                             .when(connected, |row| row.bg(colors.active_surface))
                             .hover(|row| row.bg(colors.hovered_surface))
                             .child(leading)
-                            .child(div().flex_1().min_w_0().truncate().child(conn.name.clone()));
+                            .child(logo)
+                            .child(div().flex_1().min_w_0().truncate().child(conn.name.clone()))
+                            .when_some(status_label, |row, label| {
+                                row.child(
+                                    div()
+                                        .flex_none()
+                                        .text_xs()
+                                        .text_color(status_color.unwrap_or(colors.disabled_text))
+                                        .child(label),
+                                )
+                            });
                         if connected {
                             row = row.child(
                                 Button::new(("disconnect", conn.id as usize), "Disconnect")
