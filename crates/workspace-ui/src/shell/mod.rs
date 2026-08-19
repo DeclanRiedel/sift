@@ -23,8 +23,9 @@ use crate::results::{ResultPlacement, ResultState, ResultsView};
 use crate::settings::{EditorMode, SettingsStore, UserSettings};
 
 use crate::presentation::{
-    BottomTool, ItemKind, ItemPresentation, LeftPanel, PanePresentation, PresentationState,
-    PresentationStore, WindowPresentation, WorkspacePresentation,
+    BottomTool, DatabaseObjectSource, ItemKind, ItemPresentation, ItemSource, LeftPanel,
+    PanePresentation, PresentationState, PresentationStore, WindowPresentation,
+    WorkspacePresentation,
 };
 use crate::{
     ConnectionNavEntry, LifecycleEvent, LifecycleProjection, PresenceEvent, RoomPresenceProjection,
@@ -417,6 +418,33 @@ pub enum PaneEvent {
     OpenCommandPaletteRequested,
     /// A query item asked to run SQL; the workspace dispatches it to execution.
     ExecuteRequested { item_id: u64, sql: String },
+    /// A database-backed snapshot requested a live refresh. Workspace owns
+    /// connection selection and may reconnect before executing.
+    RefreshDatabaseItemRequested { item_id: u64 },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum DatabaseItemState {
+    Live,
+    Offline,
+    Reconnecting,
+    Failed(String),
+}
+
+#[derive(Debug, Clone)]
+struct PendingDatabaseExecution {
+    item_id: u64,
+    sql: String,
+    source: DatabaseObjectSource,
+}
+
+#[derive(Debug, Clone)]
+struct DatabaseObjectTarget {
+    connection: ConnectionNavEntry,
+    catalog: String,
+    schema: String,
+    object: String,
+    object_kind: sift_protocol::ObjectKind,
 }
 
 /// Live state of the desktop's database connection. Owned by the shell,
@@ -522,6 +550,7 @@ pub struct Pane {
     editor_subscriptions: HashMap<u64, Subscription>,
     /// The Data/Messages/Explain/History surface owned by each query item.
     results: HashMap<u64, Entity<ResultsView>>,
+    database_item_states: HashMap<u64, DatabaseItemState>,
     /// Transient wrapper sizes while dragging. Keeping these on the pane avoids
     /// invalidating and repainting the result grid for every pointer event.
     live_result_extents: HashMap<u64, f32>,
@@ -552,6 +581,7 @@ impl Pane {
         let mut clean_documents = HashMap::new();
         let mut editor_subscriptions = HashMap::new();
         let mut results = HashMap::new();
+        let mut database_item_states = HashMap::new();
         for item in items
             .iter_mut()
             .filter(|item| ItemRegistry::definition(&item.kind).runtime.is_editor())
@@ -561,7 +591,13 @@ impl Pane {
             // close warning for an unchanged, empty editor.
             item.dirty = false;
             let id = item.id;
-            let document = QueryDocument::with_random_peer("");
+            let restored_text = match item.source.as_ref() {
+                Some(ItemSource::DatabaseObject(source)) => {
+                    table_preview_sql(&source.provider_id, &source.schema, &source.object)
+                }
+                None => String::new(),
+            };
+            let document = QueryDocument::with_random_peer(&restored_text);
             let language = if item.kind == ItemKind::Configuration {
                 EditorLanguage::Toml
             } else {
@@ -584,9 +620,12 @@ impl Pane {
                 }),
             );
             editors.insert(id, editor);
-            clean_documents.insert(id, String::new());
+            clean_documents.insert(id, restored_text);
             if item.kind == ItemKind::Query {
                 results.insert(id, cx.new(ResultsView::new));
+            }
+            if matches!(item.source, Some(ItemSource::DatabaseObject(_))) {
+                database_item_states.insert(id, DatabaseItemState::Offline);
             }
         }
         Self {
@@ -600,6 +639,7 @@ impl Pane {
             clean_documents,
             editor_subscriptions,
             results,
+            database_item_states,
             live_result_extents: HashMap::new(),
             result_resize_frame_pending: false,
             tab_drop_index: None,
@@ -716,6 +756,50 @@ impl Pane {
 
     fn editor(&self, item_id: u64) -> Option<Entity<QueryEditor>> {
         self.editors.get(&item_id).cloned()
+    }
+
+    fn database_source(&self, item_id: u64) -> Option<DatabaseObjectSource> {
+        self.items
+            .iter()
+            .find(|item| item.id == item_id)
+            .and_then(|item| item.source.as_ref())
+            .map(|source| match source {
+                ItemSource::DatabaseObject(source) => source.clone(),
+            })
+    }
+
+    fn set_database_item_state(&mut self, item_id: u64, state: DatabaseItemState) {
+        if self.database_source(item_id).is_some() {
+            self.database_item_states.insert(item_id, state);
+        }
+    }
+
+    fn set_all_database_item_states(&mut self, state: DatabaseItemState) {
+        let ids = self
+            .items
+            .iter()
+            .filter(|item| matches!(item.source, Some(ItemSource::DatabaseObject(_))))
+            .map(|item| item.id)
+            .collect::<Vec<_>>();
+        for item_id in ids {
+            self.database_item_states.insert(item_id, state.clone());
+        }
+    }
+
+    fn mark_database_item_refreshed(&mut self, item_id: u64) {
+        let refreshed_at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()
+            .and_then(|duration| u64::try_from(duration.as_millis()).ok());
+        let Some(item) = self.items.iter_mut().find(|item| item.id == item_id) else {
+            return;
+        };
+        let Some(ItemSource::DatabaseObject(source)) = item.source.as_mut() else {
+            return;
+        };
+        source.last_refreshed_at_ms = refreshed_at;
+        self.database_item_states
+            .insert(item_id, DatabaseItemState::Live);
     }
 
     fn can_navigate_backward(&self) -> bool {
@@ -843,6 +927,7 @@ impl Pane {
             .insert(item_id, editor.read(cx).document().text().to_owned());
         self.editors.insert(item_id, editor);
         self.results.remove(&item_id);
+        self.database_item_states.remove(&item_id);
         self.pending_close_item = None;
         cx.notify();
     }
@@ -873,6 +958,13 @@ impl Pane {
             .insert(item_id, editor.read(cx).document().text().to_owned());
         self.editors.insert(item_id, editor);
         self.results.insert(item_id, results);
+        if matches!(
+            self.items.last().and_then(|item| item.source.as_ref()),
+            Some(ItemSource::DatabaseObject(_))
+        ) {
+            self.database_item_states
+                .insert(item_id, DatabaseItemState::Offline);
+        }
         cx.notify();
     }
 
@@ -1067,6 +1159,11 @@ impl gpui::Render for Pane {
         let is_focused = self.active_focus_handle(cx).is_focused(window)
             || self.focus_handle.contains_focused(window, cx);
         let active = self.active_item().cloned();
+        let database_notice = active.as_ref().and_then(|item| {
+            let ItemSource::DatabaseObject(source) = item.source.as_ref()?;
+            let state = self.database_item_states.get(&item.id)?.clone();
+            (!matches!(state, DatabaseItemState::Live)).then_some((item.id, source.clone(), state))
+        });
         let pending_close = active
             .as_ref()
             .filter(|item| self.pending_close_item == Some(item.id))
@@ -1077,6 +1174,7 @@ impl gpui::Render for Pane {
         let pane_id = self.id;
         div()
             .id(("pane", self.id as usize))
+            .relative()
             .key_context("SiftPane")
             .track_focus(&self.focus_handle)
             // Clicking anywhere in the pane makes it the active pane. The
@@ -1532,6 +1630,111 @@ impl gpui::Render for Pane {
                     ),
                 }
             })
+            .children(database_notice.map(|(item_id, source, state)| {
+                let (message, detail, tone, tint, can_retry) = match state {
+                    DatabaseItemState::Live => unreachable!(),
+                    DatabaseItemState::Offline => (
+                        "Offline snapshot",
+                        format!(
+                            "{}.{} · {} · {}",
+                            source.schema,
+                            source.object,
+                            source.profile_name,
+                            database_snapshot_age(source.last_refreshed_at_ms)
+                        ),
+                        colors.warning,
+                        colors.warning_muted,
+                        true,
+                    ),
+                    DatabaseItemState::Reconnecting => (
+                        "Reconnecting…",
+                        format!("Opening {} before refreshing snapshot", source.profile_name),
+                        colors.warning,
+                        colors.warning_muted,
+                        false,
+                    ),
+                    DatabaseItemState::Failed(reason) => (
+                        "Snapshot unavailable",
+                        reason,
+                        colors.danger,
+                        colors.danger_muted,
+                        true,
+                    ),
+                };
+                div()
+                    .id(("database-snapshot-overlay", item_id as usize))
+                    .debug_selector(|| "database-snapshot-overlay".into())
+                    .absolute()
+                    .left_0()
+                    .right_0()
+                    .top(theme.metrics.tab_height)
+                    .bottom_0()
+                    .flex()
+                    .items_start()
+                    .justify_end()
+                    .p_3()
+                    .bg(tint)
+                    .when(can_retry, |overlay| {
+                        overlay
+                            .cursor_pointer()
+                            .on_click(cx.listener(move |_, _, _, cx| {
+                                cx.emit(PaneEvent::RefreshDatabaseItemRequested { item_id });
+                            }))
+                    })
+                    .child(
+                        div()
+                            .max_w(px(420.))
+                            .p_3()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .rounded(cx.theme().metrics.radius_large)
+                            .border_1()
+                            .border_color(tone)
+                            .bg(colors.elevated_surface)
+                            .shadow_lg()
+                            .child(icon(IconName::Warning, tone, 16.))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .flex()
+                                    .flex_col()
+                                    .child(
+                                        div()
+                                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                                            .child(message),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(colors.muted_text)
+                                            .whitespace_normal()
+                                            .child(detail),
+                                    ),
+                            )
+                            .children(
+                                can_retry.then(|| Badge::new("Reconnect").tone(Tone::Warning)),
+                            ),
+                    )
+            }))
+    }
+}
+
+fn database_snapshot_age(last_refreshed_at_ms: Option<u64>) -> String {
+    let Some(last_refreshed_at_ms) = last_refreshed_at_ms else {
+        return "not refreshed in this session".into();
+    };
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .and_then(|duration| u64::try_from(duration.as_millis()).ok())
+        .unwrap_or(last_refreshed_at_ms);
+    let elapsed_seconds = now_ms.saturating_sub(last_refreshed_at_ms) / 1_000;
+    match elapsed_seconds {
+        0..=59 => format!("fetched {elapsed_seconds}s ago"),
+        60..=3_599 => format!("fetched {}m ago", elapsed_seconds / 60),
+        _ => format!("fetched {}h ago", elapsed_seconds / 3_600),
     }
 }
 
@@ -1590,6 +1793,7 @@ pub struct WorkspaceShell {
     _executor_task: Option<Task<()>>,
     _instance_task: Option<Task<()>>,
     executor_sender: Option<tokio::sync::mpsc::UnboundedSender<ExecutorCommand>>,
+    pending_database_execution: Option<PendingDatabaseExecution>,
     instance_sender: Option<tokio::sync::mpsc::UnboundedSender<InstanceCommand>>,
     saved_servers: Vec<SavedServerProfile>,
     instance_roots: Vec<SavedInstanceRoot>,
@@ -1861,6 +2065,7 @@ impl WorkspaceShell {
             _executor_task: None,
             _instance_task: None,
             executor_sender: None,
+            pending_database_execution: None,
             instance_sender: None,
             saved_servers: Vec::new(),
             instance_roots: Vec::new(),
@@ -2126,8 +2331,17 @@ impl WorkspaceShell {
             self.workspace_sessions.insert(previous, outgoing);
         }
 
+        if let Some(sender) = &self.executor_sender {
+            let _ = sender.send(ExecutorCommand::Disconnect);
+        }
         self.connection_status = ConnectionStatus::Disconnected;
         self.connection_schema = ConnectionSchemaState::Unavailable;
+        self.pending_database_execution = None;
+        for pane in &self.panes {
+            pane.update(cx, |pane, _| {
+                pane.set_all_database_item_states(DatabaseItemState::Offline)
+            });
+        }
         self.presence.apply(PresenceEvent::Left);
         self.modal = None;
         self.app_bar_menu = None;
@@ -2299,6 +2513,7 @@ impl WorkspaceShell {
                                 kind: ItemKind::Configuration,
                                 title: "sift.toml".into(),
                                 dirty: false,
+                                source: None,
                             },
                             editor,
                             cx,
@@ -2386,7 +2601,30 @@ impl WorkspaceShell {
                 ) {
                     self.connection_schema = ConnectionSchemaState::Unavailable;
                 }
-                self.connection_status = status;
+                self.connection_status = status.clone();
+                self.sync_database_item_states(cx);
+                match status {
+                    ConnectionStatus::Connected { profile_id, .. } => {
+                        let pending = self.pending_database_execution.take().filter(|pending| {
+                            pending.source.profile_id == profile_id
+                                && pending.source.instance_id
+                                    == self.selected_instance_id.as_deref().unwrap_or_default()
+                        });
+                        if let Some(pending) = pending {
+                            self.send_execution(pending.item_id, pending.sql, cx);
+                        }
+                    }
+                    ConnectionStatus::Failed { profile_id, .. } => {
+                        if self
+                            .pending_database_execution
+                            .as_ref()
+                            .is_some_and(|pending| pending.source.profile_id == profile_id)
+                        {
+                            self.pending_database_execution = None;
+                        }
+                    }
+                    ConnectionStatus::Disconnected | ConnectionStatus::Connecting { .. } => {}
+                }
                 cx.notify();
             }
             ExecutorEvent::SchemaLoaded {
@@ -2567,6 +2805,7 @@ impl WorkspaceShell {
         let Some(sender) = &self.executor_sender else {
             return;
         };
+        self.pending_database_execution = None;
         if sender
             .send(ExecutorCommand::Connect {
                 tenant_id: entry.tenant_id,
@@ -2581,7 +2820,147 @@ impl WorkspaceShell {
             self.connection_schema = ConnectionSchemaState::Loading {
                 profile_id: entry.id,
             };
+            self.sync_database_item_states(cx);
             cx.notify();
+        }
+    }
+
+    fn database_source(&self, item_id: u64, cx: &App) -> Option<DatabaseObjectSource> {
+        self.panes
+            .iter()
+            .find_map(|pane| pane.read(cx).database_source(item_id))
+    }
+
+    fn sync_database_item_states(&mut self, cx: &mut Context<Self>) {
+        let status = self.connection_status.clone();
+        for pane in &self.panes {
+            pane.update(cx, |pane, _| {
+                let sources = pane
+                    .items
+                    .iter()
+                    .filter_map(|item| {
+                        pane.database_source(item.id)
+                            .map(|source| (item.id, source))
+                    })
+                    .collect::<Vec<_>>();
+                for (item_id, source) in sources {
+                    let state = match &status {
+                        ConnectionStatus::Connected { profile_id, .. }
+                            if *profile_id == source.profile_id =>
+                        {
+                            DatabaseItemState::Live
+                        }
+                        ConnectionStatus::Connecting { profile_id }
+                            if *profile_id == source.profile_id =>
+                        {
+                            DatabaseItemState::Reconnecting
+                        }
+                        ConnectionStatus::Failed { profile_id, reason }
+                            if *profile_id == source.profile_id =>
+                        {
+                            DatabaseItemState::Failed(reason.clone())
+                        }
+                        _ => DatabaseItemState::Offline,
+                    };
+                    pane.set_database_item_state(item_id, state);
+                }
+            });
+        }
+    }
+
+    fn execute_database_item(&mut self, item_id: u64, sql: String, cx: &mut Context<Self>) {
+        let Some(source) = self.database_source(item_id, cx) else {
+            self.send_execution(item_id, sql, cx);
+            return;
+        };
+        if self.selected_instance_id.as_deref() != Some(source.instance_id.as_str()) {
+            self.route_result(
+                item_id,
+                ResultState::Unavailable("Tab belongs to another Sift server".into()),
+                cx,
+            );
+            return;
+        }
+        if matches!(
+            self.connection_status,
+            ConnectionStatus::Connected { profile_id, .. } if profile_id == source.profile_id
+        ) {
+            self.sync_database_item_states(cx);
+            self.send_execution(item_id, sql, cx);
+            return;
+        }
+
+        self.pending_database_execution = Some(PendingDatabaseExecution {
+            item_id,
+            sql,
+            source: source.clone(),
+        });
+        let Some(sender) = &self.executor_sender else {
+            self.pending_database_execution = None;
+            self.route_result(
+                item_id,
+                ResultState::Unavailable("Database connection manager is unavailable".into()),
+                cx,
+            );
+            return;
+        };
+        let needs_connect = !matches!(
+            self.connection_status,
+            ConnectionStatus::Connecting { profile_id } if profile_id == source.profile_id
+        );
+        if needs_connect
+            && sender
+                .send(ExecutorCommand::Connect {
+                    tenant_id: source.tenant_id,
+                    profile_id: source.profile_id,
+                    name: source.profile_name,
+                })
+                .is_err()
+        {
+            self.pending_database_execution = None;
+            self.connection_status = ConnectionStatus::Failed {
+                profile_id: source.profile_id,
+                reason: "Database connection manager stopped".into(),
+            };
+            self.sync_database_item_states(cx);
+            cx.notify();
+            return;
+        }
+        self.connection_status = ConnectionStatus::Connecting {
+            profile_id: source.profile_id,
+        };
+        self.status.database = "Connecting…".into();
+        self.sync_database_item_states(cx);
+        cx.notify();
+    }
+
+    fn send_execution(&mut self, item_id: u64, sql: String, cx: &mut Context<Self>) {
+        let Some(sender) = &self.executor_sender else {
+            self.route_result(
+                item_id,
+                ResultState::Unavailable("Not connected to a database.".into()),
+                cx,
+            );
+            return;
+        };
+        if sender
+            .send(ExecutorCommand::Execute { item_id, sql })
+            .is_ok()
+        {
+            self.status.execution = "Running…".into();
+            self.clear_sql_problems(item_id);
+            cx.notify();
+        }
+    }
+
+    fn refresh_database_item(&mut self, item_id: u64, cx: &mut Context<Self>) {
+        let sql = self.panes.iter().find_map(|pane| {
+            let pane = pane.read(cx);
+            pane.editor(item_id)
+                .map(|editor| editor.read(cx).document().text().to_owned())
+        });
+        if let Some(sql) = sql {
+            self.execute_database_item(item_id, sql, cx);
         }
     }
 
@@ -2606,6 +2985,7 @@ impl WorkspaceShell {
         self.connection_status = ConnectionStatus::Disconnected;
         self.connection_schema = ConnectionSchemaState::Unavailable;
         self.status.database = "No database".into();
+        self.sync_database_item_states(cx);
         cx.notify();
     }
 
@@ -2654,19 +3034,39 @@ impl WorkspaceShell {
 
     fn open_table_preview(
         &mut self,
-        provider_id: sift_protocol::ProviderId,
-        schema: String,
-        object: String,
+        target: DatabaseObjectTarget,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let DatabaseObjectTarget {
+            connection,
+            catalog,
+            schema,
+            object,
+            object_kind,
+        } = target;
+        let source = DatabaseObjectSource {
+            instance_id: self
+                .selected_instance_id
+                .clone()
+                .unwrap_or_else(|| "local".into()),
+            tenant_id: connection.tenant_id,
+            profile_id: connection.id,
+            profile_name: connection.name.clone(),
+            provider_id: connection.provider_id.clone(),
+            catalog: Some(catalog),
+            schema: schema.clone(),
+            object: object.clone(),
+            object_kind,
+            last_refreshed_at_ms: None,
+        };
         let title = format!("{schema}.{object}");
-        if self.focus_open_item(ItemKind::Query, &title, window, cx) {
+        if self.focus_open_database_item(&source, window, cx) {
             return;
         }
         let item_id = self.next_id;
         self.next_id += 1;
-        let sql = table_preview_sql(&provider_id, &schema, &object);
+        let sql = table_preview_sql(&source.provider_id, &schema, &object);
         let keymap = if self.vim_mode_default() {
             EditorKeymap::Vim
         } else {
@@ -2685,6 +3085,7 @@ impl WorkspaceShell {
                         kind: ItemKind::Query,
                         title,
                         dirty: false,
+                        source: Some(ItemSource::DatabaseObject(source)),
                     },
                     editor,
                     results,
@@ -2692,20 +3093,49 @@ impl WorkspaceShell {
                 )
             });
         }
-        match &self.executor_sender {
-            Some(sender) => {
-                let _ = sender.send(ExecutorCommand::Execute { item_id, sql });
-                self.status.execution = "Running…".into();
-            }
-            None => self.route_result(
-                item_id,
-                ResultState::Unavailable("Not connected to a database.".into()),
-                cx,
-            ),
-        }
+        self.execute_database_item(item_id, sql, cx);
         self.focus_active_pane(window, cx);
         self.persist(cx);
         cx.notify();
+    }
+
+    fn focus_open_database_item(
+        &mut self,
+        source: &DatabaseObjectSource,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let found = self
+            .panes
+            .iter()
+            .enumerate()
+            .find_map(|(pane_index, pane)| {
+                pane.read(cx)
+                    .items
+                    .iter()
+                    .enumerate()
+                    .find(|(_, item)| {
+                        let Some(ItemSource::DatabaseObject(existing)) = item.source.as_ref()
+                        else {
+                            return false;
+                        };
+                        existing.instance_id == source.instance_id
+                            && existing.profile_id == source.profile_id
+                            && existing.catalog == source.catalog
+                            && existing.schema == source.schema
+                            && existing.object == source.object
+                            && existing.object_kind == source.object_kind
+                    })
+                    .map(|(item_index, _)| (pane_index, item_index))
+            });
+        let Some((pane_index, item_index)) = found else {
+            return false;
+        };
+        self.active_pane = pane_index;
+        self.panes[pane_index].update(cx, |pane, _| pane.activate_item(item_index, true));
+        self.focus_active_pane(window, cx);
+        cx.notify();
+        true
     }
 
     /// Focus an already-open semantic item instead of creating a duplicate.
@@ -2780,6 +3210,7 @@ impl WorkspaceShell {
                         kind: ItemKind::Configuration,
                         title: "settings.toml".into(),
                         dirty: false,
+                        source: None,
                     },
                     editor,
                     cx,
@@ -3146,13 +3577,20 @@ impl WorkspaceShell {
 
     /// Deliver an execution outcome to whichever pane owns the query item.
     fn route_result(&mut self, item_id: u64, state: ResultState, cx: &mut Context<Self>) {
+        let refreshed = matches!(state, ResultState::Ready(_));
         self.status.execution = match &state {
             ResultState::Ready(_) | ResultState::Idle => "Ready".into(),
             _ => state.status_label(),
         };
         self.replace_sql_problems(item_id, &state, cx);
         for pane in &self.panes {
-            if pane.update(cx, |pane, cx| pane.set_result(item_id, state.clone(), cx)) {
+            if pane.update(cx, |pane, cx| {
+                let routed = pane.set_result(item_id, state.clone(), cx);
+                if routed && refreshed {
+                    pane.mark_database_item_refreshed(item_id);
+                }
+                routed
+            }) {
                 break;
             }
         }
@@ -3634,6 +4072,7 @@ impl WorkspaceShell {
                             kind: ItemKind::Welcome,
                             title: "New pane".into(),
                             dirty: false,
+                            source: None,
                         })
                         .into_iter()
                         .collect(),
@@ -3778,24 +4217,12 @@ impl WorkspaceShell {
                 self.active_pane = index;
                 self.open_command_palette(&OpenCommandPalette, window, cx);
             }
-            PaneEvent::ExecuteRequested { item_id, sql } => match self.executor_sender.clone() {
-                Some(sender) => {
-                    self.status.execution = "Running…".into();
-                    self.clear_sql_problems(*item_id);
-                    let _ = sender.send(ExecutorCommand::Execute {
-                        item_id: *item_id,
-                        sql: sql.clone(),
-                    });
-                    cx.notify();
-                }
-                None => {
-                    self.route_result(
-                        *item_id,
-                        ResultState::Unavailable("Not connected to a database.".into()),
-                        cx,
-                    );
-                }
-            },
+            PaneEvent::ExecuteRequested { item_id, sql } => {
+                self.execute_database_item(*item_id, sql.clone(), cx)
+            }
+            PaneEvent::RefreshDatabaseItemRequested { item_id } => {
+                self.refresh_database_item(*item_id, cx)
+            }
         }
     }
 
@@ -5243,9 +5670,11 @@ impl WorkspaceShell {
                                     | sift_protocol::ObjectKind::ForeignTable
                                     | sift_protocol::ObjectKind::PartitionedTable
                             );
-                            let provider_id = connection.provider_id.clone();
+                            let connection_for_preview = connection.clone();
+                            let catalog_name = catalog.name.clone();
                             let schema_name = schema.name.clone();
                             let object_name = object.name.clone();
+                            let object_kind = object.kind;
                             let row = div()
                                 .id((
                                     "schema-object",
@@ -5271,9 +5700,13 @@ impl WorkspaceShell {
                                     row.hover(|row| row.bg(colors.hovered_surface)).on_click(
                                         cx.listener(move |shell, _, window, cx| {
                                             shell.open_table_preview(
-                                                provider_id.clone(),
-                                                schema_name.clone(),
-                                                object_name.clone(),
+                                                DatabaseObjectTarget {
+                                                    connection: connection_for_preview.clone(),
+                                                    catalog: catalog_name.clone(),
+                                                    schema: schema_name.clone(),
+                                                    object: object_name.clone(),
+                                                    object_kind,
+                                                },
                                                 window,
                                                 cx,
                                             )
@@ -8308,13 +8741,19 @@ mod tests {
         let window = shell_with_state(state, cx);
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         let workspace = window.root(&mut cx).unwrap();
+        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
         workspace.update_in(&mut cx, |shell, window, cx| {
+            shell.executor_sender = Some(sender);
             let editor = shell.panes[0].read(cx).editor(1).unwrap().clone();
             editor.update(cx, |editor, cx| {
                 editor.replace_text_in_range(None, "select 'local'", window, cx)
             });
             shell.switch_instance_workspace("hosted:team", window, cx);
         });
+        assert!(matches!(
+            receiver.try_recv(),
+            Ok(ExecutorCommand::Disconnect)
+        ));
         workspace.read_with(&cx, |shell, cx| {
             assert_eq!(shell.selected_workspace_id, Some(22));
             assert_eq!(shell.panes[0].read(cx).items[0].title, "Team home");
@@ -8323,6 +8762,10 @@ mod tests {
         workspace.update_in(&mut cx, |shell, window, cx| {
             shell.switch_instance_workspace("local", window, cx)
         });
+        assert!(matches!(
+            receiver.try_recv(),
+            Ok(ExecutorCommand::Disconnect)
+        ));
         workspace.read_with(&cx, |shell, cx| {
             assert_eq!(shell.selected_workspace_id, Some(11));
             assert_eq!(
@@ -8448,10 +8891,23 @@ mod tests {
 
         workspace.update_in(&mut cx, |shell, window, cx| {
             shell.executor_sender = Some(sender);
+            shell.connection_status = ConnectionStatus::Connected {
+                profile_id: 2,
+                name: "Demo".into(),
+            };
             shell.open_table_preview(
-                sift_protocol::ProviderId::new("sift/postgres").unwrap(),
-                "lab".into(),
-                "people".into(),
+                DatabaseObjectTarget {
+                    connection: ConnectionNavEntry {
+                        id: 2,
+                        tenant_id: 1,
+                        name: "Demo".into(),
+                        provider_id: sift_protocol::ProviderId::new("sift/postgres").unwrap(),
+                    },
+                    catalog: "sifttest".into(),
+                    schema: "lab".into(),
+                    object: "people".into(),
+                    object_kind: sift_protocol::ObjectKind::Table,
+                },
                 window,
                 cx,
             );
@@ -8477,9 +8933,18 @@ mod tests {
 
         workspace.update_in(&mut cx, |shell, window, cx| {
             shell.open_table_preview(
-                sift_protocol::ProviderId::new("sift/postgres").unwrap(),
-                "lab".into(),
-                "people".into(),
+                DatabaseObjectTarget {
+                    connection: ConnectionNavEntry {
+                        id: 2,
+                        tenant_id: 1,
+                        name: "Demo".into(),
+                        provider_id: sift_protocol::ProviderId::new("sift/postgres").unwrap(),
+                    },
+                    catalog: "sifttest".into(),
+                    schema: "lab".into(),
+                    object: "people".into(),
+                    object_kind: sift_protocol::ObjectKind::Table,
+                },
                 window,
                 cx,
             );
@@ -8512,6 +8977,94 @@ mod tests {
     }
 
     #[gpui::test]
+    fn database_snapshot_reconnects_lazily_and_becomes_live_after_refresh(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let connection = ConnectionNavEntry {
+            id: 9,
+            tenant_id: 4,
+            name: "Warehouse".into(),
+            provider_id: sift_protocol::ProviderId::new("sift/postgres").unwrap(),
+        };
+
+        workspace.update_in(&mut cx, |shell, window, cx| {
+            shell.executor_sender = Some(sender);
+            shell.open_table_preview(
+                DatabaseObjectTarget {
+                    connection,
+                    catalog: "analytics".into(),
+                    schema: "public".into(),
+                    object: "events".into(),
+                    object_kind: sift_protocol::ObjectKind::View,
+                },
+                window,
+                cx,
+            );
+        });
+        let item_id = workspace.read_with(&cx, |shell, cx| {
+            let pane = shell.panes[shell.active_pane].read(cx);
+            let item = pane.active_item().unwrap();
+            assert!(matches!(
+                pane.database_item_states.get(&item.id),
+                Some(DatabaseItemState::Reconnecting)
+            ));
+            item.id
+        });
+        assert!(matches!(
+            receiver.try_recv(),
+            Ok(ExecutorCommand::Connect {
+                tenant_id: 4,
+                profile_id: 9,
+                ..
+            })
+        ));
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("database-snapshot-overlay").is_some());
+
+        workspace.update(&mut cx, |shell, cx| {
+            shell.on_executor_event(
+                ExecutorEvent::Connection(ConnectionStatus::Connected {
+                    profile_id: 9,
+                    name: "Warehouse".into(),
+                }),
+                cx,
+            )
+        });
+        assert!(matches!(
+            receiver.try_recv(),
+            Ok(ExecutorCommand::Execute { item_id: executed, .. }) if executed == item_id
+        ));
+        workspace.update(&mut cx, |shell, cx| {
+            shell.route_result(item_id, ResultState::Ready(Default::default()), cx);
+        });
+        workspace.read_with(&cx, |shell, cx| {
+            let pane = shell.panes[shell.active_pane].read(cx);
+            assert!(matches!(
+                pane.database_item_states.get(&item_id),
+                Some(DatabaseItemState::Live)
+            ));
+            assert!(pane
+                .database_source(item_id)
+                .unwrap()
+                .last_refreshed_at_ms
+                .is_some());
+        });
+
+        workspace.update(&mut cx, |shell, cx| shell.disconnect(cx));
+        workspace.read_with(&cx, |shell, cx| {
+            assert!(matches!(
+                shell.panes[shell.active_pane]
+                    .read(cx)
+                    .database_item_states
+                    .get(&item_id),
+                Some(DatabaseItemState::Offline)
+            ));
+        });
+    }
+
+    #[gpui::test]
     fn pane_navigation_history_tracks_tabs_and_skips_closed_items(cx: &mut TestAppContext) {
         let mut state = PresentationState::default();
         state.workspace.panes[0].items.extend([
@@ -8520,12 +9073,14 @@ mod tests {
                 kind: ItemKind::Query,
                 title: "two.sql".into(),
                 dirty: false,
+                source: None,
             },
             ItemPresentation {
                 id: 3,
                 kind: ItemKind::Query,
                 title: "three.sql".into(),
                 dirty: false,
+                source: None,
             },
         ]);
         let window = shell_with_state(state, cx);
@@ -8555,6 +9110,7 @@ mod tests {
             kind: ItemKind::Query,
             title: "second.sql".into(),
             dirty: false,
+            source: None,
         });
         let window = shell_with_state(state, cx);
         let mut cx = VisualTestContext::from_window(window.into(), cx);
@@ -8630,6 +9186,7 @@ mod tests {
                             kind: ItemKind::Welcome,
                             title: "New pane".into(),
                             dirty: false,
+                            source: None,
                         }],
                         active_item: 0,
                     },
@@ -8652,6 +9209,7 @@ mod tests {
                     kind: ItemKind::Query,
                     title: "Query 1".into(),
                     dirty: false,
+                    source: None,
                 },
                 editor,
                 results,
@@ -9216,12 +9774,14 @@ mod tests {
                 kind: ItemKind::Query,
                 title: "two.sql".into(),
                 dirty: false,
+                source: None,
             },
             ItemPresentation {
                 id: 3,
                 kind: ItemKind::Query,
                 title: "three.sql".into(),
                 dirty: false,
+                source: None,
             },
         ]);
         let window = shell_with_state(state, cx);
@@ -9260,6 +9820,7 @@ mod tests {
             kind: ItemKind::Query,
             title: "two.sql".into(),
             dirty: false,
+            source: None,
         });
         let window = shell_with_state(state, cx);
         let mut cx = VisualTestContext::from_window(window.into(), cx);
@@ -10386,6 +10947,7 @@ mod tests {
             kind: ItemKind::Query,
             title: "report.sql".into(),
             dirty: false,
+            source: None,
         });
         let window = shell_with_state(state, cx);
         let mut cx = VisualTestContext::from_window(window.into(), cx);

@@ -100,12 +100,38 @@ pub enum ItemKind {
     Welcome,
 }
 
+/// Durable identity needed to reopen a database-backed tab. Contains only
+/// public object/profile references; credentials and result data stay out of
+/// presentation state.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DatabaseObjectSource {
+    pub instance_id: String,
+    pub tenant_id: i64,
+    pub profile_id: i64,
+    pub profile_name: String,
+    pub provider_id: sift_protocol::ProviderId,
+    pub catalog: Option<String>,
+    pub schema: String,
+    pub object: String,
+    pub object_kind: sift_protocol::ObjectKind,
+    #[serde(default)]
+    pub last_refreshed_at_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ItemSource {
+    DatabaseObject(DatabaseObjectSource),
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ItemPresentation {
     pub id: u64,
     pub kind: ItemKind,
     pub title: String,
     pub dirty: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<ItemSource>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -189,6 +215,7 @@ impl Default for PresentationState {
                         kind: ItemKind::Query,
                         title: "query.sql".into(),
                         dirty: false,
+                        source: None,
                     }],
                     active_item: 0,
                 }],
@@ -315,6 +342,18 @@ mod tests {
         let mut remote = state.workspace.clone();
         remote.instance_id = Some("hosted:team".into());
         remote.workspace_id = Some(42);
+        remote.panes[0].items[0].source = Some(ItemSource::DatabaseObject(DatabaseObjectSource {
+            instance_id: "hosted:team".into(),
+            tenant_id: 7,
+            profile_id: 9,
+            profile_name: "Warehouse".into(),
+            provider_id: sift_protocol::ProviderId::new("sift/postgres").unwrap(),
+            catalog: Some("analytics".into()),
+            schema: "public".into(),
+            object: "events".into(),
+            object_kind: sift_protocol::ObjectKind::View,
+            last_refreshed_at_ms: Some(123),
+        }));
         state
             .instance_workspaces
             .insert("hosted:team".into(), remote);

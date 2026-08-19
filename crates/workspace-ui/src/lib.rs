@@ -17,8 +17,9 @@ pub use lifecycle::{
     TenantNavEntry, WorkspaceNavEntry,
 };
 pub use presentation::{
-    BottomTool, DockPresentation, ItemKind, ItemPresentation, LeftPanel, PanePresentation,
-    PresentationState, PresentationStore, Rect, WindowPresentation, WorkspacePresentation,
+    BottomTool, DatabaseObjectSource, DockPresentation, ItemKind, ItemPresentation, ItemSource,
+    LeftPanel, PanePresentation, PresentationState, PresentationStore, Rect, WindowPresentation,
+    WorkspacePresentation,
 };
 pub use settings::{EditorMode, EditorSettings, SettingsStore, UserSettings};
 pub use shell::{
