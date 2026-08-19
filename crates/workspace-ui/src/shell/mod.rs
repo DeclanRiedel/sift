@@ -1390,14 +1390,14 @@ impl gpui::Render for Pane {
                                     .when(placement == ResultPlacement::Bottom, |handle| {
                                         handle
                                             .left_0()
-                                            .top(px(-(RESULT_RESIZE_HANDLE_SIZE - 1.0)))
+                                            .top(px(-(RESULT_RESIZE_HANDLE_SIZE - 1.0) / 2.0))
                                             .w_full()
                                             .h(px(RESULT_RESIZE_HANDLE_SIZE))
                                     })
                                     .when(placement == ResultPlacement::Right, |handle| {
                                         handle
                                             .top_0()
-                                            .left(px(-(RESULT_RESIZE_HANDLE_SIZE - 1.0)))
+                                            .left(px(-(RESULT_RESIZE_HANDLE_SIZE - 1.0) / 2.0))
                                             .h_full()
                                             .w(px(RESULT_RESIZE_HANDLE_SIZE))
                                     })
@@ -4973,12 +4973,6 @@ impl WorkspaceShell {
             .py_2()
             .border_color(colors.subtle_border)
             .border_t_1()
-            .when(definition.placement == DockPlacement::Left, |dock| {
-                dock.border_r_1()
-            })
-            .when(definition.placement == DockPlacement::Right, |dock| {
-                dock.border_l_1()
-            })
             .bg(colors.panel)
             .text_sm()
             .child(div().pl_3().child(SectionLabel::new(title.to_uppercase())))
@@ -5414,7 +5408,6 @@ impl WorkspaceShell {
                         ),
                 )
             })
-            .child(dock_resize_handle(dock.id))
     }
 
     fn render_modal(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
@@ -7555,39 +7548,44 @@ fn edge_resize_enabled(is_maximized: bool, is_fullscreen: bool) -> bool {
     !is_maximized && !is_fullscreen
 }
 
-fn dock_resize_handle(dock: DockId) -> gpui::AnyElement {
+fn dock_resize_separator(dock: DockId, border: gpui::Hsla) -> gpui::AnyElement {
     let (id, cursor) = match dock {
         DockId::Left => ("resize-left-dock", CursorStyle::ResizeLeftRight),
         DockId::Inspector => ("resize-right-dock", CursorStyle::ResizeLeftRight),
         DockId::Bottom => ("resize-bottom-dock", CursorStyle::ResizeUpDown),
     };
-    let handle = div()
-        .id(id)
-        .debug_selector(move || id.to_owned())
-        .absolute()
-        .cursor(cursor)
-        .block_mouse_except_scroll()
-        .on_drag(DockResizeDrag { dock }, |_, _, _, cx| {
-            cx.new(|_| gpui::Empty)
-        });
-
-    match dock {
-        DockId::Left => handle
-            .right_0()
-            .top_0()
-            .h_full()
-            .w(px(DOCK_RESIZE_HANDLE_SIZE)),
-        DockId::Inspector => handle
-            .left_0()
-            .top_0()
-            .h_full()
-            .w(px(DOCK_RESIZE_HANDLE_SIZE)),
-        DockId::Bottom => handle
-            .top_0()
-            .left_0()
-            .w_full()
-            .h(px(DOCK_RESIZE_HANDLE_SIZE)),
-    }
+    let vertical = dock != DockId::Bottom;
+    div()
+        .relative()
+        .flex_none()
+        .bg(border)
+        .when(vertical, |separator| separator.w(px(1.0)).h_full())
+        .when(!vertical, |separator| separator.w_full().h(px(1.0)))
+        .child(
+            div()
+                .id(id)
+                .debug_selector(move || id.to_owned())
+                .absolute()
+                .cursor(cursor)
+                .block_mouse_except_scroll()
+                .when(vertical, |handle| {
+                    handle
+                        .left(px(-(DOCK_RESIZE_HANDLE_SIZE - 1.0) / 2.0))
+                        .top_0()
+                        .h_full()
+                        .w(px(DOCK_RESIZE_HANDLE_SIZE))
+                })
+                .when(!vertical, |handle| {
+                    handle
+                        .top(px(-(DOCK_RESIZE_HANDLE_SIZE - 1.0) / 2.0))
+                        .left_0()
+                        .w_full()
+                        .h(px(DOCK_RESIZE_HANDLE_SIZE))
+                })
+                .on_drag(DockResizeDrag { dock }, |_, _, _, cx| {
+                    cx.new(|_| gpui::Empty)
+                }),
+        )
     .into_any_element()
 }
 
@@ -7605,9 +7603,7 @@ fn pane_resize_handle(boundary: usize, border: gpui::Hsla) -> gpui::AnyElement {
                 .id(("resize-pane", boundary))
                 .debug_selector(move || format!("resize-pane-{boundary}"))
                 .absolute()
-                // Keep the whole hit target above the pane painted before the
-                // separator. The following pane cannot cover this overlap.
-                .left(px(-(PANE_RESIZE_HANDLE_SIZE - 1.0)))
+                .left(px(-(PANE_RESIZE_HANDLE_SIZE - 1.0) / 2.0))
                 .top_0()
                 .w(px(PANE_RESIZE_HANDLE_SIZE))
                 .h_full()
@@ -7630,16 +7626,31 @@ impl gpui::Render for WorkspaceShell {
             .presentation
             .open
             .then(|| self.render_dock(&self.left_dock, cx));
+        let left_dock_separator = self
+            .left_dock
+            .presentation
+            .open
+            .then(|| dock_resize_separator(DockId::Left, colors.subtle_border));
         let right_dock = self
             .right_dock
             .presentation
             .open
             .then(|| self.render_dock(&self.right_dock, cx));
+        let right_dock_separator = self
+            .right_dock
+            .presentation
+            .open
+            .then(|| dock_resize_separator(DockId::Inspector, colors.subtle_border));
         let bottom_dock = self
             .bottom_dock
             .presentation
             .open
             .then(|| bottom_tools::render_bottom_panel(self, cx));
+        let bottom_dock_separator = self
+            .bottom_dock
+            .presentation
+            .open
+            .then(|| dock_resize_separator(DockId::Bottom, colors.subtle_border));
         let total_flex = self.pane_flexes.iter().sum::<f32>().max(f32::EPSILON);
         let mut pane_elements = Vec::with_capacity(self.panes.len().saturating_mul(2));
         for (index, pane) in self.panes.iter().enumerate() {
@@ -7701,6 +7712,7 @@ impl gpui::Render for WorkspaceShell {
                     .on_drag_move::<DockResizeDrag>(cx.listener(Self::resize_dock))
                     .on_drop::<DockResizeDrag>(cx.listener(Self::finish_dock_resize))
                     .children(left_dock)
+                    .children(left_dock_separator)
                     .child(
                         div()
                             .flex()
@@ -7720,8 +7732,10 @@ impl gpui::Render for WorkspaceShell {
                                     )
                                     .children(pane_elements),
                             )
+                            .children(bottom_dock_separator)
                             .children(bottom_dock),
                     )
+                    .children(right_dock_separator)
                     .children(right_dock),
             )
             .child(status_bar::render_status_bar(self, cx))
@@ -9652,6 +9666,10 @@ mod tests {
         let workspace = window.root(&mut cx).unwrap();
         let focus = workspace.read_with(&cx, |shell, cx| shell.focus_handle(cx));
         cx.update(|window, cx| focus.dispatch_action(&SplitPane, window, cx));
+        workspace.update(&mut cx, |shell, cx| {
+            shell.bottom_dock.presentation.open = true;
+            cx.notify();
+        });
         cx.run_until_parked();
 
         let pane_line = cx.debug_bounds("pane-separator-0").expect("pane separator");
@@ -9661,8 +9679,8 @@ mod tests {
         assert_eq!(pane_line.size.width, px(1.0));
         assert_eq!(pane_hitbox.size.width, px(PANE_RESIZE_HANDLE_SIZE));
         assert_eq!(
-            pane_line.left(),
-            pane_hitbox.left() + px(PANE_RESIZE_HANDLE_SIZE - 1.0)
+            pane_line.left() + pane_line.size.width / 2.0,
+            pane_hitbox.left() + pane_hitbox.size.width / 2.0
         );
 
         let first_slot = cx.debug_bounds("pane-slot-0").expect("first pane slot");
@@ -9681,15 +9699,32 @@ mod tests {
         assert_eq!(result_line.size.height, px(1.0));
         assert_eq!(result_hitbox.size.height, px(RESULT_RESIZE_HANDLE_SIZE));
         assert_eq!(
-            result_line.top(),
-            result_hitbox.top() + px(RESULT_RESIZE_HANDLE_SIZE - 1.0)
+            result_line.top() + result_line.size.height / 2.0,
+            result_hitbox.top() + result_hitbox.size.height / 2.0
         );
 
         let titlebar = cx.debug_bounds("integrated-titlebar").expect("titlebar");
         let left_dock = cx.debug_bounds("left-dock").expect("left dock");
+        let right_dock = cx.debug_bounds("right-dock").expect("right dock");
+        let bottom_dock = cx.debug_bounds("bottom-dock").expect("bottom dock");
+        let left_dock_hitbox = cx.debug_bounds("resize-left-dock").unwrap();
+        let right_dock_hitbox = cx.debug_bounds("resize-right-dock").unwrap();
+        let bottom_dock_hitbox = cx.debug_bounds("resize-bottom-dock").unwrap();
         let first_pane = cx.debug_bounds("pane-slot-0").expect("first pane");
         assert_eq!(titlebar.bottom(), left_dock.top());
         assert_eq!(left_dock.top(), first_pane.top());
+        assert_eq!(
+            left_dock.right() + px(0.5),
+            left_dock_hitbox.left() + left_dock_hitbox.size.width / 2.0
+        );
+        assert_eq!(
+            right_dock.left() - px(0.5),
+            right_dock_hitbox.left() + right_dock_hitbox.size.width / 2.0
+        );
+        assert_eq!(
+            bottom_dock.top() - px(0.5),
+            bottom_dock_hitbox.top() + bottom_dock_hitbox.size.height / 2.0
+        );
     }
 
     #[gpui::test]

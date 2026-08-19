@@ -40,8 +40,6 @@ pub(super) fn render_bottom_panel(
         .flex_none()
         .flex()
         .flex_col()
-        .border_t_1()
-        .border_color(colors.subtle_border)
         .bg(colors.panel)
         .text_sm()
         .text_color(colors.muted_text)
@@ -72,6 +70,5 @@ pub(super) fn render_bottom_panel(
                         .child(body),
                 ),
         )
-        .child(dock_resize_handle(DockId::Bottom))
         .into_any_element()
 }
