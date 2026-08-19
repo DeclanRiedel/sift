@@ -4,8 +4,7 @@
 > reflects a real gap verified against the code. This is the single ordered
 > backlog for all server-side work that must land before the product GUI.
 >
-> Companion to `docs/DECISIONS.md` (ADRs) and `docs/legacy/ZED_LESSONS.md`
-> (rationale for stolen ideas). Items marked `[x]` are verified-present in
+> Companion to `docs/DECISIONS.md` (ADRs). Items marked `[x]` are verified-present in
 > code; `[ ]` are verified-absent or stubbed.
 >
 > Format: `- [status] [Design|Implement] <area>: <goal>`. **Design** = lock a
@@ -29,8 +28,7 @@
 - **Phase D readiness was re-audited on 2026-07-20.** Runtime correctness,
   public operation coverage, OpenAPI/SDK reachability, failure auditing, and
   priority-one DDL fidelity were polished. The explicitly listed v1 and DDL
-  gaps are accepted follow-ups, not Phase E prerequisites. See
-  `docs/PLANS/phase-d-readiness.md`.
+  gaps are accepted follow-ups, not Phase E prerequisites.
 - **Phase G is complete.** Room execution consumes the streaming cursor path
   and publishes opaque, transient result references; current members
   independently page immutable result pages. Presence is leased and carries
@@ -39,13 +37,12 @@
 - **Phase H is complete.** Direct SSH bootstrap, the persistent authenticated
   proxy daemon, pre-release protocol range negotiation, lifecycle modes, signed
   periodic update staging, readiness-gated activation/rollback, and release
-  CI are implemented. See `docs/PLANS/phase-h-remote-development.md`.
+  CI are implemented under ADR-021.
 - **Phase I is complete.** Provider-neutral protocol v1, strict signed
   packages, supervised tenant-scoped Driver RPC, governed automation/MCP,
   connection-pipeline contracts, lifecycle management, hostile conformance,
   and public operational artifacts are implemented. ODBC/JDBC bridges remain
-  explicitly deferred. See `docs/PLANS/phase-i-extensibility.md` and
-  `docs/EXTENSIONS.md`.
+  explicitly deferred. See `docs/EXTENSIONS.md` and ADR-022/031.
   Post-graduation hardening made the legacy semantic engine optional for
   external core-query providers, centralized capability-gated dispatch and
   discovery, made provider quality evidence-owned, and isolated hydration and
@@ -55,13 +52,11 @@
 - **Phase K is complete.** Shared PostgreSQL/T-SQL semantics, catalog graph,
   snapshots, diff and safe migrations, comparison, diagrams and mutation
   preview, and semantic plan retention are implemented across protocol,
-  server, OpenAPI, and SDK. Safety matrices and measured budgets are in
-  `docs/PLANS/phase-k-graduation-matrix.md`.
+  server, OpenAPI, and SDK. ADR-032/033 record the contracts.
 - **Phase L is complete.** Room-owned virtual workspaces, optional projections,
   hardened Git, deterministic runs, durable scheduling, and bounded extensible
   transfer recipes are implemented across protocol, server, OpenAPI, and SDK.
-  Graduation evidence and budgets are in
-  `docs/PLANS/phase-l-graduation-matrix.md`.
+  ADR-034 records the contract.
 - **Phase M design is locked.** ADR-040 selects an exactly pinned GPUI desktop,
   a Zed-inspired entity/action/workspace model, Linux-first cross-platform
   delivery, a supervised local server, and a strict public-SDK boundary. See
@@ -74,7 +69,7 @@
 Goal: the server side of every daily-driver and power-user IDE feature, so a
 GUI later is just rendering.
 
-- [x] [Design] Inline-edit → DML generation (ADR-023). `docs/PLANS/inline-edit-dml.md`.
+- [x] [Design] Inline-edit → DML generation (ADR-023).
 - [x] [Implement] Inline-edit → DML. `protocol/src/edit.rs`,
       `server/src/edit.rs` (PK/unique-index identity, parameterized
       INSERT/UPDATE/DELETE, engine-quoted, RETURNING/OUTPUT keys),
@@ -86,11 +81,11 @@ GUI later is just rendering.
       optional dry-run conflict count not implemented.
 - [x] [Design] Transactions panel contract (ADR-026): server exposes open-tx state
       per connection, savepoint lifecycle (Phase A savepoint Operation variants
-      exist), commit/rollback preview. `docs/PLANS/transactions-panel.md`.
+      exist), commit/rollback preview.
 - [x] [Implement] Transactions panel server state. Session-scoped list and
       commit/rollback preview routes, tracked savepoint lifecycle, audited
       `Operation` variants, OpenAPI schemas, and client SDK methods.
-- [x] [Design] Schema search + data search (ADR-024). `docs/PLANS/schema-data-search.md`.
+- [x] [Design] Schema search + data search (ADR-024).
 - [x] [Implement] Schema + data search. `completion/src/fuzzy.rs`
       (subsequence matcher + scoring), `protocol/src/search.rs`,
       `server/src/search.rs` (per-connection `SearchIndex` from shallow schema +
@@ -103,7 +98,7 @@ GUI later is just rendering.
       deferred — always reports `Ready`); data fan-out is sequential (bounded
       concurrency deferred); engine-native FTS not wired (LIKE only);
       numeric/date columns not searched.
-- [x] [Design] Execution plans (typed `PlanNode` tree, ADR-025). `docs/PLANS/execution-plans.md`.
+- [x] [Design] Execution plans (typed `PlanNode` tree, ADR-025).
 - [x] [Implement] Execution plans. `protocol/src/plan.rs` (`PlanNode`,
       `ExplainRequest/Response`) + `Operation::Explain`; `server/src/plan.rs`
       parses PG `EXPLAIN (FORMAT JSON)` (serde_json) and MSSQL showplan XML
@@ -114,21 +109,21 @@ GUI later is just rendering.
       capture not wired); PG analyze is full.
 - [x] [Design] Process list + kill (ADR-027): PG `pg_stat_activity` +
       `pg_terminate_backend`, MSSQL `sys.dm_exec_requests` + `KILL`.
-      `docs/PLANS/process-control.md`.
+      ADR-027.
 - [x] [Implement] Process list + kill. Normalized cross-engine process model,
       bounded catalog queries, guarded termination route, audit variants,
       OpenAPI schemas, and client SDK methods.
 - [x] [Design] Command-palette server surface (ADR-028): enumerate available
       `OperationKind`s for a server-derived capability context at
       `GET /v1/operations/available`; preserve `/v1/operations` as the replay
-      log. `docs/PLANS/operation-capabilities.md`.
+      log (ADR-028).
 - [x] [Implement] Contextual capability query. Exhaustive `OperationKind`,
       server-derived session/connection/transaction evaluation with disabled
       reasons and destructive flags, OpenAPI schema, audit entry, and SDK.
 - [x] [Design] CSV import → table (ADR-029): server-side validation and type
       inference, optional create, atomic abort or duplicate-skip policy; PG
       `COPY FROM STDIN` and SQL Server bulk fast paths.
-      `docs/PLANS/csv-import.md`.
+      ADR-029.
 - [x] [Implement] CSV import. Validated 64 MiB-bounded parser, deterministic
       type inference, optional engine-quoted table creation, atomic abort and
       duplicate-skip modes, both engine ingest extensions, audited route,
@@ -143,7 +138,7 @@ real identity," without breaking local-first (ADR-006, ADR-010).
       principals. Deployment policy (`personal | team`) is separate from
       transport (`loopback | network | ssh-proxy`). Password and per-instance
       GitHub OAuth credentials are equivalent auth methods; OIDC is deferred.
-      `docs/PLANS/hosted-identity.md`.
+      ADR-030.
 - [x] [Design] Auth-code + state + S256 PKCE; 15-minute opaque access tokens +
       30-day rotating refresh families with replay revocation; native bearer +
       secure web cookie; WebSocket auth leases; personal tenant on first
@@ -189,7 +184,7 @@ enforcement.
       per-tenant overrides for profiles, sessions, connections, concurrent
       queries, cursors, and retained result bytes. RAII admission guards;
       `Code::TenantResourceExhausted`; trusted personal-loopback unlimited by
-      default. Detailed build contract: `docs/PLANS/phase-f-authorization.md`.
+      default (ADR-020).
 - [x] [Implement] Protocol policy/usage contracts and stable
       `RateLimited`/`TenantResourceExhausted` errors.
 - [x] [Implement] Metadata migration for profile policy revisions and
@@ -241,14 +236,14 @@ session. CRDT only for query text; everything else server-authoritative.
       fire-and-forget; document text is durable CRDT. Today presence rides
       the same `broadcast::channel(1024)` as document ops
       (`room_runtime.rs:84`). Drafted in
-      `docs/PLANS/presence-durable-separation.md` (ADR-035): two per-room
+      ADR-035: two per-room
       broadcast lanes; durable-lane lag emits the (previously dead)
       `ResyncRequired` and the client re-runs `DocumentSync`.
 - [x] [Design] Shared-connection ownership: a connection opened in a room
       is server-owned; members attach and run ops through it with role
       gating from ADR-020 (editor+ can run only operations also permitted by
       tenant/profile policy; viewer observes result references). Drafted in
-      `docs/PLANS/shared-connection-ownership.md` (ADR-036): room binds one
+      ADR-036: room binds one
       connection profile (binder's credentials, revocable); execute resolves
       the bound profile and runs `authorize()` with the submitter's scope
       (intersection gating — already implemented in `authorization.rs`).
@@ -304,7 +299,7 @@ handshake.
       model) using Phase E's instance-bound proxy capability. A hosted
       collaboration relay is a separate future topology, not required for
       initial remote support. See
-      `docs/PLANS/phase-h-remote-development.md`.
+      ADR-021.
 - [x] [Design] Remote bootstrap (SSH control-master, binary fetch/upload,
       version check, daemon spawn/reconnect, capability handoff over the
       authenticated channel); reconnect + state survival on SSH drop. The
@@ -325,9 +320,8 @@ handshake.
 Goal: a strong, versioned plugin system for database providers, SQL tooling,
 automation, and connection-time hooks without forking or destabilizing the
 server. The decision-complete contract is
-`docs/PLANS/phase-i-extensibility.md`; earlier inputs remain in
-`docs/PLANS/ide-parity-and-provider-extensibility.md` and
-`docs/PLANS/core-plugin-boundary.md`.
+ADR-022 and ADR-031; forward-looking gaps remain in
+`docs/PLANS/ide-parity-and-provider-extensibility.md`.
 
 - [x] [Design] ADR-022: built-ins remain native behind a provider-neutral
       registry; third-party providers use supervised Driver RPC v1 over
@@ -434,14 +428,14 @@ inventory: `docs/PLANS/ide-parity-and-provider-extensibility.md`.
       ADR-033 and `docs/PLANS/catalog-graph-schema-migrations.md`.
 - [x] [Design] Table/result comparison: key selection, duplicate handling,
       type-aware tolerances, bounded paging, cancellation, and optional patch
-      generation. `docs/PLANS/phase-k-modeling-operations.md`.
+      generation (ADR-032/033).
 - [x] [Design] Diagram projection from the catalog graph. Layout and visual
       editing remain client concerns; graph truth and mutations remain server
-      operations. `docs/PLANS/phase-k-modeling-operations.md`.
+      operations (ADR-032/033).
 - [x] [Design] Query-plan capture and retrieval keyed to semantic document,
       revision, and selected statement identity; bounded retention and
       redacted audit remain server-owned.
-      `docs/PLANS/phase-k-modeling-operations.md`.
+      ADR-032/033.
 - [x] [Implement] ADR-032 slice K0: bounded parsed-document state, PostgreSQL
       and T-SQL recovery parsing, statement selection, syntax diagnostics,
       cancellation/cache isolation, audited Operations, OpenAPI, and SDK.
@@ -457,20 +451,20 @@ inventory: `docs/PLANS/ide-parity-and-provider-extensibility.md`.
 - [x] [Graduate] PostgreSQL and SQL Server semantic/diff corpora, destructive
       migration safety matrix, large-schema latency budgets, and public
       Operation/OpenAPI/SDK coverage. Evidence and hard ceilings:
-      `docs/PLANS/phase-k-graduation-matrix.md`.
+      repository tests.
 
 ## Phase L — Workspaces, VCS & execution automation
 
 Goal: support DataGrip-class files, offline DDL sources, history, VCS, and run
 configurations without abandoning thin clients or breaking remote topology.
 Detailed implementation order and ADR-034 contract:
-`docs/PLANS/phase-l-workspaces-vcs-automation.md`.
+ADR-034.
 
 - [x] [Design] ADR-034: canonical server-owned virtual workspaces with optional
       filesystem/VCS projections.
       Local conveniences may use client files, but hosted/remote product state
       must have a server-authoritative representation. Contract:
-      `docs/PLANS/phase-l-workspaces-vcs-automation.md`.
+      ADR-034.
 - [x] [Design] Durable SQL files/documents, folders, revisions, local-history
       semantics, offline DDL sources, and mapping between DDL models and live
       connections.
@@ -560,9 +554,9 @@ Detailed implementation order and ADR-034 contract:
 | ADR-020 | authorization model                                                   | Phase F | written                                                        |
 | ADR-021 | remote topology                                                       | Phase H | written; direct SSH bootstrap + persistent proxy daemon        |
 | ADR-022 | driver extensibility                                                  | Phase I | written; provider ids + supervised JSON/stdio Driver RPC v1    |
-| ADR-023 | inline-edit conflict & row-identity model                             | Phase D | drafted in `docs/PLANS/inline-edit-dml.md`                     |
-| ADR-024 | search architecture (progressive schema index + bounded data fan-out) | Phase D | drafted in `docs/PLANS/schema-data-search.md`                  |
-| ADR-025 | execution-plan model (typed PlanNode + XML dep + ANALYZE-rollback)    | Phase D | drafted in `docs/PLANS/execution-plans.md`                     |
+| ADR-023 | inline-edit conflict & row-identity model                             | Phase D | implemented                                                     |
+| ADR-024 | search architecture (progressive schema index + bounded data fan-out) | Phase D | implemented                                                     |
+| ADR-025 | execution-plan model (typed PlanNode + XML dep + ANALYZE-rollback)    | Phase D | implemented                                                     |
 | ADR-026 | server-owned transaction panel state                                  | Phase D | written                                                        |
 | ADR-027 | bounded database process control                                      | Phase D | written                                                        |
 | ADR-028 | server-derived operation capabilities                                 | Phase D | written                                                        |
@@ -572,9 +566,9 @@ Detailed implementation order and ADR-034 contract:
 | ADR-032 | SQL semantic service and dialect-pack boundary                        | Phase K | implemented and graduated; `docs/PLANS/sql-semantic-service.md`                  |
 | ADR-033 | catalog graph, schema diff, and migration safety                      | Phase K | implemented and graduated; `docs/PLANS/catalog-graph-schema-migrations.md`       |
 | ADR-034 | canonical virtual workspace + optional filesystem/VCS projections     | Phase L | written; Phase L implementation contract locked                |
-| ADR-035 | room lane separation + CRDT-safe lag recovery                         | Phase G | implemented; `docs/PLANS/presence-durable-separation.md`       |
-| ADR-036 | room-owned connection binding + submitter-scoped authorization        | Phase G | implemented; `docs/PLANS/shared-connection-ownership.md`       |
-| ADR-037 | room-owned system session + submitter-scoped pre-authorization        | Phase G | implemented; `docs/PLANS/shared-room-connection-routing.md` |
+| ADR-035 | room lane separation + CRDT-safe lag recovery                         | Phase G | implemented                                                     |
+| ADR-036 | room-owned connection binding + submitter-scoped authorization        | Phase G | implemented                                                     |
+| ADR-037 | room-owned system session + submitter-scoped pre-authorization        | Phase G | implemented                                                     |
 | ADR-038 | explicit metadata migration lifecycle owner                           | Phase J | written and implemented                                      |
 | ADR-039 | Sift-state backup/restore with destination-owned identity              | Phase J | written and implemented                                      |
 | ADR-040 | GPUI desktop with a server-only product boundary                       | Phase M | written; implementation ordered in `phase-m-gpui-desktop.md` |

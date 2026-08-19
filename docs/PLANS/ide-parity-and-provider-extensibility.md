@@ -1,204 +1,243 @@
-# IDE Parity And Provider Extensibility
+# SQL IDE and DBMS Feature Coverage
 
-Status: **forward-looking design input.** This note records product gaps and
-constraints for incomplete phases only. It does not reopen completed phases or
-claim that the designs below are locked ADRs.
+Product-level coverage checklist for PostgreSQL and SQL Server.
 
-The component ownership boundary is developed separately in
-`docs/PLANS/core-plugin-boundary.md`.
+Legend: `[x]` usable in desktop · `[~]` server/API exists, desktop incomplete · `[ ]` not implemented
 
-The comparison baseline is JetBrains' current DataGrip feature overview:
-<https://www.jetbrains.com/datagrip/features/>. The target is not imitation for
-its own sake. Sift should combine serious database-IDE depth with Zed-like
-collaboration, remote operation, and responsiveness while keeping the server as
-the product.
+## SQL IDE
 
-## API finding
+### Connections and workspace
 
-The current public API is a strong database-runtime substrate: authentication,
-tenancy, sessions, connections, transactions, query streaming, cancellation,
-cursors, schema introspection, search, completion, DDL, plans, structured row
-edits, import/export, history, audit, rooms, and WebSockets are present.
+- [x] Connection profiles
+- [x] Multiple saved connections
+- [x] Connect and disconnect
+- [~] Ad-hoc connection editor
+- [~] Connection testing and health
+- [~] SSL/TLS configuration
+- [~] SSH remote connections
+- [~] Read-only connections
+- [~] Secret-store integration
+- [~] Provider capability discovery
+- [ ] Connection folders, tags, and favorites
+- [ ] Environment labels and colors
+- [ ] Production write lock
+- [ ] Startup SQL and session variables
+- [x] Persistent editor workspace
+- [~] Multiple windows
+- [~] Virtual workspaces
+- [~] Filesystem projection
+- [~] Git integration
 
-It is not yet a complete database-IDE API. Forward work must cover:
+### Explorer and navigation
 
-- SDK parity for existing routes, including session lookup, connection listing,
-  persistent room clients, and a non-buffering export consumer;
-- cursor-based pagination for potentially large list and audit surfaces;
-- generated typed OpenAPI plus generated or mechanically parity-checked SDKs;
-- a real client/server version and capability handshake;
-- reconnect discovery for sessions, queries, cursors, and shared room state;
-- complete principal, tenant-member, room, and document administration;
-- stable revision/precondition semantics for concurrent mutations.
+- [~] Database and schema tree
+- [~] Tables, views, and columns
+- [~] Indexes and constraints
+- [~] Functions, procedures, and types
+- [~] Lazy metadata loading
+- [~] Metadata refresh and invalidation
+- [~] Schema search
+- [~] Data search
+- [~] Object DDL view
+- [~] Dependency and dependent graph
+- [~] Foreign-key navigation
+- [ ] Global fuzzy object search UI
+- [ ] Recent and favorite objects
+- [ ] Object filters and saved explorer views
+- [ ] Breadcrumb and peek navigation
 
-Route/method parity testing reduces one class of OpenAPI drift, but the
-hand-authored specification remains a second source of truth. Protocol types,
-router registration, OpenAPI, and SDK reachability should ultimately derive
-from one typed contract.
+### SQL editor
 
-## DataGrip-class product gaps
+- [x] SQL editor tabs
+- [x] Syntax highlighting
+- [x] Execute document, statement, and selection
+- [~] Query cancellation
+- [~] Streaming and paged results
+- [~] Parameterized execution
+- [~] SQL formatting
+- [~] Query history
+- [~] Saved queries
+- [ ] Find and replace UI
+- [ ] Line numbers and editor gutter
+- [ ] Split editor
+- [ ] Scratch SQL files
+- [ ] Snippets and templates
+- [ ] SQL variables
+- [ ] Multi-cursor editing
+- [ ] Code folding
+- [ ] Configurable formatting rules
 
-Some DataGrip features are client presentation and need no special server
-behavior: multi-cursor editing, themes, keymaps, localization, panel layout,
-and result-grid virtualization. Sift's server contract must supply the data and
-actions without dictating those UI choices.
+### SQL intelligence
 
-The following are server-owned product semantics because thin and remote
-clients must behave identically:
+- [~] Keyword, table, and column completion
+- [~] Context-sensitive completion
+- [~] Alias-aware completion
+- [~] CTE and temporary-object completion
+- [~] Foreign-key JOIN completion
+- [~] Syntax diagnostics
+- [~] Semantic diagnostics
+- [~] Quick fixes
+- [~] Go to definition
+- [~] Find usages
+- [~] Rename refactoring
+- [~] Statement selection
+- [~] Catalog-aware binding
+- [ ] Hover types and object metadata
+- [ ] Multi-hop JOIN suggestions
+- [ ] Star expansion
+- [ ] Unsafe UPDATE/DELETE inspection UI
+- [ ] Cartesian JOIN inspection UI
 
-- normalized catalog dependency graph and navigation;
-- relationship diagrams backed by stable object identities;
-- schema snapshot comparison, migration generation, preview, and audited apply;
-- table and query-result comparison with keys, tolerances, and bounded paging;
-- dialect-aware parsing, formatting, diagnostics, quick fixes, usages, and
-  refactoring;
-- richer completion for aliases, CTEs, temporary objects, and objects created
-  in the active document;
-- general object-change DDL/DML generation and the remaining fidelity gaps;
-- extensible export formats beyond CSV/TSV/JSON, without loading arbitrary
-  extension code into the server process;
-- governed AI explain/generate/edit operations with explicit context and the
-  Phase F authorization evaluator;
-- offline DDL sources, run configurations, ordered multi-script execution, and
-  durable execution records.
+### Execution and safety
 
-## Workspace ownership decision
+- [x] Result grid
+- [x] Execution timing and outcome
+- [~] Multiple result sets
+- [~] Explicit transactions
+- [~] Commit and rollback
+- [~] Savepoints
+- [~] Query timeout
+- [~] Explain plans
+- [~] Explain Analyze safety
+- [~] Available-operation gating
+- [~] Audited operations
+- [ ] Production confirmation policy UI
+- [ ] Affected-row preview
+- [ ] Plan-node cost highlighting
+- [ ] Plan comparison
+- [ ] Query progress UI
 
-Files, local history, VCS integration, offline DDL sources, and run
-configurations expose a load-bearing choice. If clients remain thin and
-stateless, these are server-owned workspace resources. A remote client cannot
-assume that its filesystem is the server's filesystem, and a locally useful
-feature cannot silently disappear when connecting to a hosted instance.
+### Results and data editing
 
-The preferred model is:
+- [x] Virtualized result grid
+- [x] NULL and binary value rendering
+- [~] Server-side paging
+- [~] Result sorting and filtering
+- [~] Result export
+- [~] Inline row insert, update, and delete
+- [~] Staged edit preview
+- [~] Conflict detection
+- [~] Parameterized DML generation
+- [~] Table and query-result comparison
+- [ ] Result search UI
+- [ ] Copy as CSV, JSON, SQL, or Markdown
+- [ ] JSON, text, image, and blob viewers
+- [ ] Foreign-key picker
+- [ ] Aggregate selected cells
+- [ ] Saved grid layouts
 
-1. Sift documents and run configurations are durable server resources.
-2. A workspace may bind those resources to a repository through a server-side
-   VCS adapter when the deployment permits filesystem access.
-3. A desktop client may offer local import/export and native Git UI, but those
-   conveniences do not become the only representation of product state.
-4. VCS credentials use secret handles and scoped helpers; they never enter
-   SQLite, protocol payloads, or audit logs.
+### Schema and migration
 
-An ADR must lock server-owned versus hybrid workspace semantics before a GUI
-depends on either behavior.
+- [~] Object DDL generation
+- [~] Catalog graph
+- [~] Schema snapshots
+- [~] Schema diff
+- [~] Migration preview and apply
+- [~] Risk classification
+- [~] Dependency ordering
+- [~] Diagram projection
+- [~] Diagram mutation preview
+- [ ] General object designer UI
+- [ ] Rollback script generation
+- [ ] Live database versus migration-folder diff
+- [ ] Drift notifications
+- [ ] Diagram export
 
-## Database-provider strategy
+### Collaboration and assistance
 
-### What exists today
+- [~] Shared rooms
+- [~] Collaborative SQL documents
+- [~] Presence and selections
+- [~] Follow mode
+- [~] Shared room connections
+- [~] Shared result references
+- [~] Workspace history and checkpoints
+- [~] Extension system
+- [~] Governed MCP tools
+- [ ] Shared-query browser UI
+- [ ] Reviewable AI SQL generation
+- [ ] AI error and plan explanation
 
-PostgreSQL and SQL Server are first-party native Rust drivers. They implement a
-small object-safe core `Driver` trait and engine extension traits. This gives
-excellent control over async streaming, cancellation, schema fidelity, error
-classification, pooling, and engine-specific fast paths.
+## DBMS Workbench
 
-The current boundary is intentionally closed: `Engine` is a two-variant enum,
-the registry is keyed by it, connection specs are a closed union, and optional
-features use `as_pg`/`as_mssql` downcasts. Adding more downcasts and enum
-variants for every provider would make the server and public protocol the
-bottleneck for third-party drivers.
+### Sessions, locks, and monitoring
 
-### Recommended support tiers
+- [~] Process and session listing
+- [~] Cancel query
+- [~] Terminate session
+- [~] Transaction listing
+- [~] Query duration and state
+- [~] PostgreSQL activity metadata
+- [~] SQL Server request metadata
+- [ ] Lock manager UI
+- [ ] Blocking-chain visualization
+- [ ] Deadlock inspection
+- [ ] Long-running-query alerts
+- [ ] Idle-in-transaction alerts
+- [ ] Server dashboard
+- [ ] Query-performance history
 
-1. **First-party native drivers.** Important providers receive custom Rust
-   implementations in-tree. They offer the best latency, cancellation,
-   introspection, bulk paths, diagnostics, and release confidence.
-2. **Driver RPC plugins.** Other providers run out of process and implement the
-   language-neutral, versioned Sift Driver RPC over local stdio. A plugin may
-   be written in any language; Sift inherits none of those runtimes as a core
-   dependency.
-3. **Deferred compatibility bridges.** ODBC/JDBC, DSN/JAR/JVM discovery, and
-   automatic IDE-fidelity claims are outside Phase I. A future bridge must use
-   Driver RPC and pass the same explicit capability/conformance gates rather
-   than receiving special treatment.
+### Security and administration
 
-ODBC is not a dependency-free universal answer. It avoids Java but depends on a
-platform driver manager, native vendor drivers, DSN/configuration behavior, and
-often blocking APIs. JDBC has a larger provider ecosystem but requires a JVM
-and a bridge process. Both flatten provider-specific schema, type, cancellation,
-and bulk capabilities unless Sift defines its own richer contract above them.
+- [~] Principals and authentication
+- [~] Tenants and memberships
+- [~] Role-based authorization
+- [~] Connection policies
+- [~] Resource and rate limits
+- [~] Audit log
+- [~] API tokens and signing keys
+- [~] Approval workflows
+- [ ] Database users and roles editor
+- [ ] Grants and privilege matrix
+- [ ] Database and schema ownership editor
+- [ ] PostgreSQL row-level security editor
+- [ ] SQL Server login and permission editor
 
-### Driver Protocol design
+### Import, export, and transfer
 
-The RPC protocol should preserve the existing reliable core while replacing
-closed engine downcasts with discovery:
+- [~] CSV import
+- [~] CSV, TSV, JSON, and JSONL export
+- [~] Background transfer execution
+- [~] Cross-connection transfer recipes
+- [~] Column mapping
+- [~] Bounded streaming
+- [~] Transfer scheduling
+- [ ] Import schema and type inference UI
+- [ ] Dry-run transfer UI
+- [ ] Error quarantine
+- [ ] Resumable transfer UI
+- [ ] Cross-engine type-mapping editor
+- [ ] Parquet support
 
-- protocol handshake with compatible version ranges;
-- stable namespaced `provider_id`, separate display name and dialect id;
-- manifest containing plugin version, executable, supported platforms,
-  connection-configuration JSON Schema, secret-field declarations, and
-  capability descriptors;
-- opaque connection, transaction, query, and cursor handles scoped to one
-  plugin process;
-- open, ping, schema, begin, commit, rollback, execute, cancel, and close;
-- framed streaming pages with explicit backpressure and size limits;
-- structured errors, retryability, warnings, native type metadata, and
-  correlation ids;
-- optional capability families for savepoints, bulk transfer, notifications,
-  process control, explain plans, database switching, schema invalidation, and
-  provider-native operations;
-- crash containment, deadlines, cancellation, health checks, restart policy,
-  resource limits, and no in-process dynamic-library loading by default;
-- conformance fixtures and certification levels so “loads” is not confused
-  with “full IDE support.”
+### Backup, restore, and maintenance
 
-Driver RPC v1 uses length-prefixed UTF-8 JSON over stdio. Alternate local
-sockets and encodings require a future negotiated RPC version rather than
-speculative v1 switches.
+- [~] Sift state backup and restore
+- [~] Metadata migration lifecycle
+- [~] Scheduled runs
+- [~] Durable task history
+- [~] Task cancellation and recovery
+- [ ] PostgreSQL dump and restore
+- [ ] SQL Server backup and restore
+- [ ] Restore preview and target validation
+- [ ] VACUUM and ANALYZE actions
+- [ ] REINDEX actions
+- [ ] Table and index maintenance
+- [ ] Integrity checks
 
-### Engine identity and capability discovery
+### Engine-specific depth
 
-The public protocol needs an extensible provider identity before external
-drivers can work. Do not simply change every `Engine` match into a free-form
-string. Preserve well-known built-in engine/dialect identities for exhaustive
-core behavior, and introduce a validated namespaced provider id plus a declared
-capability set for runtime dispatch.
-
-Clients ask the server what a provider supports. They do not infer support from
-its name. Missing capabilities produce `UnsupportedForEngine`; they never
-silently degrade a destructive or correctness-sensitive operation.
-
-### Secrets and trust
-
-Plugin manifests declare credential fields, but stored values remain opaque
-`SecretStore` handles. The server resolves and passes the minimum credential
-material only to the admitted driver process at connection time. Secret bytes
-must never appear in manifests, metadata, logs, crash reports, or audit
-operations.
-
-Third-party plugins are code executed by the instance operator. The extension
-system therefore needs install provenance, signatures/checksums, explicit
-permissions, disabled-by-default network/filesystem capabilities where the
-platform permits enforcement, update policy, and an operator-visible trust
-state. Marketplace convenience must not imply sandbox guarantees the runtime
-cannot actually enforce.
-
-## General extension system
-
-Driver plugins are one contribution type within a broader extension host. The
-same manifest/version/permission/lifecycle foundation should support:
-
-- database providers and tunnel adapters;
-- connection hooks and credential brokers;
-- export/import formats;
-- SQL dialect, formatter, analyzer, and completion packs;
-- commands and server-side operations;
-- agent/MCP context providers and governed tools;
-- client contributions such as panels or renderers through a separately
-  versioned, declarative client contract.
-
-Extensions do not bypass product invariants. Every user-visible action maps to
-an audited core or namespaced extension `Operation`; authorization, rate and
-resource admission, secret handling, timeout, and cancellation remain owned by
-the server.
-
-## Decision status
-
-ADR-022, ADR-031, and `docs/PLANS/phase-i-extensibility.md` now lock the Phase I
-provider identity, capability, Driver RPC, manifest, permissions, installation,
-trust, lifecycle, process isolation, namespaced operation, storage, MCP, and
-certification decisions.
-
-Server-owned versus hybrid workspace/VCS topology remains Phase L (ADR-034).
-The SQL semantic service and dialect-pack execution contract remains Phase K
-(ADR-032); Phase I reserves its contribution identity only.
+- [~] PostgreSQL schema introspection
+- [~] PostgreSQL plans
+- [~] PostgreSQL process control
+- [~] PostgreSQL bulk import
+- [~] PostgreSQL notifications
+- [~] SQL Server schema introspection
+- [~] SQL Server plans
+- [~] SQL Server process control
+- [~] SQL Server bulk import
+- [ ] PostgreSQL extensions and partition management UI
+- [ ] PostgreSQL replication and statistics UI
+- [ ] PostgreSQL settings browser
+- [ ] SQL Server Query Store
+- [ ] SQL Server Agent
+- [ ] SQL Server server-settings browser

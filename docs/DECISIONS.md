@@ -253,7 +253,7 @@ Clients and servers must retain range-aware codecs for every published version
 they advertise; unreleased development shapes do not create permanent
 compatibility debt. The SDK gains a small shared handshake state before normal
 requests. Detailed wire and reconnect behavior is in
-`docs/PLANS/phase-h-remote-development.md`.
+ADR-021.
 
 ---
 
@@ -316,7 +316,7 @@ exchange for inspectability and broad implementation support; a future encoding
 requires an explicitly negotiated RPC version. Built-ins and external
 providers share logical semantics without forcing proven in-process drivers
 through a new IPC path. Detailed message, credit, cancellation, and migration
-rules are in `docs/PLANS/phase-i-extensibility.md`.
+rules are recorded by ADR-022.
 
 ---
 
@@ -410,7 +410,7 @@ plugins remain operator-trusted where the OS cannot enforce their declared
 permissions, and Sift reports that honestly. Manifest, grant, operation,
 lifecycle, storage, MCP approval, and conformance contracts become
 load-bearing public surfaces. The complete scope and graduation matrix are in
-`docs/PLANS/phase-i-extensibility.md`.
+ADR-022 and ADR-031.
 
 ---
 
@@ -897,7 +897,7 @@ single-process per metadata store, with persistence behind an auth-session
 boundary for later replacement. Phase E grows to include ownership enforcement
 and auth-specific throttling because exposing identity without those controls
 would not create a safely hostable server. Detailed contracts and sequencing
-are in `docs/PLANS/hosted-identity.md`.
+are recorded by ADR-030.
 
 ---
 
@@ -1102,7 +1102,7 @@ safe extraction, signing-key rotation, activation health, and rollback become
 release-critical code. Binary rollback cannot undo an irreversible metadata
 migration, so such a migration requires its own future release gate. The full
 manifest and mode contract is in
-`docs/PLANS/phase-h-remote-development.md`.
+ADR-021.
 
 ---
 
@@ -1196,7 +1196,7 @@ lifecycle.
 
 **Graduation.** Implemented and graduated on 2026-08-10. The two-engine
 feature, isolation, redaction, public-surface, and latency evidence is recorded
-in `docs/PLANS/phase-k-graduation-matrix.md`.
+in repository tests.
 
 ---
 
@@ -1236,12 +1236,12 @@ authorize access or promise portability. Clients own diagram layout, not graph
 truth or DDL generation. The full contract and graduation matrices are in
 `docs/PLANS/catalog-graph-schema-migrations.md`; comparison, diagram projection,
 and semantic plan retention are locked separately in
-`docs/PLANS/phase-k-modeling-operations.md`.
+ADR-032 and ADR-033.
 
 **Graduation.** Implemented and graduated on 2026-08-10. The live-engine,
 migration lifecycle, policy isolation, hostile-provider, public-surface, and
 resource-budget evidence is recorded in
-`docs/PLANS/phase-k-graduation-matrix.md`.
+repository tests.
 
 ---
 
@@ -1288,7 +1288,7 @@ must own bootstrap, forwarding, capability renewal, reconnect classification,
 and verified binary selection. Remote correctness depends on the ADR-016
 handshake rather than equal executable versions. Detailed state machines,
 failure gates, and implementation order are in
-`docs/PLANS/phase-h-remote-development.md`.
+ADR-021.
 
 ---
 
@@ -1366,12 +1366,12 @@ materialization cannot leak into an in-flight commit. The server must add
 room-aware metadata instead of reviving V003, rooted filesystem traversal,
 typed VCS/run/recipe contracts, durable recovery state, capability discovery,
 and deployment/security graduation matrices. The normative implementation
-order is `docs/PLANS/phase-l-workspaces-vcs-automation.md`.
+order is retained in git history.
 
 **Graduation.** Implemented and graduated on 2026-08-11. Deployment,
 collaboration, conflict, recovery, transfer, security, compatibility, backup,
 and measured budget evidence is recorded in
-`docs/PLANS/phase-l-graduation-matrix.md`.
+repository tests.
 
 ---
 

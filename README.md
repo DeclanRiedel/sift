@@ -43,21 +43,16 @@ Installed local and daemon releases start through `sift-launcher`, which
 health-checks staged updates, commits healthy candidates, and rolls back failed
 candidates before handing the server lifecycle to the caller.
 
-Phase I extensibility is implemented and graduated. The normative contract is
-`docs/PLANS/phase-i-extensibility.md`; the public compatibility, security, and
-operator guide is `docs/EXTENSIONS.md`. ODBC/JDBC compatibility bridges remain
-deliberately deferred.
+Phase I extensibility is implemented and graduated in ADR-022 and ADR-031.
+The public compatibility, security, and operator guide is `docs/EXTENSIONS.md`.
+ODBC/JDBC compatibility bridges remain deliberately deferred.
 
-Phase K SQL intelligence and database modeling is implemented and graduated.
-Its catalog, diff, migration, comparison, diagram, semantic-plan, safety, and
-performance evidence is recorded in
-`docs/PLANS/phase-k-graduation-matrix.md`.
+Phase K SQL intelligence and database modeling is implemented and graduated
+in ADR-032 and ADR-033.
 
 Phase L virtual workspaces, projections, hardened Git, run configurations,
 durable scheduling, and extensible transfer recipes are implemented and
-graduated. Its deployment, conflict, recovery, security, compatibility, and
-measured budget evidence is recorded in
-`docs/PLANS/phase-l-graduation-matrix.md`.
+graduated in ADR-034.
 
 Phase M is the active product-client phase. ADR-040 selects an exactly pinned
 GPUI foundation and a Zed-inspired entity/action/workspace architecture while

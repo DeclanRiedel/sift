@@ -7,8 +7,7 @@ length-prefixed JSON stdio. Sift does not invoke a shell, inherit the server
 environment, or install an extension's language runtime.
 
 The Rust wire contract and generated JSON Schema source are in
-`crates/extension-protocol`. The normative design is
-`docs/PLANS/phase-i-extensibility.md`.
+`crates/extension-protocol`. ADR-022 and ADR-031 define the normative design.
 
 ## Compatibility
 
