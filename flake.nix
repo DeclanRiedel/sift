@@ -406,8 +406,8 @@
           name = "sift-desktop";
           runtimeInputs = [ pkgs.nix ];
           text = devCommand ''
-            cargo build -p sift-server --bin sift-launcher
-            cargo run -p sift-desktop -- "$@"
+            cargo build --profile release-dev -p sift-server --bin sift-launcher
+            cargo run --profile release-dev -p sift-desktop -- "$@"
           '';
         };
 
@@ -452,7 +452,7 @@
             cd "$repo"
             # Build first, in the foreground: a cold GPUI build takes minutes,
             # and the desktop must be able to resolve its sibling server binary.
-            run_in_dev cargo build -p sift-server -p sift-desktop
+            run_in_dev cargo build --profile release-dev -p sift-server -p sift-desktop
 
             cleanup() {
               if [ "''${SIFT_DEMO_KEEP_POSTGRES:-0}" != "1" ]; then
@@ -479,11 +479,11 @@
             printf "ALTER ROLE sift PASSWORD '%s';\n" "$db_password" | \
               psql -q -h 127.0.0.1 -p "$pgport" -U sift -d sifttest
 
-            run_in_dev cargo run -q -p sift-server --bin sift -- instance lock "$instance_root"
-            run_in_dev cargo run -q -p sift-server --bin sift -- instance apply "$instance_root"
+            run_in_dev cargo run -q --profile release-dev -p sift-server --bin sift -- instance lock "$instance_root"
+            run_in_dev cargo run -q --profile release-dev -p sift-server --bin sift -- instance apply "$instance_root"
             if grep -q 'credential = "credential:demo/postgres/shared"' "$instance_root/sift.toml"; then
               printf '%s\n' "$db_password" | jq -cnR '{password: input}' | \
-                run_in_dev cargo run -q -p sift-server --bin sift -- \
+                run_in_dev cargo run -q --profile release-dev -p sift-server --bin sift -- \
                   instance credentials import "$instance_root" \
                   --slot credential:demo/postgres/shared --stdin
             fi
@@ -496,7 +496,7 @@
             echo "Desktop: supervising the applied auto-loopback instance"
             echo "The desktop can edit this run's sift.toml through the current-instance API."
 
-            run_in_dev cargo run -p sift-desktop -- --instance-root "$instance_root" "$@"
+            run_in_dev cargo run --profile release-dev -p sift-desktop -- --instance-root "$instance_root" "$@"
           '';
         };
 

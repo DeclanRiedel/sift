@@ -468,6 +468,7 @@ impl ResultsView {
             Some(GridSelection::Column(column)) => (0, column),
             Some(GridSelection::All) | None => (0, 0),
         };
+        let previous_row = row;
         let row = row
             .saturating_add_signed(row_delta)
             .min(data.rows.len() - 1);
@@ -475,8 +476,13 @@ impl ResultsView {
             .saturating_add_signed(column_delta)
             .min(data.columns.len() - 1);
         self.set_selection(GridSelection::Cell { row, column }, cx);
-        self.row_scroll_handle
-            .scroll_to_item(row, ScrollStrategy::Nearest);
+        // Horizontal navigation cannot move outside the vertical viewport.
+        // Avoid leaving a deferred scroll request for the list to resolve on
+        // every left/right key press (and at the top/bottom row boundaries).
+        if row != previous_row {
+            self.row_scroll_handle
+                .scroll_to_item(row, ScrollStrategy::Nearest);
+        }
     }
 
     fn move_cell_left(&mut self, _: &MoveCellLeft, _: &mut Window, cx: &mut Context<Self>) {
@@ -1250,8 +1256,11 @@ mod tests {
             assert_eq!(view.active_tab(), ResultTab::Messages);
             view.select_cell(0, 0, cx);
             assert_eq!(view.selected_text().as_deref(), Some("neo"));
+            view.row_scroll_handle
+                .scroll_to_item(1, ScrollStrategy::Top);
             view.move_selection(0, 1, cx);
             assert_eq!(view.selected_text().as_deref(), Some("1"));
+            assert_eq!(view.row_scroll_handle.logical_scroll_top_index(), 1);
             view.move_selection(1, 0, cx);
             assert_eq!(view.selected_text().as_deref(), Some("2"));
             view.move_selection(0, -1, cx);

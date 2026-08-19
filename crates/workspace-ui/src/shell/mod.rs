@@ -1542,6 +1542,7 @@ pub struct WorkspaceShell {
     window_presentation: WindowPresentation,
     panes: Vec<Entity<Pane>>,
     pane_flexes: Vec<f32>,
+    workspace_resize_frame_pending: bool,
     active_pane: usize,
     selected_workspace_id: Option<i64>,
     selected_instance_id: Option<String>,
@@ -1766,6 +1767,7 @@ impl WorkspaceShell {
             window_presentation,
             panes,
             pane_flexes,
+            workspace_resize_frame_pending: false,
             active_pane,
             selected_workspace_id,
             selected_instance_id,
@@ -3304,7 +3306,7 @@ impl WorkspaceShell {
     fn resize_dock(
         &mut self,
         event: &gpui::DragMoveEvent<DockResizeDrag>,
-        _: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let dock = event.drag(cx).dock;
@@ -3312,6 +3314,11 @@ impl WorkspaceShell {
         let height: f32 = event.bounds.size.height.into();
         let pointer_x: f32 = (event.event.position.x - event.bounds.left()).into();
         let pointer_y: f32 = (event.event.position.y - event.bounds.top()).into();
+        let previous_sizes = (
+            self.left_dock.presentation.size,
+            self.right_dock.presentation.size,
+            self.bottom_dock.presentation.size,
+        );
 
         match dock {
             DockId::Left | DockId::Inspector => {
@@ -3331,15 +3338,22 @@ impl WorkspaceShell {
                     dock,
                     requested,
                 );
-                self.left_dock.presentation.size = sizes.left;
-                self.right_dock.presentation.size = sizes.right;
+                self.left_dock.presentation.size = sizes.left.round();
+                self.right_dock.presentation.size = sizes.right.round();
             }
             DockId::Bottom => {
                 self.bottom_dock.presentation.size =
-                    dock_layout::fit_bottom_dock(height, height - pointer_y);
+                    dock_layout::fit_bottom_dock(height, height - pointer_y).round();
             }
         }
-        cx.notify();
+        let current_sizes = (
+            self.left_dock.presentation.size,
+            self.right_dock.presentation.size,
+            self.bottom_dock.presentation.size,
+        );
+        if current_sizes != previous_sizes {
+            self.queue_workspace_resize(window, cx);
+        }
     }
 
     fn finish_dock_resize(&mut self, _: &DockResizeDrag, _: &mut Window, cx: &mut Context<Self>) {
@@ -3349,18 +3363,35 @@ impl WorkspaceShell {
     fn resize_panes(
         &mut self,
         event: &gpui::DragMoveEvent<PaneResizeDrag>,
-        _: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let width: f32 = event.bounds.size.width.into();
-        let pointer_x: f32 = (event.event.position.x - event.bounds.left()).into();
-        resize_pane_flexes(
-            &mut self.pane_flexes,
-            event.drag(cx).boundary,
-            pointer_x,
-            width,
-        );
+        let pointer_x: f32 = f32::from(event.event.position.x - event.bounds.left()).round();
+        let boundary = event.drag(cx).boundary;
+        let previous_pair = self
+            .pane_flexes
+            .get(boundary..=boundary.saturating_add(1))
+            .map(|pair| (pair[0], pair[1]));
+        resize_pane_flexes(&mut self.pane_flexes, boundary, pointer_x, width);
+        let current_pair = self
+            .pane_flexes
+            .get(boundary..=boundary.saturating_add(1))
+            .map(|pair| (pair[0], pair[1]));
+        if current_pair != previous_pair {
+            self.queue_workspace_resize(window, cx);
+        }
+    }
+
+    fn queue_workspace_resize(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.workspace_resize_frame_pending {
+            return;
+        }
+        self.workspace_resize_frame_pending = true;
         cx.notify();
+        cx.on_next_frame(window, |shell, _, _| {
+            shell.workspace_resize_frame_pending = false;
+        });
     }
 
     fn finish_pane_resize(&mut self, _: &PaneResizeDrag, _: &mut Window, cx: &mut Context<Self>) {
@@ -9903,6 +9934,22 @@ mod tests {
             assert!(!pane.result_resize_frame_pending);
         });
         assert_eq!(cx.update(|window, cx| window.simulate_next_frame(cx)), 0);
+    }
+
+    #[gpui::test]
+    fn workspace_resize_coalesces_pointer_updates_per_frame(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+
+        workspace.update_in(&mut cx, |shell, window, cx| {
+            shell.queue_workspace_resize(window, cx);
+            shell.queue_workspace_resize(window, cx);
+            assert!(shell.workspace_resize_frame_pending);
+        });
+
+        assert_eq!(cx.update(|window, cx| window.simulate_next_frame(cx)), 1);
+        assert!(!workspace.read_with(&cx, |shell, _| shell.workspace_resize_frame_pending));
     }
 
     #[gpui::test]
