@@ -1160,9 +1160,9 @@ impl gpui::Render for Pane {
             || self.focus_handle.contains_focused(window, cx);
         let active = self.active_item().cloned();
         let database_notice = active.as_ref().and_then(|item| {
-            let ItemSource::DatabaseObject(source) = item.source.as_ref()?;
+            let ItemSource::DatabaseObject(_) = item.source.as_ref()?;
             let state = self.database_item_states.get(&item.id)?.clone();
-            (!matches!(state, DatabaseItemState::Live)).then_some((item.id, source.clone(), state))
+            (!matches!(state, DatabaseItemState::Live)).then_some((item.id, state))
         });
         let pending_close = active
             .as_ref()
@@ -1630,36 +1630,12 @@ impl gpui::Render for Pane {
                     ),
                 }
             })
-            .children(database_notice.map(|(item_id, source, state)| {
-                let (message, detail, tone, tint, can_retry) = match state {
+            .children(database_notice.map(|(item_id, state)| {
+                let (tint, can_retry) = match state {
                     DatabaseItemState::Live => unreachable!(),
-                    DatabaseItemState::Offline => (
-                        "Offline snapshot",
-                        format!(
-                            "{}.{} · {} · {}",
-                            source.schema,
-                            source.object,
-                            source.profile_name,
-                            database_snapshot_age(source.last_refreshed_at_ms)
-                        ),
-                        colors.warning,
-                        colors.warning_muted,
-                        true,
-                    ),
-                    DatabaseItemState::Reconnecting => (
-                        "Reconnecting…",
-                        format!("Opening {} before refreshing snapshot", source.profile_name),
-                        colors.warning,
-                        colors.warning_muted,
-                        false,
-                    ),
-                    DatabaseItemState::Failed(reason) => (
-                        "Snapshot unavailable",
-                        reason,
-                        colors.danger,
-                        colors.danger_muted,
-                        true,
-                    ),
+                    DatabaseItemState::Offline => (colors.warning_muted, true),
+                    DatabaseItemState::Reconnecting => (colors.warning_muted, false),
+                    DatabaseItemState::Failed(_) => (colors.danger_muted, true),
                 };
                 div()
                     .id(("database-snapshot-overlay", item_id as usize))
@@ -1669,10 +1645,6 @@ impl gpui::Render for Pane {
                     .right_0()
                     .top(theme.metrics.tab_height)
                     .bottom_0()
-                    .flex()
-                    .items_start()
-                    .justify_end()
-                    .p_3()
                     .bg(tint)
                     .when(can_retry, |overlay| {
                         overlay
@@ -1681,60 +1653,7 @@ impl gpui::Render for Pane {
                                 cx.emit(PaneEvent::RefreshDatabaseItemRequested { item_id });
                             }))
                     })
-                    .child(
-                        div()
-                            .max_w(px(420.))
-                            .p_3()
-                            .flex()
-                            .items_center()
-                            .gap_2()
-                            .rounded(cx.theme().metrics.radius_large)
-                            .border_1()
-                            .border_color(tone)
-                            .bg(colors.elevated_surface)
-                            .shadow_lg()
-                            .child(icon(IconName::Warning, tone, 16.))
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .flex()
-                                    .flex_col()
-                                    .child(
-                                        div()
-                                            .font_weight(gpui::FontWeight::SEMIBOLD)
-                                            .child(message),
-                                    )
-                                    .child(
-                                        div()
-                                            .text_xs()
-                                            .text_color(colors.muted_text)
-                                            .whitespace_normal()
-                                            .child(detail),
-                                    ),
-                            )
-                            .children(
-                                can_retry.then(|| Badge::new("Reconnect").tone(Tone::Warning)),
-                            ),
-                    )
             }))
-    }
-}
-
-fn database_snapshot_age(last_refreshed_at_ms: Option<u64>) -> String {
-    let Some(last_refreshed_at_ms) = last_refreshed_at_ms else {
-        return "not refreshed in this session".into();
-    };
-    let now_ms = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .ok()
-        .and_then(|duration| u64::try_from(duration.as_millis()).ok())
-        .unwrap_or(last_refreshed_at_ms);
-    let elapsed_seconds = now_ms.saturating_sub(last_refreshed_at_ms) / 1_000;
-    match elapsed_seconds {
-        0..=59 => format!("fetched {elapsed_seconds}s ago"),
-        60..=3_599 => format!("fetched {}m ago", elapsed_seconds / 60),
-        _ => format!("fetched {}h ago", elapsed_seconds / 3_600),
     }
 }
 
