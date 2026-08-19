@@ -537,6 +537,9 @@ pub struct Pane {
     /// Transient wrapper sizes while dragging. Keeping these on the pane avoids
     /// invalidating and repainting the result grid for every pointer event.
     live_result_extents: HashMap<u64, f32>,
+    /// Mouse-move events may outpace display refresh. One pane invalidation per
+    /// frame keeps result resizing responsive without redundant layout passes.
+    result_resize_frame_pending: bool,
     /// Insertion index a dragged tab would land at, if a drag is hovering.
     tab_drop_index: Option<usize>,
     /// Item whose tab is currently being dragged from this pane. Used to dim
@@ -610,6 +613,7 @@ impl Pane {
             editor_subscriptions,
             results,
             live_result_extents: HashMap::new(),
+            result_resize_frame_pending: false,
             tab_drop_index: None,
             dragging_item: None,
             pending_close_item: None,
@@ -864,7 +868,7 @@ impl Pane {
     fn resize_results(
         &mut self,
         event: &gpui::DragMoveEvent<ResultResizeDrag>,
-        _: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let drag = *event.drag(cx);
@@ -883,8 +887,37 @@ impl Pane {
                 .max(RESULT_MIN_EXTENT)
                 .min((width - EDITOR_MIN_EXTENT).max(RESULT_MIN_EXTENT)),
         };
-        self.live_result_extents.insert(drag.item_id, extent);
+        self.queue_result_resize(drag.item_id, extent, window, cx);
+    }
+
+    fn queue_result_resize(
+        &mut self,
+        item_id: u64,
+        extent: f32,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // Sub-pixel wrapper changes still trigger full layout. Snap them away,
+        // and skip pointer events that resolve to the current visible extent.
+        let extent = extent.round();
+        let current = self.live_result_extents.get(&item_id).copied().or_else(|| {
+            self.results
+                .get(&item_id)
+                .map(|result| result.read(cx).extent())
+        });
+        if current == Some(extent) {
+            return;
+        }
+        self.live_result_extents.insert(item_id, extent);
+
+        if self.result_resize_frame_pending {
+            return;
+        }
+        self.result_resize_frame_pending = true;
         cx.notify();
+        cx.on_next_frame(window, |pane, _, _| {
+            pane.result_resize_frame_pending = false;
+        });
     }
 
     fn finish_results_resize(
@@ -7500,7 +7533,7 @@ fn window_resize_handle(
         ResizeEdge::BottomRight => handle.bottom_0().right_0().size(px(CORNER_SIZE)),
         ResizeEdge::BottomLeft => handle.bottom_0().left_0().size(px(CORNER_SIZE)),
     }
-    .into_any_element()
+        .into_any_element()
 }
 
 fn window_resize_handles() -> Vec<gpui::AnyElement> {
@@ -9762,6 +9795,34 @@ mod tests {
 
         let after = cx.debug_bounds("pane-slot-0").unwrap().size.width;
         assert!(after > before + px(40.0));
+    }
+
+    #[gpui::test]
+    fn result_resize_coalesces_pointer_updates_per_frame(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        let pane = workspace.read_with(&cx, |shell, _| shell.panes[0].clone());
+
+        pane.update_in(&mut cx, |pane, window, cx| {
+            // Existing bottom extent is 240, so sub-pixel movement is a no-op.
+            pane.queue_result_resize(1, 240.4, window, cx);
+            assert!(!pane.result_resize_frame_pending);
+
+            pane.queue_result_resize(1, 280.1, window, cx);
+            pane.queue_result_resize(1, 300.2, window, cx);
+            assert!(pane.result_resize_frame_pending);
+            assert_eq!(pane.live_result_extents.get(&1), Some(&300.0));
+        });
+
+        assert_eq!(cx.update(|window, cx| window.simulate_next_frame(cx)), 1);
+        assert!(!pane.read_with(&cx, |pane, _| pane.result_resize_frame_pending));
+
+        pane.update_in(&mut cx, |pane, window, cx| {
+            pane.queue_result_resize(1, 300.4, window, cx);
+            assert!(!pane.result_resize_frame_pending);
+        });
+        assert_eq!(cx.update(|window, cx| window.simulate_next_frame(cx)), 0);
     }
 
     #[gpui::test]
