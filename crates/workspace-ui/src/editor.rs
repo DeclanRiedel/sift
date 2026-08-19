@@ -1555,11 +1555,10 @@ impl Element for QueryEditorElement {
             let top = text_top + line_height * line_index as f32;
 
             if cursor >= offset && cursor <= line_end {
-                let active_line_left = bounds.left() + EDITOR_GUTTER_WIDTH;
                 active_line_quad = Some(fill(
                     Bounds::new(
-                        point(active_line_left, top),
-                        size((bounds.right() - active_line_left).max(px(0.)), line_height),
+                        point(bounds.left(), top),
+                        size(bounds.size.width, line_height),
                     ),
                     theme.colors.editor_active_line,
                 ));
