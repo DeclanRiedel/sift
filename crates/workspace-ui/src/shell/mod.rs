@@ -4,9 +4,9 @@ use std::sync::Arc;
 
 use gpui::{
     actions, deferred, div, img, prelude::*, px, uniform_list, App, Context, CursorStyle,
-    DefiniteLength, Entity, EventEmitter, FocusHandle, Focusable, IntoElement, MouseButton,
-    PathPromptOptions, ResizeEdge, Role, ScrollStrategy, SharedString, Subscription, Task,
-    UniformListScrollHandle, Window, WindowBounds, WindowControlArea,
+    DefiniteLength, Div, Entity, EventEmitter, FocusHandle, Focusable, Hsla, IntoElement,
+    MouseButton, PathPromptOptions, Pixels, ResizeEdge, Role, ScrollStrategy, SharedString,
+    Subscription, Task, UniformListScrollHandle, Window, WindowBounds, WindowControlArea,
 };
 use sift_api_types::RoomId;
 use sift_ui::{
@@ -152,6 +152,35 @@ impl ObjectGroupKind {
             | ObjectKind::Extension => Self::Other,
         }
     }
+}
+
+/// Left padding for a tree row at the given depth. Levels step by a constant
+/// 14px so chevrons, icons, and labels each form one aligned column.
+fn tree_indent(level: usize) -> Pixels {
+    px(6. + 14. * level as f32)
+}
+
+/// Fixed-width slot holding a row's disclosure chevron. Leaf rows render an
+/// empty slot instead so their icons stay aligned with sibling containers.
+fn tree_chevron_slot(open: bool, color: Hsla) -> Div {
+    div()
+        .flex_none()
+        .w(px(14.))
+        .flex()
+        .items_center()
+        .child(icon(
+            if open {
+                IconName::ChevronDown
+            } else {
+                IconName::ChevronRight
+            },
+            color,
+            11.,
+        ))
+}
+
+fn tree_spacer_slot() -> Div {
+    div().flex_none().w(px(14.))
 }
 
 /// Full-colour vendor artwork for a connection's engine, when we carry it.
@@ -5574,7 +5603,8 @@ impl WorkspaceShell {
             ConnectionSchemaState::Loading {
                 profile_id: loading,
             } if *loading == profile_id => vec![div()
-                .ml_6()
+                .mx_2()
+                .pl(tree_indent(2))
                 .h(cx.theme().metrics.row_height)
                 .flex()
                 .items_center()
@@ -5586,8 +5616,9 @@ impl WorkspaceShell {
                 profile_id: failed,
                 message,
             } if *failed == profile_id => vec![div()
-                .ml_6()
-                .mr_2()
+                .mx_2()
+                .pl(tree_indent(2))
+                .pr_2()
                 .py_1()
                 .flex()
                 .flex_col()
@@ -5616,26 +5647,18 @@ impl WorkspaceShell {
                             .id(("schema-catalog", catalog_index + profile_id as usize * 1000))
                             .mx_2()
                             .h(cx.theme().metrics.row_height)
-                            .pl_4()
+                            .pl(tree_indent(2))
                             .pr_2()
                             .flex()
                             .items_center()
-                            .gap_1()
+                            .gap(px(6.))
                             .rounded_sm()
                             .text_color(colors.muted_text)
                             .hover(|row| row.bg(colors.hovered_surface).text_color(colors.text))
                             .on_click(cx.listener(move |shell, _, _, cx| {
                                 shell.toggle_catalog_schema(profile_id, catalog_name.clone(), cx)
                             }))
-                            .child(icon(
-                                if catalog_open {
-                                    IconName::ChevronDown
-                                } else {
-                                    IconName::ChevronRight
-                                },
-                                colors.muted_text,
-                                11.,
-                            ))
+                            .child(tree_chevron_slot(catalog_open, colors.muted_text))
                             .child(icon(IconName::Database, colors.muted_text, 12.))
                             .child(div().min_w_0().truncate().child(catalog.name.clone()))
                             .into_any_element(),
@@ -5658,11 +5681,11 @@ impl WorkspaceShell {
                                 ))
                                 .mx_2()
                                 .h(cx.theme().metrics.row_height)
-                                .pl_6()
+                                .pl(tree_indent(3))
                                 .pr_2()
                                 .flex()
                                 .items_center()
-                                .gap_1()
+                                .gap(px(6.))
                                 .rounded_sm()
                                 .text_color(colors.muted_text)
                                 .hover(|row| row.bg(colors.hovered_surface).text_color(colors.text))
@@ -5674,15 +5697,7 @@ impl WorkspaceShell {
                                         cx,
                                     )
                                 }))
-                                .child(icon(
-                                    if schema_open {
-                                        IconName::ChevronDown
-                                    } else {
-                                        IconName::ChevronRight
-                                    },
-                                    colors.muted_text,
-                                    11.,
-                                ))
+                                .child(tree_chevron_slot(schema_open, colors.muted_text))
                                 .child(icon(IconName::Folder, colors.muted_text, 12.))
                                 .child(div().min_w_0().truncate().child(schema.name.clone()))
                                 .child(
@@ -5726,11 +5741,11 @@ impl WorkspaceShell {
                                     ))
                                     .mx_2()
                                     .h(cx.theme().metrics.row_height)
-                                    .pl_8()
+                                    .pl(tree_indent(4))
                                     .pr_2()
                                     .flex()
                                     .items_center()
-                                    .gap_1()
+                                    .gap(px(6.))
                                     .rounded_sm()
                                     .text_color(colors.muted_text)
                                     .hover(|row| {
@@ -5745,15 +5760,7 @@ impl WorkspaceShell {
                                             cx,
                                         )
                                     }))
-                                    .child(icon(
-                                        if group_open {
-                                            IconName::ChevronDown
-                                        } else {
-                                            IconName::ChevronRight
-                                        },
-                                        colors.muted_text,
-                                        11.,
-                                    ))
+                                    .child(tree_chevron_slot(group_open, colors.muted_text))
                                     .child(icon(group.icon(), colors.muted_text, 12.))
                                     .child(group.label())
                                     .child(
@@ -5793,11 +5800,11 @@ impl WorkspaceShell {
                                     ))
                                     .mx_2()
                                     .h(cx.theme().metrics.row_height)
-                                    .pl_10()
+                                    .pl(tree_indent(5))
                                     .pr_2()
                                     .flex()
                                     .items_center()
-                                    .gap_2()
+                                    .gap(px(6.))
                                     .rounded_sm()
                                     .text_color(if can_preview {
                                         colors.text
@@ -5821,13 +5828,14 @@ impl WorkspaceShell {
                                             }),
                                         )
                                     })
+                                    .child(tree_spacer_slot())
                                     .child(
                                         div()
                                             .min_w_0()
                                             .flex_1()
                                             .flex()
                                             .items_center()
-                                            .gap_1()
+                                            .gap(px(6.))
                                             .truncate()
                                             .child(icon(
                                                 schema_object_kind_icon(object.kind),
@@ -5853,7 +5861,8 @@ impl WorkspaceShell {
                 if rows.is_empty() {
                     rows.push(
                         div()
-                            .ml_6()
+                            .mx_2()
+                            .pl(tree_indent(2))
                             .h(cx.theme().metrics.row_height)
                             .flex()
                             .items_center()
@@ -5943,27 +5952,20 @@ impl WorkspaceShell {
                         div()
                             .id(("connection-tenant", tenant_id as usize))
                             .mt_2()
-                            .h(px(24.))
-                            .px_3()
+                            .mx_2()
+                            .h(cx.theme().metrics.row_height)
+                            .pl(tree_indent(0))
+                            .pr_2()
                             .flex()
                             .items_center()
-                            .gap_1()
+                            .gap(px(6.))
                             .rounded_sm()
-                            .text_xs()
                             .text_color(colors.muted_text)
                             .hover(|row| row.bg(colors.hovered_surface).text_color(colors.text))
                             .on_click(cx.listener(move |shell, _, _, cx| {
                                 shell.toggle_tenant(tenant_id, cx)
                             }))
-                            .child(icon(
-                                if tenant_open {
-                                    IconName::ChevronDown
-                                } else {
-                                    IconName::ChevronRight
-                                },
-                                colors.muted_text,
-                                11.,
-                            ))
+                            .child(tree_chevron_slot(tenant_open, colors.muted_text))
                             .child(
                                 div()
                                     .min_w_0()
@@ -5979,11 +5981,13 @@ impl WorkspaceShell {
                     if !tenant.connections.is_empty() {
                         rows.push(
                             div()
+                                .mx_2()
                                 .h(px(20.))
-                                .px_4()
+                                .pl(tree_indent(1))
                                 .flex()
                                 .items_end()
                                 .text_xs()
+                                .font_weight(gpui::FontWeight::SEMIBOLD)
                                 .text_color(colors.disabled_text)
                                 .child("DATABASES")
                                 .into_any_element(),
@@ -6034,10 +6038,10 @@ impl WorkspaceShell {
                                 .id(("toggle-connection", connection_id as usize))
                                 .role(Role::Button)
                                 .flex_none()
-                                .size(px(16.))
+                                .w(px(14.))
+                                .h_full()
                                 .flex()
                                 .items_center()
-                                .justify_center()
                                 .on_mouse_down(MouseButton::Left, |_, _, cx| {
                                     cx.stop_propagation()
                                 })
@@ -6056,7 +6060,7 @@ impl WorkspaceShell {
                                 ))
                                 .into_any_element()
                         } else {
-                            div().flex_none().size(px(16.)).into_any_element()
+                            tree_spacer_slot().into_any_element()
                         };
                         let logo = match provider_logo_asset(&conn.provider_id) {
                             Some(asset) => {
@@ -6089,16 +6093,17 @@ impl WorkspaceShell {
                                     })
                                     .into_any_element()
                             }
-                            None => icon(IconName::Database, connection_color, 13.),
+                            None => icon(IconName::Database, connection_color, 12.),
                         };
                         let mut row = div()
                             .id(("conn", conn.id as usize))
                             .flex()
                             .items_center()
-                            .gap_2()
+                            .gap(px(6.))
                             .mx_2()
                             .h(cx.theme().metrics.row_height)
-                            .px_2()
+                            .pl(tree_indent(1))
+                            .pr_2()
                             .rounded_sm()
                             .when(connected, |row| row.bg(colors.active_surface))
                             .hover(|row| row.bg(colors.hovered_surface))
@@ -6163,11 +6168,13 @@ impl WorkspaceShell {
                     {
                         rows.push(
                             div()
+                                .mx_2()
                                 .h(px(20.))
-                                .px_4()
+                                .pl(tree_indent(1))
                                 .flex()
                                 .items_end()
                                 .text_xs()
+                                .font_weight(gpui::FontWeight::SEMIBOLD)
                                 .text_color(colors.disabled_text)
                                 .child("WORKSPACES")
                                 .into_any_element(),
@@ -6181,11 +6188,11 @@ impl WorkspaceShell {
                                 .id(("connection-room", room_id as usize))
                                 .mx_2()
                                 .h(cx.theme().metrics.row_height)
-                                .pl_4()
+                                .pl(tree_indent(1))
                                 .pr_2()
                                 .flex()
                                 .items_center()
-                                .gap_1()
+                                .gap(px(6.))
                                 .rounded_sm()
                                 .text_color(colors.muted_text)
                                 .hover(|row| {
@@ -6194,15 +6201,8 @@ impl WorkspaceShell {
                                 .on_click(cx.listener(move |shell, _, _, cx| {
                                     shell.toggle_room(room_id, cx)
                                 }))
-                                .child(icon(
-                                    if room_open {
-                                        IconName::ChevronDown
-                                    } else {
-                                        IconName::ChevronRight
-                                    },
-                                    colors.muted_text,
-                                    11.,
-                                ))
+                                .child(tree_chevron_slot(room_open, colors.muted_text))
+                                .child(icon(IconName::Users, colors.muted_text, 12.))
                                 .child(div().min_w_0().truncate().child(room.name.clone()))
                                 .into_any_element(),
                         );
@@ -6224,11 +6224,11 @@ impl WorkspaceShell {
                                     .id(("workspace", workspace.id as usize))
                                     .mx_2()
                                     .h(cx.theme().metrics.row_height)
-                                    .pl_8()
+                                    .pl(tree_indent(2))
                                     .pr_2()
                                     .flex()
                                     .items_center()
-                                    .gap_2()
+                                    .gap(px(6.))
                                     .rounded_sm()
                                     .when(is_open, |row| {
                                         row.bg(colors.active_surface).text_color(colors.text)
@@ -6237,6 +6237,8 @@ impl WorkspaceShell {
                                     .on_click(cx.listener(move |shell, _, _, cx| {
                                         shell.open_workspace(&entry, cx)
                                     }))
+                                    .child(tree_spacer_slot())
+                                    .child(icon(IconName::Workspace, colors.muted_text, 12.))
                                     .child(
                                         div()
                                             .min_w_0()
