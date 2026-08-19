@@ -780,6 +780,25 @@ impl Pane {
         }
     }
 
+    fn replace_new_pane_placeholder(&mut self) -> bool {
+        let Some(placeholder_id) = self.items.first().and_then(|item| {
+            (self.items.len() == 1
+                && item.kind == ItemKind::Welcome
+                && item.title == "New pane"
+                && !item.dirty)
+                .then_some(item.id)
+        }) else {
+            return false;
+        };
+
+        self.items.clear();
+        self.active_item = 0;
+        self.editors.remove(&placeholder_id);
+        self.results.remove(&placeholder_id);
+        self.forget_item(placeholder_id);
+        true
+    }
+
     fn mark_clean(&mut self, item_id: u64, cx: &App) {
         if let Some(editor) = self.editors.get(&item_id) {
             self.clean_documents
@@ -805,9 +824,11 @@ impl Pane {
             self.items[index] = item;
             self.activate_item(index, true);
         } else {
-            if let Some(current) = self.active_item().map(|item| item.id) {
-                self.backward_items.push(current);
-                self.forward_items.clear();
+            if !self.replace_new_pane_placeholder() {
+                if let Some(current) = self.active_item().map(|item| item.id) {
+                    self.backward_items.push(current);
+                    self.forward_items.clear();
+                }
             }
             self.items.push(item);
             self.active_item = self.items.len() - 1;
@@ -834,9 +855,11 @@ impl Pane {
         cx: &mut Context<Self>,
     ) {
         let item_id = item.id;
-        if let Some(current) = self.active_item().map(|item| item.id) {
-            self.backward_items.push(current);
-            self.forward_items.clear();
+        if !self.replace_new_pane_placeholder() {
+            if let Some(current) = self.active_item().map(|item| item.id) {
+                self.backward_items.push(current);
+                self.forward_items.clear();
+            }
         }
         self.items.push(item);
         self.active_item = self.items.len() - 1;
@@ -8314,6 +8337,55 @@ mod tests {
                 .collect::<Vec<_>>()
         });
         assert_eq!(item_counts, vec![0, 0]);
+    }
+
+    #[gpui::test]
+    fn opening_a_tab_replaces_the_new_pane_placeholder(cx: &mut TestAppContext) {
+        let pane = cx.update(|cx| {
+            cx.new(|cx| {
+                Pane::from_presentation(
+                    PanePresentation {
+                        id: 1,
+                        items: vec![ItemPresentation {
+                            id: 1,
+                            kind: ItemKind::Welcome,
+                            title: "New pane".into(),
+                            dirty: false,
+                        }],
+                        active_item: 0,
+                    },
+                    false,
+                    cx,
+                )
+            })
+        });
+        let (editor, results) = cx.update(|cx| {
+            (
+                cx.new(|cx| QueryEditor::new(QueryDocument::with_random_peer("select 1"), cx)),
+                cx.new(ResultsView::new),
+            )
+        });
+
+        pane.update(cx, |pane, cx| {
+            pane.open_query(
+                ItemPresentation {
+                    id: 2,
+                    kind: ItemKind::Query,
+                    title: "Query 1".into(),
+                    dirty: false,
+                },
+                editor,
+                results,
+                cx,
+            );
+        });
+
+        pane.read_with(cx, |pane, _| {
+            assert_eq!(pane.items.len(), 1);
+            assert_eq!(pane.items[0].title, "Query 1");
+            assert_eq!(pane.active_item, 0);
+            assert!(pane.backward_items.is_empty());
+        });
     }
 
     #[gpui::test]
