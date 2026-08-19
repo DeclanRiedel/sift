@@ -48,6 +48,9 @@ impl AssetSource for SiftAssets {
             "icons/chevron-left.svg" => Some(include_bytes!("../assets/icons/chevron-left.svg")),
             "icons/chevron-right.svg" => Some(include_bytes!("../assets/icons/chevron-right.svg")),
             "icons/close.svg" => Some(include_bytes!("../assets/icons/close.svg")),
+            "icons/close-right-pane.svg" => {
+                Some(include_bytes!("../assets/icons/close-right-pane.svg"))
+            }
             "icons/copy.svg" => Some(include_bytes!("../assets/icons/copy.svg")),
             "icons/database.svg" => Some(include_bytes!("../assets/icons/database.svg")),
             "icons/fallback.svg" => Some(include_bytes!("../assets/icons/fallback.svg")),

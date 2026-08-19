@@ -366,7 +366,7 @@ pub(super) fn render_status_bar(
                 .children(shell.right_dock.presentation.open.then(|| {
                     button(
                         "footer-close-inspector",
-                        IconName::Close,
+                        IconName::CloseRightPane,
                         "Close Inspector".into(),
                         false,
                         None,

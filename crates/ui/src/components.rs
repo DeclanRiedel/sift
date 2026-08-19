@@ -61,6 +61,7 @@ pub enum IconName {
     ChevronLeft,
     ChevronRight,
     Close,
+    CloseRightPane,
     Copy,
     Database,
     Fallback,
@@ -83,7 +84,7 @@ pub enum IconName {
 }
 
 impl IconName {
-    pub const ALL: [Self; 27] = [
+    pub const ALL: [Self; 28] = [
         Self::Activity,
         Self::Add,
         Self::Automations,
@@ -92,6 +93,7 @@ impl IconName {
         Self::ChevronLeft,
         Self::ChevronRight,
         Self::Close,
+        Self::CloseRightPane,
         Self::Copy,
         Self::Database,
         Self::Fallback,
@@ -123,6 +125,7 @@ impl IconName {
             Self::ChevronLeft => "icons/chevron-left.svg",
             Self::ChevronRight => "icons/chevron-right.svg",
             Self::Close => "icons/close.svg",
+            Self::CloseRightPane => "icons/close-right-pane.svg",
             Self::Copy => "icons/copy.svg",
             Self::Database => "icons/database.svg",
             Self::Fallback => "icons/fallback.svg",

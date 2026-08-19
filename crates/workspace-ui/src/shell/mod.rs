@@ -1648,7 +1648,7 @@ impl gpui::Render for Pane {
                     .bg(tint)
                     .when(can_retry, |overlay| {
                         overlay
-                            .cursor_pointer()
+                            .cursor(CursorStyle::OperationNotAllowed)
                             .on_click(cx.listener(move |_, _, _, cx| {
                                 cx.emit(PaneEvent::RefreshDatabaseItemRequested { item_id });
                             }))

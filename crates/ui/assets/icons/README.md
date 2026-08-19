@@ -19,6 +19,7 @@ must be used when Qlementine has no appropriate semantic icon.
 | `chevron-down.svg` | `navigation/chevron-down.svg` |
 | `chevron-right.svg` | `navigation/chevron-right.svg` |
 | `close.svg` | `action/close.svg` |
+| `close-right-pane.svg` | `navigation/ui-panels-right.svg` |
 | `copy.svg` | `action/copy.svg` |
 | `database.svg` | `hardware/database.svg` |
 | `github.svg` | `brand/github.svg` |
