@@ -6548,7 +6548,6 @@ impl WorkspaceShell {
                                 .border_b_1()
                                 .border_color(colors.subtle_border)
                                 .bg(colors.toolbar)
-                                .child(icon(IconName::Server, colors.muted_text, 14.))
                                 .child(
                                     div()
                                         .flex_1()
@@ -6595,25 +6594,14 @@ impl WorkspaceShell {
                         })
                         .child(
                             div()
-                                .h(px(24.))
-                                .px_2()
-                                .border_t_1()
-                                .border_b_1()
-                                .border_color(colors.subtle_border)
-                                .flex()
-                                .items_center()
-                                .bg(colors.toolbar)
-                                .text_xs()
-                                .text_color(colors.muted_text)
-                                .child("ADD OR OPEN"),
-                        )
-                        .child(
-                            div()
                                 .p_1()
+                                .border_t_1()
+                                .border_color(colors.subtle_border)
                                 .flex()
                                 .items_center()
                                 .justify_between()
                                 .gap_1()
+                                .bg(colors.toolbar)
                                 .child(
                                     IconButton::new(
                                         "picker-new-instance",
