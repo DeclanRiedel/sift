@@ -1069,9 +1069,14 @@ async fn connect(
     let profile_id = existing
         .map(|profile| profile.id.clone())
         .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    let session = if bearer_token.is_none() {
+        credentials.get_session(&profile_id).await?
+    } else {
+        None
+    };
     let token = match bearer_token {
         Some(token) => Some(validate_token(token)?),
-        None if had_saved_token => credentials.get(&profile_id).await?,
+        None if session.is_none() && had_saved_token => credentials.get(&profile_id).await?,
         None => None,
     };
     let profile = SavedServerProfile {
@@ -1081,6 +1086,10 @@ async fn connect(
         has_saved_token: remember_token && token.is_some(),
     };
     let target = DesktopServer::remote(profile.clone(), token.clone());
+    let target = match session {
+        Some(session) => target.with_session_tokens(session)?,
+        None => target,
+    };
     let client = target.client().await?;
     test_client(&client, "server").await?;
 

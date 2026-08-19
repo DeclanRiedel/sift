@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -143,6 +144,12 @@ pub struct PresentationState {
     pub legacy_vim_mode_default: bool,
     pub window: WindowPresentation,
     pub workspace: WorkspacePresentation,
+    /// Last presentation for each Sift server. `workspace` remains the active
+    /// entry for backwards compatibility; inactive entries let server
+    /// switching restore distinct IDE layouts instead of leaking one server's
+    /// tabs into another.
+    #[serde(default)]
+    pub instance_workspaces: HashMap<String, WorkspacePresentation>,
 }
 
 impl Default for PresentationState {
@@ -190,6 +197,7 @@ impl Default for PresentationState {
                 workspace_id: None,
                 instance_id: Some("local".into()),
             },
+            instance_workspaces: HashMap::new(),
         }
     }
 }
@@ -303,7 +311,13 @@ mod tests {
 
     #[test]
     fn presentation_round_trip_contains_references_not_product_data() {
-        let state = PresentationState::default();
+        let mut state = PresentationState::default();
+        let mut remote = state.workspace.clone();
+        remote.instance_id = Some("hosted:team".into());
+        remote.workspace_id = Some(42);
+        state
+            .instance_workspaces
+            .insert("hosted:team".into(), remote);
         let bytes = state.encode().unwrap();
         assert_eq!(PresentationState::decode(&bytes), state);
         let json = String::from_utf8(bytes).unwrap();

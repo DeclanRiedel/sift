@@ -369,7 +369,7 @@ impl SiftWindow {
             tokio::sync::mpsc::unbounded_channel();
         let (target_sender, target_receiver) = tokio::sync::watch::channel(server.clone());
         workspace.update(cx, |workspace, cx| {
-            workspace.attach_lifecycle(receiver, cx);
+            workspace.attach_lifecycle(receiver, window, cx);
             workspace.attach_presence(presence_receiver, cx);
             workspace.attach_executor(command_sender, event_receiver, cx);
             workspace.attach_instance_manager(
@@ -415,8 +415,22 @@ fn prepare_state_for_instance(
     instance: &sift_workspace_ui::InstanceSpec,
 ) -> PresentationState {
     if state.workspace.instance_id.as_deref() != Some(instance.id.as_str()) {
+        if let Some(previous) = state.workspace.instance_id.clone() {
+            state
+                .instance_workspaces
+                .insert(previous, state.workspace.clone());
+        }
+        state.workspace = match state.instance_workspaces.remove(&instance.id) {
+            Some(workspace) => workspace,
+            None => {
+                let mut workspace = PresentationState::default().workspace;
+                workspace.workspace_id = None;
+                workspace
+            }
+        };
         state.workspace.instance_id = Some(instance.id.clone());
-        state.workspace.workspace_id = None;
+    } else {
+        state.instance_workspaces.remove(&instance.id);
     }
     state
 }
@@ -945,6 +959,35 @@ mod tests {
             Some(remote.id.as_str())
         );
         assert_eq!(state.workspace.workspace_id, None);
+    }
+
+    #[test]
+    fn changing_instances_restores_that_instances_workspace_presentation() {
+        let mut state = PresentationState::default();
+        state.workspace.workspace_id = Some(42);
+        state.workspace.panes[0].items[0].title = "Local query".into();
+        let remote = sift_workspace_ui::InstanceSpec {
+            id: "hosted:team".into(),
+            name: "Team".into(),
+            base_url: "https://sift.team".into(),
+            kind: sift_workspace_ui::InstanceKind::Hosted,
+        };
+        let mut remote_workspace = PresentationState::default().workspace;
+        remote_workspace.instance_id = Some(remote.id.clone());
+        remote_workspace.workspace_id = Some(77);
+        remote_workspace.panes[0].items[0].title = "Team query".into();
+        state
+            .instance_workspaces
+            .insert(remote.id.clone(), remote_workspace);
+
+        let state = prepare_state_for_instance(state, &remote);
+
+        assert_eq!(state.workspace.workspace_id, Some(77));
+        assert_eq!(state.workspace.panes[0].items[0].title, "Team query");
+        assert_eq!(
+            state.instance_workspaces["local"].panes[0].items[0].title,
+            "Local query"
+        );
     }
 
     #[test]

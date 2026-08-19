@@ -1564,6 +1564,8 @@ pub struct WorkspaceShell {
     settings_item: Option<u64>,
     window_presentation: WindowPresentation,
     panes: Vec<Entity<Pane>>,
+    workspace_sessions: HashMap<String, WorkspaceSession>,
+    workspace_presentations: HashMap<String, WorkspacePresentation>,
     pane_flexes: Vec<f32>,
     workspace_resize_frame_pending: bool,
     active_pane: usize,
@@ -1587,7 +1589,6 @@ pub struct WorkspaceShell {
     _presence_task: Option<Task<()>>,
     _executor_task: Option<Task<()>>,
     _instance_task: Option<Task<()>>,
-    _toast_task: Option<Task<()>>,
     executor_sender: Option<tokio::sync::mpsc::UnboundedSender<ExecutorCommand>>,
     instance_sender: Option<tokio::sync::mpsc::UnboundedSender<InstanceCommand>>,
     saved_servers: Vec<SavedServerProfile>,
@@ -1622,6 +1623,48 @@ pub struct WorkspaceShell {
     next_id: u64,
 }
 
+/// Live, server-scoped IDE state. Pane entities stay alive while another
+/// server is active, preserving editor text, dirty state, results, and focus
+/// history without putting product data in `presentation.json`.
+struct WorkspaceSession {
+    panes: Vec<Entity<Pane>>,
+    pane_flexes: Vec<f32>,
+    active_pane: usize,
+    selected_workspace_id: Option<i64>,
+    left_dock: Dock,
+    right_dock: Dock,
+    bottom_dock: Dock,
+    active_left_panel: LeftPanel,
+    active_bottom_tool: BottomTool,
+    sql_problems: Vec<SqlProblem>,
+    expanded_tenants: HashSet<i64>,
+    expanded_connections: HashSet<i64>,
+    expanded_rooms: HashSet<i64>,
+    expanded_catalogs: HashSet<(i64, String)>,
+    expanded_schemas: HashSet<(i64, String, String)>,
+}
+
+impl WorkspaceSession {
+    fn snapshot(&self, instance_id: String, cx: &App) -> WorkspacePresentation {
+        WorkspacePresentation {
+            left_dock: self.left_dock.presentation.clone(),
+            right_dock: self.right_dock.presentation.clone(),
+            bottom_dock: self.bottom_dock.presentation.clone(),
+            left_panel: self.active_left_panel,
+            bottom_tool: self.active_bottom_tool,
+            panes: self
+                .panes
+                .iter()
+                .map(|pane| pane.read(cx).snapshot())
+                .collect(),
+            pane_flexes: self.pane_flexes.clone(),
+            active_pane: self.active_pane,
+            workspace_id: self.selected_workspace_id,
+            instance_id: Some(instance_id),
+        }
+    }
+}
+
 impl WorkspaceShell {
     pub fn new(
         state: PresentationState,
@@ -1641,6 +1684,7 @@ impl WorkspaceShell {
             Theme::light()
         };
         sift_ui::init_theme(theme, cx);
+        let mut workspace_presentations = state.instance_workspaces;
         let workspace = if state.workspace.panes.is_empty() {
             PresentationState::default().workspace
         } else {
@@ -1648,6 +1692,9 @@ impl WorkspaceShell {
         };
         let selected_workspace_id = workspace.workspace_id;
         let selected_instance_id = workspace.instance_id.clone();
+        if let Some(instance_id) = &selected_instance_id {
+            workspace_presentations.remove(instance_id);
+        }
         let panes = workspace
             .panes
             .into_iter()
@@ -1789,6 +1836,8 @@ impl WorkspaceShell {
             settings_item: None,
             window_presentation,
             panes,
+            workspace_sessions: HashMap::new(),
+            workspace_presentations,
             pane_flexes,
             workspace_resize_frame_pending: false,
             active_pane,
@@ -1811,7 +1860,6 @@ impl WorkspaceShell {
             _presence_task: None,
             _executor_task: None,
             _instance_task: None,
-            _toast_task: None,
             executor_sender: None,
             instance_sender: None,
             saved_servers: Vec::new(),
@@ -1977,12 +2025,13 @@ impl WorkspaceShell {
     pub fn attach_lifecycle(
         &mut self,
         mut receiver: tokio::sync::mpsc::UnboundedReceiver<LifecycleEvent>,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self._lifecycle_task = Some(cx.spawn(async move |shell, cx| {
+        self._lifecycle_task = Some(cx.spawn_in(window, async move |shell, cx| {
             while let Some(event) = receiver.recv().await {
                 if shell
-                    .update(cx, |shell, cx| {
+                    .update_in(cx, |shell, window, cx| {
                         let mut instance_changed = false;
                         if let LifecycleEvent::TenantLoaded(tenant) = &event {
                             shell.expanded_tenants.insert(tenant.id.0);
@@ -1993,14 +2042,8 @@ impl WorkspaceShell {
                         if let LifecycleEvent::Selected(instance) = &event {
                             instance_changed =
                                 shell.selected_instance_id.as_deref() != Some(instance.id.as_str());
-                            shell.selected_instance_id = Some(instance.id.clone());
                             if instance_changed {
-                                shell.selected_workspace_id = None;
-                                shell.expanded_tenants.clear();
-                                shell.expanded_connections.clear();
-                                shell.expanded_rooms.clear();
-                                shell.expanded_catalogs.clear();
-                                shell.expanded_schemas.clear();
+                                shell.switch_instance_workspace(&instance.id, window, cx);
                             }
                         }
                         shell.lifecycle.apply(event);
@@ -2017,6 +2060,135 @@ impl WorkspaceShell {
                 }
             }
         }));
+    }
+
+    fn switch_instance_workspace(
+        &mut self,
+        instance_id: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.selected_instance_id.as_deref() == Some(instance_id) {
+            return;
+        }
+
+        let target = self
+            .workspace_sessions
+            .remove(instance_id)
+            .unwrap_or_else(|| {
+                let mut presentation = self
+                    .workspace_presentations
+                    .remove(instance_id)
+                    .unwrap_or_else(|| PresentationState::default().workspace);
+                presentation.instance_id = Some(instance_id.to_owned());
+                Self::session_from_presentation(presentation, self.vim_mode_default(), window, cx)
+            });
+
+        let outgoing = WorkspaceSession {
+            panes: std::mem::replace(&mut self.panes, target.panes),
+            pane_flexes: std::mem::replace(&mut self.pane_flexes, target.pane_flexes),
+            active_pane: std::mem::replace(&mut self.active_pane, target.active_pane),
+            selected_workspace_id: std::mem::replace(
+                &mut self.selected_workspace_id,
+                target.selected_workspace_id,
+            ),
+            left_dock: std::mem::replace(&mut self.left_dock, target.left_dock),
+            right_dock: std::mem::replace(&mut self.right_dock, target.right_dock),
+            bottom_dock: std::mem::replace(&mut self.bottom_dock, target.bottom_dock),
+            active_left_panel: std::mem::replace(
+                &mut self.active_left_panel,
+                target.active_left_panel,
+            ),
+            active_bottom_tool: std::mem::replace(
+                &mut self.active_bottom_tool,
+                target.active_bottom_tool,
+            ),
+            sql_problems: std::mem::replace(&mut self.sql_problems, target.sql_problems),
+            expanded_tenants: std::mem::replace(
+                &mut self.expanded_tenants,
+                target.expanded_tenants,
+            ),
+            expanded_connections: std::mem::replace(
+                &mut self.expanded_connections,
+                target.expanded_connections,
+            ),
+            expanded_rooms: std::mem::replace(&mut self.expanded_rooms, target.expanded_rooms),
+            expanded_catalogs: std::mem::replace(
+                &mut self.expanded_catalogs,
+                target.expanded_catalogs,
+            ),
+            expanded_schemas: std::mem::replace(
+                &mut self.expanded_schemas,
+                target.expanded_schemas,
+            ),
+        };
+        if let Some(previous) = self.selected_instance_id.replace(instance_id.to_owned()) {
+            self.workspace_sessions.insert(previous, outgoing);
+        }
+
+        self.connection_status = ConnectionStatus::Disconnected;
+        self.connection_schema = ConnectionSchemaState::Unavailable;
+        self.presence.apply(PresenceEvent::Left);
+        self.modal = None;
+        self.app_bar_menu = None;
+        self.active_pane = self.active_pane.min(self.panes.len().saturating_sub(1));
+        self.next_id = self.next_id.max(
+            self.panes
+                .iter()
+                .flat_map(|pane| {
+                    pane.read(cx)
+                        .items
+                        .iter()
+                        .map(|item| item.id)
+                        .chain(std::iter::once(pane.read(cx).id))
+                })
+                .max()
+                .unwrap_or(0)
+                + 1,
+        );
+        if let Some(pane) = self.panes.get(self.active_pane) {
+            pane.read(cx).active_focus_handle(cx).focus(window, cx);
+        }
+    }
+
+    fn session_from_presentation(
+        workspace: WorkspacePresentation,
+        vim_mode_default: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> WorkspaceSession {
+        let workspace = if workspace.panes.is_empty() {
+            PresentationState::default().workspace
+        } else {
+            workspace
+        };
+        let panes = workspace
+            .panes
+            .into_iter()
+            .map(|pane| cx.new(|cx| Pane::from_presentation(pane, vim_mode_default, cx)))
+            .collect::<Vec<_>>();
+        for pane in &panes {
+            cx.subscribe_in(pane, window, Self::on_pane_event).detach();
+        }
+        let active_pane = workspace.active_pane.min(panes.len().saturating_sub(1));
+        let pane_flexes = valid_pane_flexes(workspace.pane_flexes, panes.len());
+        WorkspaceSession {
+            panes,
+            pane_flexes,
+            active_pane,
+            selected_workspace_id: workspace.workspace_id,
+            left_dock: DockRegistry::create(DockId::Left, workspace.left_dock),
+            right_dock: DockRegistry::create(DockId::Inspector, workspace.right_dock),
+            bottom_dock: DockRegistry::create(DockId::Bottom, workspace.bottom_dock),
+            active_left_panel: workspace.left_panel,
+            active_bottom_tool: workspace.bottom_tool,
+            sql_problems: Vec::new(),
+            expanded_tenants: HashSet::new(),
+            expanded_connections: HashSet::new(),
+            expanded_rooms: HashSet::new(),
+            expanded_catalogs: HashSet::new(),
+            expanded_schemas: HashSet::new(),
+        }
     }
 
     pub fn attach_presence(
@@ -2368,21 +2540,21 @@ impl WorkspaceShell {
             self.toasts.remove(0);
         }
         self.toasts.push(Toast { id, message, tone });
-        self._toast_task = Some(cx.spawn(async move |shell, cx| {
+        cx.spawn(async move |shell, cx| {
             cx.background_executor()
-                .timer(std::time::Duration::from_secs(4))
+                .timer(std::time::Duration::from_secs(3))
                 .await;
             let _ = shell.update(cx, |shell, cx| {
                 shell.toasts.retain(|toast| toast.id != id);
                 cx.notify();
             });
-        }));
+        })
+        .detach();
         cx.notify();
     }
 
     fn dismiss_toast(&mut self, cx: &mut Context<Self>) {
         self.toasts.clear();
-        self._toast_task = None;
         cx.notify();
     }
 
@@ -3269,6 +3441,17 @@ impl WorkspaceShell {
     }
 
     pub fn snapshot(&self, cx: &App) -> PresentationState {
+        let mut instance_workspaces = self.workspace_presentations.clone();
+        instance_workspaces.extend(
+            self.workspace_sessions
+                .iter()
+                .map(|(instance_id, session)| {
+                    (
+                        instance_id.clone(),
+                        session.snapshot(instance_id.clone(), cx),
+                    )
+                }),
+        );
         PresentationState {
             dark_theme: self.dark_theme,
             window: self.window_presentation.clone(),
@@ -3288,6 +3471,7 @@ impl WorkspaceShell {
                 workspace_id: self.selected_workspace_id,
                 instance_id: self.selected_instance_id.clone(),
             },
+            instance_workspaces,
             ..PresentationState::default()
         }
     }
@@ -3928,6 +4112,24 @@ impl WorkspaceShell {
         if sender.send(InstanceCommand::InspectRoot { root }).is_err() {
             self.instance_operation_pending = false;
             self.instance_operation_error = Some("Instance manager stopped".into());
+        }
+        cx.notify();
+    }
+
+    fn connect_instance_root(&mut self, root: std::path::PathBuf, cx: &mut Context<Self>) {
+        if self.server_connection_pending {
+            return;
+        }
+        let Some(sender) = &self.instance_sender else {
+            self.server_connection_error = Some("Desktop connection manager is unavailable".into());
+            cx.notify();
+            return;
+        };
+        if sender.send(InstanceCommand::StartRoot { root }).is_err() {
+            self.server_connection_error = Some("Desktop connection manager stopped".into());
+        } else {
+            self.server_connection_pending = true;
+            self.server_connection_error = None;
         }
         cx.notify();
     }
@@ -5865,6 +6067,7 @@ impl WorkspaceShell {
                     }
                     for (index, instance) in self.instance_roots.iter().cloned().enumerate() {
                         let root = instance.root.clone();
+                        let root_for_manage = instance.root.clone();
                         let root_for_remove = instance.root.clone();
                         let active = current_id.as_deref()
                             == Some(format!("config:{}", instance.manifest_id).as_str());
@@ -5878,7 +6081,7 @@ impl WorkspaceShell {
                                     .when(!pending, |row| {
                                         row.hover(|row| row.bg(colors.hovered_surface)).on_click(
                                             cx.listener(move |shell, _, _, cx| {
-                                                shell.inspect_instance_root(root.clone(), cx)
+                                                shell.connect_instance_root(root.clone(), cx)
                                             }),
                                         )
                                     }),
@@ -5893,6 +6096,28 @@ impl WorkspaceShell {
                                     } else {
                                         Tone::Neutral
                                     }),
+                            )
+                            .child(
+                                div()
+                                    .id(("manage-instance-root", index))
+                                    .role(Role::Button)
+                                    .aria_label(format!("Manage {}", instance.name))
+                                    .flex_none()
+                                    .p_1()
+                                    .rounded_sm()
+                                    .text_color(colors.muted_text)
+                                    .hover(|button| {
+                                        button.bg(colors.hovered_surface).text_color(colors.text)
+                                    })
+                                    .on_mouse_down(
+                                        MouseButton::Left,
+                                        |_, _, cx| cx.stop_propagation(),
+                                    )
+                                    .on_click(cx.listener(move |shell, _, _, cx| {
+                                        cx.stop_propagation();
+                                        shell.inspect_instance_root(root_for_manage.clone(), cx)
+                                    }))
+                                    .child(icon(IconName::Fallback, colors.muted_text, 12.)),
                             )
                             .child(
                                 div()
@@ -7917,7 +8142,7 @@ impl gpui::Render for WorkspaceShell {
                     .items_end()
                     .gap_2()
                     .children(self.toasts.iter().map(|toast| {
-                        let (icon_name, icon_color, chip_bg) = match toast.tone {
+                        let (icon_name, tone_color, chip_bg) = match toast.tone {
                             ToastTone::Info => {
                                 (IconName::Info, colors.accent_hover, colors.accent_muted)
                             }
@@ -7928,22 +8153,25 @@ impl gpui::Render for WorkspaceShell {
                                 (IconName::Warning, colors.danger, colors.danger_muted)
                             }
                         };
+                        let mut toast_bg = colors.elevated_surface;
+                        toast_bg.a = 1.0;
                         div()
                             .id(("toast", toast.id as usize))
                             .role(Role::Button)
                             .aria_label(format!("Dismiss notification: {}", toast.message))
-                            .w(px(360.))
+                            .w(px(340.))
                             .max_w(gpui::relative(0.8))
-                            .p_2()
+                            .px_3()
+                            .py_2()
                             .flex()
                             .items_center()
                             .gap_2()
                             .rounded(cx.theme().metrics.radius_large)
                             .border_1()
-                            .border_color(colors.strong_border)
-                            .bg(colors.elevated_surface)
+                            .border_color(tone_color)
+                            .bg(toast_bg)
                             .shadow_lg()
-                            .hover(|toast| toast.bg(colors.hovered_surface))
+                            .hover(|toast| toast.bg(colors.panel))
                             .on_click(cx.listener(|shell, _, _, cx| shell.dismiss_toast(cx)))
                             .child(
                                 div()
@@ -7954,7 +8182,7 @@ impl gpui::Render for WorkspaceShell {
                                     .justify_center()
                                     .rounded(cx.theme().metrics.radius)
                                     .bg(chip_bg)
-                                    .child(icon(icon_name, icon_color, 14.)),
+                                    .child(icon(icon_name, tone_color, 14.)),
                             )
                             .child(
                                 div()
@@ -8062,6 +8290,57 @@ mod tests {
     fn invalid_restored_pane_flexes_fall_back_to_equal_sizes() {
         assert_eq!(valid_pane_flexes(vec![1.0], 2), vec![1.0, 1.0]);
         assert_eq!(valid_pane_flexes(vec![1.0, -1.0], 2), vec![1.0, 1.0]);
+    }
+
+    #[gpui::test]
+    fn server_switch_swaps_and_restores_full_workspace_session(cx: &mut TestAppContext) {
+        let mut state = PresentationState::default();
+        state.workspace.workspace_id = Some(11);
+        let mut remote = PresentationState::default().workspace;
+        remote.instance_id = Some("hosted:team".into());
+        remote.workspace_id = Some(22);
+        remote.panes[0].items[0].kind = ItemKind::Welcome;
+        remote.panes[0].items[0].title = "Team home".into();
+        state
+            .instance_workspaces
+            .insert("hosted:team".into(), remote);
+
+        let window = shell_with_state(state, cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        workspace.update_in(&mut cx, |shell, window, cx| {
+            let editor = shell.panes[0].read(cx).editor(1).unwrap().clone();
+            editor.update(cx, |editor, cx| {
+                editor.replace_text_in_range(None, "select 'local'", window, cx)
+            });
+            shell.switch_instance_workspace("hosted:team", window, cx);
+        });
+        workspace.read_with(&cx, |shell, cx| {
+            assert_eq!(shell.selected_workspace_id, Some(22));
+            assert_eq!(shell.panes[0].read(cx).items[0].title, "Team home");
+        });
+
+        workspace.update_in(&mut cx, |shell, window, cx| {
+            shell.switch_instance_workspace("local", window, cx)
+        });
+        workspace.read_with(&cx, |shell, cx| {
+            assert_eq!(shell.selected_workspace_id, Some(11));
+            assert_eq!(
+                shell.panes[0]
+                    .read(cx)
+                    .editor(1)
+                    .unwrap()
+                    .read(cx)
+                    .document()
+                    .text(),
+                "select 'local'"
+            );
+            let snapshot = shell.snapshot(cx);
+            assert_eq!(
+                snapshot.instance_workspaces["hosted:team"].workspace_id,
+                Some(22)
+            );
+        });
     }
 
     #[test]
@@ -9422,6 +9701,56 @@ mod tests {
             InstanceCommand::InspectRoot { root: dispatched } => assert_eq!(dispatched, root),
             _ => panic!("expected instance-root inspection command"),
         }
+    }
+
+    #[gpui::test]
+    fn configured_instance_picker_dispatches_direct_connection(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let (_event_sender, event_receiver) = tokio::sync::mpsc::unbounded_channel();
+        let root = std::path::PathBuf::from("/tmp/sift-instance");
+
+        workspace.update(&mut cx, |shell, cx| {
+            shell.attach_instance_manager(sender, event_receiver, Vec::new(), cx);
+            shell.connect_instance_root(root.clone(), cx);
+        });
+
+        match receiver.try_recv().unwrap() {
+            InstanceCommand::StartRoot { root: dispatched } => assert_eq!(dispatched, root),
+            _ => panic!("expected direct instance connection command"),
+        }
+    }
+
+    #[gpui::test]
+    fn stacked_toasts_each_expire_three_seconds_after_creation(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+
+        workspace.update(&mut cx, |shell, cx| shell.show_toast("First".into(), cx));
+        cx.background_executor
+            .advance_clock(std::time::Duration::from_secs(1));
+        cx.run_until_parked();
+        workspace.update(&mut cx, |shell, cx| shell.show_toast("Second".into(), cx));
+        cx.background_executor
+            .advance_clock(std::time::Duration::from_secs(2));
+        cx.run_until_parked();
+        workspace.read_with(&cx, |shell, _| {
+            assert_eq!(
+                shell
+                    .toasts
+                    .iter()
+                    .map(|toast| toast.message.as_str())
+                    .collect::<Vec<_>>(),
+                vec!["Second"]
+            );
+        });
+        cx.background_executor
+            .advance_clock(std::time::Duration::from_secs(1));
+        cx.run_until_parked();
+        assert!(workspace.read_with(&cx, |shell, _| shell.toasts.is_empty()));
     }
 
     #[gpui::test]
