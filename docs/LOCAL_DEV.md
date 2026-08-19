@@ -73,12 +73,14 @@ sift-desktop-demo
 ```
 
 That command starts a throwaway Postgres cluster (default `/tmp/sift-demo-pg`,
-port 5433) seeded with `lab.people`, creates and applies a reproducible instance
+port 5433) seeded with a relational `lab` dataset, creates and applies a reproducible instance
 root (default `/tmp/sift-desktop-demo-instance-$UID`), imports a generated
 destination-local database credential, and launches `sift-desktop` with that
 root. The desktop supervises the real server through its discovered
 auto-loopback endpoint. The manifest-managed `demo/postgres` profile appears in
-the Connections dock; `SELECT * FROM lab.people;` returns three rows.
+the Connections dock. The seed includes eight tables, three views, a materialized
+view, a SQL function, indexes, foreign keys, JSON/array/network values, and over
+5,000 rows. Start with `SELECT * FROM lab.order_summary ORDER BY placed_at DESC;`.
 
 Both helper steps are also usable on their own:
 

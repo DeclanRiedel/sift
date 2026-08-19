@@ -285,7 +285,7 @@
 
             echo "Postgres: host=127.0.0.1 port=$pgport db=sifttest user=sift password=<empty> ssl=disable"
             echo "Sift connection: Demo Postgres (profile $profile_id)"
-            echo "Seeded query: SELECT * FROM lab.people;"
+            echo "Seeded query: SELECT * FROM lab.order_summary ORDER BY placed_at DESC;"
             echo "Backend log: $backend_log"
             echo "Postgres log: $pglog"
             echo "Lab UI: http://127.0.0.1:5177"
@@ -411,7 +411,7 @@
           '';
         };
 
-        # Seeded end-to-end desktop demo: local Postgres with `lab.people`, a
+        # Seeded end-to-end desktop demo: local Postgres with a relational `lab` dataset, a
         # reproducible Sift instance root, and the GPUI client supervising the
         # real (non-mock) server from that root.
         desktopDemo = pkgs.writeShellApplication {
@@ -491,7 +491,7 @@
             echo "Postgres: host=127.0.0.1 port=$pgport db=sifttest user=sift credential=<destination-local> ssl=prefer"
             echo "Sift instance root: $instance_root"
             echo "Sift connection: demo/postgres (managed by sift.toml)"
-            echo "Seeded query: SELECT * FROM lab.people;"
+            echo "Seeded query: SELECT * FROM lab.order_summary ORDER BY placed_at DESC;"
             echo "Postgres log: $pglog"
             echo "Desktop: supervising the applied auto-loopback instance"
             echo "The desktop can edit this run's sift.toml through the current-instance API."
@@ -549,7 +549,7 @@
 
             Desktop UI flow:
               nix develop
-              sift-desktop-demo            Opens the client on a seeded `lab.people` table.
+              sift-desktop-demo            Opens the client on a seeded relational `lab` dataset.
 
             Environment:
               SIFT_REPO=/path/to/sift      Override checkout path for commands that need it.

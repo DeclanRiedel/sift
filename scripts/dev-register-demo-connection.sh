@@ -43,7 +43,7 @@ profile_payload="$(
       }
     },
     credential_mode: "shared",
-    tags: ["demo", "seeded", "lab.people"]
+    tags: ["demo", "seeded", "lab"]
   }'
 )"
 
