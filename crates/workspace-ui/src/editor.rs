@@ -1398,7 +1398,6 @@ struct EditorPrepaint {
     active_line: Option<PaintQuad>,
     selections: Vec<PaintQuad>,
     cursor: Option<PaintQuad>,
-    gutter: PaintQuad,
     text_bounds: Bounds<Pixels>,
     line_height: Pixels,
 }
@@ -1631,10 +1630,6 @@ impl Element for QueryEditorElement {
             active_line: active_line_quad,
             selections,
             cursor: cursor_quad,
-            gutter: fill(
-                Bounds::new(bounds.origin, size(EDITOR_GUTTER_WIDTH, bounds.size.height)),
-                theme.colors.editor_gutter,
-            ),
             text_bounds,
             line_height,
         }
@@ -1656,7 +1651,6 @@ impl Element for QueryEditorElement {
             ElementInputHandler::new(prepaint.text_bounds, self.editor.clone()),
             cx,
         );
-        window.paint_quad(prepaint.gutter.clone());
         if let Some(active_line) = prepaint.active_line.take() {
             window.paint_quad(active_line);
         }
