@@ -496,19 +496,42 @@ impl ResultsView {
     }
 
     fn copy_selected_cell(&mut self, _: &CopySelectedCell, _: &mut Window, cx: &mut Context<Self>) {
-        if let Some(text) = self.selected_cell_text() {
+        if let Some(text) = self.selected_text() {
             cx.write_to_clipboard(ClipboardItem::new_string(text));
         }
     }
 
-    fn selected_cell_text(&self) -> Option<String> {
-        let GridSelection::Cell { row, column } = self.selected? else {
-            return None;
+    fn selected_text(&self) -> Option<String> {
+        let row_text = |row: &[CachedCellRender]| {
+            row.iter()
+                .map(|cell| cell.text.to_string())
+                .collect::<Vec<_>>()
+                .join("\t")
         };
-        self.rendered_rows
-            .get(row)?
-            .get(column)
-            .map(|cell| cell.text.to_string())
+        match self.selected? {
+            GridSelection::Cell { row, column } => self
+                .rendered_rows
+                .get(row)?
+                .get(column)
+                .map(|cell| cell.text.to_string()),
+            GridSelection::Row(row) => self.rendered_rows.get(row).map(|row| row_text(row)),
+            GridSelection::Column(column) => {
+                let values = self
+                    .rendered_rows
+                    .iter()
+                    .filter_map(|row| row.get(column))
+                    .map(|cell| cell.text.to_string())
+                    .collect::<Vec<_>>();
+                (!values.is_empty()).then(|| values.join("\n"))
+            }
+            GridSelection::All => Some(
+                self.rendered_rows
+                    .iter()
+                    .map(|row| row_text(row))
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            ),
+        }
     }
 
     fn cell_color(colors: ThemeColors, class: CellClass) -> gpui::Hsla {
@@ -599,11 +622,11 @@ impl ResultsView {
                         IconButton::new(
                             "copy-result-cell",
                             IconName::Copy,
-                            "Copy selected result cell",
+                            "Copy highlighted fields",
                         )
                         .square(px(24.))
                         .icon_size(13.)
-                        .tooltip("Copy selected result cell")
+                        .tooltip("Copy highlighted fields")
                         .on_click(cx.listener(|view, _, window, cx| {
                             view.copy_selected_cell(&CopySelectedCell, window, cx)
                         })),
@@ -664,11 +687,11 @@ impl ResultsView {
                         IconButton::new(
                             "copy-result-cell-vertical",
                             IconName::Copy,
-                            "Copy selected result cell",
+                            "Copy highlighted fields",
                         )
                         .icon_size(13.)
                         .text("Copy")
-                        .tooltip("Copy selected result cell")
+                        .tooltip("Copy highlighted fields")
                         .on_click(cx.listener(|view, _, window, cx| {
                             view.copy_selected_cell(&CopySelectedCell, window, cx)
                         })),
@@ -1226,20 +1249,22 @@ mod tests {
             view.select_tab(ResultTab::Messages, cx);
             assert_eq!(view.active_tab(), ResultTab::Messages);
             view.select_cell(0, 0, cx);
-            assert_eq!(view.selected_cell_text().as_deref(), Some("neo"));
+            assert_eq!(view.selected_text().as_deref(), Some("neo"));
             view.move_selection(0, 1, cx);
-            assert_eq!(view.selected_cell_text().as_deref(), Some("1"));
+            assert_eq!(view.selected_text().as_deref(), Some("1"));
             view.move_selection(1, 0, cx);
-            assert_eq!(view.selected_cell_text().as_deref(), Some("2"));
+            assert_eq!(view.selected_text().as_deref(), Some("2"));
             view.move_selection(0, -1, cx);
-            assert_eq!(view.selected_cell_text().as_deref(), Some("trinity"));
+            assert_eq!(view.selected_text().as_deref(), Some("trinity"));
             view.select_row(0, cx);
             assert_eq!(view.selected, Some(GridSelection::Row(0)));
-            assert!(view.selected_cell_text().is_none());
+            assert_eq!(view.selected_text().as_deref(), Some("neo\t1"));
             view.select_column(1, cx);
             assert_eq!(view.selected, Some(GridSelection::Column(1)));
+            assert_eq!(view.selected_text().as_deref(), Some("1\n2"));
             view.select_all(cx);
             assert_eq!(view.selected, Some(GridSelection::All));
+            assert_eq!(view.selected_text().as_deref(), Some("neo\t1\ntrinity\t2"));
             assert_eq!(view.placement(), ResultPlacement::Bottom);
             view.set_extent(300.0, cx);
             assert_eq!(view.extent(), 300.0);
