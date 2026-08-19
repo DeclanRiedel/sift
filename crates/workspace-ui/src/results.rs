@@ -879,7 +879,11 @@ impl ResultsView {
                                         view.selected.is_some_and(|selection| {
                                             selection.highlights_row(row_index)
                                         }),
-                                        |header| header.text_color(colors.text),
+                                        |header| {
+                                            header
+                                                .bg(colors.selected_surface)
+                                                .text_color(colors.text)
+                                        },
                                     )
                                     .on_mouse_down(
                                         MouseButton::Left,
