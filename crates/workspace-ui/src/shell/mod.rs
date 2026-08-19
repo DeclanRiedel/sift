@@ -4726,7 +4726,6 @@ impl WorkspaceShell {
                                 IconButton::new("window-close", IconName::Close, "Close window")
                                     .square(px(26.))
                                     .icon_size(16.)
-                                    .danger(true)
                                     .on_click(|_, window, _| window.remove_window()),
                             ),
                     ),
