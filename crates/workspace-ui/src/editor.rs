@@ -6,10 +6,11 @@
 use std::{cell::RefCell, collections::HashMap, ops::Range, sync::Arc, time::Duration};
 
 use gpui::{
-    actions, div, fill, point, prelude::*, px, size, App, Bounds, ClipboardItem, Context,
-    CursorStyle, Element, ElementId, ElementInputHandler, Entity, EntityInputHandler, EventEmitter,
-    FocusHandle, Focusable, GlobalElementId, IntoElement, LayoutId, MouseButton, PaintQuad, Pixels,
-    Role, ScrollHandle, ShapedLine, Style, TextRun, UTF16Selection, Window,
+    actions, div, fill, outline, point, prelude::*, px, size, App, BorderStyle, Bounds,
+    ClipboardItem, Context, CursorStyle, Element, ElementId, ElementInputHandler, Entity,
+    EntityInputHandler, EventEmitter, FocusHandle, Focusable, GlobalElementId, IntoElement,
+    LayoutId, MouseButton, PaintQuad, Pixels, Role, ScrollHandle, ShapedLine, Style, TextRun,
+    UTF16Selection, Window,
 };
 use sift_doc::{random_peer_id, TextReplica};
 use sift_ui::{ActiveTheme, Theme};
@@ -1454,6 +1455,7 @@ impl Element for QueryEditorElement {
         let language = editor.language;
         let block_cursor = editor.keymap == EditorKeymap::Vim && editor.vim_mode == VimMode::Normal;
         let cursor_visible = editor.cursor_blink.read(cx).visible;
+        let editor_focused = editor.focus_handle.is_focused(window);
         let viewport = editor.scroll_handle.bounds();
         let style = window.text_style();
         let font_size = style.font_size.to_pixels(window.rem_size());
@@ -1586,10 +1588,14 @@ impl Element for QueryEditorElement {
                 }
             }
 
-            if selection.is_empty() && cursor_visible && cursor >= offset && cursor <= line_end {
+            if selection.is_empty()
+                && (!editor_focused || cursor_visible)
+                && cursor >= offset
+                && cursor <= line_end
+            {
                 let cursor_in_line = cursor - offset;
                 let x = shaped.x_for_index(cursor_in_line);
-                let cursor_width = if block_cursor {
+                let cursor_width = if block_cursor || !editor_focused {
                     line[cursor_in_line..]
                         .chars()
                         .next()
@@ -1601,10 +1607,13 @@ impl Element for QueryEditorElement {
                 } else {
                     px(1.5)
                 };
-                cursor_quad = Some(fill(
-                    Bounds::new(point(text_left + x, top), size(cursor_width, line_height)),
-                    theme.colors.accent,
-                ));
+                let cursor_bounds =
+                    Bounds::new(point(text_left + x, top), size(cursor_width, line_height));
+                cursor_quad = Some(if editor_focused {
+                    fill(cursor_bounds, theme.colors.accent)
+                } else {
+                    outline(cursor_bounds, theme.colors.accent, BorderStyle::default())
+                });
             }
 
             lines.push((line_index, shaped));
@@ -1674,10 +1683,8 @@ impl Element for QueryEditorElement {
                 .paint(origin, line_height, gpui::TextAlign::Left, None, window, cx)
                 .expect("line number paint succeeds");
         }
-        if focus_handle.is_focused(window) {
-            if let Some(cursor) = prepaint.cursor.take() {
-                window.paint_quad(cursor);
-            }
+        if let Some(cursor) = prepaint.cursor.take() {
+            window.paint_quad(cursor);
         }
         let lines = std::mem::take(&mut prepaint.lines)
             .into_iter()
