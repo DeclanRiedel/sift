@@ -64,6 +64,7 @@ pub enum IconName {
     CloseRightPane,
     Copy,
     Database,
+    Edit,
     Fallback,
     Github,
     Info,
@@ -84,7 +85,7 @@ pub enum IconName {
 }
 
 impl IconName {
-    pub const ALL: [Self; 28] = [
+    pub const ALL: [Self; 29] = [
         Self::Activity,
         Self::Add,
         Self::Automations,
@@ -96,6 +97,7 @@ impl IconName {
         Self::CloseRightPane,
         Self::Copy,
         Self::Database,
+        Self::Edit,
         Self::Fallback,
         Self::Github,
         Self::Info,
@@ -128,6 +130,7 @@ impl IconName {
             Self::CloseRightPane => "icons/close-right-pane.svg",
             Self::Copy => "icons/copy.svg",
             Self::Database => "icons/database.svg",
+            Self::Edit => "icons/edit.svg",
             Self::Fallback => "icons/fallback.svg",
             Self::Github => "icons/github.svg",
             Self::Info => "icons/info.svg",

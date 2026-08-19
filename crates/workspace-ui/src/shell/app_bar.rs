@@ -108,7 +108,7 @@ pub(super) fn menu_items(menu: AppBarMenu) -> Vec<AppBarMenuItem> {
             Item::available(CommandId::OpenSettings),
             Item::unimplemented("Keymaps"),
             Item::available(CommandId::ToggleTheme),
-            Item::unimplemented("Server Configuration"),
+            Item::available(CommandId::OpenServerConfiguration),
         ],
     }
 }

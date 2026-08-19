@@ -53,6 +53,7 @@ impl AssetSource for SiftAssets {
             }
             "icons/copy.svg" => Some(include_bytes!("../assets/icons/copy.svg")),
             "icons/database.svg" => Some(include_bytes!("../assets/icons/database.svg")),
+            "icons/edit.svg" => Some(include_bytes!("../assets/icons/edit.svg")),
             "icons/fallback.svg" => Some(include_bytes!("../assets/icons/fallback.svg")),
             "icons/github.svg" => Some(include_bytes!("../assets/icons/github.svg")),
             "icons/info.svg" => Some(include_bytes!("../assets/icons/info.svg")),

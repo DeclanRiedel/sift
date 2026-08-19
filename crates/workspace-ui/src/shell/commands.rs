@@ -19,6 +19,7 @@ pub enum CommandId {
     ToggleInspectorDock,
     ToggleBottomDock,
     OpenSettings,
+    OpenServerConfiguration,
     OpenCommandPalette,
     ToggleTheme,
     Quit,
@@ -41,6 +42,7 @@ impl CommandId {
             Self::ToggleInspectorDock => "workspace.toggle-right-dock",
             Self::ToggleBottomDock => "workspace.toggle-bottom-dock",
             Self::OpenSettings => "ui.open-settings",
+            Self::OpenServerConfiguration => "instance.open-configuration",
             Self::OpenCommandPalette => "ui.command-palette",
             Self::ToggleTheme => "ui.toggle-theme",
             Self::Quit => "window.quit",
@@ -53,6 +55,7 @@ enum AvailabilityRule {
     Always,
     ActiveItem,
     MultiplePanes,
+    EditableInstance,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -68,6 +71,7 @@ pub struct CommandDefinition {
 pub struct CommandContext {
     pub has_active_item: bool,
     pub pane_count: usize,
+    pub has_editable_instance: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -104,7 +108,12 @@ impl CommandRegistry {
                 AvailabilityRule::Always => None,
                 AvailabilityRule::ActiveItem if !context.has_active_item => Some("No active item"),
                 AvailabilityRule::MultiplePanes if context.pane_count < 2 => Some("Only one pane"),
-                AvailabilityRule::ActiveItem | AvailabilityRule::MultiplePanes => None,
+                AvailabilityRule::EditableInstance if !context.has_editable_instance => {
+                    Some("Bundled Local Sift has no sift.toml")
+                }
+                AvailabilityRule::ActiveItem
+                | AvailabilityRule::MultiplePanes
+                | AvailabilityRule::EditableInstance => None,
             },
         }
     }
@@ -218,6 +227,13 @@ const DEFINITIONS: &[CommandDefinition] = &[
         AvailabilityRule::Always,
     ),
     command(
+        CommandId::OpenServerConfiguration,
+        "Edit Current sift.toml…",
+        "",
+        false,
+        AvailabilityRule::EditableInstance,
+    ),
+    command(
         CommandId::OpenCommandPalette,
         "Command Palette…",
         "Ctrl+Shift+P",
@@ -275,6 +291,7 @@ mod tests {
         let empty = CommandContext {
             has_active_item: false,
             pane_count: 1,
+            has_editable_instance: false,
         };
         assert_eq!(
             CommandRegistry::spec(CommandId::ExecuteStatement, empty).disabled_reason,
@@ -285,5 +302,9 @@ mod tests {
             Some("Only one pane")
         );
         assert!(CommandRegistry::spec(CommandId::SplitPane, empty).enabled());
+        assert_eq!(
+            CommandRegistry::spec(CommandId::OpenServerConfiguration, empty).disabled_reason,
+            Some("Bundled Local Sift has no sift.toml")
+        );
     }
 }

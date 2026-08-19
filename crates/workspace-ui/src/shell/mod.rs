@@ -2031,6 +2031,11 @@ impl WorkspaceShell {
         CommandContext {
             has_active_item: has_item,
             pane_count: self.panes.len(),
+            has_editable_instance: self
+                .lifecycle
+                .selected_instance
+                .as_ref()
+                .is_some_and(|instance| instance.id != "local"),
         }
     }
 
@@ -4859,6 +4864,7 @@ impl WorkspaceShell {
                 self.modal = Some(Modal::Settings);
                 cx.notify();
             }
+            CommandId::OpenServerConfiguration => self.open_current_configuration(cx),
             CommandId::ToggleTheme => self.toggle_theme(cx),
             CommandId::OpenCommandPalette => {
                 self.open_command_palette(&OpenCommandPalette, window, cx)
@@ -6388,6 +6394,7 @@ impl WorkspaceShell {
                         let active = current_id.as_deref()
                             == Some(format!("hosted:{}", profile.id).as_str());
                         let profile_for_click = profile.clone();
+                        let profile_for_edit = profile.clone();
                         rows.push(
                             picker_row(
                                 div()
@@ -6414,12 +6421,33 @@ impl WorkspaceShell {
                             } else {
                                 Badge::new("Saved").tone(Tone::Neutral)
                             })
+                            .child(
+                                IconButton::new(
+                                    ("edit-saved-server", index),
+                                    IconName::Edit,
+                                    format!("Edit {}", profile.name),
+                                )
+                                .tooltip(format!("Edit {}", profile.name))
+                                .on_click(cx.listener(move |shell, _, window, cx| {
+                                    cx.stop_propagation();
+                                    shell.open_server_connection(
+                                        &OpenServerConnection,
+                                        window,
+                                        cx,
+                                    );
+                                    shell.select_server_profile(
+                                        &profile_for_edit,
+                                        window,
+                                        cx,
+                                    );
+                                })),
+                            )
                             .into_any_element(),
                         );
                     }
                     for (index, instance) in self.instance_roots.iter().cloned().enumerate() {
                         let root = instance.root.clone();
-                        let root_for_manage = instance.root.clone();
+                        let root_for_edit = instance.root.clone();
                         let root_for_remove = instance.root.clone();
                         let active = current_id.as_deref()
                             == Some(format!("config:{}", instance.manifest_id).as_str());
@@ -6430,7 +6458,7 @@ impl WorkspaceShell {
                                     .role(Role::Button)
                                     .aria_label(instance.name.clone())
                                     .when(active, |row| row.bg(colors.active_surface))
-                                    .when(!pending, |row| {
+                                    .when(!pending && !active, |row| {
                                         row.hover(|row| row.bg(colors.hovered_surface)).on_click(
                                             cx.listener(move |shell, _, _, cx| {
                                                 shell.connect_instance_root(root.clone(), cx)
@@ -6451,9 +6479,9 @@ impl WorkspaceShell {
                             )
                             .child(
                                 div()
-                                    .id(("manage-instance-root", index))
+                                    .id(("edit-instance-root", index))
                                     .role(Role::Button)
-                                    .aria_label(format!("Manage {}", instance.name))
+                                    .aria_label(format!("Edit {} sift.toml", instance.name))
                                     .flex_none()
                                     .p_1()
                                     .rounded_sm()
@@ -6467,9 +6495,9 @@ impl WorkspaceShell {
                                     )
                                     .on_click(cx.listener(move |shell, _, _, cx| {
                                         cx.stop_propagation();
-                                        shell.inspect_instance_root(root_for_manage.clone(), cx)
+                                        shell.open_root_configuration(root_for_edit.clone(), cx)
                                     }))
-                                    .child(icon(IconName::Fallback, colors.muted_text, 12.)),
+                                    .child(icon(IconName::Edit, colors.muted_text, 12.)),
                             )
                             .child(
                                 div()
@@ -6509,43 +6537,49 @@ impl WorkspaceShell {
                         .flex()
                         .flex_col()
                         .min_w_0()
-                        .p_1()
-                        .gap_0p5()
                         .child(
                             div()
+                                .h(px(36.))
                                 .px_2()
-                                .py_1()
                                 .flex()
                                 .items_center()
+                                .justify_between()
                                 .gap_2()
+                                .border_b_1()
+                                .border_color(colors.subtle_border)
+                                .bg(colors.toolbar)
                                 .child(icon(IconName::Server, colors.muted_text, 14.))
                                 .child(
                                     div()
-                                        .flex()
                                         .flex_1()
-                                        .flex_col()
                                         .min_w_0()
-                                        .child(
-                                            div()
-                                                .truncate()
-                                                .text_sm()
-                                                .font_weight(gpui::FontWeight::SEMIBOLD)
-                                                .child("Sift Server"),
-                                        )
-                                        .child(
-                                            div()
-                                                .truncate()
-                                                .text_xs()
-                                                .text_color(colors.muted_text)
-                                                .child(format!(
-                                                    "{} · {}",
-                                                    self.active_server_name(),
-                                                    status_label
-                                                )),
-                                        ),
+                                        .truncate()
+                                        .text_sm()
+                                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                                        .child("Switch Sift server"),
+                                )
+                                .child(
+                                    div()
+                                        .flex_none()
+                                        .max_w(px(150.))
+                                        .truncate()
+                                        .text_xs()
+                                        .text_color(colors.muted_text)
+                                        .child(format!(
+                                            "{} · {}",
+                                            self.active_server_name(),
+                                            status_label
+                                        )),
                                 ),
                         )
-                        .child(div().flex().flex_col().gap_0p5().py_1().children(rows))
+                        .child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .gap_0p5()
+                                .p_1()
+                                .children(rows),
+                        )
                         .children(self.server_connection_error.as_ref().map(|message| {
                             ErrorBanner::new(message.clone())
                         }))
@@ -6561,61 +6595,64 @@ impl WorkspaceShell {
                         })
                         .child(
                             div()
-                                .mt_1()
-                                .pt_1()
+                                .h(px(24.))
+                                .px_2()
                                 .border_t_1()
+                                .border_b_1()
                                 .border_color(colors.subtle_border)
                                 .flex()
-                                .flex_col()
-                                .gap_0p5()
-                                .children(
-                                    current_id
-                                        .as_deref()
-                                        .is_some_and(|id| id.starts_with("config:"))
-                                        .then(|| {
-                                            Button::new(
-                                                "picker-edit-current-instance",
-                                                "Edit current sift.toml…",
-                                            )
-                                            .tone(ButtonTone::Ghost)
-                                            .start_icon(IconName::Fallback)
-                                            .on_click(cx.listener(|shell, _, _, cx| {
-                                                shell.open_current_configuration(cx)
-                                            }))
-                                        }),
-                                )
+                                .items_center()
+                                .bg(colors.toolbar)
+                                .text_xs()
+                                .text_color(colors.muted_text)
+                                .child("ADD OR OPEN"),
+                        )
+                        .child(
+                            div()
+                                .p_1()
+                                .flex()
+                                .items_center()
+                                .justify_between()
+                                .gap_1()
                                 .child(
-                                    Button::new("picker-new-instance", "Create Sift Instance…")
-                                        .tone(ButtonTone::Ghost)
-                                        .start_icon(IconName::Add)
+                                    IconButton::new(
+                                        "picker-new-instance",
+                                        IconName::Add,
+                                        "Create Sift Instance",
+                                    )
+                                        .text("Create")
+                                        .tooltip("Create Sift Instance")
                                         .on_click(cx.listener(|shell, _, _, cx| {
                                             shell.prompt_for_new_instance_root(cx)
                                         })),
                                 )
                                 .child(
-                                    Button::new(
+                                    IconButton::new(
                                         "picker-import-instance",
-                                        "Open Existing Sift Instance…",
+                                        IconName::Workspace,
+                                        "Open Existing Sift Instance",
                                     )
-                                    .tone(ButtonTone::Ghost)
-                                    .start_icon(IconName::Workspace)
+                                    .text("Open")
+                                    .tooltip("Open Existing Sift Instance")
                                     .on_click(cx.listener(|shell, _, _, cx| {
                                         shell.prompt_for_instance_root(cx)
                                     })),
                                 )
                                 .child(
-                                    Button::new(
-                                        "picker-manage-servers",
-                                        "Connect to or manage servers…",
+                                    IconButton::new(
+                                        "picker-add-server",
+                                        IconName::Server,
+                                        "Add remote Sift server",
                                     )
-                                    .tone(ButtonTone::Ghost)
-                                    .start_icon(IconName::Server)
+                                    .text("Add server")
+                                    .tooltip("Add remote Sift server")
                                     .on_click(cx.listener(|shell, _, window, cx| {
                                         shell.open_server_connection(
                                             &OpenServerConnection,
                                             window,
                                             cx,
-                                        )
+                                        );
+                                        shell.new_server_profile(window, cx);
                                     })),
                                 ),
                         )
@@ -9588,13 +9625,13 @@ mod tests {
                 "Settings",
                 "Keymaps",
                 "Toggle Light/Dark Theme",
-                "Server Configuration"
+                "Edit Current sift.toml…"
             ]
         );
         assert_eq!(profile[0].command, Some(CommandId::OpenSettings));
         assert_eq!(profile[2].command, Some(CommandId::ToggleTheme));
+        assert_eq!(profile[3].command, Some(CommandId::OpenServerConfiguration));
         assert!(profile[1].command.is_none());
-        assert!(profile[3].command.is_none());
 
         for menu in [
             AppBarMenu::Main,
