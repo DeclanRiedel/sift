@@ -96,22 +96,61 @@ fn table_preview_sql(
     }
 }
 
-fn schema_object_kind_label(kind: sift_protocol::ObjectKind) -> &'static str {
-    use sift_protocol::ObjectKind;
-    match kind {
-        ObjectKind::Table => "table",
-        ObjectKind::View => "view",
-        ObjectKind::MaterializedView => "materialized",
-        ObjectKind::ForeignTable => "foreign",
-        ObjectKind::PartitionedTable => "partitioned",
-        ObjectKind::TableValuedFunction => "table function",
-        ObjectKind::ScalarFunction => "function",
-        ObjectKind::Procedure => "procedure",
-        ObjectKind::Synonym => "synonym",
-        ObjectKind::Sequence => "sequence",
-        ObjectKind::Trigger => "trigger",
-        ObjectKind::Type => "type",
-        ObjectKind::Extension => "extension",
+/// Schema objects are grouped into these buckets inside each schema node.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum ObjectGroupKind {
+    Tables,
+    Views,
+    Functions,
+    Sequences,
+    Other,
+}
+
+impl ObjectGroupKind {
+    const CANONICAL: [Self; 5] = [
+        Self::Tables,
+        Self::Views,
+        Self::Functions,
+        Self::Sequences,
+        Self::Other,
+    ];
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Tables => "Tables",
+            Self::Views => "Views",
+            Self::Functions => "Functions",
+            Self::Sequences => "Sequences",
+            Self::Other => "Other",
+        }
+    }
+
+    fn icon(self) -> IconName {
+        match self {
+            Self::Tables => IconName::Table,
+            Self::Views => IconName::View,
+            Self::Functions => IconName::Function,
+            Self::Sequences => IconName::Sequence,
+            Self::Other => IconName::Folder,
+        }
+    }
+
+    fn from_object_kind(kind: sift_protocol::ObjectKind) -> Self {
+        use sift_protocol::ObjectKind;
+        match kind {
+            ObjectKind::Table | ObjectKind::ForeignTable | ObjectKind::PartitionedTable => {
+                Self::Tables
+            }
+            ObjectKind::View | ObjectKind::MaterializedView => Self::Views,
+            ObjectKind::ScalarFunction
+            | ObjectKind::TableValuedFunction
+            | ObjectKind::Procedure => Self::Functions,
+            ObjectKind::Sequence => Self::Sequences,
+            ObjectKind::Trigger
+            | ObjectKind::Synonym
+            | ObjectKind::Type
+            | ObjectKind::Extension => Self::Other,
+        }
     }
 }
 
@@ -1770,6 +1809,7 @@ pub struct WorkspaceShell {
     expanded_rooms: HashSet<i64>,
     expanded_catalogs: HashSet<(i64, String)>,
     expanded_schemas: HashSet<(i64, String, String)>,
+    expanded_object_groups: HashSet<(i64, String, String, ObjectGroupKind)>,
     selected_database_tenant: Option<i64>,
     selected_database_provider: Option<String>,
     selected_database_ssl_mode: Option<String>,
@@ -1800,6 +1840,7 @@ struct WorkspaceSession {
     expanded_rooms: HashSet<i64>,
     expanded_catalogs: HashSet<(i64, String)>,
     expanded_schemas: HashSet<(i64, String, String)>,
+    expanded_object_groups: HashSet<(i64, String, String, ObjectGroupKind)>,
 }
 
 impl WorkspaceSession {
@@ -2042,6 +2083,7 @@ impl WorkspaceShell {
             expanded_rooms: HashSet::new(),
             expanded_catalogs: HashSet::new(),
             expanded_schemas: HashSet::new(),
+            expanded_object_groups: HashSet::new(),
             selected_database_tenant: None,
             selected_database_provider: None,
             selected_database_ssl_mode: Some("prefer".into()),
@@ -2285,6 +2327,10 @@ impl WorkspaceShell {
                 &mut self.expanded_schemas,
                 target.expanded_schemas,
             ),
+            expanded_object_groups: std::mem::replace(
+                &mut self.expanded_object_groups,
+                target.expanded_object_groups,
+            ),
         };
         if let Some(previous) = self.selected_instance_id.replace(instance_id.to_owned()) {
             self.workspace_sessions.insert(previous, outgoing);
@@ -2361,6 +2407,7 @@ impl WorkspaceShell {
             expanded_rooms: HashSet::new(),
             expanded_catalogs: HashSet::new(),
             expanded_schemas: HashSet::new(),
+            expanded_object_groups: HashSet::new(),
         }
     }
 
@@ -2605,6 +2652,8 @@ impl WorkspaceShell {
                     .retain(|(expanded_profile, _)| *expanded_profile != profile_id);
                 self.expanded_schemas
                     .retain(|(expanded_profile, _, _)| *expanded_profile != profile_id);
+                self.expanded_object_groups
+                    .retain(|(expanded_profile, _, _, _)| *expanded_profile != profile_id);
                 if snapshot.trees.len() == 1 {
                     self.expanded_catalogs
                         .insert((profile_id, snapshot.trees[0].name.clone()));
@@ -2619,6 +2668,17 @@ impl WorkspaceShell {
                                 catalog.name.clone(),
                                 schema.name.clone(),
                             ));
+                            if schema.objects.iter().any(|object| {
+                                ObjectGroupKind::from_object_kind(object.kind)
+                                    == ObjectGroupKind::Tables
+                            }) {
+                                self.expanded_object_groups.insert((
+                                    profile_id,
+                                    catalog.name.clone(),
+                                    schema.name.clone(),
+                                    ObjectGroupKind::Tables,
+                                ));
+                            }
                         }
                     }
                 }
@@ -2987,6 +3047,21 @@ impl WorkspaceShell {
         let key = (profile_id, catalog, schema);
         if !self.expanded_schemas.remove(&key) {
             self.expanded_schemas.insert(key);
+        }
+        cx.notify();
+    }
+
+    fn toggle_object_group(
+        &mut self,
+        profile_id: i64,
+        catalog: String,
+        schema: String,
+        group: ObjectGroupKind,
+        cx: &mut Context<Self>,
+    ) {
+        let key = (profile_id, catalog, schema, group);
+        if !self.expanded_object_groups.remove(&key) {
+            self.expanded_object_groups.insert(key);
         }
         cx.notify();
     }
@@ -5622,86 +5697,156 @@ impl WorkspaceShell {
                         if !schema_open {
                             continue;
                         }
-                        for (object_index, object) in schema.objects.iter().enumerate() {
-                            let can_preview = matches!(
-                                object.kind,
-                                sift_protocol::ObjectKind::Table
-                                    | sift_protocol::ObjectKind::View
-                                    | sift_protocol::ObjectKind::MaterializedView
-                                    | sift_protocol::ObjectKind::ForeignTable
-                                    | sift_protocol::ObjectKind::PartitionedTable
-                            );
-                            let connection_for_preview = connection.clone();
+                        for (group_index, group) in
+                            ObjectGroupKind::CANONICAL.into_iter().enumerate()
+                        {
+                            let objects: Vec<_> = schema
+                                .objects
+                                .iter()
+                                .filter(|object| {
+                                    ObjectGroupKind::from_object_kind(object.kind) == group
+                                })
+                                .collect();
+                            if objects.is_empty() {
+                                continue;
+                            }
+                            let group_key =
+                                (profile_id, catalog.name.clone(), schema.name.clone(), group);
+                            let group_open = self.expanded_object_groups.contains(&group_key);
                             let catalog_name = catalog.name.clone();
                             let schema_name = schema.name.clone();
-                            let object_name = object.name.clone();
-                            let object_kind = object.kind;
-                            let row = div()
-                                .id((
-                                    "schema-object",
-                                    object_index
-                                        + schema_index * 1000
-                                        + catalog_index * 100_000
-                                        + profile_id as usize * 10_000_000,
-                                ))
-                                .mx_2()
-                                .h(cx.theme().metrics.row_height)
-                                .pl_8()
-                                .pr_2()
-                                .flex()
-                                .items_center()
-                                .gap_2()
-                                .rounded_sm()
-                                .text_color(if can_preview {
-                                    colors.text
-                                } else {
-                                    colors.muted_text
-                                })
-                                .when(can_preview, |row| {
-                                    row.hover(|row| row.bg(colors.hovered_surface)).on_click(
-                                        cx.listener(move |shell, _, window, cx| {
-                                            shell.open_table_preview(
-                                                DatabaseObjectTarget {
-                                                    connection: connection_for_preview.clone(),
-                                                    catalog: catalog_name.clone(),
-                                                    schema: schema_name.clone(),
-                                                    object: object_name.clone(),
-                                                    object_kind,
-                                                },
-                                                window,
-                                                cx,
-                                            )
-                                        }),
+                            rows.push(
+                                div()
+                                    .id((
+                                        "schema-group",
+                                        group_index
+                                            + schema_index * 10
+                                            + catalog_index * 100
+                                            + profile_id as usize * 100_000,
+                                    ))
+                                    .mx_2()
+                                    .h(cx.theme().metrics.row_height)
+                                    .pl_8()
+                                    .pr_2()
+                                    .flex()
+                                    .items_center()
+                                    .gap_1()
+                                    .rounded_sm()
+                                    .text_color(colors.muted_text)
+                                    .hover(|row| {
+                                        row.bg(colors.hovered_surface).text_color(colors.text)
+                                    })
+                                    .on_click(cx.listener(move |shell, _, _, cx| {
+                                        shell.toggle_object_group(
+                                            profile_id,
+                                            catalog_name.clone(),
+                                            schema_name.clone(),
+                                            group,
+                                            cx,
+                                        )
+                                    }))
+                                    .child(icon(
+                                        if group_open {
+                                            IconName::ChevronDown
+                                        } else {
+                                            IconName::ChevronRight
+                                        },
+                                        colors.muted_text,
+                                        11.,
+                                    ))
+                                    .child(icon(group.icon(), colors.muted_text, 12.))
+                                    .child(group.label())
+                                    .child(
+                                        div()
+                                            .ml_auto()
+                                            .text_xs()
+                                            .text_color(colors.disabled_text)
+                                            .child(objects.len().to_string()),
                                     )
-                                })
-                                .child(
-                                    div()
-                                        .min_w_0()
-                                        .flex_1()
-                                        .flex()
-                                        .items_center()
-                                        .gap_1()
-                                        .truncate()
-                                        .child(icon(
-                                            schema_object_kind_icon(object.kind),
-                                            if can_preview {
-                                                colors.muted_text
-                                            } else {
-                                                colors.disabled_text
-                                            },
-                                            12.,
-                                        ))
-                                        .child(
-                                            div().min_w_0().truncate().child(object.name.clone()),
-                                        ),
-                                )
-                                .child(
-                                    div()
-                                        .text_xs()
-                                        .text_color(colors.disabled_text)
-                                        .child(schema_object_kind_label(object.kind)),
+                                    .into_any_element(),
+                            );
+                            if !group_open {
+                                continue;
+                            }
+                            for (object_index, object) in objects.iter().enumerate() {
+                                let can_preview = matches!(
+                                    object.kind,
+                                    sift_protocol::ObjectKind::Table
+                                        | sift_protocol::ObjectKind::View
+                                        | sift_protocol::ObjectKind::MaterializedView
+                                        | sift_protocol::ObjectKind::ForeignTable
+                                        | sift_protocol::ObjectKind::PartitionedTable
                                 );
-                            rows.push(row.into_any_element());
+                                let connection_for_preview = connection.clone();
+                                let catalog_name = catalog.name.clone();
+                                let schema_name = schema.name.clone();
+                                let object_name = object.name.clone();
+                                let object_kind = object.kind;
+                                let row = div()
+                                    .id((
+                                        "schema-object",
+                                        object_index
+                                            + group_index * 100_000
+                                            + schema_index * 10_000_000
+                                            + catalog_index * 100_000_000
+                                            + profile_id as usize * 1_000_000_000,
+                                    ))
+                                    .mx_2()
+                                    .h(cx.theme().metrics.row_height)
+                                    .pl_10()
+                                    .pr_2()
+                                    .flex()
+                                    .items_center()
+                                    .gap_2()
+                                    .rounded_sm()
+                                    .text_color(if can_preview {
+                                        colors.text
+                                    } else {
+                                        colors.muted_text
+                                    })
+                                    .when(can_preview, |row| {
+                                        row.hover(|row| row.bg(colors.hovered_surface)).on_click(
+                                            cx.listener(move |shell, _, window, cx| {
+                                                shell.open_table_preview(
+                                                    DatabaseObjectTarget {
+                                                        connection: connection_for_preview.clone(),
+                                                        catalog: catalog_name.clone(),
+                                                        schema: schema_name.clone(),
+                                                        object: object_name.clone(),
+                                                        object_kind,
+                                                    },
+                                                    window,
+                                                    cx,
+                                                )
+                                            }),
+                                        )
+                                    })
+                                    .child(
+                                        div()
+                                            .min_w_0()
+                                            .flex_1()
+                                            .flex()
+                                            .items_center()
+                                            .gap_1()
+                                            .truncate()
+                                            .child(icon(
+                                                schema_object_kind_icon(object.kind),
+                                                if can_preview {
+                                                    colors.muted_text
+                                                } else {
+                                                    colors.disabled_text
+                                                },
+                                                12.,
+                                            ))
+                                            .child(
+                                                div()
+                                                    .min_w_0()
+                                                    .truncate()
+                                                    .child(object.name.clone()),
+                                            ),
+                                    );
+                                rows.push(row.into_any_element());
+                            }
                         }
                     }
                 }
@@ -8894,6 +9039,12 @@ mod tests {
             assert!(shell
                 .expanded_schemas
                 .contains(&(7, "sifttest".into(), "lab".into())));
+            assert!(shell.expanded_object_groups.contains(&(
+                7,
+                "sifttest".into(),
+                "lab".into(),
+                ObjectGroupKind::Tables
+            )));
         });
     }
 
@@ -8909,6 +9060,13 @@ mod tests {
             shell.toggle_room(3, cx);
             shell.toggle_catalog_schema(2, "sifttest".into(), cx);
             shell.toggle_database_schema(2, "sifttest".into(), "lab".into(), cx);
+            shell.toggle_object_group(
+                2,
+                "sifttest".into(),
+                "lab".into(),
+                ObjectGroupKind::Views,
+                cx,
+            );
         });
         workspace.read_with(&cx, |shell, _| {
             assert!(shell.expanded_tenants.contains(&1));
@@ -8918,6 +9076,12 @@ mod tests {
             assert!(shell
                 .expanded_schemas
                 .contains(&(2, "sifttest".into(), "lab".into())));
+            assert!(shell.expanded_object_groups.contains(&(
+                2,
+                "sifttest".into(),
+                "lab".into(),
+                ObjectGroupKind::Views
+            )));
         });
 
         workspace.update(&mut cx, |shell, cx| {
@@ -8926,6 +9090,13 @@ mod tests {
             shell.toggle_room(3, cx);
             shell.toggle_catalog_schema(2, "sifttest".into(), cx);
             shell.toggle_database_schema(2, "sifttest".into(), "lab".into(), cx);
+            shell.toggle_object_group(
+                2,
+                "sifttest".into(),
+                "lab".into(),
+                ObjectGroupKind::Views,
+                cx,
+            );
         });
         workspace.read_with(&cx, |shell, _| {
             assert!(shell.expanded_tenants.is_empty());
@@ -8933,6 +9104,7 @@ mod tests {
             assert!(shell.expanded_rooms.is_empty());
             assert!(shell.expanded_catalogs.is_empty());
             assert!(shell.expanded_schemas.is_empty());
+            assert!(shell.expanded_object_groups.is_empty());
         });
     }
 
