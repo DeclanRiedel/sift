@@ -337,6 +337,7 @@ pub struct ResultsView {
     tab: ResultTab,
     selected: Option<GridSelection>,
     row_scroll_handle: UniformListScrollHandle,
+    grid_scroll_handle: gpui::ScrollHandle,
     placement: ResultPlacement,
     bottom_height: f32,
     right_width: f32,
@@ -352,6 +353,7 @@ impl ResultsView {
             tab: ResultTab::Data,
             selected: None,
             row_scroll_handle: UniformListScrollHandle::new(),
+            grid_scroll_handle: gpui::ScrollHandle::new(),
             placement: ResultPlacement::Bottom,
             bottom_height: 240.0,
             right_width: 420.0,
@@ -895,6 +897,9 @@ impl ResultsView {
                 ));
 
         let row_count = data.rows.len();
+        let grid_scroll_handle = self.grid_scroll_handle.clone();
+        let row_scroll_handle = self.row_scroll_handle.clone();
+        let entity_id = cx.entity().entity_id();
         let list = uniform_list(
             "result-rows",
             row_count,
@@ -1025,13 +1030,43 @@ impl ResultsView {
         )
         .size_full()
         .min_w(grid_min_width)
-        .track_scroll(&self.row_scroll_handle);
+        // Wheel input is routed below so the nested vertical and horizontal
+        // scrollers cannot both consume the same event.
+        .overflow_hidden()
+        .track_scroll(&self.row_scroll_handle)
+        .on_scroll_wheel(move |event, window, cx| {
+            let delta = event.delta.pixel_delta(window.line_height());
+            let scroll_handle = if event.modifiers.shift {
+                &grid_scroll_handle
+            } else {
+                &row_scroll_handle.0.borrow().base_handle
+            };
+            let current = scroll_handle.offset();
+            let max = scroll_handle.max_offset();
+            let next = if event.modifiers.shift {
+                let horizontal_delta = if delta.y == px(0.) { delta.x } else { delta.y };
+                gpui::point(
+                    (current.x + horizontal_delta).clamp(-max.x, px(0.)),
+                    current.y,
+                )
+            } else {
+                gpui::point(current.x, (current.y + delta.y).clamp(-max.y, px(0.)))
+            };
+            if next != current {
+                scroll_handle.set_offset(next);
+                cx.notify(entity_id);
+            }
+            // This grid owns both axes. Prevent the enclosing horizontal
+            // scroller from also consuming an unmodified vertical wheel.
+            cx.stop_propagation();
+        });
 
         div()
             .id("result-hscroll")
             .flex_1()
             .min_h_0()
             .overflow_x_scroll()
+            .track_scroll(&self.grid_scroll_handle)
             .child(
                 div()
                     .size_full()
@@ -1391,7 +1426,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn large_grid_shapes_only_visible_cells_and_reuses_them(cx: &mut TestAppContext) {
+    fn large_grid_virtualizes_cells_and_routes_wheel_axes(cx: &mut TestAppContext) {
         let window = cx
             .update(|cx| {
                 cx.open_window(Default::default(), |_window, cx| {
@@ -1458,6 +1493,41 @@ mod tests {
             initially_shaped,
             "selection repaint must reuse visible shaped lines"
         );
+
+        let viewport = cx.debug_bounds("result-row-viewport").unwrap();
+        cx.simulate_event(gpui::ScrollWheelEvent {
+            position: viewport.center(),
+            delta: gpui::ScrollDelta::Pixels(gpui::point(px(0.), px(-120.))),
+            ..Default::default()
+        });
+        cx.run_until_parked();
+        let vertical_offset = view.read_with(&cx, |view, _| {
+            assert_eq!(view.grid_scroll_handle.offset().x, px(0.));
+            view.row_scroll_handle.0.borrow().base_handle.offset().y
+        });
+        assert!(vertical_offset < px(0.));
+
+        cx.simulate_event(gpui::ScrollWheelEvent {
+            position: viewport.center(),
+            delta: gpui::ScrollDelta::Pixels(gpui::point(px(0.), px(-120.))),
+            modifiers: gpui::Modifiers {
+                shift: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+        cx.run_until_parked();
+        view.read_with(&cx, |view, _| {
+            assert_eq!(
+                view.row_scroll_handle.0.borrow().base_handle.offset().y,
+                vertical_offset,
+                "shift-scroll must not move rows"
+            );
+            assert!(
+                view.grid_scroll_handle.offset().x < px(0.),
+                "shift-scroll should move columns"
+            );
+        });
     }
 
     #[test]
