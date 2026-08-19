@@ -7,9 +7,9 @@
 use std::ops::Range;
 
 use gpui::{
-    actions, div, prelude::*, px, uniform_list, App, ClipboardItem, Context, Div, FocusHandle,
-    Focusable, IntoElement, MouseButton, ScrollStrategy, SharedString, Stateful,
-    UniformListScrollHandle, Window,
+    actions, canvas, div, prelude::*, px, uniform_list, App, ClipboardItem, Context, Div,
+    FocusHandle, Focusable, IntoElement, MouseButton, Pixels, ScrollStrategy, ShapedLine,
+    SharedString, Stateful, TextAlign, TextRun, UniformListScrollHandle, Window,
 };
 use sift_protocol::{
     ColumnMetadata, DriverWarning, ExecuteResponse, Nullability, Page, Row, TypeRef, Value,
@@ -44,7 +44,16 @@ pub struct CellRender {
 #[derive(Debug, Clone)]
 struct CachedCellRender {
     text: SharedString,
+    paint_text: SharedString,
     class: CellClass,
+    shaped: Option<CachedShapedCell>,
+}
+
+#[derive(Debug, Clone)]
+struct CachedShapedCell {
+    line: ShapedLine,
+    run: TextRun,
+    font_size: Pixels,
 }
 
 #[derive(Debug, Clone)]
@@ -260,6 +269,19 @@ pub fn render_value(value: &Value) -> CellRender {
     CellRender { text, class }
 }
 
+fn single_line_text(text: &SharedString) -> SharedString {
+    if !text.contains('\n') && !text.contains('\r') {
+        return text.clone();
+    }
+    text.chars()
+        .map(|character| match character {
+            '\n' | '\r' => ' ',
+            other => other,
+        })
+        .collect::<String>()
+        .into()
+}
+
 /// The result tabs a query item owns.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ResultTab {
@@ -403,9 +425,12 @@ impl ResultsView {
                         .iter()
                         .map(|value| {
                             let rendered = render_value(value);
+                            let text: SharedString = rendered.text.into();
                             CachedCellRender {
-                                text: rendered.text.into(),
+                                paint_text: single_line_text(&text),
+                                text,
                                 class: rendered.class,
+                                shaped: None,
                             }
                         })
                         .collect()
@@ -550,6 +575,42 @@ impl ResultsView {
             CellClass::Structured => colors.warning,
             CellClass::Text => colors.text,
         }
+    }
+
+    fn shape_cell(
+        cell: &mut CachedCellRender,
+        color: gpui::Hsla,
+        window: &Window,
+    ) -> (ShapedLine, bool) {
+        let mut text_style = window.text_style();
+        text_style.color = color;
+        let font_size = text_style.font_size.to_pixels(window.rem_size());
+        let run = text_style.to_run(cell.paint_text.len());
+        let cache_matches = cell
+            .shaped
+            .as_ref()
+            .is_some_and(|cached| cached.run == run && cached.font_size == font_size);
+        let cache_miss = !cache_matches;
+        if cache_miss {
+            cell.shaped = Some(CachedShapedCell {
+                line: window.text_system().shape_line(
+                    cell.paint_text.clone(),
+                    font_size,
+                    std::slice::from_ref(&run),
+                    None,
+                ),
+                run,
+                font_size,
+            });
+        }
+        (
+            cell.shaped
+                .as_ref()
+                .expect("shape cache was populated")
+                .line
+                .clone(),
+            cache_miss,
+        )
     }
 
     /// One tab row shared by the horizontal and vertical result tab bars.
@@ -824,21 +885,22 @@ impl ResultsView {
         let list = uniform_list(
             "result-rows",
             row_count,
-            cx.processor(move |view, range: Range<usize>, _, cx| {
+            cx.processor(move |view, range: Range<usize>, window, cx| {
                 let colors = cx.theme().colors;
                 if view.state.ready().is_none() {
                     return Vec::new();
                 }
                 let column_count = view.rendered_columns.len();
+                let selected = view.selected;
                 range
                     .map(|row_index| {
                         let cells = (0..column_count)
                             .map(|column_index| {
                                 let rendered = view
                                     .rendered_rows
-                                    .get(row_index)
-                                    .and_then(|row| row.get(column_index));
-                                let is_selected = match view.selected {
+                                    .get_mut(row_index)
+                                    .and_then(|row| row.get_mut(column_index));
+                                let is_selected = match selected {
                                     Some(GridSelection::Cell { row, column }) => {
                                         row == row_index && column == column_index
                                     }
@@ -847,11 +909,17 @@ impl ResultsView {
                                     Some(GridSelection::All) => true,
                                     None => false,
                                 };
-                                let (text, color) = match rendered {
+                                let (shaped, color, is_number) = match rendered {
                                     Some(cell) => {
-                                        (cell.text.clone(), Self::cell_color(colors, cell.class))
+                                        let color = Self::cell_color(colors, cell.class);
+                                        let is_number = matches!(cell.class, CellClass::Number);
+                                        (
+                                            Some(Self::shape_cell(cell, color, window).0),
+                                            color,
+                                            is_number,
+                                        )
                                     }
-                                    None => (SharedString::default(), colors.muted_text),
+                                    None => (None, colors.muted_text, false),
                                 };
                                 div()
                                     .id(("cell", row_index * column_count + column_index))
@@ -865,12 +933,6 @@ impl ResultsView {
                                     .border_r_1()
                                     .border_color(colors.subtle_border)
                                     .text_color(color)
-                                    .when(
-                                        rendered.is_some_and(|cell| {
-                                            matches!(cell.class, CellClass::Number)
-                                        }),
-                                        |el| el.justify_end(),
-                                    )
                                     .when(is_selected, |el| el.bg(colors.selected_surface))
                                     .on_mouse_down(
                                         MouseButton::Left,
@@ -879,7 +941,27 @@ impl ResultsView {
                                             view.select_cell(row_index, column_index, cx)
                                         }),
                                     )
-                                    .child(div().truncate().child(text))
+                                    .children(shaped.map(|line| {
+                                        canvas(
+                                            |_, _, _| (),
+                                            move |bounds, _, window, cx| {
+                                                let align = if is_number {
+                                                    TextAlign::Right
+                                                } else {
+                                                    TextAlign::Left
+                                                };
+                                                let _ = line.paint(
+                                                    bounds.origin,
+                                                    bounds.size.height,
+                                                    align,
+                                                    Some(bounds.size.width),
+                                                    window,
+                                                    cx,
+                                                );
+                                            },
+                                        )
+                                        .size_full()
+                                    }))
                             })
                             .collect::<Vec<_>>();
                         div()
@@ -1114,6 +1196,8 @@ mod tests {
             render_value(&Value::Text("hi".into())).class,
             CellClass::Text
         );
+        let multiline: SharedString = "first\nsecond\rthird".into();
+        assert_eq!(single_line_text(&multiline), "first second third");
     }
 
     #[test]
@@ -1226,6 +1310,13 @@ mod tests {
             assert_eq!(view.rendered_rows[0][1].text, "1");
         });
         cx.run_until_parked();
+        view.update_in(&mut cx, |view, window, cx| {
+            let cell = &mut view.rendered_rows[0][0];
+            assert!(cell.shaped.is_some(), "visible cells should shape once");
+            let color = ResultsView::cell_color(cx.theme().colors, cell.class);
+            let (_, cache_miss) = ResultsView::shape_cell(cell, color, window);
+            assert!(!cache_miss, "unchanged cell layout should be reused");
+        });
         assert!(
             cx.debug_bounds("result-row-0")
                 .is_some_and(|bounds| bounds.size.height > px(0.)),
@@ -1284,6 +1375,76 @@ mod tests {
             view.toggle_placement(cx);
             assert_eq!(view.extent(), 300.0);
         });
+    }
+
+    #[gpui::test]
+    fn large_grid_shapes_only_visible_cells_and_reuses_them(cx: &mut TestAppContext) {
+        let window = cx
+            .update(|cx| {
+                cx.open_window(Default::default(), |_window, cx| {
+                    let view = cx.new(ResultsView::new);
+                    cx.new(|_| ResultsHost(view))
+                })
+            })
+            .unwrap();
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let host = window.root(&mut cx).unwrap();
+        let view = host.read_with(&cx, |host, _| host.0.clone());
+        let columns = (0..8)
+            .map(|index| {
+                column(
+                    &format!("column_{index}"),
+                    PrimitiveType::Int64,
+                    Nullability::NotNullable,
+                )
+            })
+            .collect();
+        let rows = (0..100)
+            .map(|row| {
+                Row::new(
+                    (0..8)
+                        .map(|column| Value::Int64((row * 8 + column) as i64))
+                        .collect(),
+                )
+            })
+            .collect();
+        view.update(&mut cx, |view, cx| {
+            view.set_state(
+                ResultState::from_execute(ExecuteResponse {
+                    cursor_id: sift_protocol::CursorId(1),
+                    columns,
+                    schema_digest: "d".into(),
+                    rows,
+                    affected_rows: None,
+                    warnings: Vec::new(),
+                    has_more: false,
+                }),
+                cx,
+            );
+        });
+        cx.run_until_parked();
+
+        let shaped_count = |view: &ResultsView| {
+            view.rendered_rows
+                .iter()
+                .flatten()
+                .filter(|cell| cell.shaped.is_some())
+                .count()
+        };
+        let initially_shaped = view.read_with(&cx, |view, _| shaped_count(view));
+        assert!(initially_shaped > 0);
+        assert!(
+            initially_shaped < 100 * 8,
+            "offscreen rows must remain unshaped"
+        );
+
+        view.update(&mut cx, |view, cx| view.select_cell(0, 1, cx));
+        cx.run_until_parked();
+        assert_eq!(
+            view.read_with(&cx, |view, _| shaped_count(view)),
+            initially_shaped,
+            "selection repaint must reuse visible shaped lines"
+        );
     }
 
     #[test]

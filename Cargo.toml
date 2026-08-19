@@ -138,6 +138,18 @@ debug = "line-tables-only"
 opt-level = 2
 debug = false
 
+# Keep interactive workspace code responsive when developers launch the desktop
+# directly with Cargo. Debug assertions remain enabled; only UI hot paths get a
+# small amount of optimization. The demo still uses `release-dev` for feel tests.
+[profile.dev.package.sift-ui]
+opt-level = 1
+
+[profile.dev.package.sift-workspace-ui]
+opt-level = 1
+
+[profile.dev.package.sift-desktop]
+opt-level = 1
+
 [profile.release]
 lto = "thin"
 codegen-units = 1
