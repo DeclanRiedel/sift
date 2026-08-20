@@ -5,8 +5,9 @@ use std::sync::Arc;
 use gpui::{
     actions, deferred, div, img, prelude::*, px, uniform_list, App, Context, CursorStyle,
     DefiniteLength, Div, Entity, EventEmitter, FocusHandle, Focusable, Hsla, IntoElement,
-    MouseButton, PathPromptOptions, Pixels, ResizeEdge, Role, ScrollStrategy, SharedString,
-    Subscription, Task, UniformListScrollHandle, Window, WindowBounds, WindowControlArea,
+    MouseButton, PathPromptOptions, Pixels, ResizeEdge, Role, ScrollHandle, ScrollStrategy,
+    SharedString, Subscription, Task, UniformListScrollHandle, Window, WindowBounds,
+    WindowControlArea,
 };
 use sift_api_types::RoomId;
 use sift_ui::{
@@ -670,6 +671,7 @@ pub struct Pane {
     backward_items: Vec<u64>,
     forward_items: Vec<u64>,
     focus_handle: FocusHandle,
+    tab_scroll_handle: ScrollHandle,
     /// Live editor per SQL or configuration item. Editor contents are not
     /// persisted in the local layout; their owning service rehydrates them.
     editors: HashMap<u64, Entity<QueryEditor>>,
@@ -764,6 +766,7 @@ impl Pane {
             backward_items: Vec::new(),
             forward_items: Vec::new(),
             focus_handle: cx.focus_handle(),
+            tab_scroll_handle: ScrollHandle::new(),
             editors,
             clean_documents,
             editor_subscriptions,
@@ -953,6 +956,7 @@ impl Pane {
             self.forward_items.clear();
         }
         self.active_item = index;
+        self.tab_scroll_handle.scroll_to_item(index);
     }
 
     fn navigate_backward(&mut self) {
@@ -964,6 +968,7 @@ impl Pane {
                 self.forward_items.push(current);
             }
             self.active_item = index;
+            self.tab_scroll_handle.scroll_to_item(index);
             break;
         }
     }
@@ -977,6 +982,7 @@ impl Pane {
                 self.backward_items.push(current);
             }
             self.active_item = index;
+            self.tab_scroll_handle.scroll_to_item(index);
             break;
         }
     }
@@ -1174,11 +1180,12 @@ impl Pane {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let insertion_index = if drag.pane_id == self.id && index > drag.index {
-            index + 1
-        } else {
-            index
-        };
+        let insertion_index =
+            if drag.pane_id == self.id && index > drag.index && index < self.items.len() {
+                index + 1
+            } else {
+                index
+            };
         if drag.pane_id == self.id {
             self.move_item(drag.item_id, insertion_index);
         } else {
@@ -1253,6 +1260,7 @@ impl Pane {
         let to = if from < to { to - 1 } else { to };
         self.items.insert(to, item);
         self.active_item = to;
+        self.tab_scroll_handle.scroll_to_item(to);
     }
 
     /// Detach an item so another pane can adopt it. Caller persists layout.
@@ -1297,6 +1305,7 @@ impl Pane {
             .min(self.items.len());
         self.items.insert(insertion_index, transfer.item);
         self.active_item = insertion_index;
+        self.tab_scroll_handle.scroll_to_item(insertion_index);
         self.pending_close_item = None;
         cx.notify();
     }
@@ -1340,6 +1349,7 @@ impl gpui::Render for Pane {
         let can_go_back = self.can_navigate_backward();
         let can_go_forward = self.can_navigate_forward();
         let can_drag_tabs = self.items.len() > 1;
+        let item_count = self.items.len();
         let pane_id = self.id;
         div()
             .id(("pane", self.id as usize))
@@ -1473,101 +1483,116 @@ impl gpui::Render for Pane {
                                     .flex()
                                     .h_full()
                                     .overflow_x_scroll()
-                                    .children(self.items.iter().enumerate().map(
-                                        |(index, item)| {
-                                            let selected = index == self.active_item;
-                                            let item_id = item.id;
-                                            let tab_debug = format!("tab-{item_id}");
-                                            PaneTab::new(("tab", item.id as usize))
-                                                .debug_selector(move || tab_debug.clone())
-                                                .selected(selected)
-                                                .dirty(item.dirty)
-                                                .when(can_drag_tabs, |tab| {
-                                                    tab.on_drag(
-                                                        TabDrag {
-                                                            pane_id,
-                                                            item_id,
-                                                            index,
-                                                            title: item.title.clone().into(),
-                                                            selected,
-                                                            dirty: item.dirty,
-                                                        },
-                                                        |tab, _, _, cx| cx.new(|_| tab.clone()),
-                                                    )
-                                                })
-                                                .drag_over::<TabDrag>(move |tab, dragged, _, cx| {
-                                                    let mut tab = tab
-                                                        .bg(cx
-                                                            .theme()
-                                                            .colors
-                                                            .drop_target_background)
-                                                        .border_color(
-                                                            cx.theme().colors.drop_target_border,
-                                                        )
-                                                        .border_0();
-                                                    if dragged.pane_id != pane_id
-                                                        || index < dragged.index
-                                                    {
-                                                        tab = tab.border_l_2();
-                                                    } else if index > dragged.index {
-                                                        tab = tab.border_r_2();
-                                                    }
-                                                    tab
-                                                })
-                                                .on_drop::<TabDrag>(cx.listener(
-                                                    move |pane, drag, window, cx| {
-                                                        pane.finish_tab_bar_drag(
-                                                            index, drag, window, cx,
-                                                        )
+                                    .track_scroll(&self.tab_scroll_handle)
+                                    .children(self.items.iter().enumerate().map(|(index, item)| {
+                                        let selected = index == self.active_item;
+                                        let item_id = item.id;
+                                        let tab_debug = format!("tab-{item_id}");
+                                        PaneTab::new(("tab", item.id as usize))
+                                            .debug_selector(move || tab_debug.clone())
+                                            .selected(selected)
+                                            .dirty(item.dirty)
+                                            .when(can_drag_tabs, |tab| {
+                                                tab.on_drag(
+                                                    TabDrag {
+                                                        pane_id,
+                                                        item_id,
+                                                        index,
+                                                        title: item.title.clone().into(),
+                                                        selected,
+                                                        dirty: item.dirty,
                                                     },
-                                                ))
-                                                .child(
-                                                    div()
-                                                        .id(("tab-label", item.id as usize))
-                                                        .flex()
-                                                        .flex_1()
-                                                        .min_w_0()
-                                                        .items_center()
-                                                        .h_full()
-                                                        .pl_2()
-                                                        .pr_1()
-                                                        .hover(|label| {
-                                                            label.text_color(colors.text)
-                                                        })
-                                                        .on_click(cx.listener(
-                                                            move |pane, _, window, cx| {
-                                                                pane.activate_item(index, true);
-                                                                pane.active_focus_handle(cx)
-                                                                    .focus(window, cx);
-                                                                cx.emit(PaneEvent::FocusRequested);
-                                                                cx.notify();
-                                                            },
-                                                        ))
-                                                        .child(
-                                                            div()
-                                                                .flex_1()
-                                                                .min_w_0()
-                                                                .truncate()
-                                                                .child(item.title.clone()),
-                                                        ),
+                                                    |tab, _, _, cx| cx.new(|_| tab.clone()),
                                                 )
-                                                .child(
-                                                    IconButton::new(
-                                                        ("tab-close", item.id as usize),
-                                                        IconName::Close,
-                                                        format!("Close tab {}", item.title),
+                                            })
+                                            .drag_over::<TabDrag>(move |tab, dragged, _, cx| {
+                                                let mut tab = tab
+                                                    .bg(cx.theme().colors.drop_target_background)
+                                                    .border_color(
+                                                        cx.theme().colors.drop_target_border,
                                                     )
-                                                    .square(px(22.))
-                                                    .icon_size(12.)
-                                                    .tooltip(format!("Close tab {}", item.title))
-                                                    .on_click(cx.listener(move |_, _, _, cx| {
-                                                        cx.emit(PaneEvent::CloseItemRequested {
-                                                            item_id,
-                                                        });
-                                                    })),
+                                                    .border_0();
+                                                if dragged.pane_id != pane_id
+                                                    || index < dragged.index
+                                                {
+                                                    tab = tab.border_l_2();
+                                                } else if index > dragged.index {
+                                                    tab = tab.border_r_2();
+                                                }
+                                                tab
+                                            })
+                                            .on_drop::<TabDrag>(cx.listener(
+                                                move |pane, drag, window, cx| {
+                                                    pane.finish_tab_bar_drag(
+                                                        index, drag, window, cx,
+                                                    )
+                                                },
+                                            ))
+                                            .child(
+                                                div()
+                                                    .id(("tab-label", item.id as usize))
+                                                    .flex()
+                                                    .flex_1()
+                                                    .min_w_0()
+                                                    .items_center()
+                                                    .h_full()
+                                                    .pl_2()
+                                                    .pr_1()
+                                                    .hover(|label| label.text_color(colors.text))
+                                                    .on_click(cx.listener(
+                                                        move |pane, _, window, cx| {
+                                                            pane.activate_item(index, true);
+                                                            pane.active_focus_handle(cx)
+                                                                .focus(window, cx);
+                                                            cx.emit(PaneEvent::FocusRequested);
+                                                            cx.notify();
+                                                        },
+                                                    ))
+                                                    .child(
+                                                        div()
+                                                            .flex_1()
+                                                            .min_w_0()
+                                                            .truncate()
+                                                            .child(item.title.clone()),
+                                                    ),
+                                            )
+                                            .child(
+                                                IconButton::new(
+                                                    ("tab-close", item.id as usize),
+                                                    IconName::Close,
+                                                    format!("Close tab {}", item.title),
                                                 )
-                                        },
-                                    )),
+                                                .square(px(22.))
+                                                .icon_size(12.)
+                                                .tooltip(format!("Close tab {}", item.title))
+                                                .on_click(cx.listener(move |_, _, _, cx| {
+                                                    cx.emit(PaneEvent::CloseItemRequested {
+                                                        item_id,
+                                                    });
+                                                })),
+                                            )
+                                    }))
+                                    .child(
+                                        div()
+                                            .id(("tab-bar-drop-target", pane_id as usize))
+                                            .debug_selector(move || {
+                                                format!("tab-bar-drop-target-{pane_id}")
+                                            })
+                                            .h_full()
+                                            .min_w(px(24.))
+                                            .flex_1()
+                                            .child("")
+                                            .drag_over::<TabDrag>(|target, _, _, cx| {
+                                                target.bg(cx.theme().colors.drop_target_background)
+                                            })
+                                            .on_drop::<TabDrag>(cx.listener(
+                                                move |pane, drag, window, cx| {
+                                                    pane.finish_tab_bar_drag(
+                                                        item_count, drag, window, cx,
+                                                    )
+                                                },
+                                            )),
+                                    ),
                             ),
                     )
             }))
@@ -10177,6 +10202,89 @@ mod tests {
             assert_eq!(order, vec![2, 3, 1], "tab must drop after the last tab");
             assert_eq!(pane.active_item, 2, "the dragged tab becomes active");
         });
+    }
+
+    #[gpui::test]
+    fn pane_tab_bar_blank_space_appends_a_dragged_tab(cx: &mut TestAppContext) {
+        let mut state = PresentationState::default();
+        state.workspace.panes[0].items.extend([
+            ItemPresentation {
+                id: 2,
+                kind: ItemKind::Query,
+                title: "two.sql".into(),
+                dirty: false,
+                source: None,
+            },
+            ItemPresentation {
+                id: 3,
+                kind: ItemKind::Query,
+                title: "three.sql".into(),
+                dirty: false,
+                source: None,
+            },
+        ]);
+        let window = shell_with_state(state, cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        cx.run_until_parked();
+
+        let source = cx.debug_bounds("tab-1").expect("first tab");
+        let target = cx
+            .debug_bounds("tab-bar-drop-target-1")
+            .expect("trailing tab-bar target");
+        assert!(target.size.width >= px(24.));
+        let start = source.center();
+        cx.simulate_mouse_down(start, MouseButton::Left, Modifiers::default());
+        cx.simulate_mouse_move(
+            point(start.x + px(6.), start.y),
+            MouseButton::Left,
+            Modifiers::default(),
+        );
+        cx.simulate_mouse_move(target.center(), MouseButton::Left, Modifiers::default());
+        cx.simulate_mouse_up(target.center(), MouseButton::Left, Modifiers::default());
+        cx.run_until_parked();
+
+        workspace.read_with(&cx, |shell, cx| {
+            let order = shell.panes[0]
+                .read(cx)
+                .items
+                .iter()
+                .map(|item| item.id)
+                .collect::<Vec<_>>();
+            assert_eq!(order, vec![2, 3, 1]);
+        });
+    }
+
+    #[gpui::test]
+    fn activating_an_overflowed_tab_scrolls_it_into_view(cx: &mut TestAppContext) {
+        let mut state = PresentationState::default();
+        state.workspace.panes[0]
+            .items
+            .extend((2..=10).map(|id| ItemPresentation {
+                id,
+                kind: ItemKind::Query,
+                title: format!("long-query-name-{id}.sql"),
+                dirty: false,
+                source: None,
+            }));
+        let window = shell_with_state(state, cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        cx.run_until_parked();
+
+        let pane = workspace.read_with(&cx, |shell, _| shell.panes[0].clone());
+        pane.update(&mut cx, |pane, cx| {
+            pane.activate_item(9, true);
+            cx.notify();
+        });
+        cx.run_until_parked();
+
+        let handle = pane.read_with(&cx, |pane, _| pane.tab_scroll_handle.clone());
+        let tab = cx.debug_bounds("tab-10").expect("last tab");
+        let viewport = handle.bounds();
+        assert!(handle.offset().x < px(0.));
+        assert!(tab.left() >= viewport.left());
+        assert!(tab.right() <= viewport.right());
     }
 
     #[gpui::test]
