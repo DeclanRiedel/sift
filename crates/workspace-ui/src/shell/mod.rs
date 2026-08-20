@@ -685,6 +685,9 @@ pub struct Pane {
     /// Last body bounds associated with the preview. The workspace-level drag
     /// listener clears the active hint in O(1) when the pointer leaves.
     tab_drag_preview_bounds: Option<Bounds<Pixels>>,
+    /// The workspace-edge target supersedes this pane's local target. Keeping
+    /// the local state warm makes leaving the outer edge transition instantly.
+    suppress_tab_drag_preview: bool,
     /// Dirty-close confirmation belongs to its tab and is rendered inline.
     pending_close_item: Option<u64>,
 }
@@ -768,6 +771,7 @@ impl Pane {
             result_resize_frame_pending: false,
             tab_drop_target: None,
             tab_drag_preview_bounds: None,
+            suppress_tab_drag_preview: false,
             pending_close_item: None,
         }
     }
@@ -1175,6 +1179,7 @@ impl Pane {
     ) {
         self.tab_drop_target = None;
         self.tab_drag_preview_bounds = None;
+        self.suppress_tab_drag_preview = false;
         let insertion_index =
             if drag.pane_id == self.id && index > drag.index && index < self.items.len() {
                 index + 1
@@ -1245,6 +1250,7 @@ impl Pane {
             .take()
             .unwrap_or(PaneDropTarget::Center);
         self.tab_drag_preview_bounds = None;
+        self.suppress_tab_drag_preview = false;
         let creates_pane = matches!(
             target,
             PaneDropTarget::Above
@@ -1346,20 +1352,26 @@ fn pane_border_color(theme: &Theme, is_focused: bool) -> gpui::Hsla {
     }
 }
 
+fn pane_drop_preview_colors(theme: &Theme) -> (gpui::Hsla, gpui::Hsla) {
+    let mut tint = theme.colors.muted_text;
+    tint.a = 0.14;
+    let mut border = theme.colors.muted_text;
+    border.a = 0.62;
+    (tint, border)
+}
+
 impl Pane {}
 
 impl gpui::Render for Pane {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
         let colors = theme.colors;
-        let mut pane_preview_tint = colors.muted_text;
-        pane_preview_tint.a = 0.14;
-        let mut pane_preview_border = colors.muted_text;
-        pane_preview_border.a = 0.62;
+        let (pane_preview_tint, pane_preview_border) = pane_drop_preview_colors(&theme);
         let is_focused = self.active_focus_handle(cx).is_focused(window)
             || self.focus_handle.contains_focused(window, cx);
         let active = self.active_item().cloned();
-        let has_tab_drag_preview = self.tab_drag_preview_bounds.is_some();
+        let has_tab_drag_preview =
+            self.tab_drag_preview_bounds.is_some() && !self.suppress_tab_drag_preview;
         let database_notice = active.as_ref().and_then(|item| {
             let ItemSource::DatabaseObject(_) = item.source.as_ref()?;
             let state = self.database_item_states.get(&item.id)?.clone();
@@ -1837,9 +1849,8 @@ impl gpui::Render for Pane {
                     ),
                 };
                 let target = self.tab_drop_target.unwrap_or(PaneDropTarget::Center);
-                body.child(
+                body.children(has_tab_drag_preview.then(|| {
                     div()
-                        .when(!has_tab_drag_preview, |preview| preview.invisible())
                         .debug_selector(move || match target {
                             PaneDropTarget::Center => "pane-drop-preview-center".into(),
                             PaneDropTarget::Above => "pane-drop-preview-above".into(),
@@ -1882,8 +1893,8 @@ impl gpui::Render for Pane {
                                 .right_0()
                                 .bottom_0()
                                 .h(DefiniteLength::Fraction(0.5))
-                        }),
-                )
+                        })
+                }))
             })
             .children(database_notice.map(|(item_id, state)| {
                 let (tint, can_retry) = match state {
@@ -4386,6 +4397,7 @@ impl WorkspaceShell {
                         previous.update(cx, |pane, cx| {
                             pane.tab_drop_target = None;
                             pane.tab_drag_preview_bounds = None;
+                            pane.suppress_tab_drag_preview = false;
                             cx.notify();
                         });
                     }
@@ -4667,6 +4679,7 @@ impl WorkspaceShell {
             pane.update(cx, |pane, _| {
                 pane.tab_drop_target = None;
                 pane.tab_drag_preview_bounds = None;
+                pane.suppress_tab_drag_preview = false;
             });
         }
     }
@@ -4688,6 +4701,7 @@ impl WorkspaceShell {
             pane.update(cx, |pane, cx| {
                 pane.tab_drop_target = None;
                 pane.tab_drag_preview_bounds = None;
+                pane.suppress_tab_drag_preview = false;
                 cx.notify();
             });
             self.active_tab_drop_pane = None;
@@ -4724,6 +4738,15 @@ impl WorkspaceShell {
         };
         if self.root_tab_drop_target != target {
             self.root_tab_drop_target = target;
+            let suppress = target.is_some();
+            for pane in &self.panes {
+                if pane.read(cx).suppress_tab_drag_preview != suppress {
+                    pane.update(cx, |pane, cx| {
+                        pane.suppress_tab_drag_preview = suppress;
+                        cx.notify();
+                    });
+                }
+            }
             cx.notify();
         }
     }
@@ -9254,6 +9277,7 @@ impl gpui::Render for WorkspaceShell {
         let pane_layout = self.pane_layout.clone();
         let pane_elements =
             self.render_pane_layout(&pane_layout, Vec::new(), colors.subtle_border, cx);
+        let (pane_preview_tint, pane_preview_border) = pane_drop_preview_colors(&cx.theme());
         let root_tab_drop_preview = self.root_tab_drop_target.map(|target| {
             div()
                 .debug_selector(move || match target {
@@ -9264,9 +9288,9 @@ impl gpui::Render for WorkspaceShell {
                     PaneDropTarget::Center | PaneDropTarget::Tab(_) => unreachable!(),
                 })
                 .absolute()
-                .bg(colors.drop_target_background)
+                .bg(pane_preview_tint)
                 .border_2()
-                .border_color(colors.drop_target_border)
+                .border_color(pane_preview_border)
                 .when(target == PaneDropTarget::Above, |preview| {
                     preview
                         .left_0()
@@ -10801,12 +10825,19 @@ mod tests {
 
         cx.simulate_mouse_up(drop, MouseButton::Left, Modifiers::default());
         cx.run_until_parked();
-        workspace.read_with(&cx, |shell, _| {
+        workspace.read_with(&cx, |shell, cx| {
             let PaneLayoutPresentation::Split { axis, flexes, .. } = &shell.pane_layout else {
                 panic!("vertical split remains")
             };
             assert_eq!(*axis, PaneAxis::Vertical);
             assert_eq!(flexes, &vec![1.0, 1.0]);
+            assert!(
+                shell
+                    .panes
+                    .iter()
+                    .all(|pane| !pane.read(cx).suppress_tab_drag_preview),
+                "drop cleanup must restore leaf previews"
+            );
         });
     }
 
@@ -10847,6 +10878,20 @@ mod tests {
         let preview = cx
             .debug_bounds("root-pane-drop-preview-above")
             .expect("vertical split preview");
+        workspace.read_with(&cx, |shell, cx| {
+            let target = shell
+                .panes
+                .iter()
+                .find(|pane| pane.read(cx).id == 3)
+                .expect("right target pane")
+                .read(cx);
+            assert_eq!(shell.root_tab_drop_target, Some(PaneDropTarget::Above));
+            assert!(target.suppress_tab_drag_preview);
+        });
+        assert!(
+            cx.debug_bounds("pane-drop-preview-above").is_none(),
+            "the root target must suppress the overlapping leaf preview"
+        );
         assert_eq!(preview.left(), left_slot.left());
         assert_eq!(preview.right(), right_slot.right());
         assert_eq!(preview.top(), left_slot.top());
