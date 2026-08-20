@@ -3634,7 +3634,7 @@ impl WorkspaceShell {
                 cx.notify();
             }
             ExecutorEvent::TableMigrationPreviewed { item_id, plan } => {
-                if let Some(designer) = self
+                let should_show_ddl = if let Some(designer) = self
                     .table_designer
                     .as_mut()
                     .filter(|designer| designer.item_id == item_id)
@@ -3642,6 +3642,12 @@ impl WorkspaceShell {
                     designer.plan = Some(plan);
                     designer.pending = false;
                     designer.error = None;
+                    true
+                } else {
+                    false
+                };
+                if should_show_ddl {
+                    self.open_table_designer_ddl(cx);
                 }
                 cx.notify();
             }
@@ -8193,7 +8199,7 @@ impl WorkspaceShell {
                                     .justify_end()
                                     .gap_2()
                                     .child(
-                                        Button::new("preview-table-change", "Preview")
+                                        Button::new("preview-table-change", "Preview DDL")
                                             .tone(ButtonTone::Neutral)
                                             .loading(pending)
                                             .on_click(cx.listener(|shell, _, _, cx| {
