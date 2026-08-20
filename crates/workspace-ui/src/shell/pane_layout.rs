@@ -164,6 +164,41 @@ pub fn split(
     }
 }
 
+/// Insert a pane at the outer edge of the complete layout. Matching root axes
+/// stay flat; orthogonal directions wrap the existing tree.
+pub fn split_root(layout: &mut PaneLayoutPresentation, new_id: u64, direction: SplitDirection) {
+    if let PaneLayoutPresentation::Split {
+        axis,
+        children,
+        flexes,
+    } = layout
+    {
+        if *axis == direction.axis() {
+            let index = if direction.increasing() {
+                children.len()
+            } else {
+                0
+            };
+            children.insert(index, leaf(new_id));
+            *flexes = vec![1.0; children.len()];
+            return;
+        }
+    }
+
+    let old = layout.clone();
+    let new = leaf(new_id);
+    let children = if direction.increasing() {
+        vec![old, new]
+    } else {
+        vec![new, old]
+    };
+    *layout = PaneLayoutPresentation::Split {
+        axis: direction.axis(),
+        children,
+        flexes: vec![1.0, 1.0],
+    };
+}
+
 pub fn remove(layout: &mut PaneLayoutPresentation, pane_id: u64) -> bool {
     let PaneLayoutPresentation::Split {
         children, flexes, ..
