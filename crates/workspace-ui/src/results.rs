@@ -1119,7 +1119,7 @@ impl ResultsView {
                         (!Self::is_error_state(&self.state))
                             .then(|| Badge::new(self.state.status_label())),
                     )
-                    .child(
+                    .children((self.tab == ResultTab::Data).then(|| {
                         IconButton::new(
                             "copy-result-cell",
                             IconName::Copy,
@@ -1130,8 +1130,8 @@ impl ResultsView {
                         .tooltip("Copy highlighted fields")
                         .on_click(cx.listener(|view, _, window, cx| {
                             view.copy_selected_cell(&CopySelectedCell, window, cx)
-                        })),
-                    ),
+                        }))
+                    })),
             )
     }
 
@@ -1187,7 +1187,7 @@ impl ResultsView {
                         (!Self::is_error_state(&self.state))
                             .then(|| div().truncate().child(self.state.status_label())),
                     )
-                    .child(
+                    .children((self.tab == ResultTab::Data).then(|| {
                         IconButton::new(
                             "copy-result-cell-vertical",
                             IconName::Copy,
@@ -1198,8 +1198,8 @@ impl ResultsView {
                         .tooltip("Copy highlighted fields")
                         .on_click(cx.listener(|view, _, window, cx| {
                             view.copy_selected_cell(&CopySelectedCell, window, cx)
-                        })),
-                    ),
+                        }))
+                    })),
             )
     }
 
