@@ -4436,12 +4436,6 @@ impl WorkspaceShell {
         cx.notify();
     }
 
-    fn close_inspector(&mut self, cx: &mut Context<Self>) {
-        self.right_dock.presentation.open = false;
-        self.persist(cx);
-        cx.notify();
-    }
-
     fn show_project_search(&mut self, cx: &mut Context<Self>) {
         self.show_toast("Project search is not wired to the desktop yet".into(), cx);
     }
@@ -6885,7 +6879,8 @@ impl WorkspaceShell {
             .child(
                 div()
                     .px_3()
-                    .py_2()
+                    .h(cx.theme().metrics.row_height)
+                    .flex_none()
                     .flex()
                     .items_center()
                     .justify_between()
@@ -6942,28 +6937,39 @@ impl WorkspaceShell {
                         div()
                             .id(("inspector-result-field", source_column))
                             .px_3()
-                            .py_2()
+                            .h(px(30.))
+                            .flex_none()
                             .flex()
-                            .flex_col()
-                            .gap_1()
+                            .items_center()
+                            .gap_2()
                             .border_b_1()
                             .border_color(colors.subtle_border)
                             .child(
                                 div()
                                     .min_w_0()
+                                    .flex_1()
                                     .truncate()
                                     .font_weight(gpui::FontWeight::SEMIBOLD)
                                     .child(field.name.clone()),
                             )
-                            .child(div().text_xs().text_color(colors.muted_text).child(format!(
-                                "{}{}",
-                                field.type_label,
-                                if field.nullable { "?" } else { "" }
-                            )))
                             .child(
                                 div()
+                                    .max_w(px(72.))
+                                    .truncate()
+                                    .text_xs()
+                                    .text_color(colors.muted_text)
+                                    .child(format!(
+                                        "{}{}",
+                                        field.type_label,
+                                        if field.nullable { "?" } else { "" }
+                                    )),
+                            )
+                            .child(
+                                div()
+                                    .w(px(54.))
+                                    .flex_none()
                                     .flex()
-                                    .h(px(24.))
+                                    .h(px(20.))
                                     .rounded_sm()
                                     .border_1()
                                     .border_color(colors.subtle_border)
@@ -6999,7 +7005,7 @@ impl WorkspaceShell {
                                                     )
                                                 });
                                             }))
-                                            .child("Include"),
+                                            .child("In"),
                                     )
                                     .child(
                                         div()
@@ -7034,7 +7040,7 @@ impl WorkspaceShell {
                                                     )
                                                 });
                                             }))
-                                            .child("Exclude"),
+                                            .child("Out"),
                                     ),
                             )
                     })),
@@ -7046,6 +7052,13 @@ impl WorkspaceShell {
         self.panes
             .get(self.active_pane)
             .and_then(|pane| pane.read(cx).active_results())
+    }
+
+    fn focused_item_title(&self, cx: &App) -> Option<String> {
+        self.panes
+            .get(self.active_pane)
+            .and_then(|pane| pane.read(cx).active_item())
+            .map(|item| item.title.clone())
     }
 
     fn render_dock(&self, dock: &Dock, cx: &mut Context<Self>) -> impl IntoElement {
@@ -7061,6 +7074,9 @@ impl WorkspaceShell {
             DockId::Inspector => "right-dock",
             DockId::Bottom => "bottom-dock",
         };
+        let inspector_target = (dock.id == DockId::Inspector)
+            .then(|| self.focused_item_title(cx))
+            .flatten();
         div()
             .id(title)
             .debug_selector(move || debug_selector.to_owned())
@@ -7071,12 +7087,31 @@ impl WorkspaceShell {
             .flex()
             .flex_col()
             .overflow_hidden()
-            .py_2()
+            .py_1()
             .border_color(colors.subtle_border)
             .border_t_1()
             .bg(colors.panel)
             .text_sm()
-            .child(div().pl_3().child(SectionLabel::new(title.to_uppercase())))
+            .child(
+                div()
+                    .h(cx.theme().metrics.row_height)
+                    .px_3()
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(SectionLabel::new(title.to_uppercase()))
+                    .children(inspector_target.map(|target| {
+                        div()
+                            .debug_selector(|| "inspector-target-title".into())
+                            .min_w_0()
+                            .flex_1()
+                            .truncate()
+                            .text_xs()
+                            .text_color(colors.muted_text)
+                            .child(target)
+                    })),
+            )
             .when(
                 dock.id == DockId::Left && self.active_left_panel == LeftPanel::Connections,
                 |dock_view| {
@@ -10758,6 +10793,7 @@ mod tests {
         workspace.read_with(&cx, |shell, cx| {
             assert_eq!(shell.active_pane, 0);
             assert_eq!(shell.focused_pane_results(cx), Some(first_results.clone()));
+            assert_eq!(shell.focused_item_title(cx).as_deref(), Some("query.sql"));
         });
 
         second_pane.update(&mut cx, |_, cx| cx.emit(PaneEvent::FocusRequested));
@@ -10765,6 +10801,7 @@ mod tests {
         workspace.read_with(&cx, |shell, cx| {
             assert_eq!(shell.active_pane, 1);
             assert_eq!(shell.focused_pane_results(cx), Some(second_results));
+            assert_eq!(shell.focused_item_title(cx).as_deref(), Some("second.sql"));
         });
     }
 
@@ -12935,7 +12972,7 @@ mod tests {
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         let workspace = window.root(&mut cx).unwrap();
 
-        workspace.update(&mut cx, |shell, cx| {
+        workspace.update_in(&mut cx, |shell, window, cx| {
             shell.select_left_panel(LeftPanel::Collaboration, cx);
             assert!(shell.left_dock.presentation.open);
             assert_eq!(shell.active_left_panel, LeftPanel::Collaboration);
@@ -12959,7 +12996,7 @@ mod tests {
             assert!(!shell.bottom_dock.presentation.open);
 
             assert!(shell.right_dock.presentation.open);
-            shell.close_inspector(cx);
+            shell.toggle_right_dock(&ToggleRightDock, window, cx);
             assert!(!shell.right_dock.presentation.open);
 
             let snapshot = shell.snapshot(cx);

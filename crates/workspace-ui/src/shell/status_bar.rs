@@ -362,18 +362,26 @@ pub(super) fn render_status_bar(
                         shell.select_bottom_tool(BottomTool::Automations, cx)
                     })),
                 )
-                .children(shell.right_dock.presentation.open.then(separator))
-                .children(shell.right_dock.presentation.open.then(|| {
-                    button(
-                        "footer-close-inspector",
-                        IconName::CloseRightPane,
-                        "Close Inspector".into(),
-                        false,
-                        None,
-                        false,
-                    )
-                    .on_click(cx.listener(|shell, _, _, cx| shell.close_inspector(cx)))
-                })),
+                .child(separator())
+                .child(
+                    div().id("footer-inspector-toggle-slot").flex_none().child(
+                        button(
+                            "footer-toggle-inspector",
+                            IconName::CloseRightPane,
+                            if shell.right_dock.presentation.open {
+                                "Close Inspector".into()
+                            } else {
+                                "Open Inspector".into()
+                            },
+                            shell.right_dock.presentation.open,
+                            None,
+                            false,
+                        )
+                        .on_click(cx.listener(|shell, _, window, cx| {
+                            shell.toggle_right_dock(&super::ToggleRightDock, window, cx)
+                        })),
+                    ),
+                ),
         )
         .into_any_element()
 }
