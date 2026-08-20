@@ -694,7 +694,10 @@ pub struct Pane {
     /// The workspace-edge target supersedes this pane's local target. Keeping
     /// the local state warm makes leaving the outer edge transition instantly.
     suppress_tab_drag_preview: bool,
-    tab_bar_drag_hovered: bool,
+    /// Last tab-strip bounds observed during this drag. The workspace checks
+    /// these before resolving outer-edge targets so tab insertion wins even
+    /// when both nested drag listeners receive the same pointer move.
+    tab_bar_drag_bounds: Option<Bounds<Pixels>>,
     /// Dirty-close confirmation belongs to its tab and is rendered inline.
     pending_close_item: Option<u64>,
 }
@@ -779,7 +782,7 @@ impl Pane {
             tab_drop_target: None,
             tab_drag_preview_bounds: None,
             suppress_tab_drag_preview: false,
-            tab_bar_drag_hovered: false,
+            tab_bar_drag_bounds: None,
             pending_close_item: None,
         }
     }
@@ -1189,8 +1192,8 @@ impl Pane {
         }
         let had_structural_preview =
             self.tab_drop_target.take().is_some() || self.tab_drag_preview_bounds.take().is_some();
-        if !self.tab_bar_drag_hovered {
-            self.tab_bar_drag_hovered = true;
+        if self.tab_bar_drag_bounds != Some(event.bounds) {
+            self.tab_bar_drag_bounds = Some(event.bounds);
             cx.emit(PaneEvent::TabBarDragEntered);
         }
         if had_structural_preview {
@@ -1208,7 +1211,7 @@ impl Pane {
         self.tab_drop_target = None;
         self.tab_drag_preview_bounds = None;
         self.suppress_tab_drag_preview = false;
-        self.tab_bar_drag_hovered = false;
+        self.tab_bar_drag_bounds = None;
         let insertion_index =
             if drag.pane_id == self.id && index > drag.index && index < self.items.len() {
                 index + 1
@@ -1238,7 +1241,7 @@ impl Pane {
         if !event.bounds.contains(&event.event.position) {
             return;
         }
-        self.tab_bar_drag_hovered = false;
+        self.tab_bar_drag_bounds = None;
         let relative_x = event.event.position.x - event.bounds.left();
         let relative_y = event.event.position.y - event.bounds.top();
         let width = event.bounds.size.width;
@@ -1281,7 +1284,7 @@ impl Pane {
             .unwrap_or(PaneDropTarget::Center);
         self.tab_drag_preview_bounds = None;
         self.suppress_tab_drag_preview = false;
-        self.tab_bar_drag_hovered = false;
+        self.tab_bar_drag_bounds = None;
         let creates_pane = matches!(
             target,
             PaneDropTarget::Above
@@ -1985,6 +1988,7 @@ pub struct WorkspaceShell {
     window_presentation: WindowPresentation,
     panes: Vec<Entity<Pane>>,
     active_tab_drop_pane: Option<Entity<Pane>>,
+    active_tab_bar_drag_bounds: Option<Bounds<Pixels>>,
     root_tab_drop_target: Option<PaneDropTarget>,
     workspace_sessions: HashMap<String, WorkspaceSession>,
     workspace_presentations: HashMap<String, WorkspacePresentation>,
@@ -2268,6 +2272,7 @@ impl WorkspaceShell {
             window_presentation,
             panes,
             active_tab_drop_pane: None,
+            active_tab_bar_drag_bounds: None,
             root_tab_drop_target: None,
             workspace_sessions: HashMap::new(),
             workspace_presentations,
@@ -4436,6 +4441,7 @@ impl WorkspaceShell {
                 }
             }
             PaneEvent::TabBarDragEntered => {
+                self.active_tab_bar_drag_bounds = emitter.read(cx).tab_bar_drag_bounds;
                 self.set_root_tab_drop_target(None, cx);
             }
             PaneEvent::CloseRequested => {
@@ -4726,13 +4732,14 @@ impl WorkspaceShell {
 
     fn clear_tab_drag_previews(&mut self, cx: &mut Context<Self>) {
         self.active_tab_drop_pane = None;
+        self.active_tab_bar_drag_bounds = None;
         self.set_root_tab_drop_target(None, cx);
         for pane in &self.panes {
             pane.update(cx, |pane, _| {
                 pane.tab_drop_target = None;
                 pane.tab_drag_preview_bounds = None;
                 pane.suppress_tab_drag_preview = false;
-                pane.tab_bar_drag_hovered = false;
+                pane.tab_bar_drag_bounds = None;
             });
         }
     }
@@ -4786,7 +4793,16 @@ impl WorkspaceShell {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let target = if self.panes.len() <= 1 || !event.bounds.contains(&event.event.position) {
+        let over_tab_bar = self
+            .active_tab_bar_drag_bounds
+            .is_some_and(|bounds| bounds.contains(&event.event.position));
+        if !over_tab_bar {
+            self.active_tab_bar_drag_bounds = None;
+        }
+        let target = if over_tab_bar
+            || self.panes.len() <= 1
+            || !event.bounds.contains(&event.event.position)
+        {
             None
         } else {
             let relative_x = event.event.position.x - event.bounds.left();
@@ -11097,6 +11113,15 @@ mod tests {
         cx.simulate_mouse_move(outer_edge, MouseButton::Left, Modifiers::default());
         cx.run_until_parked();
         assert!(cx.debug_bounds("root-pane-drop-preview-after").is_some());
+
+        // The empty end of another pane's tab line can overlap the workspace
+        // edge zone. It is still tab-bar territory, never a split target.
+        let empty_tab_line = point(target_body.right() - px(8.), target_tab.center().y);
+        assert!(empty_tab_line.x > target_tab.right());
+        cx.simulate_mouse_move(empty_tab_line, MouseButton::Left, Modifiers::default());
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("root-pane-drop-preview-after").is_none());
+        assert!(cx.debug_bounds("pane-drop-preview-after").is_none());
 
         cx.simulate_mouse_move(target_tab.center(), MouseButton::Left, Modifiers::default());
         cx.run_until_parked();
