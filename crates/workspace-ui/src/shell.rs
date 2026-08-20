@@ -2426,6 +2426,7 @@ pub struct WorkspaceShell {
     database_pool_max_input: Entity<TextInput>,
     table_column_name_input: Entity<TextInput>,
     table_column_type_input: Entity<TextInput>,
+    table_column_nullable_focus: FocusHandle,
     instance_secret_input: Entity<TextInput>,
     instance_configuration_editor: Entity<QueryEditor>,
     palette_selected: usize,
@@ -2642,6 +2643,7 @@ impl WorkspaceShell {
         let table_column_type_input = cx.new(|cx| {
             TextInput::new("", "Native type, for example text", cx).aria_label("Column type")
         });
+        let table_column_nullable_focus = cx.focus_handle();
         let instance_secret_input = cx.new(|cx| {
             TextInput::new("", "Required secret", cx)
                 .aria_label("Instance credential value")
@@ -2665,6 +2667,16 @@ impl WorkspaceShell {
             cx.notify();
         })
         .detach();
+        for input in [&table_column_name_input, &table_column_type_input] {
+            cx.observe(input, |shell, _, cx| {
+                if let Some(designer) = shell.table_designer.as_mut() {
+                    designer.plan = None;
+                    designer.error = None;
+                    cx.notify();
+                }
+            })
+            .detach();
+        }
         panes[active_pane]
             .read(cx)
             .active_focus_handle(cx)
@@ -2722,6 +2734,7 @@ impl WorkspaceShell {
             database_pool_max_input,
             table_column_name_input,
             table_column_type_input,
+            table_column_nullable_focus,
             instance_secret_input,
             instance_configuration_editor,
             palette_selected: 0,
@@ -4231,6 +4244,134 @@ impl WorkspaceShell {
         designer.plan = None;
         designer.error = None;
         cx.notify();
+    }
+
+    fn activate_table_designer_row(
+        &mut self,
+        column_id: Option<sift_protocol::CatalogObjectId>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(column_id) = column_id {
+            self.select_table_designer_column(column_id, cx);
+        } else {
+            self.prepare_new_table_column(cx);
+        }
+        self.table_column_name_input
+            .focus_handle(cx)
+            .focus(window, cx);
+    }
+
+    fn table_designer_row_key_down(
+        &mut self,
+        column_id: Option<sift_protocol::CatalogObjectId>,
+        event: &gpui::KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self
+            .table_column_name_input
+            .focus_handle(cx)
+            .is_focused(window)
+            || self
+                .table_column_type_input
+                .focus_handle(cx)
+                .is_focused(window)
+            || self.table_column_nullable_focus.is_focused(window)
+        {
+            return;
+        }
+        match event.keystroke.key.as_str() {
+            "enter" if !event.keystroke.modifiers.modified() => {
+                self.activate_table_designer_row(column_id, window, cx);
+                cx.stop_propagation();
+            }
+            "up" if event.keystroke.modifiers.alt && column_id.is_some() => {
+                if self
+                    .table_designer
+                    .as_ref()
+                    .and_then(|designer| designer.selected_column.as_ref())
+                    != column_id.as_ref()
+                {
+                    self.select_table_designer_column(column_id.unwrap(), cx);
+                }
+                self.move_table_designer_column(-1, cx);
+                cx.stop_propagation();
+            }
+            "down" if event.keystroke.modifiers.alt && column_id.is_some() => {
+                if self
+                    .table_designer
+                    .as_ref()
+                    .and_then(|designer| designer.selected_column.as_ref())
+                    != column_id.as_ref()
+                {
+                    self.select_table_designer_column(column_id.unwrap(), cx);
+                }
+                self.move_table_designer_column(1, cx);
+                cx.stop_propagation();
+            }
+            _ => {}
+        }
+    }
+
+    fn table_nullable_key_down(
+        &mut self,
+        event: &gpui::KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match event.keystroke.key.as_str() {
+            "enter" | "space" if !event.keystroke.modifiers.modified() => {
+                self.toggle_table_column_nullability(cx);
+                cx.stop_propagation();
+            }
+            "tab" => {
+                if event.keystroke.modifiers.shift {
+                    window.focus_prev(cx);
+                } else {
+                    window.focus_next(cx);
+                }
+                cx.stop_propagation();
+            }
+            _ => {}
+        }
+    }
+
+    fn table_designer_has_draft_change(&self, cx: &App) -> bool {
+        let Some(designer) = self.table_designer.as_ref() else {
+            return false;
+        };
+        let name = self.table_column_name_input.read(cx).text().trim();
+        let type_name = self.table_column_type_input.read(cx).text().trim();
+        let Some(column_id) = designer.selected_column.as_ref() else {
+            return !name.is_empty() && !type_name.is_empty();
+        };
+        let Some(TableDefinitionState::Ready { graph, .. }) =
+            self.table_definitions.get(&designer.item_id)
+        else {
+            return false;
+        };
+        graph
+            .data
+            .nodes
+            .iter()
+            .find(|node| &node.id == column_id)
+            .is_some_and(|node| {
+                let sift_protocol::CatalogNodeDetails::Column { column } = &node.details else {
+                    return false;
+                };
+                name != node.name
+                    || type_name != type_ref_label(&column.type_ref)
+                    || designer.nullable != column.nullable
+            })
+    }
+
+    fn show_table_designer_ddl(&mut self, cx: &mut Context<Self>) {
+        let should_preview = self.table_designer_has_draft_change(cx);
+        self.open_table_designer_ddl(cx);
+        if should_preview {
+            self.preview_table_change(cx);
+        }
     }
 
     fn preview_table_change(&mut self, cx: &mut Context<Self>) {
@@ -7925,7 +8066,7 @@ impl WorkspaceShell {
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         let colors = cx.theme().colors;
-        let header = |actions: Vec<gpui::AnyElement>| {
+        let header = |left_actions: Vec<gpui::AnyElement>, right_actions: Vec<gpui::AnyElement>| {
             div()
                 .h(cx.theme().metrics.row_height)
                 .px_3()
@@ -7936,8 +8077,9 @@ impl WorkspaceShell {
                 .border_b_1()
                 .border_color(colors.subtle_border)
                 .child(SectionLabel::new("TABLE DEFINITION"))
+                .children(left_actions)
                 .child(div().flex_1())
-                .children(actions)
+                .children(right_actions)
         };
         match self.table_definitions.get(&item_id) {
             Some(TableDefinitionState::Ready {
@@ -7970,40 +8112,81 @@ impl WorkspaceShell {
                         })
                         .unwrap_or(column.ordinal.unwrap_or(u32::MAX) as usize)
                 });
-                let mut actions = Vec::new();
+                let mut left_actions = Vec::new();
+                let mut right_actions = Vec::new();
                 if editing {
-                    actions.push(
-                        Button::new("open-table-definition-ddl", "DDL")
-                            .tone(ButtonTone::Ghost)
-                            .on_click(
-                                cx.listener(|shell, _, _, cx| shell.open_table_designer_ddl(cx)),
+                    let ddl_pending = designer.is_some_and(|designer| designer.pending);
+                    left_actions.push(
+                        div()
+                            .tab_index(0)
+                            .focus(|style| style.bg(colors.hovered_surface))
+                            .on_key_down(cx.listener(|shell, event: &gpui::KeyDownEvent, _, cx| {
+                                if !event.keystroke.modifiers.modified()
+                                    && matches!(event.keystroke.key.as_str(), "enter" | "space")
+                                {
+                                    shell.close_table_designer(cx);
+                                    cx.stop_propagation();
+                                }
+                            }))
+                            .child(
+                                Button::new("edit-table-definition", "Done")
+                                    .tone(ButtonTone::Ghost)
+                                    .on_click(cx.listener(|shell, _, _, cx| {
+                                        shell.close_table_designer(cx)
+                                    })),
+                            )
+                            .into_any_element(),
+                    );
+                    right_actions.push(
+                        div()
+                            .tab_index(0)
+                            .focus(|style| style.bg(colors.hovered_surface))
+                            .on_key_down(cx.listener(
+                                move |shell, event: &gpui::KeyDownEvent, _, cx| {
+                                    if !ddl_pending
+                                        && !event.keystroke.modifiers.modified()
+                                        && matches!(event.keystroke.key.as_str(), "enter" | "space")
+                                    {
+                                        shell.show_table_designer_ddl(cx);
+                                        cx.stop_propagation();
+                                    }
+                                },
+                            ))
+                            .child(
+                                Button::new("open-table-definition-ddl", "DDL")
+                                    .tone(ButtonTone::Ghost)
+                                    .loading(ddl_pending)
+                                    .on_click(cx.listener(|shell, _, _, cx| {
+                                        shell.show_table_designer_ddl(cx)
+                                    })),
+                            )
+                            .into_any_element(),
+                    );
+                } else {
+                    right_actions.push(
+                        div()
+                            .tab_index(0)
+                            .focus(|style| style.bg(colors.hovered_surface))
+                            .on_key_down(cx.listener(
+                                move |shell, event: &gpui::KeyDownEvent, window, cx| {
+                                    if !event.keystroke.modifiers.modified()
+                                        && matches!(event.keystroke.key.as_str(), "enter" | "space")
+                                    {
+                                        shell.open_table_designer(item_id, false, window, cx);
+                                        cx.stop_propagation();
+                                    }
+                                },
+                            ))
+                            .child(
+                                Button::new("edit-table-definition", "Edit")
+                                    .tone(ButtonTone::Ghost)
+                                    .on_click(cx.listener(move |shell, _, window, cx| {
+                                        shell.open_table_designer(item_id, false, window, cx)
+                                    })),
                             )
                             .into_any_element(),
                     );
                 }
-                actions.push(
-                    Button::new(
-                        "edit-table-definition",
-                        if editing { "Done" } else { "Edit" },
-                    )
-                    .tone(ButtonTone::Ghost)
-                    .on_click(cx.listener(move |shell, _, window, cx| {
-                        if editing {
-                            shell.close_table_designer(cx);
-                        } else {
-                            shell.open_table_designer(item_id, false, window, cx);
-                        }
-                    }))
-                    .into_any_element(),
-                );
-                actions.push(
-                    Button::new("add-table-column", "+ Add")
-                        .tone(ButtonTone::Ghost)
-                        .on_click(cx.listener(move |shell, _, window, cx| {
-                            shell.open_table_designer(item_id, true, window, cx)
-                        }))
-                        .into_any_element(),
-                );
                 div()
                     .debug_selector(|| "table-definition-inspector".into())
                     .flex_1()
@@ -8012,7 +8195,7 @@ impl WorkspaceShell {
                     .flex_col()
                     .border_b_1()
                     .border_color(colors.strong_border)
-                    .child(header(actions))
+                    .child(header(left_actions, right_actions))
                     .child(
                         div()
                             .id("table-definition-columns")
@@ -8047,9 +8230,14 @@ impl WorkspaceShell {
                                     .and_then(|designer| designer.selected_column.as_ref())
                                     == Some(&node.id);
                                 let column_id = node.id.clone();
+                                let click_column_id = column_id.clone();
+                                let key_column_id = column_id.clone();
+                                let nullable = designer
+                                    .map_or(metadata.nullable, |designer| designer.nullable)
+                                    != sift_protocol::Nullability::NotNullable;
                                 div()
                                     .id(("table-definition-column", node.ordinal.unwrap_or(0) as usize))
-                                    .h(px(28.))
+                                    .h(px(if selected { 32. } else { 28. }))
                                     .px_3()
                                     .flex_none()
                                     .flex()
@@ -8059,31 +8247,108 @@ impl WorkspaceShell {
                                     .border_color(colors.subtle_border)
                                     .when(selected, |row| row.bg(colors.active_surface))
                                     .when(editing, |row| {
+                                        row.tab_index(0)
+                                            .aria_label(format!("Edit column {}", node.name))
+                                            .focus(|style| style.bg(colors.hovered_surface))
+                                            .on_key_down(cx.listener(
+                                                move |shell, event: &gpui::KeyDownEvent, window, cx| {
+                                                    shell.table_designer_row_key_down(
+                                                        Some(key_column_id.clone()),
+                                                        event,
+                                                        window,
+                                                        cx,
+                                                    )
+                                                },
+                                            ))
+                                    })
+                                    .when(editing && !selected, |row| {
                                         row.hover(|row| row.bg(colors.hovered_surface)).on_click(
-                                            cx.listener(move |shell, _, _, cx| {
-                                                shell.select_table_designer_column(
-                                                    column_id.clone(),
+                                            cx.listener(move |shell, _, window, cx| {
+                                                shell.activate_table_designer_row(
+                                                    Some(click_column_id.clone()),
+                                                    window,
                                                     cx,
                                                 )
                                             }),
                                         )
                                     })
-                                    .child(
+                                    .child(if selected {
+                                        div()
+                                            .min_w_0()
+                                            .flex_1()
+                                            .child(self.table_column_name_input.clone())
+                                            .into_any_element()
+                                    } else {
                                         div()
                                             .min_w_0()
                                             .flex_1()
                                             .truncate()
-                                            .child(node.name.clone()),
-                                    )
-                                    .child(
+                                            .child(node.name.clone())
+                                            .into_any_element()
+                                    })
+                                    .child(if selected {
+                                        div()
+                                            .w(px(82.))
+                                            .flex_none()
+                                            .child(self.table_column_type_input.clone())
+                                            .into_any_element()
+                                    } else {
                                         div()
                                             .w(px(82.))
                                             .truncate()
                                             .text_xs()
                                             .text_color(colors.muted_text)
-                                            .child(type_ref_label(&metadata.type_ref)),
-                                    )
-                                    .child(
+                                            .child(type_ref_label(&metadata.type_ref))
+                                            .into_any_element()
+                                    })
+                                    .child(if selected {
+                                        div()
+                                            .id("table-column-nullable")
+                                            .w(px(52.))
+                                            .h(px(26.))
+                                            .flex_none()
+                                            .flex()
+                                            .items_center()
+                                            .gap_1()
+                                            .track_focus(&self.table_column_nullable_focus)
+                                            .tab_index(0)
+                                            .role(Role::CheckBox)
+                                            .aria_label(if nullable {
+                                                "Nullable, checked"
+                                            } else {
+                                                "Nullable, unchecked"
+                                            })
+                                            .focus(|style| style.bg(colors.hovered_surface))
+                                            .cursor_pointer()
+                                            .on_key_down(cx.listener(
+                                                |shell, event: &gpui::KeyDownEvent, window, cx| {
+                                                    shell.table_nullable_key_down(
+                                                        event, window, cx,
+                                                    )
+                                                },
+                                            ))
+                                            .on_click(cx.listener(|shell, _, _, cx| {
+                                                shell.toggle_table_column_nullability(cx)
+                                            }))
+                                            .child(
+                                                div()
+                                                    .size(px(14.))
+                                                    .flex()
+                                                    .items_center()
+                                                    .justify_center()
+                                                    .rounded_sm()
+                                                    .border_1()
+                                                    .border_color(if nullable {
+                                                        colors.accent
+                                                    } else {
+                                                        colors.strong_border
+                                                    })
+                                                    .children(nullable.then(|| {
+                                                        icon(IconName::Check, colors.accent, 10.)
+                                                    })),
+                                            )
+                                            .into_any_element()
+                                    } else {
                                         div()
                                             .w(px(52.))
                                             .flex_none()
@@ -8095,8 +8360,9 @@ impl WorkspaceShell {
                                                 "Yes"
                                             } else {
                                                 "No"
-                                            }),
-                                    )
+                                            })
+                                            .into_any_element()
+                                    })
                                     .children(editing.then(|| {
                                         div()
                                             .w(px(52.))
@@ -8118,113 +8384,182 @@ impl WorkspaceShell {
                                                     }))
                                             }))
                                     }))
+                            }))
+                            .children(editing.then(|| {
+                                let selected = designer
+                                    .is_some_and(|designer| designer.selected_column.is_none());
+                                let nullable = designer.is_some_and(|designer| {
+                                    designer.nullable
+                                        != sift_protocol::Nullability::NotNullable
+                                });
+                                div()
+                                    .id("add-table-column-row")
+                                    .h(px(if selected { 32. } else { 28. }))
+                                    .px_3()
+                                    .flex_none()
+                                    .flex()
+                                    .items_center()
+                                    .gap_2()
+                                    .border_b_1()
+                                    .border_color(colors.subtle_border)
+                                    .tab_index(0)
+                                    .aria_label("Add column")
+                                    .focus(|style| style.bg(colors.hovered_surface))
+                                    .hover(|row| row.bg(colors.hovered_surface))
+                                    .when(selected, |row| row.bg(colors.active_surface))
+                                    .on_key_down(cx.listener(|shell, event: &gpui::KeyDownEvent, window, cx| {
+                                        shell.table_designer_row_key_down(None, event, window, cx)
+                                    }))
+                                    .when(!selected, |row| {
+                                        row.on_click(cx.listener(|shell, _, window, cx| {
+                                            shell.activate_table_designer_row(None, window, cx)
+                                        }))
+                                    })
+                                    .child(if selected {
+                                        div()
+                                            .min_w_0()
+                                            .flex_1()
+                                            .child(self.table_column_name_input.clone())
+                                            .into_any_element()
+                                    } else {
+                                        div()
+                                            .min_w_0()
+                                            .flex_1()
+                                            .text_color(colors.muted_text)
+                                            .child("+ New column")
+                                            .into_any_element()
+                                    })
+                                    .child(if selected {
+                                        div()
+                                            .w(px(82.))
+                                            .flex_none()
+                                            .child(self.table_column_type_input.clone())
+                                            .into_any_element()
+                                    } else {
+                                        div()
+                                            .w(px(82.))
+                                            .text_xs()
+                                            .text_color(colors.muted_text)
+                                            .child("Type")
+                                            .into_any_element()
+                                    })
+                                    .child(if selected {
+                                        div()
+                                            .id("new-table-column-nullable")
+                                            .w(px(52.))
+                                            .h(px(26.))
+                                            .flex_none()
+                                            .flex()
+                                            .items_center()
+                                            .track_focus(&self.table_column_nullable_focus)
+                                            .tab_index(0)
+                                            .role(Role::CheckBox)
+                                            .aria_label(if nullable {
+                                                "Nullable, checked"
+                                            } else {
+                                                "Nullable, unchecked"
+                                            })
+                                            .focus(|style| style.bg(colors.hovered_surface))
+                                            .cursor_pointer()
+                                            .on_key_down(cx.listener(
+                                                |shell, event: &gpui::KeyDownEvent, window, cx| {
+                                                    shell.table_nullable_key_down(
+                                                        event, window, cx,
+                                                    )
+                                                },
+                                            ))
+                                            .on_click(cx.listener(|shell, _, _, cx| {
+                                                shell.toggle_table_column_nullability(cx)
+                                            }))
+                                            .child(
+                                                div()
+                                                    .size(px(14.))
+                                                    .flex()
+                                                    .items_center()
+                                                    .justify_center()
+                                                    .rounded_sm()
+                                                    .border_1()
+                                                    .border_color(if nullable {
+                                                        colors.accent
+                                                    } else {
+                                                        colors.strong_border
+                                                    })
+                                                    .children(nullable.then(|| {
+                                                        icon(IconName::Check, colors.accent, 10.)
+                                                    })),
+                                            )
+                                            .into_any_element()
+                                    } else {
+                                        div()
+                                            .w(px(52.))
+                                            .text_xs()
+                                            .text_color(colors.muted_text)
+                                            .child("Yes")
+                                            .into_any_element()
+                                    })
+                                    .child(div().w(px(52.)).flex_none())
                             })),
                     )
                     .children(designer.map(|designer| {
-                        let adding = designer.selected_column.is_none();
-                        let nullable =
-                            designer.nullable != sift_protocol::Nullability::NotNullable;
                         let pending = designer.pending;
                         let requires_acknowledgement = designer.plan.as_ref().is_some_and(|plan| {
                             !plan.required_acknowledgements.is_empty()
                         });
                         div()
-                            .id("table-designer-form")
-                            .flex_1()
-                            .min_h_0()
-                            .p_3()
+                            .id("table-designer-status")
+                            .flex_none()
+                            .p_2()
                             .flex()
                             .flex_col()
                             .gap_2()
-                            .overflow_y_scroll()
-                            .child(
-                                div()
-                                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                                    .child(if adding { "New column" } else { "Edit column" }),
-                            )
-                            .child(Field::new(
-                                "NAME",
-                                Some(self.table_column_name_input.focus_handle(cx)),
-                                self.table_column_name_input.clone(),
-                            ))
-                            .child(Field::new(
-                                "TYPE",
-                                Some(self.table_column_type_input.focus_handle(cx)),
-                                self.table_column_type_input.clone(),
-                            ))
-                            .child(
-                                div()
-                                    .id("table-column-nullable")
-                                    .role(Role::CheckBox)
-                                    .aria_label(if nullable {
-                                        "Nullable, checked"
-                                    } else {
-                                        "Nullable, unchecked"
-                                    })
-                                    .flex()
-                                    .items_center()
-                                    .gap_2()
-                                    .cursor_pointer()
-                                    .on_click(cx.listener(|shell, _, _, cx| {
-                                        shell.toggle_table_column_nullability(cx)
-                                    }))
-                                    .child(
-                                        div()
-                                            .size(px(16.))
-                                            .flex()
-                                            .items_center()
-                                            .justify_center()
-                                            .rounded_sm()
-                                            .border_1()
-                                            .border_color(if nullable {
-                                                colors.accent
-                                            } else {
-                                                colors.strong_border
-                                            })
-                                            .children(nullable.then(|| {
-                                                icon(IconName::Check, colors.accent, 11.)
-                                            })),
-                                    )
-                                    .child("Nullable"),
-                            )
                             .children(designer.error.clone().map(ErrorBanner::new))
                             .children(designer.order_dirty.then(|| {
-                                ErrorBanner::new("Column order is included in the DDL tab. Applying it automatically requires a dependency-preserving table rebuild.")
+                                ErrorBanner::new("Column order is included in the DDL view. Applying it automatically requires a dependency-preserving table rebuild.")
                                     .tone(Tone::Warning)
                             }))
-                            .child(
+                            .children((designer.plan.is_some() && !designer.order_dirty).then(|| {
                                 div()
                                     .flex()
                                     .items_center()
                                     .justify_end()
-                                    .gap_2()
                                     .child(
-                                        Button::new("preview-table-change", "Preview DDL")
-                                            .tone(ButtonTone::Neutral)
-                                            .loading(pending)
-                                            .on_click(cx.listener(|shell, _, _, cx| {
-                                                shell.preview_table_change(cx)
-                                            })),
-                                    )
-                                    .children((designer.plan.is_some() && !designer.order_dirty).then(|| {
-                                        Button::new("apply-table-change", "Apply")
-                                            .tone(if requires_acknowledgement {
-                                                ButtonTone::DangerMuted
-                                            } else {
-                                                ButtonTone::Accent
-                                            })
-                                            .loading(pending)
-                                            .on_click(cx.listener(|shell, _, _, cx| {
-                                                shell.apply_table_change(cx)
+                                        div()
+                                            .tab_index(0)
+                                            .focus(|style| style.bg(colors.hovered_surface))
+                                            .on_key_down(cx.listener(move |shell, event: &gpui::KeyDownEvent, _, cx| {
+                                                if !pending
+                                                    && !event.keystroke.modifiers.modified()
+                                                    && matches!(
+                                                        event.keystroke.key.as_str(),
+                                                        "enter" | "space"
+                                                    )
+                                                {
+                                                    shell.apply_table_change(cx);
+                                                    cx.stop_propagation();
+                                                }
                                             }))
-                                    })),
-                            )
+                                            .child(
+                                                Button::new("apply-table-change", "Apply")
+                                                    .tone(if requires_acknowledgement {
+                                                        ButtonTone::DangerMuted
+                                                    } else {
+                                                        ButtonTone::Accent
+                                                    })
+                                                    .loading(pending)
+                                                    .on_click(cx.listener(
+                                                        |shell, _, _, cx| {
+                                                            shell.apply_table_change(cx)
+                                                        },
+                                                    )),
+                                            ),
+                                    )
+                            }))
                     }))
                     .into_any_element()
             }
             Some(TableDefinitionState::Loading { .. }) => div()
                 .flex_none()
-                .child(header(Vec::new()))
+                .child(header(Vec::new(), Vec::new()))
                 .child(
                     div()
                         .px_3()
@@ -8243,7 +8578,7 @@ impl WorkspaceShell {
                     .into_any_element();
                 div()
                     .flex_none()
-                    .child(header(vec![retry]))
+                    .child(header(Vec::new(), vec![retry]))
                     .child(
                         div()
                             .px_3()
@@ -8267,7 +8602,7 @@ impl WorkspaceShell {
                     .into_any_element();
                 div()
                     .flex_none()
-                    .child(header(vec![load]))
+                    .child(header(Vec::new(), vec![load]))
                     .into_any_element()
             }
         }
@@ -12001,7 +12336,7 @@ mod tests {
             shell
                 .table_column_type_input
                 .update(cx, |input, cx| input.set_text("text", cx));
-            shell.preview_table_change(cx);
+            shell.show_table_designer_ddl(cx);
         });
         assert!(matches!(
             receiver.try_recv(),
@@ -12012,7 +12347,6 @@ mod tests {
             }) if preview_item == item_id && name == "nickname"
         ));
         workspace.update_in(&mut cx, |shell, _, cx| {
-            shell.open_table_designer_ddl(cx);
             let pane = shell.panes[shell.active_pane].read(cx);
             let item = pane.active_item().unwrap();
             assert_eq!(item.id, item_id);
