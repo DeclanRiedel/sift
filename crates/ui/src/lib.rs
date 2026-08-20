@@ -8,7 +8,8 @@ mod theme;
 pub use assets::{database_logo, SiftAssets};
 pub use components::{
     icon, keybinding_chords, Badge, Button, ButtonTone, ClickHandler, Clickable, Disableable,
-    ErrorBanner, Field, IconButton, IconName, KeyBinding, SectionLabel, Toggleable, Tone, Tooltip,
+    ErrorBanner, Field, IconButton, IconName, KeyBinding, PaneTab, SectionLabel, Toggleable, Tone,
+    Tooltip,
 };
 pub use text_input::{
     Backspace, Backtab, Copy, Cut, Delete, End, Home, Left, Paste, Right, SelectAll, Tab, TextInput,

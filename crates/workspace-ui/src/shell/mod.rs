@@ -11,7 +11,7 @@ use gpui::{
 use sift_api_types::RoomId;
 use sift_ui::{
     database_logo, icon, ActiveTheme, Badge, Button, ButtonTone, Clickable, Disableable,
-    ErrorBanner, Field, IconButton, IconName, KeyBinding, SectionLabel, TextInput, Theme,
+    ErrorBanner, Field, IconButton, IconName, KeyBinding, PaneTab, SectionLabel, TextInput, Theme,
     ThemeMetrics, Toggleable, Tone, Tooltip,
 };
 
@@ -264,29 +264,16 @@ struct TabDrag {
     index: usize,
     title: SharedString,
     selected: bool,
+    dirty: bool,
 }
 
 impl gpui::Render for TabDrag {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = cx.theme();
-        let colors = theme.colors;
-        div()
-            .h(theme.metrics.tab_height)
-            .min_w(px(110.))
-            .max_w(px(240.))
-            .px_2()
-            .flex()
-            .items_center()
-            .overflow_hidden()
-            .border_1()
-            .border_color(colors.subtle_border)
-            .bg(if self.selected {
-                colors.background
-            } else {
-                colors.toolbar
-            })
-            .text_color(colors.text)
-            .child(div().min_w_0().truncate().child(self.title.clone()))
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        PaneTab::new("dragged-tab")
+            .selected(self.selected)
+            .dirty(self.dirty)
+            .child(div().min_w_0().px_2().truncate().child(self.title.clone()))
+            .render(window, cx)
     }
 }
 
@@ -1491,18 +1478,10 @@ impl gpui::Render for Pane {
                                             let selected = index == self.active_item;
                                             let item_id = item.id;
                                             let tab_debug = format!("tab-{item_id}");
-                                            div()
-                                                .id(("tab", item.id as usize))
+                                            PaneTab::new(("tab", item.id as usize))
                                                 .debug_selector(move || tab_debug.clone())
-                                                .relative()
-                                                .flex_none()
-                                                .flex()
-                                                .items_center()
-                                                .h_full()
-                                                .min_w(px(110.))
-                                                .max_w(px(240.))
-                                                .border_r_1()
-                                                .border_color(colors.subtle_border)
+                                                .selected(selected)
+                                                .dirty(item.dirty)
                                                 .when(can_drag_tabs, |tab| {
                                                     tab.on_drag(
                                                         TabDrag {
@@ -1511,14 +1490,20 @@ impl gpui::Render for Pane {
                                                             index,
                                                             title: item.title.clone().into(),
                                                             selected,
+                                                            dirty: item.dirty,
                                                         },
                                                         |tab, _, _, cx| cx.new(|_| tab.clone()),
                                                     )
                                                 })
                                                 .drag_over::<TabDrag>(move |tab, dragged, _, cx| {
                                                     let mut tab = tab
-                                                        .bg(cx.theme().colors.accent_muted)
-                                                        .border_color(cx.theme().colors.accent)
+                                                        .bg(cx
+                                                            .theme()
+                                                            .colors
+                                                            .drop_target_background)
+                                                        .border_color(
+                                                            cx.theme().colors.drop_target_border,
+                                                        )
                                                         .border_0();
                                                     if dragged.pane_id != pane_id
                                                         || index < dragged.index
@@ -1536,10 +1521,6 @@ impl gpui::Render for Pane {
                                                         )
                                                     },
                                                 ))
-                                                .when(selected, |tab| {
-                                                    tab.bg(colors.background)
-                                                        .text_color(colors.text)
-                                                })
                                                 .child(
                                                     div()
                                                         .id(("tab-label", item.id as usize))
@@ -1550,9 +1531,6 @@ impl gpui::Render for Pane {
                                                         .h_full()
                                                         .pl_2()
                                                         .pr_1()
-                                                        .when(!selected, |label| {
-                                                            label.text_color(colors.muted_text)
-                                                        })
                                                         .hover(|label| {
                                                             label.text_color(colors.text)
                                                         })
@@ -1824,9 +1802,9 @@ impl gpui::Render for Pane {
                             PaneDropTarget::Tab(_) => unreachable!(),
                         })
                         .absolute()
-                        .bg(colors.accent_muted)
+                        .bg(colors.drop_target_background)
                         .border_2()
-                        .border_color(colors.accent)
+                        .border_color(colors.drop_target_border)
                         .group_drag_over::<TabDrag>("pane-drop", |preview| preview.visible())
                         .when(target == PaneDropTarget::Center, |preview| {
                             preview.inset_0()

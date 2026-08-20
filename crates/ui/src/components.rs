@@ -1,6 +1,6 @@
 use gpui::{
-    div, prelude::*, px, svg, AnyElement, App, Context, CursorStyle, ElementId, FocusHandle, Hsla,
-    IntoElement, MouseButton, RenderOnce, Role, SharedString, Window,
+    div, prelude::*, px, svg, AnyElement, App, Context, CursorStyle, Div, ElementId, FocusHandle,
+    Hsla, IntoElement, MouseButton, RenderOnce, Role, SharedString, Stateful, Window,
 };
 
 use crate::ActiveTheme;
@@ -25,6 +25,91 @@ pub trait Toggleable: Sized {
 /// Capability for controls that can stop accepting input.
 pub trait Disableable: Sized {
     fn disabled(self, disabled: bool) -> Self;
+}
+
+/// Shared tab chrome used by pane tab bars and their drag proxies. Feature
+/// views supply content/actions; this component owns geometry and state colors.
+#[derive(IntoElement)]
+pub struct PaneTab {
+    div: Stateful<Div>,
+    selected: bool,
+    dirty: bool,
+    children: Vec<AnyElement>,
+}
+
+impl PaneTab {
+    pub fn new(id: impl Into<ElementId>) -> Self {
+        Self {
+            div: div().id(id),
+            selected: false,
+            dirty: false,
+            children: Vec::new(),
+        }
+    }
+
+    pub fn debug_selector(mut self, selector: impl Fn() -> String + 'static) -> Self {
+        self.div = self.div.debug_selector(selector);
+        self
+    }
+
+    pub fn selected(mut self, selected: bool) -> Self {
+        self.selected = selected;
+        self
+    }
+
+    pub fn dirty(mut self, dirty: bool) -> Self {
+        self.dirty = dirty;
+        self
+    }
+}
+
+impl gpui::InteractiveElement for PaneTab {
+    fn interactivity(&mut self) -> &mut gpui::Interactivity {
+        self.div.interactivity()
+    }
+}
+
+impl gpui::StatefulInteractiveElement for PaneTab {}
+
+impl ParentElement for PaneTab {
+    fn extend(&mut self, elements: impl IntoIterator<Item = AnyElement>) {
+        self.children.extend(elements);
+    }
+}
+
+impl RenderOnce for PaneTab {
+    fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
+        let colors = cx.theme().colors;
+        self.div
+            .relative()
+            .flex_none()
+            .flex()
+            .items_center()
+            .h(cx.theme().metrics.tab_height)
+            .min_w(px(110.))
+            .max_w(px(240.))
+            .border_r_1()
+            .border_color(colors.subtle_border)
+            .bg(if self.selected {
+                colors.background
+            } else {
+                colors.toolbar
+            })
+            .text_color(if self.selected {
+                colors.text
+            } else {
+                colors.muted_text
+            })
+            .children(self.dirty.then(|| {
+                div()
+                    .ml_2()
+                    .size(px(6.))
+                    .flex_none()
+                    .rounded_full()
+                    .bg(colors.accent)
+            }))
+            .children(self.children)
+    }
 }
 
 /// Semantic intent for a labeled control. Feature views select intent; the
