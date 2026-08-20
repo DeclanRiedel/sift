@@ -141,6 +141,28 @@ pub struct PanePresentation {
     pub active_item: usize,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PaneAxis {
+    Horizontal,
+    Vertical,
+}
+
+/// Recursive, client-local pane geometry. Pane contents remain in
+/// `WorkspacePresentation::panes`; leaves reference them by stable id.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum PaneLayoutPresentation {
+    Pane {
+        pane_id: u64,
+    },
+    Split {
+        axis: PaneAxis,
+        children: Vec<PaneLayoutPresentation>,
+        flexes: Vec<f32>,
+    },
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct WorkspacePresentation {
     pub left_dock: DockPresentation,
@@ -151,8 +173,10 @@ pub struct WorkspacePresentation {
     #[serde(default)]
     pub bottom_tool: BottomTool,
     pub panes: Vec<PanePresentation>,
-    /// Client-local horizontal pane proportions. They are presentation only:
-    /// shared workspaces and sessions never observe them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pane_layout: Option<PaneLayoutPresentation>,
+    /// Legacy flat horizontal proportions, retained only to migrate older
+    /// presentation files into `pane_layout`.
     #[serde(default)]
     pub pane_flexes: Vec<f32>,
     pub active_pane: usize,
@@ -219,6 +243,7 @@ impl Default for PresentationState {
                     }],
                     active_item: 0,
                 }],
+                pane_layout: Some(PaneLayoutPresentation::Pane { pane_id: 1 }),
                 pane_flexes: vec![1.0],
                 active_pane: 0,
                 workspace_id: None,
@@ -389,11 +414,13 @@ mod tests {
             .unwrap();
         workspace.remove("left_panel");
         workspace.remove("bottom_tool");
+        workspace.remove("pane_layout");
         workspace.remove("pane_flexes");
 
         let decoded = PresentationState::decode(&serde_json::to_vec(&json).unwrap());
         assert_eq!(decoded.workspace.left_panel, LeftPanel::Connections);
         assert_eq!(decoded.workspace.bottom_tool, BottomTool::Console);
+        assert!(decoded.workspace.pane_layout.is_none());
         assert!(decoded.workspace.pane_flexes.is_empty());
         assert!(!decoded.legacy_vim_mode_default);
     }
