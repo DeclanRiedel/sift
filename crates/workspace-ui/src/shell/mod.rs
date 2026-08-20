@@ -57,6 +57,9 @@ const PANE_RESIZE_HANDLE_SIZE: f32 = 7.0;
 const PANE_MIN_WIDTH: f32 = 180.0;
 const PANE_MIN_HEIGHT: f32 = 120.0;
 const PANE_DROP_TARGET_FRACTION: f32 = 0.2;
+// Includes the tab-strip height so the top workspace edge remains reachable
+// from pane content while tab-bar hits still take precedence.
+const ROOT_PANE_DROP_TARGET_SIZE: f32 = 48.0;
 const RESULT_RESIZE_HANDLE_SIZE: f32 = 7.0;
 const RESULT_MIN_EXTENT: f32 = 140.0;
 const EDITOR_MIN_EXTENT: f32 = 160.0;
@@ -520,6 +523,9 @@ pub enum PaneEvent {
     /// This pane owns the currently visible drop ghost. The workspace tracks
     /// one owner so pointer-leave cleanup stays O(1) with many splits.
     DragPreviewActivated,
+    /// The pointer entered a tab strip; tab insertion must supersede every
+    /// structural pane target.
+    TabBarDragEntered,
     /// The pane should be removed (its close control was used, or it emptied).
     CloseRequested,
     /// A tab-local close control was used; the workspace owns dirty handling.
@@ -688,6 +694,7 @@ pub struct Pane {
     /// The workspace-edge target supersedes this pane's local target. Keeping
     /// the local state warm makes leaving the outer edge transition instantly.
     suppress_tab_drag_preview: bool,
+    tab_bar_drag_hovered: bool,
     /// Dirty-close confirmation belongs to its tab and is rendered inline.
     pending_close_item: Option<u64>,
 }
@@ -772,6 +779,7 @@ impl Pane {
             tab_drop_target: None,
             tab_drag_preview_bounds: None,
             suppress_tab_drag_preview: false,
+            tab_bar_drag_hovered: false,
             pending_close_item: None,
         }
     }
@@ -1170,6 +1178,26 @@ impl Pane {
 
     /// Drop directly on a tab. Like Zed, targets before the source insert on
     /// their left and targets after the source insert on their right.
+    fn tab_bar_drag_hover(
+        &mut self,
+        event: &gpui::DragMoveEvent<TabDrag>,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !event.bounds.contains(&event.event.position) {
+            return;
+        }
+        let had_structural_preview =
+            self.tab_drop_target.take().is_some() || self.tab_drag_preview_bounds.take().is_some();
+        if !self.tab_bar_drag_hovered {
+            self.tab_bar_drag_hovered = true;
+            cx.emit(PaneEvent::TabBarDragEntered);
+        }
+        if had_structural_preview {
+            cx.notify();
+        }
+    }
+
     fn finish_tab_bar_drag(
         &mut self,
         index: usize,
@@ -1180,6 +1208,7 @@ impl Pane {
         self.tab_drop_target = None;
         self.tab_drag_preview_bounds = None;
         self.suppress_tab_drag_preview = false;
+        self.tab_bar_drag_hovered = false;
         let insertion_index =
             if drag.pane_id == self.id && index > drag.index && index < self.items.len() {
                 index + 1
@@ -1209,6 +1238,7 @@ impl Pane {
         if !event.bounds.contains(&event.event.position) {
             return;
         }
+        self.tab_bar_drag_hovered = false;
         let relative_x = event.event.position.x - event.bounds.left();
         let relative_y = event.event.position.y - event.bounds.top();
         let width = event.bounds.size.width;
@@ -1251,6 +1281,7 @@ impl Pane {
             .unwrap_or(PaneDropTarget::Center);
         self.tab_drag_preview_bounds = None;
         self.suppress_tab_drag_preview = false;
+        self.tab_bar_drag_hovered = false;
         let creates_pane = matches!(
             target,
             PaneDropTarget::Above
@@ -1409,6 +1440,7 @@ impl gpui::Render for Pane {
             .children(has_items.then(|| {
                 div()
                     .debug_selector(|| "pane-tab-bar".into())
+                    .on_drag_move::<TabDrag>(cx.listener(Self::tab_bar_drag_hover))
                     .h(theme.metrics.tab_height)
                     .flex_none()
                     .flex()
@@ -4403,6 +4435,9 @@ impl WorkspaceShell {
                     }
                 }
             }
+            PaneEvent::TabBarDragEntered => {
+                self.set_root_tab_drop_target(None, cx);
+            }
             PaneEvent::CloseRequested => {
                 self.active_pane = index;
                 self.close_pane_at(index, window, cx);
@@ -4444,7 +4479,12 @@ impl WorkspaceShell {
                 let emitter = emitter.clone();
                 let item_id = *item_id;
                 let target = *target;
-                let root_target = self.root_tab_drop_target.take();
+                let root_target = if matches!(target, PaneDropTarget::Tab(_)) {
+                    self.set_root_tab_drop_target(None, cx);
+                    None
+                } else {
+                    self.root_tab_drop_target.take()
+                };
                 cx.defer_in(window, move |shell, window, cx| {
                     if let Some(root_target) = root_target {
                         shell.move_item_to_root(item_id, root_target, window, cx);
@@ -4488,6 +4528,8 @@ impl WorkspaceShell {
         cx: &mut Context<Self>,
     ) {
         let Some(mut target_index) = self.panes.iter().position(|pane| pane == &target_pane) else {
+            self.clear_tab_drag_previews(cx);
+            cx.notify();
             return;
         };
         let Some(source_index) = self
@@ -4495,11 +4537,15 @@ impl WorkspaceShell {
             .iter()
             .position(|pane| pane.read(cx).contains_item(item_id))
         else {
+            self.clear_tab_drag_previews(cx);
+            cx.notify();
             return;
         };
         let source_pane = self.panes[source_index].clone();
         let Some(transfer) = self.panes[source_index].update(cx, |pane, _| pane.take_item(item_id))
         else {
+            self.clear_tab_drag_previews(cx);
+            cx.notify();
             return;
         };
         let collapse_before_split = source_pane != target_pane
@@ -4514,6 +4560,8 @@ impl WorkspaceShell {
         if collapse_before_split {
             self.remove_empty_source_pane(&source_pane, cx);
             let Some(index) = self.panes.iter().position(|pane| pane == &target_pane) else {
+                self.clear_tab_drag_previews(cx);
+                cx.notify();
                 return;
             };
             target_index = index;
@@ -4595,10 +4643,14 @@ impl WorkspaceShell {
             .iter()
             .position(|pane| pane.read(cx).contains_item(item_id))
         else {
+            self.clear_tab_drag_previews(cx);
+            cx.notify();
             return;
         };
         let source_pane = self.panes[source_index].clone();
         let Some(transfer) = source_pane.update(cx, |pane, _| pane.take_item(item_id)) else {
+            self.clear_tab_drag_previews(cx);
+            cx.notify();
             return;
         };
         if source_pane.read(cx).items.is_empty() && self.panes.len() == 1 {
@@ -4674,14 +4726,32 @@ impl WorkspaceShell {
 
     fn clear_tab_drag_previews(&mut self, cx: &mut Context<Self>) {
         self.active_tab_drop_pane = None;
-        self.root_tab_drop_target = None;
+        self.set_root_tab_drop_target(None, cx);
         for pane in &self.panes {
             pane.update(cx, |pane, _| {
                 pane.tab_drop_target = None;
                 pane.tab_drag_preview_bounds = None;
                 pane.suppress_tab_drag_preview = false;
+                pane.tab_bar_drag_hovered = false;
             });
         }
+    }
+
+    fn set_root_tab_drop_target(&mut self, target: Option<PaneDropTarget>, cx: &mut Context<Self>) {
+        if self.root_tab_drop_target == target {
+            return;
+        }
+        self.root_tab_drop_target = target;
+        let suppress = target.is_some();
+        for pane in &self.panes {
+            if pane.read(cx).suppress_tab_drag_preview != suppress {
+                pane.update(cx, |pane, cx| {
+                    pane.suppress_tab_drag_preview = suppress;
+                    cx.notify();
+                });
+            }
+        }
+        cx.notify();
     }
 
     fn track_tab_drag(
@@ -4723,7 +4793,7 @@ impl WorkspaceShell {
             let relative_y = event.event.position.y - event.bounds.top();
             let width = event.bounds.size.width;
             let height = event.bounds.size.height;
-            let edge = width.min(height) * PANE_DROP_TARGET_FRACTION;
+            let edge = px(ROOT_PANE_DROP_TARGET_SIZE);
             let distances = [
                 (relative_y, PaneDropTarget::Above),
                 (width - relative_x, PaneDropTarget::After),
@@ -4736,19 +4806,7 @@ impl WorkspaceShell {
                 .filter(|(distance, _)| *distance < edge)
                 .map(|(_, target)| target)
         };
-        if self.root_tab_drop_target != target {
-            self.root_tab_drop_target = target;
-            let suppress = target.is_some();
-            for pane in &self.panes {
-                if pane.read(cx).suppress_tab_drag_preview != suppress {
-                    pane.update(cx, |pane, cx| {
-                        pane.suppress_tab_drag_preview = suppress;
-                        cx.notify();
-                    });
-                }
-            }
-            cx.notify();
-        }
+        self.set_root_tab_drop_target(target, cx);
     }
 
     fn finish_workspace_tab_drag(&mut self, _: &TabDrag, _: &mut Window, cx: &mut Context<Self>) {
@@ -10992,6 +11050,71 @@ mod tests {
             assert_eq!(shell.active_pane, 1);
             // The moved editor left its originating pane entirely.
             assert!(shell.panes[0].read(cx).editor(1).is_none());
+        });
+    }
+
+    #[gpui::test]
+    fn tab_bar_drop_joins_pane_and_clears_structural_preview(cx: &mut TestAppContext) {
+        let mut state = PresentationState::default();
+        state.workspace.panes[0].items.push(ItemPresentation {
+            id: 2,
+            kind: ItemKind::Query,
+            title: "two.sql".into(),
+            dirty: false,
+            source: None,
+        });
+        let window = shell_with_state(state, cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        workspace.update_in(&mut cx, |shell, window, cx| {
+            let source = shell.panes[0].clone();
+            shell.move_item_to_target(source.clone(), 1, PaneDropTarget::After, window, cx);
+        });
+        cx.run_until_parked();
+
+        let source = cx.debug_bounds("tab-2").expect("left tab");
+        let target_body = cx.debug_bounds("pane-body-3").expect("right pane body");
+        let target_tab = cx.debug_bounds("tab-1").expect("right tab");
+        let start = source.center();
+        cx.simulate_mouse_down(start, MouseButton::Left, Modifiers::default());
+        cx.simulate_mouse_move(
+            point(start.x + px(6.), start.y + px(20.)),
+            MouseButton::Left,
+            Modifiers::default(),
+        );
+        let inner_edge = point(target_body.left() + px(8.), target_body.center().y);
+        cx.simulate_mouse_move(inner_edge, MouseButton::Left, Modifiers::default());
+        cx.run_until_parked();
+        let local_preview = cx
+            .debug_bounds("pane-drop-preview-before")
+            .expect("local quarter-width preview");
+        let half_target = target_body.size.width / 2.0;
+        assert!(local_preview.size.width <= half_target);
+        assert!(local_preview.size.width >= half_target - px(1.0));
+        assert!(cx.debug_bounds("root-pane-drop-preview-before").is_none());
+
+        let outer_edge = point(target_body.right() - px(8.), target_body.center().y);
+        cx.simulate_mouse_move(outer_edge, MouseButton::Left, Modifiers::default());
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("root-pane-drop-preview-after").is_some());
+
+        cx.simulate_mouse_move(target_tab.center(), MouseButton::Left, Modifiers::default());
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("root-pane-drop-preview-after").is_none());
+        assert!(cx.debug_bounds("pane-drop-preview-after").is_none());
+        workspace.read_with(&cx, |shell, _| {
+            assert_eq!(shell.root_tab_drop_target, None);
+        });
+
+        cx.simulate_mouse_up(target_tab.center(), MouseButton::Left, Modifiers::default());
+        cx.run_until_parked();
+        workspace.read_with(&cx, |shell, cx| {
+            assert_eq!(shell.panes.len(), 1);
+            let pane = shell.panes[0].read(cx);
+            assert!(pane.contains_item(1));
+            assert!(pane.contains_item(2));
+            assert!(pane.tab_drag_preview_bounds.is_none());
+            assert_eq!(shell.root_tab_drop_target, None);
         });
     }
 
