@@ -518,6 +518,9 @@ pub struct Toast {
 pub enum PaneEvent {
     /// The pane was interacted with and should become the active pane.
     FocusRequested,
+    /// This pane owns the currently visible drop ghost. The workspace tracks
+    /// one owner so pointer-leave cleanup stays O(1) with many splits.
+    DragPreviewActivated,
     /// The pane should be removed (its close control was used, or it emptied).
     CloseRequested,
     /// A tab-local close control was used; the workspace owns dirty handling.
@@ -1230,6 +1233,7 @@ impl Pane {
             PaneDropTarget::Below
         };
         let drag = event.drag(cx);
+        let activating = self.tab_drag_preview.is_none();
         if self.tab_drop_target != Some(target)
             || self.tab_drag_preview.as_ref() != Some(drag)
             || self.tab_drag_preview_bounds != Some(event.bounds)
@@ -1237,6 +1241,9 @@ impl Pane {
             self.tab_drop_target = Some(target);
             self.tab_drag_preview = Some(drag.clone());
             self.tab_drag_preview_bounds = Some(event.bounds);
+            if activating {
+                cx.emit(PaneEvent::DragPreviewActivated);
+            }
         }
     }
 
@@ -1675,7 +1682,6 @@ impl gpui::Render for Pane {
                     .id(("pane-body", pane_id as usize))
                     .debug_selector(move || format!("pane-body-{pane_id}"))
                     .relative()
-                    .group("pane-drop")
                     .flex_1()
                     .min_h_0()
                     .flex()
@@ -2027,6 +2033,7 @@ pub struct WorkspaceShell {
     settings_item: Option<u64>,
     window_presentation: WindowPresentation,
     panes: Vec<Entity<Pane>>,
+    active_tab_drop_pane: Option<Entity<Pane>>,
     workspace_sessions: HashMap<String, WorkspaceSession>,
     workspace_presentations: HashMap<String, WorkspacePresentation>,
     pane_layout: PaneLayoutPresentation,
@@ -2308,6 +2315,7 @@ impl WorkspaceShell {
             settings_item: None,
             window_presentation,
             panes,
+            active_tab_drop_pane: None,
             workspace_sessions: HashMap::new(),
             workspace_presentations,
             pane_layout,
@@ -4462,6 +4470,18 @@ impl WorkspaceShell {
                 }
                 cx.notify();
             }
+            PaneEvent::DragPreviewActivated => {
+                if let Some(previous) = self.active_tab_drop_pane.replace(emitter.clone()) {
+                    if previous != *emitter {
+                        previous.update(cx, |pane, cx| {
+                            pane.tab_drop_target = None;
+                            pane.tab_drag_preview = None;
+                            pane.tab_drag_preview_bounds = None;
+                            cx.notify();
+                        });
+                    }
+                }
+            }
             PaneEvent::CloseRequested => {
                 self.active_pane = index;
                 self.close_pane_at(index, window, cx);
@@ -4653,13 +4673,38 @@ impl WorkspaceShell {
         }
     }
 
-    fn clear_tab_drag_previews(&self, cx: &mut Context<Self>) {
+    fn clear_tab_drag_previews(&mut self, cx: &mut Context<Self>) {
+        self.active_tab_drop_pane = None;
         for pane in &self.panes {
             pane.update(cx, |pane, _| {
                 pane.tab_drop_target = None;
                 pane.tab_drag_preview = None;
                 pane.tab_drag_preview_bounds = None;
             });
+        }
+    }
+
+    fn track_tab_drag(
+        &mut self,
+        event: &gpui::DragMoveEvent<TabDrag>,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(pane) = self.active_tab_drop_pane.clone() else {
+            return;
+        };
+        let stale = pane
+            .read(cx)
+            .tab_drag_preview_bounds
+            .is_some_and(|bounds| !bounds.contains(&event.event.position));
+        if stale {
+            pane.update(cx, |pane, cx| {
+                pane.tab_drop_target = None;
+                pane.tab_drag_preview = None;
+                pane.tab_drag_preview_bounds = None;
+                cx.notify();
+            });
+            self.active_tab_drop_pane = None;
         }
     }
 
@@ -9189,7 +9234,6 @@ impl gpui::Render for WorkspaceShell {
         let pane_layout = self.pane_layout.clone();
         let pane_elements =
             self.render_pane_layout(&pane_layout, Vec::new(), colors.subtle_border, cx);
-        let drag_preview_panes = self.panes.clone();
         div()
             .id("sift-shell")
             .key_context("SiftWorkspace")
@@ -9214,22 +9258,7 @@ impl gpui::Render for WorkspaceShell {
             .on_action(cx.listener(Self::toggle_left_dock))
             .on_action(cx.listener(Self::toggle_right_dock))
             .on_action(cx.listener(Self::toggle_bottom_dock))
-            .on_drag_move::<TabDrag>(move |event, _, cx| {
-                for pane in &drag_preview_panes {
-                    let stale = pane
-                        .read(cx)
-                        .tab_drag_preview_bounds
-                        .is_some_and(|bounds| !bounds.contains(&event.event.position));
-                    if stale {
-                        pane.update(cx, |pane, cx| {
-                            pane.tab_drop_target = None;
-                            pane.tab_drag_preview = None;
-                            pane.tab_drag_preview_bounds = None;
-                            cx.notify();
-                        });
-                    }
-                }
-            })
+            .on_drag_move::<TabDrag>(cx.listener(Self::track_tab_drag))
             .on_drop::<TabDrag>(cx.listener(Self::finish_workspace_tab_drag))
             .relative()
             .flex()
