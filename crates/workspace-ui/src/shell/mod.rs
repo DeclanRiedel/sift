@@ -3,7 +3,7 @@ use std::ops::Range;
 use std::sync::Arc;
 
 use gpui::{
-    actions, deferred, div, img, prelude::*, px, uniform_list, App, Context, CursorStyle,
+    actions, deferred, div, img, prelude::*, px, uniform_list, App, Bounds, Context, CursorStyle,
     DefiniteLength, Div, Entity, EventEmitter, FocusHandle, Focusable, Hsla, IntoElement,
     MouseButton, PathPromptOptions, Pixels, ResizeEdge, Role, ScrollHandle, ScrollStrategy,
     SharedString, Subscription, Task, UniformListScrollHandle, Window, WindowBounds,
@@ -683,6 +683,10 @@ pub struct Pane {
     /// Lightweight metadata for rendering a structural preview of the pane
     /// that an edge drop would create.
     tab_drag_preview: Option<TabDrag>,
+    /// Last body bounds associated with the preview. The workspace-level drag
+    /// listener uses this to clear the ghost immediately after the pointer
+    /// leaves the pane, without invalidating every pane on every move.
+    tab_drag_preview_bounds: Option<Bounds<Pixels>>,
     /// Dirty-close confirmation belongs to its tab and is rendered inline.
     pending_close_item: Option<u64>,
 }
@@ -766,6 +770,7 @@ impl Pane {
             result_resize_frame_pending: false,
             tab_drop_target: None,
             tab_drag_preview: None,
+            tab_drag_preview_bounds: None,
             pending_close_item: None,
         }
     }
@@ -1173,6 +1178,7 @@ impl Pane {
     ) {
         self.tab_drop_target = None;
         self.tab_drag_preview = None;
+        self.tab_drag_preview_bounds = None;
         let insertion_index =
             if drag.pane_id == self.id && index > drag.index && index < self.items.len() {
                 index + 1
@@ -1224,9 +1230,13 @@ impl Pane {
             PaneDropTarget::Below
         };
         let drag = event.drag(cx);
-        if self.tab_drop_target != Some(target) || self.tab_drag_preview.as_ref() != Some(drag) {
+        if self.tab_drop_target != Some(target)
+            || self.tab_drag_preview.as_ref() != Some(drag)
+            || self.tab_drag_preview_bounds != Some(event.bounds)
+        {
             self.tab_drop_target = Some(target);
             self.tab_drag_preview = Some(drag.clone());
+            self.tab_drag_preview_bounds = Some(event.bounds);
         }
     }
 
@@ -1238,6 +1248,7 @@ impl Pane {
             .take()
             .unwrap_or(PaneDropTarget::Center);
         self.tab_drag_preview = None;
+        self.tab_drag_preview_bounds = None;
         let creates_pane = matches!(
             target,
             PaneDropTarget::Above
@@ -1345,10 +1356,15 @@ impl gpui::Render for Pane {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
         let colors = theme.colors;
+        let mut pane_preview_tint = colors.muted_text;
+        pane_preview_tint.a = 0.14;
+        let mut pane_preview_border = colors.muted_text;
+        pane_preview_border.a = 0.62;
         let is_focused = self.active_focus_handle(cx).is_focused(window)
             || self.focus_handle.contains_focused(window, cx);
         let active = self.active_item().cloned();
         let tab_drag_preview = self.tab_drag_preview.clone();
+        let has_tab_drag_preview = tab_drag_preview.is_some();
         let database_notice = active.as_ref().and_then(|item| {
             let ItemSource::DatabaseObject(_) = item.source.as_ref()?;
             let state = self.database_item_states.get(&item.id)?.clone();
@@ -1830,7 +1846,7 @@ impl gpui::Render for Pane {
                 let target = self.tab_drop_target.unwrap_or(PaneDropTarget::Center);
                 body.child(
                     div()
-                        .invisible()
+                        .when(!has_tab_drag_preview, |preview| preview.invisible())
                         .debug_selector(move || match target {
                             PaneDropTarget::Center => "pane-drop-preview-center".into(),
                             PaneDropTarget::Above => "pane-drop-preview-above".into(),
@@ -1840,10 +1856,9 @@ impl gpui::Render for Pane {
                             PaneDropTarget::Tab(_) => unreachable!(),
                         })
                         .absolute()
-                        .bg(colors.drop_target_background)
+                        .bg(pane_preview_tint)
                         .border_2()
-                        .border_color(colors.drop_target_border)
-                        .group_drag_over::<TabDrag>("pane-drop", |preview| preview.visible())
+                        .border_color(pane_preview_border)
                         .when(target == PaneDropTarget::Center, |preview| {
                             preview.inset_0()
                         })
@@ -1890,6 +1905,7 @@ impl gpui::Render for Pane {
                                     };
                                     div()
                                         .debug_selector(|| "ghost-pane-chrome".into())
+                                        .relative()
                                         .size_full()
                                         .flex()
                                         .flex_col()
@@ -1950,6 +1966,7 @@ impl gpui::Render for Pane {
                                                         })),
                                                 ),
                                         )
+                                        .child(div().absolute().inset_0().bg(pane_preview_tint))
                                 }),
                         ),
                 )
@@ -4641,6 +4658,7 @@ impl WorkspaceShell {
             pane.update(cx, |pane, _| {
                 pane.tab_drop_target = None;
                 pane.tab_drag_preview = None;
+                pane.tab_drag_preview_bounds = None;
             });
         }
     }
@@ -9171,6 +9189,7 @@ impl gpui::Render for WorkspaceShell {
         let pane_layout = self.pane_layout.clone();
         let pane_elements =
             self.render_pane_layout(&pane_layout, Vec::new(), colors.subtle_border, cx);
+        let drag_preview_panes = self.panes.clone();
         div()
             .id("sift-shell")
             .key_context("SiftWorkspace")
@@ -9195,6 +9214,22 @@ impl gpui::Render for WorkspaceShell {
             .on_action(cx.listener(Self::toggle_left_dock))
             .on_action(cx.listener(Self::toggle_right_dock))
             .on_action(cx.listener(Self::toggle_bottom_dock))
+            .on_drag_move::<TabDrag>(move |event, _, cx| {
+                for pane in &drag_preview_panes {
+                    let stale = pane
+                        .read(cx)
+                        .tab_drag_preview_bounds
+                        .is_some_and(|bounds| !bounds.contains(&event.event.position));
+                    if stale {
+                        pane.update(cx, |pane, cx| {
+                            pane.tab_drop_target = None;
+                            pane.tab_drag_preview = None;
+                            pane.tab_drag_preview_bounds = None;
+                            cx.notify();
+                        });
+                    }
+                }
+            })
             .on_drop::<TabDrag>(cx.listener(Self::finish_workspace_tab_drag))
             .relative()
             .flex()
@@ -10737,6 +10772,23 @@ mod tests {
                 .expect("structural pane preview state");
             assert_eq!(ghost.title.as_ref(), "query.sql");
         });
+        let ghost_pane = cx
+            .debug_bounds("ghost-pane-chrome")
+            .expect("visible structural pane ghost");
+        assert_eq!(ghost_pane.left(), preview.left() + px(2.));
+        assert_eq!(ghost_pane.top(), preview.top() + px(2.));
+        assert_eq!(ghost_pane.size.width, preview.size.width - px(4.));
+        assert_eq!(ghost_pane.size.height, preview.size.height - px(4.));
+        assert!(cx.debug_bounds("ghost-pane-tab").is_some());
+
+        cx.simulate_mouse_move(start, MouseButton::Left, Modifiers::default());
+        cx.run_until_parked();
+        workspace.read_with(&cx, |shell, cx| {
+            assert!(shell.panes[0].read(cx).tab_drag_preview.is_none());
+        });
+        assert!(cx.debug_bounds("ghost-pane-chrome").is_none());
+        cx.simulate_mouse_move(drop, MouseButton::Left, Modifiers::default());
+        cx.run_until_parked();
 
         cx.simulate_mouse_up(drop, MouseButton::Left, Modifiers::default());
         cx.run_until_parked();
