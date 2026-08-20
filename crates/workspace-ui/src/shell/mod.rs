@@ -56,6 +56,7 @@ const DOCK_RESIZE_HANDLE_SIZE: f32 = 7.0;
 const PANE_RESIZE_HANDLE_SIZE: f32 = 7.0;
 const PANE_MIN_WIDTH: f32 = 180.0;
 const PANE_MIN_HEIGHT: f32 = 120.0;
+const PANE_DROP_TARGET_FRACTION: f32 = 0.2;
 const RESULT_RESIZE_HANDLE_SIZE: f32 = 7.0;
 const RESULT_MIN_EXTENT: f32 = 140.0;
 const EDITOR_MIN_EXTENT: f32 = 160.0;
@@ -1170,6 +1171,8 @@ impl Pane {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.tab_drop_target = None;
+        self.tab_drag_preview = None;
         let insertion_index =
             if drag.pane_id == self.id && index > drag.index && index < self.items.len() {
                 index + 1
@@ -1203,7 +1206,7 @@ impl Pane {
         let relative_y = event.event.position.y - event.bounds.top();
         let width = event.bounds.size.width;
         let height = event.bounds.size.height;
-        let edge = width.min(height) * 0.25;
+        let edge = width.min(height) * PANE_DROP_TARGET_FRACTION;
         let left = relative_x;
         let right = width - relative_x;
         let top = relative_y;
@@ -1224,7 +1227,6 @@ impl Pane {
         if self.tab_drop_target != Some(target) || self.tab_drag_preview.as_ref() != Some(drag) {
             self.tab_drop_target = Some(target);
             self.tab_drag_preview = Some(drag.clone());
-            cx.notify();
         }
     }
 
@@ -4604,6 +4606,7 @@ impl WorkspaceShell {
         if !preserve_empty_source {
             self.remove_empty_source_pane(&source_pane, cx);
         }
+        self.clear_tab_drag_previews(cx);
         self.focus_active_pane(window, cx);
         self.persist(cx);
         cx.notify();
@@ -4631,6 +4634,19 @@ impl WorkspaceShell {
         } else {
             self.active_pane = self.active_pane.min(self.panes.len() - 1);
         }
+    }
+
+    fn clear_tab_drag_previews(&self, cx: &mut Context<Self>) {
+        for pane in &self.panes {
+            pane.update(cx, |pane, _| {
+                pane.tab_drop_target = None;
+                pane.tab_drag_preview = None;
+            });
+        }
+    }
+
+    fn finish_workspace_tab_drag(&mut self, _: &TabDrag, _: &mut Window, cx: &mut Context<Self>) {
+        self.clear_tab_drag_previews(cx);
     }
 
     /// Remove a pane and keep the workspace non-empty. The final pane is never
@@ -5302,12 +5318,7 @@ impl WorkspaceShell {
 
     fn dismiss_modal(&mut self, _: &DismissModal, window: &mut Window, cx: &mut Context<Self>) {
         if cx.stop_active_drag(window) {
-            for pane in &self.panes {
-                pane.update(cx, |pane, _| {
-                    pane.tab_drop_target = None;
-                    pane.tab_drag_preview = None;
-                });
-            }
+            self.clear_tab_drag_previews(cx);
             cx.notify();
             return;
         }
@@ -9184,6 +9195,7 @@ impl gpui::Render for WorkspaceShell {
             .on_action(cx.listener(Self::toggle_left_dock))
             .on_action(cx.listener(Self::toggle_right_dock))
             .on_action(cx.listener(Self::toggle_bottom_dock))
+            .on_drop::<TabDrag>(cx.listener(Self::finish_workspace_tab_drag))
             .relative()
             .flex()
             .flex_col()
@@ -10746,6 +10758,10 @@ mod tests {
                     ..
                 }
             ));
+            assert!(shell.panes.iter().all(|pane| {
+                let pane = pane.read(cx);
+                pane.tab_drop_target.is_none() && pane.tab_drag_preview.is_none()
+            }));
         });
     }
 
