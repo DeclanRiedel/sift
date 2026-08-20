@@ -8097,26 +8097,26 @@ impl WorkspaceShell {
                                                 "No"
                                             }),
                                     )
-                                    .children((editing && selected).then(|| {
+                                    .children(editing.then(|| {
                                         div()
                                             .w(px(52.))
                                             .flex_none()
                                             .flex()
                                             .gap_1()
-                                            .child(
+                                            .children(selected.then(|| {
                                                 Button::new("move-table-column-up", "↑")
                                                     .tone(ButtonTone::Ghost)
                                                     .on_click(cx.listener(|shell, _, _, cx| {
                                                         shell.move_table_designer_column(-1, cx)
-                                                    })),
-                                            )
-                                            .child(
+                                                    }))
+                                            }))
+                                            .children(selected.then(|| {
                                                 Button::new("move-table-column-down", "↓")
                                                     .tone(ButtonTone::Ghost)
                                                     .on_click(cx.listener(|shell, _, _, cx| {
                                                         shell.move_table_designer_column(1, cx)
-                                                    })),
-                                            )
+                                                    }))
+                                            }))
                                     }))
                             })),
                     )
