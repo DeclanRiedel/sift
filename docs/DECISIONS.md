@@ -1478,3 +1478,56 @@ accessibility, focus routing, theme coverage, restoration, and failure
 isolation. Built-in commands share one definition for menus and the command
 palette. Docks and pane items use typed identities rather than display strings;
 display labels are never dispatch keys.
+
+---
+
+## ADR-042 — Recursive Client-Local Pane Layout
+
+**Context.** Phase M initially represented panes as one flat horizontal vector
+plus one parallel vector of flex values. That model can only append columns. It
+cannot express an editor split above or below another pane, mixed horizontal
+and vertical groups, local resize ownership, or deterministic collapse after a
+pane is removed. Tab dragging then has to mutate pane order and sizing as
+unrelated arrays, which makes previews and focus transfer fragile.
+
+Zed's pane group is the interaction reference: a member is either a pane or an
+axis containing members; splitting along the current axis inserts a sibling,
+splitting across it nests a new axis, and removing the penultimate child
+collapses the redundant axis. Sift needs those presentation semantics without
+importing Zed application crates or moving any product state into the client.
+
+**Decision.** Desktop presentation stores pane contents separately from one
+recursive layout tree. Leaf nodes contain stable pane ids. Split nodes contain
+an axis (`horizontal` or `vertical`), at least two child nodes, and one positive
+finite flex value per child. Every pane id occurs exactly once. Invalid,
+duplicate, missing, non-finite, or degenerate layout data is repaired to one
+horizontal group containing the known panes in presentation order.
+
+A directional split targets one leaf. Left/right use a horizontal axis;
+up/down use a vertical axis. When the parent axis matches, the new leaf is
+inserted adjacent to the target and sibling flexes are normalized. Otherwise
+the target leaf is replaced by a two-child nested axis. Removing a leaf
+collapses every one-child ancestor. The final leaf is never removed. Resize
+handles belong to axis boundaries and change only their adjacent child flexes,
+subject to the existing minimum pane extent.
+
+Drag hover uses four directional edge zones plus a center zone. Edge depth is
+the smaller pane dimension multiplied by a bounded presentation setting;
+`0.20` is the initial value. Corners choose the nearest edge. The preview is a
+typed, ephemeral drag overlay covering the exact half that a split would
+occupy. Tab-bar and pane-body targets remain separate. Escape cancels the GPUI
+drag without mutating layout. Drops defer workspace-tree mutation until event
+dispatch completes, then move the complete item runtime bundle atomically and
+focus the destination.
+
+`WorkspacePresentation` gains an optional recursive layout. Existing version-1
+files without it migrate from `panes` plus `pane_flexes`; no server or protocol
+migration is involved. New snapshots write the tree and omit legacy flex data.
+This remains OS-account-local presentation state under ADR-040.
+
+**Consequences.** Panes can form arbitrary mixed split layouts and restore
+deterministically. Preview geometry, resize ownership, focus navigation, and
+pane removal derive from one structure instead of parallel vectors. The client
+must add tree validation, migration, recursive rendering, directional tests,
+and collapse/resize coverage. Protocol, room, result, schema, session, and CRDT
+contracts remain unchanged.
