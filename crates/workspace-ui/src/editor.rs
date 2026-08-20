@@ -809,7 +809,9 @@ impl QueryEditor {
         self
     }
 
-    pub fn replace_read_only_text(&mut self, text: &str, cx: &mut Context<Self>) {
+    /// Replace the complete document from its owning surface without emitting
+    /// a collaborative edit. Used for read-only feeds and generated SQL views.
+    pub fn replace_text_from_owner(&mut self, text: &str, cx: &mut Context<Self>) {
         if self.document.text() == text {
             return;
         }
@@ -2268,7 +2270,7 @@ mod tests {
         editor.update_in(&mut cx, |editor, window, cx| {
             editor.paste(&Paste, window, cx);
             assert_eq!(editor.document().text(), "first");
-            editor.replace_read_only_text("second", cx);
+            editor.replace_text_from_owner("second", cx);
             assert_eq!(editor.document().text(), "second");
         });
     }

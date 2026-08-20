@@ -368,6 +368,9 @@ struct TabTransfer {
     editor: Entity<QueryEditor>,
     results: Option<Entity<ResultsView>>,
     clean_text: String,
+    database_item_view: Option<DatabaseItemView>,
+    database_query_text: Option<String>,
+    database_ddl_text: Option<String>,
 }
 
 fn optional_u32_field(
@@ -660,6 +663,12 @@ enum DatabaseItemState {
     Failed(String),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DatabaseItemView {
+    Query,
+    Ddl,
+}
+
 #[derive(Debug, Clone)]
 struct PendingDatabaseExecution {
     item_id: u64,
@@ -899,6 +908,9 @@ pub struct Pane {
     /// The Data/Messages/Explain/History surface owned by each query item.
     results: HashMap<u64, Entity<ResultsView>>,
     database_item_states: HashMap<u64, DatabaseItemState>,
+    database_item_views: HashMap<u64, DatabaseItemView>,
+    database_query_texts: HashMap<u64, String>,
+    database_ddl_texts: HashMap<u64, String>,
     /// Transient wrapper sizes while dragging. Keeping these on the pane avoids
     /// invalidating and repainting the result grid for every pointer event.
     live_result_extents: HashMap<u64, f32>,
@@ -938,6 +950,7 @@ impl Pane {
         let mut editor_subscriptions = HashMap::new();
         let mut results = HashMap::new();
         let mut database_item_states = HashMap::new();
+        let mut database_item_views = HashMap::new();
         for item in items
             .iter_mut()
             .filter(|item| ItemRegistry::definition(&item.kind).runtime.is_editor())
@@ -989,6 +1002,7 @@ impl Pane {
             }
             if matches!(item.source, Some(ItemSource::DatabaseObject(_))) {
                 database_item_states.insert(id, DatabaseItemState::Offline);
+                database_item_views.insert(id, DatabaseItemView::Query);
             }
         }
         Self {
@@ -1004,6 +1018,9 @@ impl Pane {
             editor_subscriptions,
             results,
             database_item_states,
+            database_item_views,
+            database_query_texts: HashMap::new(),
+            database_ddl_texts: HashMap::new(),
             live_result_extents: HashMap::new(),
             result_resize_frame_pending: false,
             tab_drop_target: None,
@@ -1197,6 +1214,50 @@ impl Pane {
         }
     }
 
+    fn show_database_item_view(
+        &mut self,
+        item_id: u64,
+        view: DatabaseItemView,
+        generated_ddl: Option<String>,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if self.database_source(item_id).is_none() {
+            return false;
+        }
+        let Some(editor) = self.editors.get(&item_id).cloned() else {
+            return false;
+        };
+        let current_view = self
+            .database_item_views
+            .get(&item_id)
+            .copied()
+            .unwrap_or(DatabaseItemView::Query);
+        let current_text = editor.read(cx).document().text().to_owned();
+        match current_view {
+            DatabaseItemView::Query => {
+                self.database_query_texts.insert(item_id, current_text);
+            }
+            DatabaseItemView::Ddl => {
+                self.database_ddl_texts.insert(item_id, current_text);
+            }
+        }
+        if let Some(ddl) = generated_ddl {
+            self.database_ddl_texts.insert(item_id, ddl);
+        }
+        let replacement = match view {
+            DatabaseItemView::Query => self.database_query_texts.get(&item_id),
+            DatabaseItemView::Ddl => self.database_ddl_texts.get(&item_id),
+        }
+        .cloned()
+        .unwrap_or_default();
+        editor.update(cx, |editor, cx| {
+            editor.replace_text_from_owner(&replacement, cx)
+        });
+        self.database_item_views.insert(item_id, view);
+        cx.notify();
+        true
+    }
+
     fn mark_database_item_refreshed(&mut self, item_id: u64) {
         let refreshed_at = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -1273,6 +1334,9 @@ impl Pane {
         self.clean_documents.remove(&item_id);
         self.editor_subscriptions.remove(&item_id);
         self.live_result_extents.remove(&item_id);
+        self.database_item_views.remove(&item_id);
+        self.database_query_texts.remove(&item_id);
+        self.database_ddl_texts.remove(&item_id);
         if self.pending_close_item == Some(item_id) {
             self.pending_close_item = None;
         }
@@ -1378,6 +1442,8 @@ impl Pane {
         ) {
             self.database_item_states
                 .insert(item_id, DatabaseItemState::Offline);
+            self.database_item_views
+                .insert(item_id, DatabaseItemView::Query);
         }
         cx.notify();
     }
@@ -1601,6 +1667,9 @@ impl Pane {
         let editor = self.editors.remove(&item_id)?;
         let results = self.results.remove(&item_id);
         let clean_text = self.clean_documents.remove(&item_id).unwrap_or_default();
+        let database_item_view = self.database_item_views.remove(&item_id);
+        let database_query_text = self.database_query_texts.remove(&item_id);
+        let database_ddl_text = self.database_ddl_texts.remove(&item_id);
         self.forget_item(item_id);
         self.active_item = self.active_item.min(self.items.len().saturating_sub(1));
         Some(TabTransfer {
@@ -1608,6 +1677,9 @@ impl Pane {
             editor,
             results,
             clean_text,
+            database_item_view,
+            database_query_text,
+            database_ddl_text,
         })
     }
 
@@ -1628,6 +1700,15 @@ impl Pane {
         );
         self.clean_documents.insert(item_id, transfer.clean_text);
         self.editors.insert(item_id, editor);
+        if let Some(view) = transfer.database_item_view {
+            self.database_item_views.insert(item_id, view);
+        }
+        if let Some(text) = transfer.database_query_text {
+            self.database_query_texts.insert(item_id, text);
+        }
+        if let Some(text) = transfer.database_ddl_text {
+            self.database_ddl_texts.insert(item_id, text);
+        }
         if let Some(results) = transfer.results {
             self.results.insert(item_id, results);
         }
@@ -2052,6 +2133,65 @@ impl gpui::Render for Pane {
                     {
                         match (self.editors.get(&item.id), self.results.get(&item.id)) {
                             (Some(editor), Some(result)) => {
+                                let database_view = self
+                                    .database_item_views
+                                    .get(&item.id)
+                                    .copied()
+                                    .unwrap_or(DatabaseItemView::Query);
+                                let database_view_switch =
+                                    self.database_ddl_texts.contains_key(&item.id).then(|| {
+                                        let query_selected =
+                                            database_view == DatabaseItemView::Query;
+                                        let item_id = item.id;
+                                        div()
+                                            .h(px(28.))
+                                            .flex_none()
+                                            .flex()
+                                            .items_center()
+                                            .gap_1()
+                                            .px_2()
+                                            .border_b_1()
+                                            .border_color(colors.subtle_border)
+                                            .bg(colors.toolbar)
+                                            .child(
+                                                Button::new(
+                                                    ("database-query-view", item_id as usize),
+                                                    "Query",
+                                                )
+                                                .tone(if query_selected {
+                                                    ButtonTone::Neutral
+                                                } else {
+                                                    ButtonTone::Ghost
+                                                })
+                                                .on_click(cx.listener(move |pane, _, _, cx| {
+                                                    pane.show_database_item_view(
+                                                        item_id,
+                                                        DatabaseItemView::Query,
+                                                        None,
+                                                        cx,
+                                                    );
+                                                })),
+                                            )
+                                            .child(
+                                                Button::new(
+                                                    ("database-ddl-view", item_id as usize),
+                                                    "DDL",
+                                                )
+                                                .tone(if query_selected {
+                                                    ButtonTone::Ghost
+                                                } else {
+                                                    ButtonTone::Neutral
+                                                })
+                                                .on_click(cx.listener(move |pane, _, _, cx| {
+                                                    pane.show_database_item_view(
+                                                        item_id,
+                                                        DatabaseItemView::Ddl,
+                                                        None,
+                                                        cx,
+                                                    );
+                                                })),
+                                            )
+                                    });
                                 let placement = result.read(cx).placement();
                                 let extent = self
                                     .live_result_extents
@@ -2140,7 +2280,7 @@ impl gpui::Render for Pane {
                                         )
                                         .into_any_element(),
                                 };
-                                body.child(split)
+                                body.children(database_view_switch).child(split)
                             }
                             _ => body.child(
                                 div()
@@ -4319,39 +4459,24 @@ impl WorkspaceShell {
         Some((format!("{}.{} DDL.sql", source.schema, source.object), ddl))
     }
 
-    fn open_table_designer_ddl(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some((title, ddl)) = self.table_designer_ddl(cx) else {
+    fn open_table_designer_ddl(&mut self, cx: &mut Context<Self>) {
+        let Some((_, ddl)) = self.table_designer_ddl(cx) else {
             return;
         };
-        let item_id = self.next_id;
-        self.next_id = self.next_id.saturating_add(1);
-        let keymap = if self.vim_mode_default() {
-            EditorKeymap::Vim
-        } else {
-            EditorKeymap::Standard
+        let Some(item_id) = self
+            .table_designer
+            .as_ref()
+            .map(|designer| designer.item_id)
+        else {
+            return;
         };
-        let editor = cx.new(|cx| {
-            QueryEditor::new(QueryDocument::with_random_peer(&ddl), cx).with_keymap(keymap)
-        });
-        let results = cx.new(ResultsView::new);
-        if let Some(pane) = self.panes.get(self.active_pane) {
-            pane.update(cx, |pane, cx| {
-                pane.open_query(
-                    ItemPresentation {
-                        id: item_id,
-                        kind: ItemKind::Query,
-                        title,
-                        dirty: false,
-                        source: None,
-                    },
-                    editor,
-                    results,
-                    cx,
-                );
-            });
+        for pane in &self.panes {
+            if pane.update(cx, |pane, cx| {
+                pane.show_database_item_view(item_id, DatabaseItemView::Ddl, Some(ddl.clone()), cx)
+            }) {
+                break;
+            }
         }
-        self.focus_active_pane(window, cx);
-        self.persist(cx);
         cx.notify();
     }
 
@@ -5081,7 +5206,7 @@ impl WorkspaceShell {
                 };
                 item.title.clone_from(&count);
                 if let Some(editor) = pane.editors.get(&item.id) {
-                    editor.update(cx, |editor, cx| editor.replace_read_only_text(&text, cx));
+                    editor.update(cx, |editor, cx| editor.replace_text_from_owner(&text, cx));
                 }
             });
         }
@@ -7844,9 +7969,9 @@ impl WorkspaceShell {
                     actions.push(
                         Button::new("open-table-definition-ddl", "DDL")
                             .tone(ButtonTone::Ghost)
-                            .on_click(cx.listener(|shell, _, window, cx| {
-                                shell.open_table_designer_ddl(window, cx)
-                            }))
+                            .on_click(
+                                cx.listener(|shell, _, _, cx| shell.open_table_designer_ddl(cx)),
+                            )
                             .into_any_element(),
                     );
                 }
@@ -11880,11 +12005,20 @@ mod tests {
                 mutation: sift_protocol::CatalogDiagramMutation::AddColumn { name, .. },
             }) if preview_item == item_id && name == "nickname"
         ));
-        workspace.update_in(&mut cx, |shell, window, cx| {
-            shell.open_table_designer_ddl(window, cx);
+        workspace.update_in(&mut cx, |shell, _, cx| {
+            shell.open_table_designer_ddl(cx);
             let pane = shell.panes[shell.active_pane].read(cx);
             let item = pane.active_item().unwrap();
-            assert_eq!(item.title, "lab.people DDL.sql");
+            assert_eq!(item.id, item_id);
+            assert_eq!(item.title, "lab.people");
+            assert_eq!(
+                pane.database_item_views.get(&item.id),
+                Some(&DatabaseItemView::Ddl)
+            );
+            assert!(pane
+                .items
+                .iter()
+                .all(|item| item.title != "lab.people DDL.sql"));
             let ddl = pane.editor(item.id).unwrap().read(cx).document().text();
             assert!(ddl.contains("CREATE TABLE \"lab\".\"people\""));
             assert!(ddl.contains("\"nickname\" text"));
