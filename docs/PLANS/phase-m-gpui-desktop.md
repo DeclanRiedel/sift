@@ -412,14 +412,17 @@ ADR amendment instead of burying a second UI toolkit behind an abstraction.
 
 ### M3 — daily-driver SQL vertical slice
 
-- [~] Implement the SQL query item, selections, statement targeting, undo/redo,
+- [x] Implement the SQL query item, selections, statement targeting, undo/redo,
       clipboard, find, and server-backed Loro document replica. **Landed:**
       `QueryDocument` (Loro `TextReplica`-backed buffer, byte-offset selections
       with sticky goal column, edit + undo/redo, quote/comment-aware statement
       targeting, case-insensitive find) and the multi-line `QueryEditor` view
       (custom element, `EntityInputHandler` text/IME, `SiftEditor` keymap),
-      hosted per query item in each pane. **Remaining:** wiring the replica to
-      the room WebSocket for live collaboration (currently a local replica).
+      hosted per query item in each pane. Room-owned tabs now persist only
+      stable instance/room/document references, restore from server snapshots,
+      emit native Loro updates to a reconnecting SDK `RoomReplica`, apply peer
+      commits, and become clean only after durable ACK. Room navigation can
+      create and open these documents without storing SQL client-side.
 - [ ] Integrate completion, diagnostics, formatting, quick fixes, usages, and
       semantic revision cancellation.
 - [x] Execute selection/document, stream status, cancel, and distinguish
@@ -439,10 +442,10 @@ ADR amendment instead of burying a second UI toolkit behind an abstraction.
       resizing/reordering, selection, copy, paging, resume, and bounded prefetch.
       **Landed:** `uniform_list`-virtualized grid, typed cell rendering
       (null/number/bool/text/temporal/binary/structured), header type badges,
-      cell selection + copy, horizontal scroll, incremental WebSocket page
-      application, one-page ACK backpressure, spill resume, and a 10,000-row
-      retained-grid cap. **Remaining:** column resize/reorder and explicit
-      navigation for rows beyond the retained window.
+      cell selection + copy, independently resizable columns, horizontal scroll,
+      incremental WebSocket page application, one-page ACK backpressure, spill
+      resume, and a 10,000-row retained-grid cap. **Remaining:** column reorder
+      and explicit navigation for rows beyond the retained window.
 - [x] Add query-owned Data/Messages/Explain/History tabs plus pin/promote.
 - [ ] Restore query and result references without persisting result data.
 - [ ] Meet measured typing, first-result, scroll, and memory budgets on large

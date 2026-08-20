@@ -358,6 +358,39 @@ CREATE INDEX IF NOT EXISTS audit_events_object_idx
   ON lab.audit_events (object_type, object_id, occurred_at DESC);
 CREATE INDEX IF NOT EXISTS audit_events_payload_idx ON lab.audit_events USING gin (payload);
 
+CREATE TABLE IF NOT EXISTS lab.large (
+  id bigint PRIMARY KEY,
+  label text NOT NULL,
+  category text NOT NULL,
+  amount numeric(14, 2) NOT NULL,
+  active boolean NOT NULL,
+  payload jsonb NOT NULL,
+  created_at timestamptz NOT NULL
+);
+INSERT INTO lab.large (id, label, category, amount, active, payload, created_at)
+SELECT
+  row_id,
+  'Large demo row ' || lpad(row_id::text, 5, '0'),
+  (ARRAY['alpha', 'beta', 'gamma', 'delta'])[((row_id - 1) % 4) + 1],
+  round((row_id * 17.29)::numeric, 2),
+  row_id % 7 <> 0,
+  jsonb_build_object(
+    'sequence', row_id,
+    'bucket', row_id % 100,
+    'fixture', 'lab.large'
+  ),
+  timestamptz '2024-01-01 00:00:00+00' + row_id * interval '1 minute'
+FROM generate_series(1, 10000) AS ids(row_id)
+ON CONFLICT (id) DO UPDATE SET
+  label = EXCLUDED.label,
+  category = EXCLUDED.category,
+  amount = EXCLUDED.amount,
+  active = EXCLUDED.active,
+  payload = EXCLUDED.payload,
+  created_at = EXCLUDED.created_at;
+DELETE FROM lab.large WHERE id < 1 OR id > 10000;
+CREATE INDEX IF NOT EXISTS large_category_idx ON lab.large (category, id);
+
 CREATE OR REPLACE VIEW lab.people_directory AS
 SELECT
   people.id,
@@ -427,6 +460,7 @@ $$;
 
 COMMENT ON SCHEMA lab IS 'Deterministic Sift desktop demo schema';
 COMMENT ON TABLE lab.audit_events IS 'High-row-count table for grid paging and filtering tests';
+COMMENT ON TABLE lab.large IS 'Exactly 10,000 deterministic rows for result-grid stress testing';
 SQL
 
 printf '%s\n' "$pgport"

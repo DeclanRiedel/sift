@@ -131,8 +131,8 @@ surfaces, then admin/platform. Within P0, the connection experience comes first.
 ### Rooms & collaboration — presence, shared docs
 
 - [~] `rooms`, presence stream — read into nav; Inspector shows participants (M2)
-- [ ] Room WS (`attach`, `attach_with_presence`, `sync_document`, `submit_update`, `update_presence`, `pump`, `heartbeat`) — live Loro collab for the editor + presence cursors (M3)
-- [ ] `documents`, `create_document`, `update_document_snapshot`, `delete_document` — document management (M3/M5)
+- [~] Room WS (`attach`, `attach_with_presence`, `sync_document`, `submit_update`, `update_presence`, `pump`, `heartbeat`) — live Loro editor sync, durable ACKs, reconnect, and presence are wired; presence cursors and one shared room transport remain (M3)
+- [~] `documents`, `create_document`, `update_document_snapshot`, `delete_document` — list/create/open are wired; rename/reorder/delete UI remains (M3/M5)
 - [ ] `create_room`, `delete_room`, `bind_room_connection`, `unbind_room_connection` — room management (M5)
 - [ ] `room_members`, `add_room_member`, `remove_room_member`, `join_room`, `leave_room` — membership (M5)
 - [ ] `room_results`, `room_result`, `room_result_pages` — shared result references (M5)
@@ -201,6 +201,9 @@ surfaces, then admin/platform. Within P0, the connection experience comes first.
 
 ### Connection profiles & credentials — connection editor
 
+- [ ] Personal/team connection vaults, masked version history, rotation, and
+  explicit team grants — [design](collaborative-connection-vaults.md); personal
+  foundation in M4, team collaboration in M5
 - [~] `upsert_connection_profile`, `delete_connection_profile` — create and
   Save & Connect are available in the Connections dock; edit/delete remain for
   the full profile editor (M4)

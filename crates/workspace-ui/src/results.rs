@@ -7,9 +7,9 @@
 use std::ops::Range;
 
 use gpui::{
-    actions, canvas, div, prelude::*, px, uniform_list, App, ClipboardItem, Context, Div,
-    FocusHandle, Focusable, IntoElement, MouseButton, Pixels, ScrollStrategy, ShapedLine,
-    SharedString, Stateful, TextAlign, TextRun, UniformListScrollHandle, Window,
+    actions, canvas, div, prelude::*, px, uniform_list, App, ClipboardItem, Context, CursorStyle,
+    Div, DragMoveEvent, FocusHandle, Focusable, IntoElement, MouseButton, Pixels, ScrollStrategy,
+    ShapedLine, SharedString, Stateful, TextAlign, TextRun, UniformListScrollHandle, Window,
 };
 use sift_protocol::{
     ColumnMetadata, DriverWarning, ExecuteResponse, Nullability, Page, Row, TypeRef, Value,
@@ -17,6 +17,9 @@ use sift_protocol::{
 use sift_ui::{ActiveTheme, Badge, Clickable, IconButton, IconName, ThemeColors};
 
 const MIN_COLUMN_WIDTH: f32 = 144.0;
+const DEFAULT_COLUMN_WIDTH: f32 = 184.0;
+const MAX_COLUMN_WIDTH: f32 = 960.0;
+const COLUMN_RESIZE_HANDLE_WIDTH: f32 = 7.0;
 pub(crate) const ROW_NUMBER_WIDTH: f32 = 46.0;
 pub(crate) const ROW_HEIGHT: f32 = 24.0;
 const HEADER_HEIGHT: f32 = 40.0;
@@ -81,6 +84,11 @@ enum GridSelection {
     Row(usize),
     Column(usize),
     All,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ColumnResizeDrag {
+    column: usize,
 }
 
 impl GridSelection {
@@ -341,6 +349,7 @@ pub struct ResultsView {
     /// for every visible row during scroll and selection paints.
     rendered_columns: Vec<CachedColumnRender>,
     rendered_rows: Vec<Vec<CachedCellRender>>,
+    column_widths: Vec<f32>,
     tab: ResultTab,
     selected: Option<GridSelection>,
     row_scroll_handle: UniformListScrollHandle,
@@ -358,6 +367,7 @@ impl ResultsView {
             state: ResultState::Idle,
             rendered_columns: Vec::new(),
             rendered_rows: Vec::new(),
+            column_widths: Vec::new(),
             tab: ResultTab::Data,
             selected: None,
             row_scroll_handle: UniformListScrollHandle::new(),
@@ -449,6 +459,7 @@ impl ResultsView {
                 .collect(),
             _ => Vec::new(),
         };
+        self.column_widths = vec![DEFAULT_COLUMN_WIDTH; self.rendered_columns.len()];
         self.state = state;
         self.stream_result_seen = false;
         self.selected = None;
@@ -490,6 +501,7 @@ impl ResultsView {
                             nullable: matches!(column.nullable, Nullability::Nullable),
                         })
                         .collect();
+                    self.column_widths = vec![DEFAULT_COLUMN_WIDTH; self.rendered_columns.len()];
                 }
                 cx.notify();
                 false
@@ -562,19 +574,24 @@ impl ResultsView {
     }
 
     fn select_cell(&mut self, row: usize, column: usize, cx: &mut Context<Self>) {
-        self.set_selection(GridSelection::Cell { row, column }, cx);
+        self.toggle_selection(GridSelection::Cell { row, column }, cx);
     }
 
     fn select_row(&mut self, row: usize, cx: &mut Context<Self>) {
-        self.set_selection(GridSelection::Row(row), cx);
+        self.toggle_selection(GridSelection::Row(row), cx);
     }
 
     fn select_column(&mut self, column: usize, cx: &mut Context<Self>) {
-        self.set_selection(GridSelection::Column(column), cx);
+        self.toggle_selection(GridSelection::Column(column), cx);
     }
 
     fn select_all(&mut self, cx: &mut Context<Self>) {
-        self.set_selection(GridSelection::All, cx);
+        self.toggle_selection(GridSelection::All, cx);
+    }
+
+    fn toggle_selection(&mut self, selection: GridSelection, cx: &mut Context<Self>) {
+        self.selected = (self.selected != Some(selection)).then_some(selection);
+        cx.notify();
     }
 
     fn set_selection(&mut self, selection: GridSelection, cx: &mut Context<Self>) {
@@ -582,6 +599,30 @@ impl ResultsView {
             self.selected = Some(selection);
             cx.notify();
         }
+    }
+
+    fn set_column_width(&mut self, column: usize, width: f32, cx: &mut Context<Self>) {
+        let Some(current) = self.column_widths.get_mut(column) else {
+            return;
+        };
+        let width = width.clamp(MIN_COLUMN_WIDTH, MAX_COLUMN_WIDTH).round();
+        if *current != width {
+            *current = width;
+            cx.notify();
+        }
+    }
+
+    fn resize_column(
+        &mut self,
+        event: &DragMoveEvent<ColumnResizeDrag>,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let column = event.drag(cx).column;
+        let pointer_x: f32 = (event.event.position.x - event.bounds.left()).into();
+        let left_edge =
+            ROW_NUMBER_WIDTH + self.column_widths.iter().take(column).copied().sum::<f32>();
+        self.set_column_width(column, pointer_x - left_edge, cx);
     }
 
     fn move_selection(&mut self, row_delta: isize, column_delta: isize, cx: &mut Context<Self>) {
@@ -909,54 +950,91 @@ impl ResultsView {
                 .child(self.state.status_label())
                 .into_any_element();
         }
-        let grid_min_width =
-            px(ROW_NUMBER_WIDTH + MIN_COLUMN_WIDTH * self.rendered_columns.len() as f32);
-        let header =
-            div()
-                .debug_selector(|| "result-header".into())
-                .flex()
-                .h(px(HEADER_HEIGHT))
-                .flex_none()
-                .w_full()
-                .min_w(grid_min_width)
-                .border_b_1()
-                .border_color(colors.subtle_border)
-                .bg(colors.toolbar)
-                .child(
-                    div()
-                        .id("result-select-all")
-                        .role(gpui::Role::Button)
-                        .aria_label("Select all result cells")
-                        .w(px(ROW_NUMBER_WIDTH))
-                        .h_full()
-                        .flex()
-                        .items_center()
-                        .justify_end()
-                        .pr_2()
-                        .border_r_1()
-                        .border_color(colors.subtle_border)
-                        .text_xs()
-                        .text_color(colors.disabled_text)
-                        .when(self.selected == Some(GridSelection::All), |header| {
-                            header.bg(colors.selected_surface)
-                        })
-                        .on_mouse_down(
-                            MouseButton::Left,
-                            cx.listener(|view, _, window, cx| {
-                                view.focus_handle.focus(window, cx);
-                                view.select_all(cx);
-                            }),
-                        )
-                        .child("#"),
-                )
-                .children(self.rendered_columns.iter().enumerate().map(
-                    |(column_index, column)| {
+        let grid_min_width = px(ROW_NUMBER_WIDTH + self.column_widths.iter().copied().sum::<f32>());
+        let mut resize_right = ROW_NUMBER_WIDTH;
+        let resize_handles = self
+            .column_widths
+            .iter()
+            .copied()
+            .enumerate()
+            .map(|(column_index, width)| {
+                resize_right += width;
+                div()
+                    .id(("resize-result-column", column_index))
+                    .debug_selector(move || format!("resize-result-column-{column_index}"))
+                    .absolute()
+                    .left(px(resize_right - COLUMN_RESIZE_HANDLE_WIDTH))
+                    .top_0()
+                    .h_full()
+                    .w(px(COLUMN_RESIZE_HANDLE_WIDTH))
+                    .cursor(CursorStyle::ResizeLeftRight)
+                    .block_mouse_except_scroll()
+                    .on_drag(
+                        ColumnResizeDrag {
+                            column: column_index,
+                        },
+                        |_, _, _, cx| cx.new(|_| gpui::Empty),
+                    )
+            })
+            .collect::<Vec<_>>();
+        let header = div()
+            .debug_selector(|| "result-header".into())
+            .on_drag_move::<ColumnResizeDrag>(cx.listener(Self::resize_column))
+            .relative()
+            .flex()
+            .h(px(HEADER_HEIGHT))
+            .flex_none()
+            .w_full()
+            .min_w(grid_min_width)
+            .border_b_1()
+            .border_color(colors.subtle_border)
+            .bg(colors.toolbar)
+            .child(
+                div()
+                    .id("result-select-all")
+                    .role(gpui::Role::Button)
+                    .aria_label("Select all result cells")
+                    .flex_none()
+                    .w(px(ROW_NUMBER_WIDTH))
+                    .h_full()
+                    .flex()
+                    .items_center()
+                    .justify_end()
+                    .pr_2()
+                    .border_r_1()
+                    .border_color(colors.subtle_border)
+                    .text_xs()
+                    .text_color(colors.disabled_text)
+                    .when(self.selected == Some(GridSelection::All), |header| {
+                        header.bg(colors.selected_surface)
+                    })
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|view, _, window, cx| {
+                            view.focus_handle.focus(window, cx);
+                            view.select_all(cx);
+                        }),
+                    )
+                    .child("#"),
+            )
+            .children(
+                self.rendered_columns
+                    .iter()
+                    .enumerate()
+                    .map(|(column_index, column)| {
+                        let width = self
+                            .column_widths
+                            .get(column_index)
+                            .copied()
+                            .unwrap_or(DEFAULT_COLUMN_WIDTH);
                         div()
                             .id(("result-column", column_index))
+                            .debug_selector(move || format!("result-column-{column_index}"))
+                            .relative()
                             .role(gpui::Role::Button)
                             .aria_label(format!("Select column {}", column.name))
-                            .flex_1()
-                            .min_w(px(MIN_COLUMN_WIDTH))
+                            .flex_none()
+                            .w(px(width))
                             .px_2()
                             .flex()
                             .flex_col()
@@ -995,8 +1073,9 @@ impl ResultsView {
                                         if column.nullable { "?" } else { "" }
                                     )),
                             )
-                    },
-                ));
+                    }),
+            )
+            .children(resize_handles);
 
         let row_count = data.rows.len();
         let grid_scroll_handle = self.grid_scroll_handle.clone();
@@ -1011,6 +1090,7 @@ impl ResultsView {
                     return Vec::new();
                 }
                 let column_count = view.rendered_columns.len();
+                let column_widths = view.column_widths.clone();
                 let selected = view.selected;
                 range
                     .map(|row_index| {
@@ -1043,8 +1123,11 @@ impl ResultsView {
                                 };
                                 div()
                                     .id(("cell", row_index * column_count + column_index))
-                                    .flex_1()
-                                    .min_w(px(MIN_COLUMN_WIDTH))
+                                    .flex_none()
+                                    .w(px(column_widths
+                                        .get(column_index)
+                                        .copied()
+                                        .unwrap_or(DEFAULT_COLUMN_WIDTH)))
                                     .h(px(ROW_HEIGHT))
                                     .px_2()
                                     .flex()
@@ -1096,6 +1179,7 @@ impl ResultsView {
                                     .id(("result-row-number", row_index))
                                     .role(gpui::Role::Button)
                                     .aria_label(format!("Select row {}", row_index + 1))
+                                    .flex_none()
                                     .w(px(ROW_NUMBER_WIDTH))
                                     .h_full()
                                     .flex()
@@ -1535,6 +1619,39 @@ mod tests {
             Some(px(HEADER_HEIGHT)),
             "column names and types need a full two-line header"
         );
+        let first_column_before = cx.debug_bounds("result-column-0").unwrap().size.width;
+        let resize_handle = cx.debug_bounds("resize-result-column-0").unwrap();
+        let resize_start = gpui::point(
+            resize_handle.left() + resize_handle.size.width / 2.0,
+            resize_handle.top() + resize_handle.size.height / 2.0,
+        );
+        cx.simulate_mouse_down(resize_start, MouseButton::Left, gpui::Modifiers::default());
+        cx.simulate_mouse_move(
+            gpui::point(resize_start.x + px(8.0), resize_start.y),
+            MouseButton::Left,
+            gpui::Modifiers::default(),
+        );
+        cx.simulate_mouse_move(
+            gpui::point(resize_start.x + px(72.0), resize_start.y),
+            MouseButton::Left,
+            gpui::Modifiers::default(),
+        );
+        cx.simulate_mouse_up(
+            gpui::point(resize_start.x + px(72.0), resize_start.y),
+            MouseButton::Left,
+            gpui::Modifiers::default(),
+        );
+        cx.run_until_parked();
+        let first_column_after = cx.debug_bounds("result-column-0").unwrap().size.width;
+        assert!(
+            first_column_after >= first_column_before + px(65.0),
+            "dragging a column divider must resize that column: {first_column_before:?} -> {first_column_after:?}"
+        );
+        assert_eq!(
+            cx.debug_bounds("result-column-1").unwrap().size.width,
+            px(DEFAULT_COLUMN_WIDTH),
+            "resizing one column must not resize its neighbor"
+        );
         let first_row = cx.debug_bounds("result-row-0").unwrap();
         cx.simulate_mouse_down(
             gpui::point(
@@ -1548,6 +1665,19 @@ mod tests {
             view.read_with(&cx, |view, _| view.selected),
             Some(GridSelection::Cell { row: 0, column: 0 }),
             "selection feedback must occur on press, without waiting for mouse-up"
+        );
+        cx.simulate_mouse_down(
+            gpui::point(
+                first_row.left() + px(ROW_NUMBER_WIDTH + 12.),
+                first_row.top() + px(ROW_HEIGHT / 2.),
+            ),
+            MouseButton::Left,
+            gpui::Modifiers::default(),
+        );
+        assert_eq!(
+            view.read_with(&cx, |view, _| view.selected),
+            None,
+            "pressing the selected cell again must clear the selection"
         );
         view.update(&mut cx, |view, cx| {
             view.select_tab(ResultTab::Messages, cx);
@@ -1565,12 +1695,21 @@ mod tests {
             assert_eq!(view.selected_text().as_deref(), Some("trinity"));
             view.select_row(0, cx);
             assert_eq!(view.selected, Some(GridSelection::Row(0)));
+            view.select_row(0, cx);
+            assert_eq!(view.selected, None);
+            view.select_row(0, cx);
             assert_eq!(view.selected_text().as_deref(), Some("neo\t1"));
             view.select_column(1, cx);
             assert_eq!(view.selected, Some(GridSelection::Column(1)));
+            view.select_column(1, cx);
+            assert_eq!(view.selected, None);
+            view.select_column(1, cx);
             assert_eq!(view.selected_text().as_deref(), Some("1\n2"));
             view.select_all(cx);
             assert_eq!(view.selected, Some(GridSelection::All));
+            view.select_all(cx);
+            assert_eq!(view.selected, None);
+            view.select_all(cx);
             assert_eq!(view.selected_text().as_deref(), Some("neo\t1\ntrinity\t2"));
             assert_eq!(view.placement(), ResultPlacement::Bottom);
             view.set_extent(300.0, cx);

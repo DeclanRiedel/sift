@@ -12,14 +12,14 @@ pub use results::{ResultData, ResultState, ResultsView};
 
 pub use lifecycle::{
     create_virtual_workspace, load_instance, stream_room_presence, ConnectionNavEntry,
-    ConnectionPhase, DegradedReason, InstanceCatalog, InstanceKind, InstanceSpec, LifecycleEvent,
-    LifecycleProjection, LoadedInstance, PresenceEvent, RoomNavEntry, RoomPresenceProjection,
-    TenantNavEntry, WorkspaceNavEntry,
+    ConnectionPhase, DegradedReason, DocumentNavEntry, InstanceCatalog, InstanceKind, InstanceSpec,
+    LifecycleEvent, LifecycleProjection, LoadedInstance, PresenceEvent, RoomNavEntry,
+    RoomPresenceProjection, TenantNavEntry, WorkspaceNavEntry,
 };
 pub use presentation::{
     BottomTool, DatabaseObjectSource, DockPresentation, ItemKind, ItemPresentation, ItemSource,
-    LeftPanel, PanePresentation, PresentationState, PresentationStore, Rect, WindowPresentation,
-    WorkspacePresentation,
+    LeftPanel, PanePresentation, PresentationState, PresentationStore, Rect, RoomDocumentSource,
+    WindowPresentation, WorkspacePresentation,
 };
 pub use settings::{EditorMode, EditorSettings, SettingsStore, UserSettings};
 pub use shell::{
@@ -29,6 +29,7 @@ pub use shell::{
     InstanceConfigurationPresentation, InstanceCredentialKind, InstanceCredentialPresentation,
     InstanceManagerEvent, InstancePlanPresentation, ItemDefinition, ItemRegistry, ItemRuntimeKind,
     Modal, OpenCommandPalette, OpenServerConnection, PaletteConfirm, PaletteDown, PaletteUp, Pane,
-    PaneEvent, SaveActiveItem, SavedInstanceRoot, SavedServerProfile, SplitPane, StatusBar, Toast,
-    ToastTone, ToggleBottomDock, ToggleLeftDock, ToggleRightDock, WorkspaceShell,
+    PaneEvent, RoomDocumentCommand, RoomDocumentEvent, SaveActiveItem, SavedInstanceRoot,
+    SavedServerProfile, SplitPane, StatusBar, Toast, ToastTone, ToggleBottomDock, ToggleLeftDock,
+    ToggleRightDock, WorkspaceShell,
 };

@@ -118,10 +118,21 @@ pub struct DatabaseObjectSource {
     pub last_refreshed_at_ms: Option<u64>,
 }
 
+/// Stable server references for a room-owned query document. SQL and CRDT
+/// bytes deliberately stay out of presentation state; reconnect resolves this
+/// identity through the room API and WebSocket.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RoomDocumentSource {
+    pub instance_id: String,
+    pub room_id: i64,
+    pub document_id: i64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ItemSource {
     DatabaseObject(DatabaseObjectSource),
+    RoomDocument(RoomDocumentSource),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -389,6 +400,26 @@ mod tests {
         for forbidden in ["password", "result_rows", "query_text", "credential"] {
             assert!(!json.contains(forbidden));
         }
+    }
+
+    #[test]
+    fn room_query_persists_identity_without_sql_or_snapshot() {
+        let mut state = PresentationState::default();
+        state.workspace.panes[0].items[0].source =
+            Some(ItemSource::RoomDocument(RoomDocumentSource {
+                instance_id: "hosted:team".into(),
+                room_id: 7,
+                document_id: 11,
+            }));
+
+        let encoded = String::from_utf8(state.encode().unwrap()).unwrap();
+        let decoded = PresentationState::decode(encoded.as_bytes());
+
+        assert!(!encoded.contains("select "));
+        assert_eq!(
+            decoded.workspace.panes[0].items[0].source,
+            state.workspace.panes[0].items[0].source
+        );
     }
 
     #[test]

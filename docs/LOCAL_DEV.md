@@ -78,9 +78,11 @@ root (default `/tmp/sift-desktop-demo-instance-$UID`), imports a generated
 destination-local database credential, and launches `sift-desktop` with that
 root. The desktop supervises the real server through its discovered
 auto-loopback endpoint. The manifest-managed `demo/postgres` profile appears in
-the Connections dock. The seed includes eight tables, three views, a materialized
+the Connections dock. The seed includes nine tables, three views, a materialized
 view, a SQL function, indexes, foreign keys, JSON/array/network values, and over
-5,000 rows. Start with `SELECT * FROM lab.order_summary ORDER BY placed_at DESC;`.
+15,000 rows. Use `SELECT * FROM lab.large ORDER BY id;` for the deterministic
+10,000-row result fixture, or start with
+`SELECT * FROM lab.order_summary ORDER BY placed_at DESC;`.
 
 Both helper steps are also usable on their own:
 

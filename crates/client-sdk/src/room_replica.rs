@@ -196,6 +196,16 @@ impl RoomReplica {
         self.update_since(&since, "del")
     }
 
+    /// Import a native Loro update authored by an attached editor replica and
+    /// prepare that exact change for durable submission. This lets UI models
+    /// keep their own replica while the transport supervisor owns ACK and
+    /// reconnect bookkeeping.
+    pub fn import_local_update(&mut self, update: &[u8]) -> Result<RoomClientMessage, DocError> {
+        let since = self.replica.version_vector();
+        self.replica.import(update)?;
+        self.update_since(&since, "edit")
+    }
+
     fn update_since(&mut self, since: &[u8], tag: &str) -> Result<RoomClientMessage, DocError> {
         let update = self.replica.export_updates_since(since)?;
         let update_id = self.next_id(tag);
@@ -370,6 +380,24 @@ mod tests {
             .unwrap()
             .is_none());
         assert_eq!(replica.pending_count(), 0);
+    }
+
+    #[test]
+    fn imports_native_editor_updates_without_replacing_text() {
+        let seed = TextReplica::new(0x11).unwrap();
+        seed.insert(0, "select 1").unwrap();
+        let snapshot = seed.export_snapshot().unwrap();
+        let editor = TextReplica::from_snapshot(0x12, &snapshot).unwrap();
+        let before = editor.version_vector();
+        editor.insert(8, "0").unwrap();
+        let update = editor.export_updates_since(&before).unwrap();
+
+        let mut transport = RoomReplica::new(7, 0x13, Some(&snapshot)).unwrap();
+        let message = transport.import_local_update(&update).unwrap();
+
+        assert_eq!(transport.text(), "select 10");
+        assert!(matches!(message, RoomClientMessage::DocumentUpdate { .. }));
+        assert_eq!(transport.pending_count(), 1);
     }
 
     #[test]

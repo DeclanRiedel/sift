@@ -38,6 +38,14 @@ pub(crate) const EDITOR_GUTTER_WIDTH: Pixels = px(48.);
 const EDITOR_TEXT_INSET: Pixels = px(12.);
 const EDITOR_VERTICAL_INSET: Pixels = px(8.);
 
+fn floor_char_boundary(text: &str, mut offset: usize) -> usize {
+    offset = offset.min(text.len());
+    while !text.is_char_boundary(offset) {
+        offset -= 1;
+    }
+    offset
+}
+
 /// A single applied edit, retained so it can be inverted for undo/redo. Offsets
 /// are byte offsets into the materialized text at the time the edit applied.
 #[derive(Debug, Clone)]
@@ -70,6 +78,7 @@ pub struct QueryDocument {
     undo: Vec<Edit>,
     redo: Vec<Edit>,
     last_change: Option<DocumentChange>,
+    pending_room_update: Option<Vec<u8>>,
 }
 
 impl QueryDocument {
@@ -90,6 +99,7 @@ impl QueryDocument {
             undo: Vec::new(),
             redo: Vec::new(),
             last_change: None,
+            pending_room_update: None,
         }
     }
 
@@ -98,8 +108,42 @@ impl QueryDocument {
         Self::new(random_peer_id(), initial)
     }
 
+    pub fn from_room_snapshot(snapshot: &[u8]) -> Result<Self, sift_doc::DocError> {
+        let replica = TextReplica::from_snapshot(random_peer_id(), snapshot)?;
+        let text = replica.text();
+        let end = text.len();
+        Ok(Self {
+            replica,
+            text,
+            selection: end..end,
+            reversed: false,
+            goal_column: None,
+            undo: Vec::new(),
+            redo: Vec::new(),
+            last_change: None,
+            pending_room_update: None,
+        })
+    }
+
     pub fn text(&self) -> &str {
         &self.text
+    }
+
+    /// Replace the materialized buffer after a room replica sync. The room
+    /// replica owns merge history; this view replica is rebuilt so remote
+    /// changes do not masquerade as locally undoable edits.
+    pub fn replace_from_room(&mut self, snapshot: &[u8]) -> Result<bool, sift_doc::DocError> {
+        let replacement = Self::from_room_snapshot(snapshot)?;
+        if self.text == replacement.text {
+            // Even an equal materialization may carry a newer CRDT frontier.
+            self.replica = replacement.replica;
+            return Ok(false);
+        }
+        let cursor = self.cursor().min(replacement.text.len());
+        *self = replacement;
+        let cursor = floor_char_boundary(&self.text, cursor);
+        self.selection = cursor..cursor;
+        Ok(true)
     }
 
     pub fn selection(&self) -> Range<usize> {
@@ -149,6 +193,7 @@ impl QueryDocument {
     /// Apply a text splice against the replica and refresh the cached text. Only
     /// touches CRDT state; selection and history are the caller's concern.
     fn splice(&mut self, start: usize, end: usize, new_text: &str) {
+        let since = self.replica.version_vector();
         let char_start = self.text[..start].chars().count();
         let removed_chars = self.text[start..end].chars().count();
         if removed_chars > 0 {
@@ -162,6 +207,14 @@ impl QueryDocument {
                 .expect("insert within bounds");
         }
         self.text = self.replica.text();
+        self.pending_room_update = self
+            .replica
+            .updates_since_if_any(&since)
+            .expect("export local editor update");
+    }
+
+    fn take_room_update(&mut self) -> Option<Vec<u8>> {
+        self.pending_room_update.take()
     }
 
     /// Replace `range` with `new_text`, recording the edit for undo and
@@ -554,7 +607,7 @@ fn find_ci(original: &str, lowered: &str, needle: &str) -> Vec<Range<usize>> {
 #[derive(Debug, Clone)]
 pub enum EditorEvent {
     /// Document text changed and the owning tab must become dirty.
-    DocumentChanged,
+    DocumentChanged { update: Vec<u8> },
     /// Cursor or modal state changed; parent chrome may refresh lazily.
     CursorChanged,
     /// Pending Vim keys or mode changed; status chrome should refresh now.
@@ -790,6 +843,23 @@ impl QueryEditor {
         &self.document
     }
 
+    /// Apply authoritative room text without emitting `DocumentChanged`,
+    /// which would otherwise echo the remote change back onto the socket.
+    pub fn apply_room_snapshot(&mut self, snapshot: &[u8], cx: &mut Context<Self>) {
+        let Ok(changed) = self.document.replace_from_room(snapshot) else {
+            return;
+        };
+        if !changed {
+            return;
+        }
+        self.revision = self.revision.wrapping_add(1);
+        self.line_cache.borrow_mut().lines.clear();
+        self.marked_range = None;
+        self.reveal_cursor();
+        cx.emit(EditorEvent::CursorChanged);
+        cx.notify();
+    }
+
     pub fn cursor_position(&self) -> (usize, usize) {
         self.document.cursor_position()
     }
@@ -807,7 +877,9 @@ impl QueryEditor {
         drop(cache);
         self.reveal_cursor();
         self.cursor_blink.update(cx, CursorBlink::pause);
-        cx.emit(EditorEvent::DocumentChanged);
+        if let Some(update) = self.document.take_room_update() {
+            cx.emit(EditorEvent::DocumentChanged { update });
+        }
         cx.notify();
     }
 
@@ -2279,6 +2351,21 @@ mod tests {
         assert_eq!(document.text(), "select 1");
         assert_eq!(document.replica.text(), "select 1");
         assert_eq!(document.selection(), 8..8);
+    }
+
+    #[test]
+    fn room_snapshot_preserves_lineage_for_the_next_native_update() {
+        let seed = TextReplica::new(41).unwrap();
+        seed.insert(0, "select 1").unwrap();
+        let snapshot = seed.export_snapshot().unwrap();
+        let mut document = QueryDocument::from_room_snapshot(&snapshot).unwrap();
+
+        document.insert("0");
+        let update = document.take_room_update().unwrap();
+        let receiver = TextReplica::from_snapshot(42, &snapshot).unwrap();
+        receiver.import(&update).unwrap();
+
+        assert_eq!(receiver.text(), "select 10");
     }
 
     #[test]

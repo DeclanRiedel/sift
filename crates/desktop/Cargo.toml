@@ -14,6 +14,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 sift-api-types = { workspace = true }
 sift-client-sdk = { workspace = true }
+sift-doc = { workspace = true }
 sift-instance-config = { workspace = true }
 sift-metadata = { workspace = true }
 sift-protocol = { workspace = true }

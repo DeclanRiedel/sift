@@ -3,15 +3,17 @@ use std::sync::Arc;
 
 use gpui::{prelude::*, App, Context, Entity, IntoElement, Window};
 use sift_api_types::{
-    ConnectionProfileId, CredentialMode, TenantId, UpsertConnectionProfileRequest,
+    ConnectionProfileId, CredentialMode, RoomId, TenantId, UpsertConnectionProfileRequest,
 };
 use sift_client_sdk::{
-    Client, Error as ClientError, OpenConnectionFromProfileRequest, SessionTokenProvider,
+    Client, Error as ClientError, Ingest, OpenConnectionFromProfileRequest, RoomReplica,
+    SessionTokenProvider,
 };
 use sift_protocol::{ConnectionId, SessionId};
 use sift_workspace_ui::{
     ConnectionStatus, EditorMode, ExecutorCommand, ExecutorEvent, PresentationState,
-    PresentationStore, Rect, ResultState, SettingsStore, UserSettings, WorkspaceShell,
+    PresentationStore, Rect, ResultState, RoomDocumentCommand, RoomDocumentEvent, SettingsStore,
+    UserSettings, WorkspaceShell,
 };
 
 use crate::config::DesktopConfig;
@@ -365,6 +367,9 @@ impl SiftWindow {
         let (presence_sender, presence_receiver) = tokio::sync::mpsc::unbounded_channel();
         let (command_sender, command_receiver) = tokio::sync::mpsc::unbounded_channel();
         let (event_sender, event_receiver) = tokio::sync::mpsc::unbounded_channel();
+        let (document_sender, document_receiver) = tokio::sync::mpsc::unbounded_channel();
+        let (document_event_sender, document_event_receiver) =
+            tokio::sync::mpsc::unbounded_channel();
         let (instance_sender, instance_receiver) = tokio::sync::mpsc::unbounded_channel();
         let (instance_event_sender, instance_event_receiver) =
             tokio::sync::mpsc::unbounded_channel();
@@ -372,6 +377,7 @@ impl SiftWindow {
         workspace.update(cx, |workspace, cx| {
             workspace.attach_lifecycle(receiver, window, cx);
             workspace.attach_presence(presence_receiver, cx);
+            workspace.attach_room_documents(document_sender, document_event_receiver, cx);
             workspace.attach_executor(command_sender, event_receiver, cx);
             workspace.attach_instance_manager(
                 instance_sender,
@@ -387,9 +393,14 @@ impl SiftWindow {
             presence_sender,
         )));
         std::mem::drop(runtime.spawn(run_query_executor(
-            target_receiver,
+            target_receiver.clone(),
             command_receiver,
             event_sender,
+        )));
+        std::mem::drop(runtime.spawn(run_room_document_supervisor(
+            target_receiver.clone(),
+            document_receiver,
+            document_event_sender,
         )));
         std::mem::drop(runtime.spawn(run_instance_manager(
             instance_store,
@@ -1169,6 +1180,207 @@ async fn supervise_instances(
                 if !wait_to_reconnect(attempt, &sender).await {
                     return;
                 }
+            }
+        }
+    }
+}
+
+async fn run_room_document_supervisor(
+    mut targets: tokio::sync::watch::Receiver<DesktopServer>,
+    mut commands: tokio::sync::mpsc::UnboundedReceiver<RoomDocumentCommand>,
+    events: tokio::sync::mpsc::UnboundedSender<RoomDocumentEvent>,
+) {
+    let mut documents: HashMap<
+        i64,
+        (
+            tokio::task::JoinHandle<()>,
+            tokio::sync::mpsc::UnboundedSender<Vec<u8>>,
+        ),
+    > = HashMap::new();
+    loop {
+        tokio::select! {
+            command = commands.recv() => {
+                let Some(command) = command else { break };
+                match command {
+                    RoomDocumentCommand::Create {
+                        instance_id,
+                        room_id,
+                        title,
+                        position,
+                    } => {
+                        let server = targets.borrow().clone();
+                        if server.instance().id != instance_id {
+                            continue;
+                        }
+                        let result = async {
+                            let client = server.client().await?;
+                            client
+                                .create_document(
+                                    RoomId(room_id),
+                                    sift_api_types::CreateDocumentRequest {
+                                        kind: "query".into(),
+                                        title,
+                                        initial_text: None,
+                                        position,
+                                        connection_profile_id: None,
+                                    },
+                                )
+                                .await
+                                .map_err(|error| format!("creating query document failed: {error}"))
+                        }
+                        .await;
+                        match result {
+                            Ok(document) => {
+                                let _ = events.send(RoomDocumentEvent::Created(
+                                    sift_workspace_ui::DocumentNavEntry {
+                                        id: document.id,
+                                        room_id: document.room_id,
+                                        title: document.title,
+                                        kind: document.kind,
+                                        position: document.position,
+                                        snapshot: document.crdt_state,
+                                    },
+                                ));
+                            }
+                            Err(message) => {
+                                let _ = events.send(RoomDocumentEvent::ServiceFailed(message));
+                            }
+                        }
+                    }
+                    RoomDocumentCommand::Open { source, snapshot } => {
+                        if targets.borrow().instance().id != source.instance_id {
+                            continue;
+                        }
+                        if documents
+                            .get(&source.document_id)
+                            .is_some_and(|(task, _)| !task.is_finished())
+                        {
+                            continue;
+                        }
+                        documents.remove(&source.document_id);
+                        let server = targets.borrow().clone();
+                        let events = events.clone();
+                        let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+                        let document_id = source.document_id;
+                        let task = tokio::spawn(async move {
+                            let result = run_room_document(
+                                server,
+                                source,
+                                snapshot,
+                                receiver,
+                                events.clone(),
+                            ).await;
+                            if let Err(message) = result {
+                                let _ = events.send(RoomDocumentEvent::Failed {
+                                    document_id,
+                                    message,
+                                });
+                            }
+                        });
+                        documents.insert(document_id, (task, sender));
+                    }
+                    RoomDocumentCommand::Update { document_id, update } => {
+                        if let Some((_, sender)) = documents.get(&document_id) {
+                            let _ = sender.send(update);
+                        }
+                    }
+                    RoomDocumentCommand::Close { document_id } => {
+                        if let Some((task, _)) = documents.remove(&document_id) {
+                            task.abort();
+                        }
+                    }
+                }
+            }
+            changed = targets.changed() => {
+                if changed.is_err() { break; }
+                for (_, (task, _)) in documents.drain() {
+                    task.abort();
+                }
+            }
+        }
+    }
+    for (_, (task, _)) in documents {
+        task.abort();
+    }
+}
+
+async fn run_room_document(
+    server: DesktopServer,
+    source: sift_workspace_ui::RoomDocumentSource,
+    snapshot: Vec<u8>,
+    mut updates: tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>,
+    events: tokio::sync::mpsc::UnboundedSender<RoomDocumentEvent>,
+) -> Result<(), String> {
+    let client = server.client().await?;
+    let mut replica = RoomReplica::new(
+        source.document_id,
+        sift_doc::random_peer_id(),
+        Some(&snapshot),
+    )
+    .map_err(|error| format!("loading replica failed: {error}"))?;
+    let mut room = client.persistent_room(
+        RoomId(source.room_id),
+        format!(
+            "sift-desktop-document-{}-{}",
+            std::process::id(),
+            source.document_id
+        ),
+    );
+    room.connect(&mut replica)
+        .await
+        .map_err(|error| format!("room sync failed: {error}"))?;
+    let _ = events.send(RoomDocumentEvent::Text {
+        document_id: source.document_id,
+        snapshot: replica
+            .persist()
+            .map_err(|error| format!("snapshotting room replica failed: {error}"))?
+            .1,
+        synced: true,
+    });
+    let mut heartbeat = tokio::time::interval(std::time::Duration::from_secs(15));
+    heartbeat.tick().await;
+    loop {
+        tokio::select! {
+            update = updates.recv() => {
+                let Some(update) = update else { return Ok(()) };
+                let message = replica.import_local_update(&update)
+                    .map_err(|error| format!("applying editor update failed: {error}"))?;
+                room.submit(&mut replica, message)
+                    .await
+                    .map_err(|error| format!("saving editor update failed: {error}"))?;
+                // Do not momentarily roll the editor back to an intermediate
+                // ACK when more local updates are already queued.
+                if updates.is_empty() {
+                    let _ = events.send(RoomDocumentEvent::Text {
+                        document_id: source.document_id,
+                        snapshot: replica
+                            .persist()
+                            .map_err(|error| format!("snapshotting room replica failed: {error}"))?
+                            .1,
+                        synced: true,
+                    });
+                }
+            }
+            incoming = room.next(&mut replica) => {
+                match incoming.map_err(|error| format!("receiving room update failed: {error}"))? {
+                    Ingest::Progress | Ingest::Acked(_) | Ingest::Synced(_) => {
+                        let _ = events.send(RoomDocumentEvent::Text {
+                            document_id: source.document_id,
+                            snapshot: replica
+                                .persist()
+                                .map_err(|error| format!("snapshotting room replica failed: {error}"))?
+                                .1,
+                            synced: replica.pending_count() == 0,
+                        });
+                    }
+                    Ingest::Error { message, .. } => return Err(message),
+                    Ingest::Resync | Ingest::Ignored => {}
+                }
+            }
+            _ = heartbeat.tick() => {
+                room.heartbeat(&mut replica)
+                    .await
+                    .map_err(|error| format!("room heartbeat failed: {error}"))?;
             }
         }
     }

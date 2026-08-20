@@ -26,11 +26,11 @@ use crate::settings::{EditorMode, SettingsStore, UserSettings};
 use crate::presentation::{
     BottomTool, DatabaseObjectSource, ItemKind, ItemPresentation, ItemSource, LeftPanel, PaneAxis,
     PaneLayoutPresentation, PanePresentation, PresentationState, PresentationStore,
-    WindowPresentation, WorkspacePresentation,
+    RoomDocumentSource, WindowPresentation, WorkspacePresentation,
 };
 use crate::{
-    ConnectionNavEntry, LifecycleEvent, LifecycleProjection, PresenceEvent, RoomPresenceProjection,
-    WorkspaceNavEntry,
+    ConnectionNavEntry, DocumentNavEntry, LifecycleEvent, LifecycleProjection, PresenceEvent,
+    RoomPresenceProjection, WorkspaceNavEntry,
 };
 
 mod app_bar;
@@ -530,25 +530,43 @@ pub enum PaneEvent {
     /// The pane should be removed (its close control was used, or it emptied).
     CloseRequested,
     /// A tab-local close control was used; the workspace owns dirty handling.
-    CloseItemRequested { item_id: u64 },
+    CloseItemRequested {
+        item_id: u64,
+    },
     /// A tab-local dirty prompt chose to discard the item.
-    DiscardItemRequested { item_id: u64 },
+    DiscardItemRequested {
+        item_id: u64,
+    },
     /// A configuration tab's dirty prompt requested a save.
-    SaveItemRequested { item_id: u64 },
+    SaveItemRequested {
+        item_id: u64,
+    },
     /// A tab was dropped onto this pane or one of its split targets.
     MoveItemRequested {
         item_id: u64,
         target: PaneDropTarget,
     },
     /// Active editor state changed. Cursor-only changes do not dirty the tab.
-    EditorStateChanged { item_id: u64, dirty: Option<bool> },
+    EditorStateChanged {
+        item_id: u64,
+        dirty: Option<bool>,
+    },
+    RoomUpdateRequested {
+        item_id: u64,
+        update: Vec<u8>,
+    },
     /// An editor requested the workspace-level command palette.
     OpenCommandPaletteRequested,
     /// A query item asked to run SQL; the workspace dispatches it to execution.
-    ExecuteRequested { item_id: u64, sql: String },
+    ExecuteRequested {
+        item_id: u64,
+        sql: String,
+    },
     /// A database-backed snapshot requested a live refresh. Workspace owns
     /// connection selection and may reconnect before executing.
-    RefreshDatabaseItemRequested { item_id: u64 },
+    RefreshDatabaseItemRequested {
+        item_id: u64,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -676,6 +694,45 @@ pub enum ExecutorEvent {
     ProfileDeletionFailed(String),
 }
 
+/// Shell → desktop room-document supervisor. The snapshot is only an initial
+/// server-provided bootstrap; it is never serialized into presentation state.
+#[derive(Debug, Clone)]
+pub enum RoomDocumentCommand {
+    Create {
+        instance_id: String,
+        room_id: i64,
+        title: String,
+        position: i64,
+    },
+    Open {
+        source: RoomDocumentSource,
+        snapshot: Vec<u8>,
+    },
+    Update {
+        document_id: i64,
+        update: Vec<u8>,
+    },
+    Close {
+        document_id: i64,
+    },
+}
+
+/// Desktop room-document supervisor → shell.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RoomDocumentEvent {
+    Created(DocumentNavEntry),
+    Text {
+        document_id: i64,
+        snapshot: Vec<u8>,
+        synced: bool,
+    },
+    Failed {
+        document_id: i64,
+        message: String,
+    },
+    ServiceFailed(String),
+}
+
 /// A pane owns its ordered items and focus handle. The workspace owns panes;
 /// items never reach sideways into sibling panes.
 pub struct Pane {
@@ -750,6 +807,7 @@ impl Pane {
                 Some(ItemSource::DatabaseObject(source)) => {
                     table_preview_sql(&source.provider_id, &source.schema, &source.object)
                 }
+                Some(ItemSource::RoomDocument(_)) => String::new(),
                 None => String::new(),
             };
             let document = QueryDocument::with_random_peer(&restored_text);
@@ -808,7 +866,7 @@ impl Pane {
 
     fn on_editor_event(&mut self, item_id: u64, event: &EditorEvent, cx: &mut Context<Self>) {
         match event {
-            EditorEvent::DocumentChanged => {
+            EditorEvent::DocumentChanged { update } => {
                 let dirty = self.editors.get(&item_id).is_some_and(|editor| {
                     self.clean_documents
                         .get(&item_id)
@@ -817,6 +875,10 @@ impl Pane {
                 cx.emit(PaneEvent::EditorStateChanged {
                     item_id,
                     dirty: Some(dirty),
+                });
+                cx.emit(PaneEvent::RoomUpdateRequested {
+                    item_id,
+                    update: update.clone(),
                 });
             }
             EditorEvent::CursorChanged | EditorEvent::VimStateChanged => {
@@ -944,8 +1006,20 @@ impl Pane {
             .iter()
             .find(|item| item.id == item_id)
             .and_then(|item| item.source.as_ref())
-            .map(|source| match source {
-                ItemSource::DatabaseObject(source) => source.clone(),
+            .and_then(|source| match source {
+                ItemSource::DatabaseObject(source) => Some(source.clone()),
+                ItemSource::RoomDocument(_) => None,
+            })
+    }
+
+    fn room_document_source(&self, item_id: u64) -> Option<RoomDocumentSource> {
+        self.items
+            .iter()
+            .find(|item| item.id == item_id)
+            .and_then(|item| item.source.as_ref())
+            .and_then(|source| match source {
+                ItemSource::RoomDocument(source) => Some(source.clone()),
+                ItemSource::DatabaseObject(_) => None,
             })
     }
 
@@ -1449,7 +1523,9 @@ impl gpui::Render for Pane {
         let has_tab_drag_preview =
             self.tab_drag_preview_bounds.is_some() && !self.suppress_tab_drag_preview;
         let database_notice = active.as_ref().and_then(|item| {
-            let ItemSource::DatabaseObject(_) = item.source.as_ref()?;
+            if !matches!(item.source, Some(ItemSource::DatabaseObject(_))) {
+                return None;
+            }
             let state = self.database_item_states.get(&item.id)?.clone();
             (!matches!(state, DatabaseItemState::Live)).then_some((item.id, state))
         });
@@ -2055,9 +2131,11 @@ pub struct WorkspaceShell {
     presence: RoomPresenceProjection,
     _lifecycle_task: Option<Task<()>>,
     _presence_task: Option<Task<()>>,
+    _room_document_task: Option<Task<()>>,
     _executor_task: Option<Task<()>>,
     _instance_task: Option<Task<()>>,
     executor_sender: Option<tokio::sync::mpsc::UnboundedSender<ExecutorCommand>>,
+    room_document_sender: Option<tokio::sync::mpsc::UnboundedSender<RoomDocumentCommand>>,
     running_queries: HashMap<u64, u64>,
     next_execution_id: u64,
     pending_database_execution: Option<PendingDatabaseExecution>,
@@ -2340,9 +2418,11 @@ impl WorkspaceShell {
             presence: RoomPresenceProjection::default(),
             _lifecycle_task: None,
             _presence_task: None,
+            _room_document_task: None,
             _executor_task: None,
             _instance_task: None,
             executor_sender: None,
+            room_document_sender: None,
             running_queries: HashMap::new(),
             next_execution_id: 1,
             pending_database_execution: None,
@@ -2543,6 +2623,7 @@ impl WorkspaceShell {
                             }
                         }
                         shell.lifecycle.apply(event);
+                        shell.reconcile_room_document_tabs(cx);
                         shell.status.connection = shell.lifecycle.status_label();
                         shell.reconcile_restored_workspace(cx);
                         if instance_changed {
@@ -2724,6 +2805,130 @@ impl WorkspaceShell {
                 }
             }
         }));
+    }
+
+    pub fn attach_room_documents(
+        &mut self,
+        sender: tokio::sync::mpsc::UnboundedSender<RoomDocumentCommand>,
+        mut receiver: tokio::sync::mpsc::UnboundedReceiver<RoomDocumentEvent>,
+        cx: &mut Context<Self>,
+    ) {
+        self.room_document_sender = Some(sender);
+        self.reconcile_room_document_tabs(cx);
+        self._room_document_task = Some(cx.spawn(async move |shell, cx| {
+            while let Some(event) = receiver.recv().await {
+                if shell
+                    .update(cx, |shell, cx| shell.on_room_document_event(event, cx))
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        }));
+    }
+
+    fn on_room_document_event(&mut self, event: RoomDocumentEvent, cx: &mut Context<Self>) {
+        match event {
+            RoomDocumentEvent::Created(document) => {
+                if let Some(room) = self
+                    .lifecycle
+                    .tenants
+                    .iter_mut()
+                    .flat_map(|tenant| &mut tenant.rooms)
+                    .find(|room| room.id == document.room_id)
+                {
+                    room.documents.push(document);
+                    room.documents.sort_by_key(|document| document.position);
+                }
+            }
+            RoomDocumentEvent::Text {
+                document_id,
+                snapshot,
+                synced,
+            } => {
+                for pane in &self.panes {
+                    let item_id = pane.read(cx).items.iter().find_map(|item| {
+                        matches!(
+                            item.source,
+                            Some(ItemSource::RoomDocument(RoomDocumentSource {
+                                document_id: id,
+                                ..
+                            })) if id == document_id
+                        )
+                        .then_some(item.id)
+                    });
+                    let Some(item_id) = item_id else { continue };
+                    pane.update(cx, |pane, cx| {
+                        if let Some(editor) = pane.editor(item_id) {
+                            editor
+                                .update(cx, |editor, cx| editor.apply_room_snapshot(&snapshot, cx));
+                        }
+                        if synced {
+                            pane.mark_clean(item_id, cx);
+                        }
+                    });
+                }
+            }
+            RoomDocumentEvent::Failed {
+                document_id,
+                message,
+            } => self.show_toast(
+                format!("Query document {document_id} could not sync: {message}"),
+                cx,
+            ),
+            RoomDocumentEvent::ServiceFailed(message) => self.show_toast(message, cx),
+        }
+        cx.notify();
+    }
+
+    fn create_room_document(&mut self, room_id: i64, cx: &mut Context<Self>) {
+        let Some(sender) = &self.room_document_sender else {
+            self.show_toast("Query document service is unavailable".into(), cx);
+            return;
+        };
+        let documents = self
+            .lifecycle
+            .tenants
+            .iter()
+            .flat_map(|tenant| &tenant.rooms)
+            .find(|room| room.id.0 == room_id)
+            .map_or(0, |room| room.documents.len());
+        let _ = sender.send(RoomDocumentCommand::Create {
+            instance_id: self
+                .selected_instance_id
+                .clone()
+                .unwrap_or_else(|| "local".into()),
+            room_id,
+            title: format!("query-{}.sql", documents + 1),
+            position: documents as i64,
+        });
+    }
+
+    fn reconcile_room_document_tabs(&self, cx: &App) {
+        let Some(sender) = &self.room_document_sender else {
+            return;
+        };
+        for pane in &self.panes {
+            for item in &pane.read(cx).items {
+                let Some(ItemSource::RoomDocument(source)) = item.source.as_ref() else {
+                    continue;
+                };
+                let snapshot = self
+                    .lifecycle
+                    .tenants
+                    .iter()
+                    .flat_map(|tenant| &tenant.rooms)
+                    .flat_map(|room| &room.documents)
+                    .find(|document| document.id.0 == source.document_id)
+                    .map(|document| document.snapshot.clone());
+                if let Some(snapshot) = snapshot {
+                    let _ = sender.send(RoomDocumentCommand::Open {
+                        source: source.clone(),
+                        snapshot,
+                    });
+                }
+            }
+        }
     }
 
     /// Attach the executor: `sender` carries connect/disconnect/run commands to
@@ -3509,6 +3714,75 @@ impl WorkspaceShell {
             });
         }
         self.execute_database_item(item_id, sql, cx);
+        self.focus_active_pane(window, cx);
+        self.persist(cx);
+        cx.notify();
+    }
+
+    fn open_room_document(
+        &mut self,
+        document: &DocumentNavEntry,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let source = RoomDocumentSource {
+            instance_id: self
+                .selected_instance_id
+                .clone()
+                .unwrap_or_else(|| "local".into()),
+            room_id: document.room_id.0,
+            document_id: document.id.0,
+        };
+        if let Some((pane_index, item_index)) = self.panes.iter().enumerate().find_map(
+            |(pane_index, pane)| {
+                pane.read(cx)
+                    .items
+                    .iter()
+                    .position(|item| {
+                        matches!(item.source.as_ref(), Some(ItemSource::RoomDocument(existing)) if existing == &source)
+                    })
+                    .map(|item_index| (pane_index, item_index))
+            },
+        ) {
+            self.active_pane = pane_index;
+            self.panes[pane_index].update(cx, |pane, _| pane.activate_item(item_index, true));
+            self.focus_active_pane(window, cx);
+            return;
+        }
+
+        let query_document = QueryDocument::from_room_snapshot(&document.snapshot)
+            .unwrap_or_else(|_| QueryDocument::with_random_peer(""));
+        let item_id = self.next_id;
+        self.next_id += 1;
+        let keymap = if self.vim_mode_default() {
+            EditorKeymap::Vim
+        } else {
+            EditorKeymap::Standard
+        };
+        let editor = cx.new(|cx| QueryEditor::new(query_document, cx).with_keymap(keymap));
+        let results = cx.new(ResultsView::new);
+        if let Some(pane) = self.panes.get(self.active_pane) {
+            pane.update(cx, |pane, cx| {
+                pane.open_query(
+                    ItemPresentation {
+                        id: item_id,
+                        kind: ItemKind::Query,
+                        title: document.title.clone(),
+                        dirty: false,
+                        source: Some(ItemSource::RoomDocument(source.clone())),
+                    },
+                    editor,
+                    results,
+                    cx,
+                )
+            });
+        }
+        if let Some(sender) = &self.room_document_sender {
+            let _ = sender.send(RoomDocumentCommand::Open {
+                source,
+                snapshot: document.snapshot.clone(),
+            });
+        }
         self.focus_active_pane(window, cx);
         self.persist(cx);
         cx.notify();
@@ -4652,6 +4926,19 @@ impl WorkspaceShell {
                 }
                 cx.notify();
             }
+            PaneEvent::RoomUpdateRequested { item_id, update } => {
+                let document_id = emitter
+                    .read(cx)
+                    .room_document_source(*item_id)
+                    .map(|source| source.document_id);
+                if let (Some(sender), Some(document_id)) = (&self.room_document_sender, document_id)
+                {
+                    let _ = sender.send(RoomDocumentCommand::Update {
+                        document_id,
+                        update: update.clone(),
+                    });
+                }
+            }
             PaneEvent::OpenCommandPaletteRequested => {
                 self.active_pane = index;
                 self.open_command_palette(&OpenCommandPalette, window, cx);
@@ -5040,6 +5327,12 @@ impl WorkspaceShell {
     }
 
     fn remove_active_item(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let removed_document_id = self.panes.get(self.active_pane).and_then(|pane| {
+            let pane = pane.read(cx);
+            pane.active_item()
+                .and_then(|item| pane.room_document_source(item.id))
+                .map(|source| source.document_id)
+        });
         let removed_item_id = self.panes.get(self.active_pane).and_then(|pane| {
             pane.update(cx, |pane, _| {
                 if !pane.items.is_empty() {
@@ -5054,6 +5347,10 @@ impl WorkspaceShell {
         });
         if let Some(item_id) = removed_item_id {
             self.clear_sql_problems(item_id);
+        }
+        if let (Some(sender), Some(document_id)) = (&self.room_document_sender, removed_document_id)
+        {
+            let _ = sender.send(RoomDocumentCommand::Close { document_id });
         }
         // A pane emptied by its last close collapses so panes never accumulate
         // as un-closeable ghosts. The final pane always survives.
@@ -6890,6 +7187,24 @@ impl WorkspaceShell {
                                 .child(tree_chevron_slot(room_open, colors.muted_text))
                                 .child(icon(IconName::Users, colors.muted_text, 12.))
                                 .child(div().min_w_0().truncate().child(room.name.clone()))
+                                .child(
+                                    div()
+                                        .id(("create-room-document", room_id as usize))
+                                        .ml_auto()
+                                        .p_1()
+                                        .rounded_sm()
+                                        .role(Role::Button)
+                                        .aria_label(format!("Create query in {}", room.name))
+                                        .hover(|button| button.bg(colors.active_surface))
+                                        .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                                            cx.stop_propagation()
+                                        })
+                                        .on_click(cx.listener(move |shell, _, _, cx| {
+                                            cx.stop_propagation();
+                                            shell.create_room_document(room_id, cx)
+                                        }))
+                                        .child(icon(IconName::Add, colors.muted_text, 11.)),
+                                )
                                 .into_any_element(),
                         );
                         if !room_open {
@@ -6930,6 +7245,35 @@ impl WorkspaceShell {
                                             .min_w_0()
                                             .truncate()
                                             .child(format!("{}{features}", workspace.name)),
+                                    )
+                                    .into_any_element(),
+                            );
+                        }
+                        for document in &room.documents {
+                            let entry = document.clone();
+                            rows.push(
+                                div()
+                                    .id(("room-document", document.id.0 as usize))
+                                    .mx_2()
+                                    .h(cx.theme().metrics.row_height)
+                                    .pl(tree_indent(2))
+                                    .pr_2()
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(6.))
+                                    .rounded_sm()
+                                    .text_color(colors.text)
+                                    .hover(|row| row.bg(colors.hovered_surface))
+                                    .on_click(cx.listener(move |shell, _, window, cx| {
+                                        shell.open_room_document(&entry, window, cx)
+                                    }))
+                                    .child(tree_spacer_slot())
+                                    .child(icon(IconName::Edit, colors.muted_text, 12.))
+                                    .child(
+                                        div()
+                                            .min_w_0()
+                                            .truncate()
+                                            .child(document.title.clone()),
                                     )
                                     .into_any_element(),
                             );
@@ -12242,6 +12586,7 @@ mod tests {
                         id: RoomId(4),
                         tenant_id: sift_api_types::TenantId(1),
                         name: "Research".into(),
+                        documents: Vec::new(),
                         workspaces: vec![WorkspaceNavEntry {
                             id: 12,
                             room_id: 4,

@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use sift_api_types::{RoomId, TenantId};
+use sift_api_types::{DocumentId, RoomId, TenantId};
 use sift_client_sdk::{Client, CreateWorkspaceRequest, Error as ClientError};
 use sift_protocol::{
     HandshakeResponse, ProviderDescriptor, RoomPresence, RoomServerMessage, WhoAmIResponse,
@@ -95,6 +95,17 @@ pub struct RoomNavEntry {
     pub tenant_id: TenantId,
     pub name: String,
     pub workspaces: Vec<WorkspaceNavEntry>,
+    pub documents: Vec<DocumentNavEntry>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DocumentNavEntry {
+    pub id: DocumentId,
+    pub room_id: RoomId,
+    pub title: String,
+    pub kind: String,
+    pub position: i64,
+    pub snapshot: Vec<u8>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -311,6 +322,20 @@ pub async fn load_instance(
         };
         let mut room_rows = Vec::with_capacity(rooms.len());
         for room in rooms {
+            let documents = match client.documents(room.id).await {
+                Ok(documents) => documents
+                    .into_iter()
+                    .map(|document| DocumentNavEntry {
+                        id: document.id,
+                        room_id: document.room_id,
+                        title: document.title,
+                        kind: document.kind,
+                        position: document.position,
+                        snapshot: document.crdt_state,
+                    })
+                    .collect::<Vec<_>>(),
+                Err(error) => return Err(fail(&sender, &error)),
+            };
             let workspaces = match client.room_workspaces(room.id).await {
                 Ok(workspaces) => workspaces
                     .into_iter()
@@ -330,6 +355,7 @@ pub async fn load_instance(
                 tenant_id,
                 name: room.name,
                 workspaces,
+                documents,
             });
         }
         if !send(
