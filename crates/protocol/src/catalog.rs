@@ -345,6 +345,12 @@ pub enum CatalogDiagramMutation {
         #[serde(default)]
         nullability: Option<Nullability>,
     },
+    AddColumn {
+        table_id: CatalogObjectId,
+        name: String,
+        type_ref: TypeRef,
+        nullability: Nullability,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]

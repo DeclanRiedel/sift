@@ -104,6 +104,90 @@ fn table_preview_sql(
     }
 }
 
+fn type_ref_label(type_ref: &sift_protocol::TypeRef) -> String {
+    match type_ref {
+        sift_protocol::TypeRef::Native { name, .. } => name.clone(),
+        sift_protocol::TypeRef::Primitive(primitive) => match primitive {
+            sift_protocol::PrimitiveType::Int16 => "smallint",
+            sift_protocol::PrimitiveType::Int32 => "integer",
+            sift_protocol::PrimitiveType::Int64 => "bigint",
+            sift_protocol::PrimitiveType::Float32 => "real",
+            sift_protocol::PrimitiveType::Float64 => "double precision",
+            sift_protocol::PrimitiveType::Decimal => "decimal",
+            sift_protocol::PrimitiveType::Bool => "boolean",
+            sift_protocol::PrimitiveType::Text => "text",
+            sift_protocol::PrimitiveType::Blob => "binary",
+            sift_protocol::PrimitiveType::Date => "date",
+            sift_protocol::PrimitiveType::Time => "time",
+            sift_protocol::PrimitiveType::Timestamp => "timestamp",
+            sift_protocol::PrimitiveType::TimestampTz => "timestamp with time zone",
+            sift_protocol::PrimitiveType::Interval => "interval",
+            sift_protocol::PrimitiveType::Uuid => "uuid",
+            sift_protocol::PrimitiveType::Json => "json",
+            sift_protocol::PrimitiveType::Jsonb => "jsonb",
+        }
+        .into(),
+    }
+}
+
+fn table_node_id(
+    graph: &sift_protocol::CatalogGraph,
+    source: &DatabaseObjectSource,
+) -> Option<sift_protocol::CatalogObjectId> {
+    graph.data.nodes.iter().find_map(|node| {
+        if node.name != source.object
+            || !matches!(
+                node.kind,
+                sift_protocol::CatalogNodeKind::Table
+                    | sift_protocol::CatalogNodeKind::PartitionedTable
+            )
+        {
+            return None;
+        }
+        let schema = node.parent_id.as_ref().and_then(|parent| {
+            graph
+                .data
+                .nodes
+                .iter()
+                .find(|candidate| &candidate.id == parent)
+        })?;
+        if schema.name != source.schema {
+            return None;
+        }
+        let catalog_matches = source.catalog.as_ref().is_none_or(|catalog| {
+            schema
+                .parent_id
+                .as_ref()
+                .and_then(|parent| {
+                    graph
+                        .data
+                        .nodes
+                        .iter()
+                        .find(|candidate| &candidate.id == parent)
+                })
+                .is_some_and(|node| &node.name == catalog)
+        });
+        catalog_matches.then(|| node.id.clone())
+    })
+}
+
+fn table_columns<'a>(
+    graph: &'a sift_protocol::CatalogGraph,
+    table_id: &sift_protocol::CatalogObjectId,
+) -> Vec<&'a sift_protocol::CatalogNode> {
+    let mut columns = graph
+        .data
+        .nodes
+        .iter()
+        .filter(|node| {
+            node.kind == sift_protocol::CatalogNodeKind::Column
+                && node.parent_id.as_ref() == Some(table_id)
+        })
+        .collect::<Vec<_>>();
+    columns.sort_by_key(|node| node.ordinal.unwrap_or(u32::MAX));
+    columns
+}
+
 /// Schema objects are grouped into these buckets inside each schema node.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum ObjectGroupKind {
@@ -345,6 +429,7 @@ pub enum Modal {
     Settings,
     Account,
     DatabaseConnection,
+    TableDesigner(u64),
     ConfirmDeleteConnection(ConnectionNavEntry),
 }
 
@@ -619,6 +704,32 @@ enum ConnectionSchemaState {
     },
 }
 
+#[derive(Debug)]
+enum TableDefinitionState {
+    Loading {
+        source: DatabaseObjectSource,
+    },
+    Ready {
+        source: DatabaseObjectSource,
+        graph: Box<sift_protocol::CatalogGraph>,
+        table_id: sift_protocol::CatalogObjectId,
+    },
+    Failed {
+        source: DatabaseObjectSource,
+        message: String,
+    },
+}
+
+#[derive(Debug, Clone)]
+struct TableDesignerState {
+    item_id: u64,
+    selected_column: Option<sift_protocol::CatalogObjectId>,
+    nullable: sift_protocol::Nullability,
+    plan: Option<Box<sift_protocol::MigrationPlan>>,
+    pending: bool,
+    error: Option<String>,
+}
+
 /// Shell → executor. The executor owns the SDK client, session, and
 /// connection; the shell only reports intent (connect / disconnect / run).
 #[derive(Clone)]
@@ -649,6 +760,19 @@ pub enum ExecutorCommand {
     DeleteConnectionProfile {
         tenant_id: i64,
         profile_id: i64,
+    },
+    LoadTableDefinition {
+        item_id: u64,
+        source: DatabaseObjectSource,
+    },
+    PreviewTableMutation {
+        item_id: u64,
+        expected_catalog_revision: sift_protocol::CatalogRevision,
+        mutation: sift_protocol::CatalogDiagramMutation,
+    },
+    ApplyTableMigration {
+        item_id: u64,
+        request: sift_protocol::ApplyMigrationRequest,
     },
 }
 
@@ -692,6 +816,26 @@ pub enum ExecutorEvent {
         profile_id: i64,
     },
     ProfileDeletionFailed(String),
+    TableDefinitionLoaded {
+        item_id: u64,
+        graph: Box<sift_protocol::CatalogGraph>,
+    },
+    TableDefinitionFailed {
+        item_id: u64,
+        message: String,
+    },
+    TableMigrationPreviewed {
+        item_id: u64,
+        plan: Box<sift_protocol::MigrationPlan>,
+    },
+    TableMigrationApplied {
+        item_id: u64,
+        run: Box<sift_protocol::MigrationRun>,
+    },
+    TableMigrationFailed {
+        item_id: u64,
+        message: String,
+    },
 }
 
 /// Shell → desktop room-document supervisor. The snapshot is only an initial
@@ -2101,6 +2245,8 @@ pub struct WorkspaceShell {
     database_timeout_input: Entity<TextInput>,
     database_pool_min_input: Entity<TextInput>,
     database_pool_max_input: Entity<TextInput>,
+    table_column_name_input: Entity<TextInput>,
+    table_column_type_input: Entity<TextInput>,
     instance_secret_input: Entity<TextInput>,
     instance_configuration_editor: Entity<QueryEditor>,
     palette_selected: usize,
@@ -2162,6 +2308,8 @@ pub struct WorkspaceShell {
     account_error: Option<String>,
     connection_status: ConnectionStatus,
     connection_schema: ConnectionSchemaState,
+    table_definitions: HashMap<u64, TableDefinitionState>,
+    table_designer: Option<TableDesignerState>,
     expanded_tenants: HashSet<i64>,
     expanded_connections: HashSet<i64>,
     expanded_rooms: HashSet<i64>,
@@ -2310,6 +2458,11 @@ impl WorkspaceShell {
             cx.new(|cx| TextInput::new("", "0", cx).aria_label("Minimum pool size"));
         let database_pool_max_input =
             cx.new(|cx| TextInput::new("", "Server default", cx).aria_label("Maximum pool size"));
+        let table_column_name_input =
+            cx.new(|cx| TextInput::new("", "Column name", cx).aria_label("Column name"));
+        let table_column_type_input = cx.new(|cx| {
+            TextInput::new("", "Native type, for example text", cx).aria_label("Column type")
+        });
         let instance_secret_input = cx.new(|cx| {
             TextInput::new("", "Required secret", cx)
                 .aria_label("Instance credential value")
@@ -2388,6 +2541,8 @@ impl WorkspaceShell {
             database_timeout_input,
             database_pool_min_input,
             database_pool_max_input,
+            table_column_name_input,
+            table_column_type_input,
             instance_secret_input,
             instance_configuration_editor,
             palette_selected: 0,
@@ -2449,6 +2604,8 @@ impl WorkspaceShell {
             account_error: None,
             connection_status: ConnectionStatus::Disconnected,
             connection_schema: ConnectionSchemaState::Unavailable,
+            table_definitions: HashMap::new(),
+            table_designer: None,
             expanded_tenants: HashSet::new(),
             expanded_connections: HashSet::new(),
             expanded_rooms: HashSet::new(),
@@ -2718,6 +2875,8 @@ impl WorkspaceShell {
         }
         self.connection_status = ConnectionStatus::Disconnected;
         self.connection_schema = ConnectionSchemaState::Unavailable;
+        self.table_definitions.clear();
+        self.table_designer = None;
         self.pending_database_execution = None;
         for pane in &self.panes {
             pane.update(cx, |pane, _| {
@@ -3264,6 +3423,93 @@ impl WorkspaceShell {
                 let _ = acknowledge.send(());
                 cx.notify();
             }
+            ExecutorEvent::TableDefinitionLoaded { item_id, graph } => {
+                let source = match self.table_definitions.remove(&item_id) {
+                    Some(TableDefinitionState::Loading { source })
+                    | Some(TableDefinitionState::Failed { source, .. })
+                    | Some(TableDefinitionState::Ready { source, .. }) => source,
+                    None => match self.database_source(item_id, cx) {
+                        Some(source) => source,
+                        None => return,
+                    },
+                };
+                match table_node_id(&graph, &source) {
+                    Some(table_id) => {
+                        self.table_definitions.insert(
+                            item_id,
+                            TableDefinitionState::Ready {
+                                source,
+                                graph,
+                                table_id,
+                            },
+                        );
+                    }
+                    None => {
+                        self.table_definitions.insert(
+                            item_id,
+                            TableDefinitionState::Failed {
+                                source,
+                                message: "Table was not present in the complete catalog graph"
+                                    .into(),
+                            },
+                        );
+                    }
+                }
+                cx.notify();
+            }
+            ExecutorEvent::TableDefinitionFailed { item_id, message } => {
+                let source = match self.table_definitions.remove(&item_id) {
+                    Some(TableDefinitionState::Loading { source })
+                    | Some(TableDefinitionState::Failed { source, .. })
+                    | Some(TableDefinitionState::Ready { source, .. }) => source,
+                    None => match self.database_source(item_id, cx) {
+                        Some(source) => source,
+                        None => return,
+                    },
+                };
+                self.table_definitions
+                    .insert(item_id, TableDefinitionState::Failed { source, message });
+                cx.notify();
+            }
+            ExecutorEvent::TableMigrationPreviewed { item_id, plan } => {
+                if let Some(designer) = self
+                    .table_designer
+                    .as_mut()
+                    .filter(|designer| designer.item_id == item_id)
+                {
+                    designer.plan = Some(plan);
+                    designer.pending = false;
+                    designer.error = None;
+                }
+                cx.notify();
+            }
+            ExecutorEvent::TableMigrationApplied { item_id, run } => {
+                let applied = run.state == sift_protocol::MigrationRunState::Applied;
+                self.table_designer = None;
+                self.modal = None;
+                if let Some(source) = self.database_source(item_id, cx) {
+                    self.request_table_definition(item_id, source, cx);
+                }
+                if applied {
+                    self.show_success_toast("Table definition updated".into(), cx);
+                } else {
+                    self.show_error_toast(
+                        format!("Migration completed with state {:?}", run.state),
+                        cx,
+                    );
+                }
+            }
+            ExecutorEvent::TableMigrationFailed { item_id, message } => {
+                if let Some(designer) = self
+                    .table_designer
+                    .as_mut()
+                    .filter(|designer| designer.item_id == item_id)
+                {
+                    designer.pending = false;
+                    designer.error = Some(message.clone());
+                }
+                self.show_error_toast(message, cx);
+            }
             ExecutorEvent::ProfileCreated {
                 entry,
                 connection_error,
@@ -3658,6 +3904,246 @@ impl WorkspaceShell {
         cx.notify();
     }
 
+    fn request_table_definition(
+        &mut self,
+        item_id: u64,
+        source: DatabaseObjectSource,
+        cx: &mut Context<Self>,
+    ) {
+        self.table_definitions.insert(
+            item_id,
+            TableDefinitionState::Loading {
+                source: source.clone(),
+            },
+        );
+        let failure_source = source.clone();
+        let sent = self.executor_sender.as_ref().is_some_and(|sender| {
+            sender
+                .send(ExecutorCommand::LoadTableDefinition { item_id, source })
+                .is_ok()
+        });
+        if !sent {
+            self.table_definitions.insert(
+                item_id,
+                TableDefinitionState::Failed {
+                    source: failure_source,
+                    message: "Database executor is unavailable".into(),
+                },
+            );
+        }
+        cx.notify();
+    }
+
+    fn open_table_designer(&mut self, item_id: u64, window: &mut Window, cx: &mut Context<Self>) {
+        let selected_column = match self.table_definitions.get(&item_id) {
+            Some(TableDefinitionState::Ready {
+                graph, table_id, ..
+            }) => table_columns(graph, table_id)
+                .first()
+                .map(|node| node.id.clone()),
+            _ => return,
+        };
+        self.table_designer = Some(TableDesignerState {
+            item_id,
+            selected_column: selected_column.clone(),
+            nullable: sift_protocol::Nullability::Nullable,
+            plan: None,
+            pending: false,
+            error: None,
+        });
+        self.modal = Some(Modal::TableDesigner(item_id));
+        if let Some(column_id) = selected_column {
+            self.select_table_designer_column(column_id, cx);
+        } else {
+            self.prepare_new_table_column(cx);
+        }
+        self.table_column_name_input
+            .focus_handle(cx)
+            .focus(window, cx);
+        cx.notify();
+    }
+
+    fn select_table_designer_column(
+        &mut self,
+        column_id: sift_protocol::CatalogObjectId,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(designer) = self.table_designer.as_ref() else {
+            return;
+        };
+        let Some(TableDefinitionState::Ready { graph, .. }) =
+            self.table_definitions.get(&designer.item_id)
+        else {
+            return;
+        };
+        let Some(column) = graph.data.nodes.iter().find(|node| node.id == column_id) else {
+            return;
+        };
+        let sift_protocol::CatalogNodeDetails::Column { column: metadata } = &column.details else {
+            return;
+        };
+        let name = column.name.clone();
+        let type_name = type_ref_label(&metadata.type_ref);
+        let nullable = metadata.nullable;
+        if let Some(designer) = self.table_designer.as_mut() {
+            designer.selected_column = Some(column_id);
+            designer.nullable = nullable;
+            designer.plan = None;
+            designer.error = None;
+        }
+        self.table_column_name_input
+            .update(cx, |input, cx| input.set_text(name, cx));
+        self.table_column_type_input
+            .update(cx, |input, cx| input.set_text(type_name, cx));
+        cx.notify();
+    }
+
+    fn prepare_new_table_column(&mut self, cx: &mut Context<Self>) {
+        if let Some(designer) = self.table_designer.as_mut() {
+            designer.selected_column = None;
+            designer.nullable = sift_protocol::Nullability::Nullable;
+            designer.plan = None;
+            designer.error = None;
+        }
+        self.table_column_name_input
+            .update(cx, |input, cx| input.set_text("", cx));
+        self.table_column_type_input
+            .update(cx, |input, cx| input.set_text("", cx));
+        cx.notify();
+    }
+
+    fn toggle_table_column_nullability(&mut self, cx: &mut Context<Self>) {
+        if let Some(designer) = self.table_designer.as_mut() {
+            designer.nullable = if designer.nullable == sift_protocol::Nullability::NotNullable {
+                sift_protocol::Nullability::Nullable
+            } else {
+                sift_protocol::Nullability::NotNullable
+            };
+            designer.plan = None;
+            designer.error = None;
+        }
+        cx.notify();
+    }
+
+    fn preview_table_change(&mut self, cx: &mut Context<Self>) {
+        let Some(mut designer) = self.table_designer.clone() else {
+            return;
+        };
+        let Some(TableDefinitionState::Ready {
+            source,
+            graph,
+            table_id,
+        }) = self.table_definitions.get(&designer.item_id)
+        else {
+            return;
+        };
+        let name = self
+            .table_column_name_input
+            .read(cx)
+            .text()
+            .trim()
+            .to_owned();
+        let type_name = self
+            .table_column_type_input
+            .read(cx)
+            .text()
+            .trim()
+            .to_owned();
+        if name.is_empty() || type_name.is_empty() {
+            designer.error = Some("Column name and type are required".into());
+            self.table_designer = Some(designer);
+            cx.notify();
+            return;
+        }
+        let native_type = sift_protocol::TypeRef::Native {
+            provider_id: source.provider_id.clone(),
+            name: type_name.clone(),
+            category: sift_protocol::TypeCategory::Other,
+        };
+        let mutation = match designer.selected_column.as_ref() {
+            Some(column_id) => {
+                let Some(node) = graph.data.nodes.iter().find(|node| &node.id == column_id) else {
+                    return;
+                };
+                let sift_protocol::CatalogNodeDetails::Column { column } = &node.details else {
+                    return;
+                };
+                let renamed = name != node.name;
+                let type_changed = type_name != type_ref_label(&column.type_ref);
+                let nullable_changed = designer.nullable != column.nullable;
+                if renamed && (type_changed || nullable_changed) {
+                    designer.error =
+                        Some("Preview a rename separately from type or nullability changes".into());
+                    self.table_designer = Some(designer);
+                    cx.notify();
+                    return;
+                }
+                if renamed {
+                    sift_protocol::CatalogDiagramMutation::RenameObject {
+                        object_id: column_id.clone(),
+                        new_name: name,
+                    }
+                } else if type_changed || nullable_changed {
+                    sift_protocol::CatalogDiagramMutation::ChangeColumn {
+                        column_id: column_id.clone(),
+                        type_ref: type_changed.then_some(native_type),
+                        nullability: nullable_changed.then_some(designer.nullable),
+                    }
+                } else {
+                    designer.error = Some("Change the name, type, or nullability first".into());
+                    self.table_designer = Some(designer);
+                    cx.notify();
+                    return;
+                }
+            }
+            None => sift_protocol::CatalogDiagramMutation::AddColumn {
+                table_id: table_id.clone(),
+                name,
+                type_ref: native_type,
+                nullability: designer.nullable,
+            },
+        };
+        let sent = self.executor_sender.as_ref().is_some_and(|sender| {
+            sender
+                .send(ExecutorCommand::PreviewTableMutation {
+                    item_id: designer.item_id,
+                    expected_catalog_revision: graph.revision,
+                    mutation,
+                })
+                .is_ok()
+        });
+        designer.pending = sent;
+        designer.plan = None;
+        designer.error = (!sent).then(|| "Database executor is unavailable".into());
+        self.table_designer = Some(designer);
+        cx.notify();
+    }
+
+    fn apply_table_change(&mut self, cx: &mut Context<Self>) {
+        let Some(designer) = self.table_designer.as_mut() else {
+            return;
+        };
+        let Some(plan) = designer.plan.as_ref() else {
+            return;
+        };
+        let request = sift_protocol::ApplyMigrationRequest {
+            plan_id: plan.id,
+            plan_digest: plan.digest.clone(),
+            acknowledgements: plan.required_acknowledgements.clone(),
+        };
+        let sent = self.executor_sender.as_ref().is_some_and(|sender| {
+            sender
+                .send(ExecutorCommand::ApplyTableMigration {
+                    item_id: designer.item_id,
+                    request,
+                })
+                .is_ok()
+        });
+        designer.pending = sent;
+        designer.error = (!sent).then(|| "Database executor is unavailable".into());
+        cx.notify();
+    }
+
     fn open_table_preview(
         &mut self,
         target: DatabaseObjectTarget,
@@ -3711,7 +4197,7 @@ impl WorkspaceShell {
                         kind: ItemKind::Query,
                         title,
                         dirty: false,
-                        source: Some(ItemSource::DatabaseObject(source)),
+                        source: Some(ItemSource::DatabaseObject(source.clone())),
                     },
                     editor,
                     results,
@@ -3720,6 +4206,7 @@ impl WorkspaceShell {
             });
         }
         self.execute_database_item(item_id, sql, cx);
+        self.request_table_definition(item_id, source, cx);
         self.focus_active_pane(window, cx);
         self.persist(cx);
         cx.notify();
@@ -3821,14 +4308,17 @@ impl WorkspaceShell {
                             && existing.object == source.object
                             && existing.object_kind == source.object_kind
                     })
-                    .map(|(item_index, _)| (pane_index, item_index))
+                    .map(|(item_index, item)| (pane_index, item_index, item.id))
             });
-        let Some((pane_index, item_index)) = found else {
+        let Some((pane_index, item_index, item_id)) = found else {
             return false;
         };
         self.active_pane = pane_index;
         self.panes[pane_index].update(cx, |pane, _| pane.activate_item(item_index, true));
         self.focus_active_pane(window, cx);
+        if !self.table_definitions.contains_key(&item_id) {
+            self.request_table_definition(item_id, source.clone(), cx);
+        }
         cx.notify();
         true
     }
@@ -5347,6 +5837,15 @@ impl WorkspaceShell {
         });
         if let Some(item_id) = removed_item_id {
             self.clear_sql_problems(item_id);
+            self.table_definitions.remove(&item_id);
+            if self
+                .table_designer
+                .as_ref()
+                .is_some_and(|designer| designer.item_id == item_id)
+            {
+                self.table_designer = None;
+                self.modal = None;
+            }
         }
         if let (Some(sender), Some(document_id)) = (&self.room_document_sender, removed_document_id)
         {
@@ -5946,6 +6445,9 @@ impl WorkspaceShell {
         if self.modal == Some(Modal::DatabaseConnection) {
             self.database_password_input
                 .update(cx, |input, cx| input.set_text("", cx));
+        }
+        if matches!(self.modal, Some(Modal::TableDesigner(_))) {
+            self.table_designer = None;
         }
         self.modal = None;
         // Return focus to the workspace so keybindings keep routing.
@@ -7061,6 +7563,166 @@ impl WorkspaceShell {
             .map(|item| item.title.clone())
     }
 
+    fn focused_database_item(&self, cx: &App) -> Option<(u64, DatabaseObjectSource)> {
+        let pane = self.panes.get(self.active_pane)?.read(cx);
+        let item = pane.active_item()?;
+        pane.database_source(item.id)
+            .map(|source| (item.id, source))
+    }
+
+    fn render_table_definition_inspector(
+        &self,
+        item_id: u64,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let colors = cx.theme().colors;
+        let header = |action: Option<gpui::AnyElement>| {
+            div()
+                .h(cx.theme().metrics.row_height)
+                .px_3()
+                .flex_none()
+                .flex()
+                .items_center()
+                .justify_between()
+                .border_b_1()
+                .border_color(colors.subtle_border)
+                .child(SectionLabel::new("TABLE DEFINITION"))
+                .children(action)
+        };
+        match self.table_definitions.get(&item_id) {
+            Some(TableDefinitionState::Ready {
+                graph, table_id, ..
+            }) => {
+                let columns = table_columns(graph, table_id);
+                let edit = Button::new("edit-table-definition", "Edit")
+                    .tone(ButtonTone::Ghost)
+                    .on_click(cx.listener(move |shell, _, window, cx| {
+                        shell.open_table_designer(item_id, window, cx)
+                    }))
+                    .into_any_element();
+                div()
+                    .debug_selector(|| "table-definition-inspector".into())
+                    .flex_none()
+                    .max_h(px(260.))
+                    .flex()
+                    .flex_col()
+                    .border_b_1()
+                    .border_color(colors.strong_border)
+                    .child(header(Some(edit)))
+                    .child(
+                        div()
+                            .id("table-definition-columns")
+                            .flex_1()
+                            .min_h_0()
+                            .overflow_y_scroll()
+                            .children(columns.into_iter().map(|node| {
+                                let metadata = match &node.details {
+                                    sift_protocol::CatalogNodeDetails::Column { column } => column,
+                                    _ => unreachable!(),
+                                };
+                                div()
+                                    .h(px(28.))
+                                    .px_3()
+                                    .flex_none()
+                                    .flex()
+                                    .items_center()
+                                    .gap_2()
+                                    .border_b_1()
+                                    .border_color(colors.subtle_border)
+                                    .child(
+                                        div()
+                                            .w(px(18.))
+                                            .flex_none()
+                                            .text_xs()
+                                            .text_color(colors.disabled_text)
+                                            .child(node.ordinal.unwrap_or(0).to_string()),
+                                    )
+                                    .child(
+                                        div()
+                                            .min_w_0()
+                                            .flex_1()
+                                            .truncate()
+                                            .child(node.name.clone()),
+                                    )
+                                    .child(
+                                        div()
+                                            .max_w(px(90.))
+                                            .truncate()
+                                            .text_xs()
+                                            .text_color(colors.muted_text)
+                                            .child(type_ref_label(&metadata.type_ref)),
+                                    )
+                                    .child(
+                                        div()
+                                            .w(px(12.))
+                                            .flex_none()
+                                            .text_xs()
+                                            .text_color(colors.disabled_text)
+                                            .child(
+                                                if metadata.nullable
+                                                    == sift_protocol::Nullability::Nullable
+                                                {
+                                                    "?"
+                                                } else {
+                                                    ""
+                                                },
+                                            ),
+                                    )
+                            })),
+                    )
+                    .into_any_element()
+            }
+            Some(TableDefinitionState::Loading { .. }) => div()
+                .flex_none()
+                .child(header(None))
+                .child(
+                    div()
+                        .px_3()
+                        .py_2()
+                        .text_color(colors.muted_text)
+                        .child("Loading definition…"),
+                )
+                .into_any_element(),
+            Some(TableDefinitionState::Failed { source, message }) => {
+                let source = source.clone();
+                let retry = Button::new("retry-table-definition", "Retry")
+                    .tone(ButtonTone::Ghost)
+                    .on_click(cx.listener(move |shell, _, _, cx| {
+                        shell.request_table_definition(item_id, source.clone(), cx)
+                    }))
+                    .into_any_element();
+                div()
+                    .flex_none()
+                    .child(header(Some(retry)))
+                    .child(
+                        div()
+                            .px_3()
+                            .py_2()
+                            .whitespace_normal()
+                            .text_color(colors.danger)
+                            .child(message.clone()),
+                    )
+                    .into_any_element()
+            }
+            None => {
+                let source = self
+                    .focused_database_item(cx)
+                    .map(|(_, source)| source)
+                    .expect("database inspector requires an active database item");
+                let load = Button::new("load-table-definition", "Load")
+                    .tone(ButtonTone::Ghost)
+                    .on_click(cx.listener(move |shell, _, _, cx| {
+                        shell.request_table_definition(item_id, source.clone(), cx)
+                    }))
+                    .into_any_element();
+                div()
+                    .flex_none()
+                    .child(header(Some(load)))
+                    .into_any_element()
+            }
+        }
+    }
+
     fn render_dock(&self, dock: &Dock, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
         let colors = theme.colors;
@@ -7622,11 +8284,12 @@ impl WorkspaceShell {
             )
             .when(dock.id == DockId::Inspector, |dock_view| {
                 let results = self.focused_pane_results(cx);
-                match results {
-                    Some(results) if !results.read(cx).inspector_fields().is_empty() => {
-                        dock_view.child(self.render_result_fields_inspector(results, cx))
-                    }
-                    _ => dock_view.child(
+                let database_item = self.focused_database_item(cx);
+                let has_fields = results
+                    .as_ref()
+                    .is_some_and(|results| !results.read(cx).inspector_fields().is_empty());
+                if database_item.is_none() && !has_fields {
+                    return dock_view.child(
                         div()
                             .p_3()
                             .flex()
@@ -7647,9 +8310,298 @@ impl WorkspaceShell {
                                         None => "Follow mode off".into(),
                                     }),
                             ),
-                    ),
+                    );
                 }
+                dock_view
+                    .children(database_item.map(|(item_id, _)| {
+                        self.render_table_definition_inspector(item_id, cx)
+                    }))
+                    .children(results.filter(|_| has_fields).map(|results| {
+                        self.render_result_fields_inspector(results, cx)
+                    }))
             })
+    }
+
+    fn render_table_designer_modal(
+        &self,
+        item_id: u64,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let colors = cx.theme().colors;
+        let Some(designer) = self
+            .table_designer
+            .as_ref()
+            .filter(|designer| designer.item_id == item_id)
+        else {
+            return div()
+                .child("Table designer is unavailable")
+                .into_any_element();
+        };
+        let Some(TableDefinitionState::Ready {
+            source,
+            graph,
+            table_id,
+        }) = self.table_definitions.get(&item_id)
+        else {
+            return div()
+                .child("Load the table definition before editing it")
+                .into_any_element();
+        };
+        let columns = table_columns(graph, table_id);
+        let adding = designer.selected_column.is_none();
+        let nullable = designer.nullable != sift_protocol::Nullability::NotNullable;
+        let pending = designer.pending;
+        let plan = designer.plan.clone();
+        let statements = plan
+            .as_ref()
+            .into_iter()
+            .flat_map(|plan| &plan.groups)
+            .flat_map(|group| &group.statements)
+            .cloned()
+            .collect::<Vec<_>>();
+        let requires_acknowledgement = plan
+            .as_ref()
+            .is_some_and(|plan| !plan.required_acknowledgements.is_empty());
+        div()
+            .debug_selector(|| "table-designer".into())
+            .flex()
+            .flex_col()
+            .min_h_0()
+            .child(
+                div()
+                    .h(px(42.))
+                    .px_3()
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .border_b_1()
+                    .border_color(colors.subtle_border)
+                    .child(
+                        div()
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .child(
+                                div()
+                                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                                    .child(format!("Edit {}.{}", source.schema, source.object)),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(colors.muted_text)
+                                    .child(format!("Catalog revision {}", graph.revision.0)),
+                            ),
+                    )
+                    .child(
+                        IconButton::new("close-table-designer", IconName::Close, "Close")
+                            .on_click(cx.listener(|shell, _, window, cx| {
+                                shell.dismiss_modal(&DismissModal, window, cx)
+                            })),
+                    ),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .flex()
+                    .child(
+                        div()
+                            .w(px(220.))
+                            .flex_none()
+                            .flex()
+                            .flex_col()
+                            .border_r_1()
+                            .border_color(colors.subtle_border)
+                            .child(
+                                div()
+                                    .h(px(32.))
+                                    .px_2()
+                                    .flex_none()
+                                    .flex()
+                                    .items_center()
+                                    .justify_between()
+                                    .child(SectionLabel::new("COLUMNS"))
+                                    .child(
+                                        Button::new("add-table-column", "Add")
+                                            .tone(ButtonTone::Ghost)
+                                            .start_icon(IconName::Add)
+                                            .on_click(cx.listener(|shell, _, _, cx| {
+                                                shell.prepare_new_table_column(cx)
+                                            })),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .id("table-designer-columns")
+                                    .flex_1()
+                                    .min_h_0()
+                                    .overflow_y_scroll()
+                                    .children(columns.into_iter().map(|node| {
+                                        let selected = designer.selected_column.as_ref()
+                                            == Some(&node.id);
+                                        let column_id = node.id.clone();
+                                        let type_name = match &node.details {
+                                            sift_protocol::CatalogNodeDetails::Column { column } => {
+                                                type_ref_label(&column.type_ref)
+                                            }
+                                            _ => String::new(),
+                                        };
+                                        div()
+                                            .id(("table-designer-column", node.ordinal.unwrap_or(0) as usize))
+                                            .h(px(32.))
+                                            .px_2()
+                                            .flex_none()
+                                            .flex()
+                                            .items_center()
+                                            .gap_2()
+                                            .when(selected, |row| row.bg(colors.active_surface))
+                                            .hover(|row| row.bg(colors.hovered_surface))
+                                            .on_click(cx.listener(move |shell, _, _, cx| {
+                                                shell.select_table_designer_column(column_id.clone(), cx)
+                                            }))
+                                            .child(
+                                                div()
+                                                    .min_w_0()
+                                                    .flex_1()
+                                                    .truncate()
+                                                    .child(node.name.clone()),
+                                            )
+                                            .child(
+                                                div()
+                                                    .max_w(px(76.))
+                                                    .truncate()
+                                                    .text_xs()
+                                                    .text_color(colors.muted_text)
+                                                    .child(type_name),
+                                            )
+                                    })),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .id("table-designer-form")
+                            .flex_1()
+                            .min_w_0()
+                            .min_h_0()
+                            .p_3()
+                            .flex()
+                            .flex_col()
+                            .gap_3()
+                            .overflow_y_scroll()
+                            .child(
+                                div()
+                                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                                    .child(if adding { "New column" } else { "Edit column" }),
+                            )
+                            .child(Field::new(
+                                "NAME",
+                                Some(self.table_column_name_input.focus_handle(cx)),
+                                self.table_column_name_input.clone(),
+                            ))
+                            .child(Field::new(
+                                "TYPE",
+                                Some(self.table_column_type_input.focus_handle(cx)),
+                                self.table_column_type_input.clone(),
+                            ))
+                            .child(
+                                div()
+                                    .id("table-column-nullable")
+                                    .role(Role::CheckBox)
+                                    .aria_label(if nullable {
+                                        "Nullable, checked"
+                                    } else {
+                                        "Nullable, unchecked"
+                                    })
+                                    .flex()
+                                    .items_center()
+                                    .gap_2()
+                                    .cursor_pointer()
+                                    .on_click(cx.listener(|shell, _, _, cx| {
+                                        shell.toggle_table_column_nullability(cx)
+                                    }))
+                                    .child(
+                                        div()
+                                            .size(px(16.))
+                                            .flex()
+                                            .items_center()
+                                            .justify_center()
+                                            .rounded_sm()
+                                            .border_1()
+                                            .border_color(if nullable {
+                                                colors.accent
+                                            } else {
+                                                colors.strong_border
+                                            })
+                                            .children(nullable.then(|| {
+                                                icon(IconName::Check, colors.accent, 11.)
+                                            })),
+                                    )
+                                    .child("Nullable"),
+                            )
+                            .children(designer.error.clone().map(ErrorBanner::new))
+                            .when(!statements.is_empty(), |form| {
+                                form.child(SectionLabel::new("MIGRATION PREVIEW")).child(
+                                    div()
+                                        .p_2()
+                                        .flex()
+                                        .flex_col()
+                                        .gap_2()
+                                        .rounded_sm()
+                                        .border_1()
+                                        .border_color(colors.subtle_border)
+                                        .bg(colors.elevated_surface)
+                                        .font_family("monospace")
+                                        .text_xs()
+                                        .children(statements.into_iter().map(|statement| {
+                                            div().whitespace_normal().child(statement.sql)
+                                        })),
+                                )
+                            })
+                            .children(requires_acknowledgement.then(|| {
+                                ErrorBanner::new(
+                                    "Applying acknowledges the migration risks shown by the server.",
+                                )
+                                .tone(Tone::Warning)
+                            }))
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .justify_end()
+                                    .gap_2()
+                                    .child(
+                                        Button::new("preview-table-change", "Preview DDL")
+                                            .tone(ButtonTone::Neutral)
+                                            .loading(pending)
+                                            .on_click(cx.listener(|shell, _, _, cx| {
+                                                shell.preview_table_change(cx)
+                                            })),
+                                    )
+                                    .children(plan.map(|_| {
+                                        Button::new("apply-table-change", "Apply migration")
+                                            .tone(if requires_acknowledgement {
+                                                ButtonTone::DangerMuted
+                                            } else {
+                                                ButtonTone::Accent
+                                            })
+                                            .loading(pending)
+                                            .on_click(cx.listener(|shell, _, _, cx| {
+                                                shell.apply_table_change(cx)
+                                            }))
+                                    })),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .whitespace_normal()
+                                    .text_color(colors.disabled_text)
+                                    .child("Column order, drops, keys, and indexes remain read-only until rebuild and dependency plans are supported."),
+                            ),
+                    ),
+            )
+            .into_any_element()
     }
 
     fn render_modal(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
@@ -7663,9 +8615,12 @@ impl WorkspaceShell {
                 Modal::ServerPicker | Modal::ServerConnection | Modal::Account
             );
             let database_connection = matches!(modal, Modal::DatabaseConnection);
+            let table_designer = matches!(modal, Modal::TableDesigner(_));
             let command_palette = matches!(modal, Modal::CommandPalette);
             let instance_setup = matches!(modal, Modal::InstanceSetup);
-            let card_width = if settings {
+            let card_width = if table_designer {
+                900.0
+            } else if settings {
                 720.0
             } else if server_picker || account {
                 360.0
@@ -9662,6 +10617,9 @@ impl WorkspaceShell {
                         )
                         .into_any_element()
                 }
+                Modal::TableDesigner(item_id) => {
+                    self.render_table_designer_modal(*item_id, cx)
+                }
             };
             let toolbar_height = cx.theme().metrics.toolbar_height;
             // Scrim-clicking dismisses transient surfaces. Long-form dialogs
@@ -9705,7 +10663,7 @@ impl WorkspaceShell {
                     layer.justify_start().pt_1().pl(px(38.))
                 })
                 .when(account, |layer| layer.justify_end().pt_1().pr_2())
-                .when(settings || database_connection, |layer| {
+                .when(settings || database_connection || table_designer, |layer| {
                     layer
                         .items_center()
                         .justify_center()
@@ -9714,7 +10672,11 @@ impl WorkspaceShell {
                         .bg(colors.scrim)
                 })
                 .when(
-                    !server_picker && !settings && !account && !database_connection,
+                    !server_picker
+                        && !settings
+                        && !account
+                        && !database_connection
+                        && !table_designer,
                     |layer| {
                         layer
                             .justify_center()
@@ -9737,7 +10699,11 @@ impl WorkspaceShell {
                         .flex()
                         .flex_col()
                         .when(
-                            !database_connection && !command_palette && !account && !server_picker,
+                            !database_connection
+                                && !command_palette
+                                && !account
+                                && !server_picker
+                                && !table_designer,
                             |card| card.p_3(),
                         )
                         .overflow_hidden()
@@ -10283,6 +11249,96 @@ mod tests {
     use super::*;
     use gpui::{point, EntityInputHandler, Modifiers, TestAppContext, VisualTestContext};
 
+    fn table_graph() -> sift_protocol::CatalogGraph {
+        use sift_protocol::{
+            CatalogCompleteness, CatalogCoverage, CatalogGraphData, CatalogNode,
+            CatalogNodeDetails, CatalogNodeKind, CatalogObjectId, CatalogRevision, ColumnMetadata,
+            DialectId, PrimitiveType, ProviderId, ProviderRef, TypeRef,
+        };
+        use std::collections::BTreeMap;
+        let catalog_id = CatalogObjectId("catalog".into());
+        let schema_id = CatalogObjectId("schema".into());
+        let table_id = CatalogObjectId("table".into());
+        let node = |id: CatalogObjectId,
+                    kind: CatalogNodeKind,
+                    name: &str,
+                    qualified_name: &str,
+                    parent_id: Option<CatalogObjectId>,
+                    ordinal: Option<u32>,
+                    details: CatalogNodeDetails| CatalogNode {
+            id,
+            native_id: None,
+            kind,
+            name: name.into(),
+            qualified_name: qualified_name.into(),
+            parent_id,
+            ordinal,
+            definition_digest: None,
+            completeness: CatalogCompleteness::Complete,
+            details,
+            extra: BTreeMap::new(),
+        };
+        sift_protocol::CatalogGraph {
+            revision: CatalogRevision(7),
+            content_digest: "catfp:test".into(),
+            invalidation_epoch: 1,
+            captured_at: serde_json::from_value(serde_json::json!("2026-01-01T00:00:00Z")).unwrap(),
+            provider: ProviderRef {
+                provider_id: ProviderId::new("sift/postgres").unwrap(),
+                dialect_id: DialectId::new("sift/postgres").unwrap(),
+                provider_version: "1".into(),
+            },
+            database_identity: "sifttest".into(),
+            data: CatalogGraphData {
+                coverage: CatalogCoverage::complete(),
+                nodes: vec![
+                    node(
+                        catalog_id.clone(),
+                        CatalogNodeKind::Catalog,
+                        "sifttest",
+                        "sifttest",
+                        None,
+                        None,
+                        CatalogNodeDetails::None,
+                    ),
+                    node(
+                        schema_id.clone(),
+                        CatalogNodeKind::Schema,
+                        "lab",
+                        "sifttest.lab",
+                        Some(catalog_id),
+                        None,
+                        CatalogNodeDetails::None,
+                    ),
+                    node(
+                        table_id.clone(),
+                        CatalogNodeKind::Table,
+                        "people",
+                        "sifttest.lab.people",
+                        Some(schema_id),
+                        None,
+                        CatalogNodeDetails::Object { routine_args: None },
+                    ),
+                    node(
+                        CatalogObjectId("column-id".into()),
+                        CatalogNodeKind::Column,
+                        "id",
+                        "sifttest.lab.people.id",
+                        Some(table_id),
+                        Some(1),
+                        CatalogNodeDetails::Column {
+                            column: ColumnMetadata::new(
+                                "id",
+                                TypeRef::Primitive(PrimitiveType::Int64),
+                            ),
+                        },
+                    ),
+                ],
+                edges: Vec::new(),
+            },
+        }
+    }
+
     fn shell(cx: &mut TestAppContext) -> gpui::WindowHandle<WorkspaceShell> {
         cx.update(|cx| {
             cx.open_window(Default::default(), |window, cx| {
@@ -10540,6 +11596,13 @@ mod tests {
             ExecutorCommand::Execute { item_id, sql, .. } => (item_id, sql),
             _ => panic!("expected preview execution"),
         };
+        assert!(matches!(
+            receiver.try_recv(),
+            Ok(ExecutorCommand::LoadTableDefinition {
+                item_id: definition_item,
+                source,
+            }) if definition_item == item_id && source.schema == "lab" && source.object == "people"
+        ));
         assert_eq!(sql, "SELECT * FROM \"lab\".\"people\" LIMIT 100;");
         workspace.read_with(&cx, |shell, cx| {
             let pane = shell.panes[shell.active_pane].read(cx);
@@ -10600,6 +11663,71 @@ mod tests {
     }
 
     #[gpui::test]
+    fn table_designer_previews_additive_column_mutation(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        workspace.update_in(&mut cx, |shell, window, cx| {
+            shell.executor_sender = Some(sender);
+            shell.connection_status = ConnectionStatus::Connected {
+                profile_id: 2,
+                name: "Demo".into(),
+            };
+            shell.open_table_preview(
+                DatabaseObjectTarget {
+                    connection: ConnectionNavEntry {
+                        id: 2,
+                        tenant_id: 1,
+                        name: "Demo".into(),
+                        provider_id: sift_protocol::ProviderId::new("sift/postgres").unwrap(),
+                    },
+                    catalog: "sifttest".into(),
+                    schema: "lab".into(),
+                    object: "people".into(),
+                    object_kind: sift_protocol::ObjectKind::Table,
+                },
+                window,
+                cx,
+            );
+        });
+        let item_id = match receiver.try_recv().unwrap() {
+            ExecutorCommand::Execute { item_id, .. } => item_id,
+            _ => panic!("expected preview execution"),
+        };
+        assert!(matches!(
+            receiver.try_recv(),
+            Ok(ExecutorCommand::LoadTableDefinition { .. })
+        ));
+        workspace.update_in(&mut cx, |shell, window, cx| {
+            shell.on_executor_event(
+                ExecutorEvent::TableDefinitionLoaded {
+                    item_id,
+                    graph: Box::new(table_graph()),
+                },
+                cx,
+            );
+            shell.open_table_designer(item_id, window, cx);
+            shell.prepare_new_table_column(cx);
+            shell
+                .table_column_name_input
+                .update(cx, |input, cx| input.set_text("nickname", cx));
+            shell
+                .table_column_type_input
+                .update(cx, |input, cx| input.set_text("text", cx));
+            shell.preview_table_change(cx);
+        });
+        assert!(matches!(
+            receiver.try_recv(),
+            Ok(ExecutorCommand::PreviewTableMutation {
+                item_id: preview_item,
+                expected_catalog_revision: sift_protocol::CatalogRevision(7),
+                mutation: sift_protocol::CatalogDiagramMutation::AddColumn { name, .. },
+            }) if preview_item == item_id && name == "nickname"
+        ));
+    }
+
+    #[gpui::test]
     fn database_snapshot_reconnects_lazily_and_becomes_live_after_refresh(cx: &mut TestAppContext) {
         let window = shell(cx);
         let mut cx = VisualTestContext::from_window(window.into(), cx);
@@ -10642,6 +11770,13 @@ mod tests {
                 profile_id: 9,
                 ..
             })
+        ));
+        assert!(matches!(
+            receiver.try_recv(),
+            Ok(ExecutorCommand::LoadTableDefinition {
+                item_id: definition_item,
+                ..
+            }) if definition_item == item_id
         ));
         cx.run_until_parked();
         assert!(cx.debug_bounds("database-snapshot-overlay").is_some());

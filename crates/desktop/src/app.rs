@@ -696,6 +696,83 @@ async fn run_query_executor(
                     return;
                 }
             }
+            ExecutorCommand::LoadTableDefinition { item_id, source } => {
+                let event = match context.as_ref() {
+                    Some(opened) if opened.profile_id == source.profile_id => {
+                        load_table_definition(opened, item_id, &source).await
+                    }
+                    _ => ExecutorEvent::TableDefinitionFailed {
+                        item_id,
+                        message: "Connect to this table before loading its definition".into(),
+                    },
+                };
+                if events.send(event).is_err() {
+                    return;
+                }
+            }
+            ExecutorCommand::PreviewTableMutation {
+                item_id,
+                expected_catalog_revision,
+                mutation,
+            } => {
+                let event = match context.as_ref() {
+                    Some(opened) => opened
+                        .client
+                        .preview_catalog_diagram_mutation(
+                            opened.session,
+                            opened.connection,
+                            sift_protocol::PreviewCatalogDiagramMutationRequest {
+                                expected_catalog_revision,
+                                mutation,
+                                options: sift_protocol::MigrationOptions::default(),
+                            },
+                        )
+                        .await
+                        .map(|plan| ExecutorEvent::TableMigrationPreviewed {
+                            item_id,
+                            plan: Box::new(plan),
+                        })
+                        .unwrap_or_else(|error| ExecutorEvent::TableMigrationFailed {
+                            item_id,
+                            message: format!("previewing table migration failed: {error}"),
+                        }),
+                    None => ExecutorEvent::TableMigrationFailed {
+                        item_id,
+                        message: "Connect to this table before previewing changes".into(),
+                    },
+                };
+                if events.send(event).is_err() {
+                    return;
+                }
+            }
+            ExecutorCommand::ApplyTableMigration { item_id, request } => {
+                let event = match context.as_ref() {
+                    Some(opened) => opened
+                        .client
+                        .apply_migration(opened.session, opened.connection, request)
+                        .await
+                        .map(|run| ExecutorEvent::TableMigrationApplied {
+                            item_id,
+                            run: Box::new(run),
+                        })
+                        .unwrap_or_else(|error| ExecutorEvent::TableMigrationFailed {
+                            item_id,
+                            message: format!("applying table migration failed: {error}"),
+                        }),
+                    None => ExecutorEvent::TableMigrationFailed {
+                        item_id,
+                        message: "Connect to this table before applying changes".into(),
+                    },
+                };
+                if events.send(event).is_err() {
+                    return;
+                }
+                if let Some(opened) = context.as_ref() {
+                    if events.send(load_schema(opened).await).is_err() {
+                        return;
+                    }
+                }
+            }
         }
     }
 }
@@ -740,6 +817,34 @@ async fn load_schema(context: &QueryContext) -> ExecutorEvent {
             message: format!("loading database schema failed: {error}"),
         },
     }
+}
+
+async fn load_table_definition(
+    context: &QueryContext,
+    item_id: u64,
+    source: &sift_workspace_ui::DatabaseObjectSource,
+) -> ExecutorEvent {
+    let request = sift_protocol::CatalogGraphRequest {
+        options: sift_protocol::CatalogGraphOptions {
+            schemas: Some(vec![source.schema.clone()]),
+            include_definitions: true,
+            max_nodes: Some(10_000),
+            ..Default::default()
+        },
+        refresh: false,
+    };
+    context
+        .client
+        .catalog_graph(context.session, context.connection, request)
+        .await
+        .map(|graph| ExecutorEvent::TableDefinitionLoaded {
+            item_id,
+            graph: Box::new(graph),
+        })
+        .unwrap_or_else(|error| ExecutorEvent::TableDefinitionFailed {
+            item_id,
+            message: format!("loading table definition failed: {error}"),
+        })
 }
 
 async fn create_connection_profile(

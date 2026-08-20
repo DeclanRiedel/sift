@@ -369,6 +369,8 @@ pub enum DiagramMutationError {
     InvalidForeignKeyColumns,
     #[error("column mutation must change type or nullability")]
     EmptyColumnChange,
+    #[error("column name is empty, oversized, or collides with an existing column")]
+    InvalidColumnName,
     #[error("mutated catalog graph failed structural validation")]
     InvalidResult,
 }
@@ -418,6 +420,15 @@ pub fn apply_diagram_mutation(
                 type_ref.as_ref(),
                 *nullability,
             )?;
+            Vec::new()
+        }
+        sift_protocol::CatalogDiagramMutation::AddColumn {
+            table_id,
+            name,
+            type_ref,
+            nullability,
+        } => {
+            add_catalog_column(&mut desired.data, table_id, name, type_ref, *nullability)?;
             Vec::new()
         }
     };
@@ -725,6 +736,76 @@ fn change_catalog_column(
     if let Some(nullability) = nullability {
         column.nullable = nullability;
     }
+    Ok(())
+}
+
+fn add_catalog_column(
+    graph: &mut CatalogGraphData,
+    table_id: &CatalogObjectId,
+    name: &str,
+    type_ref: &sift_protocol::TypeRef,
+    nullability: sift_protocol::Nullability,
+) -> Result<(), DiagramMutationError> {
+    if name.is_empty() || name.len() > 1_024 {
+        return Err(DiagramMutationError::InvalidColumnName);
+    }
+    let table = graph
+        .nodes
+        .iter()
+        .find(|node| {
+            &node.id == table_id
+                && matches!(
+                    node.kind,
+                    CatalogNodeKind::Table | CatalogNodeKind::PartitionedTable
+                )
+        })
+        .cloned()
+        .ok_or(DiagramMutationError::UnknownObject)?;
+    if graph.nodes.iter().any(|node| {
+        node.parent_id.as_ref() == Some(table_id)
+            && node.kind == CatalogNodeKind::Column
+            && node.name == name
+    }) {
+        return Err(DiagramMutationError::InvalidColumnName);
+    }
+    let ordinal = graph
+        .nodes
+        .iter()
+        .filter(|node| {
+            node.parent_id.as_ref() == Some(table_id) && node.kind == CatalogNodeKind::Column
+        })
+        .filter_map(|node| node.ordinal)
+        .max()
+        .unwrap_or(0)
+        .saturating_add(1);
+    let qualified_name = format!("{}.{name}", table.qualified_name);
+    let id = CatalogObjectId(format!(
+        "cat:{}",
+        digest(&format!("table-designer-column\0{}\0{name}", table.id.0))
+    ));
+    graph.nodes.push(CatalogNode {
+        id: id.clone(),
+        native_id: None,
+        kind: CatalogNodeKind::Column,
+        name: name.into(),
+        qualified_name,
+        parent_id: Some(table.id.clone()),
+        ordinal: Some(ordinal),
+        definition_digest: None,
+        completeness: CatalogCompleteness::Complete,
+        details: CatalogNodeDetails::Column {
+            column: sift_protocol::ColumnMetadata {
+                name: name.into(),
+                type_ref: type_ref.clone(),
+                nullable: nullability,
+                auto_increment: false,
+                primary_key: false,
+                facets: sift_protocol::EngineColumnFacets::default(),
+            },
+        },
+        extra: BTreeMap::new(),
+    });
+    contain(&mut graph.edges, &table.id, &id);
     Ok(())
 }
 
@@ -1646,6 +1727,82 @@ mod tests {
                 .zip(target_columns)
                 .map(|(from, to)| sift_protocol::CatalogColumnPair { from, to })
                 .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn table_designer_adds_a_column_at_the_next_ordinal() {
+        let mut table = ObjectInfo::new("events", ObjectKind::Table);
+        table.columns.push(ColumnMetadata::new(
+            "id",
+            TypeRef::Primitive(PrimitiveType::Int64),
+        ));
+        let data = graph_from_trees(
+            &[CatalogTree {
+                name: "db".into(),
+                schemas: vec![SchemaTree {
+                    name: "public".into(),
+                    objects: vec![table],
+                }],
+            }],
+            CatalogCoverage::complete(),
+            "provider:db",
+        );
+        let graph = CatalogGraph {
+            revision: sift_protocol::CatalogRevision(1),
+            content_digest: "catfp:fixture".into(),
+            invalidation_epoch: 1,
+            captured_at: chrono::Utc::now(),
+            provider: sift_protocol::ProviderRef {
+                provider_id: sift_protocol::ProviderId::new("test/provider").unwrap(),
+                dialect_id: sift_protocol::DialectId::new("test/dialect").unwrap(),
+                provider_version: "1".into(),
+            },
+            database_identity: "db".into(),
+            data,
+        };
+        let table = graph
+            .data
+            .nodes
+            .iter()
+            .find(|node| node.kind == CatalogNodeKind::Table)
+            .unwrap();
+        let (desired, renames) = apply_diagram_mutation(
+            &graph,
+            &sift_protocol::CatalogDiagramMutation::AddColumn {
+                table_id: table.id.clone(),
+                name: "payload".into(),
+                type_ref: TypeRef::Primitive(PrimitiveType::Jsonb),
+                nullability: sift_protocol::Nullability::Nullable,
+            },
+        )
+        .unwrap();
+        assert!(renames.is_empty());
+        let added = desired
+            .data
+            .nodes
+            .iter()
+            .find(|node| node.kind == CatalogNodeKind::Column && node.name == "payload")
+            .unwrap();
+        assert_eq!(added.parent_id.as_ref(), Some(&table.id));
+        assert_eq!(added.ordinal, Some(2));
+        assert!(desired.data.edges.iter().any(|edge| {
+            edge.from == table.id
+                && edge.to.as_ref() == Some(&added.id)
+                && edge.kind == CatalogEdgeKind::Contains
+        }));
+        assert_eq!(
+            apply_diagram_mutation(
+                &desired,
+                &sift_protocol::CatalogDiagramMutation::AddColumn {
+                    table_id: table.id.clone(),
+                    name: "payload".into(),
+                    type_ref: TypeRef::Primitive(PrimitiveType::Text),
+                    nullability: sift_protocol::Nullability::Nullable,
+                },
+            )
+            .unwrap_err(),
+            DiagramMutationError::InvalidColumnName
         );
     }
 }

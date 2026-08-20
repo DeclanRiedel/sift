@@ -925,6 +925,51 @@ mod tests {
     }
 
     #[test]
+    fn table_designer_add_column_renders_engine_aware_ddl() {
+        let from = graph_in_schema("odd schema");
+        let table = from
+            .data
+            .nodes
+            .iter()
+            .find(|node| node.kind == CatalogNodeKind::Table)
+            .unwrap();
+        let (to, _) = sift_core::catalog::apply_diagram_mutation(
+            &from,
+            &sift_protocol::CatalogDiagramMutation::AddColumn {
+                table_id: table.id.clone(),
+                name: "payload value".into(),
+                type_ref: TypeRef::Primitive(PrimitiveType::Text),
+                nullability: Nullability::NotNullable,
+            },
+        )
+        .unwrap();
+        let diff = sift_core::schema_diff::diff_catalogs(source(), &from, source(), &to, &[], None)
+            .unwrap();
+        for (engine, expected) in [
+            (
+                Engine::Postgres,
+                "ALTER TABLE \"odd schema\".\"odd table\" ADD \"payload value\" text NOT NULL;",
+            ),
+            (
+                Engine::SqlServer,
+                "ALTER TABLE [odd schema].[odd table] ADD [payload value] nvarchar(max) NOT NULL;",
+            ),
+        ] {
+            let plan = render_plan(
+                engine,
+                &diff,
+                &from,
+                &to,
+                &[],
+                CatalogRevision(1),
+                &MigrationOptions::default(),
+            )
+            .unwrap();
+            assert_eq!(plan.groups[0].statements[0].sql, expected);
+        }
+    }
+
+    #[test]
     fn table_move_renders_after_target_schema_create_for_both_engines() {
         let from = graph_in_schema("old schema");
         let to = graph_in_schema("new schema");

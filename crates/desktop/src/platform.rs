@@ -139,6 +139,6 @@ mod tests {
 
     #[test]
     fn keymap_has_stable_action_coverage() {
-        assert_eq!(shell_key_bindings().len(), 13);
+        assert_eq!(shell_key_bindings().len(), 14);
     }
 }
