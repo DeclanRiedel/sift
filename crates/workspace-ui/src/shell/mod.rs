@@ -248,7 +248,6 @@ struct TabDrag {
     pane_id: u64,
     item_id: u64,
     index: usize,
-    kind: ItemKind,
     title: SharedString,
     selected: bool,
     dirty: bool,
@@ -683,9 +682,6 @@ pub struct Pane {
     /// Shape a dragged tab would take if released over this pane body.
     /// Tab-bar hover styling is ephemeral GPUI `drag_over` state instead.
     tab_drop_target: Option<PaneDropTarget>,
-    /// Lightweight metadata for rendering a structural preview of the pane
-    /// that an edge drop would create.
-    tab_drag_preview: Option<TabDrag>,
     /// Last body bounds associated with the preview. The workspace-level drag
     /// listener uses this to clear the ghost immediately after the pointer
     /// leaves the pane, without invalidating every pane on every move.
@@ -772,7 +768,6 @@ impl Pane {
             live_result_extents: HashMap::new(),
             result_resize_frame_pending: false,
             tab_drop_target: None,
-            tab_drag_preview: None,
             tab_drag_preview_bounds: None,
             pending_close_item: None,
         }
@@ -1180,7 +1175,6 @@ impl Pane {
         cx: &mut Context<Self>,
     ) {
         self.tab_drop_target = None;
-        self.tab_drag_preview = None;
         self.tab_drag_preview_bounds = None;
         let insertion_index =
             if drag.pane_id == self.id && index > drag.index && index < self.items.len() {
@@ -1232,14 +1226,11 @@ impl Pane {
         } else {
             PaneDropTarget::Below
         };
-        let drag = event.drag(cx);
-        let activating = self.tab_drag_preview.is_none();
+        let activating = self.tab_drag_preview_bounds.is_none();
         if self.tab_drop_target != Some(target)
-            || self.tab_drag_preview.as_ref() != Some(drag)
             || self.tab_drag_preview_bounds != Some(event.bounds)
         {
             self.tab_drop_target = Some(target);
-            self.tab_drag_preview = Some(drag.clone());
             self.tab_drag_preview_bounds = Some(event.bounds);
             if activating {
                 cx.emit(PaneEvent::DragPreviewActivated);
@@ -1254,7 +1245,6 @@ impl Pane {
             .tab_drop_target
             .take()
             .unwrap_or(PaneDropTarget::Center);
-        self.tab_drag_preview = None;
         self.tab_drag_preview_bounds = None;
         let creates_pane = matches!(
             target,
@@ -1370,8 +1360,7 @@ impl gpui::Render for Pane {
         let is_focused = self.active_focus_handle(cx).is_focused(window)
             || self.focus_handle.contains_focused(window, cx);
         let active = self.active_item().cloned();
-        let tab_drag_preview = self.tab_drag_preview.clone();
-        let has_tab_drag_preview = tab_drag_preview.is_some();
+        let has_tab_drag_preview = self.tab_drag_preview_bounds.is_some();
         let database_notice = active.as_ref().and_then(|item| {
             let ItemSource::DatabaseObject(_) = item.source.as_ref()?;
             let state = self.database_item_states.get(&item.id)?.clone();
@@ -1532,7 +1521,6 @@ impl gpui::Render for Pane {
                                                     pane_id,
                                                     item_id,
                                                     index,
-                                                    kind: item.kind,
                                                     title: item.title.clone().into(),
                                                     selected,
                                                     dirty: item.dirty,
@@ -1895,86 +1883,7 @@ impl gpui::Render for Pane {
                                 .right_0()
                                 .bottom_0()
                                 .h(DefiniteLength::Fraction(0.5))
-                        })
-                        .children(
-                            tab_drag_preview
-                                .filter(|_| target != PaneDropTarget::Center)
-                                .map(|drag| {
-                                    let mut skeleton = colors.muted_text;
-                                    skeleton.a = 0.28;
-                                    let line_widths = match drag.kind {
-                                        ItemKind::Query => [0.62, 0.78, 0.46, 0.70],
-                                        ItemKind::Configuration => [0.48, 0.66, 0.58, 0.74],
-                                        ItemKind::Schema | ItemKind::Welcome => {
-                                            [0.54, 0.72, 0.40, 0.64]
-                                        }
-                                    };
-                                    div()
-                                        .debug_selector(|| "ghost-pane-chrome".into())
-                                        .relative()
-                                        .size_full()
-                                        .flex()
-                                        .flex_col()
-                                        .overflow_hidden()
-                                        .bg(colors.elevated_surface)
-                                        .child(
-                                            div()
-                                                .h(theme.metrics.tab_height)
-                                                .flex_none()
-                                                .flex()
-                                                .items_stretch()
-                                                .bg(colors.toolbar)
-                                                .border_b_1()
-                                                .border_color(colors.subtle_border)
-                                                .child(
-                                                    PaneTab::new("ghost-pane-tab")
-                                                        .debug_selector(|| "ghost-pane-tab".into())
-                                                        .selected(true)
-                                                        .dirty(drag.dirty)
-                                                        .child(
-                                                            div()
-                                                                .min_w_0()
-                                                                .px_2()
-                                                                .truncate()
-                                                                .child(drag.title),
-                                                        ),
-                                                ),
-                                        )
-                                        .child(
-                                            div()
-                                                .flex_1()
-                                                .min_h_0()
-                                                .flex()
-                                                .bg(colors.background)
-                                                .child(
-                                                    div()
-                                                        .w(EDITOR_GUTTER_WIDTH)
-                                                        .h_full()
-                                                        .flex_none()
-                                                        .bg(colors.surface)
-                                                        .border_r_1()
-                                                        .border_color(colors.subtle_border),
-                                                )
-                                                .child(
-                                                    div()
-                                                        .flex_1()
-                                                        .min_w_0()
-                                                        .p_3()
-                                                        .flex()
-                                                        .flex_col()
-                                                        .gap_2()
-                                                        .children(line_widths.map(|width| {
-                                                            div()
-                                                                .h(px(2.))
-                                                                .w(DefiniteLength::Fraction(width))
-                                                                .rounded_full()
-                                                                .bg(skeleton)
-                                                        })),
-                                                ),
-                                        )
-                                        .child(div().absolute().inset_0().bg(pane_preview_tint))
-                                }),
-                        ),
+                        }),
                 )
             })
             .children(database_notice.map(|(item_id, state)| {
@@ -4475,7 +4384,6 @@ impl WorkspaceShell {
                     if previous != *emitter {
                         previous.update(cx, |pane, cx| {
                             pane.tab_drop_target = None;
-                            pane.tab_drag_preview = None;
                             pane.tab_drag_preview_bounds = None;
                             cx.notify();
                         });
@@ -4678,7 +4586,6 @@ impl WorkspaceShell {
         for pane in &self.panes {
             pane.update(cx, |pane, _| {
                 pane.tab_drop_target = None;
-                pane.tab_drag_preview = None;
                 pane.tab_drag_preview_bounds = None;
             });
         }
@@ -4700,7 +4607,6 @@ impl WorkspaceShell {
         if stale {
             pane.update(cx, |pane, cx| {
                 pane.tab_drop_target = None;
-                pane.tab_drag_preview = None;
                 pane.tab_drag_preview_bounds = None;
                 cx.notify();
             });
@@ -10794,28 +10700,15 @@ mod tests {
         assert_eq!(preview.left(), target.left());
         assert_eq!(preview.size.width, target.size.width / 2.0);
         workspace.read_with(&cx, |shell, cx| {
-            let pane = shell.panes[0].read(cx);
-            let ghost = pane
-                .tab_drag_preview
-                .as_ref()
-                .expect("structural pane preview state");
-            assert_eq!(ghost.title.as_ref(), "query.sql");
+            assert!(shell.panes[0].read(cx).tab_drag_preview_bounds.is_some());
         });
-        let ghost_pane = cx
-            .debug_bounds("ghost-pane-chrome")
-            .expect("visible structural pane ghost");
-        assert_eq!(ghost_pane.left(), preview.left() + px(2.));
-        assert_eq!(ghost_pane.top(), preview.top() + px(2.));
-        assert_eq!(ghost_pane.size.width, preview.size.width - px(4.));
-        assert_eq!(ghost_pane.size.height, preview.size.height - px(4.));
-        assert!(cx.debug_bounds("ghost-pane-tab").is_some());
 
         cx.simulate_mouse_move(start, MouseButton::Left, Modifiers::default());
         cx.run_until_parked();
         workspace.read_with(&cx, |shell, cx| {
-            assert!(shell.panes[0].read(cx).tab_drag_preview.is_none());
+            assert!(shell.panes[0].read(cx).tab_drag_preview_bounds.is_none());
         });
-        assert!(cx.debug_bounds("ghost-pane-chrome").is_none());
+        assert!(cx.debug_bounds("pane-drop-preview-before").is_none());
         cx.simulate_mouse_move(drop, MouseButton::Left, Modifiers::default());
         cx.run_until_parked();
 
@@ -10841,7 +10734,7 @@ mod tests {
             ));
             assert!(shell.panes.iter().all(|pane| {
                 let pane = pane.read(cx);
-                pane.tab_drop_target.is_none() && pane.tab_drag_preview.is_none()
+                pane.tab_drop_target.is_none() && pane.tab_drag_preview_bounds.is_none()
             }));
         });
     }
