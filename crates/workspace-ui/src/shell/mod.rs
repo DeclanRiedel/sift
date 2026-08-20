@@ -4394,77 +4394,15 @@ impl WorkspaceShell {
                 self.save_active_item(&SaveActiveItem, window, cx);
             }
             PaneEvent::MoveItemRequested { item_id, target } => {
-                // The emitter is the drop target; find the pane that owns the
-                // tab and transfer editor, results, and clean point with it.
-                let source = self
-                    .panes
-                    .iter()
-                    .position(|pane| pane.read(cx).contains_item(*item_id));
-                let Some(source) = source else {
-                    return;
-                };
-                let transfer = self.panes[source].update(cx, |pane, _| pane.take_item(*item_id));
-                let Some(transfer) = transfer else {
-                    return;
-                };
-                match target {
-                    PaneDropTarget::Center | PaneDropTarget::Tab(_) => {
-                        let insertion_index = match target {
-                            PaneDropTarget::Tab(index) => Some(*index),
-                            _ => None,
-                        };
-                        emitter.update(cx, |pane, cx| {
-                            pane.receive_item(transfer, insertion_index, cx)
-                        });
-                        self.active_pane = index;
-                    }
-                    PaneDropTarget::Above
-                    | PaneDropTarget::Before
-                    | PaneDropTarget::After
-                    | PaneDropTarget::Below => {
-                        let target_id = emitter.read(cx).id;
-                        let id = self.next_id;
-                        self.next_id += 1;
-                        let vim_mode = self.vim_mode_default();
-                        let pane = cx.new(|cx| {
-                            Pane::from_presentation(
-                                PanePresentation {
-                                    id,
-                                    items: Vec::new(),
-                                    active_item: 0,
-                                },
-                                vim_mode,
-                                cx,
-                            )
-                        });
-                        pane.update(cx, |pane, cx| pane.receive_item(transfer, None, cx));
-                        cx.subscribe_in(&pane, window, Self::on_pane_event).detach();
-
-                        let insertion_index =
-                            if matches!(target, PaneDropTarget::Above | PaneDropTarget::Before) {
-                                index
-                            } else {
-                                index + 1
-                            };
-                        self.panes.insert(insertion_index, pane);
-                        pane_layout::split(
-                            &mut self.pane_layout,
-                            target_id,
-                            id,
-                            match target {
-                                PaneDropTarget::Above => SplitDirection::Up,
-                                PaneDropTarget::Before => SplitDirection::Left,
-                                PaneDropTarget::After => SplitDirection::Right,
-                                PaneDropTarget::Below => SplitDirection::Down,
-                                PaneDropTarget::Center | PaneDropTarget::Tab(_) => unreachable!(),
-                            },
-                        );
-                        self.active_pane = insertion_index;
-                    }
-                }
-                self.focus_active_pane(window, cx);
-                self.persist(cx);
-                cx.notify();
+                // Match Zed's effect-cycle discipline: the drop callback only
+                // records intent. Entity/tree mutations run after event
+                // dispatch, when neither source nor target pane is borrowed.
+                let emitter = emitter.clone();
+                let item_id = *item_id;
+                let target = *target;
+                cx.defer_in(window, move |shell, window, cx| {
+                    shell.move_item_to_target(emitter, item_id, target, window, cx);
+                });
             }
             PaneEvent::EditorStateChanged { item_id, dirty } => {
                 if let Some(dirty) = dirty {
@@ -4490,6 +4428,89 @@ impl WorkspaceShell {
                 self.refresh_database_item(*item_id, cx)
             }
         }
+    }
+
+    fn move_item_to_target(
+        &mut self,
+        target_pane: Entity<Pane>,
+        item_id: u64,
+        target: PaneDropTarget,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(target_index) = self.panes.iter().position(|pane| pane == &target_pane) else {
+            return;
+        };
+        let Some(source_index) = self
+            .panes
+            .iter()
+            .position(|pane| pane.read(cx).contains_item(item_id))
+        else {
+            return;
+        };
+        let Some(transfer) = self.panes[source_index].update(cx, |pane, _| pane.take_item(item_id))
+        else {
+            return;
+        };
+
+        match target {
+            PaneDropTarget::Center | PaneDropTarget::Tab(_) => {
+                let insertion_index = match target {
+                    PaneDropTarget::Tab(index) => Some(index),
+                    _ => None,
+                };
+                target_pane.update(cx, |pane, cx| {
+                    pane.receive_item(transfer, insertion_index, cx)
+                });
+                self.active_pane = target_index;
+            }
+            PaneDropTarget::Above
+            | PaneDropTarget::Before
+            | PaneDropTarget::After
+            | PaneDropTarget::Below => {
+                let target_id = target_pane.read(cx).id;
+                let id = self.next_id;
+                self.next_id += 1;
+                let vim_mode = self.vim_mode_default();
+                let pane = cx.new(|cx| {
+                    Pane::from_presentation(
+                        PanePresentation {
+                            id,
+                            items: Vec::new(),
+                            active_item: 0,
+                        },
+                        vim_mode,
+                        cx,
+                    )
+                });
+                pane.update(cx, |pane, cx| pane.receive_item(transfer, None, cx));
+                cx.subscribe_in(&pane, window, Self::on_pane_event).detach();
+
+                let insertion_index =
+                    if matches!(target, PaneDropTarget::Above | PaneDropTarget::Before) {
+                        target_index
+                    } else {
+                        target_index + 1
+                    };
+                self.panes.insert(insertion_index, pane);
+                pane_layout::split(
+                    &mut self.pane_layout,
+                    target_id,
+                    id,
+                    match target {
+                        PaneDropTarget::Above => SplitDirection::Up,
+                        PaneDropTarget::Before => SplitDirection::Left,
+                        PaneDropTarget::After => SplitDirection::Right,
+                        PaneDropTarget::Below => SplitDirection::Down,
+                        PaneDropTarget::Center | PaneDropTarget::Tab(_) => unreachable!(),
+                    },
+                );
+                self.active_pane = insertion_index;
+            }
+        }
+        self.focus_active_pane(window, cx);
+        self.persist(cx);
+        cx.notify();
     }
 
     /// Remove a pane and keep the workspace non-empty. The final pane is never
@@ -10636,6 +10657,24 @@ mod tests {
                     ..
                 }
             ));
+        });
+    }
+
+    #[gpui::test]
+    fn stale_drop_target_leaves_the_source_tab_untouched(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        let focus = workspace.read_with(&cx, |shell, cx| shell.focus_handle(cx));
+        cx.update(|window, cx| focus.dispatch_action(&SplitPane, window, cx));
+
+        workspace.update_in(&mut cx, |shell, window, cx| {
+            let stale_target = shell.panes[1].clone();
+            shell.close_pane_at(1, window, cx);
+            shell.move_item_to_target(stale_target, 1, PaneDropTarget::Center, window, cx);
+
+            assert_eq!(shell.panes.len(), 1);
+            assert!(shell.panes[0].read(cx).contains_item(1));
         });
     }
 
