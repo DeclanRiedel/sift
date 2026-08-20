@@ -201,6 +201,31 @@ pub(super) fn render_status_bar(
                     )
                     .on_click(cx.listener(|shell, _, _, cx| shell.show_project_search(cx))),
                 )
+                .child(
+                    button(
+                        "footer-problems",
+                        IconName::Warning,
+                        format!("Open problems ({})", shell.global_problems.len()),
+                        false,
+                        Some(shell.global_problems.len()),
+                        !shell.global_problems.is_empty(),
+                    )
+                    .on_click(
+                        cx.listener(|shell, _, window, cx| shell.show_global_problems(window, cx)),
+                    ),
+                )
+                .child(
+                    button(
+                        "footer-copy-problems",
+                        IconName::Copy,
+                        "Copy problems list".into(),
+                        false,
+                        None,
+                        false,
+                    )
+                    .disabled(shell.global_problems.is_empty())
+                    .on_click(cx.listener(|shell, _, _, cx| shell.copy_all_global_problems(cx))),
+                )
                 .child(separator())
                 .child(
                     div()

@@ -10,12 +10,13 @@ use crate::presentation::ItemKind;
 pub enum ItemRuntimeKind {
     Query,
     Configuration,
+    ReadOnlyText,
     Placeholder,
 }
 
 impl ItemRuntimeKind {
     pub const fn is_editor(self) -> bool {
-        matches!(self, Self::Query | Self::Configuration)
+        matches!(self, Self::Query | Self::Configuration | Self::ReadOnlyText)
     }
 }
 
@@ -34,6 +35,7 @@ impl ItemRegistry {
         match kind {
             ItemKind::Query => &QUERY,
             ItemKind::Configuration => &CONFIGURATION,
+            ItemKind::Problems => &PROBLEMS,
             ItemKind::Schema => &SCHEMA,
             ItemKind::Welcome => &WELCOME,
         }
@@ -58,6 +60,13 @@ const CONFIGURATION: ItemDefinition = ItemDefinition {
     empty_message: "Configuration editor is unavailable",
 };
 
+const PROBLEMS: ItemDefinition = ItemDefinition {
+    kind: ItemKind::Problems,
+    runtime: ItemRuntimeKind::ReadOnlyText,
+    placeholder_prefix: Some("Problems"),
+    empty_message: "Problems feed is unavailable",
+};
+
 const SCHEMA: ItemDefinition = ItemDefinition {
     kind: ItemKind::Schema,
     runtime: ItemRuntimeKind::Placeholder,
@@ -72,7 +81,7 @@ const WELCOME: ItemDefinition = ItemDefinition {
     empty_message: "Open a connection or create a query to begin.",
 };
 
-const DEFINITIONS: [ItemDefinition; 4] = [QUERY, CONFIGURATION, SCHEMA, WELCOME];
+const DEFINITIONS: [ItemDefinition; 5] = [QUERY, CONFIGURATION, PROBLEMS, SCHEMA, WELCOME];
 
 #[cfg(test)]
 mod tests {
@@ -83,11 +92,12 @@ mod tests {
         for kind in [
             ItemKind::Query,
             ItemKind::Configuration,
+            ItemKind::Problems,
             ItemKind::Schema,
             ItemKind::Welcome,
         ] {
             assert_eq!(ItemRegistry::definition(&kind).kind, kind);
         }
-        assert_eq!(ItemRegistry::definitions().len(), 4);
+        assert_eq!(ItemRegistry::definitions().len(), 5);
     }
 }

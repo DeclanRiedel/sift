@@ -64,6 +64,20 @@ const RESULT_RESIZE_HANDLE_SIZE: f32 = 7.0;
 const RESULT_MIN_EXTENT: f32 = 140.0;
 const EDITOR_MIN_EXTENT: f32 = 160.0;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProblemSeverity {
+    Error,
+    Warning,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct GlobalProblem {
+    item_id: u64,
+    title: String,
+    severity: ProblemSeverity,
+    message: String,
+}
+
 fn quote_identifier(identifier: &str) -> String {
     format!("\"{}\"", identifier.replace('"', "\"\""))
 }
@@ -941,20 +955,26 @@ impl Pane {
                 None => String::new(),
             };
             let document = QueryDocument::with_random_peer(&restored_text);
-            let language = if item.kind == ItemKind::Configuration {
-                EditorLanguage::Toml
-            } else {
-                EditorLanguage::Sql
+            let language = match item.kind {
+                ItemKind::Configuration => EditorLanguage::Toml,
+                ItemKind::Problems => EditorLanguage::PlainText,
+                ItemKind::Query | ItemKind::Schema | ItemKind::Welcome => EditorLanguage::Sql,
             };
             let keymap = if vim_mode_default {
                 EditorKeymap::Vim
             } else {
                 EditorKeymap::Standard
             };
+            let read_only = item.kind == ItemKind::Problems;
             let editor = cx.new(|cx| {
-                QueryEditor::new(document, cx)
+                let editor = QueryEditor::new(document, cx)
                     .with_language(language)
-                    .with_keymap(keymap)
+                    .with_keymap(keymap);
+                if read_only {
+                    editor.read_only()
+                } else {
+                    editor
+                }
             });
             editor_subscriptions.insert(
                 id,
@@ -1071,7 +1091,7 @@ impl Pane {
         let items = self
             .items
             .iter()
-            .filter(|item| item.kind != ItemKind::Configuration)
+            .filter(|item| !matches!(item.kind, ItemKind::Configuration | ItemKind::Problems))
             .cloned()
             .collect::<Vec<_>>();
         let active_id = self.active_item().map(|item| item.id);
@@ -1875,6 +1895,20 @@ impl gpui::Render for Pane {
                                                             .flex_1()
                                                             .min_w_0()
                                                             .truncate()
+                                                            .when(
+                                                                item.kind == ItemKind::Problems,
+                                                                |label| {
+                                                                    label
+                                                                        .flex()
+                                                                        .items_center()
+                                                                        .gap_1()
+                                                                        .child(icon(
+                                                                            IconName::Warning,
+                                                                            colors.warning,
+                                                                            13.,
+                                                                        ))
+                                                                },
+                                                            )
                                                             .child(item.title.clone()),
                                                     ),
                                             )
@@ -1990,6 +2024,25 @@ impl gpui::Render for Pane {
                                     .justify_center()
                                     .text_color(colors.muted_text)
                                     .child("Configuration editor is unavailable"),
+                            ),
+                        }
+                    }
+                    Some(item)
+                        if ItemRegistry::definition(&item.kind).runtime
+                            == ItemRuntimeKind::ReadOnlyText =>
+                    {
+                        match self.editors.get(&item.id) {
+                            Some(editor) => {
+                                body.child(div().flex_1().min_h_0().child(editor.clone()))
+                            }
+                            None => body.child(
+                                div()
+                                    .size_full()
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .text_color(colors.muted_text)
+                                    .child("Problems feed is unavailable"),
                             ),
                         }
                     }
@@ -2264,6 +2317,7 @@ pub struct WorkspaceShell {
     toasts: Vec<Toast>,
     next_toast_id: u64,
     status: StatusBar,
+    global_problems: Vec<GlobalProblem>,
     lifecycle: LifecycleProjection,
     presence: RoomPresenceProjection,
     _lifecycle_task: Option<Task<()>>,
@@ -2325,6 +2379,7 @@ struct WorkspaceSession {
     bottom_dock: Dock,
     active_left_panel: LeftPanel,
     active_bottom_tool: BottomTool,
+    global_problems: Vec<GlobalProblem>,
     expanded_tenants: HashSet<i64>,
     expanded_connections: HashSet<i64>,
     expanded_rooms: HashSet<i64>,
@@ -2558,6 +2613,7 @@ impl WorkspaceShell {
             app_bar_menu: None,
             toasts: Vec::new(),
             status: StatusBar::default(),
+            global_problems: Vec::new(),
             lifecycle: LifecycleProjection::default(),
             presence: RoomPresenceProjection::default(),
             _lifecycle_task: None,
@@ -2826,6 +2882,7 @@ impl WorkspaceShell {
                 &mut self.active_bottom_tool,
                 target.active_bottom_tool,
             ),
+            global_problems: std::mem::replace(&mut self.global_problems, target.global_problems),
             expanded_tenants: std::mem::replace(
                 &mut self.expanded_tenants,
                 target.expanded_tenants,
@@ -2924,6 +2981,7 @@ impl WorkspaceShell {
             bottom_dock: DockRegistry::create(DockId::Bottom, workspace.bottom_dock),
             active_left_panel: workspace.left_panel,
             active_bottom_tool: workspace.bottom_tool,
+            global_problems: Vec::new(),
             expanded_tenants: HashSet::new(),
             expanded_connections: HashSet::new(),
             expanded_rooms: HashSet::new(),
@@ -3381,6 +3439,7 @@ impl WorkspaceShell {
                     self.status.execution = state.status_label();
                     if terminal {
                         self.running_queries.remove(&item_id);
+                        self.replace_global_problems(item_id, &state, cx);
                     }
                 }
                 let _ = acknowledge.send(());
@@ -3741,6 +3800,7 @@ impl WorkspaceShell {
         {
             self.running_queries.insert(item_id, execution_id);
             self.status.execution = "Running…".into();
+            self.clear_global_problems_for(item_id, cx);
             cx.notify();
         }
     }
@@ -4918,6 +4978,7 @@ impl WorkspaceShell {
             ResultState::Ready(_) | ResultState::Idle => "Ready".into(),
             _ => state.status_label(),
         };
+        self.replace_global_problems(item_id, &state, cx);
         for pane in &self.panes {
             if pane.update(cx, |pane, cx| {
                 let routed = pane.set_result(item_id, state.clone(), cx);
@@ -4930,6 +4991,155 @@ impl WorkspaceShell {
             }
         }
         cx.notify();
+    }
+
+    fn query_item_title(&self, item_id: u64, cx: &App) -> String {
+        self.panes
+            .iter()
+            .find_map(|pane| {
+                pane.read(cx)
+                    .items
+                    .iter()
+                    .find(|item| item.id == item_id)
+                    .map(|item| item.title.clone())
+            })
+            .unwrap_or_else(|| format!("Query {item_id}"))
+    }
+
+    fn replace_global_problems(
+        &mut self,
+        item_id: u64,
+        state: &ResultState,
+        cx: &mut Context<Self>,
+    ) {
+        self.global_problems
+            .retain(|problem| problem.item_id != item_id);
+        let title = self.query_item_title(item_id, cx);
+        let mut push = |severity, message: String| {
+            self.global_problems.push(GlobalProblem {
+                item_id,
+                title: title.clone(),
+                severity,
+                message,
+            });
+        };
+        match state {
+            ResultState::Unavailable(message) | ResultState::Failed(message) => {
+                push(ProblemSeverity::Error, message.clone());
+            }
+            ResultState::TimedOut => push(ProblemSeverity::Error, "Query timed out".into()),
+            ResultState::OutcomeUnknown => {
+                push(ProblemSeverity::Error, "Query outcome is unknown".into());
+            }
+            ResultState::Ready(data) => {
+                for warning in &data.warnings {
+                    push(ProblemSeverity::Warning, warning.message.clone());
+                }
+            }
+            ResultState::Idle
+            | ResultState::Pending
+            | ResultState::Streaming(_)
+            | ResultState::Cancelled => {}
+        }
+        self.sync_global_problems_editor(cx);
+    }
+
+    fn clear_global_problems_for(&mut self, item_id: u64, cx: &mut Context<Self>) {
+        self.global_problems
+            .retain(|problem| problem.item_id != item_id);
+        self.sync_global_problems_editor(cx);
+    }
+
+    fn global_problems_text(&self) -> String {
+        if self.global_problems.is_empty() {
+            return "No problems.".into();
+        }
+        self.global_problems
+            .iter()
+            .map(|problem| {
+                let severity = match problem.severity {
+                    ProblemSeverity::Error => "ERROR",
+                    ProblemSeverity::Warning => "WARNING",
+                };
+                format!("[{severity}] {}\n{}", problem.title, problem.message)
+            })
+            .collect::<Vec<_>>()
+            .join("\n\n")
+    }
+
+    fn sync_global_problems_editor(&mut self, cx: &mut Context<Self>) {
+        let text = self.global_problems_text();
+        let count = self.global_problems.len().to_string();
+        for pane in &self.panes {
+            pane.update(cx, |pane, cx| {
+                let Some(item) = pane
+                    .items
+                    .iter_mut()
+                    .find(|item| item.kind == ItemKind::Problems)
+                else {
+                    return;
+                };
+                item.title.clone_from(&count);
+                if let Some(editor) = pane.editors.get(&item.id) {
+                    editor.update(cx, |editor, cx| editor.replace_read_only_text(&text, cx));
+                }
+            });
+        }
+    }
+
+    fn show_global_problems(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some((pane_index, item_index)) =
+            self.panes
+                .iter()
+                .enumerate()
+                .find_map(|(pane_index, pane)| {
+                    pane.read(cx)
+                        .items
+                        .iter()
+                        .position(|item| item.kind == ItemKind::Problems)
+                        .map(|item_index| (pane_index, item_index))
+                })
+        {
+            self.active_pane = pane_index;
+            self.panes[pane_index].update(cx, |pane, _| pane.activate_item(item_index, true));
+            self.focus_active_pane(window, cx);
+            cx.notify();
+            return;
+        }
+        let item_id = self.next_id;
+        self.next_id = self.next_id.saturating_add(1);
+        let text = self.global_problems_text();
+        let count = self.global_problems.len().to_string();
+        let editor = cx.new(|cx| {
+            QueryEditor::new(QueryDocument::with_random_peer(&text), cx)
+                .with_language(EditorLanguage::PlainText)
+                .read_only()
+        });
+        if let Some(pane) = self.panes.get(self.active_pane) {
+            pane.update(cx, |pane, cx| {
+                pane.open_configuration(
+                    ItemPresentation {
+                        id: item_id,
+                        kind: ItemKind::Problems,
+                        title: count,
+                        dirty: false,
+                        source: None,
+                    },
+                    editor,
+                    cx,
+                );
+            });
+        }
+        self.focus_active_pane(window, cx);
+        cx.notify();
+    }
+
+    fn copy_all_global_problems(&mut self, cx: &mut Context<Self>) {
+        if self.global_problems.is_empty() {
+            return;
+        }
+        cx.write_to_clipboard(gpui::ClipboardItem::new_string(self.global_problems_text()));
+        self.show_toast("Copied problems".into(), cx);
     }
 
     fn selected_workspace(&self) -> Option<&WorkspaceNavEntry> {
@@ -5847,6 +6057,7 @@ impl WorkspaceShell {
             })
         });
         if let Some(item_id) = removed_item_id {
+            self.clear_global_problems_for(item_id, cx);
             self.table_definitions.remove(&item_id);
             if self
                 .table_designer
@@ -14273,5 +14484,57 @@ mod tests {
 
         assert_eq!(cx.update(|window, cx| window.simulate_next_frame(cx)), 1);
         assert!(!workspace.read_with(&cx, |shell, _| shell.workspace_resize_frame_pending));
+    }
+
+    #[gpui::test]
+    fn global_problems_item_is_singleton_and_tracks_active_query_failures(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+
+        workspace.update_in(&mut cx, |shell, window, cx| {
+            shell.route_result(1, ResultState::Failed("bad column".into()), cx);
+            assert_eq!(shell.global_problems.len(), 1);
+            shell.copy_all_global_problems(cx);
+            assert_eq!(
+                cx.read_from_clipboard()
+                    .and_then(|item| item.text())
+                    .as_deref(),
+                Some("[ERROR] query.sql\nbad column")
+            );
+            shell.show_global_problems(window, cx);
+            shell.show_global_problems(window, cx);
+            let pane = shell.panes[shell.active_pane].read(cx);
+            assert_eq!(
+                pane.items
+                    .iter()
+                    .filter(|item| item.kind == ItemKind::Problems)
+                    .count(),
+                1
+            );
+            let item = pane.active_item().unwrap();
+            assert_eq!(item.kind, ItemKind::Problems);
+            assert_eq!(item.title, "1");
+            assert_eq!(
+                pane.editor(item.id).unwrap().read(cx).document().text(),
+                "[ERROR] query.sql\nbad column"
+            );
+        });
+
+        workspace.update(&mut cx, |shell, cx| {
+            shell.route_result(
+                1,
+                ResultState::Ready(crate::results::ResultData::default()),
+                cx,
+            );
+            assert!(shell.global_problems.is_empty());
+            let pane = shell.panes[shell.active_pane].read(cx);
+            let item = pane.active_item().unwrap();
+            assert_eq!(item.title, "0");
+            assert_eq!(
+                pane.editor(item.id).unwrap().read(cx).document().text(),
+                "No problems."
+            );
+        });
     }
 }

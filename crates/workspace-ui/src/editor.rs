@@ -622,6 +622,7 @@ pub enum EditorEvent {
 pub enum EditorLanguage {
     Sql,
     Toml,
+    PlainText,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -761,6 +762,7 @@ pub struct QueryEditor {
     line_height: Pixels,
     last_bounds: Option<Bounds<Pixels>>,
     scroll_handle: ScrollHandle,
+    read_only: bool,
 }
 
 impl QueryEditor {
@@ -788,6 +790,7 @@ impl QueryEditor {
             line_height: EDITOR_LINE_HEIGHT,
             last_bounds: None,
             scroll_handle: ScrollHandle::new(),
+            read_only: false,
         }
     }
 
@@ -799,6 +802,24 @@ impl QueryEditor {
     pub fn with_keymap(mut self, keymap: EditorKeymap) -> Self {
         self.apply_keymap(keymap);
         self
+    }
+
+    pub fn read_only(mut self) -> Self {
+        self.read_only = true;
+        self
+    }
+
+    pub fn replace_read_only_text(&mut self, text: &str, cx: &mut Context<Self>) {
+        if self.document.text() == text {
+            return;
+        }
+        let length = self.document.text().len();
+        self.document.replace_range(0..length, text);
+        let _ = self.document.take_room_update();
+        self.marked_range = None;
+        self.revision = self.revision.wrapping_add(1);
+        self.line_cache.borrow_mut().lines.clear();
+        cx.notify();
     }
 
     pub fn keymap(&self) -> EditorKeymap {
@@ -934,7 +955,10 @@ impl QueryEditor {
             self.vim_mode != snapshot.mode || self.vim_entered != snapshot.entered;
         self.vim_entered = snapshot.entered;
         let mut document_changed = false;
-        if let Some(snapshot_text) = snapshot.text.filter(|text| text != self.document.text()) {
+        if let Some(snapshot_text) = snapshot
+            .text
+            .filter(|text| !self.read_only && text != self.document.text())
+        {
             let old = self.document.text();
             let prefix = old
                 .char_indices()
@@ -1021,6 +1045,9 @@ impl QueryEditor {
     }
 
     fn backspace(&mut self, _: &Backspace, _: &mut Window, cx: &mut Context<Self>) {
+        if self.read_only {
+            return;
+        }
         if self.vim_key(modalkit::crossterm::event::KeyCode::Backspace, cx) {
             return;
         }
@@ -1029,6 +1056,9 @@ impl QueryEditor {
     }
 
     fn delete_forward(&mut self, _: &DeleteForward, _: &mut Window, cx: &mut Context<Self>) {
+        if self.read_only {
+            return;
+        }
         if self.vim_key(modalkit::crossterm::event::KeyCode::Delete, cx) {
             return;
         }
@@ -1037,6 +1067,9 @@ impl QueryEditor {
     }
 
     fn newline(&mut self, _: &Newline, _: &mut Window, cx: &mut Context<Self>) {
+        if self.read_only {
+            return;
+        }
         if self.vim_key(modalkit::crossterm::event::KeyCode::Enter, cx) {
             return;
         }
@@ -1045,6 +1078,9 @@ impl QueryEditor {
     }
 
     fn indent(&mut self, _: &Indent, _: &mut Window, cx: &mut Context<Self>) {
+        if self.read_only {
+            return;
+        }
         if self.vim_key(modalkit::crossterm::event::KeyCode::Tab, cx) {
             return;
         }
@@ -1127,6 +1163,10 @@ impl QueryEditor {
     }
 
     fn cut(&mut self, _: &Cut, window: &mut Window, cx: &mut Context<Self>) {
+        if self.read_only {
+            self.copy(&Copy, window, cx);
+            return;
+        }
         self.copy(&Copy, window, cx);
         if !self.document.selection().is_empty() {
             self.document.insert("");
@@ -1135,6 +1175,9 @@ impl QueryEditor {
     }
 
     fn paste(&mut self, _: &Paste, _: &mut Window, cx: &mut Context<Self>) {
+        if self.read_only {
+            return;
+        }
         if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
             self.document.insert(&text);
             self.edited(cx);
@@ -1142,12 +1185,18 @@ impl QueryEditor {
     }
 
     fn undo(&mut self, _: &Undo, _: &mut Window, cx: &mut Context<Self>) {
+        if self.read_only {
+            return;
+        }
         if self.document.undo() {
             self.edited(cx);
         }
     }
 
     fn redo(&mut self, _: &Redo, _: &mut Window, cx: &mut Context<Self>) {
+        if self.read_only {
+            return;
+        }
         if self.document.redo() {
             self.edited(cx);
         }
@@ -1158,6 +1207,9 @@ impl QueryEditor {
     }
 
     fn execute_statement(&mut self, _: &ExecuteStatement, _: &mut Window, cx: &mut Context<Self>) {
+        if self.read_only {
+            return;
+        }
         let sql = self
             .document
             .active_statement()
@@ -1170,6 +1222,9 @@ impl QueryEditor {
     }
 
     fn execute_document(&mut self, _: &ExecuteDocument, _: &mut Window, cx: &mut Context<Self>) {
+        if self.read_only {
+            return;
+        }
         let sql = self.document.text().trim().to_string();
         if !sql.is_empty() {
             cx.emit(EditorEvent::Execute { sql });
@@ -1224,6 +1279,7 @@ impl QueryEditor {
         let runs = match self.language {
             EditorLanguage::Sql => sql_text_runs(line_text, style.font(), theme),
             EditorLanguage::Toml => toml_text_runs(line_text, style.font(), theme),
+            EditorLanguage::PlainText => plain_text_runs(line_text, style.font(), theme),
         };
         let layout =
             window
@@ -1313,6 +1369,9 @@ impl EntityInputHandler for QueryEditor {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.read_only {
+            return;
+        }
         if self.vim_text(new_text, cx) {
             return;
         }
@@ -1336,6 +1395,9 @@ impl EntityInputHandler for QueryEditor {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.read_only {
+            return;
+        }
         let range = range_utf16
             .as_ref()
             .map(|range| self.range_from_utf16(range))
@@ -1402,6 +1464,7 @@ impl gpui::Render for QueryEditor {
             .aria_label(match self.language {
                 EditorLanguage::Sql => "SQL query editor",
                 EditorLanguage::Toml => "TOML configuration editor",
+                EditorLanguage::PlainText => "Read-only text editor",
             })
             .track_focus(&self.focus_handle)
             .cursor(CursorStyle::IBeam)
@@ -1617,6 +1680,7 @@ impl Element for QueryEditorElement {
                 let runs = match language {
                     EditorLanguage::Sql => sql_text_runs(line, style.font(), theme),
                     EditorLanguage::Toml => toml_text_runs(line, style.font(), theme),
+                    EditorLanguage::PlainText => plain_text_runs(line, style.font(), theme),
                 };
                 let shaped = window.text_system().shape_line(
                     line.to_string().into(),
@@ -1854,6 +1918,17 @@ fn sql_text_runs(line: &str, font: gpui::Font, theme: Theme) -> Vec<TextRun> {
         start = end;
     }
     runs
+}
+
+fn plain_text_runs(line: &str, font: gpui::Font, theme: Theme) -> Vec<TextRun> {
+    vec![TextRun {
+        len: line.len(),
+        font,
+        color: theme.colors.text,
+        background_color: None,
+        underline: None,
+        strikethrough: None,
+    }]
 }
 
 fn toml_diagnostic(source: &str) -> Option<String> {
@@ -2176,6 +2251,26 @@ mod tests {
             editor.read_with(&cx, |editor, _| editor.document.cursor()),
             4
         );
+    }
+
+    #[gpui::test]
+    fn read_only_text_rejects_edits_but_accepts_feed_updates(cx: &mut TestAppContext) {
+        let window = cx
+            .update(|cx| {
+                cx.open_window(Default::default(), |_window, cx| {
+                    cx.new(|cx| QueryEditor::new(doc("first"), cx).read_only())
+                })
+            })
+            .unwrap();
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let editor = window.root(&mut cx).unwrap();
+        cx.write_to_clipboard(ClipboardItem::new_string("mutated".into()));
+        editor.update_in(&mut cx, |editor, window, cx| {
+            editor.paste(&Paste, window, cx);
+            assert_eq!(editor.document().text(), "first");
+            editor.replace_read_only_text("second", cx);
+            assert_eq!(editor.document().text(), "second");
+        });
     }
 
     #[gpui::test]
