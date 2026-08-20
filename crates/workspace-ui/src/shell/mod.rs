@@ -1350,7 +1350,6 @@ impl gpui::Render for Pane {
         let has_items = !self.items.is_empty();
         let can_go_back = self.can_navigate_backward();
         let can_go_forward = self.can_navigate_forward();
-        let can_drag_tabs = self.items.len() > 1;
         let item_count = self.items.len();
         let pane_id = self.id;
         div()
@@ -1494,19 +1493,17 @@ impl gpui::Render for Pane {
                                             .debug_selector(move || tab_debug.clone())
                                             .selected(selected)
                                             .dirty(item.dirty)
-                                            .when(can_drag_tabs, |tab| {
-                                                tab.on_drag(
-                                                    TabDrag {
-                                                        pane_id,
-                                                        item_id,
-                                                        index,
-                                                        title: item.title.clone().into(),
-                                                        selected,
-                                                        dirty: item.dirty,
-                                                    },
-                                                    |tab, _, _, cx| cx.new(|_| tab.clone()),
-                                                )
-                                            })
+                                            .on_drag(
+                                                TabDrag {
+                                                    pane_id,
+                                                    item_id,
+                                                    index,
+                                                    title: item.title.clone().into(),
+                                                    selected,
+                                                    dirty: item.dirty,
+                                                },
+                                                |tab, _, _, cx| cx.new(|_| tab.clone()),
+                                            )
                                             .drag_over::<TabDrag>(move |tab, dragged, _, cx| {
                                                 let mut tab = tab
                                                     .bg(cx.theme().colors.drop_target_background)
@@ -4448,6 +4445,15 @@ impl WorkspaceShell {
         else {
             return;
         };
+        let source_pane = self.panes[source_index].clone();
+        let preserve_empty_source = source_index == target_index
+            && matches!(
+                target,
+                PaneDropTarget::Above
+                    | PaneDropTarget::Before
+                    | PaneDropTarget::After
+                    | PaneDropTarget::Below
+            );
         let Some(transfer) = self.panes[source_index].update(cx, |pane, _| pane.take_item(item_id))
         else {
             return;
@@ -4508,9 +4514,36 @@ impl WorkspaceShell {
                 self.active_pane = insertion_index;
             }
         }
+        if !preserve_empty_source {
+            self.remove_empty_source_pane(&source_pane, cx);
+        }
         self.focus_active_pane(window, cx);
         self.persist(cx);
         cx.notify();
+    }
+
+    /// Moving the sole tab to another existing pane should not strand an
+    /// empty split. A same-pane edge split intentionally keeps its empty
+    /// origin so the requested new pane remains visible.
+    fn remove_empty_source_pane(&mut self, source: &Entity<Pane>, cx: &App) {
+        if self.panes.len() <= 1 {
+            return;
+        }
+        let Some(index) = self.panes.iter().position(|pane| pane == source) else {
+            return;
+        };
+        let pane = source.read(cx);
+        if !pane.items.is_empty() {
+            return;
+        }
+        let pane_id = pane.id;
+        self.panes.remove(index);
+        pane_layout::remove(&mut self.pane_layout, pane_id);
+        if self.active_pane > index {
+            self.active_pane -= 1;
+        } else {
+            self.active_pane = self.active_pane.min(self.panes.len() - 1);
+        }
     }
 
     /// Remove a pane and keep the workspace non-empty. The final pane is never
@@ -10444,27 +10477,33 @@ mod tests {
     }
 
     #[gpui::test]
-    fn single_tab_does_not_start_a_drag(cx: &mut TestAppContext) {
+    fn single_tab_can_drag_to_create_a_new_pane(cx: &mut TestAppContext) {
         let window = shell(cx);
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         let workspace = window.root(&mut cx).unwrap();
         cx.run_until_parked();
 
         let tab = cx.debug_bounds("tab-1").expect("only tab");
-        let pane = cx.debug_bounds("pane-slot-0").expect("only pane");
+        let pane = cx.debug_bounds("pane-body-1").expect("only pane body");
         let start = tab.center();
         cx.simulate_mouse_down(start, MouseButton::Left, Modifiers::default());
-        let attempted_drop = point(pane.left() + px(10.), pane.center().y);
-        cx.simulate_mouse_move(attempted_drop, MouseButton::Left, Modifiers::default());
+        cx.simulate_mouse_move(
+            point(start.x + px(6.), start.y + px(20.)),
+            MouseButton::Left,
+            Modifiers::default(),
+        );
+        let drop = point(pane.left() + px(10.), pane.center().y);
+        cx.simulate_mouse_move(drop, MouseButton::Left, Modifiers::default());
         cx.run_until_parked();
 
-        assert!(cx.debug_bounds("tab-drop-ghost").is_none());
-        assert!(cx.debug_bounds("pane-drop-preview-before").is_none());
+        assert!(cx.debug_bounds("pane-drop-preview-before").is_some());
 
-        cx.simulate_mouse_up(attempted_drop, MouseButton::Left, Modifiers::default());
+        cx.simulate_mouse_up(drop, MouseButton::Left, Modifiers::default());
+        cx.run_until_parked();
         workspace.read_with(&cx, |shell, cx| {
-            assert_eq!(shell.panes.len(), 1);
+            assert_eq!(shell.panes.len(), 2);
             assert!(shell.panes[0].read(cx).contains_item(1));
+            assert!(shell.panes[1].read(cx).items.is_empty());
         });
     }
 
@@ -10675,6 +10714,25 @@ mod tests {
 
             assert_eq!(shell.panes.len(), 1);
             assert!(shell.panes[0].read(cx).contains_item(1));
+        });
+    }
+
+    #[gpui::test]
+    fn moving_a_sole_tab_to_another_pane_collapses_its_empty_source(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        let focus = workspace.read_with(&cx, |shell, cx| shell.focus_handle(cx));
+        cx.update(|window, cx| focus.dispatch_action(&SplitPane, window, cx));
+
+        workspace.update_in(&mut cx, |shell, window, cx| {
+            let target = shell.panes[1].clone();
+            shell.move_item_to_target(target.clone(), 1, PaneDropTarget::Center, window, cx);
+
+            assert_eq!(shell.panes.len(), 1);
+            assert_eq!(shell.panes[0], target);
+            assert!(shell.panes[0].read(cx).contains_item(1));
+            assert_eq!(pane_layout::pane_ids(&shell.pane_layout), vec![2]);
         });
     }
 
