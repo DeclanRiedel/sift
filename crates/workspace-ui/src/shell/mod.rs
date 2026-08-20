@@ -242,11 +242,12 @@ struct ResultResizeDrag {
 
 /// A pane tab being dragged. `pane_id` distinguishes a same-pane reorder from
 /// a cross-pane move; `item_id` is stable across the drag.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct TabDrag {
     pane_id: u64,
     item_id: u64,
     index: usize,
+    kind: ItemKind,
     title: SharedString,
     selected: bool,
     dirty: bool,
@@ -678,6 +679,9 @@ pub struct Pane {
     /// Shape a dragged tab would take if released over this pane body.
     /// Tab-bar hover styling is ephemeral GPUI `drag_over` state instead.
     tab_drop_target: Option<PaneDropTarget>,
+    /// Lightweight metadata for rendering a structural preview of the pane
+    /// that an edge drop would create.
+    tab_drag_preview: Option<TabDrag>,
     /// Dirty-close confirmation belongs to its tab and is rendered inline.
     pending_close_item: Option<u64>,
 }
@@ -760,6 +764,7 @@ impl Pane {
             live_result_extents: HashMap::new(),
             result_resize_frame_pending: false,
             tab_drop_target: None,
+            tab_drag_preview: None,
             pending_close_item: None,
         }
     }
@@ -1215,8 +1220,10 @@ impl Pane {
         } else {
             PaneDropTarget::Below
         };
-        if self.tab_drop_target != Some(target) {
+        let drag = event.drag(cx);
+        if self.tab_drop_target != Some(target) || self.tab_drag_preview.as_ref() != Some(drag) {
             self.tab_drop_target = Some(target);
+            self.tab_drag_preview = Some(drag.clone());
             cx.notify();
         }
     }
@@ -1228,6 +1235,7 @@ impl Pane {
             .tab_drop_target
             .take()
             .unwrap_or(PaneDropTarget::Center);
+        self.tab_drag_preview = None;
         let creates_pane = matches!(
             target,
             PaneDropTarget::Above
@@ -1338,6 +1346,7 @@ impl gpui::Render for Pane {
         let is_focused = self.active_focus_handle(cx).is_focused(window)
             || self.focus_handle.contains_focused(window, cx);
         let active = self.active_item().cloned();
+        let tab_drag_preview = self.tab_drag_preview.clone();
         let database_notice = active.as_ref().and_then(|item| {
             let ItemSource::DatabaseObject(_) = item.source.as_ref()?;
             let state = self.database_item_states.get(&item.id)?.clone();
@@ -1498,6 +1507,7 @@ impl gpui::Render for Pane {
                                                     pane_id,
                                                     item_id,
                                                     index,
+                                                    kind: item.kind,
                                                     title: item.title.clone().into(),
                                                     selected,
                                                     dirty: item.dirty,
@@ -1862,7 +1872,84 @@ impl gpui::Render for Pane {
                                 .right_0()
                                 .bottom_0()
                                 .h(DefiniteLength::Fraction(0.5))
-                        }),
+                        })
+                        .children(
+                            tab_drag_preview
+                                .filter(|_| target != PaneDropTarget::Center)
+                                .map(|drag| {
+                                    let mut skeleton = colors.muted_text;
+                                    skeleton.a = 0.28;
+                                    let line_widths = match drag.kind {
+                                        ItemKind::Query => [0.62, 0.78, 0.46, 0.70],
+                                        ItemKind::Configuration => [0.48, 0.66, 0.58, 0.74],
+                                        ItemKind::Schema | ItemKind::Welcome => {
+                                            [0.54, 0.72, 0.40, 0.64]
+                                        }
+                                    };
+                                    div()
+                                        .debug_selector(|| "ghost-pane-chrome".into())
+                                        .size_full()
+                                        .flex()
+                                        .flex_col()
+                                        .overflow_hidden()
+                                        .bg(colors.elevated_surface)
+                                        .child(
+                                            div()
+                                                .h(theme.metrics.tab_height)
+                                                .flex_none()
+                                                .flex()
+                                                .items_stretch()
+                                                .bg(colors.toolbar)
+                                                .border_b_1()
+                                                .border_color(colors.subtle_border)
+                                                .child(
+                                                    PaneTab::new("ghost-pane-tab")
+                                                        .debug_selector(|| "ghost-pane-tab".into())
+                                                        .selected(true)
+                                                        .dirty(drag.dirty)
+                                                        .child(
+                                                            div()
+                                                                .min_w_0()
+                                                                .px_2()
+                                                                .truncate()
+                                                                .child(drag.title),
+                                                        ),
+                                                ),
+                                        )
+                                        .child(
+                                            div()
+                                                .flex_1()
+                                                .min_h_0()
+                                                .flex()
+                                                .bg(colors.background)
+                                                .child(
+                                                    div()
+                                                        .w(EDITOR_GUTTER_WIDTH)
+                                                        .h_full()
+                                                        .flex_none()
+                                                        .bg(colors.surface)
+                                                        .border_r_1()
+                                                        .border_color(colors.subtle_border),
+                                                )
+                                                .child(
+                                                    div()
+                                                        .flex_1()
+                                                        .min_w_0()
+                                                        .p_3()
+                                                        .flex()
+                                                        .flex_col()
+                                                        .gap_2()
+                                                        .children(line_widths.map(|width| {
+                                                            div()
+                                                                .h(px(2.))
+                                                                .w(DefiniteLength::Fraction(width))
+                                                                .rounded_full()
+                                                                .bg(skeleton)
+                                                        })),
+                                                ),
+                                        )
+                                }),
+                        ),
                 )
             })
             .children(database_notice.map(|(item_id, state)| {
@@ -5216,7 +5303,10 @@ impl WorkspaceShell {
     fn dismiss_modal(&mut self, _: &DismissModal, window: &mut Window, cx: &mut Context<Self>) {
         if cx.stop_active_drag(window) {
             for pane in &self.panes {
-                pane.update(cx, |pane, _| pane.tab_drop_target = None);
+                pane.update(cx, |pane, _| {
+                    pane.tab_drop_target = None;
+                    pane.tab_drag_preview = None;
+                });
             }
             cx.notify();
             return;
@@ -10627,6 +10717,14 @@ mod tests {
             .expect("left split preview");
         assert_eq!(preview.left(), target.left());
         assert_eq!(preview.size.width, target.size.width / 2.0);
+        workspace.read_with(&cx, |shell, cx| {
+            let pane = shell.panes[0].read(cx);
+            let ghost = pane
+                .tab_drag_preview
+                .as_ref()
+                .expect("structural pane preview state");
+            assert_eq!(ghost.title.as_ref(), "query.sql");
+        });
 
         cx.simulate_mouse_up(drop, MouseButton::Left, Modifiers::default());
         cx.run_until_parked();
