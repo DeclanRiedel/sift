@@ -369,7 +369,7 @@ impl aide::OperationOutput for ApiError {
     type Inner = sift_protocol::ApiErrorResponse;
 
     fn operation_response(
-        ctx: &mut aide::gen::GenContext,
+        ctx: &mut aide::r#gen::GenContext,
         operation: &mut aide::openapi::Operation,
     ) -> Option<aide::openapi::Response> {
         <axum::Json<sift_protocol::ApiErrorResponse> as aide::OperationOutput>::operation_response(
@@ -378,7 +378,7 @@ impl aide::OperationOutput for ApiError {
     }
 
     fn inferred_responses(
-        ctx: &mut aide::gen::GenContext,
+        ctx: &mut aide::r#gen::GenContext,
         operation: &mut aide::openapi::Operation,
     ) -> Vec<(Option<u16>, aide::openapi::Response)> {
         Self::operation_response(ctx, operation)

@@ -72,8 +72,10 @@ macro_rules! base64_bytes {
             fn schema_name() -> String {
                 stringify!($name).to_string()
             }
-            fn json_schema(gen: &mut schemars::gen::SchemaGenerator) -> schemars::schema::Schema {
-                let mut schema = <String as schemars::JsonSchema>::json_schema(gen);
+            fn json_schema(
+                generator: &mut schemars::r#gen::SchemaGenerator,
+            ) -> schemars::schema::Schema {
+                let mut schema = <String as schemars::JsonSchema>::json_schema(generator);
                 if let schemars::schema::Schema::Object(ref mut obj) = schema {
                     obj.metadata().description = Some(
                         "standard padded RFC 4648 base64 of Loro CRDT bytes".to_string(),
@@ -139,8 +141,8 @@ impl schemars::JsonSchema for ReplicaId {
     fn schema_name() -> String {
         "ReplicaId".to_string()
     }
-    fn json_schema(gen: &mut schemars::gen::SchemaGenerator) -> schemars::schema::Schema {
-        <String as schemars::JsonSchema>::json_schema(gen)
+    fn json_schema(generator: &mut schemars::r#gen::SchemaGenerator) -> schemars::schema::Schema {
+        <String as schemars::JsonSchema>::json_schema(generator)
     }
 }
 
