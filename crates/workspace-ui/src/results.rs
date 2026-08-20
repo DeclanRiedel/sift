@@ -698,7 +698,11 @@ impl ResultsView {
     }
 
     fn select_tab(&mut self, tab: ResultTab, cx: &mut Context<Self>) {
-        self.tab = tab;
+        self.tab = if tab == ResultTab::Data && Self::is_error_state(&self.state) {
+            ResultTab::Messages
+        } else {
+            tab
+        };
         cx.notify();
     }
 
@@ -1111,7 +1115,10 @@ impl ResultsView {
                     .px_2()
                     .text_xs()
                     .text_color(colors.muted_text)
-                    .child(Badge::new(self.state.status_label()))
+                    .children(
+                        (!Self::is_error_state(&self.state))
+                            .then(|| Badge::new(self.state.status_label())),
+                    )
                     .child(
                         IconButton::new(
                             "copy-result-cell",
@@ -1176,7 +1183,10 @@ impl ResultsView {
                     .gap_1()
                     .text_xs()
                     .text_color(colors.muted_text)
-                    .child(div().truncate().child(self.state.status_label()))
+                    .children(
+                        (!Self::is_error_state(&self.state))
+                            .then(|| div().truncate().child(self.state.status_label())),
+                    )
                     .child(
                         IconButton::new(
                             "copy-result-cell-vertical",
@@ -1954,6 +1964,8 @@ mod tests {
         let view = cx.update(|cx| cx.new(ResultsView::new));
         view.update(cx, |view, cx| {
             view.set_state(ResultState::Failed("syntax error near FROM".into()), cx);
+            assert_eq!(view.active_tab(), ResultTab::Messages);
+            view.select_tab(ResultTab::Data, cx);
             assert_eq!(view.active_tab(), ResultTab::Messages);
             assert_eq!(view.messages.len(), 1);
             assert_eq!(view.messages[0].severity, MessageSeverity::Error);

@@ -219,15 +219,7 @@ pub(super) fn render_status_bar(
                         ))
                         .child(div().min_w_0().truncate().child(target_label)),
                 )
-                .child(div().flex_none().child(shell.status.transaction.clone()))
-                .child(
-                    div()
-                        .flex_none()
-                        .px_1()
-                        .rounded(theme.metrics.radius)
-                        .bg(colors.hovered_surface)
-                        .child(shell.status.execution.clone()),
-                ),
+                .child(div().flex_none().child(shell.status.transaction.clone())),
         )
         .child(separator())
         .child(
