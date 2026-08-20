@@ -261,6 +261,7 @@ struct ResultResizeDrag {
 struct TabDrag {
     pane_id: u64,
     item_id: u64,
+    index: usize,
     title: SharedString,
     selected: bool,
 }
@@ -700,7 +701,8 @@ pub struct Pane {
     /// Mouse-move events may outpace display refresh. One pane invalidation per
     /// frame keeps result resizing responsive without redundant layout passes.
     result_resize_frame_pending: bool,
-    /// Shape a dragged tab would take if released over this pane.
+    /// Shape a dragged tab would take if released over this pane body.
+    /// Tab-bar hover styling is ephemeral GPUI `drag_over` state instead.
     tab_drop_target: Option<PaneDropTarget>,
     /// Dirty-close confirmation belongs to its tab and is rendered inline.
     pending_close_item: Option<u64>,
@@ -1176,32 +1178,30 @@ impl Pane {
         }
     }
 
-    /// Pointer passed over a tab while dragging: remember where the tab would
-    /// insert. Left half inserts before the tab, right half after it.
-    fn tab_drag_hover(
+    /// Drop directly on a tab. Like Zed, targets before the source insert on
+    /// their left and targets after the source insert on their right.
+    fn finish_tab_bar_drag(
         &mut self,
         index: usize,
-        event: &gpui::DragMoveEvent<TabDrag>,
+        drag: &TabDrag,
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        // `on_drag_move` fires on every listener, hovered or not, so the tab
-        // under the pointer has to claim the drop itself. Without this the
-        // last-painted tab always wins and tabs only ever move rightwards.
-        if !event.bounds.contains(&event.event.position) {
-            return;
-        }
-        let pointer_x = event.event.position.x - event.bounds.left();
-        let drop_index = if pointer_x > event.bounds.size.width / 2. {
+        let insertion_index = if drag.pane_id == self.id && index > drag.index {
             index + 1
         } else {
             index
         };
-        let target = PaneDropTarget::Tab(drop_index);
-        if self.tab_drop_target != Some(target) {
-            self.tab_drop_target = Some(target);
-            cx.notify();
+        if drag.pane_id == self.id {
+            self.move_item(drag.item_id, insertion_index);
+        } else {
+            cx.emit(PaneEvent::MoveItemRequested {
+                item_id: drag.item_id,
+                target: PaneDropTarget::Tab(insertion_index),
+            });
         }
+        cx.emit(PaneEvent::FocusRequested);
+        cx.notify();
     }
 
     /// Track Zed-style pane landing zones. Near either side creates a pane;
@@ -1367,10 +1367,6 @@ impl gpui::Render for Pane {
             )
             .on_drag_move::<ResultResizeDrag>(cx.listener(Self::resize_results))
             .on_drop::<ResultResizeDrag>(cx.listener(Self::finish_results_resize))
-            .on_drag_move::<TabDrag>(cx.listener(Self::pane_drag_hover))
-            // A tab dropped anywhere else in the pane (not only its tab bar)
-            // still lands here; empty panes accept cross-pane drops this way.
-            .on_drop::<TabDrag>(cx.listener(Self::finish_tab_drag))
             .flex()
             .flex_col()
             .flex_1()
@@ -1495,11 +1491,6 @@ impl gpui::Render for Pane {
                                             let selected = index == self.active_item;
                                             let item_id = item.id;
                                             let tab_debug = format!("tab-{item_id}");
-                                            let dragging_over_left = self.tab_drop_target
-                                                == Some(PaneDropTarget::Tab(index));
-                                            let dragging_over_right = self.tab_drop_target
-                                                == Some(PaneDropTarget::Tab(index + 1))
-                                                && index + 1 == self.items.len();
                                             div()
                                                 .id(("tab", item.id as usize))
                                                 .debug_selector(move || tab_debug.clone())
@@ -1517,17 +1508,32 @@ impl gpui::Render for Pane {
                                                         TabDrag {
                                                             pane_id,
                                                             item_id,
+                                                            index,
                                                             title: item.title.clone().into(),
                                                             selected,
                                                         },
                                                         |tab, _, _, cx| cx.new(|_| tab.clone()),
                                                     )
                                                 })
-                                                .on_drag_move::<TabDrag>(cx.listener(
-                                                    move |pane, event, window, cx| {
-                                                        pane.tab_drag_hover(
-                                                            index, event, window, cx,
-                                                        );
+                                                .drag_over::<TabDrag>(move |tab, dragged, _, cx| {
+                                                    let mut tab = tab
+                                                        .bg(cx.theme().colors.accent_muted)
+                                                        .border_color(cx.theme().colors.accent)
+                                                        .border_0();
+                                                    if dragged.pane_id != pane_id
+                                                        || index < dragged.index
+                                                    {
+                                                        tab = tab.border_l_2();
+                                                    } else if index > dragged.index {
+                                                        tab = tab.border_r_2();
+                                                    }
+                                                    tab
+                                                })
+                                                .on_drop::<TabDrag>(cx.listener(
+                                                    move |pane, drag, window, cx| {
+                                                        pane.finish_tab_bar_drag(
+                                                            index, drag, window, cx,
+                                                        )
                                                     },
                                                 ))
                                                 .when(selected, |tab| {
@@ -1582,28 +1588,6 @@ impl gpui::Render for Pane {
                                                         });
                                                     })),
                                                 )
-                                                .when(
-                                                    dragging_over_left || dragging_over_right,
-                                                    |tab| {
-                                                        tab.bg(colors.accent_muted)
-                                                            .border_color(colors.accent)
-                                                            .border_0()
-                                                            .when(dragging_over_left, |tab| {
-                                                                tab.border_l_2()
-                                                            })
-                                                            .when(dragging_over_right, |tab| {
-                                                                tab.border_r_2()
-                                                            })
-                                                            .child(
-                                                                div()
-                                                                    .debug_selector(|| {
-                                                                        "tab-drop-ghost".into()
-                                                                    })
-                                                                    .absolute()
-                                                                    .inset_0(),
-                                                            )
-                                                    },
-                                                )
                                         },
                                     )),
                             ),
@@ -1657,8 +1641,18 @@ impl gpui::Render for Pane {
                     )
             }))
             .child({
-                let body = div().flex_1().min_h_0().flex().flex_col();
-                match active {
+                let body = div()
+                    .id(("pane-body", pane_id as usize))
+                    .debug_selector(move || format!("pane-body-{pane_id}"))
+                    .relative()
+                    .group("pane-drop")
+                    .flex_1()
+                    .min_h_0()
+                    .flex()
+                    .flex_col()
+                    .on_drag_move::<TabDrag>(cx.listener(Self::pane_drag_hover))
+                    .on_drop::<TabDrag>(cx.listener(Self::finish_tab_drag));
+                let body = match active {
                     Some(item) if item.kind == ItemKind::Configuration => {
                         match self.editors.get(&item.id) {
                             Some(editor) => {
@@ -1818,7 +1812,40 @@ impl gpui::Render for Pane {
                             .text_color(colors.muted_text)
                             .child("No open items"),
                     ),
-                }
+                };
+                let target = self.tab_drop_target.unwrap_or(PaneDropTarget::Center);
+                body.child(
+                    div()
+                        .invisible()
+                        .debug_selector(move || match target {
+                            PaneDropTarget::Center => "pane-drop-preview-center".into(),
+                            PaneDropTarget::Before => "pane-drop-preview-before".into(),
+                            PaneDropTarget::After => "pane-drop-preview-after".into(),
+                            PaneDropTarget::Tab(_) => unreachable!(),
+                        })
+                        .absolute()
+                        .bg(colors.accent_muted)
+                        .border_2()
+                        .border_color(colors.accent)
+                        .group_drag_over::<TabDrag>("pane-drop", |preview| preview.visible())
+                        .when(target == PaneDropTarget::Center, |preview| {
+                            preview.inset_0()
+                        })
+                        .when(target == PaneDropTarget::Before, |preview| {
+                            preview
+                                .left_0()
+                                .top_0()
+                                .bottom_0()
+                                .w(DefiniteLength::Fraction(0.5))
+                        })
+                        .when(target == PaneDropTarget::After, |preview| {
+                            preview
+                                .right_0()
+                                .top_0()
+                                .bottom_0()
+                                .w(DefiniteLength::Fraction(0.5))
+                        }),
+                )
             })
             .children(database_notice.map(|(item_id, state)| {
                 let (tint, can_retry) = match state {
@@ -1844,36 +1871,6 @@ impl gpui::Render for Pane {
                             }))
                     })
             }))
-            .children(
-                (cx.has_active_drag())
-                    .then_some(self.tab_drop_target)
-                    .flatten()
-                    .filter(|target| !matches!(target, PaneDropTarget::Tab(_)))
-                    .map(|target| {
-                        div()
-                            .debug_selector(move || match target {
-                                PaneDropTarget::Center => "pane-drop-preview-center".into(),
-                                PaneDropTarget::Before => "pane-drop-preview-before".into(),
-                                PaneDropTarget::After => "pane-drop-preview-after".into(),
-                                PaneDropTarget::Tab(_) => unreachable!(),
-                            })
-                            .absolute()
-                            .top_0()
-                            .bottom_0()
-                            .border_2()
-                            .border_color(colors.accent)
-                            .bg(colors.accent_muted)
-                            .when(target == PaneDropTarget::Center, |preview| {
-                                preview.left_0().right_0()
-                            })
-                            .when(target == PaneDropTarget::Before, |preview| {
-                                preview.left_0().w(DefiniteLength::Fraction(0.5))
-                            })
-                            .when(target == PaneDropTarget::After, |preview| {
-                                preview.right_0().w(DefiniteLength::Fraction(0.5))
-                            })
-                    }),
-            )
     }
 }
 
@@ -5113,6 +5110,13 @@ impl WorkspaceShell {
     }
 
     fn dismiss_modal(&mut self, _: &DismissModal, window: &mut Window, cx: &mut Context<Self>) {
+        if cx.stop_active_drag(window) {
+            for pane in &self.panes {
+                pane.update(cx, |pane, _| pane.tab_drop_target = None);
+            }
+            cx.notify();
+            return;
+        }
         if self.modal == Some(Modal::ServerConnection) {
             self.server_token_input
                 .update(cx, |input, cx| input.set_text("", cx));
@@ -10186,11 +10190,6 @@ mod tests {
         let drop = point(target.right() - px(6.), target.center().y);
         cx.simulate_mouse_move(drop, MouseButton::Left, Modifiers::default());
         cx.run_until_parked();
-        let ghost = cx
-            .debug_bounds("tab-drop-ghost")
-            .expect("full tab insertion ghost");
-        assert!(ghost.size.width >= target.size.width - px(1.));
-        assert_eq!(ghost.size.height, target.size.height);
         cx.simulate_mouse_up(drop, MouseButton::Left, Modifiers::default());
         cx.run_until_parked();
 
@@ -10224,6 +10223,45 @@ mod tests {
         workspace.read_with(&cx, |shell, cx| {
             assert_eq!(shell.panes.len(), 1);
             assert!(shell.panes[0].read(cx).contains_item(1));
+        });
+    }
+
+    #[gpui::test]
+    fn escape_cancels_tab_drag_without_leaving_a_drop_target(cx: &mut TestAppContext) {
+        let mut state = PresentationState::default();
+        state.workspace.panes[0].items.push(ItemPresentation {
+            id: 2,
+            kind: ItemKind::Query,
+            title: "two.sql".into(),
+            dirty: false,
+            source: None,
+        });
+        let window = shell_with_state(state, cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        cx.run_until_parked();
+
+        let tab = cx.debug_bounds("tab-1").expect("drag source");
+        let pane = cx.debug_bounds("pane-body-1").expect("pane body");
+        let start = tab.center();
+        cx.simulate_mouse_down(start, MouseButton::Left, Modifiers::default());
+        cx.simulate_mouse_move(
+            point(pane.left() + px(10.), pane.center().y),
+            MouseButton::Left,
+            Modifiers::default(),
+        );
+        cx.run_until_parked();
+        assert!(cx.update(|_, cx| cx.has_active_drag()));
+
+        workspace.update_in(&mut cx, |shell, window, cx| {
+            shell.dismiss_modal(&DismissModal, window, cx)
+        });
+        cx.run_until_parked();
+
+        assert!(!cx.update(|_, cx| cx.has_active_drag()));
+        workspace.read_with(&cx, |shell, cx| {
+            assert_eq!(shell.panes.len(), 1);
+            assert_eq!(shell.panes[0].read(cx).tab_drop_target, None);
         });
     }
 
