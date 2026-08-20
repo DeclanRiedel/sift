@@ -257,10 +257,45 @@ struct ResultResizeDrag {
 
 /// A pane tab being dragged. `pane_id` distinguishes a same-pane reorder from
 /// a cross-pane move; `item_id` is stable across the drag.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 struct TabDrag {
     pane_id: u64,
     item_id: u64,
+    title: SharedString,
+}
+
+/// Landing shape shown while a tab crosses a pane. `Before` and `After`
+/// create a sibling pane; `Center` joins the pane; `Tab` preserves tab-bar
+/// insertion semantics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PaneDropTarget {
+    Center,
+    Before,
+    After,
+    Tab(usize),
+}
+
+struct TabDragPreview {
+    title: SharedString,
+}
+
+impl gpui::Render for TabDragPreview {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let colors = cx.theme().colors;
+        div()
+            .max_w(px(240.))
+            .h(px(30.))
+            .px_3()
+            .flex()
+            .items_center()
+            .overflow_hidden()
+            .border_1()
+            .border_color(colors.accent)
+            .bg(colors.elevated_surface)
+            .text_color(colors.text)
+            .shadow_md()
+            .child(self.title.clone())
+    }
 }
 
 /// An item detached from one pane, ready to attach to another. Editors, their
@@ -513,8 +548,11 @@ pub enum PaneEvent {
     DiscardItemRequested { item_id: u64 },
     /// A configuration tab's dirty prompt requested a save.
     SaveItemRequested { item_id: u64 },
-    /// A tab from another pane was dropped onto this pane.
-    MoveItemRequested { item_id: u64 },
+    /// A tab was dropped onto this pane or one of its split targets.
+    MoveItemRequested {
+        item_id: u64,
+        target: PaneDropTarget,
+    },
     /// Active editor state changed. Cursor-only changes do not dirty the tab.
     EditorStateChanged { item_id: u64, dirty: Option<bool> },
     /// An editor requested the workspace-level command palette.
@@ -660,11 +698,10 @@ pub struct Pane {
     /// Mouse-move events may outpace display refresh. One pane invalidation per
     /// frame keeps result resizing responsive without redundant layout passes.
     result_resize_frame_pending: bool,
-    /// Insertion index a dragged tab would land at, if a drag is hovering.
-    tab_drop_index: Option<usize>,
-    /// Item whose tab is currently being dragged from this pane. Used to dim
-    /// the source tab; cleared lazily when no drag is active anymore.
-    dragging_item: Option<u64>,
+    /// Shape a dragged tab would take if released over this pane.
+    tab_drop_target: Option<PaneDropTarget>,
+    /// Label rendered inside the full-width tab-bar drop ghost.
+    tab_drop_title: Option<SharedString>,
     /// Dirty-close confirmation belongs to its tab and is rendered inline.
     pending_close_item: Option<u64>,
 }
@@ -745,8 +782,8 @@ impl Pane {
             database_item_states,
             live_result_extents: HashMap::new(),
             result_resize_frame_pending: false,
-            tab_drop_index: None,
-            dragging_item: None,
+            tab_drop_target: None,
+            tab_drop_title: None,
             pending_close_item: None,
         }
     }
@@ -1161,8 +1198,38 @@ impl Pane {
         } else {
             index
         };
-        if self.tab_drop_index != Some(drop_index) {
-            self.tab_drop_index = Some(drop_index);
+        let target = PaneDropTarget::Tab(drop_index);
+        let title = event.drag(cx).title.clone();
+        if self.tab_drop_target != Some(target) || self.tab_drop_title.as_ref() != Some(&title) {
+            self.tab_drop_target = Some(target);
+            self.tab_drop_title = Some(title);
+            cx.notify();
+        }
+    }
+
+    /// Track Zed-style pane landing zones. Near either side creates a pane;
+    /// the broad middle moves the tab into this pane.
+    fn pane_drag_hover(
+        &mut self,
+        event: &gpui::DragMoveEvent<TabDrag>,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !event.bounds.contains(&event.event.position) {
+            return;
+        }
+        let relative_x = event.event.position.x - event.bounds.left();
+        let edge = (event.bounds.size.width.min(event.bounds.size.height) * 0.25)
+            .min(event.bounds.size.width / 3.0);
+        let target = if relative_x < edge {
+            PaneDropTarget::Before
+        } else if relative_x > event.bounds.size.width - edge {
+            PaneDropTarget::After
+        } else {
+            PaneDropTarget::Center
+        };
+        if self.tab_drop_target != Some(target) {
+            self.tab_drop_target = Some(target);
             cx.notify();
         }
     }
@@ -1170,16 +1237,23 @@ impl Pane {
     /// A dragged tab was released over this pane: reorder locally, or ask the
     /// workspace to move it here from its originating pane.
     fn finish_tab_drag(&mut self, drag: &TabDrag, _: &mut Window, cx: &mut Context<Self>) {
-        self.dragging_item = None;
-        let to = self.tab_drop_index.take().unwrap_or(self.items.len());
-        if drag.pane_id != self.id {
+        let target = self
+            .tab_drop_target
+            .take()
+            .unwrap_or(PaneDropTarget::Center);
+        self.tab_drop_title = None;
+        let creates_pane = matches!(target, PaneDropTarget::Before | PaneDropTarget::After);
+        if drag.pane_id != self.id || creates_pane {
             cx.emit(PaneEvent::MoveItemRequested {
                 item_id: drag.item_id,
+                target,
             });
-        } else {
+        } else if let PaneDropTarget::Tab(to) = target {
             self.move_item(drag.item_id, to);
         }
-        cx.emit(PaneEvent::FocusRequested);
+        if !creates_pane {
+            cx.emit(PaneEvent::FocusRequested);
+        }
         cx.notify();
     }
 
@@ -1215,8 +1289,13 @@ impl Pane {
         })
     }
 
-    /// Adopt a tab detached from another pane, appending it as the active tab.
-    fn receive_item(&mut self, transfer: TabTransfer, cx: &mut Context<Self>) {
+    /// Adopt a tab detached from another pane at a requested tab-bar slot.
+    fn receive_item(
+        &mut self,
+        transfer: TabTransfer,
+        insertion_index: Option<usize>,
+        cx: &mut Context<Self>,
+    ) {
         let item_id = transfer.item.id;
         let editor = transfer.editor;
         self.editor_subscriptions.insert(
@@ -1230,8 +1309,11 @@ impl Pane {
         if let Some(results) = transfer.results {
             self.results.insert(item_id, results);
         }
-        self.items.push(transfer.item);
-        self.active_item = self.items.len() - 1;
+        let insertion_index = insertion_index
+            .unwrap_or(self.items.len())
+            .min(self.items.len());
+        self.items.insert(insertion_index, transfer.item);
+        self.active_item = insertion_index;
         self.pending_close_item = None;
         cx.notify();
     }
@@ -1288,6 +1370,7 @@ impl gpui::Render for Pane {
             )
             .on_drag_move::<ResultResizeDrag>(cx.listener(Self::resize_results))
             .on_drop::<ResultResizeDrag>(cx.listener(Self::finish_results_resize))
+            .on_drag_move::<TabDrag>(cx.listener(Self::pane_drag_hover))
             // A tab dropped anywhere else in the pane (not only its tab bar)
             // still lands here; empty panes accept cross-pane drops this way.
             .on_drop::<TabDrag>(cx.listener(Self::finish_tab_drag))
@@ -1410,17 +1493,20 @@ impl gpui::Render for Pane {
                                     .flex()
                                     .h_full()
                                     .overflow_x_scroll()
-                                    .children(self.items.iter().enumerate().map(
+                                    .children(self.items.iter().enumerate().flat_map(
                                         |(index, item)| {
                                             let selected = index == self.active_item;
                                             let item_id = item.id;
                                             let tab_debug = format!("tab-{item_id}");
-                                            let dragging_over_left =
-                                                self.tab_drop_index == Some(index);
-                                            let dragging_over_right = self.tab_drop_index
-                                                == Some(index + 1)
+                                            let ghost_before = self.tab_drop_target
+                                                == Some(PaneDropTarget::Tab(index));
+                                            let ghost_after = self.tab_drop_target
+                                                == Some(PaneDropTarget::Tab(index + 1))
                                                 && index + 1 == self.items.len();
-                                            div()
+                                            let payload_title: SharedString =
+                                                item.title.clone().into();
+                                            let preview_title = payload_title.clone();
+                                            let tab = div()
                                                 .id(("tab", item.id as usize))
                                                 .debug_selector(move || tab_debug.clone())
                                                 .relative()
@@ -1433,8 +1519,15 @@ impl gpui::Render for Pane {
                                                 .border_r_1()
                                                 .border_color(colors.subtle_border)
                                                 .on_drag(
-                                                    TabDrag { pane_id, item_id },
-                                                    |_, _, _, cx| cx.new(|_| gpui::Empty),
+                                                    TabDrag {
+                                                        pane_id,
+                                                        item_id,
+                                                        title: payload_title,
+                                                    },
+                                                    move |_, _, _, cx| {
+                                                        let title = preview_title.clone();
+                                                        cx.new(|_| TabDragPreview { title })
+                                                    },
                                                 )
                                                 .on_drag_move::<TabDrag>(cx.listener(
                                                     move |pane, event, window, cx| {
@@ -1443,28 +1536,6 @@ impl gpui::Render for Pane {
                                                         );
                                                     },
                                                 ))
-                                                .when(dragging_over_left, |tab| {
-                                                    tab.child(
-                                                        div()
-                                                            .absolute()
-                                                            .left_0()
-                                                            .top_0()
-                                                            .bottom_0()
-                                                            .w(px(2.))
-                                                            .bg(colors.accent),
-                                                    )
-                                                })
-                                                .when(dragging_over_right, |tab| {
-                                                    tab.child(
-                                                        div()
-                                                            .absolute()
-                                                            .right_0()
-                                                            .top_0()
-                                                            .bottom_0()
-                                                            .w(px(2.))
-                                                            .bg(colors.accent),
-                                                    )
-                                                })
                                                 .when(selected, |tab| {
                                                     tab.bg(colors.background)
                                                         .text_color(colors.text)
@@ -1516,7 +1587,39 @@ impl gpui::Render for Pane {
                                                             item_id,
                                                         });
                                                     })),
-                                                )
+                                                );
+                                            let ghost = || {
+                                                div()
+                                                    .debug_selector(|| "tab-drop-ghost".into())
+                                                    .flex_none()
+                                                    .flex()
+                                                    .items_center()
+                                                    .h_full()
+                                                    .w(px(180.))
+                                                    .px_2()
+                                                    .overflow_hidden()
+                                                    .border_1()
+                                                    .border_color(colors.accent)
+                                                    .bg(colors.accent_muted)
+                                                    .text_color(colors.text)
+                                                    .child(
+                                                        div().min_w_0().truncate().child(
+                                                            self.tab_drop_title
+                                                                .clone()
+                                                                .unwrap_or_default(),
+                                                        ),
+                                                    )
+                                                    .into_any_element()
+                                            };
+                                            let mut elements = Vec::with_capacity(3);
+                                            if ghost_before {
+                                                elements.push(ghost());
+                                            }
+                                            elements.push(tab.into_any_element());
+                                            if ghost_after {
+                                                elements.push(ghost());
+                                            }
+                                            elements
                                         },
                                     )),
                             ),
@@ -1757,6 +1860,36 @@ impl gpui::Render for Pane {
                             }))
                     })
             }))
+            .children(
+                (cx.has_active_drag())
+                    .then_some(self.tab_drop_target)
+                    .flatten()
+                    .filter(|target| !matches!(target, PaneDropTarget::Tab(_)))
+                    .map(|target| {
+                        div()
+                            .debug_selector(move || match target {
+                                PaneDropTarget::Center => "pane-drop-preview-center".into(),
+                                PaneDropTarget::Before => "pane-drop-preview-before".into(),
+                                PaneDropTarget::After => "pane-drop-preview-after".into(),
+                                PaneDropTarget::Tab(_) => unreachable!(),
+                            })
+                            .absolute()
+                            .top_0()
+                            .bottom_0()
+                            .border_2()
+                            .border_color(colors.accent)
+                            .bg(colors.accent_muted)
+                            .when(target == PaneDropTarget::Center, |preview| {
+                                preview.left_0().right_0()
+                            })
+                            .when(target == PaneDropTarget::Before, |preview| {
+                                preview.left_0().w(DefiniteLength::Fraction(0.5))
+                            })
+                            .when(target == PaneDropTarget::After, |preview| {
+                                preview.right_0().w(DefiniteLength::Fraction(0.5))
+                            })
+                    }),
+            )
     }
 }
 
@@ -4243,13 +4376,13 @@ impl WorkspaceShell {
                 });
                 self.save_active_item(&SaveActiveItem, window, cx);
             }
-            PaneEvent::MoveItemRequested { item_id } => {
+            PaneEvent::MoveItemRequested { item_id, target } => {
                 // The emitter is the drop target; find the pane that owns the
                 // tab and transfer editor, results, and clean point with it.
                 let source = self
                     .panes
                     .iter()
-                    .position(|pane| pane != emitter && pane.read(cx).contains_item(*item_id));
+                    .position(|pane| pane.read(cx).contains_item(*item_id));
                 let Some(source) = source else {
                     return;
                 };
@@ -4257,8 +4390,47 @@ impl WorkspaceShell {
                 let Some(transfer) = transfer else {
                     return;
                 };
-                emitter.update(cx, |pane, cx| pane.receive_item(transfer, cx));
-                self.active_pane = index;
+                match target {
+                    PaneDropTarget::Center | PaneDropTarget::Tab(_) => {
+                        let insertion_index = match target {
+                            PaneDropTarget::Tab(index) => Some(*index),
+                            _ => None,
+                        };
+                        emitter.update(cx, |pane, cx| {
+                            pane.receive_item(transfer, insertion_index, cx)
+                        });
+                        self.active_pane = index;
+                    }
+                    PaneDropTarget::Before | PaneDropTarget::After => {
+                        let id = self.next_id;
+                        self.next_id += 1;
+                        let vim_mode = self.vim_mode_default();
+                        let pane = cx.new(|cx| {
+                            Pane::from_presentation(
+                                PanePresentation {
+                                    id,
+                                    items: Vec::new(),
+                                    active_item: 0,
+                                },
+                                vim_mode,
+                                cx,
+                            )
+                        });
+                        pane.update(cx, |pane, cx| pane.receive_item(transfer, None, cx));
+                        cx.subscribe_in(&pane, window, Self::on_pane_event).detach();
+
+                        let new_flex = self.pane_flexes[index] / 2.0;
+                        self.pane_flexes[index] = new_flex;
+                        let insertion_index = if *target == PaneDropTarget::Before {
+                            index
+                        } else {
+                            index + 1
+                        };
+                        self.panes.insert(insertion_index, pane);
+                        self.pane_flexes.insert(insertion_index, new_flex);
+                        self.active_pane = insertion_index;
+                    }
+                }
                 self.focus_active_pane(window, cx);
                 self.persist(cx);
                 cx.notify();
@@ -10029,6 +10201,12 @@ mod tests {
         );
         let drop = point(target.right() - px(6.), target.center().y);
         cx.simulate_mouse_move(drop, MouseButton::Left, Modifiers::default());
+        cx.run_until_parked();
+        let ghost = cx
+            .debug_bounds("tab-drop-ghost")
+            .expect("full tab insertion ghost");
+        assert_eq!(ghost.size.width, px(180.));
+        assert_eq!(ghost.size.height, target.size.height);
         cx.simulate_mouse_up(drop, MouseButton::Left, Modifiers::default());
         cx.run_until_parked();
 
@@ -10085,6 +10263,51 @@ mod tests {
             assert_eq!(shell.active_pane, 1);
             // The moved editor left its originating pane entirely.
             assert!(shell.panes[0].read(cx).editor(1).is_none());
+        });
+    }
+
+    #[gpui::test]
+    fn pane_tab_drag_edge_previews_and_creates_a_sibling_pane(cx: &mut TestAppContext) {
+        let mut state = PresentationState::default();
+        state.workspace.panes[0].items.push(ItemPresentation {
+            id: 2,
+            kind: ItemKind::Query,
+            title: "two.sql".into(),
+            dirty: false,
+            source: None,
+        });
+        let window = shell_with_state(state, cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        cx.run_until_parked();
+
+        let source = cx.debug_bounds("tab-1").expect("first tab");
+        let target = cx.debug_bounds("pane-slot-0").expect("source pane");
+        let start = source.center();
+        cx.simulate_mouse_down(start, MouseButton::Left, Modifiers::default());
+        cx.simulate_mouse_move(
+            point(start.x + px(6.), start.y + px(20.)),
+            MouseButton::Left,
+            Modifiers::default(),
+        );
+        let drop = point(target.left() + px(12.), target.center().y);
+        cx.simulate_mouse_move(drop, MouseButton::Left, Modifiers::default());
+        cx.run_until_parked();
+
+        let preview = cx
+            .debug_bounds("pane-drop-preview-before")
+            .expect("left split preview");
+        assert_eq!(preview.left(), target.left());
+        assert_eq!(preview.size.width, target.size.width / 2.0);
+
+        cx.simulate_mouse_up(drop, MouseButton::Left, Modifiers::default());
+        cx.run_until_parked();
+        workspace.read_with(&cx, |shell, cx| {
+            assert_eq!(shell.panes.len(), 2);
+            assert!(shell.panes[0].read(cx).contains_item(1));
+            assert!(shell.panes[1].read(cx).contains_item(2));
+            assert_eq!(shell.active_pane, 0);
+            assert_eq!(shell.pane_flexes, vec![0.5, 0.5]);
         });
     }
 
