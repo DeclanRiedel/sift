@@ -71,8 +71,8 @@ impl Theme {
                 toolbar: hsla(0.625, 0.15, 0.118, 1.0),
                 elevated_surface: hsla(0.625, 0.13, 0.18, 1.0),
                 hovered_surface: hsla(0.60, 0.12, 1.0, 0.055),
-                selected_surface: hsla(0.55, 0.42, 0.52, 0.14),
-                active_surface: hsla(0.55, 0.50, 0.52, 0.20),
+                selected_surface: hsla(0.05029586, 0.86, 0.38627452, 0.14),
+                active_surface: hsla(0.05029586, 0.86, 0.38627452, 0.20),
                 scrim: hsla(0.0, 0.0, 0.0, 0.40),
                 border: hsla(0.625, 0.10, 0.235, 1.0),
                 subtle_border: hsla(0.625, 0.10, 0.195, 1.0),
@@ -80,13 +80,13 @@ impl Theme {
                 text: hsla(0.60, 0.12, 0.90, 1.0),
                 muted_text: hsla(0.60, 0.08, 0.62, 1.0),
                 disabled_text: hsla(0.60, 0.06, 0.42, 1.0),
-                accent: hsla(0.55, 0.62, 0.56, 1.0),
-                accent_muted: hsla(0.55, 0.55, 0.52, 0.16),
-                accent_hover: hsla(0.55, 0.68, 0.64, 1.0),
-                drop_target_background: hsla(0.55, 0.55, 0.52, 0.16),
+                accent: hsla(0.05029586, 0.857868, 0.38627452, 1.0),
+                accent_muted: hsla(0.05029586, 0.86, 0.38627452, 0.16),
+                accent_hover: hsla(0.05029586, 0.82, 0.48, 1.0),
+                drop_target_background: hsla(0.05029586, 0.86, 0.38627452, 0.16),
                 drop_target_border: hsla(0.60, 0.12, 0.78, 1.0),
                 on_accent: hsla(0.60, 0.10, 0.98, 1.0),
-                focus_ring: hsla(0.55, 0.72, 0.62, 1.0),
+                focus_ring: hsla(0.05029586, 0.82, 0.48, 1.0),
                 danger: hsla(0.005, 0.68, 0.58, 1.0),
                 danger_muted: hsla(0.005, 0.60, 0.52, 0.16),
                 warning: hsla(0.105, 0.72, 0.58, 1.0),
@@ -113,8 +113,8 @@ impl Theme {
                 toolbar: hsla(0.60, 0.16, 0.955, 1.0),
                 elevated_surface: hsla(0.60, 0.12, 1.0, 1.0),
                 hovered_surface: hsla(0.60, 0.30, 0.35, 0.055),
-                selected_surface: hsla(0.55, 0.40, 0.43, 0.10),
-                active_surface: hsla(0.55, 0.50, 0.43, 0.16),
+                selected_surface: hsla(0.05029586, 0.86, 0.38627452, 0.10),
+                active_surface: hsla(0.05029586, 0.86, 0.38627452, 0.16),
                 scrim: hsla(0.0, 0.0, 0.0, 0.28),
                 border: hsla(0.60, 0.10, 0.82, 1.0),
                 subtle_border: hsla(0.60, 0.10, 0.89, 1.0),
@@ -122,13 +122,13 @@ impl Theme {
                 text: hsla(0.625, 0.20, 0.18, 1.0),
                 muted_text: hsla(0.62, 0.09, 0.43, 1.0),
                 disabled_text: hsla(0.62, 0.07, 0.63, 1.0),
-                accent: hsla(0.55, 0.68, 0.43, 1.0),
-                accent_muted: hsla(0.55, 0.58, 0.43, 0.12),
-                accent_hover: hsla(0.55, 0.72, 0.36, 1.0),
-                drop_target_background: hsla(0.55, 0.58, 0.43, 0.12),
+                accent: hsla(0.05029586, 0.857868, 0.38627452, 1.0),
+                accent_muted: hsla(0.05029586, 0.86, 0.38627452, 0.12),
+                accent_hover: hsla(0.05029586, 0.88, 0.32, 1.0),
+                drop_target_background: hsla(0.05029586, 0.86, 0.38627452, 0.12),
                 drop_target_border: hsla(0.62, 0.16, 0.28, 1.0),
                 on_accent: hsla(0.60, 0.10, 0.99, 1.0),
-                focus_ring: hsla(0.55, 0.72, 0.43, 1.0),
+                focus_ring: hsla(0.05029586, 0.88, 0.32, 1.0),
                 danger: hsla(0.005, 0.72, 0.48, 1.0),
                 danger_muted: hsla(0.005, 0.62, 0.48, 0.12),
                 warning: hsla(0.105, 0.78, 0.43, 1.0),
@@ -214,5 +214,12 @@ mod tests {
             Theme::light().colors.on_accent,
             Theme::light().colors.accent
         );
+    }
+
+    #[test]
+    fn primary_accent_is_rust_orange() {
+        let rust_orange = hsla(0.05029586, 0.857868, 0.38627452, 1.0);
+        assert_eq!(Theme::dark().colors.accent, rust_orange);
+        assert_eq!(Theme::light().colors.accent, rust_orange);
     }
 }
