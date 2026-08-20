@@ -9,8 +9,6 @@ pub struct StatusBar {
     pub transaction: String,
     pub room: String,
     pub execution: String,
-    pub diagnostic_count: usize,
-    pub current_error: Option<String>,
 }
 
 impl Default for StatusBar {
@@ -21,8 +19,6 @@ impl Default for StatusBar {
             transaction: "TX: None".into(),
             room: "Local workspace".into(),
             execution: "Ready".into(),
-            diagnostic_count: 0,
-            current_error: None,
         }
     }
 }
@@ -205,29 +201,6 @@ pub(super) fn render_status_bar(
                     )
                     .on_click(cx.listener(|shell, _, _, cx| shell.show_project_search(cx))),
                 )
-                .child(
-                    button(
-                        "footer-diagnostics",
-                        IconName::Warning,
-                        format!("Problems ({})", shell.status.diagnostic_count),
-                        shell.bottom_dock.presentation.open
-                            && shell.active_bottom_tool == BottomTool::Problems,
-                        Some(shell.status.diagnostic_count),
-                        shell.status.diagnostic_count > 0,
-                    )
-                    .on_click(cx.listener(|shell, _, _, cx| shell.show_diagnostics(cx))),
-                )
-                .children(shell.status.current_error.as_ref().map(|error| {
-                    button(
-                        "footer-current-error",
-                        IconName::Copy,
-                        format!("Copy current error: {}", compact_error(error)),
-                        false,
-                        None,
-                        true,
-                    )
-                    .on_click(cx.listener(|shell, _, _, cx| shell.copy_current_error(cx)))
-                }))
                 .child(separator())
                 .child(
                     div()
@@ -384,27 +357,4 @@ pub(super) fn render_status_bar(
                 ),
         )
         .into_any_element()
-}
-
-fn compact_error(error: &str) -> String {
-    const MAX_CHARS: usize = 34;
-    let mut compact = error.split_whitespace().collect::<Vec<_>>().join(" ");
-    if compact.chars().count() > MAX_CHARS {
-        compact = compact.chars().take(MAX_CHARS - 1).collect::<String>() + "…";
-    }
-    compact
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn compact_error_is_single_line_and_unicode_safe() {
-        assert_eq!(compact_error("bad\n query"), "bad query");
-        let compact =
-            compact_error("数据库错误数据库错误数据库错误数据库错误数据库错误数据库错误数据库错误");
-        assert!(compact.chars().count() <= 34);
-        assert!(compact.ends_with('…'));
-    }
 }

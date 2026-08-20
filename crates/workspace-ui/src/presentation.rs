@@ -75,10 +75,10 @@ impl LeftPanel {
 #[serde(rename_all = "snake_case")]
 pub enum BottomTool {
     #[default]
+    #[serde(alias = "problems")]
     Console,
     Monitor,
     Automations,
-    Problems,
 }
 
 impl BottomTool {
@@ -87,7 +87,6 @@ impl BottomTool {
             Self::Console => "Console",
             Self::Monitor => "Monitor",
             Self::Automations => "Automations",
-            Self::Problems => "Problems",
         }
     }
 }
@@ -454,6 +453,19 @@ mod tests {
         assert!(decoded.workspace.pane_layout.is_none());
         assert!(decoded.workspace.pane_flexes.is_empty());
         assert!(!decoded.legacy_vim_mode_default);
+    }
+
+    #[test]
+    fn legacy_problems_tool_restores_as_console() {
+        let state = PresentationState::default();
+        let mut json = serde_json::to_value(state).unwrap();
+        json.get_mut("workspace")
+            .and_then(serde_json::Value::as_object_mut)
+            .unwrap()
+            .insert("bottom_tool".into(), "problems".into());
+
+        let decoded = PresentationState::decode(&serde_json::to_vec(&json).unwrap());
+        assert_eq!(decoded.workspace.bottom_tool, BottomTool::Console);
     }
 
     #[test]

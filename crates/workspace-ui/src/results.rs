@@ -14,7 +14,10 @@ use gpui::{
 use sift_protocol::{
     ColumnMetadata, DriverWarning, ExecuteResponse, Nullability, Page, Row, TypeRef, Value,
 };
-use sift_ui::{ActiveTheme, Badge, Clickable, IconButton, IconName, ThemeColors};
+use sift_ui::{
+    ActiveTheme, Badge, Button, ButtonTone, Clickable, Disableable, IconButton, IconName,
+    ThemeColors,
+};
 
 const MIN_COLUMN_WIDTH: f32 = 144.0;
 const DEFAULT_COLUMN_WIDTH: f32 = 184.0;
@@ -340,6 +343,19 @@ pub enum ResultTab {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MessageSeverity {
+    Info,
+    Warning,
+    Error,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ResultMessage {
+    severity: MessageSeverity,
+    text: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ResultPlacement {
     Bottom,
     Right,
@@ -389,6 +405,8 @@ pub struct ResultsView {
     included_columns: Vec<bool>,
     tab: ResultTab,
     selected: Option<GridSelection>,
+    messages: Vec<ResultMessage>,
+    selected_message: Option<usize>,
     row_scroll_handle: UniformListScrollHandle,
     grid_scroll_handle: gpui::ScrollHandle,
     placement: ResultPlacement,
@@ -409,6 +427,8 @@ impl ResultsView {
             included_columns: Vec::new(),
             tab: ResultTab::Data,
             selected: None,
+            messages: Vec::new(),
+            selected_message: None,
             row_scroll_handle: UniformListScrollHandle::new(),
             grid_scroll_handle: gpui::ScrollHandle::new(),
             placement: ResultPlacement::Bottom,
@@ -466,7 +486,7 @@ impl ResultsView {
         cx.notify();
     }
 
-    /// Adopt a new outcome, resetting selection and focusing the Data tab.
+    /// Adopt a new outcome, resetting selection and opening failures as text.
     pub fn set_state(&mut self, state: ResultState, cx: &mut Context<Self>) {
         self.rendered_columns = match &state {
             ResultState::Streaming(data) | ResultState::Ready(data) => data
@@ -505,11 +525,71 @@ impl ResultsView {
         self.column_widths = vec![DEFAULT_COLUMN_WIDTH; self.rendered_columns.len()];
         self.column_order = (0..self.rendered_columns.len()).collect();
         self.included_columns = vec![true; self.rendered_columns.len()];
+        self.messages = Self::messages_for_state(&state);
+        self.selected_message = None;
+        self.tab = if Self::is_error_state(&state) {
+            ResultTab::Messages
+        } else {
+            ResultTab::Data
+        };
         self.state = state;
         self.stream_result_seen = false;
         self.selected = None;
-        self.tab = ResultTab::Data;
         cx.notify();
+    }
+
+    fn is_error_state(state: &ResultState) -> bool {
+        matches!(
+            state,
+            ResultState::Unavailable(_)
+                | ResultState::Failed(_)
+                | ResultState::TimedOut
+                | ResultState::OutcomeUnknown
+        )
+    }
+
+    fn messages_for_state(state: &ResultState) -> Vec<ResultMessage> {
+        let mut messages = Vec::new();
+        match state {
+            ResultState::Streaming(data) | ResultState::Ready(data) => {
+                if let Some(affected) = data.affected_rows {
+                    messages.push(ResultMessage {
+                        severity: MessageSeverity::Info,
+                        text: format!("{affected} row(s) affected"),
+                    });
+                }
+                if data.truncated_extra_results {
+                    messages.push(ResultMessage {
+                        severity: MessageSeverity::Warning,
+                        text: "Additional result sets were truncated to the first.".into(),
+                    });
+                }
+                messages.extend(data.warnings.iter().map(|warning| ResultMessage {
+                    severity: MessageSeverity::Warning,
+                    text: warning.message.clone(),
+                }));
+            }
+            ResultState::Unavailable(message) | ResultState::Failed(message) => {
+                messages.push(ResultMessage {
+                    severity: MessageSeverity::Error,
+                    text: message.clone(),
+                });
+            }
+            ResultState::TimedOut => messages.push(ResultMessage {
+                severity: MessageSeverity::Error,
+                text: "Query timed out".into(),
+            }),
+            ResultState::OutcomeUnknown => messages.push(ResultMessage {
+                severity: MessageSeverity::Error,
+                text: "Query outcome is unknown".into(),
+            }),
+            ResultState::Cancelled => messages.push(ResultMessage {
+                severity: MessageSeverity::Info,
+                text: "Query cancelled".into(),
+            }),
+            ResultState::Idle | ResultState::Pending => {}
+        }
+        messages
     }
 
     pub fn set_pending(&mut self, cx: &mut Context<Self>) {
@@ -604,6 +684,8 @@ impl ResultsView {
                 data.affected_rows = affected_rows;
                 data.warnings = warnings;
                 self.state = ResultState::Ready(data);
+                self.messages = Self::messages_for_state(&self.state);
+                self.selected_message = None;
                 self.stream_result_seen = false;
                 cx.notify();
                 true
@@ -618,6 +700,35 @@ impl ResultsView {
     fn select_tab(&mut self, tab: ResultTab, cx: &mut Context<Self>) {
         self.tab = tab;
         cx.notify();
+    }
+
+    fn select_message(&mut self, index: usize, cx: &mut Context<Self>) {
+        self.selected_message = (self.selected_message != Some(index)).then_some(index);
+        cx.notify();
+    }
+
+    fn copy_message(&mut self, index: usize, cx: &mut Context<Self>) {
+        if let Some(message) = self.messages.get(index) {
+            cx.write_to_clipboard(ClipboardItem::new_string(message.text.clone()));
+        }
+    }
+
+    fn copy_selected_message(&mut self, cx: &mut Context<Self>) {
+        if let Some(index) = self.selected_message {
+            self.copy_message(index, cx);
+        }
+    }
+
+    fn copy_all_errors(&mut self, cx: &mut Context<Self>) {
+        let errors = self
+            .messages
+            .iter()
+            .filter(|message| message.severity == MessageSeverity::Error)
+            .map(|message| message.text.as_str())
+            .collect::<Vec<_>>();
+        if !errors.is_empty() {
+            cx.write_to_clipboard(ClipboardItem::new_string(errors.join("\n")));
+        }
     }
 
     fn select_cell(&mut self, row: usize, column: usize, cx: &mut Context<Self>) {
@@ -1477,54 +1588,115 @@ impl ResultsView {
             .into_any_element()
     }
 
-    fn render_messages(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_message_toolbar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = cx.theme().colors;
-        let body = div().p_3().flex().flex_col().gap_1().text_sm();
-        match &self.state {
-            ResultState::Streaming(data) | ResultState::Ready(data) => {
-                let mut rows: Vec<gpui::AnyElement> = Vec::new();
-                if let Some(affected) = data.affected_rows {
-                    rows.push(
-                        div()
-                            .child(format!("{affected} row(s) affected"))
-                            .into_any_element(),
-                    );
-                }
-                if data.truncated_extra_results {
-                    rows.push(
-                        div()
-                            .text_color(colors.warning)
-                            .child("Additional result sets were truncated to the first.")
-                            .into_any_element(),
-                    );
-                }
-                for warning in &data.warnings {
-                    rows.push(
-                        div()
-                            .text_color(colors.warning)
-                            .child(warning.message.clone())
-                            .into_any_element(),
-                    );
-                }
-                if rows.is_empty() {
-                    rows.push(
-                        div()
-                            .text_color(colors.muted_text)
-                            .child("No messages.")
-                            .into_any_element(),
-                    );
-                }
-                body.children(rows)
-            }
-            ResultState::Failed(message) => {
-                body.child(div().text_color(colors.danger).child(message.clone()))
-            }
-            other => body.child(
+        let error_count = self
+            .messages
+            .iter()
+            .filter(|message| message.severity == MessageSeverity::Error)
+            .count();
+        div()
+            .debug_selector(|| "result-message-toolbar".into())
+            .h(cx.theme().metrics.toolbar_height)
+            .flex_none()
+            .flex()
+            .items_center()
+            .gap_1()
+            .px_2()
+            .border_b_1()
+            .border_color(colors.subtle_border)
+            .bg(colors.panel)
+            .child(
+                Button::new("copy-selected-message", "Copy selected")
+                    .tone(ButtonTone::Ghost)
+                    .start_icon(IconName::Copy)
+                    .disabled(self.selected_message.is_none())
+                    .on_click(cx.listener(|view, _, _, cx| view.copy_selected_message(cx))),
+            )
+            .child(
+                Button::new("copy-all-errors", "Copy all errors")
+                    .tone(ButtonTone::Ghost)
+                    .start_icon(IconName::Copy)
+                    .disabled(error_count == 0)
+                    .on_click(cx.listener(|view, _, _, cx| view.copy_all_errors(cx))),
+            )
+            .child(div().flex_1())
+            .child(
                 div()
+                    .text_xs()
                     .text_color(colors.muted_text)
-                    .child(other.status_label()),
-            ),
+                    .child(format!("{} message(s)", self.messages.len())),
+            )
+    }
+
+    fn render_messages(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let colors = cx.theme().colors;
+        if self.messages.is_empty() {
+            return div()
+                .size_full()
+                .p_3()
+                .text_sm()
+                .text_color(colors.muted_text)
+                .child("No messages.")
+                .into_any_element();
         }
+        div()
+            .id("result-messages-scroll")
+            .size_full()
+            .overflow_y_scroll()
+            .flex()
+            .flex_col()
+            .children(self.messages.iter().enumerate().map(|(index, message)| {
+                let selected = self.selected_message == Some(index);
+                let (label, color) = match message.severity {
+                    MessageSeverity::Info => ("Info", colors.muted_text),
+                    MessageSeverity::Warning => ("Warning", colors.warning),
+                    MessageSeverity::Error => ("Error", colors.danger),
+                };
+                div()
+                    .id(("result-message", index))
+                    .debug_selector(move || format!("result-message-{index}"))
+                    .flex_none()
+                    .flex()
+                    .items_start()
+                    .gap_2()
+                    .px_3()
+                    .py_2()
+                    .border_b_1()
+                    .border_color(colors.subtle_border)
+                    .when(selected, |row| row.bg(colors.selected_surface))
+                    .hover(|row| row.bg(colors.hovered_surface))
+                    .on_click(cx.listener(move |view, _, _, cx| view.select_message(index, cx)))
+                    .child(
+                        div()
+                            .w(px(54.))
+                            .flex_none()
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .text_color(color)
+                            .child(label),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .font_family("monospace")
+                            .whitespace_normal()
+                            .text_color(colors.text)
+                            .child(message.text.clone()),
+                    )
+                    .child(
+                        IconButton::new(
+                            ("copy-result-message", index),
+                            IconName::Copy,
+                            "Copy message",
+                        )
+                        .square(px(24.))
+                        .icon_size(13.)
+                        .tooltip("Copy message")
+                        .on_click(cx.listener(move |view, _, _, cx| view.copy_message(index, cx))),
+                    )
+            }))
+            .into_any_element()
     }
 }
 
@@ -1591,7 +1763,18 @@ impl gpui::Render for ResultsView {
             .when(self.placement == ResultPlacement::Right, |view| {
                 view.child(self.render_vertical_tab_bar(cx))
             })
-            .child(div().flex().flex_1().min_w_0().min_h_0().child(body))
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .flex_1()
+                    .min_w_0()
+                    .min_h_0()
+                    .children(
+                        (self.tab == ResultTab::Messages).then(|| self.render_message_toolbar(cx)),
+                    )
+                    .child(div().flex().flex_1().min_w_0().min_h_0().child(body)),
+            )
     }
 }
 
@@ -1763,6 +1946,86 @@ mod tests {
                 cx,
             ));
             assert!(matches!(view.state(), ResultState::TimedOut));
+        });
+    }
+
+    #[gpui::test]
+    fn query_errors_open_messages_and_copy_locally(cx: &mut TestAppContext) {
+        let view = cx.update(|cx| cx.new(ResultsView::new));
+        view.update(cx, |view, cx| {
+            view.set_state(ResultState::Failed("syntax error near FROM".into()), cx);
+            assert_eq!(view.active_tab(), ResultTab::Messages);
+            assert_eq!(view.messages.len(), 1);
+            assert_eq!(view.messages[0].severity, MessageSeverity::Error);
+
+            view.select_message(0, cx);
+            view.copy_selected_message(cx);
+            assert_eq!(
+                cx.read_from_clipboard()
+                    .and_then(|item| item.text())
+                    .as_deref(),
+                Some("syntax error near FROM")
+            );
+
+            view.copy_all_errors(cx);
+            assert_eq!(
+                cx.read_from_clipboard()
+                    .and_then(|item| item.text())
+                    .as_deref(),
+                Some("syntax error near FROM")
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn failed_query_renders_message_toolbar_and_copyable_row(cx: &mut TestAppContext) {
+        let window = cx
+            .update(|cx| {
+                cx.open_window(Default::default(), |_window, cx| {
+                    let view = cx.new(ResultsView::new);
+                    cx.new(|_| ResultsHost(view))
+                })
+            })
+            .unwrap();
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let host = window.root(&mut cx).unwrap();
+        let view = host.read_with(&cx, |host, _| host.0.clone());
+        view.update(&mut cx, |view, cx| {
+            view.set_state(ResultState::Failed("bad column".into()), cx);
+        });
+        cx.run_until_parked();
+
+        assert!(cx.debug_bounds("result-message-toolbar").is_some());
+        assert!(cx.debug_bounds("result-message-0").is_some());
+    }
+
+    #[gpui::test]
+    fn streamed_messages_reset_per_run_and_append_terminal_warnings(cx: &mut TestAppContext) {
+        let view = cx.update(|cx| cx.new(ResultsView::new));
+        view.update(cx, |view, cx| {
+            view.set_state(ResultState::Failed("old error".into()), cx);
+            view.begin_stream(cx);
+            assert!(view.messages.is_empty());
+            assert!(view.apply_stream_page(
+                Page::Done {
+                    affected_rows: Some(3),
+                    warnings: vec![DriverWarning::new("partial result")],
+                },
+                cx,
+            ));
+            assert_eq!(
+                view.messages,
+                vec![
+                    ResultMessage {
+                        severity: MessageSeverity::Info,
+                        text: "3 row(s) affected".into(),
+                    },
+                    ResultMessage {
+                        severity: MessageSeverity::Warning,
+                        text: "partial result".into(),
+                    },
+                ]
+            );
         });
     }
 
