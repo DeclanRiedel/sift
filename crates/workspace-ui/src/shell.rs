@@ -68,6 +68,14 @@ fn quote_identifier(identifier: &str) -> String {
     format!("\"{}\"", identifier.replace('"', "\"\""))
 }
 
+fn ddl_quote_identifier(provider_id: &sift_protocol::ProviderId, identifier: &str) -> String {
+    if provider_id.as_str() == "sift/sql-server" {
+        format!("[{}]", identifier.replace(']', "]]"))
+    } else {
+        quote_identifier(identifier)
+    }
+}
+
 fn table_preview_sql(
     provider_id: &sift_protocol::ProviderId,
     schema: &str,
@@ -406,7 +414,6 @@ pub enum Modal {
     Settings,
     Account,
     DatabaseConnection,
-    TableDesigner(u64),
     ConfirmDeleteConnection(ConnectionNavEntry),
 }
 
@@ -701,6 +708,8 @@ enum TableDefinitionState {
 struct TableDesignerState {
     item_id: u64,
     selected_column: Option<sift_protocol::CatalogObjectId>,
+    column_order: Vec<sift_protocol::CatalogObjectId>,
+    order_dirty: bool,
     nullable: sift_protocol::Nullability,
     plan: Option<Box<sift_protocol::MigrationPlan>>,
     pending: bool,
@@ -3440,7 +3449,6 @@ impl WorkspaceShell {
             ExecutorEvent::TableMigrationApplied { item_id, run } => {
                 let applied = run.state == sift_protocol::MigrationRunState::Applied;
                 self.table_designer = None;
-                self.modal = None;
                 if let Some(source) = self.database_source(item_id, cx) {
                     self.request_table_definition(item_id, source, cx);
                 }
@@ -3883,24 +3891,37 @@ impl WorkspaceShell {
         cx.notify();
     }
 
-    fn open_table_designer(&mut self, item_id: u64, window: &mut Window, cx: &mut Context<Self>) {
-        let selected_column = match self.table_definitions.get(&item_id) {
+    fn open_table_designer(
+        &mut self,
+        item_id: u64,
+        adding: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let (selected_column, column_order) = match self.table_definitions.get(&item_id) {
             Some(TableDefinitionState::Ready {
                 graph, table_id, ..
-            }) => table_columns(graph, table_id)
-                .first()
-                .map(|node| node.id.clone()),
+            }) => {
+                let columns = table_columns(graph, table_id);
+                (
+                    (!adding)
+                        .then(|| columns.first().map(|node| node.id.clone()))
+                        .flatten(),
+                    columns.into_iter().map(|node| node.id.clone()).collect(),
+                )
+            }
             _ => return,
         };
         self.table_designer = Some(TableDesignerState {
             item_id,
             selected_column: selected_column.clone(),
+            column_order,
+            order_dirty: false,
             nullable: sift_protocol::Nullability::Nullable,
             plan: None,
             pending: false,
             error: None,
         });
-        self.modal = Some(Modal::TableDesigner(item_id));
         if let Some(column_id) = selected_column {
             self.select_table_designer_column(column_id, cx);
         } else {
@@ -3909,6 +3930,11 @@ impl WorkspaceShell {
         self.table_column_name_input
             .focus_handle(cx)
             .focus(window, cx);
+        cx.notify();
+    }
+
+    fn close_table_designer(&mut self, cx: &mut Context<Self>) {
+        self.table_designer = None;
         cx.notify();
     }
 
@@ -3971,6 +3997,33 @@ impl WorkspaceShell {
             designer.plan = None;
             designer.error = None;
         }
+        cx.notify();
+    }
+
+    fn move_table_designer_column(&mut self, offset: isize, cx: &mut Context<Self>) {
+        let Some(designer) = self.table_designer.as_mut() else {
+            return;
+        };
+        let Some(selected) = designer.selected_column.as_ref() else {
+            return;
+        };
+        let Some(index) = designer
+            .column_order
+            .iter()
+            .position(|column| column == selected)
+        else {
+            return;
+        };
+        let target = index
+            .saturating_add_signed(offset)
+            .min(designer.column_order.len().saturating_sub(1));
+        if target == index {
+            return;
+        }
+        designer.column_order.swap(index, target);
+        designer.order_dirty = true;
+        designer.plan = None;
+        designer.error = None;
         cx.notify();
     }
 
@@ -4090,6 +4143,155 @@ impl WorkspaceShell {
         });
         designer.pending = sent;
         designer.error = (!sent).then(|| "Database executor is unavailable".into());
+        cx.notify();
+    }
+
+    fn table_designer_ddl(&self, cx: &App) -> Option<(String, String)> {
+        let designer = self.table_designer.as_ref()?;
+        let TableDefinitionState::Ready {
+            source,
+            graph,
+            table_id: _,
+        } = self.table_definitions.get(&designer.item_id)?
+        else {
+            return None;
+        };
+        let plan_sql = designer
+            .plan
+            .as_ref()
+            .into_iter()
+            .flat_map(|plan| &plan.groups)
+            .flat_map(|group| &group.statements)
+            .map(|statement| statement.sql.as_str())
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        if !plan_sql.is_empty() && !designer.order_dirty {
+            return Some((
+                format!("{}.{} DDL.sql", source.schema, source.object),
+                plan_sql,
+            ));
+        }
+
+        let draft_name = self
+            .table_column_name_input
+            .read(cx)
+            .text()
+            .trim()
+            .to_owned();
+        let draft_type = self
+            .table_column_type_input
+            .read(cx)
+            .text()
+            .trim()
+            .to_owned();
+        let nodes = graph
+            .data
+            .nodes
+            .iter()
+            .map(|node| (node.id.clone(), node))
+            .collect::<HashMap<_, _>>();
+        let mut columns = designer
+            .column_order
+            .iter()
+            .filter_map(|column_id| {
+                let node = nodes.get(column_id)?;
+                let sift_protocol::CatalogNodeDetails::Column { column } = &node.details else {
+                    return None;
+                };
+                let editing = designer.selected_column.as_ref() == Some(column_id);
+                let name = if editing && !draft_name.is_empty() {
+                    draft_name.clone()
+                } else {
+                    node.name.clone()
+                };
+                let type_name = if editing && !draft_type.is_empty() {
+                    draft_type.clone()
+                } else {
+                    type_ref_label(&column.type_ref)
+                };
+                let nullable = if editing {
+                    designer.nullable
+                } else {
+                    column.nullable
+                };
+                Some(format!(
+                    "    {} {}{}",
+                    ddl_quote_identifier(&source.provider_id, &name),
+                    type_name,
+                    if nullable == sift_protocol::Nullability::NotNullable {
+                        " NOT NULL"
+                    } else {
+                        ""
+                    }
+                ))
+            })
+            .collect::<Vec<_>>();
+        if designer.selected_column.is_none() && !draft_name.is_empty() && !draft_type.is_empty() {
+            columns.push(format!(
+                "    {} {}{}",
+                ddl_quote_identifier(&source.provider_id, &draft_name),
+                draft_type,
+                if designer.nullable == sift_protocol::Nullability::NotNullable {
+                    " NOT NULL"
+                } else {
+                    ""
+                }
+            ));
+        }
+        let qualified = format!(
+            "{}.{}",
+            ddl_quote_identifier(&source.provider_id, &source.schema),
+            ddl_quote_identifier(&source.provider_id, &source.object)
+        );
+        let mut ddl = String::new();
+        if !plan_sql.is_empty() {
+            ddl.push_str("-- Supported migration changes\n");
+            ddl.push_str(&plan_sql);
+            ddl.push_str("\n\n");
+        }
+        ddl.push_str(
+            "-- Desired columns-only definition. Reordering an existing table requires a reviewed\n-- rebuild that preserves constraints, indexes, grants, triggers, and data.\n",
+        );
+        ddl.push_str(&format!(
+            "CREATE TABLE {qualified} (\n{}\n);",
+            columns.join(",\n")
+        ));
+        Some((format!("{}.{} DDL.sql", source.schema, source.object), ddl))
+    }
+
+    fn open_table_designer_ddl(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some((title, ddl)) = self.table_designer_ddl(cx) else {
+            return;
+        };
+        let item_id = self.next_id;
+        self.next_id = self.next_id.saturating_add(1);
+        let keymap = if self.vim_mode_default() {
+            EditorKeymap::Vim
+        } else {
+            EditorKeymap::Standard
+        };
+        let editor = cx.new(|cx| {
+            QueryEditor::new(QueryDocument::with_random_peer(&ddl), cx).with_keymap(keymap)
+        });
+        let results = cx.new(ResultsView::new);
+        if let Some(pane) = self.panes.get(self.active_pane) {
+            pane.update(cx, |pane, cx| {
+                pane.open_query(
+                    ItemPresentation {
+                        id: item_id,
+                        kind: ItemKind::Query,
+                        title,
+                        dirty: false,
+                        source: None,
+                    },
+                    editor,
+                    results,
+                    cx,
+                );
+            });
+        }
+        self.focus_active_pane(window, cx);
+        self.persist(cx);
         cx.notify();
     }
 
@@ -6254,9 +6456,6 @@ impl WorkspaceShell {
             self.database_password_input
                 .update(cx, |input, cx| input.set_text("", cx));
         }
-        if matches!(self.modal, Some(Modal::TableDesigner(_))) {
-            self.table_designer = None;
-        }
         self.modal = None;
         // Return focus to the workspace so keybindings keep routing.
         self.focus_active_pane(window, cx);
@@ -7384,7 +7583,7 @@ impl WorkspaceShell {
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         let colors = cx.theme().colors;
-        let header = |action: Option<gpui::AnyElement>| {
+        let header = |actions: Vec<gpui::AnyElement>| {
             div()
                 .h(cx.theme().metrics.row_height)
                 .px_3()
@@ -7395,40 +7594,119 @@ impl WorkspaceShell {
                 .border_b_1()
                 .border_color(colors.subtle_border)
                 .child(SectionLabel::new("TABLE DEFINITION"))
-                .children(action)
+                .child(div().flex_1())
+                .children(actions)
         };
         match self.table_definitions.get(&item_id) {
             Some(TableDefinitionState::Ready {
                 graph, table_id, ..
             }) => {
-                let columns = table_columns(graph, table_id);
-                let edit = Button::new("edit-table-definition", "Edit")
+                let designer = self
+                    .table_designer
+                    .as_ref()
+                    .filter(|designer| designer.item_id == item_id);
+                let editing = designer.is_some();
+                let columns_by_id = table_columns(graph, table_id)
+                    .into_iter()
+                    .map(|column| (column.id.clone(), column))
+                    .collect::<HashMap<_, _>>();
+                let column_ids = designer.map_or_else(
+                    || columns_by_id.keys().cloned().collect::<Vec<_>>(),
+                    |designer| designer.column_order.clone(),
+                );
+                let mut columns = column_ids
+                    .into_iter()
+                    .filter_map(|column| columns_by_id.get(&column).copied())
+                    .collect::<Vec<_>>();
+                columns.sort_by_key(|column| {
+                    designer
+                        .and_then(|designer| {
+                            designer
+                                .column_order
+                                .iter()
+                                .position(|candidate| candidate == &column.id)
+                        })
+                        .unwrap_or(column.ordinal.unwrap_or(u32::MAX) as usize)
+                });
+                let mut actions = Vec::new();
+                if editing {
+                    actions.push(
+                        Button::new("open-table-definition-ddl", "DDL")
+                            .tone(ButtonTone::Ghost)
+                            .on_click(cx.listener(|shell, _, window, cx| {
+                                shell.open_table_designer_ddl(window, cx)
+                            }))
+                            .into_any_element(),
+                    );
+                }
+                actions.push(
+                    Button::new(
+                        "edit-table-definition",
+                        if editing { "Done" } else { "Edit" },
+                    )
                     .tone(ButtonTone::Ghost)
                     .on_click(cx.listener(move |shell, _, window, cx| {
-                        shell.open_table_designer(item_id, window, cx)
+                        if editing {
+                            shell.close_table_designer(cx);
+                        } else {
+                            shell.open_table_designer(item_id, false, window, cx);
+                        }
                     }))
-                    .into_any_element();
+                    .into_any_element(),
+                );
+                actions.push(
+                    Button::new("add-table-column", "+ Add")
+                        .tone(ButtonTone::Ghost)
+                        .on_click(cx.listener(move |shell, _, window, cx| {
+                            shell.open_table_designer(item_id, true, window, cx)
+                        }))
+                        .into_any_element(),
+                );
                 div()
                     .debug_selector(|| "table-definition-inspector".into())
-                    .flex_none()
-                    .max_h(px(260.))
+                    .flex_1()
+                    .min_h_0()
                     .flex()
                     .flex_col()
                     .border_b_1()
                     .border_color(colors.strong_border)
-                    .child(header(Some(edit)))
+                    .child(header(actions))
                     .child(
                         div()
                             .id("table-definition-columns")
-                            .flex_1()
+                            .flex_none()
+                            .max_h(px(if editing { 220. } else { 320. }))
                             .min_h_0()
+                            .flex()
+                            .flex_col()
                             .overflow_y_scroll()
+                            .child(
+                                div()
+                                    .h(px(24.))
+                                    .px_3()
+                                    .flex_none()
+                                    .flex()
+                                    .items_center()
+                                    .gap_2()
+                                    .bg(colors.toolbar)
+                                    .text_xs()
+                                    .text_color(colors.muted_text)
+                                    .child(div().flex_1().child("Name"))
+                                    .child(div().w(px(82.)).child("Type"))
+                                    .child(div().w(px(52.)).child("Nullable"))
+                                    .children(editing.then(|| div().w(px(52.)).child("Order"))),
+                            )
                             .children(columns.into_iter().map(|node| {
                                 let metadata = match &node.details {
                                     sift_protocol::CatalogNodeDetails::Column { column } => column,
                                     _ => unreachable!(),
                                 };
+                                let selected = designer
+                                    .and_then(|designer| designer.selected_column.as_ref())
+                                    == Some(&node.id);
+                                let column_id = node.id.clone();
                                 div()
+                                    .id(("table-definition-column", node.ordinal.unwrap_or(0) as usize))
                                     .h(px(28.))
                                     .px_3()
                                     .flex_none()
@@ -7437,14 +7715,17 @@ impl WorkspaceShell {
                                     .gap_2()
                                     .border_b_1()
                                     .border_color(colors.subtle_border)
-                                    .child(
-                                        div()
-                                            .w(px(18.))
-                                            .flex_none()
-                                            .text_xs()
-                                            .text_color(colors.disabled_text)
-                                            .child(node.ordinal.unwrap_or(0).to_string()),
-                                    )
+                                    .when(selected, |row| row.bg(colors.active_surface))
+                                    .when(editing, |row| {
+                                        row.hover(|row| row.bg(colors.hovered_surface)).on_click(
+                                            cx.listener(move |shell, _, _, cx| {
+                                                shell.select_table_designer_column(
+                                                    column_id.clone(),
+                                                    cx,
+                                                )
+                                            }),
+                                        )
+                                    })
                                     .child(
                                         div()
                                             .min_w_0()
@@ -7454,7 +7735,7 @@ impl WorkspaceShell {
                                     )
                                     .child(
                                         div()
-                                            .max_w(px(90.))
+                                            .w(px(82.))
                                             .truncate()
                                             .text_xs()
                                             .text_color(colors.muted_text)
@@ -7462,27 +7743,146 @@ impl WorkspaceShell {
                                     )
                                     .child(
                                         div()
-                                            .w(px(12.))
+                                            .w(px(52.))
                                             .flex_none()
                                             .text_xs()
-                                            .text_color(colors.disabled_text)
-                                            .child(
-                                                if metadata.nullable
-                                                    == sift_protocol::Nullability::Nullable
-                                                {
-                                                    "?"
-                                                } else {
-                                                    ""
-                                                },
-                                            ),
+                                            .text_color(colors.muted_text)
+                                            .child(if metadata.nullable
+                                                == sift_protocol::Nullability::Nullable
+                                            {
+                                                "Yes"
+                                            } else {
+                                                "No"
+                                            }),
                                     )
+                                    .children((editing && selected).then(|| {
+                                        div()
+                                            .w(px(52.))
+                                            .flex_none()
+                                            .flex()
+                                            .gap_1()
+                                            .child(
+                                                Button::new("move-table-column-up", "↑")
+                                                    .tone(ButtonTone::Ghost)
+                                                    .on_click(cx.listener(|shell, _, _, cx| {
+                                                        shell.move_table_designer_column(-1, cx)
+                                                    })),
+                                            )
+                                            .child(
+                                                Button::new("move-table-column-down", "↓")
+                                                    .tone(ButtonTone::Ghost)
+                                                    .on_click(cx.listener(|shell, _, _, cx| {
+                                                        shell.move_table_designer_column(1, cx)
+                                                    })),
+                                            )
+                                    }))
                             })),
                     )
+                    .children(designer.map(|designer| {
+                        let adding = designer.selected_column.is_none();
+                        let nullable =
+                            designer.nullable != sift_protocol::Nullability::NotNullable;
+                        let pending = designer.pending;
+                        let requires_acknowledgement = designer.plan.as_ref().is_some_and(|plan| {
+                            !plan.required_acknowledgements.is_empty()
+                        });
+                        div()
+                            .id("table-designer-form")
+                            .flex_1()
+                            .min_h_0()
+                            .p_3()
+                            .flex()
+                            .flex_col()
+                            .gap_2()
+                            .overflow_y_scroll()
+                            .child(
+                                div()
+                                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                                    .child(if adding { "New column" } else { "Edit column" }),
+                            )
+                            .child(Field::new(
+                                "NAME",
+                                Some(self.table_column_name_input.focus_handle(cx)),
+                                self.table_column_name_input.clone(),
+                            ))
+                            .child(Field::new(
+                                "TYPE",
+                                Some(self.table_column_type_input.focus_handle(cx)),
+                                self.table_column_type_input.clone(),
+                            ))
+                            .child(
+                                div()
+                                    .id("table-column-nullable")
+                                    .role(Role::CheckBox)
+                                    .aria_label(if nullable {
+                                        "Nullable, checked"
+                                    } else {
+                                        "Nullable, unchecked"
+                                    })
+                                    .flex()
+                                    .items_center()
+                                    .gap_2()
+                                    .cursor_pointer()
+                                    .on_click(cx.listener(|shell, _, _, cx| {
+                                        shell.toggle_table_column_nullability(cx)
+                                    }))
+                                    .child(
+                                        div()
+                                            .size(px(16.))
+                                            .flex()
+                                            .items_center()
+                                            .justify_center()
+                                            .rounded_sm()
+                                            .border_1()
+                                            .border_color(if nullable {
+                                                colors.accent
+                                            } else {
+                                                colors.strong_border
+                                            })
+                                            .children(nullable.then(|| {
+                                                icon(IconName::Check, colors.accent, 11.)
+                                            })),
+                                    )
+                                    .child("Nullable"),
+                            )
+                            .children(designer.error.clone().map(ErrorBanner::new))
+                            .children(designer.order_dirty.then(|| {
+                                ErrorBanner::new("Column order is included in the DDL tab. Applying it automatically requires a dependency-preserving table rebuild.")
+                                    .tone(Tone::Warning)
+                            }))
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .justify_end()
+                                    .gap_2()
+                                    .child(
+                                        Button::new("preview-table-change", "Preview")
+                                            .tone(ButtonTone::Neutral)
+                                            .loading(pending)
+                                            .on_click(cx.listener(|shell, _, _, cx| {
+                                                shell.preview_table_change(cx)
+                                            })),
+                                    )
+                                    .children((designer.plan.is_some() && !designer.order_dirty).then(|| {
+                                        Button::new("apply-table-change", "Apply")
+                                            .tone(if requires_acknowledgement {
+                                                ButtonTone::DangerMuted
+                                            } else {
+                                                ButtonTone::Accent
+                                            })
+                                            .loading(pending)
+                                            .on_click(cx.listener(|shell, _, _, cx| {
+                                                shell.apply_table_change(cx)
+                                            }))
+                                    })),
+                            )
+                    }))
                     .into_any_element()
             }
             Some(TableDefinitionState::Loading { .. }) => div()
                 .flex_none()
-                .child(header(None))
+                .child(header(Vec::new()))
                 .child(
                     div()
                         .px_3()
@@ -7501,7 +7901,7 @@ impl WorkspaceShell {
                     .into_any_element();
                 div()
                     .flex_none()
-                    .child(header(Some(retry)))
+                    .child(header(vec![retry]))
                     .child(
                         div()
                             .px_3()
@@ -7525,7 +7925,7 @@ impl WorkspaceShell {
                     .into_any_element();
                 div()
                     .flex_none()
-                    .child(header(Some(load)))
+                    .child(header(vec![load]))
                     .into_any_element()
             }
         }
@@ -8130,288 +8530,6 @@ impl WorkspaceShell {
             })
     }
 
-    fn render_table_designer_modal(
-        &self,
-        item_id: u64,
-        cx: &mut Context<Self>,
-    ) -> gpui::AnyElement {
-        let colors = cx.theme().colors;
-        let Some(designer) = self
-            .table_designer
-            .as_ref()
-            .filter(|designer| designer.item_id == item_id)
-        else {
-            return div()
-                .child("Table designer is unavailable")
-                .into_any_element();
-        };
-        let Some(TableDefinitionState::Ready {
-            source,
-            graph,
-            table_id,
-        }) = self.table_definitions.get(&item_id)
-        else {
-            return div()
-                .child("Load the table definition before editing it")
-                .into_any_element();
-        };
-        let columns = table_columns(graph, table_id);
-        let adding = designer.selected_column.is_none();
-        let nullable = designer.nullable != sift_protocol::Nullability::NotNullable;
-        let pending = designer.pending;
-        let plan = designer.plan.clone();
-        let statements = plan
-            .as_ref()
-            .into_iter()
-            .flat_map(|plan| &plan.groups)
-            .flat_map(|group| &group.statements)
-            .cloned()
-            .collect::<Vec<_>>();
-        let requires_acknowledgement = plan
-            .as_ref()
-            .is_some_and(|plan| !plan.required_acknowledgements.is_empty());
-        div()
-            .debug_selector(|| "table-designer".into())
-            .flex()
-            .flex_col()
-            .min_h_0()
-            .child(
-                div()
-                    .h(px(42.))
-                    .px_3()
-                    .flex_none()
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .border_b_1()
-                    .border_color(colors.subtle_border)
-                    .child(
-                        div()
-                            .min_w_0()
-                            .flex()
-                            .flex_col()
-                            .child(
-                                div()
-                                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                                    .child(format!("Edit {}.{}", source.schema, source.object)),
-                            )
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .text_color(colors.muted_text)
-                                    .child(format!("Catalog revision {}", graph.revision.0)),
-                            ),
-                    )
-                    .child(
-                        IconButton::new("close-table-designer", IconName::Close, "Close")
-                            .on_click(cx.listener(|shell, _, window, cx| {
-                                shell.dismiss_modal(&DismissModal, window, cx)
-                            })),
-                    ),
-            )
-            .child(
-                div()
-                    .flex_1()
-                    .min_h_0()
-                    .flex()
-                    .child(
-                        div()
-                            .w(px(220.))
-                            .flex_none()
-                            .flex()
-                            .flex_col()
-                            .border_r_1()
-                            .border_color(colors.subtle_border)
-                            .child(
-                                div()
-                                    .h(px(32.))
-                                    .px_2()
-                                    .flex_none()
-                                    .flex()
-                                    .items_center()
-                                    .justify_between()
-                                    .child(SectionLabel::new("COLUMNS"))
-                                    .child(
-                                        Button::new("add-table-column", "Add")
-                                            .tone(ButtonTone::Ghost)
-                                            .start_icon(IconName::Add)
-                                            .on_click(cx.listener(|shell, _, _, cx| {
-                                                shell.prepare_new_table_column(cx)
-                                            })),
-                                    ),
-                            )
-                            .child(
-                                div()
-                                    .id("table-designer-columns")
-                                    .flex_1()
-                                    .min_h_0()
-                                    .overflow_y_scroll()
-                                    .children(columns.into_iter().map(|node| {
-                                        let selected = designer.selected_column.as_ref()
-                                            == Some(&node.id);
-                                        let column_id = node.id.clone();
-                                        let type_name = match &node.details {
-                                            sift_protocol::CatalogNodeDetails::Column { column } => {
-                                                type_ref_label(&column.type_ref)
-                                            }
-                                            _ => String::new(),
-                                        };
-                                        div()
-                                            .id(("table-designer-column", node.ordinal.unwrap_or(0) as usize))
-                                            .h(px(32.))
-                                            .px_2()
-                                            .flex_none()
-                                            .flex()
-                                            .items_center()
-                                            .gap_2()
-                                            .when(selected, |row| row.bg(colors.active_surface))
-                                            .hover(|row| row.bg(colors.hovered_surface))
-                                            .on_click(cx.listener(move |shell, _, _, cx| {
-                                                shell.select_table_designer_column(column_id.clone(), cx)
-                                            }))
-                                            .child(
-                                                div()
-                                                    .min_w_0()
-                                                    .flex_1()
-                                                    .truncate()
-                                                    .child(node.name.clone()),
-                                            )
-                                            .child(
-                                                div()
-                                                    .max_w(px(76.))
-                                                    .truncate()
-                                                    .text_xs()
-                                                    .text_color(colors.muted_text)
-                                                    .child(type_name),
-                                            )
-                                    })),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .id("table-designer-form")
-                            .flex_1()
-                            .min_w_0()
-                            .min_h_0()
-                            .p_3()
-                            .flex()
-                            .flex_col()
-                            .gap_3()
-                            .overflow_y_scroll()
-                            .child(
-                                div()
-                                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                                    .child(if adding { "New column" } else { "Edit column" }),
-                            )
-                            .child(Field::new(
-                                "NAME",
-                                Some(self.table_column_name_input.focus_handle(cx)),
-                                self.table_column_name_input.clone(),
-                            ))
-                            .child(Field::new(
-                                "TYPE",
-                                Some(self.table_column_type_input.focus_handle(cx)),
-                                self.table_column_type_input.clone(),
-                            ))
-                            .child(
-                                div()
-                                    .id("table-column-nullable")
-                                    .role(Role::CheckBox)
-                                    .aria_label(if nullable {
-                                        "Nullable, checked"
-                                    } else {
-                                        "Nullable, unchecked"
-                                    })
-                                    .flex()
-                                    .items_center()
-                                    .gap_2()
-                                    .cursor_pointer()
-                                    .on_click(cx.listener(|shell, _, _, cx| {
-                                        shell.toggle_table_column_nullability(cx)
-                                    }))
-                                    .child(
-                                        div()
-                                            .size(px(16.))
-                                            .flex()
-                                            .items_center()
-                                            .justify_center()
-                                            .rounded_sm()
-                                            .border_1()
-                                            .border_color(if nullable {
-                                                colors.accent
-                                            } else {
-                                                colors.strong_border
-                                            })
-                                            .children(nullable.then(|| {
-                                                icon(IconName::Check, colors.accent, 11.)
-                                            })),
-                                    )
-                                    .child("Nullable"),
-                            )
-                            .children(designer.error.clone().map(ErrorBanner::new))
-                            .when(!statements.is_empty(), |form| {
-                                form.child(SectionLabel::new("MIGRATION PREVIEW")).child(
-                                    div()
-                                        .p_2()
-                                        .flex()
-                                        .flex_col()
-                                        .gap_2()
-                                        .rounded_sm()
-                                        .border_1()
-                                        .border_color(colors.subtle_border)
-                                        .bg(colors.elevated_surface)
-                                        .font_family("monospace")
-                                        .text_xs()
-                                        .children(statements.into_iter().map(|statement| {
-                                            div().whitespace_normal().child(statement.sql)
-                                        })),
-                                )
-                            })
-                            .children(requires_acknowledgement.then(|| {
-                                ErrorBanner::new(
-                                    "Applying acknowledges the migration risks shown by the server.",
-                                )
-                                .tone(Tone::Warning)
-                            }))
-                            .child(
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .justify_end()
-                                    .gap_2()
-                                    .child(
-                                        Button::new("preview-table-change", "Preview DDL")
-                                            .tone(ButtonTone::Neutral)
-                                            .loading(pending)
-                                            .on_click(cx.listener(|shell, _, _, cx| {
-                                                shell.preview_table_change(cx)
-                                            })),
-                                    )
-                                    .children(plan.map(|_| {
-                                        Button::new("apply-table-change", "Apply migration")
-                                            .tone(if requires_acknowledgement {
-                                                ButtonTone::DangerMuted
-                                            } else {
-                                                ButtonTone::Accent
-                                            })
-                                            .loading(pending)
-                                            .on_click(cx.listener(|shell, _, _, cx| {
-                                                shell.apply_table_change(cx)
-                                            }))
-                                    })),
-                            )
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .whitespace_normal()
-                                    .text_color(colors.disabled_text)
-                                    .child("Column order, drops, keys, and indexes remain read-only until rebuild and dependency plans are supported."),
-                            ),
-                    ),
-            )
-            .into_any_element()
-    }
-
     fn render_modal(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
         let colors = cx.theme().colors;
         self.modal.as_ref().map(|modal| {
@@ -8423,12 +8541,9 @@ impl WorkspaceShell {
                 Modal::ServerPicker | Modal::ServerConnection | Modal::Account
             );
             let database_connection = matches!(modal, Modal::DatabaseConnection);
-            let table_designer = matches!(modal, Modal::TableDesigner(_));
             let command_palette = matches!(modal, Modal::CommandPalette);
             let instance_setup = matches!(modal, Modal::InstanceSetup);
-            let card_width = if table_designer {
-                900.0
-            } else if settings {
+            let card_width = if settings {
                 720.0
             } else if server_picker || account {
                 360.0
@@ -10425,9 +10540,6 @@ impl WorkspaceShell {
                         )
                         .into_any_element()
                 }
-                Modal::TableDesigner(item_id) => {
-                    self.render_table_designer_modal(*item_id, cx)
-                }
             };
             let toolbar_height = cx.theme().metrics.toolbar_height;
             // Scrim-clicking dismisses transient surfaces. Long-form dialogs
@@ -10471,7 +10583,7 @@ impl WorkspaceShell {
                     layer.justify_start().pt_1().pl(px(38.))
                 })
                 .when(account, |layer| layer.justify_end().pt_1().pr_2())
-                .when(settings || database_connection || table_designer, |layer| {
+                .when(settings || database_connection, |layer| {
                     layer
                         .items_center()
                         .justify_center()
@@ -10483,8 +10595,7 @@ impl WorkspaceShell {
                     !server_picker
                         && !settings
                         && !account
-                        && !database_connection
-                        && !table_designer,
+                        && !database_connection,
                     |layer| {
                         layer
                             .justify_center()
@@ -10510,8 +10621,7 @@ impl WorkspaceShell {
                             !database_connection
                                 && !command_palette
                                 && !account
-                                && !server_picker
-                                && !table_designer,
+                                && !server_picker,
                             |card| card.p_3(),
                         )
                         .overflow_hidden()
@@ -11141,6 +11251,24 @@ mod tests {
                             ),
                         },
                     ),
+                    node(
+                        CatalogObjectId("column-name".into()),
+                        CatalogNodeKind::Column,
+                        "name",
+                        "sifttest.lab.people.name",
+                        Some(CatalogObjectId("table".into())),
+                        Some(2),
+                        CatalogNodeDetails::Column {
+                            column: {
+                                let mut column = ColumnMetadata::new(
+                                    "name",
+                                    TypeRef::Primitive(PrimitiveType::Text),
+                                );
+                                column.nullable = sift_protocol::Nullability::Nullable;
+                                column
+                            },
+                        },
+                    ),
                 ],
                 edges: Vec::new(),
             },
@@ -11515,7 +11643,15 @@ mod tests {
                 },
                 cx,
             );
-            shell.open_table_designer(item_id, window, cx);
+            shell.open_table_designer(item_id, false, window, cx);
+            shell.move_table_designer_column(1, cx);
+            assert_eq!(
+                shell.table_designer.as_ref().unwrap().column_order,
+                vec![
+                    sift_protocol::CatalogObjectId("column-name".into()),
+                    sift_protocol::CatalogObjectId("column-id".into()),
+                ]
+            );
             shell.prepare_new_table_column(cx);
             shell
                 .table_column_name_input
@@ -11533,6 +11669,23 @@ mod tests {
                 mutation: sift_protocol::CatalogDiagramMutation::AddColumn { name, .. },
             }) if preview_item == item_id && name == "nickname"
         ));
+        workspace.update_in(&mut cx, |shell, window, cx| {
+            shell.open_table_designer_ddl(window, cx);
+            let pane = shell.panes[shell.active_pane].read(cx);
+            let item = pane.active_item().unwrap();
+            assert_eq!(item.title, "lab.people DDL.sql");
+            let ddl = pane.editor(item.id).unwrap().read(cx).document().text();
+            assert!(ddl.contains("CREATE TABLE \"lab\".\"people\""));
+            assert!(ddl.contains("\"nickname\" text"));
+            let name_position = ddl.find("\"name\" text");
+            let id_position = ddl.find("\"id\" bigint");
+            assert!(
+                name_position
+                    .zip(id_position)
+                    .is_some_and(|(name, id)| name < id),
+                "{ddl}"
+            );
+        });
     }
 
     #[gpui::test]
