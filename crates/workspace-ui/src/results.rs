@@ -14,7 +14,10 @@ use gpui::{
 use sift_protocol::{
     ColumnMetadata, DriverWarning, ExecuteResponse, Nullability, Page, Row, TypeRef, Value,
 };
-use sift_ui::{ActiveTheme, Badge, Clickable, IconButton, IconName, ThemeColors};
+use sift_ui::{
+    ActiveTheme, Badge, Clickable, Disableable, IconButton, IconName, SectionLabel, ThemeColors,
+    Toggleable,
+};
 
 const MIN_COLUMN_WIDTH: f32 = 144.0;
 pub(crate) const ROW_NUMBER_WIDTH: f32 = 46.0;
@@ -358,6 +361,11 @@ pub struct ResultsView {
     /// for every visible row during scroll and selection paints.
     rendered_columns: Vec<CachedColumnRender>,
     rendered_rows: Vec<Vec<CachedCellRender>>,
+    /// Stable source-column indices in current display order. Visibility is a
+    /// separate projection so excluded fields can return in the same position.
+    column_order: Vec<usize>,
+    included_columns: Vec<bool>,
+    fields_sidebar_open: bool,
     tab: ResultTab,
     selected: Option<GridSelection>,
     row_scroll_handle: UniformListScrollHandle,
@@ -374,6 +382,9 @@ impl ResultsView {
             state: ResultState::Idle,
             rendered_columns: Vec::new(),
             rendered_rows: Vec::new(),
+            column_order: Vec::new(),
+            included_columns: Vec::new(),
+            fields_sidebar_open: false,
             tab: ResultTab::Data,
             selected: None,
             row_scroll_handle: UniformListScrollHandle::new(),
@@ -395,7 +406,11 @@ impl ResultsView {
     #[cfg(test)]
     pub(crate) fn selected_cell(&self) -> Option<(usize, usize)> {
         match self.selected {
-            Some(GridSelection::Cell { row, column }) => Some((row, column)),
+            Some(GridSelection::Cell { row, column }) => self
+                .visible_column_indices()
+                .iter()
+                .position(|source| *source == column)
+                .map(|display_column| (row, display_column)),
             _ => None,
         }
     }
@@ -464,6 +479,8 @@ impl ResultsView {
                 .collect(),
             _ => Vec::new(),
         };
+        self.column_order = (0..self.rendered_columns.len()).collect();
+        self.included_columns = vec![true; self.rendered_columns.len()];
         self.state = state;
         self.selected = None;
         self.tab = ResultTab::Data;
@@ -506,43 +523,73 @@ impl ResultsView {
         }
     }
 
-    /// Move one displayed column onto another. Cached rows follow header order,
-    /// while a cell/column selection follows the same logical source column.
-    fn reorder_column(&mut self, source: usize, target: usize, cx: &mut Context<Self>) {
-        let column_count = self.rendered_columns.len();
-        if source == target || source >= column_count || target >= column_count {
+    fn visible_column_indices(&self) -> Vec<usize> {
+        self.column_order
+            .iter()
+            .copied()
+            .filter(|column| self.included_columns.get(*column).copied().unwrap_or(false))
+            .collect()
+    }
+
+    fn toggle_fields_sidebar(&mut self, cx: &mut Context<Self>) {
+        self.fields_sidebar_open = !self.fields_sidebar_open;
+        cx.notify();
+    }
+
+    fn set_column_included(&mut self, column: usize, included: bool, cx: &mut Context<Self>) {
+        let Some(current) = self.included_columns.get_mut(column) else {
+            return;
+        };
+        if *current == included {
             return;
         }
-
-        let column = self.rendered_columns.remove(source);
-        self.rendered_columns.insert(target, column);
-        for row in &mut self.rendered_rows {
-            if source < row.len() && target < row.len() {
-                let cell = row.remove(source);
-                row.insert(target, cell);
-            }
+        *current = included;
+        if !included
+            && self.selected.is_some_and(|selection| {
+                matches!(selection, GridSelection::Cell { column: selected, .. } | GridSelection::Column(selected) if selected == column)
+            })
+        {
+            self.selected = None;
         }
+        cx.notify();
+    }
 
-        let remap = |column: usize| {
-            if column == source {
-                target
-            } else if source < target && column > source && column <= target {
-                column - 1
-            } else if source > target && column >= target && column < source {
-                column + 1
-            } else {
-                column
-            }
+    fn set_all_columns_included(&mut self, included: bool, cx: &mut Context<Self>) {
+        self.included_columns.fill(included);
+        if !included
+            && matches!(
+                self.selected,
+                Some(GridSelection::Cell { .. } | GridSelection::Column(_))
+            )
+        {
+            self.selected = None;
+        }
+        cx.notify();
+    }
+
+    /// Move one source column onto another in display order. Selection stores
+    /// source coordinates, so logical cells remain selected without remapping.
+    fn reorder_column(&mut self, source: usize, target: usize, cx: &mut Context<Self>) {
+        if source == target {
+            return;
+        }
+        let Some(source_position) = self
+            .column_order
+            .iter()
+            .position(|column| *column == source)
+        else {
+            return;
         };
-        self.selected = self.selected.map(|selection| match selection {
-            GridSelection::Cell { row, column } => GridSelection::Cell {
-                row,
-                column: remap(column),
-            },
-            GridSelection::Column(column) => GridSelection::Column(remap(column)),
-            GridSelection::Row(row) => GridSelection::Row(row),
-            GridSelection::All => GridSelection::All,
-        });
+        let Some(target_position) = self
+            .column_order
+            .iter()
+            .position(|column| *column == target)
+        else {
+            return;
+        };
+        let column = self.column_order.remove(source_position);
+        self.column_order
+            .insert(target_position.min(self.column_order.len()), column);
         cx.notify();
     }
 
@@ -550,22 +597,27 @@ impl ResultsView {
         let Some(data) = self.state.ready() else {
             return;
         };
-        if data.rows.is_empty() || data.columns.is_empty() {
+        let visible_columns = self.visible_column_indices();
+        if data.rows.is_empty() || visible_columns.is_empty() {
             return;
         }
         let (row, column) = match self.selected {
             Some(GridSelection::Cell { row, column }) => (row, column),
-            Some(GridSelection::Row(row)) => (row, 0),
+            Some(GridSelection::Row(row)) => (row, visible_columns[0]),
             Some(GridSelection::Column(column)) => (0, column),
-            Some(GridSelection::All) | None => (0, 0),
+            Some(GridSelection::All) | None => (0, visible_columns[0]),
         };
         let previous_row = row;
         let row = row
             .saturating_add_signed(row_delta)
             .min(data.rows.len() - 1);
-        let column = column
+        let display_column = visible_columns
+            .iter()
+            .position(|visible| *visible == column)
+            .unwrap_or(0)
             .saturating_add_signed(column_delta)
-            .min(data.columns.len() - 1);
+            .min(visible_columns.len() - 1);
+        let column = visible_columns[display_column];
         self.set_selection(GridSelection::Cell { row, column }, cx);
         // Most repeated arrow events stay inside the viewport. Do not make the
         // uniform list resolve a deferred scroll request and relayout its rows
@@ -612,8 +664,11 @@ impl ResultsView {
     }
 
     fn selected_text(&self) -> Option<String> {
+        let visible_columns = self.visible_column_indices();
         let row_text = |row: &[CachedCellRender]| {
-            row.iter()
+            visible_columns
+                .iter()
+                .filter_map(|column| row.get(*column))
                 .map(|cell| cell.text.to_string())
                 .collect::<Vec<_>>()
                 .join("\t")
@@ -624,7 +679,10 @@ impl ResultsView {
                 .get(row)?
                 .get(column)
                 .map(|cell| cell.text.to_string()),
-            GridSelection::Row(row) => self.rendered_rows.get(row).map(|row| row_text(row)),
+            GridSelection::Row(row) if !visible_columns.is_empty() => {
+                self.rendered_rows.get(row).map(|row| row_text(row))
+            }
+            GridSelection::Row(_) => None,
             GridSelection::Column(column) => {
                 let values = self
                     .rendered_rows
@@ -634,13 +692,13 @@ impl ResultsView {
                     .collect::<Vec<_>>();
                 (!values.is_empty()).then(|| values.join("\n"))
             }
-            GridSelection::All => Some(
+            GridSelection::All => (!visible_columns.is_empty()).then(|| {
                 self.rendered_rows
                     .iter()
                     .map(|row| row_text(row))
                     .collect::<Vec<_>>()
-                    .join("\n"),
-            ),
+                    .join("\n")
+            }),
         }
     }
 
@@ -755,7 +813,7 @@ impl ResultsView {
                 div()
                     .flex()
                     .flex_shrink_0()
-                    .max_w(px(260.))
+                    .max_w(px(320.))
                     .min_w_0()
                     .overflow_hidden()
                     .items_center()
@@ -764,6 +822,24 @@ impl ResultsView {
                     .text_xs()
                     .text_color(colors.muted_text)
                     .child(Badge::new(self.state.status_label()))
+                    .child(
+                        div()
+                            .debug_selector(|| "toggle-result-fields".into())
+                            .child(
+                                IconButton::new(
+                                    "toggle-result-fields-button",
+                                    IconName::Table,
+                                    "Choose fields",
+                                )
+                                .text("Fields")
+                                .tooltip("Include or exclude result fields")
+                                .toggle_state(self.fields_sidebar_open)
+                                .disabled(self.rendered_columns.is_empty())
+                                .on_click(
+                                    cx.listener(|view, _, _, cx| view.toggle_fields_sidebar(cx)),
+                                ),
+                            ),
+                    )
                     .child(
                         IconButton::new(
                             "copy-result-cell",
@@ -831,6 +907,19 @@ impl ResultsView {
                     .child(div().truncate().child(self.state.status_label()))
                     .child(
                         IconButton::new(
+                            "toggle-result-fields-vertical",
+                            IconName::Table,
+                            "Choose fields",
+                        )
+                        .icon_size(13.)
+                        .text("Fields")
+                        .tooltip("Include or exclude result fields")
+                        .toggle_state(self.fields_sidebar_open)
+                        .disabled(self.rendered_columns.is_empty())
+                        .on_click(cx.listener(|view, _, _, cx| view.toggle_fields_sidebar(cx))),
+                    )
+                    .child(
+                        IconButton::new(
                             "copy-result-cell-vertical",
                             IconName::Copy,
                             "Copy highlighted fields",
@@ -842,6 +931,198 @@ impl ResultsView {
                             view.copy_selected_cell(&CopySelectedCell, window, cx)
                         })),
                     ),
+            )
+    }
+
+    fn render_fields_sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let colors = cx.theme().colors;
+        let included_count = self
+            .included_columns
+            .iter()
+            .filter(|included| **included)
+            .count();
+        let field_rows = self.column_order.iter().filter_map(|source_column| {
+            let source_column = *source_column;
+            let column = self.rendered_columns.get(source_column)?;
+            let included = self
+                .included_columns
+                .get(source_column)
+                .copied()
+                .unwrap_or(false);
+            Some(
+                div()
+                    .id(("result-field-row", source_column))
+                    .px_2()
+                    .py_2()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .border_b_1()
+                    .border_color(colors.subtle_border)
+                    .child(
+                        div()
+                            .min_w_0()
+                            .truncate()
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .child(column.name.clone()),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(colors.muted_text)
+                            .truncate()
+                            .child(format!(
+                                "{}{}",
+                                column.type_label,
+                                if column.nullable { "?" } else { "" }
+                            )),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .h(px(24.))
+                            .rounded_sm()
+                            .border_1()
+                            .border_color(colors.subtle_border)
+                            .overflow_hidden()
+                            .child(
+                                div()
+                                    .id(("include-result-field", source_column))
+                                    .debug_selector(move || {
+                                        format!("include-result-field-{source_column}")
+                                    })
+                                    .role(gpui::Role::Button)
+                                    .aria_label(format!("Include field {}", column.name))
+                                    .flex_1()
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .text_xs()
+                                    .when(included, |button| {
+                                        button.bg(colors.active_surface).text_color(colors.text)
+                                    })
+                                    .when(!included, |button| button.text_color(colors.muted_text))
+                                    .hover(|button| button.bg(colors.hovered_surface))
+                                    .on_click(cx.listener(move |view, _, _, cx| {
+                                        view.set_column_included(source_column, true, cx)
+                                    }))
+                                    .child("Include"),
+                            )
+                            .child(
+                                div()
+                                    .id(("exclude-result-field", source_column))
+                                    .debug_selector(move || {
+                                        format!("exclude-result-field-{source_column}")
+                                    })
+                                    .role(gpui::Role::Button)
+                                    .aria_label(format!("Exclude field {}", column.name))
+                                    .flex_1()
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .border_l_1()
+                                    .border_color(colors.subtle_border)
+                                    .text_xs()
+                                    .when(!included, |button| {
+                                        button.bg(colors.active_surface).text_color(colors.text)
+                                    })
+                                    .when(included, |button| button.text_color(colors.muted_text))
+                                    .hover(|button| button.bg(colors.hovered_surface))
+                                    .on_click(cx.listener(move |view, _, _, cx| {
+                                        view.set_column_included(source_column, false, cx)
+                                    }))
+                                    .child("Exclude"),
+                            ),
+                    ),
+            )
+        });
+
+        div()
+            .debug_selector(|| "result-fields-sidebar".into())
+            .w(px(240.))
+            .h_full()
+            .flex_none()
+            .flex()
+            .flex_col()
+            .min_h_0()
+            .border_l_1()
+            .border_color(colors.subtle_border)
+            .bg(colors.panel)
+            .child(
+                div()
+                    .h(cx.theme().metrics.tab_height)
+                    .px_2()
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .border_b_1()
+                    .border_color(colors.subtle_border)
+                    .child(SectionLabel::new("FIELDS"))
+                    .child(
+                        IconButton::new(
+                            "close-result-fields",
+                            IconName::CloseRightPane,
+                            "Close fields sidebar",
+                        )
+                        .square(px(24.))
+                        .icon_size(13.)
+                        .on_click(cx.listener(|view, _, _, cx| view.toggle_fields_sidebar(cx))),
+                    ),
+            )
+            .child(
+                div()
+                    .px_2()
+                    .py_1()
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .text_xs()
+                    .text_color(colors.muted_text)
+                    .child(format!(
+                        "{included_count} of {} included",
+                        self.rendered_columns.len()
+                    ))
+                    .child(
+                        div()
+                            .flex()
+                            .gap_1()
+                            .child(
+                                div()
+                                    .id("include-all-result-fields")
+                                    .role(gpui::Role::Button)
+                                    .aria_label("Include all fields")
+                                    .px_1()
+                                    .rounded_sm()
+                                    .hover(|button| button.bg(colors.hovered_surface))
+                                    .on_click(cx.listener(|view, _, _, cx| {
+                                        view.set_all_columns_included(true, cx)
+                                    }))
+                                    .child("All"),
+                            )
+                            .child(
+                                div()
+                                    .id("exclude-all-result-fields")
+                                    .role(gpui::Role::Button)
+                                    .aria_label("Exclude all fields")
+                                    .px_1()
+                                    .rounded_sm()
+                                    .hover(|button| button.bg(colors.hovered_surface))
+                                    .on_click(cx.listener(|view, _, _, cx| {
+                                        view.set_all_columns_included(false, cx)
+                                    }))
+                                    .child("None"),
+                            ),
+                    ),
+            )
+            .child(
+                div()
+                    .id("result-fields-scroll")
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .children(field_rows),
             )
     }
 
@@ -871,51 +1152,65 @@ impl ResultsView {
                 .child(self.state.status_label())
                 .into_any_element();
         }
-        let grid_min_width =
-            px(ROW_NUMBER_WIDTH + MIN_COLUMN_WIDTH * self.rendered_columns.len() as f32);
-        let header =
-            div()
-                .debug_selector(|| "result-header".into())
+        let visible_columns = self.visible_column_indices();
+        if visible_columns.is_empty() {
+            return div()
+                .size_full()
                 .flex()
-                .h(px(HEADER_HEIGHT))
-                .flex_none()
-                .w_full()
-                .min_w(grid_min_width)
-                .border_b_1()
-                .border_color(colors.subtle_border)
-                .bg(colors.toolbar)
-                .child(
-                    div()
-                        .id("result-select-all")
-                        .role(gpui::Role::Button)
-                        .aria_label("Select all result cells")
-                        .w(px(ROW_NUMBER_WIDTH))
-                        .h_full()
-                        .flex()
-                        .items_center()
-                        .justify_end()
-                        .pr_2()
-                        .border_r_1()
-                        .border_color(colors.subtle_border)
-                        .text_xs()
-                        .text_color(colors.disabled_text)
-                        .when(self.selected == Some(GridSelection::All), |header| {
-                            header.bg(colors.selected_surface)
-                        })
-                        .on_mouse_down(
-                            MouseButton::Left,
-                            cx.listener(|view, _, window, cx| {
-                                view.focus_handle.focus(window, cx);
-                                view.select_all(cx);
-                            }),
-                        )
-                        .child("#"),
-                )
-                .children(self.rendered_columns.iter().enumerate().map(
-                    |(column_index, column)| {
+                .items_center()
+                .justify_center()
+                .p_4()
+                .text_center()
+                .text_color(colors.muted_text)
+                .child("All fields excluded. Open Fields to include columns.")
+                .into_any_element();
+        }
+        let grid_min_width = px(ROW_NUMBER_WIDTH + MIN_COLUMN_WIDTH * visible_columns.len() as f32);
+        let header = div()
+            .debug_selector(|| "result-header".into())
+            .flex()
+            .h(px(HEADER_HEIGHT))
+            .flex_none()
+            .w_full()
+            .min_w(grid_min_width)
+            .border_b_1()
+            .border_color(colors.subtle_border)
+            .bg(colors.toolbar)
+            .child(
+                div()
+                    .id("result-select-all")
+                    .role(gpui::Role::Button)
+                    .aria_label("Select all result cells")
+                    .w(px(ROW_NUMBER_WIDTH))
+                    .h_full()
+                    .flex()
+                    .items_center()
+                    .justify_end()
+                    .pr_2()
+                    .border_r_1()
+                    .border_color(colors.subtle_border)
+                    .text_xs()
+                    .text_color(colors.disabled_text)
+                    .when(self.selected == Some(GridSelection::All), |header| {
+                        header.bg(colors.selected_surface)
+                    })
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|view, _, window, cx| {
+                            view.focus_handle.focus(window, cx);
+                            view.select_all(cx);
+                        }),
+                    )
+                    .child("#"),
+            )
+            .children(visible_columns.iter().enumerate().filter_map(
+                |(display_column, source_column)| {
+                    let source_column = *source_column;
+                    let column = self.rendered_columns.get(source_column)?;
+                    Some(
                         div()
-                            .id(("result-column", column_index))
-                            .debug_selector(move || format!("result-column-{column_index}"))
+                            .id(("result-column", display_column))
+                            .debug_selector(move || format!("result-column-{display_column}"))
                             .role(gpui::Role::Button)
                             .aria_label(format!("Select or drag column {}", column.name))
                             .flex_1()
@@ -929,19 +1224,19 @@ impl ResultsView {
                             .border_color(colors.subtle_border)
                             .when(
                                 self.selected.is_some_and(|selection| {
-                                    selection.highlights_column(column_index)
+                                    selection.highlights_column(source_column)
                                 }),
                                 |header| header.bg(colors.selected_surface).text_color(colors.text),
                             )
                             .on_drag(
                                 ColumnDrag {
-                                    index: column_index,
+                                    index: source_column,
                                     name: column.name.clone(),
                                 },
                                 |drag, _, _, cx| cx.new(|_| drag.clone()),
                             )
                             .drag_over::<ColumnDrag>(move |header, drag, _, cx| {
-                                if drag.index == column_index {
+                                if drag.index == source_column {
                                     header
                                 } else {
                                     header
@@ -952,12 +1247,12 @@ impl ResultsView {
                             })
                             .on_drop::<ColumnDrag>(cx.listener(
                                 move |view, drag: &ColumnDrag, _, cx| {
-                                    view.reorder_column(drag.index, column_index, cx)
+                                    view.reorder_column(drag.index, source_column, cx)
                                 },
                             ))
                             .on_click(cx.listener(move |view, _, window, cx| {
                                 view.focus_handle.focus(window, cx);
-                                view.select_column(column_index, cx);
+                                view.select_column(source_column, cx);
                             }))
                             .child(
                                 div()
@@ -976,13 +1271,15 @@ impl ResultsView {
                                         column.type_label,
                                         if column.nullable { "?" } else { "" }
                                     )),
-                            )
-                    },
-                ));
+                            ),
+                    )
+                },
+            ));
 
         let row_count = data.rows.len();
         let grid_scroll_handle = self.grid_scroll_handle.clone();
         let row_scroll_handle = self.row_scroll_handle.clone();
+        let row_columns = visible_columns.clone();
         let entity_id = cx.entity().entity_id();
         let list = uniform_list(
             "result-rows",
@@ -992,22 +1289,25 @@ impl ResultsView {
                 if view.state.ready().is_none() {
                     return Vec::new();
                 }
-                let column_count = view.rendered_columns.len();
+                let column_count = row_columns.len();
                 let selected = view.selected;
                 range
                     .map(|row_index| {
-                        let cells = (0..column_count)
-                            .map(|column_index| {
+                        let cells = row_columns
+                            .iter()
+                            .copied()
+                            .enumerate()
+                            .map(|(display_column, source_column)| {
                                 let rendered = view
                                     .rendered_rows
                                     .get_mut(row_index)
-                                    .and_then(|row| row.get_mut(column_index));
+                                    .and_then(|row| row.get_mut(source_column));
                                 let is_selected = match selected {
                                     Some(GridSelection::Cell { row, column }) => {
-                                        row == row_index && column == column_index
+                                        row == row_index && column == source_column
                                     }
                                     Some(GridSelection::Row(row)) => row == row_index,
-                                    Some(GridSelection::Column(column)) => column == column_index,
+                                    Some(GridSelection::Column(column)) => column == source_column,
                                     Some(GridSelection::All) => true,
                                     None => false,
                                 };
@@ -1024,7 +1324,7 @@ impl ResultsView {
                                     None => (None, colors.muted_text, false),
                                 };
                                 div()
-                                    .id(("cell", row_index * column_count + column_index))
+                                    .id(("cell", row_index * column_count + display_column))
                                     .flex_1()
                                     .min_w(px(MIN_COLUMN_WIDTH))
                                     .h(px(ROW_HEIGHT))
@@ -1040,7 +1340,7 @@ impl ResultsView {
                                         MouseButton::Left,
                                         cx.listener(move |view, _, window, cx| {
                                             view.focus_handle.focus(window, cx);
-                                            view.select_cell(row_index, column_index, cx)
+                                            view.select_cell(row_index, source_column, cx)
                                         }),
                                     )
                                     .children(shaped.map(|line| {
@@ -1288,7 +1588,18 @@ impl gpui::Render for ResultsView {
             .when(self.placement == ResultPlacement::Right, |view| {
                 view.child(self.render_vertical_tab_bar(cx))
             })
-            .child(div().flex().flex_1().min_w_0().min_h_0().child(body))
+            .child(
+                div()
+                    .flex()
+                    .flex_1()
+                    .min_w_0()
+                    .min_h_0()
+                    .child(body)
+                    .children(
+                        (self.fields_sidebar_open && self.tab == ResultTab::Data)
+                            .then(|| self.render_fields_sidebar(cx)),
+                    ),
+            )
     }
 }
 
@@ -1578,21 +1889,22 @@ mod tests {
 
         view.update(&mut cx, |view, cx| {
             assert_eq!(
-                view.rendered_columns
+                view.column_order
                     .iter()
-                    .map(|column| column.name.as_ref())
+                    .map(|source| view.rendered_columns[*source].name.as_ref())
                     .collect::<Vec<_>>(),
                 vec!["b", "c", "a"]
             );
             assert_eq!(
                 view.selected,
-                Some(GridSelection::Cell { row: 0, column: 2 }),
+                Some(GridSelection::Cell { row: 0, column: 0 }),
                 "selected logical cell follows its dragged column"
             );
+            assert_eq!(view.selected_cell(), Some((0, 2)));
             assert_eq!(view.selected_text().as_deref(), Some("a1"));
 
-            view.select_cell(0, 0, cx);
-            view.reorder_column(2, 0, cx);
+            view.select_cell(0, 1, cx);
+            view.reorder_column(0, 1, cx);
             assert_eq!(
                 view.selected,
                 Some(GridSelection::Cell { row: 0, column: 1 }),
@@ -1609,6 +1921,37 @@ mod tests {
                 Some("b1\tc1\ta1\nb2\tc2\ta2"),
                 "row and all-cell copy use displayed column order"
             );
+        });
+
+        let fields_button = cx.debug_bounds("toggle-result-fields").unwrap();
+        cx.simulate_click(fields_button.center(), gpui::Modifiers::default());
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("result-fields-sidebar").is_some());
+
+        view.update(&mut cx, |view, cx| view.select_column(2, cx));
+        let exclude_c = cx.debug_bounds("exclude-result-field-2").unwrap();
+        cx.simulate_click(exclude_c.center(), gpui::Modifiers::default());
+        cx.run_until_parked();
+        view.update(&mut cx, |view, cx| {
+            assert_eq!(view.visible_column_indices(), vec![1, 0]);
+            assert_eq!(view.selected, None, "excluding selected field clears it");
+            view.select_cell(0, 1, cx);
+            view.move_selection(0, 1, cx);
+            assert_eq!(view.selected_text().as_deref(), Some("a1"));
+            view.select_row(0, cx);
+            assert_eq!(
+                view.selected_text().as_deref(),
+                Some("b1\ta1"),
+                "copy omits excluded fields"
+            );
+        });
+
+        let include_c = cx.debug_bounds("include-result-field-2").unwrap();
+        cx.simulate_click(include_c.center(), gpui::Modifiers::default());
+        cx.run_until_parked();
+        view.read_with(&cx, |view, _| {
+            assert_eq!(view.visible_column_indices(), vec![1, 2, 0]);
+            assert!(view.fields_sidebar_open);
         });
     }
 
