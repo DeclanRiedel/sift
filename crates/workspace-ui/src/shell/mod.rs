@@ -262,6 +262,31 @@ struct TabDrag {
     pane_id: u64,
     item_id: u64,
     title: SharedString,
+    selected: bool,
+}
+
+impl gpui::Render for TabDrag {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme();
+        let colors = theme.colors;
+        div()
+            .h(theme.metrics.tab_height)
+            .min_w(px(110.))
+            .max_w(px(240.))
+            .px_2()
+            .flex()
+            .items_center()
+            .overflow_hidden()
+            .border_1()
+            .border_color(colors.subtle_border)
+            .bg(if self.selected {
+                colors.background
+            } else {
+                colors.toolbar
+            })
+            .text_color(colors.text)
+            .child(div().min_w_0().truncate().child(self.title.clone()))
+    }
 }
 
 /// Landing shape shown while a tab crosses a pane. `Before` and `After`
@@ -273,29 +298,6 @@ pub enum PaneDropTarget {
     Before,
     After,
     Tab(usize),
-}
-
-struct TabDragPreview {
-    title: SharedString,
-}
-
-impl gpui::Render for TabDragPreview {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let colors = cx.theme().colors;
-        div()
-            .max_w(px(240.))
-            .h(px(30.))
-            .px_3()
-            .flex()
-            .items_center()
-            .overflow_hidden()
-            .border_1()
-            .border_color(colors.accent)
-            .bg(colors.elevated_surface)
-            .text_color(colors.text)
-            .shadow_md()
-            .child(self.title.clone())
-    }
 }
 
 /// An item detached from one pane, ready to attach to another. Editors, their
@@ -700,8 +702,6 @@ pub struct Pane {
     result_resize_frame_pending: bool,
     /// Shape a dragged tab would take if released over this pane.
     tab_drop_target: Option<PaneDropTarget>,
-    /// Label rendered inside the full-width tab-bar drop ghost.
-    tab_drop_title: Option<SharedString>,
     /// Dirty-close confirmation belongs to its tab and is rendered inline.
     pending_close_item: Option<u64>,
 }
@@ -783,7 +783,6 @@ impl Pane {
             live_result_extents: HashMap::new(),
             result_resize_frame_pending: false,
             tab_drop_target: None,
-            tab_drop_title: None,
             pending_close_item: None,
         }
     }
@@ -1199,10 +1198,8 @@ impl Pane {
             index
         };
         let target = PaneDropTarget::Tab(drop_index);
-        let title = event.drag(cx).title.clone();
-        if self.tab_drop_target != Some(target) || self.tab_drop_title.as_ref() != Some(&title) {
+        if self.tab_drop_target != Some(target) {
             self.tab_drop_target = Some(target);
-            self.tab_drop_title = Some(title);
             cx.notify();
         }
     }
@@ -1241,7 +1238,6 @@ impl Pane {
             .tab_drop_target
             .take()
             .unwrap_or(PaneDropTarget::Center);
-        self.tab_drop_title = None;
         let creates_pane = matches!(target, PaneDropTarget::Before | PaneDropTarget::After);
         if drag.pane_id != self.id || creates_pane {
             cx.emit(PaneEvent::MoveItemRequested {
@@ -1356,6 +1352,7 @@ impl gpui::Render for Pane {
         let has_items = !self.items.is_empty();
         let can_go_back = self.can_navigate_backward();
         let can_go_forward = self.can_navigate_forward();
+        let can_drag_tabs = self.items.len() > 1;
         let pane_id = self.id;
         div()
             .id(("pane", self.id as usize))
@@ -1493,20 +1490,17 @@ impl gpui::Render for Pane {
                                     .flex()
                                     .h_full()
                                     .overflow_x_scroll()
-                                    .children(self.items.iter().enumerate().flat_map(
+                                    .children(self.items.iter().enumerate().map(
                                         |(index, item)| {
                                             let selected = index == self.active_item;
                                             let item_id = item.id;
                                             let tab_debug = format!("tab-{item_id}");
-                                            let ghost_before = self.tab_drop_target
+                                            let dragging_over_left = self.tab_drop_target
                                                 == Some(PaneDropTarget::Tab(index));
-                                            let ghost_after = self.tab_drop_target
+                                            let dragging_over_right = self.tab_drop_target
                                                 == Some(PaneDropTarget::Tab(index + 1))
                                                 && index + 1 == self.items.len();
-                                            let payload_title: SharedString =
-                                                item.title.clone().into();
-                                            let preview_title = payload_title.clone();
-                                            let tab = div()
+                                            div()
                                                 .id(("tab", item.id as usize))
                                                 .debug_selector(move || tab_debug.clone())
                                                 .relative()
@@ -1518,17 +1512,17 @@ impl gpui::Render for Pane {
                                                 .max_w(px(240.))
                                                 .border_r_1()
                                                 .border_color(colors.subtle_border)
-                                                .on_drag(
-                                                    TabDrag {
-                                                        pane_id,
-                                                        item_id,
-                                                        title: payload_title,
-                                                    },
-                                                    move |_, _, _, cx| {
-                                                        let title = preview_title.clone();
-                                                        cx.new(|_| TabDragPreview { title })
-                                                    },
-                                                )
+                                                .when(can_drag_tabs, |tab| {
+                                                    tab.on_drag(
+                                                        TabDrag {
+                                                            pane_id,
+                                                            item_id,
+                                                            title: item.title.clone().into(),
+                                                            selected,
+                                                        },
+                                                        |tab, _, _, cx| cx.new(|_| tab.clone()),
+                                                    )
+                                                })
                                                 .on_drag_move::<TabDrag>(cx.listener(
                                                     move |pane, event, window, cx| {
                                                         pane.tab_drag_hover(
@@ -1587,39 +1581,29 @@ impl gpui::Render for Pane {
                                                             item_id,
                                                         });
                                                     })),
-                                                );
-                                            let ghost = || {
-                                                div()
-                                                    .debug_selector(|| "tab-drop-ghost".into())
-                                                    .flex_none()
-                                                    .flex()
-                                                    .items_center()
-                                                    .h_full()
-                                                    .w(px(180.))
-                                                    .px_2()
-                                                    .overflow_hidden()
-                                                    .border_1()
-                                                    .border_color(colors.accent)
-                                                    .bg(colors.accent_muted)
-                                                    .text_color(colors.text)
-                                                    .child(
-                                                        div().min_w_0().truncate().child(
-                                                            self.tab_drop_title
-                                                                .clone()
-                                                                .unwrap_or_default(),
-                                                        ),
-                                                    )
-                                                    .into_any_element()
-                                            };
-                                            let mut elements = Vec::with_capacity(3);
-                                            if ghost_before {
-                                                elements.push(ghost());
-                                            }
-                                            elements.push(tab.into_any_element());
-                                            if ghost_after {
-                                                elements.push(ghost());
-                                            }
-                                            elements
+                                                )
+                                                .when(
+                                                    dragging_over_left || dragging_over_right,
+                                                    |tab| {
+                                                        tab.bg(colors.accent_muted)
+                                                            .border_color(colors.accent)
+                                                            .border_0()
+                                                            .when(dragging_over_left, |tab| {
+                                                                tab.border_l_2()
+                                                            })
+                                                            .when(dragging_over_right, |tab| {
+                                                                tab.border_r_2()
+                                                            })
+                                                            .child(
+                                                                div()
+                                                                    .debug_selector(|| {
+                                                                        "tab-drop-ghost".into()
+                                                                    })
+                                                                    .absolute()
+                                                                    .inset_0(),
+                                                            )
+                                                    },
+                                                )
                                         },
                                     )),
                             ),
@@ -10205,7 +10189,7 @@ mod tests {
         let ghost = cx
             .debug_bounds("tab-drop-ghost")
             .expect("full tab insertion ghost");
-        assert_eq!(ghost.size.width, px(180.));
+        assert!(ghost.size.width >= target.size.width - px(1.));
         assert_eq!(ghost.size.height, target.size.height);
         cx.simulate_mouse_up(drop, MouseButton::Left, Modifiers::default());
         cx.run_until_parked();
@@ -10215,6 +10199,31 @@ mod tests {
             let order = pane.items.iter().map(|item| item.id).collect::<Vec<_>>();
             assert_eq!(order, vec![2, 3, 1], "tab must drop after the last tab");
             assert_eq!(pane.active_item, 2, "the dragged tab becomes active");
+        });
+    }
+
+    #[gpui::test]
+    fn single_tab_does_not_start_a_drag(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        cx.run_until_parked();
+
+        let tab = cx.debug_bounds("tab-1").expect("only tab");
+        let pane = cx.debug_bounds("pane-slot-0").expect("only pane");
+        let start = tab.center();
+        cx.simulate_mouse_down(start, MouseButton::Left, Modifiers::default());
+        let attempted_drop = point(pane.left() + px(10.), pane.center().y);
+        cx.simulate_mouse_move(attempted_drop, MouseButton::Left, Modifiers::default());
+        cx.run_until_parked();
+
+        assert!(cx.debug_bounds("tab-drop-ghost").is_none());
+        assert!(cx.debug_bounds("pane-drop-preview-before").is_none());
+
+        cx.simulate_mouse_up(attempted_drop, MouseButton::Left, Modifiers::default());
+        workspace.read_with(&cx, |shell, cx| {
+            assert_eq!(shell.panes.len(), 1);
+            assert!(shell.panes[0].read(cx).contains_item(1));
         });
     }
 
