@@ -63,6 +63,30 @@ struct CachedColumnRender {
     nullable: bool,
 }
 
+#[derive(Debug, Clone)]
+struct ColumnDrag {
+    index: usize,
+    name: SharedString,
+}
+
+impl gpui::Render for ColumnDrag {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let colors = cx.theme().colors;
+        div()
+            .px_2()
+            .h(px(HEADER_HEIGHT))
+            .min_w(px(MIN_COLUMN_WIDTH))
+            .flex()
+            .items_center()
+            .bg(colors.toolbar)
+            .border_1()
+            .border_color(colors.accent)
+            .text_sm()
+            .font_weight(gpui::FontWeight::SEMIBOLD)
+            .child(self.name.clone())
+    }
+}
+
 /// A result column's presentation projection.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResultColumn {
@@ -482,6 +506,46 @@ impl ResultsView {
         }
     }
 
+    /// Move one displayed column onto another. Cached rows follow header order,
+    /// while a cell/column selection follows the same logical source column.
+    fn reorder_column(&mut self, source: usize, target: usize, cx: &mut Context<Self>) {
+        let column_count = self.rendered_columns.len();
+        if source == target || source >= column_count || target >= column_count {
+            return;
+        }
+
+        let column = self.rendered_columns.remove(source);
+        self.rendered_columns.insert(target, column);
+        for row in &mut self.rendered_rows {
+            if source < row.len() && target < row.len() {
+                let cell = row.remove(source);
+                row.insert(target, cell);
+            }
+        }
+
+        let remap = |column: usize| {
+            if column == source {
+                target
+            } else if source < target && column > source && column <= target {
+                column - 1
+            } else if source > target && column >= target && column < source {
+                column + 1
+            } else {
+                column
+            }
+        };
+        self.selected = self.selected.map(|selection| match selection {
+            GridSelection::Cell { row, column } => GridSelection::Cell {
+                row,
+                column: remap(column),
+            },
+            GridSelection::Column(column) => GridSelection::Column(remap(column)),
+            GridSelection::Row(row) => GridSelection::Row(row),
+            GridSelection::All => GridSelection::All,
+        });
+        cx.notify();
+    }
+
     fn move_selection(&mut self, row_delta: isize, column_delta: isize, cx: &mut Context<Self>) {
         let Some(data) = self.state.ready() else {
             return;
@@ -851,8 +915,9 @@ impl ResultsView {
                     |(column_index, column)| {
                         div()
                             .id(("result-column", column_index))
+                            .debug_selector(move || format!("result-column-{column_index}"))
                             .role(gpui::Role::Button)
-                            .aria_label(format!("Select column {}", column.name))
+                            .aria_label(format!("Select or drag column {}", column.name))
                             .flex_1()
                             .min_w(px(MIN_COLUMN_WIDTH))
                             .px_2()
@@ -868,13 +933,32 @@ impl ResultsView {
                                 }),
                                 |header| header.bg(colors.selected_surface).text_color(colors.text),
                             )
-                            .on_mouse_down(
-                                MouseButton::Left,
-                                cx.listener(move |view, _, window, cx| {
-                                    view.focus_handle.focus(window, cx);
-                                    view.select_column(column_index, cx);
-                                }),
+                            .on_drag(
+                                ColumnDrag {
+                                    index: column_index,
+                                    name: column.name.clone(),
+                                },
+                                |drag, _, _, cx| cx.new(|_| drag.clone()),
                             )
+                            .drag_over::<ColumnDrag>(move |header, drag, _, cx| {
+                                if drag.index == column_index {
+                                    header
+                                } else {
+                                    header
+                                        .bg(cx.theme().colors.drop_target_background)
+                                        .border_color(cx.theme().colors.drop_target_border)
+                                        .border_l_2()
+                                }
+                            })
+                            .on_drop::<ColumnDrag>(cx.listener(
+                                move |view, drag: &ColumnDrag, _, cx| {
+                                    view.reorder_column(drag.index, column_index, cx)
+                                },
+                            ))
+                            .on_click(cx.listener(move |view, _, window, cx| {
+                                view.focus_handle.focus(window, cx);
+                                view.select_column(column_index, cx);
+                            }))
                             .child(
                                 div()
                                     .text_sm()
@@ -1422,6 +1506,109 @@ mod tests {
             view.set_extent(360.0, cx);
             view.toggle_placement(cx);
             assert_eq!(view.extent(), 300.0);
+        });
+    }
+
+    #[gpui::test]
+    fn dragging_headers_reorders_display_selection_and_copy(cx: &mut TestAppContext) {
+        let window = cx
+            .update(|cx| {
+                cx.open_window(Default::default(), |_window, cx| {
+                    let view = cx.new(ResultsView::new);
+                    cx.new(|_| ResultsHost(view))
+                })
+            })
+            .unwrap();
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let host = window.root(&mut cx).unwrap();
+        let view = host.read_with(&cx, |host, _| host.0.clone());
+
+        view.update(&mut cx, |view, cx| {
+            view.set_state(
+                ResultState::from_execute(ExecuteResponse {
+                    cursor_id: sift_protocol::CursorId(1),
+                    columns: vec![
+                        column("a", PrimitiveType::Text, Nullability::NotNullable),
+                        column("b", PrimitiveType::Text, Nullability::NotNullable),
+                        column("c", PrimitiveType::Text, Nullability::NotNullable),
+                    ],
+                    schema_digest: "d".into(),
+                    rows: vec![
+                        Row::new(vec![
+                            Value::Text("a1".into()),
+                            Value::Text("b1".into()),
+                            Value::Text("c1".into()),
+                        ]),
+                        Row::new(vec![
+                            Value::Text("a2".into()),
+                            Value::Text("b2".into()),
+                            Value::Text("c2".into()),
+                        ]),
+                    ],
+                    affected_rows: None,
+                    warnings: Vec::new(),
+                    has_more: false,
+                }),
+                cx,
+            );
+        });
+        cx.run_until_parked();
+
+        view.update(&mut cx, |view, cx| view.select_cell(0, 0, cx));
+        let source = cx.debug_bounds("result-column-0").unwrap();
+        let target = cx.debug_bounds("result-column-2").unwrap();
+        let start = source.center();
+        cx.simulate_mouse_down(start, MouseButton::Left, gpui::Modifiers::default());
+        cx.simulate_mouse_move(
+            gpui::point(start.x + px(6.), start.y),
+            MouseButton::Left,
+            gpui::Modifiers::default(),
+        );
+        cx.simulate_mouse_move(
+            target.center(),
+            MouseButton::Left,
+            gpui::Modifiers::default(),
+        );
+        cx.simulate_mouse_up(
+            target.center(),
+            MouseButton::Left,
+            gpui::Modifiers::default(),
+        );
+        cx.run_until_parked();
+
+        view.update(&mut cx, |view, cx| {
+            assert_eq!(
+                view.rendered_columns
+                    .iter()
+                    .map(|column| column.name.as_ref())
+                    .collect::<Vec<_>>(),
+                vec!["b", "c", "a"]
+            );
+            assert_eq!(
+                view.selected,
+                Some(GridSelection::Cell { row: 0, column: 2 }),
+                "selected logical cell follows its dragged column"
+            );
+            assert_eq!(view.selected_text().as_deref(), Some("a1"));
+
+            view.select_cell(0, 0, cx);
+            view.reorder_column(2, 0, cx);
+            assert_eq!(
+                view.selected,
+                Some(GridSelection::Cell { row: 0, column: 1 }),
+                "unmoved logical cell follows its shifted display position"
+            );
+            assert_eq!(view.selected_text().as_deref(), Some("b1"));
+
+            view.reorder_column(0, 2, cx);
+            view.select_row(0, cx);
+            assert_eq!(view.selected_text().as_deref(), Some("b1\tc1\ta1"));
+            view.select_all(cx);
+            assert_eq!(
+                view.selected_text().as_deref(),
+                Some("b1\tc1\ta1\nb2\tc2\ta2"),
+                "row and all-cell copy use displayed column order"
+            );
         });
     }
 
