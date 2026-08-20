@@ -14,7 +14,7 @@ use crate::app::{display_rects, SiftApp, SiftWindow};
 use crate::config::DesktopConfig;
 use crate::platform::{primary_modifier, shell_key_bindings};
 use sift_workspace_ui::{
-    editor as ed, results as res, CloseActiveItem, CloseActivePane, FocusNextPane,
+    editor as ed, results as res, CancelExecution, CloseActiveItem, CloseActivePane, FocusNextPane,
     OpenCommandPalette, OpenServerConnection, SaveActiveItem, SplitPane, ToggleBottomDock,
     ToggleLeftDock, ToggleRightDock,
 };
@@ -87,6 +87,7 @@ fn main() {
                 Menu::new("Query").items([
                     MenuItem::action("Run Statement", ed::ExecuteStatement),
                     MenuItem::action("Run Document", ed::ExecuteDocument),
+                    MenuItem::action("Cancel Query", CancelExecution),
                 ]),
                 Menu::new("View").items([
                     MenuItem::action("Connections Dock", ToggleLeftDock),

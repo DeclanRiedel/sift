@@ -427,6 +427,63 @@ pub struct SessionWebSocket {
     socket: TransportWebSocket,
 }
 
+/// One server-backed query cursor carried over a session WebSocket.
+///
+/// Pages are delivered one at a time. Callers must acknowledge each
+/// non-terminal page after consuming it; until then the server will not send
+/// another page. This makes UI backpressure explicit instead of collecting an
+/// unbounded `Vec<Page>` in the SDK.
+pub struct QueryStream {
+    socket: SessionWebSocket,
+    connection: ConnectionId,
+    cursor_id: CursorId,
+}
+
+#[derive(Debug, serde::Deserialize)]
+pub struct SpilledCursorPages {
+    pub cursor_id: CursorId,
+    pub pages: Vec<Page>,
+    pub done: bool,
+}
+
+impl QueryStream {
+    pub const fn cursor_id(&self) -> CursorId {
+        self.cursor_id
+    }
+
+    pub async fn next_page(&mut self) -> Result<(u64, Page)> {
+        match self.socket.next().await? {
+            WsServerMessage::Page {
+                cursor_id,
+                seq,
+                page,
+            } if cursor_id == self.cursor_id => Ok((seq, page)),
+            WsServerMessage::Error { message, .. } => Err(Error::Protocol(message)),
+            other => Err(Error::Protocol(format!(
+                "unexpected websocket message: {other:?}"
+            ))),
+        }
+    }
+
+    pub async fn acknowledge(&mut self, seq: u64) -> Result<()> {
+        self.socket
+            .send(WsClientMessage::Ack {
+                cursor_id: self.cursor_id,
+                seq,
+            })
+            .await
+    }
+
+    pub async fn cancel(&mut self) -> Result<()> {
+        self.socket
+            .send(WsClientMessage::Cancel {
+                connection: self.connection,
+                cursor_id: self.cursor_id,
+            })
+            .await
+    }
+}
+
 impl SessionWebSocket {
     pub async fn send(&mut self, message: WsClientMessage) -> Result<()> {
         use futures::SinkExt;
@@ -2128,6 +2185,29 @@ impl Client {
             .await
     }
 
+    /// Typed spill-resume page batch for cursor-stream consumers.
+    pub async fn read_spilled_page_batch(
+        &self,
+        cursor: CursorId,
+        from_seq: Option<usize>,
+        limit: Option<usize>,
+    ) -> Result<SpilledCursorPages> {
+        let mut query = Vec::new();
+        if let Some(seq) = from_seq {
+            query.push(format!("from_seq={seq}"));
+        }
+        if let Some(limit) = limit {
+            query.push(format!("limit={limit}"));
+        }
+        let suffix = if query.is_empty() {
+            String::new()
+        } else {
+            format!("?{}", query.join("&"))
+        };
+        self.get(&format!("/v1/cursors/{}/pages{suffix}", cursor.0))
+            .await
+    }
+
     /// Delete a spilled cursor's file explicitly. Idempotent — returns
     /// ok even if the entry has already been reaped by TTL or fully
     /// drained.
@@ -3423,37 +3503,40 @@ impl Client {
         connection: ConnectionId,
         sql: impl Into<String>,
     ) -> Result<Vec<Page>> {
-        use futures::SinkExt;
-        use tokio_tungstenite::tungstenite::client::IntoClientRequest;
-        use tokio_tungstenite::tungstenite::Message;
-
-        let mut request = self.ws_url(session).into_client_request()?;
-        let selected = self.negotiated().await?.selected_protocol;
-        insert_ws_protocol_header(&mut request, selected).map_err(Error::Protocol)?;
-        if let Some(token) = self.current_bearer().await {
-            request.headers_mut().insert(
-                "authorization",
-                format!("Bearer {token}")
-                    .parse()
-                    .map_err(|e| Error::Protocol(format!("invalid bearer token header: {e}")))?,
-            );
+        let mut stream = self.start_query_stream(session, connection, sql).await?;
+        let mut pages = Vec::new();
+        loop {
+            let (seq, page) = stream.next_page().await?;
+            let done = matches!(page, Page::Done { .. } | Page::Error { .. });
+            pages.push(page);
+            if done {
+                return Ok(pages);
+            }
+            stream.acknowledge(seq).await?;
         }
-        let (mut ws, response) = tokio_tungstenite::connect_async(request).await?;
-        validate_ws_response_protocol(&response, selected).map_err(Error::Protocol)?;
+    }
+
+    /// Start a query without buffering its result pages. Consumers acknowledge
+    /// each page only after downstream processing has completed.
+    pub async fn start_query_stream(
+        &self,
+        session: SessionId,
+        connection: ConnectionId,
+        sql: impl Into<String>,
+    ) -> Result<QueryStream> {
+        let mut socket = self.connect_session_websocket(session).await?;
         let request_id = "sdk-stream-query".to_string();
-        ws.send(Message::Text(
-            serde_json::to_string(&WsClientMessage::Execute {
+        socket
+            .send(WsClientMessage::Execute {
                 request_id: request_id.clone(),
                 connection,
                 sql: sql.into(),
                 params: Vec::new(),
                 tx: None,
-            })?
-            .into(),
-        ))
-        .await?;
+            })
+            .await?;
 
-        let first = next_ws(&mut ws).await?;
+        let first = socket.next().await?;
         let cursor_id = match first {
             WsServerMessage::Started {
                 request_id: got,
@@ -3465,34 +3548,11 @@ impl Client {
                 )));
             }
         };
-
-        let mut pages = Vec::new();
-        loop {
-            let msg = next_ws(&mut ws).await?;
-            match msg {
-                WsServerMessage::Page {
-                    cursor_id: got,
-                    seq,
-                    page,
-                } if got == cursor_id => {
-                    let done = matches!(page, Page::Done { .. } | Page::Error { .. });
-                    pages.push(page);
-                    if done {
-                        return Ok(pages);
-                    }
-                    ws.send(Message::Text(
-                        serde_json::to_string(&WsClientMessage::Ack { cursor_id, seq })?.into(),
-                    ))
-                    .await?;
-                }
-                WsServerMessage::Error { message, .. } => return Err(Error::Protocol(message)),
-                other => {
-                    return Err(Error::Protocol(format!(
-                        "unexpected websocket message: {other:?}"
-                    )));
-                }
-            }
-        }
+        Ok(QueryStream {
+            socket,
+            connection,
+            cursor_id,
+        })
     }
 
     pub async fn connect_session_websocket(&self, session: SessionId) -> Result<SessionWebSocket> {
@@ -3878,5 +3938,22 @@ mod tests {
         let snapshot = provider.snapshot().await;
         assert_eq!(snapshot.access_token, "access-two");
         assert_eq!(snapshot.refresh_token, "refresh-two");
+    }
+
+    #[test]
+    fn spilled_cursor_batches_have_a_typed_shape() {
+        let batch: SpilledCursorPages = serde_json::from_value(serde_json::json!({
+            "cursor_id": 42,
+            "pages": [{
+                "kind": "done",
+                "affected_rows": null,
+                "warnings": []
+            }],
+            "done": true
+        }))
+        .unwrap();
+        assert_eq!(batch.cursor_id, CursorId(42));
+        assert!(batch.done);
+        assert!(matches!(batch.pages.as_slice(), [Page::Done { .. }]));
     }
 }

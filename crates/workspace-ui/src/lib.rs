@@ -23,9 +23,9 @@ pub use presentation::{
 };
 pub use settings::{EditorMode, EditorSettings, SettingsStore, UserSettings};
 pub use shell::{
-    CloseActiveItem, CloseActivePane, CommandDefinition, CommandId, CommandRegistry, CommandSpec,
-    ConnectionStatus, DismissModal, Dock, DockDefinition, DockId, DockPlacement, DockRegistry,
-    ExecutorCommand, ExecutorEvent, FocusNextPane, InstanceCommand,
+    CancelExecution, CloseActiveItem, CloseActivePane, CommandDefinition, CommandId,
+    CommandRegistry, CommandSpec, ConnectionStatus, DismissModal, Dock, DockDefinition, DockId,
+    DockPlacement, DockRegistry, ExecutorCommand, ExecutorEvent, FocusNextPane, InstanceCommand,
     InstanceConfigurationPresentation, InstanceCredentialKind, InstanceCredentialPresentation,
     InstanceManagerEvent, InstancePlanPresentation, ItemDefinition, ItemRegistry, ItemRuntimeKind,
     Modal, OpenCommandPalette, OpenServerConnection, PaletteConfirm, PaletteDown, PaletteUp, Pane,

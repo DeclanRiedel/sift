@@ -114,6 +114,11 @@ pub fn shell_key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new(&format!("{primary}-w"), CloseActiveItem, context),
         KeyBinding::new(&format!("{primary}-shift-w"), CloseActivePane, context),
         KeyBinding::new(&format!("{primary}-s"), SaveActiveItem, context),
+        KeyBinding::new(
+            &format!("{primary}-alt-c"),
+            sift_workspace_ui::CancelExecution,
+            context,
+        ),
         KeyBinding::new(&format!("{primary}-shift-b"), ToggleLeftDock, context),
         KeyBinding::new(&format!("{primary}-shift-i"), ToggleRightDock, context),
         KeyBinding::new(&format!("{primary}-j"), ToggleBottomDock, context),

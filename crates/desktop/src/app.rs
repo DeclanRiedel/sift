@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use gpui::{prelude::*, App, Context, Entity, IntoElement, Window};
@@ -452,6 +453,8 @@ async fn run_query_executor(
     events: tokio::sync::mpsc::UnboundedSender<ExecutorEvent>,
 ) {
     let mut context: Option<QueryContext> = None;
+    let mut active_queries: HashMap<u64, (u64, tokio::sync::mpsc::UnboundedSender<QueryControl>)> =
+        HashMap::new();
     loop {
         let command = tokio::select! {
             command = commands.recv() => command,
@@ -459,6 +462,7 @@ async fn run_query_executor(
                 if changed.is_err() {
                     return;
                 }
+                cancel_active_queries(&mut active_queries);
                 if let Some(previous) = context.take() {
                     let _ = previous.client.close_session(previous.session).await;
                 }
@@ -477,6 +481,7 @@ async fn run_query_executor(
                 profile_id,
                 name,
             } => {
+                cancel_active_queries(&mut active_queries);
                 if let Some(previous) = context.take() {
                     let _ = previous.client.close_session(previous.session).await;
                 }
@@ -512,6 +517,7 @@ async fn run_query_executor(
                 }
             }
             ExecutorCommand::Disconnect => {
+                cancel_active_queries(&mut active_queries);
                 if let Some(opened) = context.take() {
                     let _ = opened.client.close_session(opened.session).await;
                 }
@@ -530,13 +536,62 @@ async fn run_query_executor(
                     return;
                 }
             }
-            ExecutorCommand::Execute { item_id, sql } => {
-                let state = run_one(&mut context, &events, &sql).await;
-                if events
-                    .send(ExecutorEvent::Execution { item_id, state })
-                    .is_err()
+            ExecutorCommand::Execute {
+                item_id,
+                execution_id,
+                sql,
+            } => {
+                let Some(opened) = context.as_ref() else {
+                    if events
+                        .send(ExecutorEvent::Execution {
+                            item_id,
+                            execution_id,
+                            state: ResultState::Unavailable(
+                                "Not connected — pick a connection to run this.".into(),
+                            ),
+                        })
+                        .is_err()
+                    {
+                        return;
+                    }
+                    continue;
+                };
+                if let Some((_, previous)) = active_queries.remove(&item_id) {
+                    let _ = previous.send(QueryControl::Cancel);
+                }
+                let (control_sender, control_receiver) = tokio::sync::mpsc::unbounded_channel();
+                active_queries.insert(item_id, (execution_id, control_sender));
+                let client = opened.client.clone();
+                let session = opened.session;
+                let connection = opened.connection;
+                let events = events.clone();
+                std::mem::drop(tokio::spawn(async move {
+                    run_streamed_query(
+                        QueryRun {
+                            client,
+                            session,
+                            connection,
+                            item_id,
+                            execution_id,
+                            sql,
+                        },
+                        control_receiver,
+                        events,
+                    )
+                    .await;
+                }));
+            }
+            ExecutorCommand::Cancel {
+                item_id,
+                execution_id,
+            } => {
+                if active_queries
+                    .get(&item_id)
+                    .is_some_and(|(active, _)| *active == execution_id)
                 {
-                    return;
+                    if let Some((_, control)) = active_queries.remove(&item_id) {
+                        let _ = control.send(QueryControl::Cancel);
+                    }
                 }
             }
             ExecutorCommand::CreateConnectionProfile {
@@ -634,6 +689,18 @@ async fn run_query_executor(
     }
 }
 
+enum QueryControl {
+    Cancel,
+}
+
+fn cancel_active_queries(
+    active_queries: &mut HashMap<u64, (u64, tokio::sync::mpsc::UnboundedSender<QueryControl>)>,
+) {
+    for (_, (_, control)) in active_queries.drain() {
+        let _ = control.send(QueryControl::Cancel);
+    }
+}
+
 async fn delete_connection_profile(
     server: &DesktopServer,
     tenant_id: i64,
@@ -693,33 +760,266 @@ async fn create_connection_profile(
     })
 }
 
-/// Run one query against the current connection, or report not-connected.
-/// A transport loss drops the connection and notifies the UI.
-async fn run_one(
-    context: &mut Option<QueryContext>,
-    events: &tokio::sync::mpsc::UnboundedSender<ExecutorEvent>,
-    sql: &str,
-) -> ResultState {
-    let Some(opened) = context.as_ref() else {
-        return ResultState::Unavailable("Not connected — pick a connection to run this.".into());
+struct QueryRun {
+    client: Client,
+    session: SessionId,
+    connection: ConnectionId,
+    item_id: u64,
+    execution_id: u64,
+    sql: String,
+}
+
+async fn run_streamed_query(
+    run: QueryRun,
+    mut controls: tokio::sync::mpsc::UnboundedReceiver<QueryControl>,
+    events: tokio::sync::mpsc::UnboundedSender<ExecutorEvent>,
+) {
+    let QueryRun {
+        client,
+        session,
+        connection,
+        item_id,
+        execution_id,
+        sql,
+    } = run;
+    let started = tokio::select! {
+        stream = client.start_query_stream(session, connection, sql) => stream,
+        control = controls.recv() => {
+            if matches!(control, Some(QueryControl::Cancel)) {
+                let _ = events.send(ExecutorEvent::Execution {
+                    item_id,
+                    execution_id,
+                    state: ResultState::Cancelled,
+                });
+            }
+            return;
+        }
     };
-    match opened
-        .client
-        .execute(opened.session, opened.connection, sql)
-        .await
+    let mut stream = match started {
+        Ok(stream) => stream,
+        Err(error) => {
+            send_execution_error(item_id, execution_id, error, &events);
+            return;
+        }
+    };
+    let cursor_id = stream.cursor_id();
+    if events
+        .send(ExecutorEvent::ExecutionStarted {
+            item_id,
+            execution_id,
+            cursor_id,
+        })
+        .is_err()
     {
-        Ok(response) => ResultState::from_execute(response),
-        Err(error @ (ClientError::Transport(_) | ClientError::WebSocket(_))) => {
-            // Transport loss: the connection is gone and the outcome is unknown.
-            *context = None;
-            let _ = events.send(ExecutorEvent::Connection(ConnectionStatus::Disconnected));
-            ResultState::from_execution_error(true, error.to_string())
-        }
-        Err(ClientError::Server { error, .. }) => {
-            ResultState::from_execution_error(false, error.message)
-        }
-        Err(other) => ResultState::from_execution_error(false, other.to_string()),
+        let _ = stream.cancel().await;
+        return;
     }
+
+    loop {
+        let next = tokio::select! {
+            page = stream.next_page() => page,
+            control = controls.recv() => {
+                if matches!(control, Some(QueryControl::Cancel)) {
+                    let _ = stream.cancel().await;
+                    let _ = events.send(ExecutorEvent::Execution {
+                        item_id,
+                        execution_id,
+                        state: ResultState::Cancelled,
+                    });
+                }
+                return;
+            }
+        };
+        let (seq, page) = match next {
+            Ok(page) => page,
+            Err(error) => {
+                send_execution_error(item_id, execution_id, error, &events);
+                return;
+            }
+        };
+        if matches!(
+            &page,
+            sift_protocol::Page::Error { error }
+                if error.code == sift_protocol::Code::CursorEvicted
+                    && error.resume_url.is_some()
+        ) {
+            resume_spilled_query(
+                &client,
+                cursor_id,
+                item_id,
+                execution_id,
+                &mut controls,
+                &events,
+            )
+            .await;
+            return;
+        }
+        let terminal = matches!(
+            page,
+            sift_protocol::Page::Done { .. } | sift_protocol::Page::Error { .. }
+        );
+        let (acknowledge, consumed) = tokio::sync::oneshot::channel();
+        if events
+            .send(ExecutorEvent::ExecutionPage {
+                item_id,
+                execution_id,
+                cursor_id,
+                page,
+                acknowledge,
+            })
+            .is_err()
+        {
+            let _ = stream.cancel().await;
+            return;
+        }
+        if terminal {
+            return;
+        }
+        tokio::select! {
+            acknowledged = consumed => {
+                if acknowledged.is_err() || stream.acknowledge(seq).await.is_err() {
+                    let _ = stream.cancel().await;
+                    return;
+                }
+            }
+            control = controls.recv() => {
+                if matches!(control, Some(QueryControl::Cancel)) {
+                    let _ = stream.cancel().await;
+                    let _ = events.send(ExecutorEvent::Execution {
+                        item_id,
+                        execution_id,
+                        state: ResultState::Cancelled,
+                    });
+                }
+                return;
+            }
+        }
+    }
+}
+
+async fn resume_spilled_query(
+    client: &Client,
+    cursor_id: sift_protocol::CursorId,
+    item_id: u64,
+    execution_id: u64,
+    controls: &mut tokio::sync::mpsc::UnboundedReceiver<QueryControl>,
+    events: &tokio::sync::mpsc::UnboundedSender<ExecutorEvent>,
+) {
+    loop {
+        let batch = tokio::select! {
+            batch = client.read_spilled_page_batch(cursor_id, None, Some(1)) => batch,
+            control = controls.recv() => {
+                if matches!(control, Some(QueryControl::Cancel)) {
+                    let _ = client.delete_spilled_cursor(cursor_id).await;
+                    let _ = events.send(ExecutorEvent::Execution {
+                        item_id,
+                        execution_id,
+                        state: ResultState::Cancelled,
+                    });
+                }
+                return;
+            }
+        };
+        let batch = match batch {
+            Ok(batch) => batch,
+            Err(error) => {
+                send_execution_error(item_id, execution_id, error, events);
+                return;
+            }
+        };
+        if batch.cursor_id != cursor_id || (batch.pages.is_empty() && !batch.done) {
+            let _ = events.send(ExecutorEvent::Execution {
+                item_id,
+                execution_id,
+                state: ResultState::Failed("invalid spilled cursor page sequence".into()),
+            });
+            return;
+        }
+        let mut saw_terminal = false;
+        for page in batch.pages {
+            saw_terminal |= matches!(
+                &page,
+                sift_protocol::Page::Done { .. } | sift_protocol::Page::Error { .. }
+            );
+            let (acknowledge, consumed) = tokio::sync::oneshot::channel();
+            if events
+                .send(ExecutorEvent::ExecutionPage {
+                    item_id,
+                    execution_id,
+                    cursor_id,
+                    page,
+                    acknowledge,
+                })
+                .is_err()
+            {
+                let _ = client.delete_spilled_cursor(cursor_id).await;
+                return;
+            }
+            if saw_terminal {
+                return;
+            }
+            tokio::select! {
+                acknowledged = consumed => {
+                    if acknowledged.is_err() {
+                        return;
+                    }
+                }
+                control = controls.recv() => {
+                    if matches!(control, Some(QueryControl::Cancel)) {
+                        let _ = client.delete_spilled_cursor(cursor_id).await;
+                        let _ = events.send(ExecutorEvent::Execution {
+                            item_id,
+                            execution_id,
+                            state: ResultState::Cancelled,
+                        });
+                    }
+                    return;
+                }
+            }
+        }
+        if batch.done {
+            if !saw_terminal {
+                let (acknowledge, _) = tokio::sync::oneshot::channel();
+                let _ = events.send(ExecutorEvent::ExecutionPage {
+                    item_id,
+                    execution_id,
+                    cursor_id,
+                    page: sift_protocol::Page::Done {
+                        affected_rows: None,
+                        warnings: vec![sift_protocol::DriverWarning::new(
+                            "Cursor resumed after eviction; only retained spill pages are available.",
+                        )],
+                    },
+                    acknowledge,
+                });
+            }
+            return;
+        }
+    }
+}
+
+fn send_execution_error(
+    item_id: u64,
+    execution_id: u64,
+    error: ClientError,
+    events: &tokio::sync::mpsc::UnboundedSender<ExecutorEvent>,
+) {
+    let transport = matches!(
+        &error,
+        ClientError::Transport(_) | ClientError::WebSocket(_)
+    );
+    let message = match error {
+        ClientError::Server { error, .. } => error.message,
+        other => other.to_string(),
+    };
+    if transport {
+        let _ = events.send(ExecutorEvent::Connection(ConnectionStatus::Disconnected));
+    }
+    let _ = events.send(ExecutorEvent::Execution {
+        item_id,
+        execution_id,
+        state: ResultState::from_execution_error(transport, message),
+    });
 }
 
 /// Open a session and a connection for the chosen tenant/profile. Ids come from

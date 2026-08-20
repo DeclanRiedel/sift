@@ -20,6 +20,10 @@ const MIN_COLUMN_WIDTH: f32 = 144.0;
 pub(crate) const ROW_NUMBER_WIDTH: f32 = 46.0;
 pub(crate) const ROW_HEIGHT: f32 = 24.0;
 const HEADER_HEIGHT: f32 = 40.0;
+/// Hard UI retention bound. WebSocket ACK backpressure limits pages in flight;
+/// this separately prevents an arbitrarily large completed query from growing
+/// desktop memory without bound.
+pub const MAX_RETAINED_ROWS: usize = 10_000;
 
 /// How a single cell's value should be classified for rendering. Keeps color
 /// and alignment decisions in the view while the model stays presentation-free.
@@ -134,6 +138,8 @@ pub enum ResultState {
     Idle,
     /// A run is in flight.
     Pending,
+    /// Streamed rows are available while the query remains in flight.
+    Streaming(ResultData),
     /// Rows (or an affected-row count) are available.
     Ready(ResultData),
     /// The server rejected or could not run the query (offline, no connection,
@@ -219,6 +225,7 @@ impl ResultState {
         match self {
             ResultState::Idle => "Ready".into(),
             ResultState::Pending => "Running…".into(),
+            ResultState::Streaming(data) => format!("{}+ row(s) · Running…", data.rows.len()),
             ResultState::Ready(data) => match (data.rows.len(), data.affected_rows) {
                 (0, Some(affected)) => format!("{affected} row(s) affected"),
                 (rows, _) => {
@@ -236,7 +243,7 @@ impl ResultState {
 
     fn ready(&self) -> Option<&ResultData> {
         match self {
-            ResultState::Ready(data) => Some(data),
+            ResultState::Streaming(data) | ResultState::Ready(data) => Some(data),
             _ => None,
         }
     }
@@ -341,6 +348,7 @@ pub struct ResultsView {
     placement: ResultPlacement,
     bottom_height: f32,
     right_width: f32,
+    stream_result_seen: bool,
 }
 
 impl ResultsView {
@@ -357,6 +365,7 @@ impl ResultsView {
             placement: ResultPlacement::Bottom,
             bottom_height: 240.0,
             right_width: 420.0,
+            stream_result_seen: false,
         }
     }
 
@@ -407,7 +416,7 @@ impl ResultsView {
     /// Adopt a new outcome, resetting selection and focusing the Data tab.
     pub fn set_state(&mut self, state: ResultState, cx: &mut Context<Self>) {
         self.rendered_columns = match &state {
-            ResultState::Ready(data) => data
+            ResultState::Streaming(data) | ResultState::Ready(data) => data
                 .columns
                 .iter()
                 .map(|column| CachedColumnRender {
@@ -419,7 +428,7 @@ impl ResultsView {
             _ => Vec::new(),
         };
         self.rendered_rows = match &state {
-            ResultState::Ready(data) => data
+            ResultState::Streaming(data) | ResultState::Ready(data) => data
                 .rows
                 .iter()
                 .map(|row| {
@@ -441,6 +450,7 @@ impl ResultsView {
             _ => Vec::new(),
         };
         self.state = state;
+        self.stream_result_seen = false;
         self.selected = None;
         self.tab = ResultTab::Data;
         cx.notify();
@@ -448,6 +458,98 @@ impl ResultsView {
 
     pub fn set_pending(&mut self, cx: &mut Context<Self>) {
         self.set_state(ResultState::Pending, cx);
+    }
+
+    /// Reset this surface for a cursor-backed stream. Subsequent pages append
+    /// incrementally and retain at most [`MAX_RETAINED_ROWS`].
+    pub fn begin_stream(&mut self, cx: &mut Context<Self>) {
+        self.set_state(ResultState::Streaming(ResultData::default()), cx);
+    }
+
+    /// Consume one server page. Returns true when the page ends the stream.
+    pub fn apply_stream_page(&mut self, page: Page, cx: &mut Context<Self>) -> bool {
+        if !matches!(self.state, ResultState::Streaming(_)) {
+            self.begin_stream(cx);
+        }
+
+        match page {
+            Page::NextResult { columns } => {
+                let ResultState::Streaming(data) = &mut self.state else {
+                    unreachable!("stream initialized above")
+                };
+                if self.stream_result_seen {
+                    data.truncated_extra_results = true;
+                } else {
+                    self.stream_result_seen = true;
+                    data.columns = columns.iter().map(ResultColumn::from_metadata).collect();
+                    self.rendered_columns = columns
+                        .iter()
+                        .map(|column| CachedColumnRender {
+                            name: column.name.clone().into(),
+                            type_label: ResultColumn::from_metadata(column).type_label.into(),
+                            nullable: matches!(column.nullable, Nullability::Nullable),
+                        })
+                        .collect();
+                }
+                cx.notify();
+                false
+            }
+            Page::Rows { rows } => {
+                let ResultState::Streaming(data) = &mut self.state else {
+                    unreachable!("stream initialized above")
+                };
+                if !data.truncated_extra_results {
+                    let available = MAX_RETAINED_ROWS.saturating_sub(data.rows.len());
+                    let dropped = rows.len().saturating_sub(available);
+                    for row in rows.into_iter().take(available) {
+                        self.rendered_rows.push(
+                            row.values
+                                .iter()
+                                .map(|value| {
+                                    let rendered = render_value(value);
+                                    let text: SharedString = rendered.text.into();
+                                    CachedCellRender {
+                                        paint_text: single_line_text(&text),
+                                        text,
+                                        class: rendered.class,
+                                        shaped: None,
+                                    }
+                                })
+                                .collect(),
+                        );
+                        data.rows.push(row);
+                    }
+                    data.has_more |= dropped > 0;
+                }
+                cx.notify();
+                false
+            }
+            Page::Error { error } => {
+                let state = match error.code {
+                    sift_protocol::Code::QueryCanceled => ResultState::Cancelled,
+                    sift_protocol::Code::QueryTimedOut => ResultState::TimedOut,
+                    _ => ResultState::Failed(error.message),
+                };
+                self.set_state(state, cx);
+                true
+            }
+            Page::Done {
+                affected_rows,
+                warnings,
+            } => {
+                let state = std::mem::replace(&mut self.state, ResultState::Idle);
+                let mut data = match state {
+                    ResultState::Streaming(data) => data,
+                    _ => unreachable!("stream initialized above"),
+                };
+                data.affected_rows = affected_rows;
+                data.warnings = warnings;
+                self.state = ResultState::Ready(data);
+                self.stream_result_seen = false;
+                cx.notify();
+                true
+            }
+        }
     }
 
     pub fn set_unavailable(&mut self, reason: impl Into<String>, cx: &mut Context<Self>) {
@@ -1094,7 +1196,7 @@ impl ResultsView {
         let colors = cx.theme().colors;
         let body = div().p_3().flex().flex_col().gap_1().text_sm();
         match &self.state {
-            ResultState::Ready(data) => {
+            ResultState::Streaming(data) | ResultState::Ready(data) => {
                 let mut rows: Vec<gpui::AnyElement> = Vec::new();
                 if let Some(affected) = data.affected_rows {
                     rows.push(
@@ -1320,6 +1422,63 @@ mod tests {
             ResultState::from_pages(pages),
             ResultState::Failed(message) if message == "boom"
         ));
+    }
+
+    #[gpui::test]
+    fn streamed_pages_append_incrementally_and_respect_retention_bound(cx: &mut TestAppContext) {
+        let view = cx.update(|cx| cx.new(ResultsView::new));
+        view.update(cx, |view, cx| {
+            view.begin_stream(cx);
+            assert!(!view.apply_stream_page(
+                Page::NextResult {
+                    columns: vec![column("id", PrimitiveType::Int64, Nullability::NotNullable,)],
+                },
+                cx,
+            ));
+            let rows = (0..MAX_RETAINED_ROWS + 5)
+                .map(|value| Row::new(vec![Value::Int64(value as i64)]))
+                .collect();
+            assert!(!view.apply_stream_page(Page::Rows { rows }, cx));
+            let ResultState::Streaming(data) = view.state() else {
+                panic!("expected streaming result")
+            };
+            assert_eq!(data.rows.len(), MAX_RETAINED_ROWS);
+            assert!(data.has_more);
+            assert_eq!(view.rendered_rows.len(), MAX_RETAINED_ROWS);
+
+            assert!(view.apply_stream_page(
+                Page::Done {
+                    affected_rows: None,
+                    warnings: Vec::new(),
+                },
+                cx,
+            ));
+            assert!(matches!(view.state(), ResultState::Ready(data) if data.has_more));
+        });
+    }
+
+    #[gpui::test]
+    fn streamed_terminal_errors_keep_distinct_outcomes(cx: &mut TestAppContext) {
+        let view = cx.update(|cx| cx.new(ResultsView::new));
+        view.update(cx, |view, cx| {
+            view.begin_stream(cx);
+            assert!(view.apply_stream_page(
+                Page::Error {
+                    error: DriverError::new(Code::QueryCanceled, "query was canceled"),
+                },
+                cx,
+            ));
+            assert!(matches!(view.state(), ResultState::Cancelled));
+
+            view.begin_stream(cx);
+            assert!(view.apply_stream_page(
+                Page::Error {
+                    error: DriverError::new(Code::QueryTimedOut, "query timed out"),
+                },
+                cx,
+            ));
+            assert!(matches!(view.state(), ResultState::TimedOut));
+        });
     }
 
     #[gpui::test]

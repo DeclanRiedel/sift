@@ -329,6 +329,7 @@ actions!(
         CloseActivePane,
         CloseActiveItem,
         SaveActiveItem,
+        CancelExecution,
         ToggleLeftDock,
         ToggleRightDock,
         ToggleBottomDock
@@ -613,7 +614,12 @@ pub enum ExecutorCommand {
     RefreshSchema,
     Execute {
         item_id: u64,
+        execution_id: u64,
         sql: String,
+    },
+    Cancel {
+        item_id: u64,
+        execution_id: u64,
     },
     CreateConnectionProfile {
         tenant_id: i64,
@@ -630,7 +636,7 @@ pub enum ExecutorCommand {
 
 /// Executor → shell. Connection-state changes and query outcomes share one
 /// channel so ordering (connect before its run's result) is preserved.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub enum ExecutorEvent {
     Connection(ConnectionStatus),
     SchemaLoaded {
@@ -643,7 +649,20 @@ pub enum ExecutorEvent {
     },
     Execution {
         item_id: u64,
+        execution_id: u64,
         state: ResultState,
+    },
+    ExecutionStarted {
+        item_id: u64,
+        execution_id: u64,
+        cursor_id: sift_protocol::CursorId,
+    },
+    ExecutionPage {
+        item_id: u64,
+        execution_id: u64,
+        cursor_id: sift_protocol::CursorId,
+        page: sift_protocol::Page,
+        acknowledge: tokio::sync::oneshot::Sender<()>,
     },
     ProfileCreated {
         entry: ConnectionNavEntry,
@@ -831,6 +850,29 @@ impl Pane {
             }
             None => false,
         }
+    }
+
+    fn begin_result_stream(&mut self, item_id: u64, cx: &mut Context<Self>) -> bool {
+        match self.results.get(&item_id) {
+            Some(result) => {
+                result.update(cx, |result, cx| result.begin_stream(cx));
+                true
+            }
+            None => false,
+        }
+    }
+
+    fn apply_result_page(
+        &mut self,
+        item_id: u64,
+        page: sift_protocol::Page,
+        cx: &mut Context<Self>,
+    ) -> Option<ResultState> {
+        let result = self.results.get(&item_id)?;
+        result.update(cx, |result, cx| {
+            result.apply_stream_page(page, cx);
+        });
+        Some(result.read(cx).state().clone())
     }
 
     fn snapshot(&self) -> PanePresentation {
@@ -2016,6 +2058,8 @@ pub struct WorkspaceShell {
     _executor_task: Option<Task<()>>,
     _instance_task: Option<Task<()>>,
     executor_sender: Option<tokio::sync::mpsc::UnboundedSender<ExecutorCommand>>,
+    running_queries: HashMap<u64, u64>,
+    next_execution_id: u64,
     pending_database_execution: Option<PendingDatabaseExecution>,
     instance_sender: Option<tokio::sync::mpsc::UnboundedSender<InstanceCommand>>,
     saved_servers: Vec<SavedServerProfile>,
@@ -2299,6 +2343,8 @@ impl WorkspaceShell {
             _executor_task: None,
             _instance_task: None,
             executor_sender: None,
+            running_queries: HashMap::new(),
+            next_execution_id: 1,
             pending_database_execution: None,
             instance_sender: None,
             saved_servers: Vec::new(),
@@ -2352,6 +2398,11 @@ impl WorkspaceShell {
                 .selected_instance
                 .as_ref()
                 .is_some_and(|instance| instance.id != "local"),
+            active_query_running: self
+                .panes
+                .get(self.active_pane)
+                .and_then(|pane| pane.read(cx).active_item())
+                .is_some_and(|item| self.running_queries.contains_key(&item.id)),
         }
     }
 
@@ -2944,7 +2995,64 @@ impl WorkspaceShell {
                 self.status.diagnostic_count = 1;
                 cx.notify();
             }
-            ExecutorEvent::Execution { item_id, state } => self.route_result(item_id, state, cx),
+            ExecutorEvent::Execution {
+                item_id,
+                execution_id,
+                state,
+            } => {
+                if self.running_queries.get(&item_id) != Some(&execution_id) {
+                    return;
+                }
+                self.running_queries.remove(&item_id);
+                self.route_result(item_id, state, cx);
+            }
+            ExecutorEvent::ExecutionStarted {
+                item_id,
+                execution_id,
+                ..
+            } => {
+                if self.running_queries.get(&item_id) != Some(&execution_id) {
+                    return;
+                }
+                self.status.execution = "Running…".into();
+                for pane in &self.panes {
+                    if pane.update(cx, |pane, cx| pane.begin_result_stream(item_id, cx)) {
+                        break;
+                    }
+                }
+                cx.notify();
+            }
+            ExecutorEvent::ExecutionPage {
+                item_id,
+                execution_id,
+                page,
+                acknowledge,
+                ..
+            } => {
+                if self.running_queries.get(&item_id) != Some(&execution_id) {
+                    let _ = acknowledge.send(());
+                    return;
+                }
+                let mut state = None;
+                for pane in &self.panes {
+                    if let Some(updated) = pane.update(cx, |pane, cx| {
+                        pane.apply_result_page(item_id, page.clone(), cx)
+                    }) {
+                        state = Some(updated);
+                        break;
+                    }
+                }
+                if let Some(state) = state {
+                    let terminal = !matches!(state, ResultState::Streaming(_));
+                    self.status.execution = state.status_label();
+                    if terminal {
+                        self.running_queries.remove(&item_id);
+                        self.replace_sql_problems(item_id, &state, cx);
+                    }
+                }
+                let _ = acknowledge.send(());
+                cx.notify();
+            }
             ExecutorEvent::ProfileCreated {
                 entry,
                 connection_error,
@@ -3206,12 +3314,41 @@ impl WorkspaceShell {
             );
             return;
         };
+        let execution_id = self.next_execution_id;
+        self.next_execution_id = self.next_execution_id.saturating_add(1);
         if sender
-            .send(ExecutorCommand::Execute { item_id, sql })
+            .send(ExecutorCommand::Execute {
+                item_id,
+                execution_id,
+                sql,
+            })
             .is_ok()
         {
+            self.running_queries.insert(item_id, execution_id);
             self.status.execution = "Running…".into();
             self.clear_sql_problems(item_id);
+            cx.notify();
+        }
+    }
+
+    fn cancel_execution(&mut self, _: &CancelExecution, _: &mut Window, cx: &mut Context<Self>) {
+        let Some(item_id) = self
+            .panes
+            .get(self.active_pane)
+            .and_then(|pane| pane.read(cx).active_item())
+            .map(|item| item.id)
+        else {
+            return;
+        };
+        let Some(execution_id) = self.running_queries.get(&item_id).copied() else {
+            return;
+        };
+        if let Some(sender) = &self.executor_sender {
+            let _ = sender.send(ExecutorCommand::Cancel {
+                item_id,
+                execution_id,
+            });
+            self.status.execution = "Cancelling…".into();
             cx.notify();
         }
     }
@@ -3915,7 +4052,10 @@ impl WorkspaceShell {
                     push(SqlProblemSeverity::Warning, warning.message.clone());
                 }
             }
-            ResultState::Idle | ResultState::Pending | ResultState::Cancelled => {}
+            ResultState::Idle
+            | ResultState::Pending
+            | ResultState::Streaming(_)
+            | ResultState::Cancelled => {}
         }
         self.sync_sql_problem_status();
     }
@@ -5530,6 +5670,7 @@ impl WorkspaceShell {
             CommandId::ExecuteDocument => {
                 self.dispatch_active_editor_action(&crate::editor::ExecuteDocument, window, cx)
             }
+            CommandId::CancelExecution => self.cancel_execution(&CancelExecution, window, cx),
             CommandId::UndoQuery => {
                 self.dispatch_active_editor_action(&crate::editor::Undo, window, cx)
             }
@@ -9415,6 +9556,7 @@ impl gpui::Render for WorkspaceShell {
             .on_action(cx.listener(Self::close_active_pane))
             .on_action(cx.listener(Self::close_active_item))
             .on_action(cx.listener(Self::save_active_item))
+            .on_action(cx.listener(Self::cancel_execution))
             .on_action(cx.listener(Self::toggle_left_dock))
             .on_action(cx.listener(Self::toggle_right_dock))
             .on_action(cx.listener(Self::toggle_bottom_dock))
@@ -9823,7 +9965,7 @@ mod tests {
         });
 
         let (item_id, sql) = match receiver.try_recv().unwrap() {
-            ExecutorCommand::Execute { item_id, sql } => (item_id, sql),
+            ExecutorCommand::Execute { item_id, sql, .. } => (item_id, sql),
             _ => panic!("expected preview execution"),
         };
         assert_eq!(sql, "SELECT * FROM \"lab\".\"people\" LIMIT 100;");
@@ -11330,10 +11472,17 @@ mod tests {
         let focus = workspace.read_with(&cx, |shell, cx| shell.focus_handle(cx));
         cx.update(|window, cx| focus.dispatch_action(&OpenCommandPalette, window, cx));
         assert!(workspace.read_with(&cx, |shell, _| shell.left_dock.presentation.open));
-        // Arrow down to "Toggle Connections Dock" (index 10) and run it.
-        // This crosses the virtual list's ten-row viewport, exercising the
-        // scroll-to-selection path as well as command dispatch.
-        for _ in 0..10 {
+        // Find stable command id rather than coupling navigation to registry
+        // insertion order. Target remains beyond the lazy viewport.
+        let target = workspace.read_with(&cx, |shell, cx| {
+            shell
+                .command_specs(cx)
+                .iter()
+                .position(|command| command.id == CommandId::ToggleLeftDock)
+                .expect("toggle-left command")
+        });
+        assert!(target >= PALETTE_VISIBLE_ROWS);
+        for _ in 0..target {
             cx.update(|window, cx| focus.dispatch_action(&PaletteDown, window, cx));
         }
         cx.update(|window, cx| focus.dispatch_action(&PaletteConfirm, window, cx));
@@ -11391,6 +11540,36 @@ mod tests {
             workspace.read_with(&cx, |shell, _| shell.status.database.clone()),
             "No database"
         );
+    }
+
+    #[gpui::test]
+    fn stale_execution_events_cannot_overwrite_a_newer_run(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        workspace.update(&mut cx, |shell, cx| {
+            shell.running_queries.insert(1, 2);
+            shell.on_executor_event(
+                ExecutorEvent::Execution {
+                    item_id: 1,
+                    execution_id: 1,
+                    state: ResultState::Failed("stale failure".into()),
+                },
+                cx,
+            );
+            assert_eq!(shell.running_queries.get(&1), Some(&2));
+            shell.on_executor_event(
+                ExecutorEvent::Execution {
+                    item_id: 1,
+                    execution_id: 2,
+                    state: ResultState::Cancelled,
+                },
+                cx,
+            );
+            assert!(!shell.running_queries.contains_key(&1));
+            let results = shell.panes[0].read(cx).results.get(&1).unwrap().clone();
+            assert!(matches!(results.read(cx).state(), ResultState::Cancelled));
+        });
     }
 
     #[gpui::test]

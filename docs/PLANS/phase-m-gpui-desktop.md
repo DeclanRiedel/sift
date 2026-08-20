@@ -1,6 +1,6 @@
 # Phase M — GPUI Desktop Client
 
-Status: **design locked on 2026-08-11; M0–M2 complete, M3 pending.** ADR-040 is
+Status: **design locked on 2026-08-11; M0–M2 complete, M3 in progress.** ADR-040 is
 normative. Every milestone below ends in a separately reviewable commit with
 the workspace quality gates green.
 
@@ -422,24 +422,27 @@ ADR amendment instead of burying a second UI toolkit behind an abstraction.
       the room WebSocket for live collaboration (currently a local replica).
 - [ ] Integrate completion, diagnostics, formatting, quick fixes, usages, and
       semantic revision cancellation.
-- [~] Execute selection/document, stream status, cancel, and distinguish
+- [x] Execute selection/document, stream status, cancel, and distinguish
       rejected, failed, cancelled, timed-out, and outcome-unknown operations.
       **Landed:** editor `ExecuteStatement`/`ExecuteDocument` actions
       (Ctrl/Cmd+Enter) emit `EditorEvent::Execute`; the pane raises
       `PaneEvent::ExecuteRequested` and shows Pending; the workspace forwards it
       over an `ExecuteCommand` channel to a background executor in `sift-desktop`
-      that owns the SDK client, opens a session + connection-from-profile, calls
-      HTTP `execute`, and returns an `ExecutionOutcome` mapped through
-      `ResultState::from_execute`/`from_execution_error` into the distinct
+      that owns the SDK client, opens a session + connection-from-profile, and
+      uses a cursor-backed session WebSocket. Each page reaches the UI before
+      its ACK, bounding in-flight work to one page; query tasks remain
+      independently cancellable through the same cursor socket. Evicted cursors
+      resume through typed spill batches, transport loss remains an explicit
+      outcome-unknown state, and all terminal responses map to distinct
       Ready/Unavailable/Failed/Cancelled/TimedOut/OutcomeUnknown states.
-      **Remaining:** the streaming/cursor path (`stream_query`, paged status,
-      cancel) — today runs use the bounded HTTP first page.
 - [~] Implement virtualized results with typed cells, null/error states, column
       resizing/reordering, selection, copy, paging, resume, and bounded prefetch.
       **Landed:** `uniform_list`-virtualized grid, typed cell rendering
       (null/number/bool/text/temporal/binary/structured), header type badges,
-      cell selection + copy, horizontal scroll. **Remaining:** column
-      resize/reorder, paging/resume, bounded prefetch.
+      cell selection + copy, horizontal scroll, incremental WebSocket page
+      application, one-page ACK backpressure, spill resume, and a 10,000-row
+      retained-grid cap. **Remaining:** column resize/reorder and explicit
+      navigation for rows beyond the retained window.
 - [x] Add query-owned Data/Messages/Explain/History tabs plus pin/promote.
 - [ ] Restore query and result references without persisting result data.
 - [ ] Meet measured typing, first-result, scroll, and memory budgets on large

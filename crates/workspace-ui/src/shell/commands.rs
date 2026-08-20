@@ -8,6 +8,7 @@ pub enum CommandId {
     ConnectServer,
     ExecuteStatement,
     ExecuteDocument,
+    CancelExecution,
     UndoQuery,
     RedoQuery,
     SplitPane,
@@ -31,6 +32,7 @@ impl CommandId {
             Self::ConnectServer => "instance.connect-server",
             Self::ExecuteStatement => "query.execute-statement",
             Self::ExecuteDocument => "query.execute-document",
+            Self::CancelExecution => "query.cancel",
             Self::UndoQuery => "query.undo",
             Self::RedoQuery => "query.redo",
             Self::SplitPane => "workspace.split-pane",
@@ -56,6 +58,7 @@ enum AvailabilityRule {
     ActiveItem,
     MultiplePanes,
     EditableInstance,
+    RunningQuery,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -72,6 +75,7 @@ pub struct CommandContext {
     pub has_active_item: bool,
     pub pane_count: usize,
     pub has_editable_instance: bool,
+    pub active_query_running: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -111,9 +115,13 @@ impl CommandRegistry {
                 AvailabilityRule::EditableInstance if !context.has_editable_instance => {
                     Some("Bundled Local Sift has no sift.toml")
                 }
+                AvailabilityRule::RunningQuery if !context.active_query_running => {
+                    Some("Active query is not running")
+                }
                 AvailabilityRule::ActiveItem
                 | AvailabilityRule::MultiplePanes
-                | AvailabilityRule::EditableInstance => None,
+                | AvailabilityRule::EditableInstance
+                | AvailabilityRule::RunningQuery => None,
             },
         }
     }
@@ -148,6 +156,13 @@ const DEFINITIONS: &[CommandDefinition] = &[
         "Ctrl+Shift+Enter",
         true,
         AvailabilityRule::ActiveItem,
+    ),
+    command(
+        CommandId::CancelExecution,
+        "Cancel Query",
+        "Ctrl+Alt+C",
+        true,
+        AvailabilityRule::RunningQuery,
     ),
     command(
         CommandId::UndoQuery,
@@ -292,6 +307,7 @@ mod tests {
             has_active_item: false,
             pane_count: 1,
             has_editable_instance: false,
+            active_query_running: false,
         };
         assert_eq!(
             CommandRegistry::spec(CommandId::ExecuteStatement, empty).disabled_reason,
@@ -306,5 +322,17 @@ mod tests {
             CommandRegistry::spec(CommandId::OpenServerConfiguration, empty).disabled_reason,
             Some("Bundled Local Sift has no sift.toml")
         );
+        assert_eq!(
+            CommandRegistry::spec(CommandId::CancelExecution, empty).disabled_reason,
+            Some("Active query is not running")
+        );
+        assert!(CommandRegistry::spec(
+            CommandId::CancelExecution,
+            CommandContext {
+                active_query_running: true,
+                ..empty
+            }
+        )
+        .enabled());
     }
 }
