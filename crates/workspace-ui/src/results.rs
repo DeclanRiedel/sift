@@ -14,10 +14,7 @@ use gpui::{
 use sift_protocol::{
     ColumnMetadata, DriverWarning, ExecuteResponse, Nullability, Page, Row, TypeRef, Value,
 };
-use sift_ui::{
-    ActiveTheme, Badge, Clickable, Disableable, IconButton, IconName, SectionLabel, ThemeColors,
-    Toggleable,
-};
+use sift_ui::{ActiveTheme, Badge, Clickable, IconButton, IconName, ThemeColors};
 
 const MIN_COLUMN_WIDTH: f32 = 144.0;
 const DEFAULT_COLUMN_WIDTH: f32 = 184.0;
@@ -71,6 +68,15 @@ struct CachedColumnRender {
     name: SharedString,
     type_label: SharedString,
     nullable: bool,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ResultFieldInspectorRow {
+    pub source_column: usize,
+    pub name: SharedString,
+    pub type_label: SharedString,
+    pub nullable: bool,
+    pub included: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -381,7 +387,6 @@ pub struct ResultsView {
     /// separate projection so excluded fields can return in the same position.
     column_order: Vec<usize>,
     included_columns: Vec<bool>,
-    fields_sidebar_open: bool,
     tab: ResultTab,
     selected: Option<GridSelection>,
     row_scroll_handle: UniformListScrollHandle,
@@ -402,7 +407,6 @@ impl ResultsView {
             column_widths: Vec::new(),
             column_order: Vec::new(),
             included_columns: Vec::new(),
-            fields_sidebar_open: false,
             tab: ResultTab::Data,
             selected: None,
             row_scroll_handle: UniformListScrollHandle::new(),
@@ -686,12 +690,12 @@ impl ResultsView {
             .collect()
     }
 
-    fn toggle_fields_sidebar(&mut self, cx: &mut Context<Self>) {
-        self.fields_sidebar_open = !self.fields_sidebar_open;
-        cx.notify();
-    }
-
-    fn set_column_included(&mut self, column: usize, included: bool, cx: &mut Context<Self>) {
+    pub(crate) fn set_column_included(
+        &mut self,
+        column: usize,
+        included: bool,
+        cx: &mut Context<Self>,
+    ) {
         let Some(current) = self.included_columns.get_mut(column) else {
             return;
         };
@@ -709,7 +713,7 @@ impl ResultsView {
         cx.notify();
     }
 
-    fn set_all_columns_included(&mut self, included: bool, cx: &mut Context<Self>) {
+    pub(crate) fn set_all_columns_included(&mut self, included: bool, cx: &mut Context<Self>) {
         self.included_columns.fill(included);
         if !included
             && matches!(
@@ -720,6 +724,26 @@ impl ResultsView {
             self.selected = None;
         }
         cx.notify();
+    }
+
+    pub(crate) fn inspector_fields(&self) -> Vec<ResultFieldInspectorRow> {
+        self.column_order
+            .iter()
+            .filter_map(|source_column| {
+                let column = self.rendered_columns.get(*source_column)?;
+                Some(ResultFieldInspectorRow {
+                    source_column: *source_column,
+                    name: column.name.clone(),
+                    type_label: column.type_label.clone(),
+                    nullable: column.nullable,
+                    included: self
+                        .included_columns
+                        .get(*source_column)
+                        .copied()
+                        .unwrap_or(false),
+                })
+            })
+            .collect()
     }
 
     /// Move one source column onto another in display order. Selection stores
@@ -978,24 +1002,6 @@ impl ResultsView {
                     .text_color(colors.muted_text)
                     .child(Badge::new(self.state.status_label()))
                     .child(
-                        div()
-                            .debug_selector(|| "toggle-result-fields".into())
-                            .child(
-                                IconButton::new(
-                                    "toggle-result-fields-button",
-                                    IconName::Table,
-                                    "Choose fields",
-                                )
-                                .text("Fields")
-                                .tooltip("Include or exclude result fields")
-                                .toggle_state(self.fields_sidebar_open)
-                                .disabled(self.rendered_columns.is_empty())
-                                .on_click(
-                                    cx.listener(|view, _, _, cx| view.toggle_fields_sidebar(cx)),
-                                ),
-                            ),
-                    )
-                    .child(
                         IconButton::new(
                             "copy-result-cell",
                             IconName::Copy,
@@ -1062,19 +1068,6 @@ impl ResultsView {
                     .child(div().truncate().child(self.state.status_label()))
                     .child(
                         IconButton::new(
-                            "toggle-result-fields-vertical",
-                            IconName::Table,
-                            "Choose fields",
-                        )
-                        .icon_size(13.)
-                        .text("Fields")
-                        .tooltip("Include or exclude result fields")
-                        .toggle_state(self.fields_sidebar_open)
-                        .disabled(self.rendered_columns.is_empty())
-                        .on_click(cx.listener(|view, _, _, cx| view.toggle_fields_sidebar(cx))),
-                    )
-                    .child(
-                        IconButton::new(
                             "copy-result-cell-vertical",
                             IconName::Copy,
                             "Copy highlighted fields",
@@ -1086,198 +1079,6 @@ impl ResultsView {
                             view.copy_selected_cell(&CopySelectedCell, window, cx)
                         })),
                     ),
-            )
-    }
-
-    fn render_fields_sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let colors = cx.theme().colors;
-        let included_count = self
-            .included_columns
-            .iter()
-            .filter(|included| **included)
-            .count();
-        let field_rows = self.column_order.iter().filter_map(|source_column| {
-            let source_column = *source_column;
-            let column = self.rendered_columns.get(source_column)?;
-            let included = self
-                .included_columns
-                .get(source_column)
-                .copied()
-                .unwrap_or(false);
-            Some(
-                div()
-                    .id(("result-field-row", source_column))
-                    .px_2()
-                    .py_2()
-                    .flex()
-                    .flex_col()
-                    .gap_1()
-                    .border_b_1()
-                    .border_color(colors.subtle_border)
-                    .child(
-                        div()
-                            .min_w_0()
-                            .truncate()
-                            .font_weight(gpui::FontWeight::SEMIBOLD)
-                            .child(column.name.clone()),
-                    )
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(colors.muted_text)
-                            .truncate()
-                            .child(format!(
-                                "{}{}",
-                                column.type_label,
-                                if column.nullable { "?" } else { "" }
-                            )),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .h(px(24.))
-                            .rounded_sm()
-                            .border_1()
-                            .border_color(colors.subtle_border)
-                            .overflow_hidden()
-                            .child(
-                                div()
-                                    .id(("include-result-field", source_column))
-                                    .debug_selector(move || {
-                                        format!("include-result-field-{source_column}")
-                                    })
-                                    .role(gpui::Role::Button)
-                                    .aria_label(format!("Include field {}", column.name))
-                                    .flex_1()
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .text_xs()
-                                    .when(included, |button| {
-                                        button.bg(colors.active_surface).text_color(colors.text)
-                                    })
-                                    .when(!included, |button| button.text_color(colors.muted_text))
-                                    .hover(|button| button.bg(colors.hovered_surface))
-                                    .on_click(cx.listener(move |view, _, _, cx| {
-                                        view.set_column_included(source_column, true, cx)
-                                    }))
-                                    .child("Include"),
-                            )
-                            .child(
-                                div()
-                                    .id(("exclude-result-field", source_column))
-                                    .debug_selector(move || {
-                                        format!("exclude-result-field-{source_column}")
-                                    })
-                                    .role(gpui::Role::Button)
-                                    .aria_label(format!("Exclude field {}", column.name))
-                                    .flex_1()
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .border_l_1()
-                                    .border_color(colors.subtle_border)
-                                    .text_xs()
-                                    .when(!included, |button| {
-                                        button.bg(colors.active_surface).text_color(colors.text)
-                                    })
-                                    .when(included, |button| button.text_color(colors.muted_text))
-                                    .hover(|button| button.bg(colors.hovered_surface))
-                                    .on_click(cx.listener(move |view, _, _, cx| {
-                                        view.set_column_included(source_column, false, cx)
-                                    }))
-                                    .child("Exclude"),
-                            ),
-                    ),
-            )
-        });
-
-        div()
-            .debug_selector(|| "result-fields-sidebar".into())
-            .w(px(240.))
-            .h_full()
-            .flex_none()
-            .flex()
-            .flex_col()
-            .min_h_0()
-            .border_l_1()
-            .border_color(colors.subtle_border)
-            .bg(colors.panel)
-            .child(
-                div()
-                    .h(cx.theme().metrics.tab_height)
-                    .px_2()
-                    .flex_none()
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .border_b_1()
-                    .border_color(colors.subtle_border)
-                    .child(SectionLabel::new("FIELDS"))
-                    .child(
-                        IconButton::new(
-                            "close-result-fields",
-                            IconName::CloseRightPane,
-                            "Close fields sidebar",
-                        )
-                        .square(px(24.))
-                        .icon_size(13.)
-                        .on_click(cx.listener(|view, _, _, cx| view.toggle_fields_sidebar(cx))),
-                    ),
-            )
-            .child(
-                div()
-                    .px_2()
-                    .py_1()
-                    .flex_none()
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .text_xs()
-                    .text_color(colors.muted_text)
-                    .child(format!(
-                        "{included_count} of {} included",
-                        self.rendered_columns.len()
-                    ))
-                    .child(
-                        div()
-                            .flex()
-                            .gap_1()
-                            .child(
-                                div()
-                                    .id("include-all-result-fields")
-                                    .role(gpui::Role::Button)
-                                    .aria_label("Include all fields")
-                                    .px_1()
-                                    .rounded_sm()
-                                    .hover(|button| button.bg(colors.hovered_surface))
-                                    .on_click(cx.listener(|view, _, _, cx| {
-                                        view.set_all_columns_included(true, cx)
-                                    }))
-                                    .child("All"),
-                            )
-                            .child(
-                                div()
-                                    .id("exclude-all-result-fields")
-                                    .role(gpui::Role::Button)
-                                    .aria_label("Exclude all fields")
-                                    .px_1()
-                                    .rounded_sm()
-                                    .hover(|button| button.bg(colors.hovered_surface))
-                                    .on_click(cx.listener(|view, _, _, cx| {
-                                        view.set_all_columns_included(false, cx)
-                                    }))
-                                    .child("None"),
-                            ),
-                    ),
-            )
-            .child(
-                div()
-                    .id("result-fields-scroll")
-                    .flex_1()
-                    .min_h_0()
-                    .overflow_y_scroll()
-                    .children(field_rows),
             )
     }
 
@@ -1317,7 +1118,7 @@ impl ResultsView {
                 .p_4()
                 .text_center()
                 .text_color(colors.muted_text)
-                .child("All fields excluded. Open Fields to include columns.")
+                .child("All fields excluded. Use Inspector to include columns.")
                 .into_any_element();
         }
         let visible_widths = visible_columns
@@ -1790,18 +1591,7 @@ impl gpui::Render for ResultsView {
             .when(self.placement == ResultPlacement::Right, |view| {
                 view.child(self.render_vertical_tab_bar(cx))
             })
-            .child(
-                div()
-                    .flex()
-                    .flex_1()
-                    .min_w_0()
-                    .min_h_0()
-                    .child(body)
-                    .children(
-                        (self.fields_sidebar_open && self.tab == ResultTab::Data)
-                            .then(|| self.render_fields_sidebar(cx)),
-                    ),
-            )
+            .child(div().flex().flex_1().min_w_0().min_h_0().child(body))
     }
 }
 
@@ -2237,16 +2027,9 @@ mod tests {
             );
         });
 
-        let fields_button = cx.debug_bounds("toggle-result-fields").unwrap();
-        cx.simulate_click(fields_button.center(), gpui::Modifiers::default());
-        cx.run_until_parked();
-        assert!(cx.debug_bounds("result-fields-sidebar").is_some());
-
-        view.update(&mut cx, |view, cx| view.select_column(2, cx));
-        let exclude_c = cx.debug_bounds("exclude-result-field-2").unwrap();
-        cx.simulate_click(exclude_c.center(), gpui::Modifiers::default());
-        cx.run_until_parked();
         view.update(&mut cx, |view, cx| {
+            view.select_column(2, cx);
+            view.set_column_included(2, false, cx);
             assert_eq!(view.visible_column_indices(), vec![1, 0]);
             assert_eq!(view.selected, None, "excluding selected field clears it");
             view.select_cell(0, 1, cx);
@@ -2258,14 +2041,15 @@ mod tests {
                 Some("b1\ta1"),
                 "copy omits excluded fields"
             );
-        });
-
-        let include_c = cx.debug_bounds("include-result-field-2").unwrap();
-        cx.simulate_click(include_c.center(), gpui::Modifiers::default());
-        cx.run_until_parked();
-        view.read_with(&cx, |view, _| {
+            view.set_column_included(2, true, cx);
             assert_eq!(view.visible_column_indices(), vec![1, 2, 0]);
-            assert!(view.fields_sidebar_open);
+            assert_eq!(
+                view.inspector_fields()
+                    .into_iter()
+                    .map(|field| (field.name.to_string(), field.included))
+                    .collect::<Vec<_>>(),
+                vec![("b".into(), true), ("c".into(), true), ("a".into(), true)]
+            );
         });
     }
 

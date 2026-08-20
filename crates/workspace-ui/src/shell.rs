@@ -1001,6 +1001,12 @@ impl Pane {
         self.editors.get(&item_id).cloned()
     }
 
+    fn active_results(&self) -> Option<Entity<ResultsView>> {
+        self.active_item()
+            .and_then(|item| self.results.get(&item.id))
+            .cloned()
+    }
+
     fn database_source(&self, item_id: u64) -> Option<DatabaseObjectSource> {
         self.items
             .iter()
@@ -6861,6 +6867,187 @@ impl WorkspaceShell {
         }
     }
 
+    fn render_result_fields_inspector(
+        &self,
+        results: Entity<ResultsView>,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let colors = cx.theme().colors;
+        let fields = results.read(cx).inspector_fields();
+        let included = fields.iter().filter(|field| field.included).count();
+        let all_results = results.clone();
+        let no_results = results.clone();
+        div()
+            .debug_selector(|| "inspector-result-fields".into())
+            .flex()
+            .flex_col()
+            .min_h_0()
+            .child(
+                div()
+                    .px_3()
+                    .py_2()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .border_b_1()
+                    .border_color(colors.subtle_border)
+                    .child(SectionLabel::new("FIELDS"))
+                    .child(
+                        div()
+                            .flex()
+                            .gap_2()
+                            .text_xs()
+                            .text_color(colors.muted_text)
+                            .child(format!("{included} of {}", fields.len()))
+                            .child(
+                                div()
+                                    .id("inspector-include-all-fields")
+                                    .role(Role::Button)
+                                    .aria_label("Include all fields")
+                                    .hover(|button| button.text_color(colors.text))
+                                    .on_click(cx.listener(move |_, _, _, cx| {
+                                        all_results.update(cx, |view, cx| {
+                                            view.set_all_columns_included(true, cx)
+                                        });
+                                    }))
+                                    .child("All"),
+                            )
+                            .child(
+                                div()
+                                    .id("inspector-exclude-all-fields")
+                                    .role(Role::Button)
+                                    .aria_label("Exclude all fields")
+                                    .hover(|button| button.text_color(colors.text))
+                                    .on_click(cx.listener(move |_, _, _, cx| {
+                                        no_results.update(cx, |view, cx| {
+                                            view.set_all_columns_included(false, cx)
+                                        });
+                                    }))
+                                    .child("None"),
+                            ),
+                    ),
+            )
+            .child(
+                div()
+                    .id("inspector-result-fields-scroll")
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .children(fields.into_iter().map(|field| {
+                        let include_results = results.clone();
+                        let exclude_results = results.clone();
+                        let source_column = field.source_column;
+                        let include_label = format!("Include field {}", field.name);
+                        let exclude_label = format!("Exclude field {}", field.name);
+                        div()
+                            .id(("inspector-result-field", source_column))
+                            .px_3()
+                            .py_2()
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .border_b_1()
+                            .border_color(colors.subtle_border)
+                            .child(
+                                div()
+                                    .min_w_0()
+                                    .truncate()
+                                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                                    .child(field.name.clone()),
+                            )
+                            .child(div().text_xs().text_color(colors.muted_text).child(format!(
+                                "{}{}",
+                                field.type_label,
+                                if field.nullable { "?" } else { "" }
+                            )))
+                            .child(
+                                div()
+                                    .flex()
+                                    .h(px(24.))
+                                    .rounded_sm()
+                                    .border_1()
+                                    .border_color(colors.subtle_border)
+                                    .overflow_hidden()
+                                    .child(
+                                        div()
+                                            .id(("include-result-field", source_column))
+                                            .debug_selector(move || {
+                                                format!("include-result-field-{source_column}")
+                                            })
+                                            .role(Role::Button)
+                                            .aria_label(include_label)
+                                            .flex_1()
+                                            .flex()
+                                            .items_center()
+                                            .justify_center()
+                                            .text_xs()
+                                            .when(field.included, |button| {
+                                                button
+                                                    .bg(colors.active_surface)
+                                                    .text_color(colors.text)
+                                            })
+                                            .when(!field.included, |button| {
+                                                button.text_color(colors.muted_text)
+                                            })
+                                            .hover(|button| button.bg(colors.hovered_surface))
+                                            .on_click(cx.listener(move |_, _, _, cx| {
+                                                include_results.update(cx, |view, cx| {
+                                                    view.set_column_included(
+                                                        source_column,
+                                                        true,
+                                                        cx,
+                                                    )
+                                                });
+                                            }))
+                                            .child("Include"),
+                                    )
+                                    .child(
+                                        div()
+                                            .id(("exclude-result-field", source_column))
+                                            .debug_selector(move || {
+                                                format!("exclude-result-field-{source_column}")
+                                            })
+                                            .role(Role::Button)
+                                            .aria_label(exclude_label)
+                                            .flex_1()
+                                            .flex()
+                                            .items_center()
+                                            .justify_center()
+                                            .border_l_1()
+                                            .border_color(colors.subtle_border)
+                                            .text_xs()
+                                            .when(!field.included, |button| {
+                                                button
+                                                    .bg(colors.active_surface)
+                                                    .text_color(colors.text)
+                                            })
+                                            .when(field.included, |button| {
+                                                button.text_color(colors.muted_text)
+                                            })
+                                            .hover(|button| button.bg(colors.hovered_surface))
+                                            .on_click(cx.listener(move |_, _, _, cx| {
+                                                exclude_results.update(cx, |view, cx| {
+                                                    view.set_column_included(
+                                                        source_column,
+                                                        false,
+                                                        cx,
+                                                    )
+                                                });
+                                            }))
+                                            .child("Exclude"),
+                                    ),
+                            )
+                    })),
+            )
+            .into_any_element()
+    }
+
+    fn focused_pane_results(&self, cx: &App) -> Option<Entity<ResultsView>> {
+        self.panes
+            .get(self.active_pane)
+            .and_then(|pane| pane.read(cx).active_results())
+    }
+
     fn render_dock(&self, dock: &Dock, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
         let colors = theme.colors;
@@ -7399,28 +7586,34 @@ impl WorkspaceShell {
                 },
             )
             .when(dock.id == DockId::Inspector, |dock_view| {
-                dock_view.child(
-                    div()
-                        .p_3()
-                        .flex()
-                        .flex_col()
-                        .gap_2()
-                        .min_w_0()
-                        .text_sm()
-                        .child(format!("{} participants", self.presence.participants.len()))
-                        .child(
-                            div()
-                                .min_w_0()
-                                .whitespace_normal()
-                                .text_color(colors.muted_text)
-                                .child(match self.presence.followed_attachment {
-                                    Some(attachment) => {
-                                        format!("Following attachment {attachment}")
-                                    }
-                                    None => "Follow mode off".into(),
-                                }),
-                        ),
-                )
+                let results = self.focused_pane_results(cx);
+                match results {
+                    Some(results) if !results.read(cx).inspector_fields().is_empty() => {
+                        dock_view.child(self.render_result_fields_inspector(results, cx))
+                    }
+                    _ => dock_view.child(
+                        div()
+                            .p_3()
+                            .flex()
+                            .flex_col()
+                            .gap_2()
+                            .min_w_0()
+                            .text_sm()
+                            .child(format!("{} participants", self.presence.participants.len()))
+                            .child(
+                                div()
+                                    .min_w_0()
+                                    .whitespace_normal()
+                                    .text_color(colors.muted_text)
+                                    .child(match self.presence.followed_attachment {
+                                        Some(attachment) => {
+                                            format!("Following attachment {attachment}")
+                                        }
+                                        None => "Follow mode off".into(),
+                                    }),
+                            ),
+                    ),
+                }
             })
     }
 
@@ -10523,6 +10716,55 @@ mod tests {
                 pane.results.get(&2).unwrap().read(cx).placement(),
                 ResultPlacement::Bottom
             );
+        });
+    }
+
+    #[gpui::test]
+    fn inspector_results_follow_the_focused_pane(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        workspace.update_in(&mut cx, |shell, window, cx| {
+            shell.split_pane(&SplitPane, window, cx);
+            let editor = cx.new(|cx| QueryEditor::new(QueryDocument::with_random_peer(""), cx));
+            let results = cx.new(ResultsView::new);
+            shell.panes[1].update(cx, |pane, cx| {
+                pane.open_query(
+                    ItemPresentation {
+                        id: 99,
+                        kind: ItemKind::Query,
+                        title: "second.sql".into(),
+                        dirty: false,
+                        source: None,
+                    },
+                    editor,
+                    results,
+                    cx,
+                );
+            });
+        });
+        let (first_pane, second_pane, first_results, second_results) =
+            workspace.read_with(&cx, |shell, cx| {
+                (
+                    shell.panes[0].clone(),
+                    shell.panes[1].clone(),
+                    shell.panes[0].read(cx).active_results().unwrap(),
+                    shell.panes[1].read(cx).active_results().unwrap(),
+                )
+            });
+
+        first_pane.update(&mut cx, |_, cx| cx.emit(PaneEvent::FocusRequested));
+        cx.run_until_parked();
+        workspace.read_with(&cx, |shell, cx| {
+            assert_eq!(shell.active_pane, 0);
+            assert_eq!(shell.focused_pane_results(cx), Some(first_results.clone()));
+        });
+
+        second_pane.update(&mut cx, |_, cx| cx.emit(PaneEvent::FocusRequested));
+        cx.run_until_parked();
+        workspace.read_with(&cx, |shell, cx| {
+            assert_eq!(shell.active_pane, 1);
+            assert_eq!(shell.focused_pane_results(cx), Some(second_results));
         });
     }
 
