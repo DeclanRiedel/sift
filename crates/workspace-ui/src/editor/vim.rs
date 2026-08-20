@@ -10,7 +10,7 @@ use modalkit::{
         buffer::{CursorGroupId, EditBuffer},
         context::Resolve,
         cursor::Cursor,
-        store::Store,
+        store::SharedStore,
     },
     env::vim::{
         keybindings::{default_vim_keys, VimMachine},
@@ -38,7 +38,7 @@ pub(super) struct VimEngine {
     bindings: VimMachine<TerminalKey>,
     buffer: EditBuffer<EmptyInfo>,
     cursor_group: CursorGroupId,
-    store: Store<EmptyInfo>,
+    store: SharedStore<EmptyInfo>,
     viewport: ViewportContext<Cursor>,
     entered: String,
     /// Cursor after entering Insert. ModalKit moves left on an immediate Esc;
@@ -47,7 +47,16 @@ pub(super) struct VimEngine {
 }
 
 impl VimEngine {
+    #[cfg(test)]
     pub fn new(text: &str, cursor: usize) -> Self {
+        Self::with_store(
+            text,
+            cursor,
+            modalkit::editing::store::Store::default().shared(),
+        )
+    }
+
+    pub fn with_store(text: &str, cursor: usize, store: SharedStore<EmptyInfo>) -> Self {
         // ModalKit buffers always retain a final newline. Add a dedicated
         // sentinel newline so a user-authored trailing newline is preserved.
         let modal_text = format!("{text}\n");
@@ -58,7 +67,7 @@ impl VimEngine {
             bindings: default_vim_keys(),
             buffer,
             cursor_group,
-            store: Store::default(),
+            store,
             viewport: ViewportContext::default(),
             entered: String::new(),
             empty_insert_origin: None,
@@ -114,6 +123,10 @@ impl VimEngine {
         }
         self.bindings.input_key(event.into());
         let mut action_completed = false;
+        let store = self.store.clone();
+        let mut store = store
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         while let Some((action, context)) = self.bindings.pop() {
             action_completed = true;
             match action {
@@ -121,9 +134,9 @@ impl VimEngine {
                     text_changed |= editor_action_changes_text(&action, &context);
                     if !self.apply_compatibility_motion(&action, &context) {
                         let editor_context = (self.cursor_group, &self.viewport, &context);
-                        let _ =
-                            self.buffer
-                                .editor_command(&action, &editor_context, &mut self.store);
+                        let _ = self
+                            .buffer
+                            .editor_command(&action, &editor_context, &mut store);
                     }
                 }
                 Action::Jump(list, direction, count) => {
@@ -135,7 +148,7 @@ impl VimEngine {
                     let editor_context = (self.cursor_group, &self.viewport, &context);
                     let _ = self
                         .buffer
-                        .search(direction, count, &editor_context, &mut self.store);
+                        .search(direction, count, &editor_context, &mut store);
                 }
                 Action::Repeat(sequence) => self.bindings.repeat(sequence, Some(context)),
                 _ => {}
@@ -350,6 +363,19 @@ mod tests {
 
         assert_eq!(vim.input_text("2d").entered, "2d");
         assert_eq!(vim.input_text("d").entered, "");
+    }
+
+    #[test]
+    fn unnamed_register_is_shared_between_editors() {
+        let store = modalkit::editing::store::Store::<EmptyInfo>::default().shared();
+        let mut first = VimEngine::with_store("one\ntwo", 0, store.clone());
+        let mut second = VimEngine::with_store("alpha\nbeta", 0, store);
+
+        assert_eq!(first.input_text("yy").text, None);
+        assert_eq!(
+            second.input_text("p").text.as_deref(),
+            Some("alpha\none\nbeta")
+        );
     }
 
     #[test]

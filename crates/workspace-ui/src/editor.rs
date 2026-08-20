@@ -12,11 +12,25 @@ use gpui::{
     LayoutId, MouseButton, PaintQuad, Pixels, Role, ScrollHandle, ShapedLine, Style, TextRun,
     UTF16Selection, Window,
 };
+use modalkit::editing::{application::EmptyInfo, store::SharedStore};
 use sift_doc::{random_peer_id, TextReplica};
 use sift_ui::{ActiveTheme, Theme};
 
 mod vim;
 use self::vim::{VimEngine, VimSnapshot};
+
+struct GlobalVimStore(SharedStore<EmptyInfo>);
+
+impl gpui::Global for GlobalVimStore {}
+
+fn shared_vim_store(cx: &mut App) -> SharedStore<EmptyInfo> {
+    if let Some(store) = cx.try_global::<GlobalVimStore>() {
+        return store.0.clone();
+    }
+    let store = modalkit::editing::store::Store::default().shared();
+    cx.set_global(GlobalVimStore(store.clone()));
+    store
+}
 
 const EDITOR_LINE_HEIGHT: Pixels = px(20.);
 const BLOCK_CURSOR_FALLBACK_WIDTH: Pixels = px(7.);
@@ -681,6 +695,7 @@ pub struct QueryEditor {
     keymap: EditorKeymap,
     vim_mode: VimMode,
     vim_entered: String,
+    vim_store: SharedStore<EmptyInfo>,
     vim: Option<VimEngine>,
     cursor_blink: Entity<CursorBlink>,
     cursor_event_pending: bool,
@@ -699,6 +714,7 @@ impl QueryEditor {
     pub fn new(document: QueryDocument, cx: &mut Context<Self>) -> Self {
         let cursor_blink = cx.new(|_| CursorBlink::new());
         cx.observe(&cursor_blink, |_, _, cx| cx.notify()).detach();
+        let vim_store = shared_vim_store(cx);
         Self {
             focus_handle: cx.focus_handle(),
             document,
@@ -706,6 +722,7 @@ impl QueryEditor {
             keymap: EditorKeymap::Standard,
             vim_mode: VimMode::Insert,
             vim_entered: String::new(),
+            vim_store,
             vim: None,
             cursor_blink,
             cursor_event_pending: false,
@@ -760,8 +777,13 @@ impl QueryEditor {
             EditorKeymap::Vim => VimMode::Normal,
         };
         self.vim_entered.clear();
-        self.vim = (self.keymap == EditorKeymap::Vim)
-            .then(|| VimEngine::new(self.document.text(), self.document.cursor()));
+        self.vim = (self.keymap == EditorKeymap::Vim).then(|| {
+            VimEngine::with_store(
+                self.document.text(),
+                self.document.cursor(),
+                self.vim_store.clone(),
+            )
+        });
     }
 
     pub fn document(&self) -> &QueryDocument {
