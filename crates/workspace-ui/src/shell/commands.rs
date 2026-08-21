@@ -15,6 +15,7 @@ pub enum CommandId {
     FormatSql,
     ApplySqlQuickFix,
     FindSqlUsages,
+    SearchSchema,
     NextSqlProblem,
     SplitPane,
     FocusNextPane,
@@ -44,6 +45,7 @@ impl CommandId {
             Self::FormatSql => "query.format",
             Self::ApplySqlQuickFix => "query.quick-fix",
             Self::FindSqlUsages => "query.find-usages",
+            Self::SearchSchema => "database.search-schema",
             Self::NextSqlProblem => "query.next-problem",
             Self::SplitPane => "workspace.split-pane",
             Self::FocusNextPane => "workspace.focus-next-pane",
@@ -69,6 +71,7 @@ enum AvailabilityRule {
     MultiplePanes,
     EditableInstance,
     RunningQuery,
+    ConnectedDatabase,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -86,6 +89,7 @@ pub struct CommandContext {
     pub pane_count: usize,
     pub has_editable_instance: bool,
     pub active_query_running: bool,
+    pub database_connected: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -128,10 +132,14 @@ impl CommandRegistry {
                 AvailabilityRule::RunningQuery if !context.active_query_running => {
                     Some("Active query is not running")
                 }
+                AvailabilityRule::ConnectedDatabase if !context.database_connected => {
+                    Some("No database connected")
+                }
                 AvailabilityRule::ActiveItem
                 | AvailabilityRule::MultiplePanes
                 | AvailabilityRule::EditableInstance
-                | AvailabilityRule::RunningQuery => None,
+                | AvailabilityRule::RunningQuery
+                | AvailabilityRule::ConnectedDatabase => None,
             },
         }
     }
@@ -215,6 +223,13 @@ const DEFINITIONS: &[CommandDefinition] = &[
         "Shift+F12",
         true,
         AvailabilityRule::ActiveItem,
+    ),
+    command(
+        CommandId::SearchSchema,
+        "Search Database Schema…",
+        "",
+        true,
+        AvailabilityRule::ConnectedDatabase,
     ),
     command(
         CommandId::NextSqlProblem,
@@ -353,6 +368,7 @@ mod tests {
             pane_count: 1,
             has_editable_instance: false,
             active_query_running: false,
+            database_connected: false,
         };
         assert_eq!(
             CommandRegistry::spec(CommandId::ExecuteStatement, empty).disabled_reason,
@@ -371,10 +387,22 @@ mod tests {
             CommandRegistry::spec(CommandId::CancelExecution, empty).disabled_reason,
             Some("Active query is not running")
         );
+        assert_eq!(
+            CommandRegistry::spec(CommandId::SearchSchema, empty).disabled_reason,
+            Some("No database connected")
+        );
         assert!(CommandRegistry::spec(
             CommandId::CancelExecution,
             CommandContext {
                 active_query_running: true,
+                ..empty
+            }
+        )
+        .enabled());
+        assert!(CommandRegistry::spec(
+            CommandId::SearchSchema,
+            CommandContext {
+                database_connected: true,
                 ..empty
             }
         )

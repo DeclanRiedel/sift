@@ -455,6 +455,8 @@ pub enum StreamProgress {
 pub enum ResultsEvent {
     /// Discard the retained window and consume the held page onwards.
     LoadNextWindowRequested,
+    /// Present this live Data grid in the workspace's near-fullscreen modal.
+    OpenDataModalRequested,
     /// Explain the editor's targeted statement. Analyze is explicit because it
     /// executes the statement to collect runtime counters.
     ExplainRequested { analyze: bool },
@@ -497,6 +499,7 @@ pub struct ResultsView {
     /// A page is being held because the window is full.
     window_held: bool,
     explain: ExplainState,
+    large_view: bool,
 }
 
 impl ResultsView {
@@ -522,6 +525,7 @@ impl ResultsView {
             window_start: 0,
             window_held: false,
             explain: ExplainState::Empty,
+            large_view: false,
         }
     }
 
@@ -531,6 +535,13 @@ impl ResultsView {
 
     pub fn active_tab(&self) -> ResultTab {
         self.tab
+    }
+
+    pub fn set_large_view(&mut self, active: bool, cx: &mut Context<Self>) {
+        if self.large_view != active {
+            self.large_view = active;
+            cx.notify();
+        }
     }
 
     #[cfg(test)]
@@ -1306,17 +1317,44 @@ impl ResultsView {
                             .then(|| Badge::new(self.state.status_label())),
                     )
                     .children((self.tab == ResultTab::Data).then(|| {
-                        IconButton::new(
-                            "copy-result-cell",
-                            IconName::Copy,
-                            "Copy highlighted fields",
-                        )
-                        .square(px(24.))
-                        .icon_size(13.)
-                        .tooltip("Copy highlighted fields")
-                        .on_click(cx.listener(|view, _, window, cx| {
-                            view.copy_selected_cell(&CopySelectedCell, window, cx)
-                        }))
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_1()
+                            .children((!self.large_view).then(|| {
+                                div()
+                                    .debug_selector(|| "open-result-data-modal".into())
+                                    .child(
+                                        IconButton::new(
+                                            "open-result-data-modal",
+                                            IconName::Maximize,
+                                            "Open Data in large view",
+                                        )
+                                        .square(px(24.))
+                                        .icon_size(13.)
+                                        .tooltip("Open Data in large view")
+                                        .on_click(
+                                            cx.listener(|_, _, _, cx| {
+                                                cx.emit(ResultsEvent::OpenDataModalRequested)
+                                            }),
+                                        ),
+                                    )
+                            }))
+                            .child(
+                                IconButton::new(
+                                    "copy-result-cell",
+                                    IconName::Copy,
+                                    "Copy highlighted fields",
+                                )
+                                .square(px(24.))
+                                .icon_size(13.)
+                                .tooltip("Copy highlighted fields")
+                                .on_click(cx.listener(
+                                    |view, _, window, cx| {
+                                        view.copy_selected_cell(&CopySelectedCell, window, cx)
+                                    },
+                                )),
+                            )
                     })),
             )
     }
@@ -1374,17 +1412,38 @@ impl ResultsView {
                             .then(|| div().truncate().child(self.state.status_label())),
                     )
                     .children((self.tab == ResultTab::Data).then(|| {
-                        IconButton::new(
-                            "copy-result-cell-vertical",
-                            IconName::Copy,
-                            "Copy highlighted fields",
-                        )
-                        .icon_size(13.)
-                        .text("Copy")
-                        .tooltip("Copy highlighted fields")
-                        .on_click(cx.listener(|view, _, window, cx| {
-                            view.copy_selected_cell(&CopySelectedCell, window, cx)
-                        }))
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .children((!self.large_view).then(|| {
+                                IconButton::new(
+                                    "open-result-data-modal-vertical",
+                                    IconName::Maximize,
+                                    "Open Data in large view",
+                                )
+                                .icon_size(13.)
+                                .text("Expand")
+                                .tooltip("Open Data in large view")
+                                .on_click(cx.listener(
+                                    |_, _, _, cx| cx.emit(ResultsEvent::OpenDataModalRequested),
+                                ))
+                            }))
+                            .child(
+                                IconButton::new(
+                                    "copy-result-cell-vertical",
+                                    IconName::Copy,
+                                    "Copy highlighted fields",
+                                )
+                                .icon_size(13.)
+                                .text("Copy")
+                                .tooltip("Copy highlighted fields")
+                                .on_click(cx.listener(
+                                    |view, _, window, cx| {
+                                        view.copy_selected_cell(&CopySelectedCell, window, cx)
+                                    },
+                                )),
+                            )
                     })),
             )
     }

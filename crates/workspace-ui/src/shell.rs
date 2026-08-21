@@ -640,6 +640,8 @@ actions!(
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Modal {
     CommandPalette,
+    SchemaSearch,
+    DataResults(u64),
     ServerPicker,
     ServerConnection,
     InstanceSetup,
@@ -872,6 +874,9 @@ pub enum PaneEvent {
     LoadNextRowWindowRequested {
         item_id: u64,
     },
+    OpenDataResultsRequested {
+        item_id: u64,
+    },
     ExplainRequested {
         item_id: u64,
         sql: String,
@@ -950,57 +955,15 @@ enum ConnectionSchemaState {
     },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum SchemaSearchFilter {
-    All,
-    Relations,
-    Routines,
-}
-
-impl SchemaSearchFilter {
-    const ALL: [Self; 3] = [Self::All, Self::Relations, Self::Routines];
-
-    fn label(self) -> &'static str {
-        match self {
-            Self::All => "All",
-            Self::Relations => "Relations",
-            Self::Routines => "Routines",
-        }
-    }
-
-    fn kinds(self) -> Option<Vec<sift_protocol::ObjectKind>> {
-        match self {
-            Self::All => None,
-            Self::Relations => Some(vec![
-                sift_protocol::ObjectKind::Table,
-                sift_protocol::ObjectKind::View,
-                sift_protocol::ObjectKind::MaterializedView,
-                sift_protocol::ObjectKind::ForeignTable,
-                sift_protocol::ObjectKind::PartitionedTable,
-            ]),
-            Self::Routines => Some(vec![
-                sift_protocol::ObjectKind::TableValuedFunction,
-                sift_protocol::ObjectKind::ScalarFunction,
-                sift_protocol::ObjectKind::Procedure,
-            ]),
-        }
-    }
-}
-
 #[derive(Debug, Clone)]
 enum SchemaSearchState {
     Idle,
-    Loading {
-        generation: u64,
-    },
+    Loading,
     Ready {
         generation: u64,
         response: Box<sift_protocol::SchemaSearchResponse>,
     },
-    Failed {
-        generation: u64,
-        message: String,
-    },
+    Failed(String),
 }
 
 #[derive(Debug)]
@@ -1282,6 +1245,9 @@ pub struct Pane {
     tab_bar_drag_bounds: Option<Bounds<Pixels>>,
     /// Dirty-close confirmation belongs to its tab and is rendered inline.
     pending_close_item: Option<u64>,
+    /// The live result entity is mounted in the workspace modal while this is
+    /// set, so it never renders twice with one scroll handle.
+    expanded_result_item: Option<u64>,
 }
 
 impl Pane {
@@ -1392,6 +1358,7 @@ impl Pane {
             suppress_tab_drag_preview: false,
             tab_bar_drag_bounds: None,
             pending_close_item: None,
+            expanded_result_item: None,
         }
     }
 
@@ -1410,6 +1377,9 @@ impl Pane {
         match event {
             ResultsEvent::LoadNextWindowRequested => {
                 cx.emit(PaneEvent::LoadNextRowWindowRequested { item_id })
+            }
+            ResultsEvent::OpenDataModalRequested => {
+                cx.emit(PaneEvent::OpenDataResultsRequested { item_id })
             }
             ResultsEvent::ExplainRequested { analyze } => {
                 let sql = self
@@ -2695,38 +2665,47 @@ impl gpui::Render for Pane {
                                         handle.h_full().w(px(1.0))
                                     })
                                     .child(resize_hitbox);
-                                let split = match placement {
-                                    ResultPlacement::Bottom => div()
+                                let split = if self.expanded_result_item == Some(item_id) {
+                                    div()
                                         .size_full()
                                         .min_h_0()
-                                        .flex()
-                                        .flex_col()
-                                        .child(div().flex_1().min_h_0().child(editor.clone()))
-                                        .child(handle)
-                                        .child(
-                                            div()
-                                                .h(px(extent))
-                                                .flex_none()
-                                                .flex()
-                                                .min_h_0()
-                                                .child(result.clone()),
-                                        )
-                                        .into_any_element(),
-                                    ResultPlacement::Right => div()
-                                        .size_full()
                                         .min_w_0()
-                                        .flex()
-                                        .child(div().flex_1().min_w_0().child(editor.clone()))
-                                        .child(handle)
-                                        .child(
-                                            div()
-                                                .w(px(extent))
-                                                .flex_none()
-                                                .flex()
-                                                .min_w_0()
-                                                .child(result.clone()),
-                                        )
-                                        .into_any_element(),
+                                        .child(editor.clone())
+                                        .into_any_element()
+                                } else {
+                                    match placement {
+                                        ResultPlacement::Bottom => div()
+                                            .size_full()
+                                            .min_h_0()
+                                            .flex()
+                                            .flex_col()
+                                            .child(div().flex_1().min_h_0().child(editor.clone()))
+                                            .child(handle)
+                                            .child(
+                                                div()
+                                                    .h(px(extent))
+                                                    .flex_none()
+                                                    .flex()
+                                                    .min_h_0()
+                                                    .child(result.clone()),
+                                            )
+                                            .into_any_element(),
+                                        ResultPlacement::Right => div()
+                                            .size_full()
+                                            .min_w_0()
+                                            .flex()
+                                            .child(div().flex_1().min_w_0().child(editor.clone()))
+                                            .child(handle)
+                                            .child(
+                                                div()
+                                                    .w(px(extent))
+                                                    .flex_none()
+                                                    .flex()
+                                                    .min_w_0()
+                                                    .child(result.clone()),
+                                            )
+                                            .into_any_element(),
+                                    }
                                 };
                                 body.children(database_view_switch).child(split)
                             }
@@ -2903,6 +2882,8 @@ pub struct WorkspaceShell {
     instance_configuration_editor: Entity<QueryEditor>,
     palette_selected: usize,
     palette_scroll_handle: UniformListScrollHandle,
+    schema_search_selected: usize,
+    schema_search_scroll_handle: UniformListScrollHandle,
     dark_theme: bool,
     settings: UserSettings,
     settings_store: Option<Arc<SettingsStore>>,
@@ -2971,7 +2952,6 @@ pub struct WorkspaceShell {
     account_error: Option<String>,
     connection_status: ConnectionStatus,
     connection_schema: ConnectionSchemaState,
-    schema_search_filter: SchemaSearchFilter,
     schema_search_generation: u64,
     schema_search_state: SchemaSearchState,
     table_definitions: HashMap<u64, TableDefinitionState>,
@@ -3159,6 +3139,10 @@ impl WorkspaceShell {
         })
         .detach();
         cx.observe(&schema_search_input, |shell, _, cx| {
+            shell.schema_search_selected = 0;
+            shell
+                .schema_search_scroll_handle
+                .scroll_to_item(0, ScrollStrategy::Top);
             shell.request_schema_search(cx);
         })
         .detach();
@@ -3235,6 +3219,8 @@ impl WorkspaceShell {
             instance_configuration_editor,
             palette_selected: 0,
             palette_scroll_handle: UniformListScrollHandle::new(),
+            schema_search_selected: 0,
+            schema_search_scroll_handle: UniformListScrollHandle::new(),
             dark_theme: state.dark_theme,
             next_toast_id: 1,
             settings,
@@ -3297,7 +3283,6 @@ impl WorkspaceShell {
             account_error: None,
             connection_status: ConnectionStatus::Disconnected,
             connection_schema: ConnectionSchemaState::Unavailable,
-            schema_search_filter: SchemaSearchFilter::All,
             schema_search_generation: 0,
             schema_search_state: SchemaSearchState::Idle,
             table_definitions: HashMap::new(),
@@ -3344,6 +3329,10 @@ impl WorkspaceShell {
                 .get(self.active_pane)
                 .and_then(|pane| pane.read(cx).active_item())
                 .is_some_and(|item| self.running_queries.contains_key(&item.id)),
+            database_connected: matches!(
+                self.connection_status,
+                ConnectionStatus::Connected { .. }
+            ),
         }
     }
 
@@ -4237,10 +4226,7 @@ impl WorkspaceShell {
                 message,
             } => {
                 if generation == self.schema_search_generation {
-                    self.schema_search_state = SchemaSearchState::Failed {
-                        generation,
-                        message,
-                    };
+                    self.schema_search_state = SchemaSearchState::Failed(message);
                     cx.notify();
                 }
             }
@@ -4972,7 +4958,7 @@ impl WorkspaceShell {
         }
         let request = sift_protocol::SchemaSearchRequest {
             query,
-            kinds: self.schema_search_filter.kinds(),
+            kinds: None,
             limit: Some(80),
         };
         let sent = self.executor_sender.as_ref().is_some_and(|sender| {
@@ -4984,22 +4970,11 @@ impl WorkspaceShell {
                 .is_ok()
         });
         self.schema_search_state = if sent {
-            SchemaSearchState::Loading { generation }
+            SchemaSearchState::Loading
         } else {
-            SchemaSearchState::Failed {
-                generation,
-                message: "Database executor is unavailable".into(),
-            }
+            SchemaSearchState::Failed("Database executor is unavailable".into())
         };
         cx.notify();
-    }
-
-    fn set_schema_search_filter(&mut self, filter: SchemaSearchFilter, cx: &mut Context<Self>) {
-        if self.schema_search_filter == filter {
-            return;
-        }
-        self.schema_search_filter = filter;
-        self.request_schema_search(cx);
     }
 
     fn disconnect(&mut self, cx: &mut Context<Self>) {
@@ -5804,6 +5779,97 @@ impl WorkspaceShell {
         cx.notify();
     }
 
+    fn open_schema_search_target(
+        &mut self,
+        target: DatabaseObjectTarget,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if matches!(
+            target.object_kind,
+            sift_protocol::ObjectKind::Table
+                | sift_protocol::ObjectKind::View
+                | sift_protocol::ObjectKind::MaterializedView
+                | sift_protocol::ObjectKind::ForeignTable
+                | sift_protocol::ObjectKind::PartitionedTable
+        ) {
+            self.open_table_preview(target, window, cx);
+            return;
+        }
+
+        let source = DatabaseObjectSource {
+            instance_id: self
+                .selected_instance_id
+                .clone()
+                .unwrap_or_else(|| "local".into()),
+            tenant_id: target.connection.tenant_id,
+            profile_id: target.connection.id,
+            profile_name: target.connection.name.clone(),
+            provider_id: target.connection.provider_id,
+            catalog: Some(target.catalog),
+            schema: target.schema.clone(),
+            object: target.object.clone(),
+            object_kind: target.object_kind,
+            last_refreshed_at_ms: None,
+        };
+        if self.focus_open_database_item(&source, window, cx) {
+            return;
+        }
+        let item_id = self.next_id;
+        self.next_id += 1;
+        let title = format!("{}.{}", source.schema, source.object);
+        let keymap = if self.vim_mode_default() {
+            EditorKeymap::Vim
+        } else {
+            EditorKeymap::Standard
+        };
+        let editor = cx.new(|cx| {
+            QueryEditor::new(
+                QueryDocument::with_random_peer("-- Loading canonical object DDL…"),
+                cx,
+            )
+            .with_keymap(keymap)
+        });
+        let results = cx.new(ResultsView::new);
+        if let Some(pane) = self.panes.get(self.active_pane) {
+            pane.update(cx, |pane, cx| {
+                pane.open_query(
+                    ItemPresentation {
+                        id: item_id,
+                        kind: ItemKind::Query,
+                        title,
+                        dirty: false,
+                        source: Some(ItemSource::DatabaseObject(source.clone())),
+                        last_result: None,
+                    },
+                    editor,
+                    results,
+                    cx,
+                );
+                pane.show_database_item_view(
+                    item_id,
+                    DatabaseItemView::Ddl,
+                    Some("-- Loading canonical object DDL…".into()),
+                    cx,
+                );
+            });
+        }
+        if let Some(sender) = &self.executor_sender {
+            if sender
+                .send(ExecutorCommand::LoadObjectDdl {
+                    item_id,
+                    source: source.clone(),
+                })
+                .is_ok()
+            {
+                self.pending_object_ddl.insert(item_id);
+            }
+        }
+        self.focus_active_pane(window, cx);
+        self.persist(cx);
+        cx.notify();
+    }
+
     fn open_room_document(
         &mut self,
         document: &DocumentNavEntry,
@@ -5909,7 +5975,15 @@ impl WorkspaceShell {
         self.active_pane = pane_index;
         self.panes[pane_index].update(cx, |pane, _| pane.activate_item(item_index, true));
         self.focus_active_pane(window, cx);
-        if !self.table_definitions.contains_key(&item_id) {
+        if matches!(
+            source.object_kind,
+            sift_protocol::ObjectKind::Table
+                | sift_protocol::ObjectKind::View
+                | sift_protocol::ObjectKind::MaterializedView
+                | sift_protocol::ObjectKind::ForeignTable
+                | sift_protocol::ObjectKind::PartitionedTable
+        ) && !self.table_definitions.contains_key(&item_id)
+        {
             self.request_table_definition(item_id, source.clone(), cx);
         }
         cx.notify();
@@ -7067,6 +7141,10 @@ impl WorkspaceShell {
             PaneEvent::LoadNextRowWindowRequested { item_id } => {
                 self.load_next_row_window(*item_id, cx)
             }
+            PaneEvent::OpenDataResultsRequested { item_id } => {
+                self.active_pane = index;
+                self.open_data_results_modal(emitter, *item_id, window, cx);
+            }
             PaneEvent::ExplainRequested {
                 item_id,
                 sql,
@@ -7574,6 +7652,73 @@ impl WorkspaceShell {
         cx.notify();
     }
 
+    fn open_schema_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !matches!(self.connection_status, ConnectionStatus::Connected { .. }) {
+            self.show_toast(
+                "Connect to a database before searching its schema".into(),
+                cx,
+            );
+            return;
+        }
+        self.modal = Some(Modal::SchemaSearch);
+        self.schema_search_selected = 0;
+        self.schema_search_scroll_handle
+            .scroll_to_item(0, ScrollStrategy::Top);
+        self.schema_search_input
+            .update(cx, |input, cx| input.set_text("", cx));
+        self.schema_search_input.focus_handle(cx).focus(window, cx);
+        cx.notify();
+    }
+
+    fn open_data_results_modal(
+        &mut self,
+        pane: &Entity<Pane>,
+        item_id: u64,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(results) = pane.read(cx).results.get(&item_id).cloned() else {
+            return;
+        };
+        for candidate in &self.panes {
+            candidate.update(cx, |candidate, cx| {
+                if let Some(previous) = candidate.expanded_result_item {
+                    if let Some(results) = candidate.results.get(&previous) {
+                        results.update(cx, |results, cx| results.set_large_view(false, cx));
+                    }
+                }
+                candidate.expanded_result_item = None;
+                cx.notify();
+            });
+        }
+        pane.update(cx, |pane, cx| {
+            pane.expanded_result_item = Some(item_id);
+            cx.notify();
+        });
+        results.update(cx, |results, cx| results.set_large_view(true, cx));
+        self.modal = Some(Modal::DataResults(item_id));
+        results.focus_handle(cx).focus(window, cx);
+        cx.notify();
+    }
+
+    fn data_results_modal_target(
+        &self,
+        item_id: u64,
+        cx: &App,
+    ) -> Option<(SharedString, Entity<ResultsView>)> {
+        self.panes.iter().find_map(|pane| {
+            let pane = pane.read(cx);
+            let title = pane
+                .items
+                .iter()
+                .find(|item| item.id == item_id)?
+                .title
+                .clone();
+            let results = pane.results.get(&item_id)?.clone();
+            Some((title.into(), results))
+        })
+    }
+
     fn open_server_connection(
         &mut self,
         _: &OpenServerConnection,
@@ -8038,36 +8183,112 @@ impl WorkspaceShell {
             .collect()
     }
 
-    fn palette_up(&mut self, _: &PaletteUp, _: &mut Window, cx: &mut Context<Self>) {
-        if self.modal != Some(Modal::CommandPalette) {
-            return;
+    fn schema_palette_hits(&self) -> Vec<sift_protocol::SearchHit> {
+        match &self.schema_search_state {
+            SchemaSearchState::Ready {
+                generation,
+                response,
+            } if *generation == self.schema_search_generation => response.hits.clone(),
+            _ => Vec::new(),
         }
-        self.palette_selected = self.palette_selected.saturating_sub(1);
-        self.palette_scroll_handle
-            .scroll_to_item(self.palette_selected, ScrollStrategy::Nearest);
+    }
+
+    fn schema_search_target(&self, hit: &sift_protocol::SearchHit) -> Option<DatabaseObjectTarget> {
+        let profile_id = match self.connection_status {
+            ConnectionStatus::Connected { profile_id, .. } => profile_id,
+            _ => return None,
+        };
+        let connection = self
+            .lifecycle
+            .tenants
+            .iter()
+            .flat_map(|tenant| tenant.connections.iter())
+            .find(|connection| connection.id == profile_id)?
+            .clone();
+        let fallback_catalog = match &self.connection_schema {
+            ConnectionSchemaState::Ready {
+                profile_id: ready,
+                snapshot,
+            } if *ready == profile_id => snapshot.trees.first().map(|tree| tree.name.clone()),
+            _ => None,
+        };
+        let object_kind = match hit.target {
+            sift_protocol::SearchTarget::Object { object_kind } => object_kind,
+            sift_protocol::SearchTarget::Column => {
+                hit.path.kind.unwrap_or(sift_protocol::ObjectKind::Table)
+            }
+        };
+        Some(DatabaseObjectTarget {
+            connection,
+            catalog: hit
+                .path
+                .catalog
+                .clone()
+                .or(fallback_catalog)
+                .unwrap_or_default(),
+            schema: hit.path.schema.clone().unwrap_or_default(),
+            object: hit.path.name.clone(),
+            object_kind,
+        })
+    }
+
+    fn palette_up(&mut self, _: &PaletteUp, _: &mut Window, cx: &mut Context<Self>) {
+        match self.modal {
+            Some(Modal::CommandPalette) => {
+                self.palette_selected = self.palette_selected.saturating_sub(1);
+                self.palette_scroll_handle
+                    .scroll_to_item(self.palette_selected, ScrollStrategy::Nearest);
+            }
+            Some(Modal::SchemaSearch) => {
+                self.schema_search_selected = self.schema_search_selected.saturating_sub(1);
+                self.schema_search_scroll_handle
+                    .scroll_to_item(self.schema_search_selected, ScrollStrategy::Nearest);
+            }
+            _ => return,
+        }
         cx.notify();
     }
 
     fn palette_down(&mut self, _: &PaletteDown, _: &mut Window, cx: &mut Context<Self>) {
-        if self.modal != Some(Modal::CommandPalette) {
-            return;
+        match self.modal {
+            Some(Modal::CommandPalette) => {
+                let last = self.filtered_commands(cx).len().saturating_sub(1);
+                self.palette_selected = (self.palette_selected + 1).min(last);
+                self.palette_scroll_handle
+                    .scroll_to_item(self.palette_selected, ScrollStrategy::Nearest);
+            }
+            Some(Modal::SchemaSearch) => {
+                let last = self.schema_palette_hits().len().saturating_sub(1);
+                self.schema_search_selected = (self.schema_search_selected + 1).min(last);
+                self.schema_search_scroll_handle
+                    .scroll_to_item(self.schema_search_selected, ScrollStrategy::Nearest);
+            }
+            _ => return,
         }
-        let last = self.filtered_commands(cx).len().saturating_sub(1);
-        self.palette_selected = (self.palette_selected + 1).min(last);
-        self.palette_scroll_handle
-            .scroll_to_item(self.palette_selected, ScrollStrategy::Nearest);
         cx.notify();
     }
 
     fn palette_confirm(&mut self, _: &PaletteConfirm, window: &mut Window, cx: &mut Context<Self>) {
-        if self.modal != Some(Modal::CommandPalette) {
-            return;
-        }
-        let commands = self.filtered_commands(cx);
-        if let Some(command) = commands.get(self.palette_selected) {
-            if command.enabled() {
-                self.run_command(command.id, window, cx);
+        match self.modal {
+            Some(Modal::CommandPalette) => {
+                let commands = self.filtered_commands(cx);
+                if let Some(command) = commands.get(self.palette_selected) {
+                    if command.enabled() {
+                        self.run_command(command.id, window, cx);
+                    }
+                }
             }
+            Some(Modal::SchemaSearch) => {
+                let hit = self
+                    .schema_palette_hits()
+                    .get(self.schema_search_selected)
+                    .cloned();
+                if let Some(target) = hit.as_ref().and_then(|hit| self.schema_search_target(hit)) {
+                    self.dismiss_modal(&DismissModal, window, cx);
+                    self.open_schema_search_target(target, window, cx);
+                }
+            }
+            _ => {}
         }
     }
 
@@ -8083,6 +8304,23 @@ impl WorkspaceShell {
         }
         if self.modal == Some(Modal::DatabaseConnection) {
             self.database_password_input
+                .update(cx, |input, cx| input.set_text("", cx));
+        }
+        if matches!(self.modal, Some(Modal::DataResults(_))) {
+            for pane in &self.panes {
+                pane.update(cx, |pane, cx| {
+                    if let Some(item_id) = pane.expanded_result_item {
+                        if let Some(results) = pane.results.get(&item_id) {
+                            results.update(cx, |results, cx| results.set_large_view(false, cx));
+                        }
+                    }
+                    pane.expanded_result_item = None;
+                    cx.notify();
+                });
+            }
+        }
+        if self.modal == Some(Modal::SchemaSearch) {
+            self.schema_search_input
                 .update(cx, |input, cx| input.set_text("", cx));
         }
         self.modal = None;
@@ -8124,6 +8362,7 @@ impl WorkspaceShell {
             CommandId::FindSqlUsages => {
                 self.dispatch_active_editor_action(&crate::editor::FindUsages, window, cx)
             }
+            CommandId::SearchSchema => self.open_schema_search(window, cx),
             CommandId::NextSqlProblem => {
                 self.dispatch_active_editor_action(&crate::editor::GoToNextDiagnostic, window, cx)
             }
@@ -8773,9 +9012,6 @@ impl WorkspaceShell {
                 profile_id: ready,
                 snapshot,
             } if *ready == profile_id => {
-                if !self.schema_search_input.read(cx).text().trim().is_empty() {
-                    return self.schema_search_rows(connection, snapshot, colors, cx);
-                }
                 let mut rows = Vec::new();
                 for (catalog_index, catalog) in snapshot.trees.iter().enumerate() {
                     let catalog_key = (profile_id, catalog.name.clone());
@@ -9015,183 +9251,6 @@ impl WorkspaceShell {
             }
             _ => Vec::new(),
         }
-    }
-
-    fn schema_search_rows(
-        &self,
-        connection: &ConnectionNavEntry,
-        snapshot: &sift_protocol::SchemaSnapshot,
-        colors: sift_ui::ThemeColors,
-        cx: &mut Context<Self>,
-    ) -> Vec<gpui::AnyElement> {
-        let status_row = |message: String, color: Hsla| {
-            div()
-                .mx_2()
-                .pl(tree_indent(2))
-                .pr_2()
-                .min_h(cx.theme().metrics.row_height)
-                .flex()
-                .items_center()
-                .text_xs()
-                .text_color(color)
-                .child(message)
-                .into_any_element()
-        };
-        let SchemaSearchState::Ready {
-            generation,
-            response,
-        } = &self.schema_search_state
-        else {
-            return match &self.schema_search_state {
-                SchemaSearchState::Loading { generation } => vec![status_row(
-                    format!("Searching schema… #{generation}"),
-                    colors.muted_text,
-                )],
-                SchemaSearchState::Failed {
-                    generation,
-                    message,
-                } => vec![status_row(
-                    format!("Search #{generation} failed: {message}"),
-                    colors.danger,
-                )],
-                SchemaSearchState::Idle | SchemaSearchState::Ready { .. } => Vec::new(),
-            };
-        };
-        if *generation != self.schema_search_generation {
-            return vec![status_row("Searching schema…".into(), colors.muted_text)];
-        }
-        let hits = response
-            .hits
-            .iter()
-            .filter(|hit| match (self.schema_search_filter, &hit.target) {
-                (SchemaSearchFilter::All, _) => true,
-                (SchemaSearchFilter::Relations, sift_protocol::SearchTarget::Column) => true,
-                (
-                    SchemaSearchFilter::Relations,
-                    sift_protocol::SearchTarget::Object { object_kind },
-                ) => matches!(
-                    object_kind,
-                    sift_protocol::ObjectKind::Table
-                        | sift_protocol::ObjectKind::View
-                        | sift_protocol::ObjectKind::MaterializedView
-                        | sift_protocol::ObjectKind::ForeignTable
-                        | sift_protocol::ObjectKind::PartitionedTable
-                ),
-                (
-                    SchemaSearchFilter::Routines,
-                    sift_protocol::SearchTarget::Object { object_kind },
-                ) => matches!(
-                    object_kind,
-                    sift_protocol::ObjectKind::TableValuedFunction
-                        | sift_protocol::ObjectKind::ScalarFunction
-                        | sift_protocol::ObjectKind::Procedure
-                ),
-                (SchemaSearchFilter::Routines, sift_protocol::SearchTarget::Column) => false,
-            })
-            .collect::<Vec<_>>();
-        if hits.is_empty() {
-            return vec![status_row(
-                "No matching schema objects".into(),
-                colors.muted_text,
-            )];
-        }
-        let fallback_catalog = snapshot.trees.first().map(|tree| tree.name.clone());
-        hits.into_iter()
-            .enumerate()
-            .map(|(index, hit)| {
-                let object_kind = match hit.target {
-                    sift_protocol::SearchTarget::Object { object_kind } => object_kind,
-                    sift_protocol::SearchTarget::Column => {
-                        hit.path.kind.unwrap_or(sift_protocol::ObjectKind::Table)
-                    }
-                };
-                let can_preview = matches!(
-                    object_kind,
-                    sift_protocol::ObjectKind::Table
-                        | sift_protocol::ObjectKind::View
-                        | sift_protocol::ObjectKind::MaterializedView
-                        | sift_protocol::ObjectKind::ForeignTable
-                        | sift_protocol::ObjectKind::PartitionedTable
-                );
-                let target = DatabaseObjectTarget {
-                    connection: connection.clone(),
-                    catalog: hit
-                        .path
-                        .catalog
-                        .clone()
-                        .or_else(|| fallback_catalog.clone())
-                        .unwrap_or_default(),
-                    schema: hit.path.schema.clone().unwrap_or_default(),
-                    object: hit.path.name.clone(),
-                    object_kind,
-                };
-                let detail = match (&hit.column, &hit.type_display) {
-                    (Some(column), Some(type_name)) => Some(format!("{column} · {type_name}")),
-                    (Some(column), None) => Some(column.clone()),
-                    _ => None,
-                };
-                div()
-                    .id(("schema-search-hit", index))
-                    .mx_2()
-                    .min_h(cx.theme().metrics.row_height)
-                    .pl(tree_indent(2))
-                    .pr_2()
-                    .py_1()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .rounded_sm()
-                    .tab_index(if can_preview { 0 } else { -1 })
-                    .role(Role::Button)
-                    .aria_label(format!("Open {}", hit.display))
-                    .text_color(if can_preview {
-                        colors.text
-                    } else {
-                        colors.muted_text
-                    })
-                    .when(can_preview, |row| {
-                        let click_target = target.clone();
-                        let key_target = target.clone();
-                        row.cursor_pointer()
-                            .hover(|row| row.bg(colors.hovered_surface))
-                            .focus(|row| row.bg(colors.hovered_surface))
-                            .on_click(cx.listener(move |shell, _, window, cx| {
-                                shell.open_table_preview(click_target.clone(), window, cx)
-                            }))
-                            .on_key_down(cx.listener(
-                                move |shell, event: &gpui::KeyDownEvent, window, cx| {
-                                    if !event.keystroke.modifiers.modified()
-                                        && matches!(event.keystroke.key.as_str(), "enter" | "space")
-                                    {
-                                        shell.open_table_preview(key_target.clone(), window, cx);
-                                        cx.stop_propagation();
-                                    }
-                                },
-                            ))
-                    })
-                    .child(icon(
-                        schema_object_kind_icon(object_kind),
-                        colors.muted_text,
-                        12.,
-                    ))
-                    .child(
-                        div()
-                            .min_w_0()
-                            .flex_1()
-                            .flex()
-                            .flex_col()
-                            .child(div().truncate().child(hit.display.clone()))
-                            .children(detail.map(|detail| {
-                                div()
-                                    .truncate()
-                                    .text_xs()
-                                    .text_color(colors.muted_text)
-                                    .child(detail)
-                            })),
-                    )
-                    .into_any_element()
-            })
-            .collect()
     }
 
     fn render_result_fields_inspector(
@@ -10496,41 +10555,6 @@ impl WorkspaceShell {
             .when(
                 dock.id == DockId::Left && self.active_left_panel == LeftPanel::Connections,
                 |dock_view| {
-                let filter_buttons = SchemaSearchFilter::ALL.into_iter().enumerate().map(|(index, filter)| {
-                    let selected = self.schema_search_filter == filter;
-                    div()
-                        .id(("schema-search-filter", index))
-                        .h(px(24.))
-                        .px_2()
-                        .flex()
-                        .items_center()
-                        .rounded_sm()
-                        .tab_index(0)
-                        .role(Role::Button)
-                        .aria_label(format!("Filter schema search by {}", filter.label()))
-                        .bg(if selected {
-                            colors.selected_surface
-                        } else {
-                            colors.panel
-                        })
-                        .text_xs()
-                        .text_color(if selected { colors.text } else { colors.muted_text })
-                        .hover(|button| button.bg(colors.hovered_surface).text_color(colors.text))
-                        .focus(|button| button.bg(colors.hovered_surface))
-                        .on_click(cx.listener(move |shell, _, _, cx| {
-                            shell.set_schema_search_filter(filter, cx)
-                        }))
-                        .on_key_down(cx.listener(
-                            move |shell, event: &gpui::KeyDownEvent, _, cx| {
-                                if !event.keystroke.modifiers.modified()
-                                    && matches!(event.keystroke.key.as_str(), "enter" | "space")
-                                {
-                                    shell.set_schema_search_filter(filter, cx);
-                                    cx.stop_propagation();
-                                }
-                            },
-                        ))
-                }).collect::<Vec<_>>();
                 dock_view.child(
                     div()
                         .mx_2()
@@ -10549,29 +10573,35 @@ impl WorkspaceShell {
                         .when(
                             matches!(self.connection_status, ConnectionStatus::Connected { .. }),
                             |toolbar| {
-                                toolbar.child(
-                                    Button::new("refresh-connection-schema", "Refresh")
-                                        .tone(ButtonTone::Ghost)
-                                        .on_click(cx.listener(|shell, _, _, cx| {
-                                            shell.refresh_connection_schema(cx)
-                                        })),
-                                )
+                                toolbar
+                                    .child(
+                                        div()
+                                            .debug_selector(|| "open-schema-search".into())
+                                            .child(
+                                                IconButton::new(
+                                                    "open-schema-search",
+                                                    IconName::Search,
+                                                    "Search database schema",
+                                                )
+                                                .square(px(26.))
+                                                .icon_size(13.)
+                                                .tooltip("Search database schema")
+                                                .on_click(cx.listener(
+                                                    |shell, _, window, cx| {
+                                                        shell.open_schema_search(window, cx)
+                                                    },
+                                                )),
+                                            ),
+                                    )
+                                    .child(
+                                        Button::new("refresh-connection-schema", "Refresh")
+                                            .tone(ButtonTone::Ghost)
+                                            .on_click(cx.listener(|shell, _, _, cx| {
+                                                shell.refresh_connection_schema(cx)
+                                            })),
+                                    )
                             },
                         ),
-                )
-                .child(
-                    div()
-                        .mx_2()
-                        .mb_1()
-                        .flex()
-                        .flex_col()
-                        .gap_1()
-                        .child(
-                            div()
-                                .h(px(28.))
-                                .child(self.schema_search_input.clone()),
-                        )
-                        .child(div().flex().items_center().gap_1().children(filter_buttons)),
                 )
                 },
             )
@@ -11102,8 +11132,12 @@ impl WorkspaceShell {
             );
             let database_connection = matches!(modal, Modal::DatabaseConnection);
             let command_palette = matches!(modal, Modal::CommandPalette);
+            let schema_search = matches!(modal, Modal::SchemaSearch);
+            let data_results = matches!(modal, Modal::DataResults(_));
             let instance_setup = matches!(modal, Modal::InstanceSetup);
-            let card_width = if settings {
+            let card_width = if data_results {
+                0.0
+            } else if settings || schema_search {
                 720.0
             } else if server_picker || account {
                 360.0
@@ -11246,6 +11280,244 @@ impl WorkspaceShell {
                         })
                         .into_any_element()
                 }
+                Modal::SchemaSearch => {
+                    let hits = self.schema_palette_hits();
+                    let hit_count = hits.len();
+                    let list_height = hit_count.min(12) as f32 * PALETTE_ROW_HEIGHT;
+                    let search_state = self.schema_search_state.clone();
+                    div()
+                        .flex()
+                        .flex_col()
+                        .child(
+                            div()
+                                .h(px(42.))
+                                .px_2()
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .border_b_1()
+                                .border_color(colors.subtle_border)
+                                .bg(colors.toolbar)
+                                .child(icon(IconName::Search, colors.muted_text, 15.))
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .overflow_hidden()
+                                        .child(self.schema_search_input.clone()),
+                                )
+                                .child(
+                                    div()
+                                        .debug_selector(|| "close-schema-search".into())
+                                        .child(
+                                            IconButton::new(
+                                                "close-schema-search",
+                                                IconName::Close,
+                                                "Close schema search",
+                                            )
+                                            .square(px(26.))
+                                            .icon_size(13.)
+                                            .on_click(cx.listener(|shell, _, window, cx| {
+                                                shell.dismiss_modal(&DismissModal, window, cx)
+                                            })),
+                                        ),
+                                ),
+                        )
+                        .when(hit_count > 0, |palette| {
+                            palette.child(
+                                uniform_list(
+                                    "schema-search-list",
+                                    hit_count,
+                                    cx.processor(move |shell, range: Range<usize>, _, cx| {
+                                        let hits = shell.schema_palette_hits();
+                                        let selected = shell
+                                            .schema_search_selected
+                                            .min(hits.len().saturating_sub(1));
+                                        range
+                                            .filter_map(|index| {
+                                                hits.get(index).cloned().map(|hit| (index, hit))
+                                            })
+                                            .map(|(index, hit)| {
+                                                let row_hit = hit.clone();
+                                                let object_kind = match hit.target {
+                                                    sift_protocol::SearchTarget::Object {
+                                                        object_kind,
+                                                    } => object_kind,
+                                                    sift_protocol::SearchTarget::Column => hit
+                                                        .path
+                                                        .kind
+                                                        .unwrap_or(
+                                                            sift_protocol::ObjectKind::Table,
+                                                        ),
+                                                };
+                                                let detail = match (
+                                                    hit.column.as_deref(),
+                                                    hit.type_display.as_deref(),
+                                                ) {
+                                                    (Some(column), Some(data_type)) => {
+                                                        format!("{column}  ·  {data_type}")
+                                                    }
+                                                    (Some(column), None) => column.to_owned(),
+                                                    _ => format!("{object_kind:?}")
+                                                        .replace('_', " ")
+                                                        .to_lowercase(),
+                                                };
+                                                div()
+                                                    .id(("schema-palette-hit", index))
+                                                    .h(px(PALETTE_ROW_HEIGHT))
+                                                    .px_2()
+                                                    .flex()
+                                                    .items_center()
+                                                    .gap_2()
+                                                    .rounded_sm()
+                                                    .when(index == selected, |row| {
+                                                        row.bg(colors.active_surface)
+                                                    })
+                                                    .hover(|row| {
+                                                        row.bg(colors.hovered_surface)
+                                                    })
+                                                    .on_click(cx.listener(
+                                                        move |shell, _, window, cx| {
+                                                            if let Some(target) = shell
+                                                                .schema_search_target(&row_hit)
+                                                            {
+                                                                shell.dismiss_modal(
+                                                                    &DismissModal,
+                                                                    window,
+                                                                    cx,
+                                                                );
+                                                                shell.open_schema_search_target(
+                                                                    target, window, cx,
+                                                                );
+                                                            }
+                                                        },
+                                                    ))
+                                                    .child(icon(
+                                                        schema_object_kind_icon(object_kind),
+                                                        colors.muted_text,
+                                                        13.,
+                                                    ))
+                                                    .child(
+                                                        div()
+                                                            .flex_1()
+                                                            .min_w_0()
+                                                            .flex()
+                                                            .flex_col()
+                                                            .child(
+                                                                div()
+                                                                    .truncate()
+                                                                    .child(hit.display),
+                                                            )
+                                                            .child(
+                                                                div()
+                                                                    .truncate()
+                                                                    .text_xs()
+                                                                    .text_color(
+                                                                        colors.muted_text,
+                                                                    )
+                                                                    .child(detail),
+                                                            ),
+                                                    )
+                                            })
+                                            .collect()
+                                    }),
+                                )
+                                .h(px(list_height.max(PALETTE_ROW_HEIGHT)))
+                                .track_scroll(&self.schema_search_scroll_handle),
+                            )
+                        })
+                        .when(hit_count == 0, |palette| {
+                            let (message, color) = match search_state {
+                                SchemaSearchState::Idle => {
+                                    ("Type to search objects and columns".to_owned(), colors.muted_text)
+                                }
+                                SchemaSearchState::Loading => {
+                                    ("Searching schema…".to_owned(), colors.muted_text)
+                                }
+                                SchemaSearchState::Failed(message) => (message, colors.danger),
+                                SchemaSearchState::Ready { .. } => {
+                                    ("No matching schema objects".to_owned(), colors.muted_text)
+                                }
+                            };
+                            palette.child(
+                                div()
+                                    .h(px(PALETTE_ROW_HEIGHT * 2.0))
+                                    .px_3()
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .text_color(color)
+                                    .child(message),
+                            )
+                        })
+                        .child(
+                            div()
+                                .h(px(28.))
+                                .px_2()
+                                .flex()
+                                .items_center()
+                                .justify_between()
+                                .border_t_1()
+                                .border_color(colors.subtle_border)
+                                .text_xs()
+                                .text_color(colors.muted_text)
+                                .child("↑/↓ navigate  ·  Enter open")
+                                .child("Esc close"),
+                        )
+                        .into_any_element()
+                }
+                Modal::DataResults(item_id) => match self.data_results_modal_target(*item_id, cx) {
+                    Some((title, results)) => div()
+                        .size_full()
+                        .flex()
+                        .flex_col()
+                        .child(
+                            div()
+                                .h(px(36.))
+                                .flex_none()
+                                .px_2()
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .border_b_1()
+                                .border_color(colors.subtle_border)
+                                .bg(colors.toolbar)
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .truncate()
+                                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                                        .child(format!("Data · {title}")),
+                                )
+                                .child(
+                                    div()
+                                        .debug_selector(|| "close-data-results-modal".into())
+                                        .child(
+                                            IconButton::new(
+                                                "close-data-results-modal",
+                                                IconName::Close,
+                                                "Close large Data view",
+                                            )
+                                            .square(px(26.))
+                                            .icon_size(13.)
+                                            .on_click(cx.listener(|shell, _, window, cx| {
+                                                shell.dismiss_modal(&DismissModal, window, cx)
+                                            })),
+                                        ),
+                                ),
+                        )
+                        .child(div().flex_1().min_h_0().min_w_0().child(results))
+                        .into_any_element(),
+                    None => div()
+                        .size_full()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .text_color(colors.muted_text)
+                        .child("These query results are no longer available")
+                        .into_any_element(),
+                },
                 Modal::ServerPicker => {
                     let current_id = self
                         .lifecycle
@@ -13110,11 +13382,14 @@ impl WorkspaceShell {
                     | Modal::Settings
                     | Modal::Account
                     | Modal::CommandPalette
+                    | Modal::SchemaSearch
+                    | Modal::DataResults(_)
                     | Modal::DatabaseConnection
                     | Modal::ConfirmDeleteConnection(_)
             );
             div()
                 .id("modal-layer")
+                .debug_selector(|| "modal-layer".into())
                 .key_context("SiftModal")
                 .absolute()
                 .top(if app_bar_modal {
@@ -13151,11 +13426,15 @@ impl WorkspaceShell {
                         .py_4()
                         .bg(colors.scrim)
                 })
+                .when(data_results, |layer| {
+                    layer.items_center().justify_center().bg(colors.scrim)
+                })
                 .when(
                     !server_picker
                         && !settings
                         && !account
-                        && !database_connection,
+                        && !database_connection
+                        && !data_results,
                     |layer| {
                         layer
                             .justify_center()
@@ -13170,16 +13449,22 @@ impl WorkspaceShell {
                 .child(
                     div()
                         .id("modal-card")
+                        .debug_selector(|| "modal-card".into())
                         .occlude()
                         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                        .w_full()
-                        .max_w(px(card_width))
-                        .max_h(gpui::relative(0.92))
+                        .when(!data_results, |card| card.w_full().max_w(px(card_width)))
+                        .when(data_results, |card| {
+                            card.w(gpui::relative(0.985))
+                                .h(gpui::relative(0.985))
+                        })
+                        .when(!data_results, |card| card.max_h(gpui::relative(0.92)))
                         .flex()
                         .flex_col()
                         .when(
                             !database_connection
                                 && !command_palette
+                                && !schema_search
+                                && !data_results
                                 && !account
                                 && !server_picker,
                             |card| card.p_3(),
@@ -14084,7 +14369,6 @@ mod tests {
             shell
                 .schema_search_input
                 .update(cx, |input, cx| input.set_text("people", cx));
-            shell.set_schema_search_filter(SchemaSearchFilter::Relations, cx);
         });
         let mut latest = None;
         while let Ok(command) = receiver.try_recv() {
@@ -14098,10 +14382,7 @@ mod tests {
         }
         let (generation, request) = latest.expect("schema search command");
         assert_eq!(request.query, "people");
-        assert!(request
-            .kinds
-            .as_ref()
-            .is_some_and(|kinds| kinds.contains(&sift_protocol::ObjectKind::Table)));
+        assert!(request.kinds.is_none());
 
         workspace.update(&mut cx, |shell, cx| {
             shell.on_executor_event(
@@ -14116,7 +14397,7 @@ mod tests {
             );
             assert!(matches!(
                 shell.schema_search_state,
-                SchemaSearchState::Loading { .. }
+                SchemaSearchState::Loading
             ));
             let current_generation = shell.schema_search_generation;
             shell.on_executor_event(
@@ -14694,6 +14975,65 @@ mod tests {
                 ResultPlacement::Bottom
             );
         });
+    }
+
+    #[gpui::test]
+    fn data_results_modal_mounts_the_live_grid_once_at_viewport_scale(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        cx.run_until_parked();
+        let expand = cx
+            .debug_bounds("open-result-data-modal")
+            .expect("Data expand button");
+        cx.simulate_click(expand.center(), Modifiers::default());
+        cx.run_until_parked();
+
+        workspace.read_with(&cx, |shell, cx| {
+            assert_eq!(shell.modal, Some(Modal::DataResults(1)));
+            assert_eq!(shell.panes[0].read(cx).expanded_result_item, Some(1));
+        });
+        let layer = cx.debug_bounds("modal-layer").expect("modal layer");
+        let card = cx.debug_bounds("modal-card").expect("modal card");
+        assert!((f32::from(card.size.width) / f32::from(layer.size.width) - 0.985).abs() < 0.01);
+        assert!((f32::from(card.size.height) / f32::from(layer.size.height) - 0.985).abs() < 0.01);
+        assert!(cx.debug_bounds("close-data-results-modal").is_some());
+
+        workspace.update_in(&mut cx, |shell, window, cx| {
+            shell.dismiss_modal(&DismissModal, window, cx)
+        });
+        workspace.read_with(&cx, |shell, cx| {
+            assert!(shell.modal.is_none());
+            assert_eq!(shell.panes[0].read(cx).expanded_result_item, None);
+        });
+    }
+
+    #[gpui::test]
+    fn schema_search_is_a_palette_instead_of_inline_dock_chrome(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        workspace.update(&mut cx, |shell, cx| {
+            shell.connection_status = ConnectionStatus::Connected {
+                profile_id: 2,
+                name: "Demo".into(),
+            };
+            cx.notify();
+        });
+        cx.run_until_parked();
+        let search = cx
+            .debug_bounds("open-schema-search")
+            .expect("schema search launcher");
+        cx.simulate_click(search.center(), Modifiers::default());
+        cx.run_until_parked();
+
+        workspace.read_with(&cx, |shell, _| {
+            assert_eq!(shell.modal, Some(Modal::SchemaSearch));
+        });
+        assert!(cx.debug_bounds("schema-search-list").is_none());
+        assert!(cx.debug_bounds("close-schema-search").is_some());
+        assert!(cx.debug_bounds("open-schema-search").is_some());
+        assert!(cx.debug_bounds("schema-search-filter-0").is_none());
     }
 
     #[gpui::test]
