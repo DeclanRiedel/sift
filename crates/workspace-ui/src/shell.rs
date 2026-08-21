@@ -4806,6 +4806,64 @@ impl WorkspaceShell {
         cx.notify();
     }
 
+    fn open_table_columns_ddl(&mut self, item_id: u64, cx: &mut Context<Self>) {
+        let Some(TableDefinitionState::Ready {
+            source,
+            graph,
+            table_id,
+        }) = self.table_definitions.get(&item_id)
+        else {
+            return;
+        };
+        let qualified_relation = format!(
+            "{}.{}",
+            ddl_quote_identifier(&source.provider_id, &source.schema),
+            ddl_quote_identifier(&source.provider_id, &source.object)
+        );
+        let columns = table_columns(graph, table_id)
+            .into_iter()
+            .filter_map(|node| {
+                let sift_protocol::CatalogNodeDetails::Column { column } = &node.details else {
+                    return None;
+                };
+                Some(format!(
+                    "    {} {}{}",
+                    ddl_quote_identifier(&source.provider_id, &node.name),
+                    type_ref_label(&column.type_ref),
+                    if column.nullable == sift_protocol::Nullability::NotNullable {
+                        " NOT NULL"
+                    } else {
+                        ""
+                    }
+                ))
+            })
+            .collect::<Vec<_>>();
+        let ddl = if matches!(
+            source.object_kind,
+            sift_protocol::ObjectKind::Table
+                | sift_protocol::ObjectKind::ForeignTable
+                | sift_protocol::ObjectKind::PartitionedTable
+        ) {
+            format!(
+                "-- Catalog-derived relation DDL preview\n-- Columns only; indexes, constraints, triggers, storage, and grants are omitted.\nCREATE TABLE {qualified_relation} (\n{}\n);",
+                columns.join(",\n")
+            )
+        } else {
+            format!(
+                "-- Catalog-derived column metadata for {qualified_relation}\n-- Exact relation DDL is unavailable in this UI foundation.\n{}",
+                columns.join("\n")
+            )
+        };
+        for pane in &self.panes {
+            if pane.update(cx, |pane, cx| {
+                pane.show_database_item_view(item_id, DatabaseItemView::Ddl, Some(ddl.clone()), cx)
+            }) {
+                break;
+            }
+        }
+        cx.notify();
+    }
+
     fn open_table_preview(
         &mut self,
         target: DatabaseObjectTarget,
@@ -8672,7 +8730,11 @@ impl WorkspaceShell {
                                     .child(div().flex_1().child("Name"))
                                     .child(div().w(px(82.)).child("Type"))
                                     .child(div().w(px(52.)).child("Nullable"))
-                                    .children(editing.then(|| div().w(px(52.)).child("Order"))),
+                                    .child(
+                                        div()
+                                            .w(px(52.))
+                                            .child(if editing { "Order" } else { "DDL" }),
+                                    ),
                             )
                             .children(columns.into_iter().map(|node| {
                                 let metadata = match &node.details {
@@ -8699,6 +8761,36 @@ impl WorkspaceShell {
                                     .border_b_1()
                                     .border_color(colors.subtle_border)
                                     .when(selected, |row| row.bg(colors.active_surface))
+                                    .when(!editing, |row| {
+                                        row.tab_index(0)
+                                            .role(Role::Button)
+                                            .aria_label(format!(
+                                                "Open column DDL preview for {}",
+                                                node.name
+                                            ))
+                                            .cursor_pointer()
+                                            .focus(|style| style.bg(colors.hovered_surface))
+                                            .hover(|style| style.bg(colors.hovered_surface))
+                                            .on_key_down(cx.listener(
+                                                move |shell,
+                                                      event: &gpui::KeyDownEvent,
+                                                      _,
+                                                      cx| {
+                                                    if !event.keystroke.modifiers.modified()
+                                                        && matches!(
+                                                            event.keystroke.key.as_str(),
+                                                            "enter" | "space"
+                                                        )
+                                                    {
+                                                        shell.open_table_columns_ddl(item_id, cx);
+                                                        cx.stop_propagation();
+                                                    }
+                                                },
+                                            ))
+                                            .on_click(cx.listener(move |shell, _, _, cx| {
+                                                shell.open_table_columns_ddl(item_id, cx)
+                                            }))
+                                    })
                                     .when(editing, |row| {
                                         row.tab_index(0)
                                             .aria_label(format!("Edit column {}", node.name))
@@ -8836,6 +8928,14 @@ impl WorkspaceShell {
                                                         shell.move_table_designer_column(1, cx)
                                                     }))
                                             }))
+                                    }))
+                                    .children((!editing).then(|| {
+                                        div()
+                                            .w(px(52.))
+                                            .flex_none()
+                                            .text_xs()
+                                            .text_color(colors.muted_text)
+                                            .child("Preview")
                                     }))
                             }))
                             .children(editing.then(|| {
@@ -12977,6 +13077,16 @@ mod tests {
                 },
                 cx,
             );
+            shell.open_table_columns_ddl(item_id, cx);
+        });
+        workspace.update_in(&mut cx, |shell, _, cx| {
+            let pane = shell.panes[shell.active_pane].read(cx);
+            let ddl = pane.editor(item_id).unwrap().read(cx).document().text();
+            assert!(ddl.contains("CREATE TABLE \"lab\".\"people\""), "{ddl}");
+            assert!(ddl.contains("\"id\" bigint"), "{ddl}");
+            assert!(ddl.contains("\"name\" text"), "{ddl}");
+        });
+        workspace.update_in(&mut cx, |shell, _, cx| {
             shell.select_table_definition_section(item_id, TableDefinitionSection::Indexes, cx);
             shell.open_table_detail_ddl(
                 item_id,
