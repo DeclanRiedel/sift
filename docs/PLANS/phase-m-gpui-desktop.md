@@ -423,8 +423,21 @@ ADR amendment instead of burying a second UI toolkit behind an abstraction.
       emit native Loro updates to a reconnecting SDK `RoomReplica`, apply peer
       commits, and become clean only after durable ACK. Room navigation can
       create and open these documents without storing SQL client-side.
-- [ ] Integrate completion, diagnostics, formatting, quick fixes, usages, and
-      semantic revision cancellation.
+- [x] Integrate completion, diagnostics, formatting, quick fixes, usages, and
+      semantic revision cancellation. **Landed:** `workspace-ui/src/editor/semantic.rs`
+      projects the server semantic document onto client byte offsets; the editor
+      owns a completion menu, severity-coloured diagnostic underlines, usage
+      highlights, a caret-diagnostic status strip, and typed actions
+      (`Complete`, `FormatDocument`, `ApplyQuickFix`, `FindUsages`,
+      `GoToNextDiagnostic`) surfaced through the keymap, Query menu, and command
+      palette. The shell debounces keystroke-driven `Analyze` and dispatches
+      interactive requests immediately; `desktop/src/app.rs` runs a per-connection
+      semantic service task that resynchronizes the server document from the text
+      each job carries, so requests need no ordering protocol. Revision
+      cancellation is enforced twice — superseded jobs are discarded before they
+      cost a round trip, and answers whose revision no longer matches the buffer
+      are dropped rather than applied late. Catalog-bound diagnostics degrade to
+      syntax-only rather than failing.
 - [x] Execute selection/document, stream status, cancel, and distinguish
       rejected, failed, cancelled, timed-out, and outcome-unknown operations.
       **Landed:** editor `ExecuteStatement`/`ExecuteDocument` actions

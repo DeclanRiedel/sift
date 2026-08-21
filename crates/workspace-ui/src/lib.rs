@@ -7,7 +7,7 @@ pub mod results;
 mod settings;
 mod shell;
 
-pub use editor::{QueryDocument, QueryEditor};
+pub use editor::{QueryDocument, QueryEditor, SemanticOutcome, SemanticRequestKind};
 pub use results::{ResultData, ResultState, ResultsView};
 
 pub use lifecycle::{

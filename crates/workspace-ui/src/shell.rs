@@ -17,8 +17,8 @@ use sift_ui::{
 };
 
 use crate::editor::{
-    EditorEvent, EditorKeymap, EditorLanguage, QueryDocument, QueryEditor, VimMode,
-    EDITOR_GUTTER_WIDTH,
+    EditorEvent, EditorKeymap, EditorLanguage, QueryDocument, QueryEditor, SemanticOutcome,
+    SemanticRequestKind, VimMode, EDITOR_GUTTER_WIDTH,
 };
 use crate::results::{ResultPlacement, ResultState, ResultsView};
 use crate::settings::{EditorMode, SettingsStore, UserSettings};
@@ -653,6 +653,13 @@ pub enum PaneEvent {
     RefreshDatabaseItemRequested {
         item_id: u64,
     },
+    /// An editor wants semantic work done for one of its revisions. The
+    /// workspace owns the connection and the debounce policy.
+    SemanticRequested {
+        item_id: u64,
+        revision: u64,
+        request: SemanticRequestKind,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -783,6 +790,19 @@ pub enum ExecutorCommand {
         item_id: u64,
         request: sift_protocol::ApplyMigrationRequest,
     },
+    /// Run one semantic request for `item_id`. `text` is the exact buffer the
+    /// revision names, so the executor can resynchronize the server document
+    /// before running the request instead of relying on message ordering.
+    Semantic {
+        item_id: u64,
+        text_revision: u64,
+        text: String,
+        request: SemanticRequestKind,
+    },
+    /// Release the server semantic document backing a closed tab.
+    CloseSemanticDocument {
+        item_id: u64,
+    },
 }
 
 /// Executor → shell. Connection-state changes and query outcomes share one
@@ -844,6 +864,11 @@ pub enum ExecutorEvent {
     TableMigrationFailed {
         item_id: u64,
         message: String,
+    },
+    Semantic {
+        item_id: u64,
+        text_revision: u64,
+        outcome: Box<SemanticOutcome>,
     },
 }
 
@@ -1064,6 +1089,13 @@ impl Pane {
                 cx.emit(PaneEvent::ExecuteRequested {
                     item_id,
                     sql: sql.clone(),
+                });
+            }
+            EditorEvent::SemanticRequest { revision, request } => {
+                cx.emit(PaneEvent::SemanticRequested {
+                    item_id,
+                    revision: *revision,
+                    request: request.clone(),
                 });
             }
         }
@@ -2405,6 +2437,11 @@ impl gpui::Render for Pane {
     }
 }
 
+/// One coalescing window for keystroke-driven reanalysis. Long enough that a
+/// fast typist produces one request per pause, short enough that diagnostics
+/// feel attached to the edit that caused them.
+const SEMANTIC_ANALYZE_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(160);
+
 pub struct WorkspaceShell {
     focus_handle: FocusHandle,
     query_input: Entity<TextInput>,
@@ -2469,6 +2506,10 @@ pub struct WorkspaceShell {
     executor_sender: Option<tokio::sync::mpsc::UnboundedSender<ExecutorCommand>>,
     room_document_sender: Option<tokio::sync::mpsc::UnboundedSender<RoomDocumentCommand>>,
     running_queries: HashMap<u64, u64>,
+    /// Debounce generation per item for `Analyze` requests. Only the newest
+    /// generation is allowed to dispatch, so a burst of keystrokes costs one
+    /// server round trip instead of one per character.
+    semantic_analyze_generation: HashMap<u64, u64>,
     next_execution_id: u64,
     pending_database_execution: Option<PendingDatabaseExecution>,
     instance_sender: Option<tokio::sync::mpsc::UnboundedSender<InstanceCommand>>,
@@ -2777,6 +2818,7 @@ impl WorkspaceShell {
             executor_sender: None,
             room_document_sender: None,
             running_queries: HashMap::new(),
+            semantic_analyze_generation: HashMap::new(),
             next_execution_id: 1,
             pending_database_execution: None,
             instance_sender: None,
@@ -3598,6 +3640,11 @@ impl WorkspaceShell {
                 let _ = acknowledge.send(());
                 cx.notify();
             }
+            ExecutorEvent::Semantic {
+                item_id,
+                text_revision,
+                outcome,
+            } => self.route_semantic_outcome(item_id, text_revision, *outcome, cx),
             ExecutorEvent::TableDefinitionLoaded { item_id, graph } => {
                 let source = match self.table_definitions.remove(&item_id) {
                     Some(TableDefinitionState::Loading { source })
@@ -3962,6 +4009,104 @@ impl WorkspaceShell {
             self.clear_global_problems_for(item_id, cx);
             cx.notify();
         }
+    }
+
+    /// Editor semantic entry point. `Analyze` is debounced because it fires on
+    /// every keystroke; everything else is a direct response to a command the
+    /// user is waiting on and dispatches immediately.
+    fn semantic_requested(
+        &mut self,
+        item_id: u64,
+        revision: u64,
+        request: SemanticRequestKind,
+        cx: &mut Context<Self>,
+    ) {
+        if !request.is_debounced() {
+            self.dispatch_semantic_request(item_id, revision, request, cx);
+            return;
+        }
+        let generation = self
+            .semantic_analyze_generation
+            .entry(item_id)
+            .and_modify(|generation| *generation = generation.wrapping_add(1))
+            .or_insert(1);
+        let generation = *generation;
+        cx.spawn(async move |shell, cx| {
+            cx.background_executor()
+                .timer(SEMANTIC_ANALYZE_DEBOUNCE)
+                .await;
+            let _ = shell.update(cx, |shell, cx| {
+                if shell.semantic_analyze_generation.get(&item_id) != Some(&generation) {
+                    return;
+                }
+                shell.dispatch_semantic_request(
+                    item_id,
+                    revision,
+                    SemanticRequestKind::Analyze,
+                    cx,
+                );
+            });
+        })
+        .detach();
+    }
+
+    /// Send a semantic request with the exact text of the revision it names.
+    /// A request whose editor has since moved on is dropped here rather than
+    /// costing a round trip that could only produce a stale answer.
+    fn dispatch_semantic_request(
+        &mut self,
+        item_id: u64,
+        revision: u64,
+        request: SemanticRequestKind,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(sender) = self.executor_sender.clone() else {
+            return;
+        };
+        let Some(editor) = self.editor_for_item(item_id, cx) else {
+            return;
+        };
+        let (current_revision, text) = {
+            let editor = editor.read(cx);
+            if !editor.semantic_enabled() {
+                return;
+            }
+            (editor.text_revision(), editor.document().text().to_owned())
+        };
+        if current_revision != revision {
+            return;
+        }
+        let _ = sender.send(ExecutorCommand::Semantic {
+            item_id,
+            text_revision: revision,
+            text,
+            request,
+        });
+    }
+
+    fn editor_for_item(&self, item_id: u64, cx: &App) -> Option<Entity<QueryEditor>> {
+        self.panes
+            .iter()
+            .find_map(|pane| pane.read(cx).editor(item_id))
+    }
+
+    /// Hand one semantic answer to the editor that asked for it. The editor
+    /// decides whether the answer is still current; the shell only surfaces
+    /// hard service failures that the user has to know about.
+    fn route_semantic_outcome(
+        &mut self,
+        item_id: u64,
+        text_revision: u64,
+        outcome: SemanticOutcome,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(editor) = self.editor_for_item(item_id, cx) else {
+            return;
+        };
+        editor.update(cx, |editor, cx| {
+            editor.apply_semantic_outcome(text_revision, outcome, cx);
+        });
+        cx.notify();
     }
 
     fn cancel_execution(&mut self, _: &CancelExecution, _: &mut Window, cx: &mut Context<Self>) {
@@ -5948,6 +6093,11 @@ impl WorkspaceShell {
             PaneEvent::RefreshDatabaseItemRequested { item_id } => {
                 self.refresh_database_item(*item_id, cx)
             }
+            PaneEvent::SemanticRequested {
+                item_id,
+                revision,
+                request,
+            } => self.semantic_requested(*item_id, *revision, request.clone(), cx),
         }
     }
 
@@ -6339,6 +6489,10 @@ impl WorkspaceShell {
                 self.table_designer = None;
                 self.modal = None;
             }
+        }
+        if let (Some(sender), Some(item_id)) = (&self.executor_sender, removed_item_id) {
+            self.semantic_analyze_generation.remove(&item_id);
+            let _ = sender.send(ExecutorCommand::CloseSemanticDocument { item_id });
         }
         if let (Some(sender), Some(document_id)) = (&self.room_document_sender, removed_document_id)
         {
@@ -6965,6 +7119,21 @@ impl WorkspaceShell {
             }
             CommandId::RedoQuery => {
                 self.dispatch_active_editor_action(&crate::editor::Redo, window, cx)
+            }
+            CommandId::CompleteSql => {
+                self.dispatch_active_editor_action(&crate::editor::Complete, window, cx)
+            }
+            CommandId::FormatSql => {
+                self.dispatch_active_editor_action(&crate::editor::FormatDocument, window, cx)
+            }
+            CommandId::ApplySqlQuickFix => {
+                self.dispatch_active_editor_action(&crate::editor::ApplyQuickFix, window, cx)
+            }
+            CommandId::FindSqlUsages => {
+                self.dispatch_active_editor_action(&crate::editor::FindUsages, window, cx)
+            }
+            CommandId::NextSqlProblem => {
+                self.dispatch_active_editor_action(&crate::editor::GoToNextDiagnostic, window, cx)
             }
             CommandId::SplitPane => self.split_pane(&SplitPane, window, cx),
             CommandId::FocusNextPane => self.focus_next_pane(&FocusNextPane, window, cx),
