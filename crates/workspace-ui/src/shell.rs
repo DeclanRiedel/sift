@@ -8118,6 +8118,7 @@ impl WorkspaceShell {
                     let ddl_pending = designer.is_some_and(|designer| designer.pending);
                     left_actions.push(
                         div()
+                            .id("cancel-table-definition-edit-focus")
                             .tab_index(0)
                             .focus(|style| style.bg(colors.hovered_surface))
                             .on_key_down(cx.listener(|shell, event: &gpui::KeyDownEvent, _, cx| {
@@ -8129,7 +8130,7 @@ impl WorkspaceShell {
                                 }
                             }))
                             .child(
-                                Button::new("edit-table-definition", "Done")
+                                Button::new("edit-table-definition", "Cancel")
                                     .tone(ButtonTone::Ghost)
                                     .on_click(cx.listener(|shell, _, _, cx| {
                                         shell.close_table_designer(cx)
@@ -8139,6 +8140,7 @@ impl WorkspaceShell {
                     );
                     right_actions.push(
                         div()
+                            .id("review-table-definition-ddl-focus")
                             .tab_index(0)
                             .focus(|style| style.bg(colors.hovered_surface))
                             .on_key_down(cx.listener(
@@ -8153,7 +8155,7 @@ impl WorkspaceShell {
                                 },
                             ))
                             .child(
-                                Button::new("open-table-definition-ddl", "DDL")
+                                Button::new("open-table-definition-ddl", "Review DDL")
                                     .tone(ButtonTone::Ghost)
                                     .loading(ddl_pending)
                                     .on_click(cx.listener(|shell, _, _, cx| {
@@ -8165,6 +8167,7 @@ impl WorkspaceShell {
                 } else {
                     right_actions.push(
                         div()
+                            .id("edit-table-definition-focus")
                             .tab_index(0)
                             .focus(|style| style.bg(colors.hovered_surface))
                             .on_key_down(cx.listener(
@@ -8500,7 +8503,11 @@ impl WorkspaceShell {
                                     .child(div().w(px(52.)).flex_none())
                             })),
                     )
-                    .children(designer.map(|designer| {
+                    .children(designer.filter(|designer| {
+                        designer.error.is_some()
+                            || designer.order_dirty
+                            || designer.plan.is_some()
+                    }).map(|designer| {
                         let pending = designer.pending;
                         let requires_acknowledgement = designer.plan.as_ref().is_some_and(|plan| {
                             !plan.required_acknowledgements.is_empty()
@@ -8511,11 +8518,34 @@ impl WorkspaceShell {
                             .p_2()
                             .flex()
                             .flex_col()
-                            .gap_2()
-                            .children(designer.error.clone().map(ErrorBanner::new))
+                            .gap_1()
+                            .children(designer.error.clone().map(|message| {
+                                div()
+                                    .min_h(px(26.))
+                                    .px_2()
+                                    .flex()
+                                    .items_center()
+                                    .gap_2()
+                                    .rounded_sm()
+                                    .bg(colors.danger_muted)
+                                    .text_xs()
+                                    .text_color(colors.danger)
+                                    .child(icon(IconName::Warning, colors.danger, 12.))
+                                    .child(message)
+                            }))
                             .children(designer.order_dirty.then(|| {
-                                ErrorBanner::new("Column order is included in the DDL view. Applying it automatically requires a dependency-preserving table rebuild.")
-                                    .tone(Tone::Warning)
+                                div()
+                                    .min_h(px(26.))
+                                    .px_2()
+                                    .flex()
+                                    .items_center()
+                                    .gap_2()
+                                    .rounded_sm()
+                                    .bg(colors.warning_muted)
+                                    .text_xs()
+                                    .text_color(colors.warning)
+                                    .child(icon(IconName::Warning, colors.warning, 12.))
+                                    .child("Reordering needs a reviewed table rebuild. Review DDL before running it.")
                             }))
                             .children((designer.plan.is_some() && !designer.order_dirty).then(|| {
                                 div()
@@ -8524,6 +8554,7 @@ impl WorkspaceShell {
                                     .justify_end()
                                     .child(
                                         div()
+                                            .id("apply-table-definition-focus")
                                             .tab_index(0)
                                             .focus(|style| style.bg(colors.hovered_surface))
                                             .on_key_down(cx.listener(move |shell, event: &gpui::KeyDownEvent, _, cx| {
