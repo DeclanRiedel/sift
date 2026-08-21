@@ -20,7 +20,7 @@ use crate::editor::{
     EditorEvent, EditorKeymap, EditorLanguage, QueryDocument, QueryEditor, SemanticOutcome,
     SemanticRequestKind, VimMode, EDITOR_GUTTER_WIDTH,
 };
-use crate::results::{ResultPlacement, ResultState, ResultsView};
+use crate::results::{ResultPlacement, ResultState, ResultsEvent, ResultsView, StreamProgress};
 use crate::settings::{EditorMode, SettingsStore, UserSettings};
 
 use crate::presentation::{
@@ -653,6 +653,10 @@ pub enum PaneEvent {
     RefreshDatabaseItemRequested {
         item_id: u64,
     },
+    /// The retained row window is full and the user asked to continue past it.
+    LoadNextRowWindowRequested {
+        item_id: u64,
+    },
     /// An editor wants semantic work done for one of its revisions. The
     /// workspace owns the connection and the debounce policy.
     SemanticRequested {
@@ -932,6 +936,9 @@ pub struct Pane {
     editor_subscriptions: HashMap<u64, Subscription>,
     /// The Data/Messages/Explain/History surface owned by each query item.
     results: HashMap<u64, Entity<ResultsView>>,
+    /// Live results subscriptions, keyed by item, held for the same reason as
+    /// `editor_subscriptions`.
+    result_subscriptions: HashMap<u64, Subscription>,
     database_item_states: HashMap<u64, DatabaseItemState>,
     database_item_views: HashMap<u64, DatabaseItemView>,
     database_query_texts: HashMap<u64, String>,
@@ -974,6 +981,7 @@ impl Pane {
         let mut clean_documents = HashMap::new();
         let mut editor_subscriptions = HashMap::new();
         let mut results = HashMap::new();
+        let mut result_subscriptions = HashMap::new();
         let mut database_item_states = HashMap::new();
         let mut database_item_views = HashMap::new();
         for item in items
@@ -1029,6 +1037,12 @@ impl Pane {
                 if let Some(reference) = item.last_result.clone() {
                     view.update(cx, |view, cx| view.restore_reference(reference, cx));
                 }
+                result_subscriptions.insert(
+                    id,
+                    cx.subscribe(&view, move |pane, _, event, cx| {
+                        pane.on_results_event(id, event, cx);
+                    }),
+                );
                 results.insert(id, view);
             }
             if matches!(item.source, Some(ItemSource::DatabaseObject(_))) {
@@ -1048,6 +1062,7 @@ impl Pane {
             clean_documents,
             editor_subscriptions,
             results,
+            result_subscriptions,
             database_item_states,
             database_item_views,
             database_query_texts: HashMap::new(),
@@ -1059,6 +1074,25 @@ impl Pane {
             suppress_tab_drag_preview: false,
             tab_bar_drag_bounds: None,
             pending_close_item: None,
+        }
+    }
+
+    /// Adopt a results surface for `item_id`, subscribing to its intents.
+    fn attach_results(&mut self, item_id: u64, view: Entity<ResultsView>, cx: &mut Context<Self>) {
+        self.result_subscriptions.insert(
+            item_id,
+            cx.subscribe(&view, move |pane, _, event, cx| {
+                pane.on_results_event(item_id, event, cx);
+            }),
+        );
+        self.results.insert(item_id, view);
+    }
+
+    fn on_results_event(&mut self, item_id: u64, event: &ResultsEvent, cx: &mut Context<Self>) {
+        match event {
+            ResultsEvent::LoadNextWindowRequested => {
+                cx.emit(PaneEvent::LoadNextRowWindowRequested { item_id })
+            }
         }
     }
 
@@ -1146,12 +1180,18 @@ impl Pane {
         item_id: u64,
         page: sift_protocol::Page,
         cx: &mut Context<Self>,
-    ) -> Option<ResultState> {
+    ) -> Option<(StreamProgress, ResultState)> {
         let result = self.results.get(&item_id)?;
-        result.update(cx, |result, cx| {
-            result.apply_stream_page(page, cx);
-        });
-        Some(result.read(cx).state().clone())
+        let progress = result.update(cx, |result, cx| result.apply_stream_page(page, cx));
+        Some((progress, result.read(cx).state().clone()))
+    }
+
+    /// Discard the retained window so the held page can be consumed.
+    fn advance_result_window(&mut self, item_id: u64, cx: &mut Context<Self>) -> bool {
+        match self.results.get(&item_id) {
+            Some(result) => result.update(cx, |result, cx| result.advance_window(cx)),
+            None => false,
+        }
     }
 
     fn snapshot(&self) -> PanePresentation {
@@ -1715,6 +1755,7 @@ impl Pane {
         let index = self.items.iter().position(|item| item.id == item_id)?;
         let item = self.items.remove(index);
         let editor = self.editors.remove(&item_id)?;
+        self.result_subscriptions.remove(&item_id);
         let results = self.results.remove(&item_id);
         let clean_text = self.clean_documents.remove(&item_id).unwrap_or_default();
         let database_item_view = self.database_item_views.remove(&item_id);
@@ -1760,7 +1801,7 @@ impl Pane {
             self.database_ddl_texts.insert(item_id, text);
         }
         if let Some(results) = transfer.results {
-            self.results.insert(item_id, results);
+            self.attach_results(item_id, results, cx);
         }
         let insertion_index = insertion_index
             .unwrap_or(self.items.len())
@@ -2455,6 +2496,16 @@ impl gpui::Render for Pane {
     }
 }
 
+/// One streamed page held back from its tab, with the acknowledgement that
+/// resumes the server stream. Dropping this cancels the query, which is the
+/// correct outcome when its tab goes away.
+struct HeldResultPage {
+    execution_id: u64,
+    cursor_id: sift_protocol::CursorId,
+    page: sift_protocol::Page,
+    acknowledge: tokio::sync::oneshot::Sender<()>,
+}
+
 /// Wall-clock milliseconds, used only to stamp result references. A clock that
 /// cannot be read yields 0, which reads as "unknown" rather than failing a run.
 fn epoch_millis() -> u64 {
@@ -2532,6 +2583,10 @@ pub struct WorkspaceShell {
     executor_sender: Option<tokio::sync::mpsc::UnboundedSender<ExecutorCommand>>,
     room_document_sender: Option<tokio::sync::mpsc::UnboundedSender<RoomDocumentCommand>>,
     running_queries: HashMap<u64, u64>,
+    /// Pages withheld because their tab's retained window is full. Holding the
+    /// acknowledgement holds the whole server stream, which is the backpressure
+    /// that keeps a huge result from being pulled through and thrown away.
+    held_result_pages: HashMap<u64, HeldResultPage>,
     /// Debounce generation per item for `Analyze` requests. Only the newest
     /// generation is allowed to dispatch, so a burst of keystrokes costs one
     /// server round trip instead of one per character.
@@ -2844,6 +2899,7 @@ impl WorkspaceShell {
             executor_sender: None,
             room_document_sender: None,
             running_queries: HashMap::new(),
+            held_result_pages: HashMap::new(),
             semantic_analyze_generation: HashMap::new(),
             next_execution_id: 1,
             pending_database_execution: None,
@@ -3618,6 +3674,7 @@ impl WorkspaceShell {
                     return;
                 }
                 self.running_queries.remove(&item_id);
+                self.held_result_pages.remove(&item_id);
                 self.route_result(item_id, state, cx);
             }
             ExecutorEvent::ExecutionStarted {
@@ -3647,23 +3704,41 @@ impl WorkspaceShell {
                     let _ = acknowledge.send(());
                     return;
                 }
-                let mut state = None;
+                let mut applied = None;
                 for pane in &self.panes {
                     if let Some(updated) = pane.update(cx, |pane, cx| {
                         pane.apply_result_page(item_id, page.clone(), cx)
                     }) {
-                        state = Some(updated);
+                        applied = Some(updated);
                         break;
                     }
                 }
-                if let Some(state) = state {
-                    let terminal = !matches!(state, ResultState::Streaming(_));
-                    self.status.execution = state.status_label();
-                    if terminal {
-                        self.running_queries.remove(&item_id);
-                        self.replace_global_problems(item_id, &state, cx);
-                        self.record_result_reference(item_id, &state, Some(cursor_id.0), cx);
-                    }
+                let Some((progress, state)) = applied else {
+                    // No surface owns this item any more; releasing the page
+                    // lets the executor tear the stream down.
+                    return;
+                };
+                self.status.execution = state.status_label();
+                if progress == StreamProgress::WindowFull {
+                    // Hold the page — and with it the whole server stream —
+                    // until the user chooses to move past the retained window.
+                    self.held_result_pages.insert(
+                        item_id,
+                        HeldResultPage {
+                            execution_id,
+                            cursor_id,
+                            page,
+                            acknowledge,
+                        },
+                    );
+                    cx.notify();
+                    return;
+                }
+                if progress == StreamProgress::Terminal {
+                    self.running_queries.remove(&item_id);
+                    self.held_result_pages.remove(&item_id);
+                    self.replace_global_problems(item_id, &state, cx);
+                    self.record_result_reference(item_id, &state, Some(cursor_id.0), cx);
                 }
                 let _ = acknowledge.send(());
                 cx.notify();
@@ -4033,6 +4108,8 @@ impl WorkspaceShell {
             .is_ok()
         {
             self.running_queries.insert(item_id, execution_id);
+            // Dropping any held page cancels the run that produced it.
+            self.held_result_pages.remove(&item_id);
             self.status.execution = "Running…".into();
             self.clear_global_problems_for(item_id, cx);
             // The previous reference stops describing this tab the moment a
@@ -4119,6 +4196,38 @@ impl WorkspaceShell {
         });
     }
 
+    /// Move past the retained window: discard the rows on screen, consume the
+    /// page that was held back, and let the server resume streaming.
+    ///
+    /// This is deliberately user-driven. Consuming pages automatically would
+    /// pull an entire large result through the client to discard almost all of
+    /// it, and silently replacing the visible rows would look like data loss.
+    fn load_next_row_window(&mut self, item_id: u64, cx: &mut Context<Self>) {
+        let Some(held) = self.held_result_pages.remove(&item_id) else {
+            return;
+        };
+        if self.running_queries.get(&item_id) != Some(&held.execution_id) {
+            return;
+        }
+        let advanced = self
+            .panes
+            .iter()
+            .any(|pane| pane.update(cx, |pane, cx| pane.advance_result_window(item_id, cx)));
+        if !advanced {
+            return;
+        }
+        self.on_executor_event(
+            ExecutorEvent::ExecutionPage {
+                item_id,
+                execution_id: held.execution_id,
+                cursor_id: held.cursor_id,
+                page: held.page,
+                acknowledge: held.acknowledge,
+            },
+            cx,
+        );
+    }
+
     /// Persist the reference to a completed run on its tab. Runs that did not
     /// complete with rows leave the previous reference cleared rather than
     /// stale, so the tab never describes a result the user cannot get back to.
@@ -4182,6 +4291,7 @@ impl WorkspaceShell {
                 item_id,
                 execution_id,
             });
+            self.held_result_pages.remove(&item_id);
             self.status.execution = "Cancelling…".into();
             cx.notify();
         }
@@ -4216,6 +4326,7 @@ impl WorkspaceShell {
         if let Some(sender) = &self.executor_sender {
             let _ = sender.send(ExecutorCommand::Disconnect);
         }
+        self.held_result_pages.clear();
         self.connection_status = ConnectionStatus::Disconnected;
         self.connection_schema = ConnectionSchemaState::Unavailable;
         self.status.database = "No database".into();
@@ -6157,6 +6268,9 @@ impl WorkspaceShell {
             PaneEvent::RefreshDatabaseItemRequested { item_id } => {
                 self.refresh_database_item(*item_id, cx)
             }
+            PaneEvent::LoadNextRowWindowRequested { item_id } => {
+                self.load_next_row_window(*item_id, cx)
+            }
             PaneEvent::SemanticRequested {
                 item_id,
                 revision,
@@ -6553,6 +6667,9 @@ impl WorkspaceShell {
                 self.table_designer = None;
                 self.modal = None;
             }
+        }
+        if let Some(item_id) = removed_item_id {
+            self.held_result_pages.remove(&item_id);
         }
         if let (Some(sender), Some(item_id)) = (&self.executor_sender, removed_item_id) {
             self.semantic_analyze_generation.remove(&item_id);
@@ -14307,6 +14424,125 @@ mod tests {
 
         workspace.read_with(&cx, |shell, cx| {
             assert!(shell.panes[0].read(cx).items[0].last_result.is_none());
+        });
+    }
+
+    #[gpui::test]
+    fn a_full_row_window_withholds_the_page_until_the_user_advances(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        let cursor_id = sift_protocol::CursorId(9);
+
+        let send_page = |page: sift_protocol::Page,
+                         cx: &mut VisualTestContext|
+         -> tokio::sync::oneshot::Receiver<()> {
+            let (acknowledge, acknowledged) = tokio::sync::oneshot::channel();
+            workspace.update(cx, |shell, cx| {
+                shell.on_executor_event(
+                    ExecutorEvent::ExecutionPage {
+                        item_id: 1,
+                        execution_id: 1,
+                        cursor_id,
+                        page,
+                        acknowledge,
+                    },
+                    cx,
+                );
+            });
+            acknowledged
+        };
+
+        workspace.update(&mut cx, |shell, cx| {
+            shell.running_queries.insert(1, 1);
+            shell.on_executor_event(
+                ExecutorEvent::ExecutionStarted {
+                    item_id: 1,
+                    execution_id: 1,
+                    cursor_id,
+                },
+                cx,
+            );
+        });
+        let columns = send_page(
+            sift_protocol::Page::NextResult {
+                columns: vec![sift_protocol::ColumnMetadata::new(
+                    "id",
+                    sift_protocol::TypeRef::Primitive(sift_protocol::PrimitiveType::Int64),
+                )],
+            },
+            &mut cx,
+        );
+        assert!(columns.blocking_recv().is_ok());
+
+        let rows = |from: usize| sift_protocol::Page::Rows {
+            rows: (from..from + 8_000)
+                .map(|value| {
+                    sift_protocol::Row::new(vec![sift_protocol::Value::Int64(value as i64)])
+                })
+                .collect(),
+        };
+        let first = send_page(rows(0), &mut cx);
+        assert!(first.blocking_recv().is_ok());
+
+        // The second page overflows the retained window, so it is neither
+        // applied nor acknowledged: the server stream stays paused.
+        let mut held = send_page(rows(8_000), &mut cx);
+        assert!(held.try_recv().is_err());
+        workspace.read_with(&cx, |shell, cx| {
+            assert!(shell.held_result_pages.contains_key(&1));
+            let results = shell.panes[0].read(cx).results.get(&1).unwrap().clone();
+            let results = results.read(cx);
+            assert!(results.window_held());
+            assert_eq!(results.window_rows(), Some((1, 8_000)));
+        });
+
+        workspace.update(&mut cx, |shell, cx| shell.load_next_row_window(1, cx));
+        assert!(held.blocking_recv().is_ok());
+        workspace.read_with(&cx, |shell, cx| {
+            assert!(!shell.held_result_pages.contains_key(&1));
+            let results = shell.panes[0].read(cx).results.get(&1).unwrap().clone();
+            let results = results.read(cx);
+            assert!(!results.window_held());
+            assert_eq!(results.window_rows(), Some((8_001, 16_000)));
+        });
+    }
+
+    #[gpui::test]
+    fn cancelling_releases_a_held_page_so_the_stream_tears_down(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        let (sender, _commands) = tokio::sync::mpsc::unbounded_channel();
+        let (_events, events) = tokio::sync::mpsc::unbounded_channel();
+        let (acknowledge, mut acknowledged) = tokio::sync::oneshot::channel();
+        workspace.update(&mut cx, |shell, cx| {
+            shell.attach_executor(sender, events, cx);
+            shell.running_queries.insert(1, 1);
+            shell.held_result_pages.insert(
+                1,
+                HeldResultPage {
+                    execution_id: 1,
+                    cursor_id: sift_protocol::CursorId(9),
+                    page: sift_protocol::Page::Rows { rows: Vec::new() },
+                    acknowledge,
+                },
+            );
+        });
+        assert!(acknowledged.try_recv().is_err());
+
+        workspace.update_in(&mut cx, |shell, window, cx| {
+            shell.cancel_execution(&CancelExecution, window, cx);
+        });
+
+        // The sender was dropped rather than fired, which is how the executor
+        // learns to cancel instead of resuming.
+        assert!(matches!(
+            acknowledged.try_recv(),
+            Err(tokio::sync::oneshot::error::TryRecvError::Closed)
+        ));
+        workspace.read_with(&cx, |shell, _| {
+            assert!(shell.held_result_pages.is_empty());
         });
     }
 

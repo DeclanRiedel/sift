@@ -426,6 +426,28 @@ actions!(
     ]
 );
 
+/// What consuming one streamed page did, so the dispatcher knows whether to
+/// acknowledge it and let the server send the next one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StreamProgress {
+    /// The page was consumed; acknowledge it.
+    Consumed,
+    /// The retained window is full. Nothing was consumed and the page must be
+    /// held unacknowledged until the user asks for the next window, which is
+    /// what keeps a large result from streaming through the client unseen.
+    WindowFull,
+    /// The stream ended.
+    Terminal,
+}
+
+/// Raised for the owning query tab. The results surface never reaches the
+/// executor itself; it reports intent and the workspace dispatches.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResultsEvent {
+    /// Discard the retained window and consume the held page onwards.
+    LoadNextWindowRequested,
+}
+
 /// The query-owned results surface.
 pub struct ResultsView {
     focus_handle: FocusHandle,
@@ -449,6 +471,11 @@ pub struct ResultsView {
     bottom_height: f32,
     right_width: f32,
     stream_result_seen: bool,
+    /// Absolute index of the first retained row within the whole result, so
+    /// row numbers keep describing the result rather than the window.
+    window_start: usize,
+    /// A page is being held because the window is full.
+    window_held: bool,
 }
 
 impl ResultsView {
@@ -471,6 +498,8 @@ impl ResultsView {
             bottom_height: 240.0,
             right_width: 420.0,
             stream_result_seen: false,
+            window_start: 0,
+            window_held: false,
         }
     }
 
@@ -570,6 +599,8 @@ impl ResultsView {
         };
         self.state = state;
         self.stream_result_seen = false;
+        self.window_start = 0;
+        self.window_held = false;
         self.selected = None;
         cx.notify();
     }
@@ -660,8 +691,13 @@ impl ResultsView {
         self.set_state(ResultState::Streaming(ResultData::default()), cx);
     }
 
-    /// Consume one server page. Returns true when the page ends the stream.
-    pub fn apply_stream_page(&mut self, page: Page, cx: &mut Context<Self>) -> bool {
+    /// Consume one server page.
+    ///
+    /// A page is taken whole or not at all. Splitting one would mean carrying a
+    /// row remainder across the pause, and the retained bound is a memory
+    /// budget rather than an exact window size, so a window may end slightly
+    /// short of [`MAX_RETAINED_ROWS`] instead.
+    pub fn apply_stream_page(&mut self, page: Page, cx: &mut Context<Self>) -> StreamProgress {
         if !matches!(self.state, ResultState::Streaming(_)) {
             self.begin_stream(cx);
         }
@@ -689,37 +725,42 @@ impl ResultsView {
                     self.included_columns = vec![true; self.rendered_columns.len()];
                 }
                 cx.notify();
-                false
+                StreamProgress::Consumed
             }
             Page::Rows { rows } => {
                 let ResultState::Streaming(data) = &mut self.state else {
                     unreachable!("stream initialized above")
                 };
-                if !data.truncated_extra_results {
-                    let available = MAX_RETAINED_ROWS.saturating_sub(data.rows.len());
-                    let dropped = rows.len().saturating_sub(available);
-                    for row in rows.into_iter().take(available) {
-                        self.rendered_rows.push(
-                            row.values
-                                .iter()
-                                .map(|value| {
-                                    let rendered = render_value(value);
-                                    let text: SharedString = rendered.text.into();
-                                    CachedCellRender {
-                                        paint_text: single_line_text(&text),
-                                        text,
-                                        class: rendered.class,
-                                        shaped: None,
-                                    }
-                                })
-                                .collect(),
-                        );
-                        data.rows.push(row);
-                    }
-                    data.has_more |= dropped > 0;
+                if data.truncated_extra_results {
+                    cx.notify();
+                    return StreamProgress::Consumed;
+                }
+                if data.rows.len() + rows.len() > MAX_RETAINED_ROWS && !data.rows.is_empty() {
+                    self.window_held = true;
+                    data.has_more = true;
+                    cx.notify();
+                    return StreamProgress::WindowFull;
+                }
+                for row in rows {
+                    self.rendered_rows.push(
+                        row.values
+                            .iter()
+                            .map(|value| {
+                                let rendered = render_value(value);
+                                let text: SharedString = rendered.text.into();
+                                CachedCellRender {
+                                    paint_text: single_line_text(&text),
+                                    text,
+                                    class: rendered.class,
+                                    shaped: None,
+                                }
+                            })
+                            .collect(),
+                    );
+                    data.rows.push(row);
                 }
                 cx.notify();
-                false
+                StreamProgress::Consumed
             }
             Page::Error { error } => {
                 let state = match error.code {
@@ -728,7 +769,7 @@ impl ResultsView {
                     _ => ResultState::Failed(error.message),
                 };
                 self.set_state(state, cx);
-                true
+                StreamProgress::Terminal
             }
             Page::Done {
                 affected_rows,
@@ -745,10 +786,46 @@ impl ResultsView {
                 self.messages = Self::messages_for_state(&self.state);
                 self.selected_message = None;
                 self.stream_result_seen = false;
+                self.window_held = false;
                 cx.notify();
-                true
+                StreamProgress::Terminal
             }
         }
+    }
+
+    /// True while a page is held because the retained window is full.
+    pub fn window_held(&self) -> bool {
+        self.window_held
+    }
+
+    /// Absolute row numbers currently retained, 1-based and inclusive. `None`
+    /// when no rows are retained.
+    pub fn window_rows(&self) -> Option<(usize, usize)> {
+        let count = self.state.ready().map_or(0, |data| data.rows.len());
+        (count > 0).then(|| (self.window_start + 1, self.window_start + count))
+    }
+
+    /// Drop the retained window and continue from where the stream paused.
+    ///
+    /// Server cursors are forward-only (ADR-011), so this is explicitly a
+    /// one-way move: the previous window cannot be scrolled back to without
+    /// re-running the query, and the UI says so rather than implying paging.
+    pub fn advance_window(&mut self, cx: &mut Context<Self>) -> bool {
+        if !self.window_held {
+            return false;
+        }
+        let ResultState::Streaming(data) = &mut self.state else {
+            return false;
+        };
+        self.window_start += data.rows.len();
+        data.rows.clear();
+        self.rendered_rows.clear();
+        self.window_held = false;
+        self.selected = None;
+        self.row_scroll_handle
+            .scroll_to_item(0, ScrollStrategy::Top);
+        cx.notify();
+        true
     }
 
     pub fn set_unavailable(&mut self, reason: impl Into<String>, cx: &mut Context<Self>) {
@@ -1547,6 +1624,7 @@ impl ResultsView {
                                     }))
                             })
                             .collect::<Vec<_>>();
+                        let row_number = view.window_start + row_index + 1;
                         div()
                             .debug_selector(move || format!("result-row-{row_index}"))
                             .flex()
@@ -1558,7 +1636,7 @@ impl ResultsView {
                                 div()
                                     .id(("result-row-number", row_index))
                                     .role(gpui::Role::Button)
-                                    .aria_label(format!("Select row {}", row_index + 1))
+                                    .aria_label(format!("Select row {row_number}"))
                                     .flex_none()
                                     .w(px(ROW_NUMBER_WIDTH))
                                     .h_full()
@@ -1587,7 +1665,7 @@ impl ResultsView {
                                             view.select_row(row_index, cx);
                                         }),
                                     )
-                                    .child((row_index + 1).to_string()),
+                                    .child(row_number.to_string()),
                             )
                             .children(cells)
                     })
@@ -1654,6 +1732,52 @@ impl ResultsView {
                     ),
             )
             .into_any_element()
+    }
+
+    /// Window strip for a result larger than the retained bound. It states the
+    /// absolute rows on screen and offers the only forward move a server cursor
+    /// supports, while saying plainly that the move is not reversible.
+    fn render_window_bar(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
+        let (first, last) = self.window_rows()?;
+        if !self.window_held && self.window_start == 0 {
+            return None;
+        }
+        let colors = cx.theme().colors;
+        Some(
+            div()
+                .id("result-window-bar")
+                .debug_selector(|| "result-window-bar".into())
+                .flex()
+                .items_center()
+                .gap_2()
+                .px_3()
+                .py_1()
+                .border_t_1()
+                .border_color(colors.subtle_border)
+                .bg(colors.surface)
+                .child(
+                    div()
+                        .flex_1()
+                        .text_xs()
+                        .text_color(colors.muted_text)
+                        .child(if self.window_held {
+                            format!(
+                                "Rows {first}–{last}. More rows are waiting; \
+                                 loading them discards this window."
+                            )
+                        } else {
+                            format!("Rows {first}–{last}. Earlier rows need a re-run.")
+                        }),
+                )
+                .child(
+                    Button::new("result-load-next-window", "Load Next Rows")
+                        .tone(ButtonTone::Accent)
+                        .disabled(!self.window_held)
+                        .on_click(cx.listener(|_, _, _, cx| {
+                            cx.emit(ResultsEvent::LoadNextWindowRequested);
+                        })),
+                ),
+        )
     }
 
     fn render_message_toolbar(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -1841,10 +1965,17 @@ impl gpui::Render for ResultsView {
                     .children(
                         (self.tab == ResultTab::Messages).then(|| self.render_message_toolbar(cx)),
                     )
-                    .child(div().flex().flex_1().min_w_0().min_h_0().child(body)),
+                    .child(div().flex().flex_1().min_w_0().min_h_0().child(body))
+                    .children(
+                        (self.tab == ResultTab::Data)
+                            .then(|| self.render_window_bar(cx))
+                            .flatten(),
+                    ),
             )
     }
 }
+
+impl gpui::EventEmitter<ResultsEvent> for ResultsView {}
 
 #[cfg(test)]
 mod tests {
@@ -2061,36 +2192,115 @@ mod tests {
         ));
     }
 
+    fn rows_page(count: usize, from: usize) -> Page {
+        Page::Rows {
+            rows: (from..from + count)
+                .map(|value| Row::new(vec![Value::Int64(value as i64)]))
+                .collect(),
+        }
+    }
+
     #[gpui::test]
-    fn streamed_pages_append_incrementally_and_respect_retention_bound(cx: &mut TestAppContext) {
+    fn a_full_window_holds_the_next_page_instead_of_dropping_it(cx: &mut TestAppContext) {
         let view = cx.update(|cx| cx.new(ResultsView::new));
         view.update(cx, |view, cx| {
             view.begin_stream(cx);
-            assert!(!view.apply_stream_page(
-                Page::NextResult {
-                    columns: vec![column("id", PrimitiveType::Int64, Nullability::NotNullable,)],
-                },
-                cx,
-            ));
-            let rows = (0..MAX_RETAINED_ROWS + 5)
-                .map(|value| Row::new(vec![Value::Int64(value as i64)]))
-                .collect();
-            assert!(!view.apply_stream_page(Page::Rows { rows }, cx));
+            assert_eq!(
+                view.apply_stream_page(
+                    Page::NextResult {
+                        columns: vec![column("id", PrimitiveType::Int64, Nullability::NotNullable)],
+                    },
+                    cx,
+                ),
+                StreamProgress::Consumed
+            );
+            for page in 0..2 {
+                assert_eq!(
+                    view.apply_stream_page(rows_page(4_000, page * 4_000), cx),
+                    StreamProgress::Consumed
+                );
+            }
+            assert_eq!(view.window_rows(), Some((1, 8_000)));
+
+            // The third page does not fit, so it is refused rather than
+            // silently discarded, and the window says so.
+            assert_eq!(
+                view.apply_stream_page(rows_page(4_000, 8_000), cx),
+                StreamProgress::WindowFull
+            );
+            assert!(view.window_held());
+            assert_eq!(view.window_rows(), Some((1, 8_000)));
             let ResultState::Streaming(data) = view.state() else {
                 panic!("expected streaming result")
             };
-            assert_eq!(data.rows.len(), MAX_RETAINED_ROWS);
+            assert_eq!(data.rows.len(), 8_000);
             assert!(data.has_more);
-            assert_eq!(view.rendered_rows.len(), MAX_RETAINED_ROWS);
+        });
+    }
 
-            assert!(view.apply_stream_page(
-                Page::Done {
-                    affected_rows: None,
-                    warnings: Vec::new(),
+    #[gpui::test]
+    fn advancing_the_window_renumbers_rows_and_resumes_the_stream(cx: &mut TestAppContext) {
+        let view = cx.update(|cx| cx.new(ResultsView::new));
+        view.update(cx, |view, cx| {
+            view.begin_stream(cx);
+            view.apply_stream_page(
+                Page::NextResult {
+                    columns: vec![column("id", PrimitiveType::Int64, Nullability::NotNullable)],
                 },
                 cx,
-            ));
+            );
+            view.apply_stream_page(rows_page(8_000, 0), cx);
+            view.apply_stream_page(rows_page(4_000, 8_000), cx);
+
+            assert!(view.advance_window(cx));
+            assert!(!view.window_held());
+            assert_eq!(view.window_rows(), None);
+            assert!(view.rendered_rows.is_empty());
+
+            // The held page is what resumes the stream, so no row is skipped
+            // between the two windows.
+            assert_eq!(
+                view.apply_stream_page(rows_page(4_000, 8_000), cx),
+                StreamProgress::Consumed
+            );
+            assert_eq!(view.window_rows(), Some((8_001, 12_000)));
+            assert_eq!(view.rendered_rows.len(), 4_000);
+
+            assert_eq!(
+                view.apply_stream_page(
+                    Page::Done {
+                        affected_rows: None,
+                        warnings: Vec::new(),
+                    },
+                    cx,
+                ),
+                StreamProgress::Terminal
+            );
             assert!(matches!(view.state(), ResultState::Ready(data) if data.has_more));
+            assert!(!view.window_held());
+        });
+    }
+
+    #[gpui::test]
+    fn a_first_page_larger_than_the_budget_is_taken_whole(cx: &mut TestAppContext) {
+        // Holding it instead would stall the stream forever, since no amount of
+        // advancing would make room. Real driver pages are far smaller than the
+        // retained budget; this bounds the pathological case to one page.
+        let view = cx.update(|cx| cx.new(ResultsView::new));
+        view.update(cx, |view, cx| {
+            view.begin_stream(cx);
+            view.apply_stream_page(
+                Page::NextResult {
+                    columns: vec![column("id", PrimitiveType::Int64, Nullability::NotNullable)],
+                },
+                cx,
+            );
+            assert_eq!(
+                view.apply_stream_page(rows_page(MAX_RETAINED_ROWS + 5, 0), cx),
+                StreamProgress::Consumed
+            );
+            assert!(!view.window_held());
+            assert_eq!(view.rendered_rows.len(), MAX_RETAINED_ROWS + 5);
         });
     }
 
@@ -2099,21 +2309,27 @@ mod tests {
         let view = cx.update(|cx| cx.new(ResultsView::new));
         view.update(cx, |view, cx| {
             view.begin_stream(cx);
-            assert!(view.apply_stream_page(
-                Page::Error {
-                    error: DriverError::new(Code::QueryCanceled, "query was canceled"),
-                },
-                cx,
-            ));
+            assert_eq!(
+                view.apply_stream_page(
+                    Page::Error {
+                        error: DriverError::new(Code::QueryCanceled, "query was canceled"),
+                    },
+                    cx,
+                ),
+                StreamProgress::Terminal
+            );
             assert!(matches!(view.state(), ResultState::Cancelled));
 
             view.begin_stream(cx);
-            assert!(view.apply_stream_page(
-                Page::Error {
-                    error: DriverError::new(Code::QueryTimedOut, "query timed out"),
-                },
-                cx,
-            ));
+            assert_eq!(
+                view.apply_stream_page(
+                    Page::Error {
+                        error: DriverError::new(Code::QueryTimedOut, "query timed out"),
+                    },
+                    cx,
+                ),
+                StreamProgress::Terminal
+            );
             assert!(matches!(view.state(), ResultState::TimedOut));
         });
     }
@@ -2177,13 +2393,16 @@ mod tests {
             view.set_state(ResultState::Failed("old error".into()), cx);
             view.begin_stream(cx);
             assert!(view.messages.is_empty());
-            assert!(view.apply_stream_page(
-                Page::Done {
-                    affected_rows: Some(3),
-                    warnings: vec![DriverWarning::new("partial result")],
-                },
-                cx,
-            ));
+            assert_eq!(
+                view.apply_stream_page(
+                    Page::Done {
+                        affected_rows: Some(3),
+                        warnings: vec![DriverWarning::new("partial result")],
+                    },
+                    cx,
+                ),
+                StreamProgress::Terminal
+            );
             assert_eq!(
                 view.messages,
                 vec![

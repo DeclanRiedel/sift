@@ -451,14 +451,21 @@ ADR amendment instead of burying a second UI toolkit behind an abstraction.
       resume through typed spill batches, transport loss remains an explicit
       outcome-unknown state, and all terminal responses map to distinct
       Ready/Unavailable/Failed/Cancelled/TimedOut/OutcomeUnknown states.
-- [~] Implement virtualized results with typed cells, null/error states, column
+- [x] Implement virtualized results with typed cells, null/error states, column
       resizing/reordering, selection, copy, paging, resume, and bounded prefetch.
       **Landed:** `uniform_list`-virtualized grid, typed cell rendering
       (null/number/bool/text/temporal/binary/structured), header type badges,
-      cell selection + copy, independently resizable columns, horizontal scroll,
-      incremental WebSocket page application, one-page ACK backpressure, spill
-      resume, and a 10,000-row retained-grid cap. **Remaining:** column reorder
-      and explicit navigation for rows beyond the retained window.
+      cell selection + copy, independently resizable columns, drag-to-reorder
+      headers, horizontal scroll, incremental WebSocket page application,
+      one-page ACK backpressure, spill resume, and a 10,000-row retained-grid
+      cap. Rows beyond the cap are now reachable explicitly: a page that would
+      overflow the window is refused and held *unacknowledged*, which pauses the
+      whole server stream instead of pulling a large result through the client to
+      discard it. A window strip states the absolute row range and offers the one
+      forward move a cursor supports; advancing discards the visible window,
+      consumes the held page, and renumbers rows against the whole result.
+      Dropping a held page (cancel, close, disconnect, re-run) tears the stream
+      down rather than resuming it.
 - [x] Add query-owned Data/Messages/Explain/History tabs plus pin/promote.
 - [x] Restore query and result references without persisting result data.
       **Landed:** `ItemPresentation::last_result` carries a `ResultReference`
