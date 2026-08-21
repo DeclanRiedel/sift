@@ -217,6 +217,129 @@ fn table_detail_nodes<'a>(
     nodes
 }
 
+fn catalog_detail_ddl(
+    source: &DatabaseObjectSource,
+    node: &sift_protocol::CatalogNode,
+) -> Option<String> {
+    let qualified_table = format!(
+        "{}.{}",
+        ddl_quote_identifier(&source.provider_id, &source.schema),
+        ddl_quote_identifier(&source.provider_id, &source.object)
+    );
+    match &node.details {
+        sift_protocol::CatalogNodeDetails::Index { index } => {
+            let columns = index
+                .columns
+                .iter()
+                .map(|column| {
+                    if column
+                        .chars()
+                        .all(|character| character.is_alphanumeric() || character == '_')
+                    {
+                        ddl_quote_identifier(&source.provider_id, column)
+                    } else {
+                        column.clone()
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            let mut ddl = format!(
+                "-- Catalog-derived index DDL preview\nCREATE {}INDEX {} ON {} ({})",
+                if index.unique { "UNIQUE " } else { "" },
+                ddl_quote_identifier(&source.provider_id, &index.name),
+                qualified_table,
+                columns
+            );
+            if let Some(predicate) = &index.partial_predicate {
+                ddl.push_str(" WHERE ");
+                ddl.push_str(predicate);
+            }
+            ddl.push(';');
+            Some(ddl)
+        }
+        sift_protocol::CatalogNodeDetails::Constraint { constraint } => Some(
+            constraint
+                .definition
+                .as_ref()
+                .map(|definition| {
+                    format!(
+                        "-- Catalog relation definition\nALTER TABLE {} ADD CONSTRAINT {} {};",
+                        qualified_table,
+                        ddl_quote_identifier(&source.provider_id, &constraint.name),
+                        definition.trim().trim_end_matches(';')
+                    )
+                })
+                .unwrap_or_else(|| {
+                    format!(
+                        "-- DDL definition is unavailable for relation {}.",
+                        constraint.name
+                    )
+                }),
+        ),
+        sift_protocol::CatalogNodeDetails::Trigger { trigger } => {
+            Some(trigger.definition.clone().unwrap_or_else(|| {
+                format!(
+                    "-- DDL definition is unavailable for trigger {}.",
+                    trigger.name
+                )
+            }))
+        }
+        _ => None,
+    }
+}
+
+fn catalog_columns_ddl(
+    source: &DatabaseObjectSource,
+    graph: &sift_protocol::CatalogGraph,
+    table_id: &sift_protocol::CatalogObjectId,
+    columns_only: bool,
+) -> String {
+    let qualified_relation = format!(
+        "{}.{}",
+        ddl_quote_identifier(&source.provider_id, &source.schema),
+        ddl_quote_identifier(&source.provider_id, &source.object)
+    );
+    let columns = table_columns(graph, table_id)
+        .into_iter()
+        .filter_map(|node| {
+            let sift_protocol::CatalogNodeDetails::Column { column } = &node.details else {
+                return None;
+            };
+            Some(format!(
+                "    {} {}{}",
+                ddl_quote_identifier(&source.provider_id, &node.name),
+                type_ref_label(&column.type_ref),
+                if column.nullable == sift_protocol::Nullability::NotNullable {
+                    " NOT NULL"
+                } else {
+                    ""
+                }
+            ))
+        })
+        .collect::<Vec<_>>();
+    if matches!(
+        source.object_kind,
+        sift_protocol::ObjectKind::Table
+            | sift_protocol::ObjectKind::ForeignTable
+            | sift_protocol::ObjectKind::PartitionedTable
+    ) {
+        let scope = if columns_only {
+            "-- Columns only; indexes, constraints, triggers, storage, and grants are omitted."
+        } else {
+            "-- Base relation definition; engine-specific storage and grants may be omitted."
+        };
+        format!(
+            "-- Catalog-derived relation DDL preview\n{scope}\nCREATE TABLE {qualified_relation} (\n{}\n);",
+            columns.join(",\n")
+        )
+    } else {
+        format!(
+            "-- Catalog-derived column metadata for {qualified_relation}\n-- Exact relation DDL is unavailable in this UI foundation.\n{}",
+            columns.join("\n")
+        )
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum TableDefinitionSection {
     Columns,
@@ -5048,69 +5171,8 @@ impl WorkspaceShell {
         let Some(node) = graph.data.nodes.iter().find(|node| &node.id == node_id) else {
             return;
         };
-        let qualified_table = format!(
-            "{}.{}",
-            ddl_quote_identifier(&source.provider_id, &source.schema),
-            ddl_quote_identifier(&source.provider_id, &source.object)
-        );
-        let ddl = match &node.details {
-            sift_protocol::CatalogNodeDetails::Index { index } => {
-                let columns = index
-                    .columns
-                    .iter()
-                    .map(|column| {
-                        if column
-                            .chars()
-                            .all(|character| character.is_alphanumeric() || character == '_')
-                        {
-                            ddl_quote_identifier(&source.provider_id, column)
-                        } else {
-                            column.clone()
-                        }
-                    })
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                let mut ddl = format!(
-                    "-- Catalog-derived index DDL preview\nCREATE {}INDEX {} ON {} ({})",
-                    if index.unique { "UNIQUE " } else { "" },
-                    ddl_quote_identifier(&source.provider_id, &index.name),
-                    qualified_table,
-                    columns
-                );
-                if let Some(predicate) = &index.partial_predicate {
-                    ddl.push_str(" WHERE ");
-                    ddl.push_str(predicate);
-                }
-                ddl.push(';');
-                ddl
-            }
-            sift_protocol::CatalogNodeDetails::Constraint { constraint } => constraint
-                .definition
-                .as_ref()
-                .map(|definition| {
-                    format!(
-                        "-- Catalog relation definition\nALTER TABLE {} ADD CONSTRAINT {} {};",
-                        qualified_table,
-                        ddl_quote_identifier(&source.provider_id, &constraint.name),
-                        definition.trim().trim_end_matches(';')
-                    )
-                })
-                .unwrap_or_else(|| {
-                    format!(
-                        "-- DDL definition is unavailable for relation {}.\n-- Refresh metadata or use the full table DDL view.",
-                        constraint.name
-                    )
-                }),
-            sift_protocol::CatalogNodeDetails::Trigger { trigger } => trigger
-                .definition
-                .clone()
-                .unwrap_or_else(|| {
-                    format!(
-                        "-- DDL definition is unavailable for trigger {}.\n-- Refresh metadata or use the database engine's catalog tools.",
-                        trigger.name
-                    )
-                }),
-            _ => return,
+        let Some(ddl) = catalog_detail_ddl(source, node) else {
+            return;
         };
         for pane in &self.panes {
             if pane.update(cx, |pane, cx| {
@@ -5131,45 +5193,42 @@ impl WorkspaceShell {
         else {
             return;
         };
-        let qualified_relation = format!(
-            "{}.{}",
-            ddl_quote_identifier(&source.provider_id, &source.schema),
-            ddl_quote_identifier(&source.provider_id, &source.object)
-        );
-        let columns = table_columns(graph, table_id)
-            .into_iter()
-            .filter_map(|node| {
-                let sift_protocol::CatalogNodeDetails::Column { column } = &node.details else {
-                    return None;
-                };
-                Some(format!(
-                    "    {} {}{}",
-                    ddl_quote_identifier(&source.provider_id, &node.name),
-                    type_ref_label(&column.type_ref),
-                    if column.nullable == sift_protocol::Nullability::NotNullable {
-                        " NOT NULL"
-                    } else {
-                        ""
-                    }
-                ))
-            })
-            .collect::<Vec<_>>();
-        let ddl = if matches!(
-            source.object_kind,
-            sift_protocol::ObjectKind::Table
-                | sift_protocol::ObjectKind::ForeignTable
-                | sift_protocol::ObjectKind::PartitionedTable
-        ) {
-            format!(
-                "-- Catalog-derived relation DDL preview\n-- Columns only; indexes, constraints, triggers, storage, and grants are omitted.\nCREATE TABLE {qualified_relation} (\n{}\n);",
-                columns.join(",\n")
-            )
-        } else {
-            format!(
-                "-- Catalog-derived column metadata for {qualified_relation}\n-- Exact relation DDL is unavailable in this UI foundation.\n{}",
-                columns.join("\n")
-            )
+        let ddl = catalog_columns_ddl(source, graph, table_id, true);
+        for pane in &self.panes {
+            if pane.update(cx, |pane, cx| {
+                pane.show_database_item_view(item_id, DatabaseItemView::Ddl, Some(ddl.clone()), cx)
+            }) {
+                break;
+            }
+        }
+        cx.notify();
+    }
+
+    fn open_table_full_ddl(&mut self, item_id: u64, cx: &mut Context<Self>) {
+        let Some(TableDefinitionState::Ready {
+            source,
+            graph,
+            table_id,
+        }) = self.table_definitions.get(&item_id)
+        else {
+            return;
         };
+        let mut sections = vec![catalog_columns_ddl(source, graph, table_id, false)];
+        for kind in [
+            sift_protocol::CatalogNodeKind::Constraint,
+            sift_protocol::CatalogNodeKind::Index,
+            sift_protocol::CatalogNodeKind::Trigger,
+        ] {
+            sections.extend(
+                table_detail_nodes(graph, table_id, kind)
+                    .into_iter()
+                    .filter_map(|node| catalog_detail_ddl(source, node)),
+            );
+        }
+        let ddl = format!(
+            "-- Full catalog-derived DDL preview\n-- Review engine-specific details before execution.\n\n{}",
+            sections.join("\n\n")
+        );
         for pane in &self.panes {
             if pane.update(cx, |pane, cx| {
                 pane.show_database_item_view(item_id, DatabaseItemView::Ddl, Some(ddl.clone()), cx)
@@ -9520,6 +9579,16 @@ impl WorkspaceShell {
         let inspector_target = (dock.id == DockId::Inspector)
             .then(|| self.focused_item_title(cx))
             .flatten();
+        let inspector_full_ddl_item = (dock.id == DockId::Inspector)
+            .then(|| self.focused_database_item(cx))
+            .flatten()
+            .and_then(|(item_id, _)| {
+                matches!(
+                    self.table_definitions.get(&item_id),
+                    Some(TableDefinitionState::Ready { .. })
+                )
+                .then_some(item_id)
+            });
         div()
             .id(title)
             .debug_selector(move || debug_selector.to_owned())
@@ -9553,6 +9622,30 @@ impl WorkspaceShell {
                             .text_xs()
                             .text_color(colors.muted_text)
                             .child(target)
+                    }))
+                    .children(inspector_full_ddl_item.map(|item_id| {
+                        div()
+                            .id("view-full-table-ddl-focus")
+                            .flex_none()
+                            .tab_index(0)
+                            .focus(|style| style.bg(colors.hovered_surface))
+                            .on_key_down(cx.listener(
+                                move |shell, event: &gpui::KeyDownEvent, _, cx| {
+                                    if !event.keystroke.modifiers.modified()
+                                        && matches!(event.keystroke.key.as_str(), "enter" | "space")
+                                    {
+                                        shell.open_table_full_ddl(item_id, cx);
+                                        cx.stop_propagation();
+                                    }
+                                },
+                            ))
+                            .child(
+                                Button::new("view-full-table-ddl", "Full DDL")
+                                    .tone(ButtonTone::Ghost)
+                                    .on_click(cx.listener(move |shell, _, _, cx| {
+                                        shell.open_table_full_ddl(item_id, cx)
+                                    })),
+                            )
                     })),
             )
             .when(
@@ -13397,6 +13490,17 @@ mod tests {
             assert!(ddl.contains("CREATE TABLE \"lab\".\"people\""), "{ddl}");
             assert!(ddl.contains("\"id\" bigint"), "{ddl}");
             assert!(ddl.contains("\"name\" text"), "{ddl}");
+        });
+        workspace.update_in(&mut cx, |shell, _, cx| {
+            shell.open_table_full_ddl(item_id, cx);
+        });
+        workspace.update_in(&mut cx, |shell, _, cx| {
+            let pane = shell.panes[shell.active_pane].read(cx);
+            let ddl = pane.editor(item_id).unwrap().read(cx).document().text();
+            assert!(ddl.contains("Full catalog-derived DDL preview"), "{ddl}");
+            assert!(ddl.contains("ADD CONSTRAINT \"people_team_fk\""), "{ddl}");
+            assert!(ddl.contains("CREATE INDEX \"people_name_idx\""), "{ddl}");
+            assert!(ddl.contains("CREATE TRIGGER people_touch"), "{ddl}");
         });
         workspace.update_in(&mut cx, |shell, _, cx| {
             shell.select_table_definition_section(item_id, TableDefinitionSection::Indexes, cx);
