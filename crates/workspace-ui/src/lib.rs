@@ -7,7 +7,7 @@ pub mod results;
 mod settings;
 mod shell;
 
-pub use editor::{QueryDocument, QueryEditor};
+pub use editor::{QueryDocument, QueryEditor, SemanticOutcome, SemanticRequestKind};
 pub use results::{ResultData, ResultState, ResultsView};
 
 pub use lifecycle::{
@@ -18,8 +18,8 @@ pub use lifecycle::{
 };
 pub use presentation::{
     BottomTool, DatabaseObjectSource, DockPresentation, ItemKind, ItemPresentation, ItemSource,
-    LeftPanel, PanePresentation, PresentationState, PresentationStore, Rect, RoomDocumentSource,
-    WindowPresentation, WorkspacePresentation,
+    LeftPanel, PanePresentation, PresentationState, PresentationStore, Rect, ResultReference,
+    RoomDocumentSource, WindowPresentation, WorkspacePresentation,
 };
 pub use settings::{EditorMode, EditorSettings, SettingsStore, UserSettings};
 pub use shell::{

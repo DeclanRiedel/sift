@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use gpui::{prelude::*, App, Context, Entity, IntoElement, Window};
@@ -12,8 +12,8 @@ use sift_client_sdk::{
 use sift_protocol::{ConnectionId, SessionId};
 use sift_workspace_ui::{
     ConnectionStatus, EditorMode, ExecutorCommand, ExecutorEvent, PresentationState,
-    PresentationStore, Rect, ResultState, RoomDocumentCommand, RoomDocumentEvent, SettingsStore,
-    UserSettings, WorkspaceShell,
+    PresentationStore, Rect, ResultState, RoomDocumentCommand, RoomDocumentEvent, SemanticOutcome,
+    SemanticRequestKind, SettingsStore, UserSettings, WorkspaceShell,
 };
 
 use crate::config::DesktopConfig;
@@ -456,6 +456,9 @@ struct QueryContext {
     connection: ConnectionId,
     metadata_connection: ConnectionId,
     profile_id: i64,
+    /// Semantic work runs on its own task; dropping this sender ends it and
+    /// releases every server document it owns with the connection.
+    semantic: tokio::sync::mpsc::UnboundedSender<SemanticControl>,
 }
 
 /// Owns the SDK client and the current session/connection. Connection is
@@ -500,7 +503,7 @@ async fn run_query_executor(
                     let _ = previous.client.close_session(previous.session).await;
                 }
                 let server = targets.borrow().clone();
-                match open_query_context(&server, tenant_id, profile_id).await {
+                match open_query_context(&server, tenant_id, profile_id, &events).await {
                     Ok(opened) => {
                         if events
                             .send(ExecutorEvent::Connection(ConnectionStatus::Connected {
@@ -631,7 +634,7 @@ async fn run_query_executor(
                 match result {
                     Ok(entry) => {
                         let connection_error =
-                            match open_query_context(&server, tenant_id, entry.id).await {
+                            match open_query_context(&server, tenant_id, entry.id, &events).await {
                                 Ok(opened) => {
                                     let _ = events.send(ExecutorEvent::Connection(
                                         ConnectionStatus::Connected {
@@ -746,6 +749,40 @@ async fn run_query_executor(
                 };
                 if events.send(event).is_err() {
                     return;
+                }
+            }
+            ExecutorCommand::Semantic {
+                item_id,
+                text_revision,
+                text,
+                request,
+            } => {
+                let job = SemanticJob {
+                    item_id,
+                    text_revision,
+                    text,
+                    request,
+                };
+                let delivered = context
+                    .as_ref()
+                    .is_some_and(|opened| opened.semantic.send(SemanticControl::Run(job)).is_ok());
+                if !delivered
+                    && events
+                        .send(ExecutorEvent::Semantic {
+                            item_id,
+                            text_revision,
+                            outcome: Box::new(SemanticOutcome::Failed(
+                                "Not connected — SQL analysis needs a connection.".into(),
+                            )),
+                        })
+                        .is_err()
+                {
+                    return;
+                }
+            }
+            ExecutorCommand::CloseSemanticDocument { item_id } => {
+                if let Some(opened) = context.as_ref() {
+                    let _ = opened.semantic.send(SemanticControl::Close(item_id));
                 }
             }
             ExecutorCommand::ApplyTableMigration { item_id, request } => {
@@ -878,6 +915,9 @@ async fn create_connection_profile(
         provider_id: profile.provider_id,
     })
 }
+
+const SEMANTIC_COMPLETION_LIMIT: u32 = 50;
+const SEMANTIC_USAGE_LIMIT: u32 = 500;
 
 struct QueryRun {
     client: Client,
@@ -1143,10 +1183,442 @@ fn send_execution_error(
 
 /// Open a session and a connection for the chosen tenant/profile. Ids come from
 /// the UI's connection picker, so no discovery/guessing happens here.
+/// One unit of semantic work, addressed to the exact buffer revision it
+/// describes. The text travels with the job so the server document can be
+/// resynchronized without relying on the order two channels happened to be
+/// drained in.
+struct SemanticJob {
+    item_id: u64,
+    text_revision: u64,
+    text: String,
+    request: SemanticRequestKind,
+}
+
+enum SemanticControl {
+    Run(SemanticJob),
+    Close(u64),
+}
+
+/// Server-side identity of one editor's semantic document.
+struct SemanticDocument {
+    id: sift_protocol::SemanticDocumentId,
+    /// Server document revision, required verbatim by every read operation.
+    revision: u64,
+    /// Client text revision the server text currently matches.
+    text_revision: u64,
+}
+
+/// Owns every server semantic document for one connection.
+///
+/// Runs on its own task so a slow analysis never delays query execution, and
+/// processes jobs sequentially because the server document is stateful: two
+/// concurrent updates would race on `base_revision`. Each pass drains
+/// everything already queued first, which is where revision cancellation
+/// happens — superseded work is discarded before it costs a round trip.
+async fn run_semantic_service(
+    client: Client,
+    session: SessionId,
+    connection: ConnectionId,
+    mut controls: tokio::sync::mpsc::UnboundedReceiver<SemanticControl>,
+    events: tokio::sync::mpsc::UnboundedSender<ExecutorEvent>,
+) {
+    let mut documents: HashMap<u64, SemanticDocument> = HashMap::new();
+    let mut catalog_revision: Option<sift_protocol::CatalogRevision> = None;
+    while let Some(first) = controls.recv().await {
+        let mut batch = vec![first];
+        while let Ok(next) = controls.try_recv() {
+            batch.push(next);
+        }
+        let closed = batch
+            .iter()
+            .filter_map(|control| match control {
+                SemanticControl::Close(item_id) => Some(*item_id),
+                SemanticControl::Run(_) => None,
+            })
+            .collect::<HashSet<_>>();
+        for item_id in &closed {
+            if let Some(document) = documents.remove(item_id) {
+                let _ = client
+                    .close_semantic_document(session, connection, document.id)
+                    .await;
+            }
+        }
+        let jobs = admissible_jobs(batch, &closed, &events);
+        for job in jobs {
+            if run_semantic_job(
+                &client,
+                session,
+                connection,
+                &mut documents,
+                &mut catalog_revision,
+                job,
+                &events,
+            )
+            .await
+            .is_err()
+            {
+                return;
+            }
+        }
+    }
+    for (_, document) in documents.drain() {
+        let _ = client
+            .close_semantic_document(session, connection, document.id)
+            .await;
+    }
+}
+
+/// Reduce one drained batch to the work still worth doing: newest revision per
+/// item, and at most one `Analyze` for it. A superseded interactive request is
+/// reported back rather than dropped silently, so the editor never waits on an
+/// answer that will never arrive.
+fn admissible_jobs(
+    batch: Vec<SemanticControl>,
+    closed: &HashSet<u64>,
+    events: &tokio::sync::mpsc::UnboundedSender<ExecutorEvent>,
+) -> Vec<SemanticJob> {
+    let mut jobs = batch
+        .into_iter()
+        .filter_map(|control| match control {
+            SemanticControl::Run(job) if !closed.contains(&job.item_id) => Some(job),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let mut newest: HashMap<u64, u64> = HashMap::new();
+    for job in &jobs {
+        let entry = newest.entry(job.item_id).or_insert(job.text_revision);
+        *entry = (*entry).max(job.text_revision);
+    }
+    // Walking backwards keeps the last Analyze of a burst, which is the one
+    // whose answer matches what the user is now looking at.
+    let mut analyzed: HashSet<u64> = HashSet::new();
+    let mut kept = Vec::with_capacity(jobs.len());
+    for job in jobs.drain(..).rev() {
+        let current = newest.get(&job.item_id).copied() == Some(job.text_revision);
+        let duplicate_analyze =
+            job.request == SemanticRequestKind::Analyze && !analyzed.insert(job.item_id);
+        if current && !duplicate_analyze {
+            kept.push(job);
+            continue;
+        }
+        if job.request != SemanticRequestKind::Analyze {
+            let _ = events.send(ExecutorEvent::Semantic {
+                item_id: job.item_id,
+                text_revision: job.text_revision,
+                outcome: Box::new(SemanticOutcome::Failed(
+                    "Buffer changed before the request ran.".into(),
+                )),
+            });
+        }
+    }
+    kept.reverse();
+    kept
+}
+
+/// Bring the server document in line with `job.text`, returning the server
+/// revision to quote in the request. Opening a fresh document is the recovery
+/// path for any update failure: an out-of-date `base_revision` is not
+/// something the client can reconcile, and the text is authoritative here.
+async fn sync_semantic_document(
+    client: &Client,
+    session: SessionId,
+    connection: ConnectionId,
+    documents: &mut HashMap<u64, SemanticDocument>,
+    job: &SemanticJob,
+) -> Result<(sift_protocol::SemanticDocumentId, u64), String> {
+    if let Some(existing) = documents.get(&job.item_id) {
+        if existing.text_revision == job.text_revision {
+            return Ok((existing.id, existing.revision));
+        }
+        let updated = client
+            .update_semantic_document(
+                session,
+                connection,
+                existing.id,
+                sift_protocol::UpdateSemanticDocumentRequest {
+                    base_revision: existing.revision,
+                    text: job.text.clone(),
+                },
+            )
+            .await;
+        match updated {
+            Ok(state) => {
+                documents.insert(
+                    job.item_id,
+                    SemanticDocument {
+                        id: state.document_id,
+                        revision: state.revision,
+                        text_revision: job.text_revision,
+                    },
+                );
+                return Ok((state.document_id, state.revision));
+            }
+            Err(_) => {
+                documents.remove(&job.item_id);
+            }
+        }
+    }
+    let state = client
+        .open_semantic_document(
+            session,
+            connection,
+            sift_protocol::CreateSemanticDocumentRequest {
+                text: job.text.clone(),
+                source: Some(sift_protocol::SemanticSource::Scratch),
+            },
+        )
+        .await
+        .map_err(|error| format!("SQL analysis is unavailable: {error}"))?;
+    documents.insert(
+        job.item_id,
+        SemanticDocument {
+            id: state.document_id,
+            revision: state.revision,
+            text_revision: job.text_revision,
+        },
+    );
+    Ok((state.document_id, state.revision))
+}
+
+/// The catalog revision the semantic endpoints will accept. Both the catalog
+/// diagnostics and quick-fix routes rebuild the graph from the *default*
+/// request and reject anything but its current revision, so this must ask for
+/// exactly that shape.
+async fn current_catalog_revision(
+    client: &Client,
+    session: SessionId,
+    connection: ConnectionId,
+    cached: &mut Option<sift_protocol::CatalogRevision>,
+) -> Option<sift_protocol::CatalogRevision> {
+    if let Some(revision) = *cached {
+        return Some(revision);
+    }
+    let graph = client
+        .catalog_graph(
+            session,
+            connection,
+            sift_protocol::CatalogGraphRequest::default(),
+        )
+        .await
+        .ok()?;
+    *cached = Some(graph.revision);
+    *cached
+}
+
+/// Run one job. `Err(())` means the UI channel closed and the service should
+/// stop; every other failure is reported to the editor as an outcome.
+#[allow(clippy::result_unit_err)]
+async fn run_semantic_job(
+    client: &Client,
+    session: SessionId,
+    connection: ConnectionId,
+    documents: &mut HashMap<u64, SemanticDocument>,
+    catalog_revision: &mut Option<sift_protocol::CatalogRevision>,
+    job: SemanticJob,
+    events: &tokio::sync::mpsc::UnboundedSender<ExecutorEvent>,
+) -> Result<(), ()> {
+    let item_id = job.item_id;
+    let text_revision = job.text_revision;
+    let outcome = match sync_semantic_document(client, session, connection, documents, &job).await {
+        Ok((document, revision)) => {
+            semantic_outcome(
+                client,
+                session,
+                connection,
+                document,
+                revision,
+                catalog_revision,
+                job.request,
+            )
+            .await
+        }
+        Err(message) => SemanticOutcome::Failed(message),
+    };
+    events
+        .send(ExecutorEvent::Semantic {
+            item_id,
+            text_revision,
+            outcome: Box::new(outcome),
+        })
+        .map_err(|_| ())
+}
+
+async fn semantic_outcome(
+    client: &Client,
+    session: SessionId,
+    connection: ConnectionId,
+    document: sift_protocol::SemanticDocumentId,
+    revision: u64,
+    catalog_revision: &mut Option<sift_protocol::CatalogRevision>,
+    request: SemanticRequestKind,
+) -> SemanticOutcome {
+    match request {
+        SemanticRequestKind::Analyze => {
+            // Catalog-bound diagnostics are strictly better but need a live
+            // catalog revision. When it is stale or unavailable, fall back to
+            // syntax-only diagnostics instead of showing the user nothing.
+            if let Some(catalog) =
+                current_catalog_revision(client, session, connection, catalog_revision).await
+            {
+                match client
+                    .semantic_diagnostics_with_catalog(
+                        session, connection, document, revision, catalog,
+                    )
+                    .await
+                {
+                    Ok(response) => {
+                        return SemanticOutcome::Diagnostics {
+                            diagnostics: response.diagnostics,
+                            incomplete: response.incomplete,
+                        }
+                    }
+                    Err(_) => *catalog_revision = None,
+                }
+            }
+            match client
+                .semantic_diagnostics(session, connection, document, revision)
+                .await
+            {
+                Ok(response) => SemanticOutcome::Diagnostics {
+                    diagnostics: response.diagnostics,
+                    incomplete: true,
+                },
+                Err(error) => SemanticOutcome::Failed(format!("diagnostics failed: {error}")),
+            }
+        }
+        SemanticRequestKind::Complete { cursor } => {
+            match client
+                .complete_semantic_document(
+                    session,
+                    connection,
+                    document,
+                    sift_protocol::SemanticCompletionRequest {
+                        revision,
+                        cursor,
+                        limit: Some(SEMANTIC_COMPLETION_LIMIT),
+                    },
+                )
+                .await
+            {
+                Ok(response) => SemanticOutcome::Completions {
+                    replaced: sift_protocol::TextRange {
+                        start: response.replaced_range.start,
+                        end: response.replaced_range.end,
+                    },
+                    candidates: response.candidates,
+                },
+                Err(error) => SemanticOutcome::Failed(format!("completion failed: {error}")),
+            }
+        }
+        SemanticRequestKind::Format { range } => {
+            match client
+                .format_semantic_document(
+                    session,
+                    connection,
+                    document,
+                    sift_protocol::FormatSqlRequest {
+                        revision,
+                        range,
+                        options: sift_protocol::FormatOptions::default(),
+                    },
+                )
+                .await
+            {
+                Ok(edit) => workspace_edit_outcome(edit, document),
+                Err(error) => SemanticOutcome::Failed(format!("formatting failed: {error}")),
+            }
+        }
+        SemanticRequestKind::QuickFix { fix_id } => {
+            let Some(catalog) =
+                current_catalog_revision(client, session, connection, catalog_revision).await
+            else {
+                return SemanticOutcome::Failed(
+                    "Quick fixes need catalog metadata this connection cannot provide.".into(),
+                );
+            };
+            match client
+                .prepare_semantic_quick_fix(
+                    session,
+                    connection,
+                    document,
+                    &fix_id,
+                    sift_protocol::SqlQuickFixRequest {
+                        revision,
+                        catalog_revision: catalog,
+                    },
+                )
+                .await
+            {
+                Ok(edit) => workspace_edit_outcome(edit, document),
+                Err(error) => {
+                    *catalog_revision = None;
+                    SemanticOutcome::Failed(format!("quick fix failed: {error}"))
+                }
+            }
+        }
+        SemanticRequestKind::Usages { position } => {
+            let catalog =
+                current_catalog_revision(client, session, connection, catalog_revision).await;
+            match client
+                .find_semantic_usages(
+                    session,
+                    connection,
+                    document,
+                    sift_protocol::FindSqlUsagesRequest {
+                        revision,
+                        catalog_revision: catalog,
+                        target: sift_protocol::SqlSymbolTarget::AtPosition { position },
+                        cursor: None,
+                        limit: Some(SEMANTIC_USAGE_LIMIT),
+                    },
+                )
+                .await
+            {
+                Ok(page) => SemanticOutcome::Usages {
+                    usages: page.usages,
+                    is_complete: page.is_complete,
+                },
+                Err(error) => {
+                    *catalog_revision = None;
+                    SemanticOutcome::Failed(format!("finding usages failed: {error}"))
+                }
+            }
+        }
+    }
+}
+
+/// Keep only the edits aimed at this editor's own document. A multi-document
+/// `WorkspaceEdit` is reported rather than partially applied, because the
+/// desktop has no way to edit another session's document on the user's behalf.
+fn workspace_edit_outcome(
+    edit: sift_protocol::WorkspaceEdit,
+    document: sift_protocol::SemanticDocumentId,
+) -> SemanticOutcome {
+    let mut warnings = edit.warnings;
+    let foreign = edit
+        .documents
+        .iter()
+        .any(|target| target.document_id != document);
+    if foreign {
+        warnings.push("Edits for other documents were not applied.".into());
+    }
+    if !edit.is_complete {
+        warnings.push("The server returned a partial edit.".into());
+    }
+    let edits = edit
+        .documents
+        .into_iter()
+        .filter(|target| target.document_id == document)
+        .flat_map(|target| target.edits)
+        .collect();
+    SemanticOutcome::Edits { edits, warnings }
+}
+
 async fn open_query_context(
     server: &DesktopServer,
     tenant_id: i64,
     profile_id: i64,
+    events: &tokio::sync::mpsc::UnboundedSender<ExecutorEvent>,
 ) -> Result<QueryContext, String> {
     let client = server.client().await?;
     let session = client
@@ -1181,12 +1653,37 @@ async fn open_query_context(
             return Err(format!("opening a metadata connection failed: {error}"));
         }
     };
+    let semantic_connection = match client
+        .open_connection_from_profile(
+            session,
+            OpenConnectionFromProfileRequest {
+                tenant_id,
+                profile_id,
+            },
+        )
+        .await
+    {
+        Ok(connection) => connection.id,
+        Err(error) => {
+            let _ = client.close_session(session).await;
+            return Err(format!("opening a semantic connection failed: {error}"));
+        }
+    };
+    let (semantic, controls) = tokio::sync::mpsc::unbounded_channel();
+    std::mem::drop(tokio::spawn(run_semantic_service(
+        client.clone(),
+        session,
+        semantic_connection,
+        controls,
+        events.clone(),
+    )));
     Ok(QueryContext {
         client,
         session,
         connection,
         metadata_connection,
         profile_id,
+        semantic,
     })
 }
 
@@ -1662,5 +2159,116 @@ mod tests {
 
         assert_eq!(settings.editor.default_mode, EditorMode::Vim);
         assert_eq!(store.load().unwrap(), settings);
+    }
+
+    fn job(item_id: u64, text_revision: u64, request: SemanticRequestKind) -> SemanticControl {
+        SemanticControl::Run(SemanticJob {
+            item_id,
+            text_revision,
+            text: format!("select {text_revision}"),
+            request,
+        })
+    }
+
+    #[test]
+    fn a_keystroke_burst_collapses_to_one_analysis_of_the_newest_text() {
+        let (events, mut received) = tokio::sync::mpsc::unbounded_channel();
+        let kept = admissible_jobs(
+            vec![
+                job(1, 1, SemanticRequestKind::Analyze),
+                job(1, 2, SemanticRequestKind::Analyze),
+                job(1, 3, SemanticRequestKind::Analyze),
+                job(2, 9, SemanticRequestKind::Analyze),
+            ],
+            &HashSet::new(),
+            &events,
+        );
+
+        assert_eq!(kept.len(), 2);
+        assert_eq!((kept[0].item_id, kept[0].text_revision), (1, 3));
+        assert_eq!((kept[1].item_id, kept[1].text_revision), (2, 9));
+        // Superseded analysis is silent; nothing was waiting on it.
+        assert!(received.try_recv().is_err());
+    }
+
+    #[test]
+    fn a_superseded_interactive_request_is_reported_rather_than_dropped() {
+        let (events, mut received) = tokio::sync::mpsc::unbounded_channel();
+        let kept = admissible_jobs(
+            vec![
+                job(1, 1, SemanticRequestKind::Complete { cursor: 3 }),
+                job(1, 2, SemanticRequestKind::Analyze),
+            ],
+            &HashSet::new(),
+            &events,
+        );
+
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].request, SemanticRequestKind::Analyze);
+        assert!(matches!(
+            received.try_recv(),
+            Ok(ExecutorEvent::Semantic {
+                item_id: 1,
+                text_revision: 1,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn work_for_a_closed_tab_is_abandoned() {
+        let (events, mut received) = tokio::sync::mpsc::unbounded_channel();
+        let kept = admissible_jobs(
+            vec![
+                job(1, 1, SemanticRequestKind::Format { range: None }),
+                SemanticControl::Close(1),
+            ],
+            &HashSet::from([1]),
+            &events,
+        );
+
+        assert!(kept.is_empty());
+        assert!(received.try_recv().is_err());
+    }
+
+    #[test]
+    fn foreign_documents_in_a_workspace_edit_are_not_applied() {
+        let mine = sift_protocol::SemanticDocumentId(uuid::Uuid::from_u128(1));
+        let theirs = sift_protocol::SemanticDocumentId(uuid::Uuid::from_u128(2));
+        let outcome = workspace_edit_outcome(
+            sift_protocol::WorkspaceEdit {
+                documents: vec![
+                    sift_protocol::DocumentEdit {
+                        document_id: mine,
+                        expected_revision: 1,
+                        source_digest: "d".into(),
+                        edits: vec![sift_protocol::TextEdit {
+                            range: sift_protocol::TextRange { start: 0, end: 1 },
+                            new_text: "A".into(),
+                        }],
+                    },
+                    sift_protocol::DocumentEdit {
+                        document_id: theirs,
+                        expected_revision: 1,
+                        source_digest: "d".into(),
+                        edits: vec![sift_protocol::TextEdit {
+                            range: sift_protocol::TextRange { start: 0, end: 1 },
+                            new_text: "B".into(),
+                        }],
+                    },
+                ],
+                warnings: Vec::new(),
+                is_complete: true,
+                actual_range: None,
+            },
+            mine,
+        );
+
+        let SemanticOutcome::Edits { edits, warnings } = outcome else {
+            panic!("formatting produces edits");
+        };
+        assert_eq!(edits.len(), 1);
+        assert_eq!(edits[0].new_text, "A");
+        assert_eq!(warnings.len(), 1);
     }
 }

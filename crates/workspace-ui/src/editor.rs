@@ -16,7 +16,12 @@ use modalkit::editing::{application::EmptyInfo, store::SharedStore};
 use sift_doc::{random_peer_id, TextReplica};
 use sift_ui::{ActiveTheme, Theme};
 
+mod semantic;
 mod vim;
+use self::semantic::{completion_kind_badge, ordered_edits, usage_kind_label};
+pub use self::semantic::{
+    CompletionMenu, EditorDiagnostic, SemanticOutcome, SemanticRequestKind, SemanticState,
+};
 use self::vim::{VimEngine, VimSnapshot};
 
 struct GlobalVimStore(SharedStore<EmptyInfo>);
@@ -37,6 +42,43 @@ const BLOCK_CURSOR_FALLBACK_WIDTH: Pixels = px(7.);
 pub(crate) const EDITOR_GUTTER_WIDTH: Pixels = px(48.);
 const EDITOR_TEXT_INSET: Pixels = px(12.);
 const EDITOR_VERTICAL_INSET: Pixels = px(8.);
+const DIAGNOSTIC_UNDERLINE_HEIGHT: Pixels = px(2.);
+/// Zero-width server ranges (end-of-statement errors) still need a visible
+/// mark, so they paint as a narrow stub rather than nothing.
+const EMPTY_SPAN_WIDTH: Pixels = px(6.);
+const COMPLETION_MENU_WIDTH: Pixels = px(340.);
+const COMPLETION_ROW_HEIGHT: Pixels = px(22.);
+const COMPLETION_VISIBLE_ROWS: usize = 9;
+
+/// Pixel bounds of the part of `range` that falls on the line starting at
+/// `line_start`, or `None` when the range misses this line entirely.
+fn span_bounds(
+    range: &Range<usize>,
+    line_start: usize,
+    line_end: usize,
+    shaped: &ShapedLine,
+    text_left: Pixels,
+    top: Pixels,
+    line_height: Pixels,
+) -> Option<Bounds<Pixels>> {
+    if range.start > line_end || range.end < line_start {
+        return None;
+    }
+    let start = range.start.clamp(line_start, line_end);
+    let end = range.end.clamp(line_start, line_end);
+    let x0 = shaped.x_for_index(start - line_start);
+    let x1 = if end > start {
+        shaped
+            .x_for_index(end - line_start)
+            .max(x0 + EMPTY_SPAN_WIDTH)
+    } else {
+        x0 + EMPTY_SPAN_WIDTH
+    };
+    Some(Bounds::from_corners(
+        point(text_left + x0, top),
+        point(text_left + x1, top + line_height),
+    ))
+}
 
 fn floor_char_boundary(text: &str, mut offset: usize) -> usize {
     offset = offset.min(text.len());
@@ -616,6 +658,13 @@ pub enum EditorEvent {
     OpenCommandPalette,
     /// Run this SQL (the statement under the caret, or the whole document).
     Execute { sql: String },
+    /// Ask the workspace to drive the server semantic document. `revision` is
+    /// this editor's text revision; answers that no longer match it are
+    /// dropped rather than applied to a buffer that has moved on.
+    SemanticRequest {
+        revision: u64,
+        request: SemanticRequestKind,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -666,7 +715,12 @@ actions!(
         Paste,
         Undo,
         Redo,
-        ExitInsertMode
+        ExitInsertMode,
+        Complete,
+        FormatDocument,
+        ApplyQuickFix,
+        FindUsages,
+        GoToNextDiagnostic
     ]
 );
 
@@ -763,6 +817,7 @@ pub struct QueryEditor {
     last_bounds: Option<Bounds<Pixels>>,
     scroll_handle: ScrollHandle,
     read_only: bool,
+    semantic: SemanticState,
 }
 
 impl QueryEditor {
@@ -791,6 +846,7 @@ impl QueryEditor {
             last_bounds: None,
             scroll_handle: ScrollHandle::new(),
             read_only: false,
+            semantic: SemanticState::default(),
         }
     }
 
@@ -822,6 +878,8 @@ impl QueryEditor {
         self.marked_range = None;
         self.revision = self.revision.wrapping_add(1);
         self.line_cache.borrow_mut().lines.clear();
+        self.semantic.invalidate();
+        self.request_semantic(SemanticRequestKind::Analyze, cx);
         cx.notify();
     }
 
@@ -890,6 +948,8 @@ impl QueryEditor {
         self.revision = self.revision.wrapping_add(1);
         self.line_cache.borrow_mut().lines.clear();
         self.marked_range = None;
+        self.semantic.invalidate();
+        self.request_semantic(SemanticRequestKind::Analyze, cx);
         self.reveal_cursor();
         cx.emit(EditorEvent::CursorChanged);
         cx.notify();
@@ -897,6 +957,220 @@ impl QueryEditor {
 
     pub fn cursor_position(&self) -> (usize, usize) {
         self.document.cursor_position()
+    }
+
+    /// Monotonic identity of the current buffer contents. Every semantic
+    /// request is tagged with it and every answer is checked against it, so a
+    /// slow server reply can never be applied to text the user has since
+    /// changed.
+    pub fn text_revision(&self) -> u64 {
+        self.revision
+    }
+
+    pub fn semantic(&self) -> &SemanticState {
+        &self.semantic
+    }
+
+    /// Semantics are a SQL-only, writable-buffer concern. Read-only DDL
+    /// previews and TOML settings buffers never open a server document.
+    pub fn semantic_enabled(&self) -> bool {
+        self.language == EditorLanguage::Sql && !self.read_only
+    }
+
+    fn request_semantic(&mut self, request: SemanticRequestKind, cx: &mut Context<Self>) {
+        if !self.semantic_enabled() {
+            return;
+        }
+        cx.emit(EditorEvent::SemanticRequest {
+            revision: self.revision,
+            request,
+        });
+    }
+
+    /// Apply one semantic answer. Returns whether it was fresh enough to use.
+    pub fn apply_semantic_outcome(
+        &mut self,
+        revision: u64,
+        outcome: SemanticOutcome,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let current = self.revision;
+        let applied = match outcome {
+            SemanticOutcome::Diagnostics {
+                diagnostics,
+                incomplete,
+            } => self.semantic.set_diagnostics(
+                self.document.text(),
+                revision,
+                current,
+                diagnostics,
+                incomplete,
+            ),
+            SemanticOutcome::Completions {
+                replaced,
+                candidates,
+            } => self.semantic.set_completions(
+                self.document.text(),
+                revision,
+                current,
+                replaced,
+                candidates,
+            ),
+            SemanticOutcome::Usages {
+                usages,
+                is_complete,
+            } => self.semantic.set_usages(
+                self.document.text(),
+                revision,
+                current,
+                usages,
+                is_complete,
+            ),
+            SemanticOutcome::Edits { edits, warnings } => {
+                self.apply_semantic_edits(revision, edits, warnings, cx)
+            }
+            SemanticOutcome::Failed(message) => {
+                self.semantic.set_notice(Some(message));
+                true
+            }
+        };
+        cx.notify();
+        applied
+    }
+
+    /// Apply a server `WorkspaceEdit` to this buffer. Applying back-to-front
+    /// keeps each remaining range valid; the edits land as separate undo
+    /// entries, which is the same granularity the document model uses for
+    /// ordinary typing.
+    fn apply_semantic_edits(
+        &mut self,
+        revision: u64,
+        edits: Vec<sift_protocol::TextEdit>,
+        warnings: Vec<String>,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if self.read_only {
+            return false;
+        }
+        if revision != self.revision {
+            self.semantic.set_notice(Some(
+                "Buffer changed; the server edit was discarded.".into(),
+            ));
+            return false;
+        }
+        let ordered = ordered_edits(self.document.text(), edits);
+        if ordered.is_empty() {
+            self.semantic.set_notice(
+                warnings
+                    .first()
+                    .cloned()
+                    .or_else(|| Some("Nothing to change.".into())),
+            );
+            return true;
+        }
+        for (range, new_text) in ordered {
+            self.document.replace_range(range, &new_text);
+        }
+        self.semantic.set_notice(warnings.first().cloned());
+        self.edited(cx);
+        true
+    }
+
+    fn complete(&mut self, _: &Complete, _: &mut Window, cx: &mut Context<Self>) {
+        if !self.semantic_enabled() {
+            return;
+        }
+        self.semantic.expect_completion(self.revision);
+        let cursor = self.document.cursor() as u32;
+        self.request_semantic(SemanticRequestKind::Complete { cursor }, cx);
+        cx.notify();
+    }
+
+    /// Returns whether a menu was open and consumed the keystroke.
+    fn accept_active_completion(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.read_only {
+            return false;
+        }
+        let Some(menu) = self.semantic.completion() else {
+            return false;
+        };
+        let Some(candidate) = menu.selected() else {
+            self.semantic.cancel_completion();
+            return false;
+        };
+        let insert = candidate.insert.to_string();
+        let replace = menu.replace.clone();
+        self.semantic.cancel_completion();
+        self.document.replace_range(replace, &insert);
+        self.edited(cx);
+        true
+    }
+
+    fn format_document(&mut self, _: &FormatDocument, _: &mut Window, cx: &mut Context<Self>) {
+        if self.read_only {
+            return;
+        }
+        let selection = self.document.selection();
+        let range = (!selection.is_empty()).then_some(sift_protocol::TextRange {
+            start: selection.start as u32,
+            end: selection.end as u32,
+        });
+        self.request_semantic(SemanticRequestKind::Format { range }, cx);
+    }
+
+    fn apply_quick_fix(&mut self, _: &ApplyQuickFix, _: &mut Window, cx: &mut Context<Self>) {
+        if self.read_only {
+            return;
+        }
+        let fix_id = self
+            .semantic
+            .diagnostic_at(self.document.cursor())
+            .and_then(|diagnostic| diagnostic.quick_fix_ids.first().cloned());
+        match fix_id {
+            Some(fix_id) => self.request_semantic(SemanticRequestKind::QuickFix { fix_id }, cx),
+            None => {
+                self.semantic
+                    .set_notice(Some("No quick fix at the caret.".into()));
+                cx.notify();
+            }
+        }
+    }
+
+    fn find_usages(&mut self, _: &FindUsages, _: &mut Window, cx: &mut Context<Self>) {
+        let position = self.document.cursor() as u32;
+        self.request_semantic(SemanticRequestKind::Usages { position }, cx);
+    }
+
+    /// Move the caret to the next diagnostic, wrapping once. Keeps a
+    /// keyboard-only path to every problem the server reported.
+    fn go_to_next_diagnostic(
+        &mut self,
+        _: &GoToNextDiagnostic,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let cursor = self.document.cursor();
+        let target = self
+            .semantic
+            .diagnostics()
+            .iter()
+            .map(|diagnostic| diagnostic.range.start)
+            .find(|start| *start > cursor)
+            .or_else(|| {
+                self.semantic
+                    .diagnostics()
+                    .first()
+                    .map(|diagnostic| diagnostic.range.start)
+            });
+        let Some(target) = target else {
+            return;
+        };
+        let target = target.min(self.document.text().len());
+        self.document.set_selection(target..target, false);
+        if let Some(vim) = self.vim.as_mut() {
+            vim.set_cursor(self.document.text(), target);
+        }
+        self.selection_changed(cx);
     }
 
     fn edited(&mut self, cx: &mut Context<Self>) {
@@ -914,6 +1188,17 @@ impl QueryEditor {
         self.cursor_blink.update(cx, CursorBlink::pause);
         if let Some(update) = self.document.take_room_update() {
             cx.emit(EditorEvent::DocumentChanged { update });
+        }
+        // An open menu stays open across typing by re-requesting against the
+        // new revision; the server owns the filtering, the client never
+        // narrows a stale candidate list itself.
+        let reopen_completion = self.semantic.completion().is_some();
+        self.semantic.invalidate();
+        self.request_semantic(SemanticRequestKind::Analyze, cx);
+        if reopen_completion {
+            self.semantic.expect_completion(self.revision);
+            let cursor = self.document.cursor() as u32;
+            self.request_semantic(SemanticRequestKind::Complete { cursor }, cx);
         }
         cx.notify();
     }
@@ -1084,6 +1369,9 @@ impl QueryEditor {
         if self.read_only {
             return;
         }
+        if self.accept_active_completion(cx) {
+            return;
+        }
         if self.vim_key(modalkit::crossterm::event::KeyCode::Enter, cx) {
             return;
         }
@@ -1093,6 +1381,9 @@ impl QueryEditor {
 
     fn indent(&mut self, _: &Indent, _: &mut Window, cx: &mut Context<Self>) {
         if self.read_only {
+            return;
+        }
+        if self.accept_active_completion(cx) {
             return;
         }
         if self.vim_key(modalkit::crossterm::event::KeyCode::Tab, cx) {
@@ -1119,6 +1410,10 @@ impl QueryEditor {
     }
 
     fn move_up(&mut self, _: &MoveUp, _: &mut Window, cx: &mut Context<Self>) {
+        if self.semantic.move_completion_selection(-1) {
+            cx.notify();
+            return;
+        }
         if self.vim_key(modalkit::crossterm::event::KeyCode::Up, cx) {
             return;
         }
@@ -1127,6 +1422,10 @@ impl QueryEditor {
     }
 
     fn move_down(&mut self, _: &MoveDown, _: &mut Window, cx: &mut Context<Self>) {
+        if self.semantic.move_completion_selection(1) {
+            cx.notify();
+            return;
+        }
         if self.vim_key(modalkit::crossterm::event::KeyCode::Down, cx) {
             return;
         }
@@ -1217,6 +1516,12 @@ impl QueryEditor {
     }
 
     fn exit_insert_mode(&mut self, _: &ExitInsertMode, _: &mut Window, cx: &mut Context<Self>) {
+        // Escape dismisses the completion menu before it reaches Vim, so one
+        // press never both closes the menu and leaves insert mode.
+        if self.semantic.cancel_completion() {
+            cx.notify();
+            return;
+        }
         self.vim_key(modalkit::crossterm::event::KeyCode::Esc, cx);
     }
 
@@ -1321,6 +1626,135 @@ impl QueryEditor {
 
     fn range_to_utf16(&self, range: &Range<usize>) -> Range<usize> {
         self.offset_to_utf16(range.start)..self.offset_to_utf16(range.end)
+    }
+
+    /// Caret position in scroll-content coordinates, used to anchor the
+    /// completion menu to the text rather than to the viewport. `None` before
+    /// the first paint, or when the caret's line is not currently laid out.
+    fn caret_content_origin(&self) -> Option<(Pixels, Pixels)> {
+        let cursor = self.document.cursor();
+        let (line, line_start) = self.line_of(cursor);
+        let layout = self
+            .line_layouts
+            .get(line.checked_sub(self.visible_line_start)?)?;
+        let x = layout.x_for_index(cursor.saturating_sub(line_start));
+        Some((
+            EDITOR_GUTTER_WIDTH + EDITOR_TEXT_INSET + x,
+            EDITOR_VERTICAL_INSET + self.line_height * (line + 1) as f32,
+        ))
+    }
+
+    fn render_completion_menu(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+        let menu = self.semantic.completion()?;
+        let (left, top) = self.caret_content_origin()?;
+        let colors = cx.theme().colors;
+        let selected = menu.selected;
+        let rows =
+            menu.candidates
+                .iter()
+                .enumerate()
+                .skip(selected.saturating_sub(COMPLETION_VISIBLE_ROWS - 1))
+                .take(COMPLETION_VISIBLE_ROWS)
+                .map(|(index, candidate)| {
+                    let active = index == selected;
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .px_2()
+                        .h(COMPLETION_ROW_HEIGHT)
+                        .when(active, |row| row.bg(colors.selected_surface))
+                        .child(
+                            div()
+                                .w(px(14.))
+                                .text_xs()
+                                .text_color(colors.accent)
+                                .child(completion_kind_badge(candidate.kind)),
+                        )
+                        .child(
+                            div()
+                                .flex_1()
+                                .text_xs()
+                                .text_color(colors.text)
+                                .child(candidate.label.to_string()),
+                        )
+                        .children(candidate.detail.clone().map(|detail| {
+                            div().text_xs().text_color(colors.muted_text).child(detail)
+                        }))
+                })
+                .collect::<Vec<_>>();
+        Some(
+            div()
+                .absolute()
+                .left(left)
+                .top(top)
+                .w(COMPLETION_MENU_WIDTH)
+                .border_1()
+                .border_color(colors.border)
+                .bg(colors.elevated_surface)
+                .rounded(cx.theme().metrics.radius)
+                .overflow_hidden()
+                .flex()
+                .flex_col()
+                .children(rows)
+                .into_any_element(),
+        )
+    }
+
+    /// One-line semantic status: the diagnostic under the caret if there is
+    /// one, else the last notice, else the aggregate counts. Never blocks
+    /// editing and never claims freshness it does not have.
+    fn semantic_status(&self) -> Option<(String, bool)> {
+        if let Some(diagnostic) = self.semantic.diagnostic_at(self.document.cursor()) {
+            let stale = self.semantic.diagnostics_stale(self.revision);
+            let suffix = if diagnostic.quick_fix_ids.is_empty() {
+                String::new()
+            } else {
+                " · quick fix available".into()
+            };
+            let prefix = if stale { "(stale) " } else { "" };
+            return Some((
+                format!(
+                    "{prefix}{}: {}{suffix}",
+                    diagnostic.code, diagnostic.message
+                ),
+                diagnostic.severity == sift_protocol::DiagnosticSeverity::Error,
+            ));
+        }
+        if let Some(notice) = self.semantic.notice() {
+            return Some((notice.to_owned(), false));
+        }
+        if !self.semantic.usages().is_empty() {
+            let cursor = self.document.cursor();
+            let here = self
+                .semantic
+                .usages()
+                .iter()
+                .find(|(range, _)| range.contains(&cursor))
+                .map(|(_, kind)| usage_kind_label(*kind));
+            let total = self.semantic.usages().len();
+            return Some((
+                match here {
+                    Some(kind) => format!("{total} usage(s) · caret is a {kind}"),
+                    None => format!("{total} usage(s) highlighted"),
+                },
+                false,
+            ));
+        }
+        let errors = self.semantic.error_count();
+        let warnings = self.semantic.warning_count();
+        if errors == 0 && warnings == 0 {
+            return None;
+        }
+        let incomplete = if self.semantic.diagnostics_incomplete() {
+            " · catalog checks incomplete"
+        } else {
+            ""
+        };
+        Some((
+            format!("{errors} error(s), {warnings} warning(s){incomplete}"),
+            errors > 0,
+        ))
     }
 
     /// Line index and byte offset of a caret within its line.
@@ -1530,6 +1964,11 @@ impl gpui::Render for QueryEditor {
             .on_action(cx.listener(Self::exit_insert_mode))
             .on_action(cx.listener(Self::execute_statement))
             .on_action(cx.listener(Self::execute_document))
+            .on_action(cx.listener(Self::complete))
+            .on_action(cx.listener(Self::format_document))
+            .on_action(cx.listener(Self::apply_quick_fix))
+            .on_action(cx.listener(Self::find_usages))
+            .on_action(cx.listener(Self::go_to_next_diagnostic))
             .children(
                 (self.language == EditorLanguage::Toml)
                     .then(|| toml_diagnostic(self.document.text()))
@@ -1546,6 +1985,22 @@ impl gpui::Render for QueryEditor {
                             .child(diagnostic)
                     }),
             )
+            .children(self.semantic_status().map(|(message, is_error)| {
+                let (text, background) = if is_error {
+                    (colors.danger, colors.danger_muted)
+                } else {
+                    (colors.muted_text, colors.surface)
+                };
+                div()
+                    .px_3()
+                    .py_1()
+                    .border_b_1()
+                    .border_color(colors.subtle_border)
+                    .bg(background)
+                    .text_xs()
+                    .text_color(text)
+                    .child(message)
+            }))
             .child(
                 div()
                     .id("editor-scroll")
@@ -1554,9 +2009,18 @@ impl gpui::Render for QueryEditor {
                     .bg(colors.background)
                     .overflow_y_scroll()
                     .track_scroll(&self.scroll_handle)
-                    .child(QueryEditorElement {
-                        editor: cx.entity(),
-                    }),
+                    .child(
+                        // Relative-positioned wrapper so the completion menu
+                        // anchors to the text. Its height must stay auto or the
+                        // scroll container would clamp the editor's content.
+                        div()
+                            .relative()
+                            .w_full()
+                            .child(QueryEditorElement {
+                                editor: cx.entity(),
+                            })
+                            .children(self.render_completion_menu(cx)),
+                    ),
             )
     }
 }
@@ -1572,6 +2036,8 @@ struct EditorPrepaint {
     visible_line_start: usize,
     active_line: Option<PaintQuad>,
     selections: Vec<PaintQuad>,
+    usages: Vec<PaintQuad>,
+    diagnostics: Vec<PaintQuad>,
     cursor: Option<PaintQuad>,
     text_bounds: Bounds<Pixels>,
     line_height: Pixels,
@@ -1651,6 +2117,8 @@ impl Element for QueryEditorElement {
             cache.line_starts.clone()
         };
         let mut selections = Vec::new();
+        let mut usage_quads = Vec::new();
+        let mut diagnostic_quads = Vec::new();
         let mut cursor_quad = None;
         let mut active_line_quad = None;
         let text_top = bounds.top() + EDITOR_VERTICAL_INSET;
@@ -1763,6 +2231,46 @@ impl Element for QueryEditorElement {
                 }
             }
 
+            // Usage highlights sit behind the glyphs; diagnostics underline
+            // them. Both are clipped to this line's span of the range.
+            for (range, _) in editor.semantic.usages() {
+                if let Some(bounds) = span_bounds(
+                    range,
+                    offset,
+                    line_end,
+                    &shaped,
+                    text_left,
+                    top,
+                    line_height,
+                ) {
+                    usage_quads.push(fill(bounds, theme.colors.accent_muted));
+                }
+            }
+            for diagnostic in editor.semantic.diagnostics() {
+                let color = match diagnostic.severity {
+                    sift_protocol::DiagnosticSeverity::Error => theme.colors.danger,
+                    sift_protocol::DiagnosticSeverity::Warning => theme.colors.warning,
+                    _ => theme.colors.muted_text,
+                };
+                if let Some(bounds) = span_bounds(
+                    &diagnostic.range,
+                    offset,
+                    line_end,
+                    &shaped,
+                    text_left,
+                    top,
+                    line_height,
+                ) {
+                    diagnostic_quads.push(fill(
+                        Bounds::new(
+                            point(bounds.left(), bounds.bottom() - DIAGNOSTIC_UNDERLINE_HEIGHT),
+                            size(bounds.size.width, DIAGNOSTIC_UNDERLINE_HEIGHT),
+                        ),
+                        color,
+                    ));
+                }
+            }
+
             if selection.is_empty()
                 && (!editor_focused || cursor_visible)
                 && cursor >= offset
@@ -1812,6 +2320,8 @@ impl Element for QueryEditorElement {
             visible_line_start: visible_start,
             active_line: active_line_quad,
             selections,
+            usages: usage_quads,
+            diagnostics: diagnostic_quads,
             cursor: cursor_quad,
             text_bounds,
             line_height,
@@ -1840,6 +2350,9 @@ impl Element for QueryEditorElement {
         for selection in prepaint.selections.drain(..) {
             window.paint_quad(selection);
         }
+        for usage in prepaint.usages.drain(..) {
+            window.paint_quad(usage);
+        }
         let line_height = prepaint.line_height;
         for (index, line) in &prepaint.lines {
             let origin = point(
@@ -1857,6 +2370,9 @@ impl Element for QueryEditorElement {
             number
                 .paint(origin, line_height, gpui::TextAlign::Left, None, window, cx)
                 .expect("line number paint succeeds");
+        }
+        for diagnostic in prepaint.diagnostics.drain(..) {
+            window.paint_quad(diagnostic);
         }
         if let Some(cursor) = prepaint.cursor.take() {
             window.paint_quad(cursor);
@@ -2116,6 +2632,213 @@ mod tests {
 
     fn doc(text: &str) -> QueryDocument {
         QueryDocument::new(7, text)
+    }
+
+    /// Collects the semantic intents an editor raises so tests can assert on
+    /// what the workspace would have dispatched.
+    struct SemanticSpy(Vec<(u64, SemanticRequestKind)>);
+
+    fn editor_with_spy(
+        text: &str,
+        cx: &mut TestAppContext,
+    ) -> (VisualTestContext, Entity<QueryEditor>, Entity<SemanticSpy>) {
+        let window = cx
+            .update(|cx| {
+                let text = text.to_owned();
+                cx.open_window(Default::default(), move |_window, cx| {
+                    cx.new(|cx| QueryEditor::new(doc(&text), cx))
+                })
+            })
+            .unwrap();
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let editor = window.root(&mut cx).unwrap();
+        let spy = cx.new(|_| SemanticSpy(Vec::new()));
+        spy.update(&mut cx, |_, cx| {
+            cx.subscribe(&editor, |spy: &mut SemanticSpy, _, event, _| {
+                if let EditorEvent::SemanticRequest { revision, request } = event {
+                    spy.0.push((*revision, request.clone()));
+                }
+            })
+            .detach();
+        });
+        cx.run_until_parked();
+        (cx, editor, spy)
+    }
+
+    fn diagnostic(
+        start: u32,
+        end: u32,
+        quick_fix_ids: Vec<String>,
+    ) -> sift_protocol::SemanticDiagnostic {
+        sift_protocol::SemanticDiagnostic {
+            id: "d1".into(),
+            severity: sift_protocol::DiagnosticSeverity::Error,
+            code: "SQL001".into(),
+            message: "unknown table".into(),
+            range: sift_protocol::TextRange { start, end },
+            related_ranges: Vec::new(),
+            source: "binder".into(),
+            quick_fix_ids,
+        }
+    }
+
+    fn candidate(label: &str) -> sift_protocol::completion::CompletionCandidate {
+        sift_protocol::completion::CompletionCandidate {
+            label: label.to_owned().into(),
+            insert: label.to_owned().into(),
+            kind: sift_protocol::completion::CompletionKind::Table,
+            detail: None,
+            qualified_name: None,
+            score: 1,
+        }
+    }
+
+    #[gpui::test]
+    fn editing_asks_for_analysis_of_the_revision_it_produced(cx: &mut TestAppContext) {
+        let (mut cx, editor, spy) = editor_with_spy("sel", cx);
+        editor.update_in(&mut cx, |editor, window, cx| {
+            editor.replace_text_in_range(None, "ect", window, cx);
+        });
+        cx.run_until_parked();
+        let revision = editor.read_with(&cx, |editor, _| editor.text_revision());
+        let requests = spy.read_with(&cx, |spy, _| spy.0.clone());
+        assert_eq!(
+            requests.last(),
+            Some(&(revision, SemanticRequestKind::Analyze))
+        );
+    }
+
+    #[gpui::test]
+    fn a_semantic_answer_for_an_older_revision_is_discarded(cx: &mut TestAppContext) {
+        let (mut cx, editor, _) = editor_with_spy("select 1", cx);
+        editor.update(&mut cx, |editor, cx| {
+            let current = editor.text_revision();
+            assert!(!editor.apply_semantic_outcome(
+                current.wrapping_sub(1),
+                SemanticOutcome::Diagnostics {
+                    diagnostics: vec![diagnostic(0, 6, Vec::new())],
+                    incomplete: false,
+                },
+                cx,
+            ));
+            assert!(editor.semantic().diagnostics().is_empty());
+            assert!(editor.apply_semantic_outcome(
+                current,
+                SemanticOutcome::Diagnostics {
+                    diagnostics: vec![diagnostic(0, 6, Vec::new())],
+                    incomplete: false,
+                },
+                cx,
+            ));
+            assert_eq!(editor.semantic().error_count(), 1);
+        });
+    }
+
+    #[gpui::test]
+    fn accepting_a_completion_replaces_the_server_reported_range(cx: &mut TestAppContext) {
+        let (mut cx, editor, spy) = editor_with_spy("select * from us", cx);
+        editor.update_in(&mut cx, |editor, window, cx| {
+            editor.document.set_selection(16..16, false);
+            editor.complete(&Complete, window, cx);
+        });
+        cx.run_until_parked();
+        let (revision, request) = spy
+            .read_with(&cx, |spy, _| spy.0.last().cloned())
+            .expect("completion request raised");
+        assert_eq!(request, SemanticRequestKind::Complete { cursor: 16 });
+        editor.update(&mut cx, |editor, cx| {
+            assert!(editor.apply_semantic_outcome(
+                revision,
+                SemanticOutcome::Completions {
+                    replaced: sift_protocol::TextRange { start: 14, end: 16 },
+                    candidates: vec![candidate("users")],
+                },
+                cx,
+            ));
+        });
+        // Enter accepts the highlighted candidate instead of breaking the line.
+        editor.update_in(&mut cx, |editor, window, cx| {
+            editor.newline(&Newline, window, cx);
+        });
+        editor.read_with(&cx, |editor, _| {
+            assert_eq!(editor.document().text(), "select * from users");
+            assert!(editor.semantic().completion().is_none());
+        });
+    }
+
+    #[gpui::test]
+    fn server_edits_apply_back_to_front_over_the_whole_buffer(cx: &mut TestAppContext) {
+        let (mut cx, editor, _) = editor_with_spy("select 1", cx);
+        editor.update(&mut cx, |editor, cx| {
+            let revision = editor.text_revision();
+            assert!(editor.apply_semantic_outcome(
+                revision,
+                SemanticOutcome::Edits {
+                    edits: vec![
+                        sift_protocol::TextEdit {
+                            range: sift_protocol::TextRange { start: 0, end: 6 },
+                            new_text: "SELECT".into(),
+                        },
+                        sift_protocol::TextEdit {
+                            range: sift_protocol::TextRange { start: 7, end: 8 },
+                            new_text: "2".into(),
+                        },
+                    ],
+                    warnings: Vec::new(),
+                },
+                cx,
+            ));
+        });
+        editor.read_with(&cx, |editor, _| {
+            assert_eq!(editor.document().text(), "SELECT 2");
+        });
+    }
+
+    #[gpui::test]
+    fn quick_fix_uses_the_diagnostic_under_the_caret(cx: &mut TestAppContext) {
+        let (mut cx, editor, spy) = editor_with_spy("select * from usrs", cx);
+        editor.update_in(&mut cx, |editor, window, cx| {
+            let revision = editor.text_revision();
+            editor.apply_semantic_outcome(
+                revision,
+                SemanticOutcome::Diagnostics {
+                    diagnostics: vec![diagnostic(14, 18, vec!["create-table".into()])],
+                    incomplete: false,
+                },
+                cx,
+            );
+            editor.document.set_selection(15..15, false);
+            editor.apply_quick_fix(&ApplyQuickFix, window, cx);
+        });
+        cx.run_until_parked();
+        let request = spy.read_with(&cx, |spy, _| spy.0.last().cloned());
+        assert_eq!(
+            request.map(|(_, request)| request),
+            Some(SemanticRequestKind::QuickFix {
+                fix_id: "create-table".into()
+            })
+        );
+
+        // Outside the diagnostic there is nothing to prepare, and the editor
+        // says so instead of issuing a request the server would reject.
+        editor.update_in(&mut cx, |editor, window, cx| {
+            editor.document.set_selection(0..0, false);
+            editor.apply_quick_fix(&ApplyQuickFix, window, cx);
+        });
+        cx.run_until_parked();
+        editor.read_with(&cx, |editor, _| {
+            assert_eq!(
+                editor.semantic().notice(),
+                Some("No quick fix at the caret.")
+            );
+        });
+        let last = spy.read_with(&cx, |spy, _| spy.0.last().cloned());
+        assert_eq!(
+            last.map(|(_, request)| request),
+            Some(SemanticRequestKind::QuickFix {
+                fix_id: "create-table".into()
+            })
+        );
     }
 
     #[gpui::test]
