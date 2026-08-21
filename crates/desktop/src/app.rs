@@ -447,11 +447,14 @@ fn prepare_state_for_instance(
     state
 }
 
-/// An opened, reusable execution target: one client, session, and connection.
+/// An opened target with separate execution and metadata lanes. Streaming a
+/// query holds its driver connection until the terminal page, so catalog and
+/// migration work must not share that physical connection.
 struct QueryContext {
     client: Client,
     session: SessionId,
     connection: ConnectionId,
+    metadata_connection: ConnectionId,
     profile_id: i64,
 }
 
@@ -720,7 +723,7 @@ async fn run_query_executor(
                         .client
                         .preview_catalog_diagram_mutation(
                             opened.session,
-                            opened.connection,
+                            opened.metadata_connection,
                             sift_protocol::PreviewCatalogDiagramMutationRequest {
                                 expected_catalog_revision,
                                 mutation,
@@ -749,7 +752,7 @@ async fn run_query_executor(
                 let event = match context.as_ref() {
                     Some(opened) => opened
                         .client
-                        .apply_migration(opened.session, opened.connection, request)
+                        .apply_migration(opened.session, opened.metadata_connection, request)
                         .await
                         .map(|run| ExecutorEvent::TableMigrationApplied {
                             item_id,
@@ -805,7 +808,7 @@ async fn delete_connection_profile(
 async fn load_schema(context: &QueryContext) -> ExecutorEvent {
     match context
         .client
-        .schema(context.session, context.connection)
+        .schema(context.session, context.metadata_connection)
         .await
     {
         Ok(snapshot) => ExecutorEvent::SchemaLoaded {
@@ -835,7 +838,7 @@ async fn load_table_definition(
     };
     context
         .client
-        .catalog_graph(context.session, context.connection, request)
+        .catalog_graph(context.session, context.metadata_connection, request)
         .await
         .map(|graph| ExecutorEvent::TableDefinitionLoaded {
             item_id,
@@ -1162,10 +1165,27 @@ async fn open_query_context(
         .await
         .map_err(|error| format!("opening a connection failed: {error}"))?
         .id;
+    let metadata_connection = match client
+        .open_connection_from_profile(
+            session,
+            OpenConnectionFromProfileRequest {
+                tenant_id,
+                profile_id,
+            },
+        )
+        .await
+    {
+        Ok(connection) => connection.id,
+        Err(error) => {
+            let _ = client.close_session(session).await;
+            return Err(format!("opening a metadata connection failed: {error}"));
+        }
+    };
     Ok(QueryContext {
         client,
         session,
         connection,
+        metadata_connection,
         profile_id,
     })
 }
