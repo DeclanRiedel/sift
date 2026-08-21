@@ -598,6 +598,76 @@ async fn run_query_executor(
                     .await;
                 }));
             }
+            ExecutorCommand::Explain {
+                item_id,
+                request_id,
+                tenant_id,
+                profile_id,
+                sql,
+                analyze,
+            } => {
+                let Some(opened) = context
+                    .as_ref()
+                    .filter(|opened| opened.profile_id == profile_id)
+                else {
+                    if events
+                        .send(ExecutorEvent::ExplainFinished {
+                            item_id,
+                            request_id,
+                            response: Err(
+                                "Connect to this database before requesting a plan".into()
+                            ),
+                        })
+                        .is_err()
+                    {
+                        return;
+                    }
+                    continue;
+                };
+                let client = opened.client.clone();
+                let session = opened.session;
+                let events = events.clone();
+                std::mem::drop(tokio::spawn(async move {
+                    let response = match client
+                        .open_connection_from_profile(
+                            session,
+                            OpenConnectionFromProfileRequest {
+                                tenant_id,
+                                profile_id,
+                            },
+                        )
+                        .await
+                    {
+                        Ok(connection) => {
+                            let connection_id = connection.id;
+                            let result = client
+                                .explain(
+                                    session,
+                                    connection_id,
+                                    sift_protocol::ExplainRequest {
+                                        connection: connection_id,
+                                        sql,
+                                        params: Vec::new(),
+                                        analyze,
+                                    },
+                                )
+                                .await
+                                .map(Box::new)
+                                .map_err(|error| format!("explaining query failed: {error}"));
+                            let _ = client.close_connection(session, connection_id).await;
+                            result
+                        }
+                        Err(error) => Err(format!(
+                            "opening an isolated explain connection failed: {error}"
+                        )),
+                    };
+                    let _ = events.send(ExecutorEvent::ExplainFinished {
+                        item_id,
+                        request_id,
+                        response,
+                    });
+                }));
+            }
             ExecutorCommand::Cancel {
                 item_id,
                 execution_id,

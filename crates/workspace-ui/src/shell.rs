@@ -853,6 +853,11 @@ pub enum PaneEvent {
     LoadNextRowWindowRequested {
         item_id: u64,
     },
+    ExplainRequested {
+        item_id: u64,
+        sql: String,
+        analyze: bool,
+    },
     /// An editor wants semantic work done for one of its revisions. The
     /// workspace owns the connection and the debounce policy.
     SemanticRequested {
@@ -880,6 +885,14 @@ enum DatabaseItemView {
 struct PendingDatabaseExecution {
     item_id: u64,
     sql: String,
+    source: DatabaseObjectSource,
+}
+
+#[derive(Debug, Clone)]
+struct PendingDatabaseExplain {
+    item_id: u64,
+    sql: String,
+    analyze: bool,
     source: DatabaseObjectSource,
 }
 
@@ -962,6 +975,14 @@ pub enum ExecutorCommand {
         execution_id: u64,
         sql: String,
     },
+    Explain {
+        item_id: u64,
+        request_id: u64,
+        tenant_id: i64,
+        profile_id: i64,
+        sql: String,
+        analyze: bool,
+    },
     Cancel {
         item_id: u64,
         execution_id: u64,
@@ -1034,6 +1055,11 @@ pub enum ExecutorEvent {
         cursor_id: sift_protocol::CursorId,
         page: sift_protocol::Page,
         acknowledge: tokio::sync::oneshot::Sender<()>,
+    },
+    ExplainFinished {
+        item_id: u64,
+        request_id: u64,
+        response: Result<Box<sift_protocol::ExplainResponse>, String>,
     },
     ProfileCreated {
         entry: ConnectionNavEntry,
@@ -1289,6 +1315,30 @@ impl Pane {
             ResultsEvent::LoadNextWindowRequested => {
                 cx.emit(PaneEvent::LoadNextRowWindowRequested { item_id })
             }
+            ResultsEvent::ExplainRequested { analyze } => {
+                let sql = self
+                    .editors
+                    .get(&item_id)
+                    .map(|editor| {
+                        let editor = editor.read(cx);
+                        let document = editor.document();
+                        let selected = document.selected_text().trim();
+                        if !selected.is_empty() {
+                            return selected.to_owned();
+                        }
+                        document
+                            .active_statement()
+                            .map(|range| document.text()[range].trim().to_owned())
+                            .filter(|sql| !sql.is_empty())
+                            .unwrap_or_else(|| document.text().trim().to_owned())
+                    })
+                    .unwrap_or_default();
+                cx.emit(PaneEvent::ExplainRequested {
+                    item_id,
+                    sql,
+                    analyze: *analyze,
+                });
+            }
         }
     }
 
@@ -1355,6 +1405,21 @@ impl Pane {
         match self.results.get(&item_id) {
             Some(result) => {
                 result.update(cx, |result, cx| result.set_state(state, cx));
+                true
+            }
+            None => false,
+        }
+    }
+
+    fn set_explain_result(
+        &mut self,
+        item_id: u64,
+        response: Result<Box<sift_protocol::ExplainResponse>, String>,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        match self.results.get(&item_id) {
+            Some(result) => {
+                result.update(cx, |result, cx| result.set_explain_result(response, cx));
                 true
             }
             None => false,
@@ -2788,7 +2853,10 @@ pub struct WorkspaceShell {
     /// server round trip instead of one per character.
     semantic_analyze_generation: HashMap<u64, u64>,
     next_execution_id: u64,
+    running_explains: HashMap<u64, u64>,
+    next_explain_id: u64,
     pending_database_execution: Option<PendingDatabaseExecution>,
+    pending_database_explain: Option<PendingDatabaseExplain>,
     instance_sender: Option<tokio::sync::mpsc::UnboundedSender<InstanceCommand>>,
     saved_servers: Vec<SavedServerProfile>,
     instance_roots: Vec<SavedInstanceRoot>,
@@ -3099,7 +3167,10 @@ impl WorkspaceShell {
             held_result_pages: HashMap::new(),
             semantic_analyze_generation: HashMap::new(),
             next_execution_id: 1,
+            running_explains: HashMap::new(),
+            next_explain_id: 1,
             pending_database_execution: None,
+            pending_database_explain: None,
             instance_sender: None,
             saved_servers: Vec::new(),
             instance_roots: Vec::new(),
@@ -3393,6 +3464,8 @@ impl WorkspaceShell {
         self.table_definition_sections.clear();
         self.table_designer = None;
         self.pending_database_execution = None;
+        self.pending_database_explain = None;
+        self.running_explains.clear();
         for pane in &self.panes {
             pane.update(cx, |pane, _| {
                 pane.set_all_database_item_states(DatabaseItemState::Offline)
@@ -3795,14 +3868,38 @@ impl WorkspaceShell {
                         if let Some(pending) = pending {
                             self.send_execution(pending.item_id, pending.sql, cx);
                         }
+                        let pending = self.pending_database_explain.take().filter(|pending| {
+                            pending.source.profile_id == profile_id
+                                && pending.source.instance_id
+                                    == self.selected_instance_id.as_deref().unwrap_or_default()
+                        });
+                        if let Some(pending) = pending {
+                            self.send_explain(
+                                pending.item_id,
+                                pending.source.tenant_id,
+                                pending.source.profile_id,
+                                pending.sql,
+                                pending.analyze,
+                                cx,
+                            );
+                        }
                     }
-                    ConnectionStatus::Failed { profile_id, .. } => {
+                    ConnectionStatus::Failed { profile_id, reason } => {
                         if self
                             .pending_database_execution
                             .as_ref()
                             .is_some_and(|pending| pending.source.profile_id == profile_id)
                         {
                             self.pending_database_execution = None;
+                        }
+                        let failed_explain = self
+                            .pending_database_explain
+                            .as_ref()
+                            .is_some_and(|pending| pending.source.profile_id == profile_id)
+                            .then(|| self.pending_database_explain.take())
+                            .flatten();
+                        if let Some(pending) = failed_explain {
+                            self.route_explain(pending.item_id, Err(reason), cx);
                         }
                     }
                     ConnectionStatus::Disconnected | ConnectionStatus::Connecting { .. } => {}
@@ -3941,6 +4038,17 @@ impl WorkspaceShell {
                 }
                 let _ = acknowledge.send(());
                 cx.notify();
+            }
+            ExecutorEvent::ExplainFinished {
+                item_id,
+                request_id,
+                response,
+            } => {
+                if self.running_explains.get(&item_id) != Some(&request_id) {
+                    return;
+                }
+                self.running_explains.remove(&item_id);
+                self.route_explain(item_id, response, cx);
             }
             ExecutorEvent::Semantic {
                 item_id,
@@ -4159,6 +4267,8 @@ impl WorkspaceShell {
             return;
         };
         self.pending_database_execution = None;
+        self.pending_database_explain = None;
+        self.running_explains.clear();
         if sender
             .send(ExecutorCommand::Connect {
                 tenant_id: entry.tenant_id,
@@ -4320,6 +4430,168 @@ impl WorkspaceShell {
             }
             cx.notify();
         }
+    }
+
+    fn explain_database_item(
+        &mut self,
+        item_id: u64,
+        sql: String,
+        analyze: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if sql.trim().is_empty() {
+            self.route_explain(
+                item_id,
+                Err("Write or select a statement to explain".into()),
+                cx,
+            );
+            return;
+        }
+        if let Some(source) = self.database_source(item_id, cx) {
+            if self.selected_instance_id.as_deref() != Some(source.instance_id.as_str()) {
+                self.route_explain(
+                    item_id,
+                    Err("Tab belongs to another Sift server".into()),
+                    cx,
+                );
+                return;
+            }
+            if matches!(
+                self.connection_status,
+                ConnectionStatus::Connected { profile_id, .. } if profile_id == source.profile_id
+            ) {
+                self.send_explain(
+                    item_id,
+                    source.tenant_id,
+                    source.profile_id,
+                    sql,
+                    analyze,
+                    cx,
+                );
+                return;
+            }
+            self.pending_database_explain = Some(PendingDatabaseExplain {
+                item_id,
+                sql,
+                analyze,
+                source: source.clone(),
+            });
+            let Some(sender) = &self.executor_sender else {
+                self.pending_database_explain = None;
+                self.route_explain(
+                    item_id,
+                    Err("Database connection manager is unavailable".into()),
+                    cx,
+                );
+                return;
+            };
+            if sender
+                .send(ExecutorCommand::Connect {
+                    tenant_id: source.tenant_id,
+                    profile_id: source.profile_id,
+                    name: source.profile_name,
+                })
+                .is_err()
+            {
+                self.pending_database_explain = None;
+                self.route_explain(
+                    item_id,
+                    Err("Database connection manager stopped".into()),
+                    cx,
+                );
+            }
+            return;
+        }
+
+        let Some(profile_id) = (match self.connection_status {
+            ConnectionStatus::Connected { profile_id, .. } => Some(profile_id),
+            _ => None,
+        }) else {
+            self.route_explain(
+                item_id,
+                Err("Pick a connection before explaining SQL".into()),
+                cx,
+            );
+            return;
+        };
+        let tenant_id = self
+            .lifecycle
+            .tenants
+            .iter()
+            .find(|tenant| {
+                tenant
+                    .connections
+                    .iter()
+                    .any(|entry| entry.id == profile_id)
+            })
+            .map(|tenant| tenant.id.0);
+        match tenant_id {
+            Some(tenant_id) => self.send_explain(item_id, tenant_id, profile_id, sql, analyze, cx),
+            None => self.route_explain(
+                item_id,
+                Err("Connected profile is no longer available".into()),
+                cx,
+            ),
+        }
+    }
+
+    fn send_explain(
+        &mut self,
+        item_id: u64,
+        tenant_id: i64,
+        profile_id: i64,
+        sql: String,
+        analyze: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(sender) = &self.executor_sender else {
+            self.route_explain(item_id, Err("Not connected to a database".into()), cx);
+            return;
+        };
+        let request_id = self.next_explain_id;
+        self.next_explain_id = self.next_explain_id.saturating_add(1);
+        if sender
+            .send(ExecutorCommand::Explain {
+                item_id,
+                request_id,
+                tenant_id,
+                profile_id,
+                sql,
+                analyze,
+            })
+            .is_ok()
+        {
+            self.running_explains.insert(item_id, request_id);
+            self.status.execution = if analyze {
+                "Analyzing plan…".into()
+            } else {
+                "Explaining…".into()
+            };
+            cx.notify();
+        } else {
+            self.route_explain(item_id, Err("Database executor is unavailable".into()), cx);
+        }
+    }
+
+    fn route_explain(
+        &mut self,
+        item_id: u64,
+        response: Result<Box<sift_protocol::ExplainResponse>, String>,
+        cx: &mut Context<Self>,
+    ) {
+        self.status.execution = if response.is_ok() {
+            "Ready".into()
+        } else {
+            "Explain failed".into()
+        };
+        for pane in &self.panes {
+            if pane.update(cx, |pane, cx| {
+                pane.set_explain_result(item_id, response.clone(), cx)
+            }) {
+                break;
+            }
+        }
+        cx.notify();
     }
 
     /// Editor semantic entry point. `Analyze` is debounced because it fires on
@@ -6571,6 +6843,11 @@ impl WorkspaceShell {
             PaneEvent::LoadNextRowWindowRequested { item_id } => {
                 self.load_next_row_window(*item_id, cx)
             }
+            PaneEvent::ExplainRequested {
+                item_id,
+                sql,
+                analyze,
+            } => self.explain_database_item(*item_id, sql.clone(), *analyze, cx),
             PaneEvent::SemanticRequested {
                 item_id,
                 revision,
@@ -6960,6 +7237,14 @@ impl WorkspaceShell {
             self.clear_global_problems_for(item_id, cx);
             self.table_definitions.remove(&item_id);
             self.table_definition_sections.remove(&item_id);
+            self.running_explains.remove(&item_id);
+            if self
+                .pending_database_explain
+                .as_ref()
+                .is_some_and(|pending| pending.item_id == item_id)
+            {
+                self.pending_database_explain = None;
+            }
             if self
                 .table_designer
                 .as_ref()
@@ -15170,6 +15455,48 @@ mod tests {
             assert!(!shell.running_queries.contains_key(&1));
             let results = shell.panes[0].read(cx).results.get(&1).unwrap().clone();
             assert!(matches!(results.read(cx).state(), ResultState::Cancelled));
+        });
+    }
+
+    #[gpui::test]
+    fn stale_explain_events_cannot_overwrite_a_newer_plan(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        workspace.update(&mut cx, |shell, cx| {
+            shell.running_explains.insert(1, 2);
+            shell.status.execution = "Explaining…".into();
+            let response = || {
+                Ok(Box::new(sift_protocol::ExplainResponse {
+                    engine: sift_protocol::Engine::Postgres,
+                    analyzed: false,
+                    root: sift_protocol::PlanNode::new("Index Scan"),
+                    raw: "{\"Plan\":{}}".into(),
+                    warnings: Vec::new(),
+                }))
+            };
+
+            shell.on_executor_event(
+                ExecutorEvent::ExplainFinished {
+                    item_id: 1,
+                    request_id: 1,
+                    response: response(),
+                },
+                cx,
+            );
+            assert_eq!(shell.running_explains.get(&1), Some(&2));
+            assert_eq!(shell.status.execution, "Explaining…");
+
+            shell.on_executor_event(
+                ExecutorEvent::ExplainFinished {
+                    item_id: 1,
+                    request_id: 2,
+                    response: response(),
+                },
+                cx,
+            );
+            assert!(!shell.running_explains.contains_key(&1));
+            assert_eq!(shell.status.execution, "Ready");
         });
     }
 

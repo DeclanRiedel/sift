@@ -12,7 +12,8 @@ use gpui::{
     ShapedLine, SharedString, Stateful, TextAlign, TextRun, UniformListScrollHandle, Window,
 };
 use sift_protocol::{
-    ColumnMetadata, DriverWarning, ExecuteResponse, Nullability, Page, Row, TypeRef, Value,
+    ColumnMetadata, DriverWarning, ExecuteResponse, ExplainResponse, Nullability, Page, PlanNode,
+    Row, TypeRef, Value,
 };
 use sift_ui::{
     ActiveTheme, Badge, Button, ButtonTone, Clickable, Disableable, IconButton, IconName,
@@ -32,6 +33,14 @@ const HEADER_HEIGHT: f32 = 40.0;
 /// this separately prevents an arbitrarily large completed query from growing
 /// desktop memory without bound.
 pub const MAX_RETAINED_ROWS: usize = 10_000;
+
+fn plan_number(value: f64) -> String {
+    if value.abs() >= 1_000.0 || value.fract().abs() < f64::EPSILON {
+        format!("{value:.0}")
+    } else {
+        format!("{value:.2}")
+    }
+}
 
 /// How a single cell's value should be classified for rendering. Keeps color
 /// and alignment decisions in the view while the model stays presentation-free.
@@ -446,6 +455,17 @@ pub enum StreamProgress {
 pub enum ResultsEvent {
     /// Discard the retained window and consume the held page onwards.
     LoadNextWindowRequested,
+    /// Explain the editor's targeted statement. Analyze is explicit because it
+    /// executes the statement to collect runtime counters.
+    ExplainRequested { analyze: bool },
+}
+
+#[derive(Debug, Clone)]
+enum ExplainState {
+    Empty,
+    Pending { analyze: bool },
+    Ready(Box<ExplainResponse>),
+    Failed(String),
 }
 
 /// The query-owned results surface.
@@ -476,6 +496,7 @@ pub struct ResultsView {
     window_start: usize,
     /// A page is being held because the window is full.
     window_held: bool,
+    explain: ExplainState,
 }
 
 impl ResultsView {
@@ -500,6 +521,7 @@ impl ResultsView {
             stream_result_seen: false,
             window_start: 0,
             window_held: false,
+            explain: ExplainState::Empty,
         }
     }
 
@@ -839,6 +861,35 @@ impl ResultsView {
             tab
         };
         cx.notify();
+    }
+
+    fn request_explain(&mut self, analyze: bool, cx: &mut Context<Self>) {
+        if matches!(self.explain, ExplainState::Pending { .. }) {
+            return;
+        }
+        self.explain = ExplainState::Pending { analyze };
+        self.tab = ResultTab::Explain;
+        cx.emit(ResultsEvent::ExplainRequested { analyze });
+        cx.notify();
+    }
+
+    pub fn set_explain_result(
+        &mut self,
+        result: Result<Box<ExplainResponse>, String>,
+        cx: &mut Context<Self>,
+    ) {
+        self.explain = match result {
+            Ok(response) => ExplainState::Ready(response),
+            Err(message) => ExplainState::Failed(message),
+        };
+        self.tab = ResultTab::Explain;
+        cx.notify();
+    }
+
+    fn copy_raw_plan(&mut self, cx: &mut Context<Self>) {
+        if let ExplainState::Ready(response) = &self.explain {
+            cx.write_to_clipboard(ClipboardItem::new_string(response.raw.clone()));
+        }
     }
 
     fn select_message(&mut self, index: usize, cx: &mut Context<Self>) {
@@ -1780,6 +1831,194 @@ impl ResultsView {
         )
     }
 
+    fn render_plan_node(
+        &self,
+        node: &PlanNode,
+        depth: usize,
+        colors: ThemeColors,
+    ) -> gpui::AnyElement {
+        let estimated = [
+            node.est_rows
+                .map(|value| format!("est rows {}", plan_number(value))),
+            node.est_cost
+                .map(|value| format!("cost {}", plan_number(value))),
+        ]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+        .join("  ·  ");
+        let actual = [
+            node.actual_rows
+                .map(|value| format!("actual rows {}", plan_number(value))),
+            node.actual_ms
+                .map(|value| format!("{} ms", plan_number(value))),
+        ]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+        .join("  ·  ");
+        div()
+            .flex()
+            .flex_col()
+            .child(
+                div()
+                    .min_h(px(40.))
+                    .pl(px(12. + depth as f32 * 18.))
+                    .pr_3()
+                    .py_1()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .border_b_1()
+                    .border_color(colors.subtle_border)
+                    .when(depth > 0, |row| row.border_l_1())
+                    .child(
+                        div()
+                            .min_w_0()
+                            .flex_1()
+                            .flex()
+                            .flex_col()
+                            .gap_0p5()
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_2()
+                                    .child(
+                                        div()
+                                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                                            .child(node.op.clone()),
+                                    )
+                                    .children(node.relation.clone().map(Badge::new)),
+                            )
+                            .children((!estimated.is_empty()).then(|| {
+                                div()
+                                    .text_xs()
+                                    .text_color(colors.muted_text)
+                                    .child(estimated)
+                            }))
+                            .children(
+                                (!actual.is_empty()).then(|| {
+                                    div().text_xs().text_color(colors.accent).child(actual)
+                                }),
+                            ),
+                    ),
+            )
+            .children(
+                node.children
+                    .iter()
+                    .map(|child| self.render_plan_node(child, depth + 1, colors)),
+            )
+            .into_any_element()
+    }
+
+    fn render_explain_toolbar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let colors = cx.theme().colors;
+        let pending = matches!(self.explain, ExplainState::Pending { .. });
+        div()
+            .h(cx.theme().metrics.toolbar_height)
+            .flex_none()
+            .flex()
+            .items_center()
+            .gap_1()
+            .px_2()
+            .border_b_1()
+            .border_color(colors.subtle_border)
+            .bg(colors.panel)
+            .child(
+                Button::new("explain-estimated-plan", "Explain")
+                    .tone(ButtonTone::Ghost)
+                    .disabled(pending)
+                    .on_click(cx.listener(|view, _, _, cx| view.request_explain(false, cx))),
+            )
+            .child(
+                Button::new("explain-analyzed-plan", "Analyze (runs query)")
+                    .tone(ButtonTone::DangerMuted)
+                    .disabled(pending)
+                    .on_click(cx.listener(|view, _, _, cx| view.request_explain(true, cx))),
+            )
+            .child(div().flex_1())
+            .children(matches!(self.explain, ExplainState::Ready(_)).then(|| {
+                Button::new("copy-raw-plan", "Copy raw")
+                    .tone(ButtonTone::Ghost)
+                    .start_icon(IconName::Copy)
+                    .on_click(cx.listener(|view, _, _, cx| view.copy_raw_plan(cx)))
+            }))
+    }
+
+    fn render_explain(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let colors = cx.theme().colors;
+        match &self.explain {
+            ExplainState::Empty => div()
+                .size_full()
+                .flex()
+                .items_center()
+                .justify_center()
+                .p_4()
+                .text_center()
+                .text_color(colors.muted_text)
+                .child("Explain estimates a plan. Analyze runs the statement and adds runtime counters.")
+                .into_any_element(),
+            ExplainState::Pending { analyze } => div()
+                .size_full()
+                .flex()
+                .items_center()
+                .justify_center()
+                .text_color(colors.muted_text)
+                .child(if *analyze {
+                    "Running statement and collecting its plan…"
+                } else {
+                    "Estimating execution plan…"
+                })
+                .into_any_element(),
+            ExplainState::Failed(message) => div()
+                .size_full()
+                .p_3()
+                .whitespace_normal()
+                .text_color(colors.danger)
+                .child(message.clone())
+                .into_any_element(),
+            ExplainState::Ready(response) => {
+                let engine = match response.engine {
+                    sift_protocol::Engine::Postgres => "PostgreSQL",
+                    sift_protocol::Engine::SqlServer => "SQL Server",
+                };
+                div()
+                    .id("execution-plan-scroll")
+                    .size_full()
+                    .overflow_y_scroll()
+                    .child(
+                        div()
+                            .min_h(px(30.))
+                            .px_3()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .bg(colors.toolbar)
+                            .text_xs()
+                            .text_color(colors.muted_text)
+                            .child(engine)
+                            .child(if response.analyzed {
+                                "Analyzed plan"
+                            } else {
+                                "Estimated plan"
+                            }),
+                    )
+                    .children(response.warnings.iter().map(|warning| {
+                        div()
+                            .px_3()
+                            .py_1()
+                            .bg(colors.warning_muted)
+                            .text_xs()
+                            .text_color(colors.warning)
+                            .child(warning.message.clone())
+                    }))
+                    .child(self.render_plan_node(&response.root, 0, colors))
+                    .into_any_element()
+            }
+        }
+    }
+
     fn render_message_toolbar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = cx.theme().colors;
         let error_count = self
@@ -1904,16 +2143,7 @@ impl gpui::Render for ResultsView {
         let body = match self.tab {
             ResultTab::Data => self.render_grid(cx),
             ResultTab::Messages => self.render_messages(cx).into_any_element(),
-            ResultTab::Explain => div()
-                .size_full()
-                .flex()
-                .items_center()
-                .justify_center()
-                .p_4()
-                .text_center()
-                .text_color(colors.muted_text)
-                .child("Run with EXPLAIN to see a plan here.")
-                .into_any_element(),
+            ResultTab::Explain => self.render_explain(cx),
             ResultTab::History => div()
                 .size_full()
                 .flex()
@@ -1965,6 +2195,9 @@ impl gpui::Render for ResultsView {
                     .children(
                         (self.tab == ResultTab::Messages).then(|| self.render_message_toolbar(cx)),
                     )
+                    .children(
+                        (self.tab == ResultTab::Explain).then(|| self.render_explain_toolbar(cx)),
+                    )
                     .child(div().flex().flex_1().min_w_0().min_h_0().child(body))
                     .children(
                         (self.tab == ResultTab::Data)
@@ -2007,6 +2240,46 @@ mod tests {
         let mut column = ColumnMetadata::new(name, TypeRef::Primitive(primitive));
         column.nullable = nullable;
         column
+    }
+
+    #[gpui::test]
+    fn explain_tracks_estimated_and_analyzed_plan_states(cx: &mut TestAppContext) {
+        let view = cx.update(|cx| cx.new(ResultsView::new));
+        view.update(cx, |view, cx| view.request_explain(false, cx));
+        assert!(view.read_with(cx, |view, _| matches!(
+            view.explain,
+            ExplainState::Pending { analyze: false }
+        )));
+
+        let mut root = PlanNode::new("Index Scan");
+        root.relation = Some("orders_customer_idx".into());
+        root.est_rows = Some(12.0);
+        root.est_cost = Some(4.25);
+        view.update(cx, |view, cx| {
+            view.set_explain_result(
+                Ok(Box::new(ExplainResponse {
+                    engine: sift_protocol::Engine::Postgres,
+                    analyzed: false,
+                    root,
+                    raw: "{\"Plan\":{}}".into(),
+                    warnings: Vec::new(),
+                })),
+                cx,
+            )
+        });
+        view.read_with(cx, |view, _| match &view.explain {
+            ExplainState::Ready(response) => {
+                assert_eq!(response.root.op, "Index Scan");
+                assert!(!response.analyzed);
+            }
+            state => panic!("expected ready plan, got {state:?}"),
+        });
+
+        view.update(cx, |view, cx| view.request_explain(true, cx));
+        assert!(view.read_with(cx, |view, _| matches!(
+            view.explain,
+            ExplainState::Pending { analyze: true }
+        )));
     }
 
     #[gpui::test]
