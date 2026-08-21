@@ -158,6 +158,22 @@ fn trigger_event_label(event: sift_protocol::TriggerEvent) -> &'static str {
     }
 }
 
+fn catalog_edge_kind_label(kind: sift_protocol::CatalogEdgeKind) -> &'static str {
+    match kind {
+        sift_protocol::CatalogEdgeKind::DependsOn => "depends on",
+        sift_protocol::CatalogEdgeKind::ForeignKey => "foreign key",
+        sift_protocol::CatalogEdgeKind::ReadsFrom => "reads from",
+        sift_protocol::CatalogEdgeKind::WritesTo => "writes to",
+        sift_protocol::CatalogEdgeKind::Calls => "calls",
+        sift_protocol::CatalogEdgeKind::TriggerOn => "trigger on",
+        sift_protocol::CatalogEdgeKind::Contains => "contains",
+        sift_protocol::CatalogEdgeKind::UsesType => "uses type",
+        sift_protocol::CatalogEdgeKind::OwnsSequence => "owns sequence",
+        sift_protocol::CatalogEdgeKind::Indexes => "indexes",
+        sift_protocol::CatalogEdgeKind::Constrains => "constrains",
+    }
+}
+
 fn table_node_id(
     graph: &sift_protocol::CatalogGraph,
     source: &DatabaseObjectSource,
@@ -346,14 +362,16 @@ enum TableDefinitionSection {
     Indexes,
     Relations,
     Triggers,
+    Dependencies,
 }
 
 impl TableDefinitionSection {
-    const ALL: [Self; 4] = [
+    const ALL: [Self; 5] = [
         Self::Columns,
         Self::Indexes,
         Self::Relations,
         Self::Triggers,
+        Self::Dependencies,
     ];
 
     fn label(self) -> &'static str {
@@ -362,6 +380,7 @@ impl TableDefinitionSection {
             Self::Indexes => "Indexes",
             Self::Relations => "Relations",
             Self::Triggers => "Triggers",
+            Self::Dependencies => "Dependencies",
         }
     }
 }
@@ -931,6 +950,59 @@ enum ConnectionSchemaState {
     },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SchemaSearchFilter {
+    All,
+    Relations,
+    Routines,
+}
+
+impl SchemaSearchFilter {
+    const ALL: [Self; 3] = [Self::All, Self::Relations, Self::Routines];
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::All => "All",
+            Self::Relations => "Relations",
+            Self::Routines => "Routines",
+        }
+    }
+
+    fn kinds(self) -> Option<Vec<sift_protocol::ObjectKind>> {
+        match self {
+            Self::All => None,
+            Self::Relations => Some(vec![
+                sift_protocol::ObjectKind::Table,
+                sift_protocol::ObjectKind::View,
+                sift_protocol::ObjectKind::MaterializedView,
+                sift_protocol::ObjectKind::ForeignTable,
+                sift_protocol::ObjectKind::PartitionedTable,
+            ]),
+            Self::Routines => Some(vec![
+                sift_protocol::ObjectKind::TableValuedFunction,
+                sift_protocol::ObjectKind::ScalarFunction,
+                sift_protocol::ObjectKind::Procedure,
+            ]),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+enum SchemaSearchState {
+    Idle,
+    Loading {
+        generation: u64,
+    },
+    Ready {
+        generation: u64,
+        response: Box<sift_protocol::SchemaSearchResponse>,
+    },
+    Failed {
+        generation: u64,
+        message: String,
+    },
+}
+
 #[derive(Debug)]
 enum TableDefinitionState {
     Loading {
@@ -999,6 +1071,14 @@ pub enum ExecutorCommand {
         profile_id: i64,
     },
     LoadTableDefinition {
+        item_id: u64,
+        source: DatabaseObjectSource,
+    },
+    SearchSchema {
+        generation: u64,
+        request: sift_protocol::SchemaSearchRequest,
+    },
+    LoadObjectDdl {
         item_id: u64,
         source: DatabaseObjectSource,
     },
@@ -1076,6 +1156,22 @@ pub enum ExecutorEvent {
         graph: Box<sift_protocol::CatalogGraph>,
     },
     TableDefinitionFailed {
+        item_id: u64,
+        message: String,
+    },
+    SchemaSearchLoaded {
+        generation: u64,
+        response: Box<sift_protocol::SchemaSearchResponse>,
+    },
+    SchemaSearchFailed {
+        generation: u64,
+        message: String,
+    },
+    ObjectDdlLoaded {
+        item_id: u64,
+        ddl: String,
+    },
+    ObjectDdlFailed {
         item_id: u64,
         message: String,
     },
@@ -2783,6 +2879,7 @@ const SEMANTIC_ANALYZE_DEBOUNCE: std::time::Duration = std::time::Duration::from
 pub struct WorkspaceShell {
     focus_handle: FocusHandle,
     query_input: Entity<TextInput>,
+    schema_search_input: Entity<TextInput>,
     server_name_input: Entity<TextInput>,
     server_url_input: Entity<TextInput>,
     server_token_input: Entity<TextInput>,
@@ -2874,8 +2971,12 @@ pub struct WorkspaceShell {
     account_error: Option<String>,
     connection_status: ConnectionStatus,
     connection_schema: ConnectionSchemaState,
+    schema_search_filter: SchemaSearchFilter,
+    schema_search_generation: u64,
+    schema_search_state: SchemaSearchState,
     table_definitions: HashMap<u64, TableDefinitionState>,
     table_definition_sections: HashMap<u64, TableDefinitionSection>,
+    pending_object_ddl: HashSet<u64>,
     table_designer: Option<TableDesignerState>,
     expanded_tenants: HashSet<i64>,
     expanded_connections: HashSet<i64>,
@@ -2990,6 +3091,9 @@ impl WorkspaceShell {
             .unwrap_or(0)
             + 1;
         let query_input = cx.new(|cx| TextInput::new("", "Search commands…", cx));
+        let schema_search_input = cx.new(|cx| {
+            TextInput::new("", "Search schema…", cx).aria_label("Search database schema")
+        });
         let server_name_input = cx.new(|cx| TextInput::new("", "Display name", cx));
         let server_url_input = cx.new(|cx| TextInput::new("", "http://192.168.1.20:7474", cx));
         let server_token_input =
@@ -3054,6 +3158,10 @@ impl WorkspaceShell {
             cx.notify();
         })
         .detach();
+        cx.observe(&schema_search_input, |shell, _, cx| {
+            shell.request_schema_search(cx);
+        })
+        .detach();
         for input in [&table_column_name_input, &table_column_type_input] {
             cx.observe(input, |shell, _, cx| {
                 if let Some(designer) = shell.table_designer.as_mut() {
@@ -3103,6 +3211,7 @@ impl WorkspaceShell {
         Self {
             focus_handle: cx.focus_handle(),
             query_input,
+            schema_search_input,
             server_name_input,
             server_url_input,
             server_token_input,
@@ -3188,8 +3297,12 @@ impl WorkspaceShell {
             account_error: None,
             connection_status: ConnectionStatus::Disconnected,
             connection_schema: ConnectionSchemaState::Unavailable,
+            schema_search_filter: SchemaSearchFilter::All,
+            schema_search_generation: 0,
+            schema_search_state: SchemaSearchState::Idle,
             table_definitions: HashMap::new(),
             table_definition_sections: HashMap::new(),
+            pending_object_ddl: HashSet::new(),
             table_designer: None,
             expanded_tenants: HashSet::new(),
             expanded_connections: HashSet::new(),
@@ -3462,6 +3575,7 @@ impl WorkspaceShell {
         self.connection_schema = ConnectionSchemaState::Unavailable;
         self.table_definitions.clear();
         self.table_definition_sections.clear();
+        self.pending_object_ddl.clear();
         self.table_designer = None;
         self.pending_database_execution = None;
         self.pending_database_explain = None;
@@ -3949,6 +4063,9 @@ impl WorkspaceShell {
                     profile_id,
                     snapshot,
                 };
+                if !self.schema_search_input.read(cx).text().trim().is_empty() {
+                    self.request_schema_search(cx);
+                }
                 cx.notify();
             }
             ExecutorEvent::SchemaLoadFailed {
@@ -4102,6 +4219,57 @@ impl WorkspaceShell {
                 self.table_definitions
                     .insert(item_id, TableDefinitionState::Failed { source, message });
                 cx.notify();
+            }
+            ExecutorEvent::SchemaSearchLoaded {
+                generation,
+                response,
+            } => {
+                if generation == self.schema_search_generation {
+                    self.schema_search_state = SchemaSearchState::Ready {
+                        generation,
+                        response,
+                    };
+                    cx.notify();
+                }
+            }
+            ExecutorEvent::SchemaSearchFailed {
+                generation,
+                message,
+            } => {
+                if generation == self.schema_search_generation {
+                    self.schema_search_state = SchemaSearchState::Failed {
+                        generation,
+                        message,
+                    };
+                    cx.notify();
+                }
+            }
+            ExecutorEvent::ObjectDdlLoaded { item_id, ddl } => {
+                if !self.pending_object_ddl.remove(&item_id) {
+                    return;
+                }
+                for pane in &self.panes {
+                    if pane.update(cx, |pane, cx| {
+                        pane.show_database_item_view(
+                            item_id,
+                            DatabaseItemView::Ddl,
+                            Some(ddl.clone()),
+                            cx,
+                        )
+                    }) {
+                        break;
+                    }
+                }
+                cx.notify();
+            }
+            ExecutorEvent::ObjectDdlFailed { item_id, message } => {
+                if !self.pending_object_ddl.remove(&item_id) {
+                    return;
+                }
+                self.show_error_toast(
+                    format!("Exact DDL unavailable; showing catalog preview. {message}"),
+                    cx,
+                );
             }
             ExecutorEvent::TableMigrationPreviewed { item_id, plan } => {
                 let should_show_ddl = if let Some(designer) = self
@@ -4793,6 +4961,47 @@ impl WorkspaceShell {
         }
     }
 
+    fn request_schema_search(&mut self, cx: &mut Context<Self>) {
+        let query = self.schema_search_input.read(cx).text().trim().to_owned();
+        self.schema_search_generation = self.schema_search_generation.wrapping_add(1);
+        let generation = self.schema_search_generation;
+        if query.is_empty() {
+            self.schema_search_state = SchemaSearchState::Idle;
+            cx.notify();
+            return;
+        }
+        let request = sift_protocol::SchemaSearchRequest {
+            query,
+            kinds: self.schema_search_filter.kinds(),
+            limit: Some(80),
+        };
+        let sent = self.executor_sender.as_ref().is_some_and(|sender| {
+            sender
+                .send(ExecutorCommand::SearchSchema {
+                    generation,
+                    request,
+                })
+                .is_ok()
+        });
+        self.schema_search_state = if sent {
+            SchemaSearchState::Loading { generation }
+        } else {
+            SchemaSearchState::Failed {
+                generation,
+                message: "Database executor is unavailable".into(),
+            }
+        };
+        cx.notify();
+    }
+
+    fn set_schema_search_filter(&mut self, filter: SchemaSearchFilter, cx: &mut Context<Self>) {
+        if self.schema_search_filter == filter {
+            return;
+        }
+        self.schema_search_filter = filter;
+        self.request_schema_search(cx);
+    }
+
     fn disconnect(&mut self, cx: &mut Context<Self>) {
         if let Some(sender) = &self.executor_sender {
             let _ = sender.send(ExecutorCommand::Disconnect);
@@ -4800,6 +5009,7 @@ impl WorkspaceShell {
         self.held_result_pages.clear();
         self.connection_status = ConnectionStatus::Disconnected;
         self.connection_schema = ConnectionSchemaState::Unavailable;
+        self.schema_search_state = SchemaSearchState::Idle;
         self.status.database = "No database".into();
         self.sync_database_item_states(cx);
         cx.notify();
@@ -5402,6 +5612,7 @@ impl WorkspaceShell {
         else {
             return;
         };
+        self.pending_object_ddl.remove(&item_id);
         for pane in &self.panes {
             if pane.update(cx, |pane, cx| {
                 pane.show_database_item_view(item_id, DatabaseItemView::Ddl, Some(ddl.clone()), cx)
@@ -5432,6 +5643,7 @@ impl WorkspaceShell {
         node_id: &sift_protocol::CatalogObjectId,
         cx: &mut Context<Self>,
     ) {
+        self.pending_object_ddl.remove(&item_id);
         let Some(TableDefinitionState::Ready {
             source,
             graph,
@@ -5457,6 +5669,7 @@ impl WorkspaceShell {
     }
 
     fn open_table_columns_ddl(&mut self, item_id: u64, cx: &mut Context<Self>) {
+        self.pending_object_ddl.remove(&item_id);
         let Some(TableDefinitionState::Ready {
             source,
             graph,
@@ -5506,6 +5719,17 @@ impl WorkspaceShell {
                 pane.show_database_item_view(item_id, DatabaseItemView::Ddl, Some(ddl.clone()), cx)
             }) {
                 break;
+            }
+        }
+        if let Some(sender) = &self.executor_sender {
+            if sender
+                .send(ExecutorCommand::LoadObjectDdl {
+                    item_id,
+                    source: source.clone(),
+                })
+                .is_ok()
+            {
+                self.pending_object_ddl.insert(item_id);
             }
         }
         cx.notify();
@@ -7245,6 +7469,7 @@ impl WorkspaceShell {
             {
                 self.pending_database_explain = None;
             }
+            self.pending_object_ddl.remove(&item_id);
             if self
                 .table_designer
                 .as_ref()
@@ -8548,6 +8773,9 @@ impl WorkspaceShell {
                 profile_id: ready,
                 snapshot,
             } if *ready == profile_id => {
+                if !self.schema_search_input.read(cx).text().trim().is_empty() {
+                    return self.schema_search_rows(connection, snapshot, colors, cx);
+                }
                 let mut rows = Vec::new();
                 for (catalog_index, catalog) in snapshot.trees.iter().enumerate() {
                     let catalog_key = (profile_id, catalog.name.clone());
@@ -8789,6 +9017,183 @@ impl WorkspaceShell {
         }
     }
 
+    fn schema_search_rows(
+        &self,
+        connection: &ConnectionNavEntry,
+        snapshot: &sift_protocol::SchemaSnapshot,
+        colors: sift_ui::ThemeColors,
+        cx: &mut Context<Self>,
+    ) -> Vec<gpui::AnyElement> {
+        let status_row = |message: String, color: Hsla| {
+            div()
+                .mx_2()
+                .pl(tree_indent(2))
+                .pr_2()
+                .min_h(cx.theme().metrics.row_height)
+                .flex()
+                .items_center()
+                .text_xs()
+                .text_color(color)
+                .child(message)
+                .into_any_element()
+        };
+        let SchemaSearchState::Ready {
+            generation,
+            response,
+        } = &self.schema_search_state
+        else {
+            return match &self.schema_search_state {
+                SchemaSearchState::Loading { generation } => vec![status_row(
+                    format!("Searching schema… #{generation}"),
+                    colors.muted_text,
+                )],
+                SchemaSearchState::Failed {
+                    generation,
+                    message,
+                } => vec![status_row(
+                    format!("Search #{generation} failed: {message}"),
+                    colors.danger,
+                )],
+                SchemaSearchState::Idle | SchemaSearchState::Ready { .. } => Vec::new(),
+            };
+        };
+        if *generation != self.schema_search_generation {
+            return vec![status_row("Searching schema…".into(), colors.muted_text)];
+        }
+        let hits = response
+            .hits
+            .iter()
+            .filter(|hit| match (self.schema_search_filter, &hit.target) {
+                (SchemaSearchFilter::All, _) => true,
+                (SchemaSearchFilter::Relations, sift_protocol::SearchTarget::Column) => true,
+                (
+                    SchemaSearchFilter::Relations,
+                    sift_protocol::SearchTarget::Object { object_kind },
+                ) => matches!(
+                    object_kind,
+                    sift_protocol::ObjectKind::Table
+                        | sift_protocol::ObjectKind::View
+                        | sift_protocol::ObjectKind::MaterializedView
+                        | sift_protocol::ObjectKind::ForeignTable
+                        | sift_protocol::ObjectKind::PartitionedTable
+                ),
+                (
+                    SchemaSearchFilter::Routines,
+                    sift_protocol::SearchTarget::Object { object_kind },
+                ) => matches!(
+                    object_kind,
+                    sift_protocol::ObjectKind::TableValuedFunction
+                        | sift_protocol::ObjectKind::ScalarFunction
+                        | sift_protocol::ObjectKind::Procedure
+                ),
+                (SchemaSearchFilter::Routines, sift_protocol::SearchTarget::Column) => false,
+            })
+            .collect::<Vec<_>>();
+        if hits.is_empty() {
+            return vec![status_row(
+                "No matching schema objects".into(),
+                colors.muted_text,
+            )];
+        }
+        let fallback_catalog = snapshot.trees.first().map(|tree| tree.name.clone());
+        hits.into_iter()
+            .enumerate()
+            .map(|(index, hit)| {
+                let object_kind = match hit.target {
+                    sift_protocol::SearchTarget::Object { object_kind } => object_kind,
+                    sift_protocol::SearchTarget::Column => {
+                        hit.path.kind.unwrap_or(sift_protocol::ObjectKind::Table)
+                    }
+                };
+                let can_preview = matches!(
+                    object_kind,
+                    sift_protocol::ObjectKind::Table
+                        | sift_protocol::ObjectKind::View
+                        | sift_protocol::ObjectKind::MaterializedView
+                        | sift_protocol::ObjectKind::ForeignTable
+                        | sift_protocol::ObjectKind::PartitionedTable
+                );
+                let target = DatabaseObjectTarget {
+                    connection: connection.clone(),
+                    catalog: hit
+                        .path
+                        .catalog
+                        .clone()
+                        .or_else(|| fallback_catalog.clone())
+                        .unwrap_or_default(),
+                    schema: hit.path.schema.clone().unwrap_or_default(),
+                    object: hit.path.name.clone(),
+                    object_kind,
+                };
+                let detail = match (&hit.column, &hit.type_display) {
+                    (Some(column), Some(type_name)) => Some(format!("{column} · {type_name}")),
+                    (Some(column), None) => Some(column.clone()),
+                    _ => None,
+                };
+                div()
+                    .id(("schema-search-hit", index))
+                    .mx_2()
+                    .min_h(cx.theme().metrics.row_height)
+                    .pl(tree_indent(2))
+                    .pr_2()
+                    .py_1()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .rounded_sm()
+                    .tab_index(if can_preview { 0 } else { -1 })
+                    .role(Role::Button)
+                    .aria_label(format!("Open {}", hit.display))
+                    .text_color(if can_preview {
+                        colors.text
+                    } else {
+                        colors.muted_text
+                    })
+                    .when(can_preview, |row| {
+                        let click_target = target.clone();
+                        let key_target = target.clone();
+                        row.cursor_pointer()
+                            .hover(|row| row.bg(colors.hovered_surface))
+                            .focus(|row| row.bg(colors.hovered_surface))
+                            .on_click(cx.listener(move |shell, _, window, cx| {
+                                shell.open_table_preview(click_target.clone(), window, cx)
+                            }))
+                            .on_key_down(cx.listener(
+                                move |shell, event: &gpui::KeyDownEvent, window, cx| {
+                                    if !event.keystroke.modifiers.modified()
+                                        && matches!(event.keystroke.key.as_str(), "enter" | "space")
+                                    {
+                                        shell.open_table_preview(key_target.clone(), window, cx);
+                                        cx.stop_propagation();
+                                    }
+                                },
+                            ))
+                    })
+                    .child(icon(
+                        schema_object_kind_icon(object_kind),
+                        colors.muted_text,
+                        12.,
+                    ))
+                    .child(
+                        div()
+                            .min_w_0()
+                            .flex_1()
+                            .flex()
+                            .flex_col()
+                            .child(div().truncate().child(hit.display.clone()))
+                            .children(detail.map(|detail| {
+                                div()
+                                    .truncate()
+                                    .text_xs()
+                                    .text_color(colors.muted_text)
+                                    .child(detail)
+                            })),
+                    )
+                    .into_any_element()
+            })
+            .collect()
+    }
+
     fn render_result_fields_inspector(
         &self,
         results: Entity<ResultsView>,
@@ -9005,6 +9410,9 @@ impl WorkspaceShell {
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         let colors = cx.theme().colors;
+        if section == TableDefinitionSection::Dependencies {
+            return self.render_table_dependencies(graph, table_id, cx);
+        }
         let nodes = match section {
             TableDefinitionSection::Indexes => {
                 table_detail_nodes(graph, table_id, sift_protocol::CatalogNodeKind::Index)
@@ -9025,6 +9433,7 @@ impl WorkspaceShell {
                 table_detail_nodes(graph, table_id, sift_protocol::CatalogNodeKind::Trigger)
             }
             TableDefinitionSection::Columns => Vec::new(),
+            TableDefinitionSection::Dependencies => unreachable!(),
         };
         if nodes.is_empty() {
             return div()
@@ -9167,6 +9576,130 @@ impl WorkspaceShell {
             .into_any_element()
     }
 
+    fn render_table_dependencies(
+        &self,
+        graph: &sift_protocol::CatalogGraph,
+        table_id: &sift_protocol::CatalogObjectId,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let colors = cx.theme().colors;
+        let owned_ids = graph
+            .data
+            .nodes
+            .iter()
+            .filter(|node| node.id == *table_id || node.parent_id.as_ref() == Some(table_id))
+            .map(|node| node.id.clone())
+            .collect::<HashSet<_>>();
+        let visible_kind = |kind| {
+            matches!(
+                kind,
+                sift_protocol::CatalogEdgeKind::DependsOn
+                    | sift_protocol::CatalogEdgeKind::ForeignKey
+                    | sift_protocol::CatalogEdgeKind::ReadsFrom
+                    | sift_protocol::CatalogEdgeKind::WritesTo
+                    | sift_protocol::CatalogEdgeKind::Calls
+                    | sift_protocol::CatalogEdgeKind::TriggerOn
+            )
+        };
+        let node_name = |id: &sift_protocol::CatalogObjectId| {
+            graph
+                .data
+                .nodes
+                .iter()
+                .find(|node| &node.id == id)
+                .map(|node| node.qualified_name.clone())
+        };
+        let mut rows = Vec::new();
+        for edge in graph
+            .data
+            .edges
+            .iter()
+            .filter(|edge| visible_kind(edge.kind))
+        {
+            let outgoing = owned_ids.contains(&edge.from)
+                && edge.to.as_ref().is_some_and(|to| !owned_ids.contains(to));
+            let incoming = !owned_ids.contains(&edge.from)
+                && edge.to.as_ref().is_some_and(|to| owned_ids.contains(to));
+            if !outgoing && !incoming {
+                continue;
+            }
+            let target = if outgoing {
+                edge.to
+                    .as_ref()
+                    .and_then(node_name)
+                    .or_else(|| edge.referenced_path.clone())
+                    .unwrap_or_else(|| "Unresolved object".into())
+            } else {
+                node_name(&edge.from).unwrap_or_else(|| "Unresolved object".into())
+            };
+            rows.push((outgoing, edge.kind, edge.certainty, target));
+        }
+        rows.sort_by(|left, right| left.3.cmp(&right.3));
+        rows.dedup();
+        if rows.is_empty() {
+            return div()
+                .flex_1()
+                .min_h(px(96.))
+                .flex()
+                .items_center()
+                .justify_center()
+                .text_sm()
+                .text_color(colors.muted_text)
+                .child("No dependencies or usages in this catalog scope")
+                .into_any_element();
+        }
+        div()
+            .id("table-dependencies-section")
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scroll()
+            .children(rows.into_iter().enumerate().map(
+                |(index, (outgoing, kind, certainty, target))| {
+                    div()
+                        .id(("table-dependency-row", index))
+                        .px_3()
+                        .py_2()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .border_b_1()
+                        .border_color(colors.subtle_border)
+                        .child(icon(
+                            if outgoing {
+                                IconName::ChevronRight
+                            } else {
+                                IconName::ChevronLeft
+                            },
+                            colors.muted_text,
+                            12.,
+                        ))
+                        .child(
+                            div()
+                                .min_w_0()
+                                .flex_1()
+                                .flex()
+                                .flex_col()
+                                .child(div().truncate().child(target))
+                                .child(div().text_xs().text_color(colors.muted_text).child(
+                                    format!(
+                                        "{} · {}",
+                                        if outgoing { "Dependency" } else { "Used by" },
+                                        catalog_edge_kind_label(kind)
+                                    ),
+                                )),
+                        )
+                        .child(
+                            div()
+                                .flex_none()
+                                .text_xs()
+                                .text_color(colors.disabled_text)
+                                .child(format!("{certainty:?}").to_lowercase()),
+                        )
+                },
+            ))
+            .into_any_element()
+    }
+
     fn render_table_definition_inspector(
         &self,
         item_id: u64,
@@ -9218,6 +9751,32 @@ impl WorkspaceShell {
                             )
                         })
                         .count();
+                let owned_ids = graph
+                    .data
+                    .nodes
+                    .iter()
+                    .filter(|node| {
+                        node.id == *table_id || node.parent_id.as_ref() == Some(table_id)
+                    })
+                    .map(|node| node.id.clone())
+                    .collect::<HashSet<_>>();
+                let dependency_count = graph
+                    .data
+                    .edges
+                    .iter()
+                    .filter(|edge| {
+                        matches!(
+                            edge.kind,
+                            sift_protocol::CatalogEdgeKind::DependsOn
+                                | sift_protocol::CatalogEdgeKind::ForeignKey
+                                | sift_protocol::CatalogEdgeKind::ReadsFrom
+                                | sift_protocol::CatalogEdgeKind::WritesTo
+                                | sift_protocol::CatalogEdgeKind::Calls
+                                | sift_protocol::CatalogEdgeKind::TriggerOn
+                        ) && (owned_ids.contains(&edge.from)
+                            || edge.to.as_ref().is_some_and(|to| owned_ids.contains(to)))
+                    })
+                    .count();
                 let section_counts = [
                     table_columns(graph, table_id).len(),
                     table_detail_nodes(graph, table_id, sift_protocol::CatalogNodeKind::Index)
@@ -9225,6 +9784,7 @@ impl WorkspaceShell {
                     relation_count,
                     table_detail_nodes(graph, table_id, sift_protocol::CatalogNodeKind::Trigger)
                         .len(),
+                    dependency_count,
                 ];
                 let columns_by_id = table_columns(graph, table_id)
                     .into_iter()
@@ -9936,6 +10496,41 @@ impl WorkspaceShell {
             .when(
                 dock.id == DockId::Left && self.active_left_panel == LeftPanel::Connections,
                 |dock_view| {
+                let filter_buttons = SchemaSearchFilter::ALL.into_iter().enumerate().map(|(index, filter)| {
+                    let selected = self.schema_search_filter == filter;
+                    div()
+                        .id(("schema-search-filter", index))
+                        .h(px(24.))
+                        .px_2()
+                        .flex()
+                        .items_center()
+                        .rounded_sm()
+                        .tab_index(0)
+                        .role(Role::Button)
+                        .aria_label(format!("Filter schema search by {}", filter.label()))
+                        .bg(if selected {
+                            colors.selected_surface
+                        } else {
+                            colors.panel
+                        })
+                        .text_xs()
+                        .text_color(if selected { colors.text } else { colors.muted_text })
+                        .hover(|button| button.bg(colors.hovered_surface).text_color(colors.text))
+                        .focus(|button| button.bg(colors.hovered_surface))
+                        .on_click(cx.listener(move |shell, _, _, cx| {
+                            shell.set_schema_search_filter(filter, cx)
+                        }))
+                        .on_key_down(cx.listener(
+                            move |shell, event: &gpui::KeyDownEvent, _, cx| {
+                                if !event.keystroke.modifiers.modified()
+                                    && matches!(event.keystroke.key.as_str(), "enter" | "space")
+                                {
+                                    shell.set_schema_search_filter(filter, cx);
+                                    cx.stop_propagation();
+                                }
+                            },
+                        ))
+                }).collect::<Vec<_>>();
                 dock_view.child(
                     div()
                         .mx_2()
@@ -9963,6 +10558,20 @@ impl WorkspaceShell {
                                 )
                             },
                         ),
+                )
+                .child(
+                    div()
+                        .mx_2()
+                        .mb_1()
+                        .flex()
+                        .flex_col()
+                        .gap_1()
+                        .child(
+                            div()
+                                .h(px(28.))
+                                .child(self.schema_search_input.clone()),
+                        )
+                        .child(div().flex().items_center().gap_1().children(filter_buttons)),
                 )
                 },
             )
@@ -13464,6 +14073,70 @@ mod tests {
     }
 
     #[gpui::test]
+    fn schema_search_uses_the_executor_and_ignores_stale_results(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+
+        workspace.update(&mut cx, |shell, cx| {
+            shell.executor_sender = Some(sender);
+            shell
+                .schema_search_input
+                .update(cx, |input, cx| input.set_text("people", cx));
+            shell.set_schema_search_filter(SchemaSearchFilter::Relations, cx);
+        });
+        let mut latest = None;
+        while let Ok(command) = receiver.try_recv() {
+            if let ExecutorCommand::SearchSchema {
+                generation,
+                request,
+            } = command
+            {
+                latest = Some((generation, request));
+            }
+        }
+        let (generation, request) = latest.expect("schema search command");
+        assert_eq!(request.query, "people");
+        assert!(request
+            .kinds
+            .as_ref()
+            .is_some_and(|kinds| kinds.contains(&sift_protocol::ObjectKind::Table)));
+
+        workspace.update(&mut cx, |shell, cx| {
+            shell.on_executor_event(
+                ExecutorEvent::SchemaSearchLoaded {
+                    generation: generation.saturating_sub(1),
+                    response: Box::new(sift_protocol::SchemaSearchResponse {
+                        hits: Vec::new(),
+                        index_state: sift_protocol::IndexState::Ready,
+                    }),
+                },
+                cx,
+            );
+            assert!(matches!(
+                shell.schema_search_state,
+                SchemaSearchState::Loading { .. }
+            ));
+            let current_generation = shell.schema_search_generation;
+            shell.on_executor_event(
+                ExecutorEvent::SchemaSearchLoaded {
+                    generation: current_generation,
+                    response: Box::new(sift_protocol::SchemaSearchResponse {
+                        hits: Vec::new(),
+                        index_state: sift_protocol::IndexState::Ready,
+                    }),
+                },
+                cx,
+            );
+            assert!(matches!(
+                shell.schema_search_state,
+                SchemaSearchState::Ready { .. }
+            ));
+        });
+    }
+
+    #[gpui::test]
     fn every_connections_tree_container_can_collapse_and_expand(cx: &mut TestAppContext) {
         let window = shell(cx);
         let mut cx = VisualTestContext::from_window(window.into(), cx);
@@ -13779,6 +14452,13 @@ mod tests {
         workspace.update_in(&mut cx, |shell, _, cx| {
             shell.open_table_full_ddl(item_id, cx);
         });
+        assert!(matches!(
+            receiver.try_recv(),
+            Ok(ExecutorCommand::LoadObjectDdl {
+                item_id: ddl_item,
+                source,
+            }) if ddl_item == item_id && source.object == "people"
+        ));
         workspace.update_in(&mut cx, |shell, _, cx| {
             let pane = shell.panes[shell.active_pane].read(cx);
             let ddl = pane.editor(item_id).unwrap().read(cx).document().text();
@@ -13786,6 +14466,20 @@ mod tests {
             assert!(ddl.contains("ADD CONSTRAINT \"people_team_fk\""), "{ddl}");
             assert!(ddl.contains("CREATE INDEX \"people_name_idx\""), "{ddl}");
             assert!(ddl.contains("CREATE TRIGGER people_touch"), "{ddl}");
+        });
+        workspace.update_in(&mut cx, |shell, _, cx| {
+            shell.on_executor_event(
+                ExecutorEvent::ObjectDdlLoaded {
+                    item_id,
+                    ddl: "CREATE TABLE lab.people (id bigint); -- exact".into(),
+                },
+                cx,
+            );
+            let pane = shell.panes[shell.active_pane].read(cx);
+            assert_eq!(
+                pane.editor(item_id).unwrap().read(cx).document().text(),
+                "CREATE TABLE lab.people (id bigint); -- exact"
+            );
         });
         workspace.update_in(&mut cx, |shell, _, cx| {
             shell.select_table_definition_section(item_id, TableDefinitionSection::Indexes, cx);

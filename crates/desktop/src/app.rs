@@ -786,6 +786,64 @@ async fn run_query_executor(
                     return;
                 }
             }
+            ExecutorCommand::SearchSchema {
+                generation,
+                request,
+            } => {
+                let event = match context.as_ref() {
+                    Some(opened) => opened
+                        .client
+                        .search_schema(opened.session, opened.metadata_connection, request)
+                        .await
+                        .map(|response| ExecutorEvent::SchemaSearchLoaded {
+                            generation,
+                            response: Box::new(response),
+                        })
+                        .unwrap_or_else(|error| ExecutorEvent::SchemaSearchFailed {
+                            generation,
+                            message: format!("searching schema failed: {error}"),
+                        }),
+                    None => ExecutorEvent::SchemaSearchFailed {
+                        generation,
+                        message: "Connect to a database before searching its schema".into(),
+                    },
+                };
+                if events.send(event).is_err() {
+                    return;
+                }
+            }
+            ExecutorCommand::LoadObjectDdl { item_id, source } => {
+                let event = match context.as_ref() {
+                    Some(opened) if opened.profile_id == source.profile_id => {
+                        let path = sift_protocol::ObjectPath {
+                            catalog: source.catalog.clone(),
+                            schema: Some(source.schema.clone()),
+                            name: source.object.clone(),
+                            kind: Some(source.object_kind),
+                            routine_args: None,
+                        };
+                        opened
+                            .client
+                            .object_ddl(opened.session, opened.metadata_connection, &path)
+                            .await
+                            .map(|object| ExecutorEvent::ObjectDdlLoaded {
+                                item_id,
+                                ddl: object.ddl,
+                            })
+                            .unwrap_or_else(|error| ExecutorEvent::ObjectDdlFailed {
+                                item_id,
+                                message: format!("loading object DDL failed: {error}"),
+                            })
+                    }
+                    _ => ExecutorEvent::ObjectDdlFailed {
+                        item_id,
+                        message: "Connect to this object before loading its DDL".into(),
+                    },
+                };
+                if events.send(event).is_err() {
+                    return;
+                }
+            }
             ExecutorCommand::PreviewTableMutation {
                 item_id,
                 expected_catalog_revision,
