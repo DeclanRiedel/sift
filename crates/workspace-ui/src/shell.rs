@@ -26,7 +26,7 @@ use crate::settings::{EditorMode, SettingsStore, UserSettings};
 use crate::presentation::{
     BottomTool, DatabaseObjectSource, ItemKind, ItemPresentation, ItemSource, LeftPanel, PaneAxis,
     PaneLayoutPresentation, PanePresentation, PresentationState, PresentationStore,
-    RoomDocumentSource, WindowPresentation, WorkspacePresentation,
+    ResultReference, RoomDocumentSource, WindowPresentation, WorkspacePresentation,
 };
 use crate::{
     ConnectionNavEntry, DocumentNavEntry, LifecycleEvent, LifecycleProjection, PresenceEvent,
@@ -1023,7 +1023,13 @@ impl Pane {
             editors.insert(id, editor);
             clean_documents.insert(id, restored_text);
             if item.kind == ItemKind::Query {
-                results.insert(id, cx.new(ResultsView::new));
+                let view = cx.new(ResultsView::new);
+                // A restored tab shows what it last produced as a reference.
+                // The rows themselves were never written to disk.
+                if let Some(reference) = item.last_result.clone() {
+                    view.update(cx, |view, cx| view.restore_reference(reference, cx));
+                }
+                results.insert(id, view);
             }
             if matches!(item.source, Some(ItemSource::DatabaseObject(_))) {
                 database_item_states.insert(id, DatabaseItemState::Offline);
@@ -1098,6 +1104,18 @@ impl Pane {
                     request: request.clone(),
                 });
             }
+        }
+    }
+
+    /// Record the reference to a finished run on its tab, or clear it when a
+    /// new run starts. Returns whether this pane owns the item.
+    fn set_last_result(&mut self, item_id: u64, reference: Option<ResultReference>) -> bool {
+        match self.items.iter_mut().find(|item| item.id == item_id) {
+            Some(item) => {
+                item.last_result = reference;
+                true
+            }
+            None => false,
         }
     }
 
@@ -2437,6 +2455,14 @@ impl gpui::Render for Pane {
     }
 }
 
+/// Wall-clock milliseconds, used only to stamp result references. A clock that
+/// cannot be read yields 0, which reads as "unknown" rather than failing a run.
+fn epoch_millis() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_millis() as u64)
+}
+
 /// One coalescing window for keystroke-driven reanalysis. Long enough that a
 /// fast typist produces one request per pause, short enough that diagnostics
 /// feel attached to the edit that caused them.
@@ -3419,6 +3445,7 @@ impl WorkspaceShell {
                                 title: "sift.toml".into(),
                                 dirty: false,
                                 source: None,
+                                last_result: None,
                             },
                             editor,
                             cx,
@@ -3612,9 +3639,9 @@ impl WorkspaceShell {
             ExecutorEvent::ExecutionPage {
                 item_id,
                 execution_id,
+                cursor_id,
                 page,
                 acknowledge,
-                ..
             } => {
                 if self.running_queries.get(&item_id) != Some(&execution_id) {
                     let _ = acknowledge.send(());
@@ -3635,6 +3662,7 @@ impl WorkspaceShell {
                     if terminal {
                         self.running_queries.remove(&item_id);
                         self.replace_global_problems(item_id, &state, cx);
+                        self.record_result_reference(item_id, &state, Some(cursor_id.0), cx);
                     }
                 }
                 let _ = acknowledge.send(());
@@ -4007,6 +4035,13 @@ impl WorkspaceShell {
             self.running_queries.insert(item_id, execution_id);
             self.status.execution = "Running…".into();
             self.clear_global_problems_for(item_id, cx);
+            // The previous reference stops describing this tab the moment a
+            // new run starts; a failed run must not leave the old one behind.
+            for pane in &self.panes {
+                if pane.update(cx, |pane, _| pane.set_last_result(item_id, None)) {
+                    break;
+                }
+            }
             cx.notify();
         }
     }
@@ -4082,6 +4117,27 @@ impl WorkspaceShell {
             text,
             request,
         });
+    }
+
+    /// Persist the reference to a completed run on its tab. Runs that did not
+    /// complete with rows leave the previous reference cleared rather than
+    /// stale, so the tab never describes a result the user cannot get back to.
+    fn record_result_reference(
+        &mut self,
+        item_id: u64,
+        state: &ResultState,
+        cursor_id: Option<u64>,
+        cx: &mut Context<Self>,
+    ) {
+        let reference = state.reference(cursor_id, epoch_millis());
+        for pane in &self.panes {
+            if pane.update(cx, |pane, _| {
+                pane.set_last_result(item_id, reference.clone())
+            }) {
+                break;
+            }
+        }
+        self.persist(cx);
     }
 
     fn editor_for_item(&self, item_id: u64, cx: &App) -> Option<Entity<QueryEditor>> {
@@ -4826,6 +4882,7 @@ impl WorkspaceShell {
                         title,
                         dirty: false,
                         source: Some(ItemSource::DatabaseObject(source.clone())),
+                        last_result: None,
                     },
                     editor,
                     results,
@@ -4891,6 +4948,7 @@ impl WorkspaceShell {
                         title: document.title.clone(),
                         dirty: false,
                         source: Some(ItemSource::RoomDocument(source.clone())),
+                        last_result: None,
                     },
                     editor,
                     results,
@@ -5024,6 +5082,7 @@ impl WorkspaceShell {
                         title: "settings.toml".into(),
                         dirty: false,
                         source: None,
+                        last_result: None,
                     },
                     editor,
                     cx,
@@ -5407,6 +5466,8 @@ impl WorkspaceShell {
                 break;
             }
         }
+        // Bounded HTTP results have no cursor to correlate with.
+        self.record_result_reference(item_id, &state, None, cx);
         cx.notify();
     }
 
@@ -5454,6 +5515,7 @@ impl WorkspaceShell {
                 }
             }
             ResultState::Idle
+            | ResultState::Detached(_)
             | ResultState::Pending
             | ResultState::Streaming(_)
             | ResultState::Cancelled => {}
@@ -5541,6 +5603,7 @@ impl WorkspaceShell {
                         title: count,
                         dirty: false,
                         source: None,
+                        last_result: None,
                     },
                     editor,
                     cx,
@@ -5921,6 +5984,7 @@ impl WorkspaceShell {
                             title: "New pane".into(),
                             dirty: false,
                             source: None,
+                            last_result: None,
                         })
                         .into_iter()
                         .collect(),
@@ -12647,6 +12711,7 @@ mod tests {
                 title: "two.sql".into(),
                 dirty: false,
                 source: None,
+                last_result: None,
             },
             ItemPresentation {
                 id: 3,
@@ -12654,6 +12719,7 @@ mod tests {
                 title: "three.sql".into(),
                 dirty: false,
                 source: None,
+                last_result: None,
             },
         ]);
         let window = shell_with_state(state, cx);
@@ -12684,6 +12750,7 @@ mod tests {
             title: "second.sql".into(),
             dirty: false,
             source: None,
+            last_result: None,
         });
         let window = shell_with_state(state, cx);
         let mut cx = VisualTestContext::from_window(window.into(), cx);
@@ -12721,6 +12788,7 @@ mod tests {
                         title: "second.sql".into(),
                         dirty: false,
                         source: None,
+                        last_result: None,
                     },
                     editor,
                     results,
@@ -12811,6 +12879,7 @@ mod tests {
                             title: "New pane".into(),
                             dirty: false,
                             source: None,
+                            last_result: None,
                         }],
                         active_item: 0,
                     },
@@ -12834,6 +12903,7 @@ mod tests {
                     title: "Query 1".into(),
                     dirty: false,
                     source: None,
+                    last_result: None,
                 },
                 editor,
                 results,
@@ -13399,6 +13469,7 @@ mod tests {
                 title: "two.sql".into(),
                 dirty: false,
                 source: None,
+                last_result: None,
             },
             ItemPresentation {
                 id: 3,
@@ -13406,6 +13477,7 @@ mod tests {
                 title: "three.sql".into(),
                 dirty: false,
                 source: None,
+                last_result: None,
             },
         ]);
         let window = shell_with_state(state, cx);
@@ -13447,6 +13519,7 @@ mod tests {
                 title: "two.sql".into(),
                 dirty: false,
                 source: None,
+                last_result: None,
             },
             ItemPresentation {
                 id: 3,
@@ -13454,6 +13527,7 @@ mod tests {
                 title: "three.sql".into(),
                 dirty: false,
                 source: None,
+                last_result: None,
             },
         ]);
         let window = shell_with_state(state, cx);
@@ -13499,6 +13573,7 @@ mod tests {
                 title: format!("long-query-name-{id}.sql"),
                 dirty: false,
                 source: None,
+                last_result: None,
             }));
         let window = shell_with_state(state, cx);
         let mut cx = VisualTestContext::from_window(window.into(), cx);
@@ -13569,6 +13644,7 @@ mod tests {
             title: "two.sql".into(),
             dirty: false,
             source: None,
+            last_result: None,
         });
         let window = shell_with_state(state, cx);
         let mut cx = VisualTestContext::from_window(window.into(), cx);
@@ -13639,6 +13715,7 @@ mod tests {
             title: "two.sql".into(),
             dirty: false,
             source: None,
+            last_result: None,
         });
         let window = shell_with_state(state, cx);
         let mut cx = VisualTestContext::from_window(window.into(), cx);
@@ -13706,6 +13783,7 @@ mod tests {
             title: "two.sql".into(),
             dirty: false,
             source: None,
+            last_result: None,
         });
         let window = shell_with_state(state, cx);
         let mut cx = VisualTestContext::from_window(window.into(), cx);
@@ -13745,6 +13823,7 @@ mod tests {
             title: "two.sql".into(),
             dirty: false,
             source: None,
+            last_result: None,
         });
         let window = shell_with_state(state, cx);
         let mut cx = VisualTestContext::from_window(window.into(), cx);
@@ -13793,6 +13872,7 @@ mod tests {
             title: "two.sql".into(),
             dirty: false,
             source: None,
+            last_result: None,
         });
         let window = shell_with_state(state, cx);
         let mut cx = VisualTestContext::from_window(window.into(), cx);
@@ -13867,6 +13947,7 @@ mod tests {
             title: "two.sql".into(),
             dirty: false,
             source: None,
+            last_result: None,
         });
         let window = shell_with_state(state, cx);
         let mut cx = VisualTestContext::from_window(window.into(), cx);
@@ -13940,6 +14021,7 @@ mod tests {
             title: "two.sql".into(),
             dirty: false,
             source: None,
+            last_result: None,
         });
         let window = shell_with_state(state, cx);
         let mut cx = VisualTestContext::from_window(window.into(), cx);
@@ -14142,6 +14224,89 @@ mod tests {
             assert!(!shell.running_queries.contains_key(&1));
             let results = shell.panes[0].read(cx).results.get(&1).unwrap().clone();
             assert!(matches!(results.read(cx).state(), ResultState::Cancelled));
+        });
+    }
+
+    #[gpui::test]
+    fn a_finished_run_leaves_a_restorable_reference_and_no_rows(cx: &mut TestAppContext) {
+        let state = {
+            let window = shell(cx);
+            let mut visual = VisualTestContext::from_window(window.into(), cx);
+            let workspace = window.root(&mut visual).unwrap();
+            workspace.update(&mut visual, |shell, cx| {
+                shell.running_queries.insert(1, 1);
+                shell.on_executor_event(
+                    ExecutorEvent::Execution {
+                        item_id: 1,
+                        execution_id: 1,
+                        state: ResultState::from_execute(sift_protocol::ExecuteResponse {
+                            cursor_id: sift_protocol::CursorId(4),
+                            columns: vec![sift_protocol::ColumnMetadata::new(
+                                "id",
+                                sift_protocol::TypeRef::Primitive(
+                                    sift_protocol::PrimitiveType::Int64,
+                                ),
+                            )],
+                            schema_digest: "digest".into(),
+                            rows: vec![sift_protocol::Row {
+                                values: vec![sift_protocol::Value::Int64(1)],
+                            }],
+                            affected_rows: None,
+                            warnings: Vec::new(),
+                            has_more: false,
+                        }),
+                    },
+                    cx,
+                );
+                shell.snapshot(cx)
+            })
+        };
+
+        let reference = state.workspace.panes[0].items[0]
+            .last_result
+            .clone()
+            .expect("a completed run records its reference");
+        assert_eq!(reference.row_count, 1);
+
+        // Restoring that presentation shows the reference, not the row.
+        let window = shell_with_state(state, cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        workspace.read_with(&cx, |shell, cx| {
+            let results = shell.panes[0].read(cx).results.get(&1).unwrap().clone();
+            let results = results.read(cx);
+            assert!(matches!(results.state(), ResultState::Detached(_)));
+            assert!(results.state().status_label().contains("re-run"));
+        });
+    }
+
+    #[gpui::test]
+    fn starting_a_run_clears_the_previous_reference(cx: &mut TestAppContext) {
+        let mut state = PresentationState::default();
+        state.workspace.panes[0].items[0].last_result = Some(ResultReference {
+            cursor_id: Some(2),
+            row_count: 5,
+            affected_rows: None,
+            has_more: false,
+            completed_at_ms: 1,
+        });
+        let window = shell_with_state(state, cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        let (sender, mut commands) = tokio::sync::mpsc::unbounded_channel();
+        let (_events, events) = tokio::sync::mpsc::unbounded_channel();
+        workspace.update(&mut cx, |shell, cx| {
+            shell.attach_executor(sender, events, cx);
+            shell.connection_status = ConnectionStatus::Connected {
+                profile_id: 1,
+                name: "local".into(),
+            };
+            shell.execute_database_item(1, "select 1".into(), cx);
+        });
+        assert!(commands.try_recv().is_ok());
+
+        workspace.read_with(&cx, |shell, cx| {
+            assert!(shell.panes[0].read(cx).items[0].last_result.is_none());
         });
     }
 

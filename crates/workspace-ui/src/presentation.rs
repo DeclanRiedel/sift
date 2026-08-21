@@ -135,6 +135,28 @@ pub enum ItemSource {
     RoomDocument(RoomDocumentSource),
 }
 
+/// What a finished run left behind, durable across restarts.
+///
+/// This is deliberately a *reference*, not a result: row and cell values are
+/// server-owned product data and never enter client-local presentation state
+/// (ADR-034). Restoring one tells the user what the tab last produced and lets
+/// them re-run it; it never pretends the rows are still available.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResultReference {
+    /// Server cursor the run streamed from, when it had one. Retained for
+    /// correlation with server-side history, not as a promise it still exists.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor_id: Option<u64>,
+    /// Rows the client actually received, after the retention bound.
+    pub row_count: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub affected_rows: Option<u64>,
+    /// True when the run had more rows than were retained or delivered.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub has_more: bool,
+    pub completed_at_ms: u64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ItemPresentation {
     pub id: u64,
@@ -143,6 +165,9 @@ pub struct ItemPresentation {
     pub dirty: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<ItemSource>,
+    /// Reference to this tab's last completed run. Never its rows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_result: Option<ResultReference>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -251,6 +276,7 @@ impl Default for PresentationState {
                         title: "query.sql".into(),
                         dirty: false,
                         source: None,
+                        last_result: None,
                     }],
                     active_item: 0,
                 }],
@@ -400,6 +426,43 @@ mod tests {
         for forbidden in ["password", "result_rows", "query_text", "credential"] {
             assert!(!json.contains(forbidden));
         }
+    }
+
+    #[test]
+    fn a_result_reference_survives_restart_without_carrying_rows() {
+        let mut state = PresentationState::default();
+        state.workspace.panes[0].items[0].last_result = Some(ResultReference {
+            cursor_id: Some(31),
+            row_count: 10_000,
+            affected_rows: None,
+            has_more: true,
+            completed_at_ms: 1_700_000_000_000,
+        });
+
+        let encoded = String::from_utf8(state.encode().unwrap()).unwrap();
+        let decoded = PresentationState::decode(encoded.as_bytes());
+
+        assert_eq!(decoded, state);
+        // The reference is metadata about a run, never the run's output.
+        for forbidden in ["rows\":[", "values", "columns"] {
+            assert!(
+                !encoded.contains(forbidden),
+                "{forbidden} leaked into presentation state"
+            );
+        }
+    }
+
+    #[test]
+    fn a_tab_without_a_recorded_run_omits_the_reference_entirely() {
+        let state = PresentationState::default();
+        let encoded = String::from_utf8(state.encode().unwrap()).unwrap();
+        assert!(!encoded.contains("last_result"));
+        assert!(PresentationState::decode(encoded.as_bytes())
+            .workspace
+            .panes[0]
+            .items[0]
+            .last_result
+            .is_none());
     }
 
     #[test]

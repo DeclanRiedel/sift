@@ -18,8 +18,8 @@ pub use lifecycle::{
 };
 pub use presentation::{
     BottomTool, DatabaseObjectSource, DockPresentation, ItemKind, ItemPresentation, ItemSource,
-    LeftPanel, PanePresentation, PresentationState, PresentationStore, Rect, RoomDocumentSource,
-    WindowPresentation, WorkspacePresentation,
+    LeftPanel, PanePresentation, PresentationState, PresentationStore, Rect, ResultReference,
+    RoomDocumentSource, WindowPresentation, WorkspacePresentation,
 };
 pub use settings::{EditorMode, EditorSettings, SettingsStore, UserSettings};
 pub use shell::{

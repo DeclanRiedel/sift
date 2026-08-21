@@ -460,7 +460,16 @@ ADR amendment instead of burying a second UI toolkit behind an abstraction.
       resume, and a 10,000-row retained-grid cap. **Remaining:** column reorder
       and explicit navigation for rows beyond the retained window.
 - [x] Add query-owned Data/Messages/Explain/History tabs plus pin/promote.
-- [ ] Restore query and result references without persisting result data.
+- [x] Restore query and result references without persisting result data.
+      **Landed:** `ItemPresentation::last_result` carries a `ResultReference`
+      (cursor id, retained row count, affected rows, `has_more`, completion
+      timestamp) and nothing else; rows, cells, columns, and SQL stay out of
+      `presentation.json`. A completed run records its reference and a starting
+      run clears it, so a tab never describes a result the user cannot return
+      to. Restoring seeds the results surface with a distinct
+      `ResultState::Detached` — separate from `Idle` because something did run —
+      which reports what the tab last produced and says the rows were never
+      saved locally. Query text continues to restore through its room document.
 - [ ] Meet measured typing, first-result, scroll, and memory budgets on large
       fixtures.
 

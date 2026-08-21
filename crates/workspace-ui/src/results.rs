@@ -19,6 +19,8 @@ use sift_ui::{
     ThemeColors,
 };
 
+use crate::presentation::ResultReference;
+
 const MIN_COLUMN_WIDTH: f32 = 144.0;
 const DEFAULT_COLUMN_WIDTH: f32 = 184.0;
 const MAX_COLUMN_WIDTH: f32 = 960.0;
@@ -180,6 +182,10 @@ pub struct ResultData {
 pub enum ResultState {
     /// Nothing has been run yet.
     Idle,
+    /// A previous run is known by reference only — its rows were never
+    /// persisted and are gone. Distinct from `Idle`: something *did* run, and
+    /// the user needs to be told the rows are not what they are looking at.
+    Detached(ResultReference),
     /// A run is in flight.
     Pending,
     /// Streamed rows are available while the query remains in flight.
@@ -265,9 +271,39 @@ impl ResultState {
     }
 
     /// Short label for the status strip.
+    /// The durable reference a finished run leaves on its tab, or `None` while
+    /// nothing has completed. Rows are deliberately excluded.
+    pub fn reference(
+        &self,
+        cursor_id: Option<u64>,
+        completed_at_ms: u64,
+    ) -> Option<ResultReference> {
+        let data = match self {
+            ResultState::Ready(data) => data,
+            _ => return None,
+        };
+        Some(ResultReference {
+            cursor_id,
+            row_count: data.rows.len() as u64,
+            affected_rows: data.affected_rows,
+            has_more: data.has_more,
+            completed_at_ms,
+        })
+    }
+
     pub fn status_label(&self) -> String {
         match self {
             ResultState::Idle => "Ready".into(),
+            ResultState::Detached(reference) => match reference.affected_rows {
+                Some(affected) => format!("{affected} row(s) affected · previous session"),
+                None => {
+                    let more = if reference.has_more { "+" } else { "" };
+                    format!(
+                        "{}{more} row(s) last run · re-run to view",
+                        reference.row_count
+                    )
+                }
+            },
             ResultState::Pending => "Running…".into(),
             ResultState::Streaming(data) => format!("{}+ row(s) · Running…", data.rows.len()),
             ResultState::Ready(data) => match (data.rows.len(), data.affected_rows) {
@@ -587,9 +623,31 @@ impl ResultsView {
                 severity: MessageSeverity::Info,
                 text: "Query cancelled".into(),
             }),
+            ResultState::Detached(reference) => messages.push(ResultMessage {
+                severity: MessageSeverity::Info,
+                text: format!(
+                    "This tab last returned {}{} row(s). Result data is never saved \
+                     locally, so re-run the query to see it.",
+                    reference.row_count,
+                    if reference.has_more { "+" } else { "" }
+                ),
+            }),
             ResultState::Idle | ResultState::Pending => {}
         }
         messages
+    }
+
+    /// Seed a restored tab with the reference to its last run. Kept separate
+    /// from `set_state` so restoring never selects the Messages tab or clears
+    /// a live result that arrived first.
+    pub fn restore_reference(&mut self, reference: ResultReference, cx: &mut Context<Self>) {
+        if !matches!(self.state, ResultState::Idle) {
+            return;
+        }
+        self.state = ResultState::Detached(reference);
+        self.messages = Self::messages_for_state(&self.state);
+        self.selected_message = None;
+        cx.notify();
     }
 
     pub fn set_pending(&mut self, cx: &mut Context<Self>) {
@@ -1802,10 +1860,111 @@ mod tests {
         }
     }
 
+    fn execute_response(rows: Vec<Row>, has_more: bool) -> ExecuteResponse {
+        ExecuteResponse {
+            cursor_id: sift_protocol::CursorId(1),
+            columns: vec![column("id", PrimitiveType::Int64, Nullability::NotNullable)],
+            schema_digest: "digest".into(),
+            rows,
+            affected_rows: None,
+            warnings: Vec::new(),
+            has_more,
+        }
+    }
+
     fn column(name: &str, primitive: PrimitiveType, nullable: Nullability) -> ColumnMetadata {
         let mut column = ColumnMetadata::new(name, TypeRef::Primitive(primitive));
         column.nullable = nullable;
         column
+    }
+
+    #[gpui::test]
+    fn a_restored_tab_reports_its_last_run_without_rows(cx: &mut TestAppContext) {
+        let view = cx.update(|cx| cx.new(ResultsView::new));
+        view.update(cx, |view, cx| {
+            view.restore_reference(
+                ResultReference {
+                    cursor_id: Some(7),
+                    row_count: 128,
+                    affected_rows: None,
+                    has_more: true,
+                    completed_at_ms: 1_700_000_000_000,
+                },
+                cx,
+            );
+        });
+
+        view.read_with(cx, |view, _| {
+            assert!(matches!(view.state(), ResultState::Detached(_)));
+            assert!(view.rendered_rows.is_empty());
+            assert!(view.state().status_label().contains("128+ row(s)"));
+            assert!(view.messages[0].text.contains("re-run"));
+        });
+    }
+
+    #[gpui::test]
+    fn a_live_result_is_never_overwritten_by_a_restored_reference(cx: &mut TestAppContext) {
+        let view = cx.update(|cx| cx.new(ResultsView::new));
+        view.update(cx, |view, cx| {
+            view.set_state(
+                ResultState::from_execute(execute_response(
+                    vec![Row {
+                        values: vec![Value::Int64(1)],
+                    }],
+                    false,
+                )),
+                cx,
+            );
+            view.restore_reference(
+                ResultReference {
+                    cursor_id: None,
+                    row_count: 9,
+                    affected_rows: None,
+                    has_more: false,
+                    completed_at_ms: 1,
+                },
+                cx,
+            );
+        });
+
+        view.read_with(cx, |view, _| {
+            assert!(matches!(view.state(), ResultState::Ready(_)));
+            assert_eq!(view.rendered_rows.len(), 1);
+        });
+    }
+
+    #[test]
+    fn only_a_completed_run_produces_a_reference() {
+        let ready = ResultState::from_execute(execute_response(
+            vec![
+                Row {
+                    values: vec![Value::Int64(1)],
+                },
+                Row {
+                    values: vec![Value::Int64(2)],
+                },
+            ],
+            true,
+        ));
+        let reference = ready.reference(Some(3), 42).expect("ready run references");
+        assert_eq!(reference.row_count, 2);
+        assert_eq!(reference.cursor_id, Some(3));
+        assert!(reference.has_more);
+        assert_eq!(reference.completed_at_ms, 42);
+
+        // Nothing that failed, was cancelled, or is still running describes a
+        // result the user could return to.
+        for state in [
+            ResultState::Idle,
+            ResultState::Pending,
+            ResultState::Cancelled,
+            ResultState::TimedOut,
+            ResultState::OutcomeUnknown,
+            ResultState::Failed("boom".into()),
+            ResultState::Streaming(ResultData::default()),
+        ] {
+            assert!(state.reference(Some(3), 42).is_none());
+        }
     }
 
     #[test]
