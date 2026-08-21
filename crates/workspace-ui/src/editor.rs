@@ -818,10 +818,21 @@ impl QueryEditor {
         let length = self.document.text().len();
         self.document.replace_range(0..length, text);
         let _ = self.document.take_room_update();
+        self.resync_keymap_after_external_change(cx);
         self.marked_range = None;
         self.revision = self.revision.wrapping_add(1);
         self.line_cache.borrow_mut().lines.clear();
         cx.notify();
+    }
+
+    /// External replacements bypass ModalKit's edit path. Rebuild its rope and
+    /// cursor group from the canonical document before accepting more input.
+    fn resync_keymap_after_external_change(&mut self, cx: &mut Context<Self>) {
+        if self.keymap != EditorKeymap::Vim {
+            return;
+        }
+        self.apply_keymap(EditorKeymap::Vim);
+        cx.emit(EditorEvent::VimStateChanged);
     }
 
     pub fn keymap(&self) -> EditorKeymap {
@@ -875,6 +886,7 @@ impl QueryEditor {
         if !changed {
             return;
         }
+        self.resync_keymap_after_external_change(cx);
         self.revision = self.revision.wrapping_add(1);
         self.line_cache.borrow_mut().lines.clear();
         self.marked_range = None;
@@ -2272,6 +2284,33 @@ mod tests {
             assert_eq!(editor.document().text(), "first");
             editor.replace_text_from_owner("second", cx);
             assert_eq!(editor.document().text(), "second");
+        });
+    }
+
+    #[gpui::test]
+    fn owner_replacement_resyncs_vim_buffer_before_next_edit(cx: &mut TestAppContext) {
+        let window = cx
+            .update(|cx| {
+                cx.open_window(Default::default(), |_window, cx| {
+                    cx.new(|cx| QueryEditor::new(doc("one\ntwo\nthree\nfour"), cx))
+                })
+            })
+            .unwrap();
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let editor = window.root(&mut cx).unwrap();
+        editor.update_in(&mut cx, |editor, window, cx| {
+            editor.toggle_keymap(cx);
+            let old_text = editor.document().text().to_owned();
+            let old_end = old_text.len();
+            editor.vim.as_mut().unwrap().set_cursor(&old_text, old_end);
+
+            editor.replace_text_from_owner("select 1;\n", cx);
+            editor.replace_text_in_range(None, "i", window, cx);
+            editor.replace_text_in_range(None, "x", window, cx);
+        });
+        editor.read_with(&cx, |editor, _| {
+            assert_eq!(editor.document().text(), "select 1;\nx");
+            assert_eq!(editor.keymap(), EditorKeymap::Vim);
         });
     }
 
