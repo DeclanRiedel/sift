@@ -129,6 +129,35 @@ fn type_ref_label(type_ref: &sift_protocol::TypeRef) -> String {
     }
 }
 
+fn index_kind_label(kind: sift_protocol::IndexKind) -> &'static str {
+    match kind {
+        sift_protocol::IndexKind::Btree => "BTREE",
+        sift_protocol::IndexKind::Hash => "HASH",
+        sift_protocol::IndexKind::Gist => "GIST",
+        sift_protocol::IndexKind::Gin => "GIN",
+        sift_protocol::IndexKind::Brin => "BRIN",
+        sift_protocol::IndexKind::Spgist => "SPGIST",
+        sift_protocol::IndexKind::Other => "INDEX",
+    }
+}
+
+fn trigger_timing_label(timing: sift_protocol::TriggerTiming) -> &'static str {
+    match timing {
+        sift_protocol::TriggerTiming::Before => "BEFORE",
+        sift_protocol::TriggerTiming::After => "AFTER",
+        sift_protocol::TriggerTiming::InsteadOf => "INSTEAD OF",
+    }
+}
+
+fn trigger_event_label(event: sift_protocol::TriggerEvent) -> &'static str {
+    match event {
+        sift_protocol::TriggerEvent::Insert => "INSERT",
+        sift_protocol::TriggerEvent::Update => "UPDATE",
+        sift_protocol::TriggerEvent::Delete => "DELETE",
+        sift_protocol::TriggerEvent::Truncate => "TRUNCATE",
+    }
+}
+
 fn table_node_id(
     graph: &sift_protocol::CatalogGraph,
     source: &DatabaseObjectSource,
@@ -138,6 +167,9 @@ fn table_node_id(
             || !matches!(
                 node.kind,
                 sift_protocol::CatalogNodeKind::Table
+                    | sift_protocol::CatalogNodeKind::View
+                    | sift_protocol::CatalogNodeKind::MaterializedView
+                    | sift_protocol::CatalogNodeKind::ForeignTable
                     | sift_protocol::CatalogNodeKind::PartitionedTable
             )
         {
@@ -168,6 +200,47 @@ fn table_node_id(
         });
         catalog_matches.then(|| node.id.clone())
     })
+}
+
+fn table_detail_nodes<'a>(
+    graph: &'a sift_protocol::CatalogGraph,
+    table_id: &sift_protocol::CatalogObjectId,
+    kind: sift_protocol::CatalogNodeKind,
+) -> Vec<&'a sift_protocol::CatalogNode> {
+    let mut nodes = graph
+        .data
+        .nodes
+        .iter()
+        .filter(|node| node.kind == kind && node.parent_id.as_ref() == Some(table_id))
+        .collect::<Vec<_>>();
+    nodes.sort_by(|left, right| left.name.cmp(&right.name));
+    nodes
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum TableDefinitionSection {
+    Columns,
+    Indexes,
+    Relations,
+    Triggers,
+}
+
+impl TableDefinitionSection {
+    const ALL: [Self; 4] = [
+        Self::Columns,
+        Self::Indexes,
+        Self::Relations,
+        Self::Triggers,
+    ];
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Columns => "Columns",
+            Self::Indexes => "Indexes",
+            Self::Relations => "Relations",
+            Self::Triggers => "Triggers",
+        }
+    }
 }
 
 fn table_columns<'a>(
@@ -2489,6 +2562,7 @@ pub struct WorkspaceShell {
     connection_status: ConnectionStatus,
     connection_schema: ConnectionSchemaState,
     table_definitions: HashMap<u64, TableDefinitionState>,
+    table_definition_sections: HashMap<u64, TableDefinitionSection>,
     table_designer: Option<TableDesignerState>,
     expanded_tenants: HashSet<i64>,
     expanded_connections: HashSet<i64>,
@@ -2797,6 +2871,7 @@ impl WorkspaceShell {
             connection_status: ConnectionStatus::Disconnected,
             connection_schema: ConnectionSchemaState::Unavailable,
             table_definitions: HashMap::new(),
+            table_definition_sections: HashMap::new(),
             table_designer: None,
             expanded_tenants: HashSet::new(),
             expanded_connections: HashSet::new(),
@@ -3068,6 +3143,7 @@ impl WorkspaceShell {
         self.connection_status = ConnectionStatus::Disconnected;
         self.connection_schema = ConnectionSchemaState::Unavailable;
         self.table_definitions.clear();
+        self.table_definition_sections.clear();
         self.table_designer = None;
         self.pending_database_execution = None;
         for pane in &self.panes {
@@ -4117,6 +4193,8 @@ impl WorkspaceShell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.table_definition_sections
+            .insert(item_id, TableDefinitionSection::Columns);
         let (selected_column, column_order) = match self.table_definitions.get(&item_id) {
             Some(TableDefinitionState::Ready {
                 graph, table_id, ..
@@ -4616,6 +4694,107 @@ impl WorkspaceShell {
             .map(|designer| designer.item_id)
         else {
             return;
+        };
+        for pane in &self.panes {
+            if pane.update(cx, |pane, cx| {
+                pane.show_database_item_view(item_id, DatabaseItemView::Ddl, Some(ddl.clone()), cx)
+            }) {
+                break;
+            }
+        }
+        cx.notify();
+    }
+
+    fn select_table_definition_section(
+        &mut self,
+        item_id: u64,
+        section: TableDefinitionSection,
+        cx: &mut Context<Self>,
+    ) {
+        self.table_definition_sections.insert(item_id, section);
+        cx.notify();
+    }
+
+    fn open_table_detail_ddl(
+        &mut self,
+        item_id: u64,
+        node_id: &sift_protocol::CatalogObjectId,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(TableDefinitionState::Ready {
+            source,
+            graph,
+            table_id: _,
+        }) = self.table_definitions.get(&item_id)
+        else {
+            return;
+        };
+        let Some(node) = graph.data.nodes.iter().find(|node| &node.id == node_id) else {
+            return;
+        };
+        let qualified_table = format!(
+            "{}.{}",
+            ddl_quote_identifier(&source.provider_id, &source.schema),
+            ddl_quote_identifier(&source.provider_id, &source.object)
+        );
+        let ddl = match &node.details {
+            sift_protocol::CatalogNodeDetails::Index { index } => {
+                let columns = index
+                    .columns
+                    .iter()
+                    .map(|column| {
+                        if column
+                            .chars()
+                            .all(|character| character.is_alphanumeric() || character == '_')
+                        {
+                            ddl_quote_identifier(&source.provider_id, column)
+                        } else {
+                            column.clone()
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let mut ddl = format!(
+                    "-- Catalog-derived index DDL preview\nCREATE {}INDEX {} ON {} ({})",
+                    if index.unique { "UNIQUE " } else { "" },
+                    ddl_quote_identifier(&source.provider_id, &index.name),
+                    qualified_table,
+                    columns
+                );
+                if let Some(predicate) = &index.partial_predicate {
+                    ddl.push_str(" WHERE ");
+                    ddl.push_str(predicate);
+                }
+                ddl.push(';');
+                ddl
+            }
+            sift_protocol::CatalogNodeDetails::Constraint { constraint } => constraint
+                .definition
+                .as_ref()
+                .map(|definition| {
+                    format!(
+                        "-- Catalog relation definition\nALTER TABLE {} ADD CONSTRAINT {} {};",
+                        qualified_table,
+                        ddl_quote_identifier(&source.provider_id, &constraint.name),
+                        definition.trim().trim_end_matches(';')
+                    )
+                })
+                .unwrap_or_else(|| {
+                    format!(
+                        "-- DDL definition is unavailable for relation {}.\n-- Refresh metadata or use the full table DDL view.",
+                        constraint.name
+                    )
+                }),
+            sift_protocol::CatalogNodeDetails::Trigger { trigger } => trigger
+                .definition
+                .clone()
+                .unwrap_or_else(|| {
+                    format!(
+                        "-- DDL definition is unavailable for trigger {}.\n-- Refresh metadata or use the database engine's catalog tools.",
+                        trigger.name
+                    )
+                }),
+            _ => return,
         };
         for pane in &self.panes {
             if pane.update(cx, |pane, cx| {
@@ -6331,6 +6510,7 @@ impl WorkspaceShell {
         if let Some(item_id) = removed_item_id {
             self.clear_global_problems_for(item_id, cx);
             self.table_definitions.remove(&item_id);
+            self.table_definition_sections.remove(&item_id);
             if self
                 .table_designer
                 .as_ref()
@@ -8060,6 +8240,177 @@ impl WorkspaceShell {
             .map(|source| (item.id, source))
     }
 
+    fn render_table_detail_section(
+        &self,
+        item_id: u64,
+        section: TableDefinitionSection,
+        graph: &sift_protocol::CatalogGraph,
+        table_id: &sift_protocol::CatalogObjectId,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let colors = cx.theme().colors;
+        let nodes = match section {
+            TableDefinitionSection::Indexes => {
+                table_detail_nodes(graph, table_id, sift_protocol::CatalogNodeKind::Index)
+            }
+            TableDefinitionSection::Relations => {
+                table_detail_nodes(graph, table_id, sift_protocol::CatalogNodeKind::Constraint)
+                    .into_iter()
+                    .filter(|node| {
+                        matches!(
+                            &node.details,
+                            sift_protocol::CatalogNodeDetails::Constraint { constraint }
+                                if constraint.kind == sift_protocol::ConstraintKind::ForeignKey
+                        )
+                    })
+                    .collect()
+            }
+            TableDefinitionSection::Triggers => {
+                table_detail_nodes(graph, table_id, sift_protocol::CatalogNodeKind::Trigger)
+            }
+            TableDefinitionSection::Columns => Vec::new(),
+        };
+        if nodes.is_empty() {
+            return div()
+                .flex_1()
+                .min_h(px(96.))
+                .flex()
+                .items_center()
+                .justify_center()
+                .text_sm()
+                .text_color(colors.muted_text)
+                .child(format!("No {}", section.label().to_lowercase()))
+                .into_any_element();
+        }
+
+        div()
+            .id("table-detail-section")
+            .flex_1()
+            .min_h_0()
+            .flex()
+            .flex_col()
+            .overflow_y_scroll()
+            .children(nodes.into_iter().enumerate().map(|(index, node)| {
+                let (summary, ddl_label) = match &node.details {
+                    sift_protocol::CatalogNodeDetails::Index { index } => {
+                        let mut attributes = Vec::new();
+                        if index.primary_key {
+                            attributes.push("PRIMARY KEY".to_owned());
+                        } else if index.unique {
+                            attributes.push("UNIQUE".to_owned());
+                        }
+                        attributes.push(index_kind_label(index.kind).to_owned());
+                        if !index.columns.is_empty() {
+                            attributes.push(index.columns.join(", "));
+                        }
+                        if index.partial_predicate.is_some() {
+                            attributes.push("PARTIAL".to_owned());
+                        }
+                        (attributes.join("  ·  "), "Preview")
+                    }
+                    sift_protocol::CatalogNodeDetails::Constraint { constraint } => {
+                        let columns = if constraint.columns.is_empty() {
+                            "Foreign key".to_owned()
+                        } else {
+                            constraint.columns.join(", ")
+                        };
+                        let target = constraint
+                            .references
+                            .as_deref()
+                            .unwrap_or("Referenced relation");
+                        let ddl_label = if constraint.definition.is_some() {
+                            "DDL"
+                        } else {
+                            "Unavailable"
+                        };
+                        (format!("{columns}  →  {target}"), ddl_label)
+                    }
+                    sift_protocol::CatalogNodeDetails::Trigger { trigger } => {
+                        let events = trigger
+                            .events
+                            .iter()
+                            .copied()
+                            .map(trigger_event_label)
+                            .collect::<Vec<_>>()
+                            .join(" OR ");
+                        let mut summary =
+                            format!("{} {}", trigger_timing_label(trigger.timing), events);
+                        if !trigger.columns.is_empty() {
+                            summary.push_str("  ·  ");
+                            summary.push_str(&trigger.columns.join(", "));
+                        }
+                        let ddl_label = if trigger.definition.is_some() {
+                            "DDL"
+                        } else {
+                            "Unavailable"
+                        };
+                        (summary, ddl_label)
+                    }
+                    _ => (String::new(), "Unavailable"),
+                };
+                let node_id = node.id.clone();
+                let click_node_id = node_id.clone();
+                div()
+                    .id(("table-detail-row", index))
+                    .min_h(px(44.))
+                    .px_3()
+                    .py_1()
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .border_b_1()
+                    .border_color(colors.subtle_border)
+                    .tab_index(0)
+                    .role(Role::Button)
+                    .aria_label(format!("Open DDL for {}", node.name))
+                    .cursor_pointer()
+                    .focus(|style| style.bg(colors.hovered_surface))
+                    .hover(|style| style.bg(colors.hovered_surface))
+                    .on_key_down(
+                        cx.listener(move |shell, event: &gpui::KeyDownEvent, _, cx| {
+                            if !event.keystroke.modifiers.modified()
+                                && matches!(event.keystroke.key.as_str(), "enter" | "space")
+                            {
+                                shell.open_table_detail_ddl(item_id, &node_id, cx);
+                                cx.stop_propagation();
+                            }
+                        }),
+                    )
+                    .on_click(cx.listener(move |shell, _, _, cx| {
+                        shell.open_table_detail_ddl(item_id, &click_node_id, cx)
+                    }))
+                    .child(
+                        div()
+                            .min_w_0()
+                            .flex_1()
+                            .flex()
+                            .flex_col()
+                            .gap_0p5()
+                            .child(div().truncate().text_sm().child(node.name.clone()))
+                            .child(
+                                div()
+                                    .truncate()
+                                    .text_xs()
+                                    .text_color(colors.muted_text)
+                                    .child(summary),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .flex_none()
+                            .text_xs()
+                            .text_color(if ddl_label == "DDL" {
+                                colors.accent
+                            } else {
+                                colors.muted_text
+                            })
+                            .child(ddl_label),
+                    )
+            }))
+            .into_any_element()
+    }
+
     fn render_table_definition_inspector(
         &self,
         item_id: u64,
@@ -8076,20 +8427,49 @@ impl WorkspaceShell {
                 .justify_between()
                 .border_b_1()
                 .border_color(colors.subtle_border)
-                .child(SectionLabel::new("TABLE DEFINITION"))
+                .child(SectionLabel::new("RELATION DEFINITION"))
                 .children(left_actions)
                 .child(div().flex_1())
                 .children(right_actions)
         };
         match self.table_definitions.get(&item_id) {
             Some(TableDefinitionState::Ready {
-                graph, table_id, ..
+                source,
+                graph,
+                table_id,
             }) => {
                 let designer = self
                     .table_designer
                     .as_ref()
                     .filter(|designer| designer.item_id == item_id);
                 let editing = designer.is_some();
+                let section = if editing {
+                    TableDefinitionSection::Columns
+                } else {
+                    self.table_definition_sections
+                        .get(&item_id)
+                        .copied()
+                        .unwrap_or(TableDefinitionSection::Columns)
+                };
+                let relation_count =
+                    table_detail_nodes(graph, table_id, sift_protocol::CatalogNodeKind::Constraint)
+                        .into_iter()
+                        .filter(|node| {
+                            matches!(
+                                &node.details,
+                                sift_protocol::CatalogNodeDetails::Constraint { constraint }
+                                    if constraint.kind == sift_protocol::ConstraintKind::ForeignKey
+                            )
+                        })
+                        .count();
+                let section_counts = [
+                    table_columns(graph, table_id).len(),
+                    table_detail_nodes(graph, table_id, sift_protocol::CatalogNodeKind::Index)
+                        .len(),
+                    relation_count,
+                    table_detail_nodes(graph, table_id, sift_protocol::CatalogNodeKind::Trigger)
+                        .len(),
+                ];
                 let columns_by_id = table_columns(graph, table_id)
                     .into_iter()
                     .map(|column| (column.id.clone(), column))
@@ -8164,7 +8544,13 @@ impl WorkspaceShell {
                             )
                             .into_any_element(),
                     );
-                } else {
+                } else if section == TableDefinitionSection::Columns
+                    && matches!(
+                        source.object_kind,
+                        sift_protocol::ObjectKind::Table
+                            | sift_protocol::ObjectKind::PartitionedTable
+                    )
+                {
                     right_actions.push(
                         div()
                             .id("edit-table-definition-focus")
@@ -8190,6 +8576,69 @@ impl WorkspaceShell {
                             .into_any_element(),
                     );
                 }
+                let section_navigation = div()
+                    .h(px(30.))
+                    .px_2()
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .border_b_1()
+                    .border_color(colors.subtle_border)
+                    .children(TableDefinitionSection::ALL.into_iter().enumerate().map(
+                        |(index, candidate)| {
+                            let selected = section == candidate;
+                            div()
+                                .id(("table-definition-section", index))
+                                .h(px(24.))
+                                .px_2()
+                                .flex()
+                                .items_center()
+                                .gap_1()
+                                .rounded_sm()
+                                .tab_index(0)
+                                .role(Role::Button)
+                                .aria_label(format!(
+                                    "{}: {}",
+                                    candidate.label(),
+                                    section_counts[index]
+                                ))
+                                .cursor_pointer()
+                                .text_xs()
+                                .text_color(if selected {
+                                    colors.text
+                                } else {
+                                    colors.muted_text
+                                })
+                                .when(selected, |button| button.bg(colors.active_surface))
+                                .focus(|style| style.bg(colors.hovered_surface))
+                                .hover(|style| style.bg(colors.hovered_surface))
+                                .on_key_down(cx.listener(
+                                    move |shell, event: &gpui::KeyDownEvent, _, cx| {
+                                        if !event.keystroke.modifiers.modified()
+                                            && matches!(
+                                                event.keystroke.key.as_str(),
+                                                "enter" | "space"
+                                            )
+                                        {
+                                            shell.select_table_definition_section(
+                                                item_id, candidate, cx,
+                                            );
+                                            cx.stop_propagation();
+                                        }
+                                    },
+                                ))
+                                .on_click(cx.listener(move |shell, _, _, cx| {
+                                    shell.select_table_definition_section(item_id, candidate, cx)
+                                }))
+                                .child(candidate.label())
+                                .child(
+                                    div()
+                                        .text_color(colors.muted_text)
+                                        .child(section_counts[index].to_string()),
+                                )
+                        },
+                    ));
                 div()
                     .debug_selector(|| "table-definition-inspector".into())
                     .flex_1()
@@ -8199,7 +8648,8 @@ impl WorkspaceShell {
                     .border_b_1()
                     .border_color(colors.strong_border)
                     .child(header(left_actions, right_actions))
-                    .child(
+                    .children((!editing).then_some(section_navigation))
+                    .child(if section == TableDefinitionSection::Columns {
                         div()
                             .id("table-definition-columns")
                             .flex_none()
@@ -8501,8 +8951,11 @@ impl WorkspaceShell {
                                             .into_any_element()
                                     })
                                     .child(div().w(px(52.)).flex_none())
-                            })),
-                    )
+                            }))
+                            .into_any_element()
+                    } else {
+                        self.render_table_detail_section(item_id, section, graph, table_id, cx)
+                    })
                     .children(designer.filter(|designer| {
                         designer.error.is_some()
                             || designer.order_dirty
@@ -11983,6 +12436,81 @@ mod tests {
         }
     }
 
+    fn table_graph_with_details() -> sift_protocol::CatalogGraph {
+        use sift_protocol::{
+            CatalogCompleteness, CatalogNode, CatalogNodeDetails, CatalogNodeKind, CatalogObjectId,
+            ConstraintInfo, ConstraintKind, IndexInfo, IndexKind, TriggerEvent, TriggerInfo,
+            TriggerTiming,
+        };
+        use std::collections::BTreeMap;
+
+        let mut graph = table_graph();
+        let detail_node = |id: &str,
+                           kind: CatalogNodeKind,
+                           name: &str,
+                           details: CatalogNodeDetails| CatalogNode {
+            id: CatalogObjectId(id.into()),
+            native_id: None,
+            kind,
+            name: name.into(),
+            qualified_name: format!("sifttest.lab.people.{name}"),
+            parent_id: Some(CatalogObjectId("table".into())),
+            ordinal: None,
+            definition_digest: None,
+            completeness: CatalogCompleteness::Complete,
+            details,
+            extra: BTreeMap::new(),
+        };
+        graph.data.nodes.extend([
+            detail_node(
+                "index-name",
+                CatalogNodeKind::Index,
+                "people_name_idx",
+                CatalogNodeDetails::Index {
+                    index: IndexInfo {
+                        name: "people_name_idx".into(),
+                        columns: vec!["name".into()],
+                        unique: false,
+                        primary_key: false,
+                        kind: IndexKind::Btree,
+                        partial_predicate: Some("name IS NOT NULL".into()),
+                    },
+                },
+            ),
+            detail_node(
+                "relation-team",
+                CatalogNodeKind::Constraint,
+                "people_team_fk",
+                CatalogNodeDetails::Constraint {
+                    constraint: ConstraintInfo {
+                        name: "people_team_fk".into(),
+                        kind: ConstraintKind::ForeignKey,
+                        columns: vec!["team_id".into()],
+                        definition: Some("FOREIGN KEY (team_id) REFERENCES lab.teams(id)".into()),
+                        references: Some("lab.teams".into()),
+                    },
+                },
+            ),
+            detail_node(
+                "trigger-touch",
+                CatalogNodeKind::Trigger,
+                "people_touch",
+                CatalogNodeDetails::Trigger {
+                    trigger: TriggerInfo {
+                        name: "people_touch".into(),
+                        timing: TriggerTiming::Before,
+                        events: vec![TriggerEvent::Update],
+                        columns: vec![],
+                        definition: Some(
+                            "CREATE TRIGGER people_touch BEFORE UPDATE ON lab.people;".into(),
+                        ),
+                    },
+                },
+            ),
+        ]);
+        graph
+    }
+
     fn shell(cx: &mut TestAppContext) -> gpui::WindowHandle<WorkspaceShell> {
         cx.update(|cx| {
             cx.open_window(Default::default(), |window, cx| {
@@ -12401,6 +12929,100 @@ mod tests {
                     .is_some_and(|(name, id)| name < id),
                 "{ddl}"
             );
+        });
+    }
+
+    #[gpui::test]
+    fn table_detail_ddl_reuses_the_relation_tab(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        workspace.update_in(&mut cx, |shell, window, cx| {
+            shell.executor_sender = Some(sender);
+            shell.connection_status = ConnectionStatus::Connected {
+                profile_id: 2,
+                name: "Demo".into(),
+            };
+            shell.open_table_preview(
+                DatabaseObjectTarget {
+                    connection: ConnectionNavEntry {
+                        id: 2,
+                        tenant_id: 1,
+                        name: "Demo".into(),
+                        provider_id: sift_protocol::ProviderId::new("sift/postgres").unwrap(),
+                    },
+                    catalog: "sifttest".into(),
+                    schema: "lab".into(),
+                    object: "people".into(),
+                    object_kind: sift_protocol::ObjectKind::Table,
+                },
+                window,
+                cx,
+            );
+        });
+        let item_id = match receiver.try_recv().unwrap() {
+            ExecutorCommand::Execute { item_id, .. } => item_id,
+            _ => panic!("expected preview execution"),
+        };
+        assert!(matches!(
+            receiver.try_recv(),
+            Ok(ExecutorCommand::LoadTableDefinition { .. })
+        ));
+        workspace.update_in(&mut cx, |shell, _, cx| {
+            shell.on_executor_event(
+                ExecutorEvent::TableDefinitionLoaded {
+                    item_id,
+                    graph: Box::new(table_graph_with_details()),
+                },
+                cx,
+            );
+            shell.select_table_definition_section(item_id, TableDefinitionSection::Indexes, cx);
+            shell.open_table_detail_ddl(
+                item_id,
+                &sift_protocol::CatalogObjectId("index-name".into()),
+                cx,
+            );
+        });
+        workspace.update_in(&mut cx, |shell, _, cx| {
+            let pane = shell.panes[shell.active_pane].read(cx);
+            assert_eq!(
+                pane.items.iter().filter(|item| item.id == item_id).count(),
+                1
+            );
+            assert_eq!(pane.active_item().map(|item| item.id), Some(item_id));
+            let ddl = pane.editor(item_id).unwrap().read(cx).document().text();
+            assert!(ddl.contains("CREATE INDEX \"people_name_idx\""), "{ddl}");
+            assert!(ddl.contains("WHERE name IS NOT NULL"), "{ddl}");
+        });
+        workspace.update_in(&mut cx, |shell, _, cx| {
+            shell.open_table_detail_ddl(
+                item_id,
+                &sift_protocol::CatalogObjectId("relation-team".into()),
+                cx,
+            );
+        });
+        workspace.update_in(&mut cx, |shell, _, cx| {
+            let pane = shell.panes[shell.active_pane].read(cx);
+            let ddl = pane.editor(item_id).unwrap().read(cx).document().text();
+            assert!(ddl.contains("ADD CONSTRAINT \"people_team_fk\""), "{ddl}");
+            assert!(ddl.contains("REFERENCES lab.teams(id)"), "{ddl}");
+        });
+        workspace.update_in(&mut cx, |shell, _, cx| {
+            shell.open_table_detail_ddl(
+                item_id,
+                &sift_protocol::CatalogObjectId("trigger-touch".into()),
+                cx,
+            );
+        });
+        workspace.update_in(&mut cx, |shell, _, cx| {
+            let pane = shell.panes[shell.active_pane].read(cx);
+            assert_eq!(
+                pane.items.iter().filter(|item| item.id == item_id).count(),
+                1
+            );
+            let ddl = pane.editor(item_id).unwrap().read(cx).document().text();
+            assert!(ddl.contains("CREATE TRIGGER people_touch"), "{ddl}");
         });
     }
 
