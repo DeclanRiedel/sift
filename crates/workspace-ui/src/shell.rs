@@ -5024,7 +5024,11 @@ impl WorkspaceShell {
         cx: &mut Context<Self>,
     ) {
         self.table_definition_sections.insert(item_id, section);
-        cx.notify();
+        if section == TableDefinitionSection::Columns {
+            self.open_table_columns_ddl(item_id, cx);
+        } else {
+            cx.notify();
+        }
     }
 
     fn open_table_detail_ddl(
@@ -9006,11 +9010,11 @@ impl WorkspaceShell {
                                 .rounded_sm()
                                 .tab_index(0)
                                 .role(Role::Button)
-                                .aria_label(format!(
-                                    "{}: {}",
-                                    candidate.label(),
-                                    section_counts[index]
-                                ))
+                                .aria_label(if candidate == TableDefinitionSection::Columns {
+                                    format!("Columns: {}; open DDL preview", section_counts[index])
+                                } else {
+                                    format!("{}: {}", candidate.label(), section_counts[index])
+                                })
                                 .cursor_pointer()
                                 .text_xs()
                                 .text_color(if selected {
@@ -9080,11 +9084,7 @@ impl WorkspaceShell {
                                     .child(div().flex_1().child("Name"))
                                     .child(div().w(px(82.)).child("Type"))
                                     .child(div().w(px(52.)).child("Nullable"))
-                                    .child(
-                                        div()
-                                            .w(px(52.))
-                                            .child(if editing { "Order" } else { "DDL" }),
-                                    ),
+                                    .children(editing.then(|| div().w(px(52.)).child("Order"))),
                             )
                             .children(columns.into_iter().map(|node| {
                                 let metadata = match &node.details {
@@ -9111,36 +9111,6 @@ impl WorkspaceShell {
                                     .border_b_1()
                                     .border_color(colors.subtle_border)
                                     .when(selected, |row| row.bg(colors.active_surface))
-                                    .when(!editing, |row| {
-                                        row.tab_index(0)
-                                            .role(Role::Button)
-                                            .aria_label(format!(
-                                                "Open column DDL preview for {}",
-                                                node.name
-                                            ))
-                                            .cursor_pointer()
-                                            .focus(|style| style.bg(colors.hovered_surface))
-                                            .hover(|style| style.bg(colors.hovered_surface))
-                                            .on_key_down(cx.listener(
-                                                move |shell,
-                                                      event: &gpui::KeyDownEvent,
-                                                      _,
-                                                      cx| {
-                                                    if !event.keystroke.modifiers.modified()
-                                                        && matches!(
-                                                            event.keystroke.key.as_str(),
-                                                            "enter" | "space"
-                                                        )
-                                                    {
-                                                        shell.open_table_columns_ddl(item_id, cx);
-                                                        cx.stop_propagation();
-                                                    }
-                                                },
-                                            ))
-                                            .on_click(cx.listener(move |shell, _, _, cx| {
-                                                shell.open_table_columns_ddl(item_id, cx)
-                                            }))
-                                    })
                                     .when(editing, |row| {
                                         row.tab_index(0)
                                             .aria_label(format!("Edit column {}", node.name))
@@ -9278,14 +9248,6 @@ impl WorkspaceShell {
                                                         shell.move_table_designer_column(1, cx)
                                                     }))
                                             }))
-                                    }))
-                                    .children((!editing).then(|| {
-                                        div()
-                                            .w(px(52.))
-                                            .flex_none()
-                                            .text_xs()
-                                            .text_color(colors.muted_text)
-                                            .child("Preview")
                                     }))
                             }))
                             .children(editing.then(|| {
@@ -13427,7 +13389,7 @@ mod tests {
                 },
                 cx,
             );
-            shell.open_table_columns_ddl(item_id, cx);
+            shell.select_table_definition_section(item_id, TableDefinitionSection::Columns, cx);
         });
         workspace.update_in(&mut cx, |shell, _, cx| {
             let pane = shell.panes[shell.active_pane].read(cx);
