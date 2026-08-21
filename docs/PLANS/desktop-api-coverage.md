@@ -65,11 +65,11 @@ surfaces, then admin/platform. Within P0, the connection experience comes first.
 ### Schema & catalog navigation — Schema tree, object details
 
 - [ ] `schema` — lazy schema tree in the left dock (M4)
-- [ ] `object_ddl` — object DDL view (M4)
+- [x] `object_ddl` — canonical object DDL replaces the immediate catalog-derived preview (M4)
 - [ ] `providers` — engine/provider hints for rendering (M4)
-- [ ] `search_schema` — schema search (M4)
+- [x] `search_schema` — filtered schema search in the Connections dock (M4)
 - [ ] `search_data` — data search (M4)
-- [ ] `catalog_graph` — dependency graph (M4/M5)
+- [x] `catalog_graph` — dependency/usages section in the object inspector (M4/M5)
 
 ### Query history & saved queries — History tab, saved queries
 
@@ -84,7 +84,7 @@ surfaces, then admin/platform. Within P0, the connection experience comes first.
 
 - [ ] find bar (model `find_matches` exists, no UI)
 - [ ] gutter + line numbers, current-line highlight, vertical scroll, empty placeholder
-- [ ] `explain` — Explain tab content (M3/M4)
+- [x] `explain` — estimated and analyzed plans with normalized tree + raw copy (M3/M4)
 
 ---
 

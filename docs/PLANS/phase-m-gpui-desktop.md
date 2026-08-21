@@ -484,8 +484,15 @@ ADR amendment instead of burying a second UI toolkit behind an abstraction.
 
 - [ ] Implement lazy schema navigation, filtering, refresh/invalidation, object
       details, DDL, dependencies, usages, and data browsing.
+      **Partial:** the Connections dock now searches the server-side schema
+      index with object-kind filters; the inspector renders incoming usages and
+      outgoing dependencies; and full DDL upgrades its immediate catalog
+      preview to the canonical server response.
 - [ ] Render transaction state, savepoints, process control, execution plans,
       schema/data search, saved queries, and query history.
+      **Partial:** the Explain result tab now requests estimated plans or an
+      explicit Analyze run, renders the normalized plan tree, and exposes the
+      raw engine plan for copying.
 - [ ] Implement typed edit staging, preview, optimistic conflict display,
       approval, apply, and deterministic reconciliation.
 - [ ] Ensure read-only/capability-limited connections remain useful and explain
