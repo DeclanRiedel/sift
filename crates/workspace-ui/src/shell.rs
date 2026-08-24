@@ -3188,6 +3188,14 @@ fn detect_query_parameters(sql: &str) -> Vec<String> {
                 index += 1;
             }
             ScanState::Sql if bytes[index] == b'$' => {
+                if let Some(delimiter_end) = postgres_dollar_quote_delimiter(bytes, index) {
+                    let delimiter = &sql[index..delimiter_end];
+                    let body_start = delimiter_end;
+                    index = sql[body_start..]
+                        .find(delimiter)
+                        .map_or(bytes.len(), |offset| body_start + offset + delimiter.len());
+                    continue;
+                }
                 let start = index + 1;
                 let mut end = start;
                 while end < bytes.len() && bytes[end].is_ascii_digit() {
@@ -3262,8 +3270,29 @@ fn detect_query_parameters(sql: &str) -> Vec<String> {
         .collect()
 }
 
+fn postgres_dollar_quote_delimiter(bytes: &[u8], start: usize) -> Option<usize> {
+    let first = *bytes.get(start + 1)?;
+    if first == b'$' {
+        return Some(start + 2);
+    }
+    if !(first.is_ascii_alphabetic() || first == b'_') {
+        return None;
+    }
+    let mut index = start + 2;
+    while bytes
+        .get(index)
+        .is_some_and(|byte| byte.is_ascii_alphanumeric() || *byte == b'_')
+    {
+        index += 1;
+    }
+    (bytes.get(index) == Some(&b'$')).then_some(index + 1)
+}
+
 fn parameter_binding_key(sql: &str) -> String {
-    sql.split_whitespace().collect::<Vec<_>>().join(" ")
+    use sha2::{Digest as _, Sha256};
+
+    let normalized = sql.split_whitespace().collect::<Vec<_>>().join(" ");
+    format!("{:x}", Sha256::digest(normalized.as_bytes()))
 }
 
 fn parse_parameter_value(text: &str) -> Result<sift_protocol::Value, String> {
@@ -3753,6 +3782,12 @@ impl WorkspaceShell {
             .collect::<Vec<_>>();
         let pane_layout =
             pane_layout::repair(workspace.pane_layout, &pane_ids, workspace.pane_flexes);
+        let remembered_parameter_bindings = settings_store
+            .as_ref()
+            .and_then(|store| store.load_query_bindings().ok())
+            .unwrap_or_default()
+            .into_iter()
+            .collect();
         let shell = cx.weak_entity();
         let shell_window = window.window_handle();
         let key_interceptor_subscription = cx.intercept_keystrokes(move |event, window, cx| {
@@ -3874,7 +3909,7 @@ impl WorkspaceShell {
             plan_capture_error: None,
             pending_parameter_run: None,
             parameter_binding_inputs: Vec::new(),
-            remembered_parameter_bindings: HashMap::new(),
+            remembered_parameter_bindings,
             parameter_binding_error: None,
             pending_database_execution: None,
             pending_database_explain: None,
@@ -5484,6 +5519,16 @@ impl WorkspaceShell {
         };
         self.remembered_parameter_bindings
             .insert(pending.binding_key, texts);
+        if let Some(store) = &self.settings_store {
+            let bindings = self
+                .remembered_parameter_bindings
+                .iter()
+                .map(|(key, values)| (key.clone(), values.clone()))
+                .collect();
+            if let Err(error) = store.save_query_bindings(&bindings) {
+                self.show_error_toast(error, cx);
+            }
+        }
         self.parameter_binding_inputs.clear();
         self.parameter_binding_error = None;
         self.modal = None;
@@ -23126,6 +23171,12 @@ mod tests {
                 "select '$9', \"$8\" from audit.events -- $7\nwhere id = $1 and state = $2 /* $6 */"
             ),
             vec!["$1", "$2"]
+        );
+        assert_eq!(
+            detect_query_parameters(
+                "select $$ ignored $8 $$, $tag$ ignored $9 $tag$, $1, $_x$ @p7 $_x$"
+            ),
+            vec!["$1"]
         );
         assert_eq!(
             detect_query_parameters("select * from audit.events where id = @P1 and state = @p2"),

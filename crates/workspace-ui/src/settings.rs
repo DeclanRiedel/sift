@@ -8,6 +8,7 @@ use toml_edit::{DocumentMut, Item, Value};
 
 const SETTINGS_VERSION: u32 = 1;
 const KEYMAPS_VERSION: u32 = 1;
+const QUERY_BINDINGS_VERSION: u32 = 1;
 
 const fn settings_version() -> u32 {
     SETTINGS_VERSION
@@ -127,6 +128,21 @@ impl KeymapSettings {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct QueryBindingSettings {
+    version: u32,
+    bindings: BTreeMap<String, Vec<String>>,
+}
+
+impl Default for QueryBindingSettings {
+    fn default() -> Self {
+        Self {
+            version: QUERY_BINDINGS_VERSION,
+            bindings: BTreeMap::new(),
+        }
+    }
+}
+
 fn validate_leader_sequence(sequence: &str) -> Result<(), String> {
     if sequence.is_empty() {
         return Ok(());
@@ -210,6 +226,49 @@ impl SettingsStore {
 
     pub fn keymaps_path(&self) -> PathBuf {
         self.path.with_file_name("keymaps.json")
+    }
+
+    pub fn query_bindings_path(&self) -> PathBuf {
+        self.path.with_file_name("query-bindings.json")
+    }
+
+    pub fn load_query_bindings(&self) -> Result<BTreeMap<String, Vec<String>>, String> {
+        let path = self.query_bindings_path();
+        let source = match std::fs::read_to_string(&path) {
+            Ok(source) => source,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(BTreeMap::new());
+            }
+            Err(error) => return Err(format!("reading {} failed: {error}", path.display())),
+        };
+        let stored: QueryBindingSettings = serde_json::from_str(&source)
+            .map_err(|error| format!("{} is invalid: {error}", path.display()))?;
+        if stored.version != QUERY_BINDINGS_VERSION {
+            return Err(format!(
+                "{} version {} is unsupported; expected {QUERY_BINDINGS_VERSION}",
+                path.display(),
+                stored.version
+            ));
+        }
+        Ok(stored.bindings)
+    }
+
+    pub fn save_query_bindings(
+        &self,
+        bindings: &BTreeMap<String, Vec<String>>,
+    ) -> Result<(), String> {
+        let _guard = self
+            .write_lock
+            .lock()
+            .map_err(|_| "settings write lock poisoned".to_string())?;
+        let stored = QueryBindingSettings {
+            version: QUERY_BINDINGS_VERSION,
+            bindings: bindings.clone(),
+        };
+        let source = serde_json::to_string_pretty(&stored)
+            .map(|source| format!("{source}\n"))
+            .map_err(|error| format!("serializing query bindings failed: {error}"))?;
+        write_atomic(&self.query_bindings_path(), &source, "json")
     }
 
     pub fn load_keymaps(&self) -> Result<KeymapSettings, String> {
@@ -446,5 +505,21 @@ mod tests {
         }"#;
         assert!(store.save_keymaps_text(invalid).is_err());
         assert_eq!(store.load_keymaps().unwrap(), keymaps);
+    }
+
+    #[test]
+    fn query_bindings_survive_a_new_store_instance() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("settings.toml");
+        let store = SettingsStore::new(&path);
+        let bindings =
+            BTreeMap::from([("query-fingerprint".into(), vec!["42".into(), "open".into()])]);
+
+        store.save_query_bindings(&bindings).unwrap();
+
+        assert_eq!(
+            SettingsStore::new(path).load_query_bindings().unwrap(),
+            bindings
+        );
     }
 }

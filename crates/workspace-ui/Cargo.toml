@@ -10,6 +10,7 @@ gpui = { workspace = true }
 modalkit = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+sha2 = { workspace = true }
 sift-api-types = { workspace = true }
 sift-client-sdk = { workspace = true }
 sift-doc = { workspace = true }
