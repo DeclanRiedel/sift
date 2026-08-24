@@ -3764,6 +3764,7 @@ impl WorkspaceShell {
         if self.selected_instance_id.as_deref() == Some(instance_id) {
             return;
         }
+        self.fail_running_explains("Explain interrupted by server switch", cx);
 
         let target = self
             .workspace_sessions
@@ -3834,7 +3835,6 @@ impl WorkspaceShell {
         self.table_designer = None;
         self.pending_database_execution = None;
         self.pending_database_explain = None;
-        self.running_explains.clear();
         for pane in &self.panes {
             pane.update(cx, |pane, _| {
                 pane.set_all_database_item_states(DatabaseItemState::Offline)
@@ -4227,6 +4227,16 @@ impl WorkspaceShell {
                     self.operation_capabilities.clear();
                 }
                 self.connection_status = status.clone();
+                match &status {
+                    ConnectionStatus::Disconnected => self.fail_running_explains(
+                        "Explain interrupted because the database disconnected",
+                        cx,
+                    ),
+                    ConnectionStatus::Failed { reason, .. } => {
+                        self.fail_running_explains(reason, cx)
+                    }
+                    ConnectionStatus::Connected { .. } | ConnectionStatus::Connecting { .. } => {}
+                }
                 self.sync_database_item_states(cx);
                 match status {
                     ConnectionStatus::Connected { profile_id, .. } => {
@@ -4746,12 +4756,18 @@ impl WorkspaceShell {
 
     /// Ask the executor to open `entry`. Optimistically shows connecting.
     fn connect(&mut self, entry: &ConnectionNavEntry, cx: &mut Context<Self>) {
-        let Some(sender) = &self.executor_sender else {
+        let Some(sender) = self.executor_sender.clone() else {
             return;
         };
         self.pending_database_execution = None;
-        self.pending_database_explain = None;
-        self.running_explains.clear();
+        if let Some(pending) = self.pending_database_explain.take() {
+            self.route_explain(
+                pending.item_id,
+                Err("Explain interrupted by connection change".into()),
+                cx,
+            );
+        }
+        self.fail_running_explains("Explain interrupted by connection change", cx);
         if sender
             .send(ExecutorCommand::Connect {
                 tenant_id: entry.tenant_id,
@@ -5077,6 +5093,14 @@ impl WorkspaceShell {
         cx.notify();
     }
 
+    fn fail_running_explains(&mut self, reason: &str, cx: &mut Context<Self>) {
+        let item_ids = self.running_explains.keys().copied().collect::<Vec<_>>();
+        self.running_explains.clear();
+        for item_id in item_ids {
+            self.route_explain(item_id, Err(reason.into()), cx);
+        }
+    }
+
     /// Editor semantic entry point. `Analyze` is debounced because it fires on
     /// every keystroke; everything else is a direct response to a command the
     /// user is waiting on and dispatches immediately.
@@ -5385,6 +5409,14 @@ impl WorkspaceShell {
             let _ = sender.send(ExecutorCommand::Disconnect);
         }
         self.held_result_pages.clear();
+        if let Some(pending) = self.pending_database_explain.take() {
+            self.route_explain(
+                pending.item_id,
+                Err("Explain interrupted because the database disconnected".into()),
+                cx,
+            );
+        }
+        self.fail_running_explains("Explain interrupted because the database disconnected", cx);
         self.connection_status = ConnectionStatus::Disconnected;
         self.operation_capabilities.clear();
         self.connection_schema = ConnectionSchemaState::Unavailable;
@@ -19201,6 +19233,27 @@ mod tests {
             );
             assert!(!shell.running_explains.contains_key(&1));
             assert_eq!(shell.status.execution, "Ready");
+        });
+    }
+
+    #[gpui::test]
+    fn interrupted_explain_leaves_pending_state_with_an_actionable_failure(
+        cx: &mut TestAppContext,
+    ) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+
+        workspace.update(&mut cx, |shell, cx| {
+            shell.running_explains.insert(1, 9);
+            shell.fail_running_explains("Explain interrupted by connection change", cx);
+            assert!(!shell.running_explains.contains_key(&1));
+            assert_eq!(shell.status.execution, "Explain failed");
+            let results = shell.panes[0].read(cx).results.get(&1).unwrap().clone();
+            assert_eq!(
+                results.read(cx).explain_failure(),
+                Some("Explain interrupted by connection change")
+            );
         });
     }
 

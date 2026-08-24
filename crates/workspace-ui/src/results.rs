@@ -1028,6 +1028,14 @@ impl ResultsView {
         cx.notify();
     }
 
+    #[cfg(test)]
+    pub(crate) fn explain_failure(&self) -> Option<&str> {
+        match &self.explain {
+            ExplainState::Failed(message) => Some(message),
+            ExplainState::Empty | ExplainState::Pending { .. } | ExplainState::Ready(_) => None,
+        }
+    }
+
     fn copy_raw_plan(&mut self, cx: &mut Context<Self>) {
         if let ExplainState::Ready(response) = &self.explain {
             cx.write_to_clipboard(ClipboardItem::new_string(response.raw.clone()));

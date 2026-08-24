@@ -2,6 +2,8 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 const HISTORY_LOAD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+const ESTIMATED_PLAN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+const ANALYZED_PLAN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
 
 use gpui::{prelude::*, App, Context, Entity, IntoElement, Window};
 use sift_api_types::{
@@ -656,21 +658,38 @@ async fn run_query_executor(
                 let plan_lock = opened.plan_lock.clone();
                 let events = events.clone();
                 std::mem::drop(tokio::spawn(async move {
-                    let _plan_guard = plan_lock.lock().await;
-                    let response = client
-                        .explain(
-                            session,
-                            connection,
-                            sift_protocol::ExplainRequest {
+                    let deadline = if analyze {
+                        ANALYZED_PLAN_TIMEOUT
+                    } else {
+                        ESTIMATED_PLAN_TIMEOUT
+                    };
+                    let explain = async {
+                        let _plan_guard = plan_lock.lock().await;
+                        client
+                            .explain(
+                                session,
                                 connection,
-                                sql,
-                                params: Vec::new(),
-                                analyze,
-                            },
-                        )
+                                sift_protocol::ExplainRequest {
+                                    connection,
+                                    sql,
+                                    params: Vec::new(),
+                                    analyze,
+                                },
+                            )
+                            .await
+                            .map(Box::new)
+                            .map_err(|error| format!("explaining query failed: {error}"))
+                    };
+                    let response = tokio::time::timeout(deadline, explain)
                         .await
-                        .map(Box::new)
-                        .map_err(|error| format!("explaining query failed: {error}"));
+                        .unwrap_or_else(|_| {
+                            Err(if analyze {
+                                "Analyzed plan timed out after 120 seconds"
+                            } else {
+                                "Estimated plan timed out after 10 seconds"
+                            }
+                            .into())
+                        });
                     let _ = events.send(ExecutorEvent::ExplainFinished {
                         item_id,
                         request_id,
