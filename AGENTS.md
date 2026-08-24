@@ -26,6 +26,8 @@ what sift is and the five product goals; this file is the operational subset.
 - A wedged driver cannot freeze the server — queries run in `tokio::spawn`
   with timeouts + cancel tokens, never inline in handlers.
 - CRDTs are for query text only. Never for results, schema, or sessions.
+- Treat Vim as the only supported interaction mode in both the IDE and editor;
+  fully ignore Standard mode support in implementation and tests.
 
 ## Workflow
 
