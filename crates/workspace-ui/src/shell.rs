@@ -415,6 +415,46 @@ enum ObjectGroupKind {
     Other,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WorkspaceSurface {
+    Editor,
+    Connections,
+    Inspector,
+    Results,
+    Problems,
+}
+
+#[derive(Debug, Clone)]
+struct ConnectionTreeItem {
+    depth: usize,
+    action: ConnectionTreeAction,
+}
+
+#[derive(Debug, Clone)]
+enum ConnectionTreeAction {
+    Tenant(i64),
+    Connection(ConnectionNavEntry),
+    Catalog {
+        profile_id: i64,
+        catalog: String,
+    },
+    Schema {
+        profile_id: i64,
+        catalog: String,
+        schema: String,
+    },
+    Group {
+        profile_id: i64,
+        catalog: String,
+        schema: String,
+        group: ObjectGroupKind,
+    },
+    Object(DatabaseObjectTarget),
+    Room(i64),
+    Workspace(WorkspaceNavEntry),
+    Document(DocumentNavEntry),
+}
+
 impl ObjectGroupKind {
     const CANONICAL: [Self; 5] = [
         Self::Tables,
@@ -645,6 +685,7 @@ actions!(
 enum KeyLanguageHint {
     Root,
     Find,
+    Go,
     View,
     Execute,
     Tab,
@@ -657,6 +698,7 @@ fn key_language_hint(keys: &[String]) -> KeyLanguageHint {
     match keys.first().map(String::as_str) {
         None => KeyLanguageHint::Root,
         Some("f") => KeyLanguageHint::Find,
+        Some("g") => KeyLanguageHint::Go,
         Some("v") => KeyLanguageHint::View,
         Some("x") => KeyLanguageHint::Execute,
         Some("t") => KeyLanguageHint::Tab,
@@ -2888,6 +2930,9 @@ const SEMANTIC_ANALYZE_DEBOUNCE: std::time::Duration = std::time::Duration::from
 
 pub struct WorkspaceShell {
     focus_handle: FocusHandle,
+    connections_focus_handle: FocusHandle,
+    inspector_focus_handle: FocusHandle,
+    connections_scroll_handle: ScrollHandle,
     query_input: Entity<TextInput>,
     schema_search_input: Entity<TextInput>,
     server_name_input: Entity<TextInput>,
@@ -2938,6 +2983,10 @@ pub struct WorkspaceShell {
     active_bottom_tool: BottomTool,
     modal: Option<Modal>,
     ide_input: Option<Vec<String>>,
+    pane_input: bool,
+    focused_surface: WorkspaceSurface,
+    connection_nav_selected: usize,
+    connection_nav_g_pending: bool,
     app_bar_expanded: bool,
     app_bar_menu: Option<AppBarMenu>,
     toasts: Vec<Toast>,
@@ -3237,6 +3286,9 @@ impl WorkspaceShell {
         });
         Self {
             focus_handle: cx.focus_handle(),
+            connections_focus_handle: cx.focus_handle(),
+            inspector_focus_handle: cx.focus_handle(),
+            connections_scroll_handle: ScrollHandle::new(),
             query_input,
             schema_search_input,
             server_name_input,
@@ -3288,6 +3340,10 @@ impl WorkspaceShell {
             active_bottom_tool: workspace.bottom_tool,
             modal: None,
             ide_input: None,
+            pane_input: false,
+            focused_surface: WorkspaceSurface::Editor,
+            connection_nav_selected: 0,
+            connection_nav_g_pending: false,
             app_bar_expanded: false,
             app_bar_menu: None,
             toasts: Vec::new(),
@@ -5093,6 +5149,340 @@ impl WorkspaceShell {
         cx.notify();
     }
 
+    fn visible_connection_items(&self) -> Vec<ConnectionTreeItem> {
+        let mut items = Vec::new();
+        for tenant in &self.lifecycle.tenants {
+            let tenant_id = tenant.id.0;
+            items.push(ConnectionTreeItem {
+                depth: 0,
+                action: ConnectionTreeAction::Tenant(tenant_id),
+            });
+            if !self.expanded_tenants.contains(&tenant_id) {
+                continue;
+            }
+            for connection in &tenant.connections {
+                items.push(ConnectionTreeItem {
+                    depth: 1,
+                    action: ConnectionTreeAction::Connection(connection.clone()),
+                });
+                let connected = matches!(
+                    self.connection_status,
+                    ConnectionStatus::Connected { profile_id, .. } if profile_id == connection.id
+                );
+                if !connected || !self.expanded_connections.contains(&connection.id) {
+                    continue;
+                }
+                let ConnectionSchemaState::Ready {
+                    profile_id,
+                    snapshot,
+                } = &self.connection_schema
+                else {
+                    continue;
+                };
+                if *profile_id != connection.id {
+                    continue;
+                }
+                for catalog in &snapshot.trees {
+                    items.push(ConnectionTreeItem {
+                        depth: 2,
+                        action: ConnectionTreeAction::Catalog {
+                            profile_id: connection.id,
+                            catalog: catalog.name.clone(),
+                        },
+                    });
+                    if !self
+                        .expanded_catalogs
+                        .contains(&(connection.id, catalog.name.clone()))
+                    {
+                        continue;
+                    }
+                    for schema in &catalog.schemas {
+                        items.push(ConnectionTreeItem {
+                            depth: 3,
+                            action: ConnectionTreeAction::Schema {
+                                profile_id: connection.id,
+                                catalog: catalog.name.clone(),
+                                schema: schema.name.clone(),
+                            },
+                        });
+                        if !self.expanded_schemas.contains(&(
+                            connection.id,
+                            catalog.name.clone(),
+                            schema.name.clone(),
+                        )) {
+                            continue;
+                        }
+                        for group in ObjectGroupKind::CANONICAL {
+                            let objects = schema
+                                .objects
+                                .iter()
+                                .filter(|object| {
+                                    ObjectGroupKind::from_object_kind(object.kind) == group
+                                })
+                                .collect::<Vec<_>>();
+                            if objects.is_empty() {
+                                continue;
+                            }
+                            items.push(ConnectionTreeItem {
+                                depth: 4,
+                                action: ConnectionTreeAction::Group {
+                                    profile_id: connection.id,
+                                    catalog: catalog.name.clone(),
+                                    schema: schema.name.clone(),
+                                    group,
+                                },
+                            });
+                            if !self.expanded_object_groups.contains(&(
+                                connection.id,
+                                catalog.name.clone(),
+                                schema.name.clone(),
+                                group,
+                            )) {
+                                continue;
+                            }
+                            for object in objects {
+                                items.push(ConnectionTreeItem {
+                                    depth: 5,
+                                    action: ConnectionTreeAction::Object(DatabaseObjectTarget {
+                                        connection: connection.clone(),
+                                        catalog: catalog.name.clone(),
+                                        schema: schema.name.clone(),
+                                        object: object.name.clone(),
+                                        object_kind: object.kind,
+                                    }),
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+            for room in &tenant.rooms {
+                let room_id = room.id.0;
+                items.push(ConnectionTreeItem {
+                    depth: 1,
+                    action: ConnectionTreeAction::Room(room_id),
+                });
+                if !self.expanded_rooms.contains(&room_id) {
+                    continue;
+                }
+                items.extend(
+                    room.workspaces
+                        .iter()
+                        .cloned()
+                        .map(|workspace| ConnectionTreeItem {
+                            depth: 2,
+                            action: ConnectionTreeAction::Workspace(workspace),
+                        }),
+                );
+                items.extend(
+                    room.documents
+                        .iter()
+                        .cloned()
+                        .map(|document| ConnectionTreeItem {
+                            depth: 2,
+                            action: ConnectionTreeAction::Document(document),
+                        }),
+                );
+            }
+        }
+        items
+    }
+
+    fn normalize_connection_selection(&mut self) {
+        let count = self.visible_connection_items().len();
+        self.connection_nav_selected = self.connection_nav_selected.min(count.saturating_sub(1));
+    }
+
+    fn move_connection_selection(&mut self, delta: isize, cx: &mut Context<Self>) {
+        let count = self.visible_connection_items().len();
+        if count == 0 {
+            self.connection_nav_selected = 0;
+            return;
+        }
+        self.connection_nav_selected = self
+            .connection_nav_selected
+            .saturating_add_signed(delta)
+            .min(count - 1);
+        self.connection_nav_g_pending = false;
+        cx.notify();
+    }
+
+    fn set_connection_selection(&mut self, index: usize, cx: &mut Context<Self>) {
+        self.connection_nav_selected = index;
+        self.connection_nav_g_pending = false;
+        self.focused_surface = WorkspaceSurface::Connections;
+        cx.notify();
+    }
+
+    fn connection_item_expanded(&self, action: &ConnectionTreeAction) -> bool {
+        match action {
+            ConnectionTreeAction::Tenant(id) => self.expanded_tenants.contains(id),
+            ConnectionTreeAction::Connection(entry) => {
+                self.expanded_connections.contains(&entry.id)
+            }
+            ConnectionTreeAction::Catalog {
+                profile_id,
+                catalog,
+            } => self
+                .expanded_catalogs
+                .contains(&(*profile_id, catalog.clone())),
+            ConnectionTreeAction::Schema {
+                profile_id,
+                catalog,
+                schema,
+            } => self
+                .expanded_schemas
+                .contains(&(*profile_id, catalog.clone(), schema.clone())),
+            ConnectionTreeAction::Group {
+                profile_id,
+                catalog,
+                schema,
+                group,
+            } => self.expanded_object_groups.contains(&(
+                *profile_id,
+                catalog.clone(),
+                schema.clone(),
+                *group,
+            )),
+            ConnectionTreeAction::Room(id) => self.expanded_rooms.contains(id),
+            ConnectionTreeAction::Object(_)
+            | ConnectionTreeAction::Workspace(_)
+            | ConnectionTreeAction::Document(_) => false,
+        }
+    }
+
+    fn expand_connection_item(&mut self, cx: &mut Context<Self>) {
+        let Some(item) = self
+            .visible_connection_items()
+            .get(self.connection_nav_selected)
+            .cloned()
+        else {
+            return;
+        };
+        if self.connection_item_expanded(&item.action) {
+            return;
+        }
+        match item.action {
+            ConnectionTreeAction::Tenant(id) => self.toggle_tenant(id, cx),
+            ConnectionTreeAction::Connection(entry) => {
+                if matches!(self.connection_status, ConnectionStatus::Connected { profile_id, .. } if profile_id == entry.id)
+                {
+                    self.toggle_connection(entry.id, cx);
+                }
+            }
+            ConnectionTreeAction::Catalog {
+                profile_id,
+                catalog,
+            } => self.toggle_catalog_schema(profile_id, catalog, cx),
+            ConnectionTreeAction::Schema {
+                profile_id,
+                catalog,
+                schema,
+            } => self.toggle_database_schema(profile_id, catalog, schema, cx),
+            ConnectionTreeAction::Group {
+                profile_id,
+                catalog,
+                schema,
+                group,
+            } => self.toggle_object_group(profile_id, catalog, schema, group, cx),
+            ConnectionTreeAction::Room(id) => self.toggle_room(id, cx),
+            ConnectionTreeAction::Object(_)
+            | ConnectionTreeAction::Workspace(_)
+            | ConnectionTreeAction::Document(_) => {}
+        }
+        self.normalize_connection_selection();
+    }
+
+    fn collapse_connection_item(&mut self, cx: &mut Context<Self>) {
+        let items = self.visible_connection_items();
+        let Some(item) = items.get(self.connection_nav_selected).cloned() else {
+            return;
+        };
+        if self.connection_item_expanded(&item.action) {
+            match item.action {
+                ConnectionTreeAction::Tenant(id) => self.toggle_tenant(id, cx),
+                ConnectionTreeAction::Connection(entry) => self.toggle_connection(entry.id, cx),
+                ConnectionTreeAction::Catalog {
+                    profile_id,
+                    catalog,
+                } => self.toggle_catalog_schema(profile_id, catalog, cx),
+                ConnectionTreeAction::Schema {
+                    profile_id,
+                    catalog,
+                    schema,
+                } => self.toggle_database_schema(profile_id, catalog, schema, cx),
+                ConnectionTreeAction::Group {
+                    profile_id,
+                    catalog,
+                    schema,
+                    group,
+                } => self.toggle_object_group(profile_id, catalog, schema, group, cx),
+                ConnectionTreeAction::Room(id) => self.toggle_room(id, cx),
+                ConnectionTreeAction::Object(_)
+                | ConnectionTreeAction::Workspace(_)
+                | ConnectionTreeAction::Document(_) => {}
+            }
+            self.normalize_connection_selection();
+            return;
+        }
+        if let Some(parent) = items[..self.connection_nav_selected]
+            .iter()
+            .rposition(|candidate| candidate.depth < item.depth)
+        {
+            self.connection_nav_selected = parent;
+            cx.notify();
+        }
+    }
+
+    fn activate_connection_item(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(item) = self
+            .visible_connection_items()
+            .get(self.connection_nav_selected)
+            .cloned()
+        else {
+            return;
+        };
+        match item.action {
+            ConnectionTreeAction::Connection(entry) if !matches!(self.connection_status, ConnectionStatus::Connected { profile_id, .. } if profile_id == entry.id) => {
+                self.connect(&entry, cx)
+            }
+            ConnectionTreeAction::Object(target)
+                if matches!(
+                    target.object_kind,
+                    sift_protocol::ObjectKind::Table
+                        | sift_protocol::ObjectKind::View
+                        | sift_protocol::ObjectKind::MaterializedView
+                        | sift_protocol::ObjectKind::ForeignTable
+                        | sift_protocol::ObjectKind::PartitionedTable
+                ) =>
+            {
+                self.open_table_preview(target, window, cx)
+            }
+            ConnectionTreeAction::Workspace(entry) => self.open_workspace(&entry, cx),
+            ConnectionTreeAction::Document(entry) => self.open_room_document(&entry, window, cx),
+            ConnectionTreeAction::Tenant(id) => self.toggle_tenant(id, cx),
+            ConnectionTreeAction::Connection(entry) => self.toggle_connection(entry.id, cx),
+            ConnectionTreeAction::Catalog {
+                profile_id,
+                catalog,
+            } => self.toggle_catalog_schema(profile_id, catalog, cx),
+            ConnectionTreeAction::Schema {
+                profile_id,
+                catalog,
+                schema,
+            } => self.toggle_database_schema(profile_id, catalog, schema, cx),
+            ConnectionTreeAction::Group {
+                profile_id,
+                catalog,
+                schema,
+                group,
+            } => self.toggle_object_group(profile_id, catalog, schema, group, cx),
+            ConnectionTreeAction::Room(id) => self.toggle_room(id, cx),
+            ConnectionTreeAction::Object(_) => {}
+        }
+        self.normalize_connection_selection();
+    }
+
     fn request_table_definition(
         &mut self,
         item_id: u64,
@@ -6608,6 +6998,7 @@ impl WorkspaceShell {
             self.active_pane = pane_index;
             self.panes[pane_index].update(cx, |pane, _| pane.activate_item(item_index, true));
             self.focus_active_pane(window, cx);
+            self.focused_surface = WorkspaceSurface::Problems;
             cx.notify();
             return;
         }
@@ -6637,6 +7028,7 @@ impl WorkspaceShell {
             });
         }
         self.focus_active_pane(window, cx);
+        self.focused_surface = WorkspaceSurface::Problems;
         cx.notify();
     }
 
@@ -7069,9 +7461,42 @@ impl WorkspaceShell {
     /// Called whenever the active pane changes or a modal is dismissed so focus
     /// is never orphaned — an orphaned focus silently drops all keybindings.
     fn focus_active_pane(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.focused_surface = WorkspaceSurface::Editor;
+        self.connection_nav_g_pending = false;
+        self.pane_input = false;
         if let Some(pane) = self.panes.get(self.active_pane) {
             pane.read(cx).active_focus_handle(cx).focus(window, cx);
         }
+    }
+
+    fn focus_connections(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.active_left_panel = LeftPanel::Connections;
+        self.left_dock.presentation.open = true;
+        self.fit_side_docks_to_width(window.window_bounds().get_bounds().size.width.into());
+        self.focused_surface = WorkspaceSurface::Connections;
+        self.normalize_connection_selection();
+        self.connections_focus_handle.focus(window, cx);
+        self.persist(cx);
+        cx.notify();
+    }
+
+    fn focus_inspector(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.right_dock.presentation.open = true;
+        self.fit_side_docks_to_width(window.window_bounds().get_bounds().size.width.into());
+        self.focused_surface = WorkspaceSurface::Inspector;
+        self.inspector_focus_handle.focus(window, cx);
+        self.persist(cx);
+        cx.notify();
+    }
+
+    fn focus_results(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(results) = self.focused_pane_results(cx) else {
+            self.show_toast("Active tab has no result surface".into(), cx);
+            return;
+        };
+        self.focused_surface = WorkspaceSurface::Results;
+        results.focus_handle(cx).focus(window, cx);
+        cx.notify();
     }
 
     #[cfg(test)]
@@ -7109,6 +7534,22 @@ impl WorkspaceShell {
                 // pane click restores the active editor after a modal.
                 if !emitter.read(cx).focus_handle.contains_focused(window, cx) {
                     self.focus_active_pane(window, cx);
+                } else {
+                    let pane = emitter.read(cx);
+                    self.focused_surface = if pane
+                        .active_item()
+                        .and_then(|item| pane.results.get(&item.id))
+                        .is_some_and(|results| results.focus_handle(cx).is_focused(window))
+                    {
+                        WorkspaceSurface::Results
+                    } else if pane
+                        .active_item()
+                        .is_some_and(|item| item.kind == ItemKind::Problems)
+                    {
+                        WorkspaceSurface::Problems
+                    } else {
+                        WorkspaceSurface::Editor
+                    };
                 }
                 cx.notify();
             }
@@ -7575,6 +8016,35 @@ impl WorkspaceShell {
         cx.notify();
     }
 
+    fn focus_pane_direction(
+        &mut self,
+        direction: SplitDirection,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(active_id) = self
+            .panes
+            .get(self.active_pane)
+            .map(|pane| pane.read(cx).id)
+        else {
+            return;
+        };
+        let Some(neighbor_id) = pane_layout::neighbor(&self.pane_layout, active_id, direction)
+        else {
+            return;
+        };
+        let Some(index) = self
+            .panes
+            .iter()
+            .position(|pane| pane.read(cx).id == neighbor_id)
+        else {
+            return;
+        };
+        self.active_pane = index;
+        self.focus_active_pane(window, cx);
+        cx.notify();
+    }
+
     fn close_active_item(
         &mut self,
         _: &CloseActiveItem,
@@ -7770,6 +8240,108 @@ impl WorkspaceShell {
             let editor = has_context("SiftEditor");
             let text_input = has_context("SiftTextInput");
             let modal = has_context("SiftModal");
+
+            if self.pane_input {
+                cx.stop_propagation();
+                self.pane_input = false;
+                match key.as_str() {
+                    "h" => self.focus_pane_direction(SplitDirection::Left, window, cx),
+                    "j" => self.focus_pane_direction(SplitDirection::Down, window, cx),
+                    "k" => self.focus_pane_direction(SplitDirection::Up, window, cx),
+                    "l" => self.focus_pane_direction(SplitDirection::Right, window, cx),
+                    "escape" => cx.notify(),
+                    _ => self.show_toast(format!("Unknown pane command: Ctrl+W {key}"), cx),
+                }
+                return;
+            }
+
+            if workspace
+                && !modal
+                && !text_input
+                && (self.keyboard_profile() == KeyboardProfile::Vim || vim_normal || !editor)
+                && key == "ctrl-w"
+            {
+                self.pane_input = true;
+                cx.stop_propagation();
+                cx.notify();
+                return;
+            }
+
+            if workspace && !modal && !text_input && has_context("SiftConnections") {
+                let handled = match key.as_str() {
+                    "j" => {
+                        self.move_connection_selection(1, cx);
+                        true
+                    }
+                    "k" => {
+                        self.move_connection_selection(-1, cx);
+                        true
+                    }
+                    "h" => {
+                        self.connection_nav_g_pending = false;
+                        self.collapse_connection_item(cx);
+                        true
+                    }
+                    "l" => {
+                        self.connection_nav_g_pending = false;
+                        self.expand_connection_item(cx);
+                        true
+                    }
+                    "enter" => {
+                        self.connection_nav_g_pending = false;
+                        self.activate_connection_item(window, cx);
+                        true
+                    }
+                    "/" => {
+                        self.connection_nav_g_pending = false;
+                        self.open_schema_search(window, cx);
+                        true
+                    }
+                    "r" => {
+                        self.connection_nav_g_pending = false;
+                        self.refresh_connection_schema(cx);
+                        true
+                    }
+                    "g" if self.connection_nav_g_pending => {
+                        self.connection_nav_g_pending = false;
+                        self.connection_nav_selected = 0;
+                        cx.notify();
+                        true
+                    }
+                    "g" => {
+                        self.connection_nav_g_pending = true;
+                        cx.notify();
+                        true
+                    }
+                    "shift-g" => {
+                        self.connection_nav_g_pending = false;
+                        self.connection_nav_selected =
+                            self.visible_connection_items().len().saturating_sub(1);
+                        cx.notify();
+                        true
+                    }
+                    "escape" => {
+                        self.focus_active_pane(window, cx);
+                        cx.notify();
+                        true
+                    }
+                    _ => {
+                        self.connection_nav_g_pending = false;
+                        false
+                    }
+                };
+                if handled {
+                    cx.stop_propagation();
+                    return;
+                }
+            }
+            if workspace && !modal && !text_input && has_context("SiftInspector") && key == "escape"
+            {
+                self.focus_active_pane(window, cx);
+                cx.stop_propagation();
+                cx.notify();
+                return;
+            }
             let starts_ide_command = workspace
                 && !modal
                 && ((key == "space" && (vim_normal || (!editor && !text_input)))
@@ -7832,6 +8404,9 @@ impl WorkspaceShell {
     }
 
     fn ide_key_buffer(&self) -> String {
+        if self.pane_input {
+            return "Ctrl+W".into();
+        }
         match self.ide_input.as_deref() {
             Some([]) => "<leader>".into(),
             Some(keys) => format!("<leader> {}", keys.join(" ")),
@@ -8574,6 +9149,17 @@ impl WorkspaceShell {
             }
             CommandId::SplitPane => self.split_pane(&SplitPane, window, cx),
             CommandId::FocusNextPane => self.focus_next_pane(&FocusNextPane, window, cx),
+            CommandId::FocusPaneLeft => self.focus_pane_direction(SplitDirection::Left, window, cx),
+            CommandId::FocusPaneDown => self.focus_pane_direction(SplitDirection::Down, window, cx),
+            CommandId::FocusPaneUp => self.focus_pane_direction(SplitDirection::Up, window, cx),
+            CommandId::FocusPaneRight => {
+                self.focus_pane_direction(SplitDirection::Right, window, cx)
+            }
+            CommandId::FocusConnections => self.focus_connections(window, cx),
+            CommandId::FocusEditor => self.focus_active_pane(window, cx),
+            CommandId::FocusInspector => self.focus_inspector(window, cx),
+            CommandId::FocusResults => self.focus_results(window, cx),
+            CommandId::FocusProblems => self.show_global_problems(window, cx),
             CommandId::ClosePane => self.close_active_pane(&CloseActivePane, window, cx),
             CommandId::SaveItem => self.save_active_item(&SaveActiveItem, window, cx),
             CommandId::CloseItem => self.close_active_item(&CloseActiveItem, window, cx),
@@ -9181,6 +9767,8 @@ impl WorkspaceShell {
         &self,
         connection: &ConnectionNavEntry,
         colors: sift_ui::ThemeColors,
+        nav_index: &mut usize,
+        render_offset: usize,
         cx: &mut Context<Self>,
     ) -> Vec<gpui::AnyElement> {
         let profile_id = connection.id;
@@ -9224,6 +9812,14 @@ impl WorkspaceShell {
             } if *ready == profile_id => {
                 let mut rows = Vec::new();
                 for (catalog_index, catalog) in snapshot.trees.iter().enumerate() {
+                    let catalog_nav_index = *nav_index;
+                    *nav_index += 1;
+                    if self.focused_surface == WorkspaceSurface::Connections
+                        && self.connection_nav_selected == catalog_nav_index
+                    {
+                        self.connections_scroll_handle
+                            .scroll_to_item(render_offset + rows.len());
+                    }
                     let catalog_key = (profile_id, catalog.name.clone());
                     let catalog_open = self.expanded_catalogs.contains(&catalog_key);
                     let catalog_name = catalog.name.clone();
@@ -9238,9 +9834,15 @@ impl WorkspaceShell {
                             .items_center()
                             .gap(px(6.))
                             .rounded_sm()
+                            .when(
+                                self.focused_surface == WorkspaceSurface::Connections
+                                    && self.connection_nav_selected == catalog_nav_index,
+                                |row| row.bg(colors.accent_muted).text_color(colors.text),
+                            )
                             .text_color(colors.muted_text)
                             .hover(|row| row.bg(colors.hovered_surface).text_color(colors.text))
                             .on_click(cx.listener(move |shell, _, _, cx| {
+                                shell.set_connection_selection(catalog_nav_index, cx);
                                 shell.toggle_catalog_schema(profile_id, catalog_name.clone(), cx)
                             }))
                             .child(tree_chevron_slot(catalog_open, colors.muted_text))
@@ -9252,6 +9854,14 @@ impl WorkspaceShell {
                         continue;
                     }
                     for (schema_index, schema) in catalog.schemas.iter().enumerate() {
+                        let schema_nav_index = *nav_index;
+                        *nav_index += 1;
+                        if self.focused_surface == WorkspaceSurface::Connections
+                            && self.connection_nav_selected == schema_nav_index
+                        {
+                            self.connections_scroll_handle
+                                .scroll_to_item(render_offset + rows.len());
+                        }
                         let schema_key = (profile_id, catalog.name.clone(), schema.name.clone());
                         let schema_open = self.expanded_schemas.contains(&schema_key);
                         let catalog_name = catalog.name.clone();
@@ -9272,9 +9882,15 @@ impl WorkspaceShell {
                                 .items_center()
                                 .gap(px(6.))
                                 .rounded_sm()
+                                .when(
+                                    self.focused_surface == WorkspaceSurface::Connections
+                                        && self.connection_nav_selected == schema_nav_index,
+                                    |row| row.bg(colors.accent_muted).text_color(colors.text),
+                                )
                                 .text_color(colors.muted_text)
                                 .hover(|row| row.bg(colors.hovered_surface).text_color(colors.text))
                                 .on_click(cx.listener(move |shell, _, _, cx| {
+                                    shell.set_connection_selection(schema_nav_index, cx);
                                     shell.toggle_database_schema(
                                         profile_id,
                                         catalog_name.clone(),
@@ -9312,6 +9928,14 @@ impl WorkspaceShell {
                             }
                             let group_key =
                                 (profile_id, catalog.name.clone(), schema.name.clone(), group);
+                            let group_nav_index = *nav_index;
+                            *nav_index += 1;
+                            if self.focused_surface == WorkspaceSurface::Connections
+                                && self.connection_nav_selected == group_nav_index
+                            {
+                                self.connections_scroll_handle
+                                    .scroll_to_item(render_offset + rows.len());
+                            }
                             let group_open = self.expanded_object_groups.contains(&group_key);
                             let catalog_name = catalog.name.clone();
                             let schema_name = schema.name.clone();
@@ -9332,11 +9956,17 @@ impl WorkspaceShell {
                                     .items_center()
                                     .gap(px(6.))
                                     .rounded_sm()
+                                    .when(
+                                        self.focused_surface == WorkspaceSurface::Connections
+                                            && self.connection_nav_selected == group_nav_index,
+                                        |row| row.bg(colors.accent_muted).text_color(colors.text),
+                                    )
                                     .text_color(colors.muted_text)
                                     .hover(|row| {
                                         row.bg(colors.hovered_surface).text_color(colors.text)
                                     })
                                     .on_click(cx.listener(move |shell, _, _, cx| {
+                                        shell.set_connection_selection(group_nav_index, cx);
                                         shell.toggle_object_group(
                                             profile_id,
                                             catalog_name.clone(),
@@ -9361,6 +9991,14 @@ impl WorkspaceShell {
                                 continue;
                             }
                             for (object_index, object) in objects.iter().enumerate() {
+                                let object_nav_index = *nav_index;
+                                *nav_index += 1;
+                                if self.focused_surface == WorkspaceSurface::Connections
+                                    && self.connection_nav_selected == object_nav_index
+                                {
+                                    self.connections_scroll_handle
+                                        .scroll_to_item(render_offset + rows.len());
+                                }
                                 let can_preview = matches!(
                                     object.kind,
                                     sift_protocol::ObjectKind::Table
@@ -9391,6 +10029,11 @@ impl WorkspaceShell {
                                     .items_center()
                                     .gap(px(6.))
                                     .rounded_sm()
+                                    .when(
+                                        self.focused_surface == WorkspaceSurface::Connections
+                                            && self.connection_nav_selected == object_nav_index,
+                                        |row| row.bg(colors.accent_muted),
+                                    )
                                     .text_color(if can_preview {
                                         colors.text
                                     } else {
@@ -9399,6 +10042,8 @@ impl WorkspaceShell {
                                     .when(can_preview, |row| {
                                         row.hover(|row| row.bg(colors.hovered_surface)).on_click(
                                             cx.listener(move |shell, _, window, cx| {
+                                                shell
+                                                    .set_connection_selection(object_nav_index, cx);
                                                 shell.open_table_preview(
                                                     DatabaseObjectTarget {
                                                         connection: connection_for_preview.clone(),
@@ -10703,10 +11348,26 @@ impl WorkspaceShell {
                 )
                 .then_some(item_id)
             });
+        let keyboard_focused = matches!(
+            (dock.id, self.focused_surface),
+            (DockId::Left, WorkspaceSurface::Connections)
+                | (DockId::Inspector, WorkspaceSurface::Inspector)
+        );
         div()
             .id(title)
             .debug_selector(move || debug_selector.to_owned())
             .key_context("SiftDock")
+            .when(
+                dock.id == DockId::Left && self.active_left_panel == LeftPanel::Connections,
+                |dock| {
+                    dock.key_context("SiftConnections")
+                        .track_focus(&self.connections_focus_handle)
+                },
+            )
+            .when(dock.id == DockId::Inspector, |dock| {
+                dock.key_context("SiftInspector")
+                    .track_focus(&self.inspector_focus_handle)
+            })
             .relative()
             .w(px(dock.presentation.size))
             .min_h_0()
@@ -10714,7 +11375,11 @@ impl WorkspaceShell {
             .flex_col()
             .overflow_hidden()
             .py_1()
-            .border_color(colors.subtle_border)
+            .border_color(if keyboard_focused {
+                colors.accent
+            } else {
+                colors.subtle_border
+            })
             .border_t_1()
             .bg(colors.panel)
             .text_sm()
@@ -10820,9 +11485,17 @@ impl WorkspaceShell {
                 |dock_view| {
                 let selected = self.selected_workspace_id;
                 let mut rows: Vec<gpui::AnyElement> = Vec::new();
+                let mut nav_index = 0usize;
                 for tenant in &self.lifecycle.tenants {
                     let tenant_id = tenant.id.0;
                     let tenant_open = self.expanded_tenants.contains(&tenant_id);
+                    let tenant_nav_index = nav_index;
+                    nav_index += 1;
+                    if self.focused_surface == WorkspaceSurface::Connections
+                        && self.connection_nav_selected == tenant_nav_index
+                    {
+                        self.connections_scroll_handle.scroll_to_item(rows.len());
+                    }
                     rows.push(
                         div()
                             .id(("connection-tenant", tenant_id as usize))
@@ -10835,9 +11508,15 @@ impl WorkspaceShell {
                             .items_center()
                             .gap(px(6.))
                             .rounded_sm()
+                            .when(
+                                self.focused_surface == WorkspaceSurface::Connections
+                                    && self.connection_nav_selected == tenant_nav_index,
+                                |row| row.bg(colors.accent_muted).text_color(colors.text),
+                            )
                             .text_color(colors.muted_text)
                             .hover(|row| row.bg(colors.hovered_surface).text_color(colors.text))
                             .on_click(cx.listener(move |shell, _, _, cx| {
+                                shell.set_connection_selection(tenant_nav_index, cx);
                                 shell.toggle_tenant(tenant_id, cx)
                             }))
                             .child(tree_chevron_slot(tenant_open, colors.muted_text))
@@ -10869,6 +11548,13 @@ impl WorkspaceShell {
                         );
                     }
                     for conn in &tenant.connections {
+                        let connection_nav_index = nav_index;
+                        nav_index += 1;
+                        if self.focused_surface == WorkspaceSurface::Connections
+                            && self.connection_nav_selected == connection_nav_index
+                        {
+                            self.connections_scroll_handle.scroll_to_item(rows.len());
+                        }
                         let connection_id = conn.id;
                         let entry_for_delete = conn.clone();
                         let (connection_color, connected) = match &self.connection_status {
@@ -10922,6 +11608,7 @@ impl WorkspaceShell {
                                 })
                                 .on_click(cx.listener(move |shell, _, _, cx| {
                                     cx.stop_propagation();
+                                    shell.set_connection_selection(connection_nav_index, cx);
                                     shell.toggle_connection(connection_id, cx)
                                 }))
                                 .child(icon(
@@ -10980,6 +11667,11 @@ impl WorkspaceShell {
                             .pl(tree_indent(1))
                             .pr_2()
                             .rounded_sm()
+                            .when(
+                                self.focused_surface == WorkspaceSurface::Connections
+                                    && self.connection_nav_selected == connection_nav_index,
+                                |row| row.bg(colors.accent_muted).text_color(colors.text),
+                            )
                             .when(connected, |row| row.bg(colors.active_surface))
                             .hover(|row| row.bg(colors.hovered_surface))
                             .child(leading)
@@ -11004,9 +11696,10 @@ impl WorkspaceShell {
                             );
                         } else {
                             let entry = conn.clone();
-                            row = row.on_click(
-                                cx.listener(move |shell, _, _, cx| shell.connect(&entry, cx)),
-                            );
+                            row = row.on_click(cx.listener(move |shell, _, _, cx| {
+                                shell.set_connection_selection(connection_nav_index, cx);
+                                shell.connect(&entry, cx)
+                            }));
                         }
                         row = row.child(
                             div()
@@ -11033,7 +11726,14 @@ impl WorkspaceShell {
                         );
                         rows.push(row.into_any_element());
                         if connected && connection_open {
-                            rows.extend(self.connection_schema_rows(conn, colors, cx));
+                            let render_offset = rows.len();
+                            rows.extend(self.connection_schema_rows(
+                                conn,
+                                colors,
+                                &mut nav_index,
+                                render_offset,
+                                cx,
+                            ));
                         }
                     }
                     if tenant
@@ -11058,6 +11758,13 @@ impl WorkspaceShell {
                     for room in &tenant.rooms {
                         let room_id = room.id.0;
                         let room_open = self.expanded_rooms.contains(&room_id);
+                        let room_nav_index = nav_index;
+                        nav_index += 1;
+                        if self.focused_surface == WorkspaceSurface::Connections
+                            && self.connection_nav_selected == room_nav_index
+                        {
+                            self.connections_scroll_handle.scroll_to_item(rows.len());
+                        }
                         rows.push(
                             div()
                                 .id(("connection-room", room_id as usize))
@@ -11069,11 +11776,17 @@ impl WorkspaceShell {
                                 .items_center()
                                 .gap(px(6.))
                                 .rounded_sm()
+                                .when(
+                                    self.focused_surface == WorkspaceSurface::Connections
+                                        && self.connection_nav_selected == room_nav_index,
+                                    |row| row.bg(colors.accent_muted).text_color(colors.text),
+                                )
                                 .text_color(colors.muted_text)
                                 .hover(|row| {
                                     row.bg(colors.hovered_surface).text_color(colors.text)
                                 })
                                 .on_click(cx.listener(move |shell, _, _, cx| {
+                                    shell.set_connection_selection(room_nav_index, cx);
                                     shell.toggle_room(room_id, cx)
                                 }))
                                 .child(tree_chevron_slot(room_open, colors.muted_text))
@@ -11103,6 +11816,13 @@ impl WorkspaceShell {
                             continue;
                         }
                         for workspace in &room.workspaces {
+                            let workspace_nav_index = nav_index;
+                            nav_index += 1;
+                            if self.focused_surface == WorkspaceSurface::Connections
+                                && self.connection_nav_selected == workspace_nav_index
+                            {
+                                self.connections_scroll_handle.scroll_to_item(rows.len());
+                            }
                             let features =
                                 match (workspace.git_enabled, workspace.scheduling_enabled) {
                                     (true, true) => " · Git · Runs",
@@ -11123,11 +11843,17 @@ impl WorkspaceShell {
                                     .items_center()
                                     .gap(px(6.))
                                     .rounded_sm()
+                                    .when(
+                                        self.focused_surface == WorkspaceSurface::Connections
+                                            && self.connection_nav_selected == workspace_nav_index,
+                                        |row| row.bg(colors.accent_muted).text_color(colors.text),
+                                    )
                                     .when(is_open, |row| {
                                         row.bg(colors.active_surface).text_color(colors.text)
                                     })
                                     .hover(|row| row.bg(colors.hovered_surface))
                                     .on_click(cx.listener(move |shell, _, _, cx| {
+                                        shell.set_connection_selection(workspace_nav_index, cx);
                                         shell.open_workspace(&entry, cx)
                                     }))
                                     .child(tree_spacer_slot())
@@ -11142,6 +11868,13 @@ impl WorkspaceShell {
                             );
                         }
                         for document in &room.documents {
+                            let document_nav_index = nav_index;
+                            nav_index += 1;
+                            if self.focused_surface == WorkspaceSurface::Connections
+                                && self.connection_nav_selected == document_nav_index
+                            {
+                                self.connections_scroll_handle.scroll_to_item(rows.len());
+                            }
                             let entry = document.clone();
                             rows.push(
                                 div()
@@ -11154,9 +11887,15 @@ impl WorkspaceShell {
                                     .items_center()
                                     .gap(px(6.))
                                     .rounded_sm()
+                                    .when(
+                                        self.focused_surface == WorkspaceSurface::Connections
+                                            && self.connection_nav_selected == document_nav_index,
+                                        |row| row.bg(colors.accent_muted),
+                                    )
                                     .text_color(colors.text)
                                     .hover(|row| row.bg(colors.hovered_surface))
                                     .on_click(cx.listener(move |shell, _, window, cx| {
+                                        shell.set_connection_selection(document_nav_index, cx);
                                         shell.open_room_document(&entry, window, cx)
                                     }))
                                     .child(tree_spacer_slot())
@@ -11175,9 +11914,17 @@ impl WorkspaceShell {
                 dock_view.child(
                     div()
                         .id("connections-scroll")
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|shell, _, window, cx| {
+                                shell.focused_surface = WorkspaceSurface::Connections;
+                                shell.connections_focus_handle.focus(window, cx);
+                            }),
+                        )
                         .flex_1()
                         .min_h_0()
                         .overflow_y_scroll()
+                        .track_scroll(&self.connections_scroll_handle)
                         .children(rows),
                 )
                 },
@@ -13849,6 +14596,7 @@ impl WorkspaceShell {
                 "<leader>",
                 &[
                     ("f", "find"),
+                    ("g", "go / focus"),
                     ("v", "view"),
                     ("x", "execute"),
                     ("t", "tab"),
@@ -13860,6 +14608,16 @@ impl WorkspaceShell {
             KeyLanguageHint::Find => (
                 "<leader> f",
                 &[("c", "commands"), ("d", "schema"), ("u", "usages")],
+            ),
+            KeyLanguageHint::Go => (
+                "<leader> g",
+                &[
+                    ("c", "Connections"),
+                    ("e", "editor"),
+                    ("i", "Inspector"),
+                    ("r", "results"),
+                    ("p", "Problems"),
+                ],
             ),
             KeyLanguageHint::View => (
                 "<leader> v",
@@ -13881,7 +14639,12 @@ impl WorkspaceShell {
             KeyLanguageHint::Database => ("<leader> d", &[("c", "connect server")]),
             KeyLanguageHint::Workspace => (
                 "<leader> w",
-                &[("s", "split"), ("n", "next pane"), ("c", "close pane")],
+                &[
+                    ("h/j/k/l", "focus pane"),
+                    ("s", "split"),
+                    ("n", "next pane"),
+                    ("c", "close pane"),
+                ],
             ),
         };
         let colors = cx.theme().colors;
@@ -14968,6 +15731,64 @@ mod tests {
             assert!(shell.expanded_schemas.is_empty());
             assert!(shell.expanded_object_groups.is_empty());
         });
+    }
+
+    #[gpui::test]
+    fn connections_normal_mode_focuses_and_navigates_visible_tree_rows(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        workspace.update_in(&mut cx, |shell, window, cx| {
+            shell.lifecycle.tenants = vec![crate::TenantNavEntry {
+                id: sift_api_types::TenantId(1),
+                name: "Personal".into(),
+                rooms: Vec::new(),
+                connections: vec![ConnectionNavEntry {
+                    id: 7,
+                    tenant_id: 1,
+                    name: "Demo".into(),
+                    provider_id: sift_protocol::ProviderId::new("sift/postgres").unwrap(),
+                }],
+            }];
+            shell.run_command(CommandId::FocusConnections, window, cx);
+        });
+        workspace.read_with(&cx, |shell, _| {
+            assert_eq!(shell.focused_surface, WorkspaceSurface::Connections);
+            assert!(shell.left_dock.presentation.open);
+            assert_eq!(shell.connection_nav_selected, 0);
+        });
+
+        cx.simulate_keystrokes("l j");
+        workspace.read_with(&cx, |shell, _| {
+            assert!(shell.expanded_tenants.contains(&1));
+            assert_eq!(shell.connection_nav_selected, 1);
+        });
+        cx.simulate_keystrokes("k shift-g g g");
+        assert_eq!(
+            workspace.read_with(&cx, |shell, _| shell.connection_nav_selected),
+            0
+        );
+        cx.simulate_keystrokes("escape");
+        assert_eq!(
+            workspace.read_with(&cx, |shell, _| shell.focused_surface),
+            WorkspaceSurface::Editor
+        );
+    }
+
+    #[gpui::test]
+    fn ctrl_w_motion_uses_spatial_pane_neighbors(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        workspace.update_in(&mut cx, |shell, window, cx| {
+            shell.split_pane(&SplitPane, window, cx);
+            assert_eq!(shell.active_pane, 1);
+        });
+
+        cx.simulate_keystrokes("ctrl-w h");
+        assert_eq!(workspace.read_with(&cx, |shell, _| shell.active_pane), 0);
+        cx.simulate_keystrokes("ctrl-w l");
+        assert_eq!(workspace.read_with(&cx, |shell, _| shell.active_pane), 1);
     }
 
     #[gpui::test]

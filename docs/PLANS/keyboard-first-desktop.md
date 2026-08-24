@@ -79,10 +79,12 @@ prefixes display a compact which-key strip generated from the same vocabulary.
       palette.
 - [x] Remove advertised/default F-key dependencies.
 - [x] Add standalone HTML/CSS default-key wiki and Nix runner.
-- [ ] Add a directional focus graph and Vim `Ctrl+W h/j/k/l/s/v/c/o` pane
-      language.
-- [ ] Give Connections, Inspector, result tabs, and Problems explicit NORMAL
-      selection state and local `h/j/k/l`, `gg/G`, `/`, `n/N` behavior.
+- [x] Add a directional focus graph and Vim `Ctrl+W h/j/k/l` pane language;
+      expose the same movement through `<leader> w h/j/k/l`.
+- [x] Add `<leader> g c/e/i/r/p` surface focus and Connections NORMAL mode with
+      `h/j/k/l`, `gg/G`, `/`, `Enter`, `r`, and `Escape`.
+- [ ] Give Inspector, result tabs, and Problems complete NORMAL selection state
+      and their remaining local motions/operators.
 - [ ] Add grid visual selection and system-clipboard `yc`, `yy`, `yh`, and `p`.
 - [ ] Add editable-result `i`, `dd`, `o`, undo/redo, Preview, Apply, Revert.
 - [ ] Add generated keyboard-equivalence tests proving every visible action has

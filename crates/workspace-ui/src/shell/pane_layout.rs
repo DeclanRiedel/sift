@@ -199,6 +199,94 @@ pub fn split_root(layout: &mut PaneLayoutPresentation, new_id: u64, direction: S
     };
 }
 
+/// Find the visually nearest pane in one cardinal direction. Layout flexes are
+/// projected into normalized rectangles, so navigation follows what the user
+/// sees even through nested mixed-axis splits.
+pub fn neighbor(
+    layout: &PaneLayoutPresentation,
+    pane_id: u64,
+    direction: SplitDirection,
+) -> Option<u64> {
+    #[derive(Clone, Copy)]
+    struct Leaf {
+        id: u64,
+        x: f32,
+        y: f32,
+        width: f32,
+        height: f32,
+    }
+
+    fn collect(
+        layout: &PaneLayoutPresentation,
+        x: f32,
+        y: f32,
+        width: f32,
+        height: f32,
+        leaves: &mut Vec<Leaf>,
+    ) {
+        match layout {
+            PaneLayoutPresentation::Pane { pane_id } => leaves.push(Leaf {
+                id: *pane_id,
+                x,
+                y,
+                width,
+                height,
+            }),
+            PaneLayoutPresentation::Split {
+                axis,
+                children,
+                flexes,
+            } => {
+                let total = flexes.iter().sum::<f32>().max(f32::EPSILON);
+                let mut offset = 0.;
+                for (child, flex) in children.iter().zip(flexes) {
+                    let share = *flex / total;
+                    match axis {
+                        PaneAxis::Horizontal => {
+                            let child_width = width * share;
+                            collect(child, x + offset, y, child_width, height, leaves);
+                            offset += child_width;
+                        }
+                        PaneAxis::Vertical => {
+                            let child_height = height * share;
+                            collect(child, x, y + offset, width, child_height, leaves);
+                            offset += child_height;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    let mut leaves = Vec::new();
+    collect(layout, 0., 0., 1., 1., &mut leaves);
+    let current = leaves.iter().find(|leaf| leaf.id == pane_id)?;
+    let center = |leaf: &Leaf| (leaf.x + leaf.width / 2., leaf.y + leaf.height / 2.);
+    let (current_x, current_y) = center(current);
+    leaves
+        .iter()
+        .filter(|candidate| candidate.id != pane_id)
+        .filter_map(|candidate| {
+            let (x, y) = center(candidate);
+            let (primary, secondary) = match direction {
+                SplitDirection::Left if x < current_x => (current_x - x, (current_y - y).abs()),
+                SplitDirection::Right if x > current_x => (x - current_x, (current_y - y).abs()),
+                SplitDirection::Up if y < current_y => (current_y - y, (current_x - x).abs()),
+                SplitDirection::Down if y > current_y => (y - current_y, (current_x - x).abs()),
+                _ => return None,
+            };
+            Some((primary + secondary * 2., primary, secondary, candidate.id))
+        })
+        .min_by(|left, right| {
+            left.0
+                .total_cmp(&right.0)
+                .then(left.1.total_cmp(&right.1))
+                .then(left.2.total_cmp(&right.2))
+                .then(left.3.cmp(&right.3))
+        })
+        .map(|(_, _, _, id)| id)
+}
+
 pub fn remove(layout: &mut PaneLayoutPresentation, pane_id: u64) -> bool {
     let PaneLayoutPresentation::Split {
         children, flexes, ..
@@ -332,5 +420,18 @@ mod tests {
             panic!("nested split")
         };
         assert_eq!(flexes, &vec![1.5, 0.5]);
+    }
+
+    #[test]
+    fn directional_neighbor_follows_nested_visual_geometry() {
+        let mut layout = from_legacy(&[1, 2], vec![1.0, 1.0]);
+        assert!(split(&mut layout, 1, 3, SplitDirection::Down));
+
+        assert_eq!(neighbor(&layout, 1, SplitDirection::Down), Some(3));
+        assert_eq!(neighbor(&layout, 3, SplitDirection::Up), Some(1));
+        assert_eq!(neighbor(&layout, 1, SplitDirection::Right), Some(2));
+        assert_eq!(neighbor(&layout, 3, SplitDirection::Right), Some(2));
+        assert_eq!(neighbor(&layout, 2, SplitDirection::Left), Some(1));
+        assert_eq!(neighbor(&layout, 1, SplitDirection::Up), None);
     }
 }
