@@ -722,6 +722,7 @@ pub enum Modal {
     SchemaSearch,
     DataSearch,
     DataResults(u64),
+    QueryParameters,
     EditResultCell,
     PlanCaptures,
     ServerPicker,
@@ -1010,7 +1011,19 @@ enum DatabaseItemView {
 struct PendingDatabaseExecution {
     item_id: u64,
     sql: String,
+    params: Vec<sift_protocol::Value>,
     source: DatabaseObjectSource,
+}
+
+struct PendingParameterRun {
+    item_id: u64,
+    sql: String,
+    binding_key: String,
+}
+
+struct ParameterBindingInput {
+    label: String,
+    input: Entity<TextInput>,
 }
 
 #[derive(Debug, Clone)]
@@ -3099,82 +3112,150 @@ fn epoch_millis() -> u64 {
         .map_or(0, |elapsed| elapsed.as_millis() as u64)
 }
 
-/// Bind provider placeholders from a visible, portable query directive:
-/// `-- sift-params: [42, "active"]`. Keeping values outside SQL prevents the
-/// editor from encouraging interpolated strings while working for `$1` and
-/// `@p1` providers alike.
-fn parse_query_parameters(sql: &str) -> Result<(String, Vec<sift_protocol::Value>), String> {
-    let placeholder_count = sql
-        .as_bytes()
-        .windows(2)
-        .filter_map(|pair| match pair {
-            [b'$', digit] if digit.is_ascii_digit() => Some((digit - b'0') as usize),
-            [b'@', b'p' | b'P'] => Some(0),
-            _ => None,
-        })
-        .max()
-        .unwrap_or(0)
-        .max(
-            sql.as_bytes()
-                .windows(3)
-                .filter_map(|window| match window {
-                    [b'@', b'p' | b'P', digit] if digit.is_ascii_digit() => {
-                        Some((digit - b'0') as usize)
-                    }
-                    _ => None,
-                })
-                .max()
-                .unwrap_or(0),
-        );
-    let Some((directive_index, directive)) = sql
-        .lines()
-        .enumerate()
-        .find(|(_, line)| !line.trim().is_empty())
-        .filter(|(_, line)| line.trim_start().starts_with("-- sift-params:"))
-    else {
-        if placeholder_count > 0 {
-            return Err(format!(
-                "This query needs {placeholder_count} parameter(s). Add `-- sift-params: [value, ...]` as its first line."
-            ));
-        }
-        return Ok((sql.to_owned(), Vec::new()));
-    };
-    let json = directive
-        .trim_start()
-        .strip_prefix("-- sift-params:")
-        .unwrap_or_default()
-        .trim();
-    let values: Vec<serde_json::Value> = serde_json::from_str(json)
-        .map_err(|error| format!("Invalid sift parameter array: {error}"))?;
-    if values.len() != placeholder_count {
-        return Err(format!(
-            "Query has {placeholder_count} placeholder(s), but the sift parameter array has {} value(s)",
-            values.len()
-        ));
+/// Find positional placeholders outside SQL strings and comments. Both
+/// PostgreSQL (`$1`) and SQL Server (`@p1`) spellings map to the same ordered
+/// parameter vector used by the protocol.
+fn detect_query_parameters(sql: &str) -> Vec<String> {
+    #[derive(Clone, Copy)]
+    enum ScanState {
+        Sql,
+        SingleQuote,
+        DoubleQuote,
+        LineComment,
+        BlockComment,
     }
-    let params = values
-        .into_iter()
-        .map(|value| match value {
-            serde_json::Value::Null => sift_protocol::Value::Null,
-            serde_json::Value::Bool(value) => sift_protocol::Value::Bool(value),
-            serde_json::Value::Number(value) => value.as_i64().map_or_else(
-                || sift_protocol::Value::Decimal(value.to_string()),
-                sift_protocol::Value::Int64,
-            ),
-            serde_json::Value::String(value) => sift_protocol::Value::Text(value),
-            value @ (serde_json::Value::Array(_) | serde_json::Value::Object(_)) => {
-                sift_protocol::Value::Json(value)
+
+    let bytes = sql.as_bytes();
+    let mut state = ScanState::Sql;
+    let mut index = 0;
+    let mut max_parameter = 0;
+    let mut sql_server_style = false;
+    while index < bytes.len() {
+        match state {
+            ScanState::Sql if bytes[index..].starts_with(b"--") => {
+                state = ScanState::LineComment;
+                index += 2;
+            }
+            ScanState::Sql if bytes[index..].starts_with(b"/*") => {
+                state = ScanState::BlockComment;
+                index += 2;
+            }
+            ScanState::Sql if bytes[index] == b'\'' => {
+                state = ScanState::SingleQuote;
+                index += 1;
+            }
+            ScanState::Sql if bytes[index] == b'"' => {
+                state = ScanState::DoubleQuote;
+                index += 1;
+            }
+            ScanState::Sql if bytes[index] == b'$' => {
+                let start = index + 1;
+                let mut end = start;
+                while end < bytes.len() && bytes[end].is_ascii_digit() {
+                    end += 1;
+                }
+                if end > start {
+                    if let Ok(value) = sql[start..end].parse::<usize>() {
+                        max_parameter = max_parameter.max(value);
+                    }
+                    index = end;
+                } else {
+                    index += 1;
+                }
+            }
+            ScanState::Sql
+                if bytes[index] == b'@'
+                    && index + 2 < bytes.len()
+                    && matches!(bytes[index + 1], b'p' | b'P')
+                    && bytes[index + 2].is_ascii_digit() =>
+            {
+                let start = index + 2;
+                let mut end = start;
+                while end < bytes.len() && bytes[end].is_ascii_digit() {
+                    end += 1;
+                }
+                if let Ok(value) = sql[start..end].parse::<usize>() {
+                    max_parameter = max_parameter.max(value);
+                    sql_server_style = true;
+                }
+                index = end;
+            }
+            ScanState::Sql => index += 1,
+            ScanState::SingleQuote if bytes[index] == b'\'' => {
+                if bytes.get(index + 1) == Some(&b'\'') {
+                    index += 2;
+                } else {
+                    state = ScanState::Sql;
+                    index += 1;
+                }
+            }
+            ScanState::DoubleQuote if bytes[index] == b'"' => {
+                if bytes.get(index + 1) == Some(&b'"') {
+                    index += 2;
+                } else {
+                    state = ScanState::Sql;
+                    index += 1;
+                }
+            }
+            ScanState::LineComment if bytes[index] == b'\n' => {
+                state = ScanState::Sql;
+                index += 1;
+            }
+            ScanState::BlockComment if bytes[index..].starts_with(b"*/") => {
+                state = ScanState::Sql;
+                index += 2;
+            }
+            ScanState::SingleQuote
+            | ScanState::DoubleQuote
+            | ScanState::LineComment
+            | ScanState::BlockComment => index += 1,
+        }
+    }
+
+    (1..=max_parameter)
+        .map(|number| {
+            if sql_server_style {
+                format!("@p{number}")
+            } else {
+                format!("${number}")
             }
         })
-        .collect();
-    let sql = sql
-        .lines()
-        .enumerate()
-        .filter(|(index, _)| *index != directive_index)
-        .map(|(_, line)| line)
-        .collect::<Vec<_>>()
-        .join("\n");
-    Ok((sql, params))
+        .collect()
+}
+
+fn parameter_binding_key(sql: &str) -> String {
+    sql.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn parse_parameter_value(text: &str) -> Result<sift_protocol::Value, String> {
+    let trimmed = text.trim();
+    if trimmed.eq_ignore_ascii_case("null") {
+        return Ok(sift_protocol::Value::Null);
+    }
+    if trimmed.is_empty() {
+        return Ok(sift_protocol::Value::Text(String::new()));
+    }
+    let looks_typed = matches!(trimmed.as_bytes().first(), Some(b'"' | b'[' | b'{'))
+        || matches!(trimmed, "true" | "false")
+        || trimmed.parse::<i64>().is_ok()
+        || trimmed.parse::<f64>().is_ok();
+    if !looks_typed {
+        return Ok(sift_protocol::Value::Text(trimmed.to_owned()));
+    }
+    let value: serde_json::Value = serde_json::from_str(trimmed)
+        .map_err(|error| format!("Expected text or a valid JSON value: {error}"))?;
+    Ok(match value {
+        serde_json::Value::Null => sift_protocol::Value::Null,
+        serde_json::Value::Bool(value) => sift_protocol::Value::Bool(value),
+        serde_json::Value::Number(value) => value.as_i64().map_or_else(
+            || sift_protocol::Value::Decimal(value.to_string()),
+            sift_protocol::Value::Int64,
+        ),
+        serde_json::Value::String(value) => sift_protocol::Value::Text(value),
+        value @ (serde_json::Value::Array(_) | serde_json::Value::Object(_)) => {
+            sift_protocol::Value::Json(value)
+        }
+    })
 }
 
 /// One coalescing window for keystroke-driven reanalysis. Long enough that a
@@ -3291,6 +3372,10 @@ pub struct WorkspaceShell {
     plan_captures: Vec<sift_protocol::PlanCaptureSummary>,
     plan_capture_comparison: Option<sift_protocol::PlanCaptureComparison>,
     plan_capture_error: Option<String>,
+    pending_parameter_run: Option<PendingParameterRun>,
+    parameter_binding_inputs: Vec<ParameterBindingInput>,
+    remembered_parameter_bindings: HashMap<String, Vec<String>>,
+    parameter_binding_error: Option<String>,
     pending_database_execution: Option<PendingDatabaseExecution>,
     pending_database_explain: Option<PendingDatabaseExplain>,
     instance_sender: Option<tokio::sync::mpsc::UnboundedSender<InstanceCommand>>,
@@ -3713,6 +3798,10 @@ impl WorkspaceShell {
             plan_captures: Vec::new(),
             plan_capture_comparison: None,
             plan_capture_error: None,
+            pending_parameter_run: None,
+            parameter_binding_inputs: Vec::new(),
+            remembered_parameter_bindings: HashMap::new(),
+            parameter_binding_error: None,
             pending_database_execution: None,
             pending_database_explain: None,
             instance_sender: None,
@@ -4477,7 +4566,7 @@ impl WorkspaceShell {
                                     == self.selected_instance_id.as_deref().unwrap_or_default()
                         });
                         if let Some(pending) = pending {
-                            self.send_execution(pending.item_id, pending.sql, cx);
+                            self.send_execution(pending.item_id, pending.sql, pending.params, cx);
                         }
                         let pending = self.pending_database_explain.take().filter(|pending| {
                             pending.source.profile_id == profile_id
@@ -5212,8 +5301,82 @@ impl WorkspaceShell {
     }
 
     fn execute_database_item(&mut self, item_id: u64, sql: String, cx: &mut Context<Self>) {
+        let parameters = detect_query_parameters(&sql);
+        if !parameters.is_empty() {
+            let binding_key = parameter_binding_key(&sql);
+            let remembered = self
+                .remembered_parameter_bindings
+                .get(&binding_key)
+                .cloned()
+                .unwrap_or_default();
+            self.parameter_binding_inputs = parameters
+                .into_iter()
+                .enumerate()
+                .map(|(index, label)| {
+                    let text = remembered.get(index).cloned().unwrap_or_default();
+                    let aria_label = format!("Value for {label}");
+                    let input = cx.new(|cx| {
+                        TextInput::new(text, "Enter a value…", cx).aria_label(aria_label)
+                    });
+                    ParameterBindingInput { label, input }
+                })
+                .collect();
+            self.pending_parameter_run = Some(PendingParameterRun {
+                item_id,
+                sql,
+                binding_key,
+            });
+            self.parameter_binding_error = None;
+            self.modal = Some(Modal::QueryParameters);
+            cx.notify();
+            return;
+        }
+        self.execute_database_item_with_params(item_id, sql, Vec::new(), cx);
+    }
+
+    fn submit_query_parameters(&mut self, cx: &mut Context<Self>) {
+        let Some(pending) = self.pending_parameter_run.take() else {
+            return;
+        };
+        let texts = self
+            .parameter_binding_inputs
+            .iter()
+            .map(|binding| binding.input.read(cx).text().to_owned())
+            .collect::<Vec<_>>();
+        let params = self
+            .parameter_binding_inputs
+            .iter()
+            .zip(&texts)
+            .map(|(binding, text)| {
+                parse_parameter_value(text).map_err(|error| format!("{}: {error}", binding.label))
+            })
+            .collect::<Result<Vec<_>, _>>();
+        let params = match params {
+            Ok(params) => params,
+            Err(error) => {
+                self.pending_parameter_run = Some(pending);
+                self.parameter_binding_error = Some(error);
+                cx.notify();
+                return;
+            }
+        };
+        self.remembered_parameter_bindings
+            .insert(pending.binding_key, texts);
+        self.parameter_binding_inputs.clear();
+        self.parameter_binding_error = None;
+        self.modal = None;
+        self.execute_database_item_with_params(pending.item_id, pending.sql, params, cx);
+    }
+
+    fn execute_database_item_with_params(
+        &mut self,
+        item_id: u64,
+        sql: String,
+        params: Vec<sift_protocol::Value>,
+        cx: &mut Context<Self>,
+    ) {
         let Some(source) = self.database_source(item_id, cx) else {
-            self.send_execution(item_id, sql, cx);
+            self.send_execution(item_id, sql, params, cx);
             return;
         };
         if self.selected_instance_id.as_deref() != Some(source.instance_id.as_str()) {
@@ -5229,13 +5392,14 @@ impl WorkspaceShell {
             ConnectionStatus::Connected { profile_id, .. } if profile_id == source.profile_id
         ) {
             self.sync_database_item_states(cx);
-            self.send_execution(item_id, sql, cx);
+            self.send_execution(item_id, sql, params, cx);
             return;
         }
 
         self.pending_database_execution = Some(PendingDatabaseExecution {
             item_id,
             sql,
+            params,
             source: source.clone(),
         });
         let Some(sender) = &self.executor_sender else {
@@ -5277,14 +5441,13 @@ impl WorkspaceShell {
         cx.notify();
     }
 
-    fn send_execution(&mut self, item_id: u64, sql: String, cx: &mut Context<Self>) {
-        let (sql, params) = match parse_query_parameters(&sql) {
-            Ok(run) => run,
-            Err(message) => {
-                self.route_result(item_id, ResultState::Failed(message), cx);
-                return;
-            }
-        };
+    fn send_execution(
+        &mut self,
+        item_id: u64,
+        sql: String,
+        params: Vec<sift_protocol::Value>,
+        cx: &mut Context<Self>,
+    ) {
         let Some(sender) = &self.executor_sender else {
             self.route_result(
                 item_id,
@@ -10581,6 +10744,11 @@ impl WorkspaceShell {
             self.data_search_input
                 .update(cx, |input, cx| input.set_text("", cx));
         }
+        if self.modal == Some(Modal::QueryParameters) {
+            self.pending_parameter_run = None;
+            self.parameter_binding_inputs.clear();
+            self.parameter_binding_error = None;
+        }
         if self.modal == Some(Modal::EditResultCell) {
             self.staged_result_edit = None;
             self.pending_edit_set = None;
@@ -13751,6 +13919,7 @@ impl WorkspaceShell {
             let schema_search = matches!(modal, Modal::SchemaSearch);
             let data_search = matches!(modal, Modal::DataSearch);
             let data_results = matches!(modal, Modal::DataResults(_));
+            let query_parameters = matches!(modal, Modal::QueryParameters);
             let result_cell_edit = matches!(modal, Modal::EditResultCell);
             let plan_captures = matches!(modal, Modal::PlanCaptures);
             let instance_setup = matches!(modal, Modal::InstanceSetup);
@@ -13760,6 +13929,7 @@ impl WorkspaceShell {
                 || keymaps
                 || command_palette
                 || schema_search
+                || query_parameters
                 || result_cell_edit
                 || plan_captures
             {
@@ -14288,6 +14458,126 @@ impl WorkspaceShell {
                                 .text_color(colors.muted_text)
                                 .child(summary.unwrap_or_else(|| "Bounded to 20 tables".into()))
                                 .child("Esc close"),
+                        )
+                        .into_any_element()
+                }
+                Modal::QueryParameters => {
+                    let parameter_count = self.parameter_binding_inputs.len();
+                    div()
+                        .flex()
+                        .flex_col()
+                        .max_h(px(640.))
+                        .child(
+                            div()
+                                .h(px(42.))
+                                .px_3()
+                                .flex()
+                                .items_center()
+                                .justify_between()
+                                .border_b_1()
+                                .border_color(colors.subtle_border)
+                                .bg(colors.toolbar)
+                                .child(
+                                    div()
+                                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                                        .child("Query parameters"),
+                                )
+                                .child(
+                                    IconButton::new(
+                                        "close-query-parameters",
+                                        IconName::Close,
+                                        "Cancel query",
+                                    )
+                                    .square(px(26.))
+                                    .icon_size(13.)
+                                    .on_click(cx.listener(|shell, _, window, cx| {
+                                        shell.dismiss_modal(&DismissModal, window, cx)
+                                    })),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .id("query-parameters-body")
+                                .p_3()
+                                .flex()
+                                .flex_col()
+                                .gap_3()
+                                .overflow_y_scroll()
+                                .child(
+                                    div()
+                                        .text_sm()
+                                        .text_color(colors.muted_text)
+                                        .child(format!(
+                                            "Bind {parameter_count} detected parameter{} before running.",
+                                            if parameter_count == 1 { "" } else { "s" }
+                                        )),
+                                )
+                                .children(self.parameter_binding_inputs.iter().map(|binding| {
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .gap_3()
+                                        .child(
+                                            div()
+                                                .w(px(64.))
+                                                .font_family("monospace")
+                                                .text_sm()
+                                                .text_color(colors.muted_text)
+                                                .child(binding.label.clone()),
+                                        )
+                                        .child(div().flex_1().min_w_0().child(binding.input.clone()))
+                                }))
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(colors.muted_text)
+                                        .child("Use JSON for numbers, booleans, strings, arrays, and objects. Type null for SQL NULL; unquoted values are text."),
+                                )
+                                .children(self.parameter_binding_error.as_ref().map(|error| {
+                                    div()
+                                        .p_2()
+                                        .rounded_sm()
+                                        .bg(colors.danger_muted)
+                                        .text_sm()
+                                        .text_color(colors.danger)
+                                        .child(error.clone())
+                                })),
+                        )
+                        .child(
+                            div()
+                                .px_3()
+                                .py_2()
+                                .flex()
+                                .items_center()
+                                .justify_between()
+                                .border_t_1()
+                                .border_color(colors.subtle_border)
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(colors.muted_text)
+                                        .child("Bindings are remembered for this query"),
+                                )
+                                .child(
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .gap_2()
+                                        .child(
+                                            Button::new("cancel-query-parameters", "Cancel")
+                                                .tone(ButtonTone::Neutral)
+                                                .on_click(cx.listener(|shell, _, window, cx| {
+                                                    shell.dismiss_modal(&DismissModal, window, cx)
+                                                })),
+                                        )
+                                        .child(
+                                            Button::new("run-with-query-parameters", "Run")
+                                                .tone(ButtonTone::Accent)
+                                                .on_click(cx.listener(|shell, _, _, cx| {
+                                                    shell.submit_query_parameters(cx)
+                                                })),
+                                        ),
+                                ),
                         )
                         .into_any_element()
                 }
@@ -16674,6 +16964,7 @@ impl WorkspaceShell {
                     | Modal::SchemaSearch
                     | Modal::DataSearch
                     | Modal::DataResults(_)
+                    | Modal::QueryParameters
                     | Modal::EditResultCell
                     | Modal::PlanCaptures
                     | Modal::DatabaseConnection
@@ -22176,29 +22467,73 @@ mod tests {
     }
 
     #[test]
-    fn parameter_directive_binds_values_without_interpolating_sql() {
-        let (sql, params) = parse_query_parameters(
-            "-- sift-params: [42, \"open\", true, null]\nselect * from audit.events where id = $1 and state = $2 and visible = $3 and owner = $4",
-        )
-        .unwrap();
-        assert!(sql.starts_with("select * from audit.events"));
+    fn query_parameters_are_detected_outside_strings_and_comments() {
         assert_eq!(
-            params,
-            vec![
-                sift_protocol::Value::Int64(42),
-                sift_protocol::Value::Text("open".into()),
-                sift_protocol::Value::Bool(true),
-                sift_protocol::Value::Null,
-            ]
+            detect_query_parameters(
+                "select '$9', \"$8\" from audit.events -- $7\nwhere id = $1 and state = $2 /* $6 */"
+            ),
+            vec!["$1", "$2"]
+        );
+        assert_eq!(
+            detect_query_parameters("select * from audit.events where id = @P1 and state = @p2"),
+            vec!["@p1", "@p2"]
         );
     }
 
     #[test]
-    fn placeholders_without_bindings_fail_before_execution() {
-        assert!(
-            parse_query_parameters("select * from audit.events where id = @p1")
-                .unwrap_err()
-                .contains("sift-params")
+    fn parameter_values_support_typed_json_null_and_plain_text() {
+        assert_eq!(
+            ["42", "3.5", "true", "null", "\"open\"", "plain text"]
+                .into_iter()
+                .map(parse_parameter_value)
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap(),
+            vec![
+                sift_protocol::Value::Int64(42),
+                sift_protocol::Value::Decimal("3.5".into()),
+                sift_protocol::Value::Bool(true),
+                sift_protocol::Value::Null,
+                sift_protocol::Value::Text("open".into()),
+                sift_protocol::Value::Text("plain text".into()),
+            ]
         );
+    }
+
+    #[gpui::test]
+    fn parameter_dialog_remembers_bindings_for_the_query(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+
+        workspace.update(&mut cx, |shell, cx| {
+            shell.execute_database_item(
+                1,
+                "select * from audit.events where id = $1 and action = $2".into(),
+                cx,
+            );
+            assert_eq!(shell.modal, Some(Modal::QueryParameters));
+            shell.parameter_binding_inputs[0]
+                .input
+                .update(cx, |input, cx| input.set_text("42", cx));
+            shell.parameter_binding_inputs[1]
+                .input
+                .update(cx, |input, cx| input.set_text("open", cx));
+            shell.submit_query_parameters(cx);
+            assert_eq!(shell.modal, None);
+
+            shell.execute_database_item(
+                1,
+                "select * from audit.events where id = $1 and action = $2".into(),
+                cx,
+            );
+            assert_eq!(
+                shell
+                    .parameter_binding_inputs
+                    .iter()
+                    .map(|binding| binding.input.read(cx).text().to_owned())
+                    .collect::<Vec<_>>(),
+                vec!["42", "open"]
+            );
+        });
     }
 }
