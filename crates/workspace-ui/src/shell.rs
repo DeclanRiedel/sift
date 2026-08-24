@@ -8545,7 +8545,10 @@ impl WorkspaceShell {
             }
             let starts_ide_command = workspace
                 && !modal
-                && ((key == "space" && (vim_normal || (!editor && !text_input)))
+                && ((key == "space"
+                    && (vim_normal
+                        || self.focused_surface == WorkspaceSurface::Problems
+                        || (!editor && !text_input)))
                     || (key == "ctrl-k" && !text_input));
             if !starts_ide_command {
                 return;
@@ -19636,6 +19639,13 @@ mod tests {
                 "[ERROR] query.sql\nbad column"
             );
         });
+
+        cx.simulate_keystrokes("space");
+        assert_eq!(
+            workspace.read_with(&cx, |shell, _| shell.ide_key_buffer()),
+            "<leader>"
+        );
+        cx.simulate_keystrokes("escape");
 
         workspace.update(&mut cx, |shell, cx| {
             shell.route_result(
