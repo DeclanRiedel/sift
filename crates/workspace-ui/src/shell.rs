@@ -1178,6 +1178,7 @@ pub enum ExecutorCommand {
         name: String,
     },
     Disconnect,
+    CheckConnectionHealth,
     BeginTransaction,
     CommitTransaction,
     RollbackTransaction,
@@ -3510,6 +3511,8 @@ pub struct WorkspaceShell {
     connection_status: ConnectionStatus,
     connection_health: Option<ConnectionHealthReport>,
     connection_last_success_ms: Option<u64>,
+    reconnect_attempt: u32,
+    reconnect_available_at_ms: u64,
     operation_capabilities:
         HashMap<sift_protocol::OperationKind, sift_protocol::OperationCapability>,
     connection_schema: ConnectionSchemaState,
@@ -3949,6 +3952,8 @@ impl WorkspaceShell {
             connection_status: ConnectionStatus::Disconnected,
             connection_health: None,
             connection_last_success_ms: None,
+            reconnect_attempt: 0,
+            reconnect_available_at_ms: 0,
             operation_capabilities: HashMap::new(),
             connection_schema: ConnectionSchemaState::Unavailable,
             schema_search_generation: 0,
@@ -4742,6 +4747,15 @@ impl WorkspaceShell {
             ExecutorEvent::ConnectionHealth(report) => {
                 if report.failure.is_none() {
                     self.connection_last_success_ms = Some(report.checked_at_ms);
+                    self.reconnect_attempt = 0;
+                    self.reconnect_available_at_ms = 0;
+                } else {
+                    self.reconnect_attempt = self.reconnect_attempt.saturating_add(1);
+                    let shift = self.reconnect_attempt.saturating_sub(1).min(5);
+                    let delay_seconds = 1_u64.checked_shl(shift).unwrap_or(32);
+                    self.reconnect_available_at_ms = report
+                        .checked_at_ms
+                        .saturating_add(delay_seconds.saturating_mul(1_000));
                 }
                 self.connection_health = Some(report);
                 cx.notify();
@@ -6281,6 +6295,15 @@ impl WorkspaceShell {
     }
 
     fn reconnect(&mut self, cx: &mut Context<Self>) {
+        let now = epoch_millis();
+        if now < self.reconnect_available_at_ms {
+            let wait_seconds = self
+                .reconnect_available_at_ms
+                .saturating_sub(now)
+                .div_ceil(1_000);
+            self.show_toast(format!("Reconnect available in {wait_seconds}s"), cx);
+            return;
+        }
         let profile_id = match self.connection_status {
             ConnectionStatus::Connected { profile_id, .. }
             | ConnectionStatus::Failed { profile_id, .. } => profile_id,
@@ -6315,6 +6338,19 @@ impl WorkspaceShell {
                 "The active connection profile is no longer available".into(),
                 cx,
             );
+        }
+    }
+
+    fn check_connection_health(&mut self, cx: &mut Context<Self>) {
+        if !self.running_queries.is_empty() {
+            self.show_toast(
+                "Wait for running queries before checking the query connection".into(),
+                cx,
+            );
+            return;
+        }
+        if let Some(sender) = &self.executor_sender {
+            let _ = sender.send(ExecutorCommand::CheckConnectionHealth);
         }
     }
 
@@ -23049,6 +23085,14 @@ mod tests {
                 .and_then(|report| report.failure.as_ref())
                 .cloned()),
             Some(ConnectionHealthFailure::Database(message)) if message == "connection refused"
+        ));
+        workspace.update(&mut cx, |shell, cx| {
+            shell.running_queries.clear();
+            shell.check_connection_health(cx);
+        });
+        assert!(matches!(
+            receiver.try_recv(),
+            Ok(ExecutorCommand::CheckConnectionHealth)
         ));
         workspace.update(&mut cx, |shell, cx| shell.reconnect(cx));
         assert!(matches!(

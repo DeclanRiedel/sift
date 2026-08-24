@@ -494,6 +494,24 @@ struct QueryContext {
     semantic: tokio::sync::mpsc::UnboundedSender<SemanticControl>,
 }
 
+async fn check_connection_health(context: &QueryContext) -> ConnectionHealthReport {
+    let started = std::time::Instant::now();
+    let failure = match context.client.health().await {
+        Ok(_) => context
+            .client
+            .ping_connection(context.session, context.connection)
+            .await
+            .err()
+            .map(|error| ConnectionHealthFailure::Database(format!("{error}"))),
+        Err(error) => Some(ConnectionHealthFailure::Server(format!("{error}"))),
+    };
+    ConnectionHealthReport {
+        checked_at_ms: system_epoch_millis(),
+        latency_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+        failure,
+    }
+}
+
 /// Owns the SDK client and the current session/connection. Connection is
 /// explicit — the user picks a profile in the UI; the executor opens it and
 /// runs queries against it. The UI thread never touches the SDK directly.
@@ -510,23 +528,9 @@ async fn run_query_executor(
     loop {
         let command = tokio::select! {
             command = commands.recv() => command,
-            _ = health_tick.tick(), if context.is_some() => {
+            _ = health_tick.tick(), if context.is_some() && active_queries.values().all(|(_, control)| control.is_closed()) => {
                 let opened = context.as_ref().expect("guarded by context");
-                let started = std::time::Instant::now();
-                let failure = match opened.client.health().await {
-                    Ok(_) => opened
-                        .client
-                        .ping_connection(opened.session, opened.metadata_connection)
-                        .await
-                        .err()
-                        .map(|error| ConnectionHealthFailure::Database(format!("{error}"))),
-                    Err(error) => Some(ConnectionHealthFailure::Server(format!("{error}"))),
-                };
-                let report = ConnectionHealthReport {
-                    checked_at_ms: system_epoch_millis(),
-                    latency_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
-                    failure,
-                };
+                let report = check_connection_health(opened).await;
                 if events.send(ExecutorEvent::ConnectionHealth(report)).is_err() {
                     return;
                 }
@@ -603,6 +607,20 @@ async fn run_query_executor(
                     .is_err()
                 {
                     return;
+                }
+            }
+            ExecutorCommand::CheckConnectionHealth => {
+                active_queries.retain(|_, (_, control)| !control.is_closed());
+                if active_queries.is_empty() {
+                    if let Some(opened) = context.as_ref() {
+                        let report = check_connection_health(opened).await;
+                        if events
+                            .send(ExecutorEvent::ConnectionHealth(report))
+                            .is_err()
+                        {
+                            return;
+                        }
+                    }
                 }
             }
             ExecutorCommand::BeginTransaction => {

@@ -351,6 +351,24 @@ pub(super) fn render_status_bar(
                     matches!(shell.connection_status, ConnectionStatus::Connected { .. }).then(
                         || {
                             button(
+                                "footer-check-connection",
+                                IconName::Activity,
+                                "Check the active query connection now".into(),
+                                false,
+                                None,
+                                false,
+                            )
+                            .disabled(!shell.running_queries.is_empty())
+                            .on_click(
+                                cx.listener(|shell, _, _, cx| shell.check_connection_health(cx)),
+                            )
+                        },
+                    ),
+                )
+                .children(
+                    matches!(shell.connection_status, ConnectionStatus::Connected { .. }).then(
+                        || {
+                            button(
                                 "footer-disconnect-database",
                                 IconName::Close,
                                 "Disconnect the active database session".into(),
