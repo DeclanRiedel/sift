@@ -1127,12 +1127,27 @@ struct TableDesignerState {
 }
 
 #[derive(Debug, Clone)]
-struct StagedResultEdit {
+struct ResultCellEditTarget {
     item_id: u64,
     column: String,
     original: sift_protocol::Value,
     original_row: Vec<(String, sift_protocol::Value)>,
     source: DatabaseObjectSource,
+}
+
+#[derive(Debug, Clone)]
+struct StagedResultEdit {
+    item_id: u64,
+    column: String,
+    original: sift_protocol::Value,
+    value: sift_protocol::Value,
+    original_row: Vec<(String, sift_protocol::Value)>,
+    source: DatabaseObjectSource,
+}
+
+struct StagedResultRow {
+    original: Vec<(String, sift_protocol::Value)>,
+    changes: Vec<sift_protocol::CellEdit>,
 }
 
 /// Shell → executor. The executor owns the SDK client, session, and
@@ -3269,6 +3284,31 @@ fn parse_parameter_value(text: &str) -> Result<sift_protocol::Value, String> {
     })
 }
 
+fn result_edit_conflict_index(message: &str) -> Option<usize> {
+    let marker = message.find("edit ")? + "edit ".len();
+    let digits = message[marker..]
+        .chars()
+        .take_while(char::is_ascii_digit)
+        .collect::<String>();
+    (!digits.is_empty()).then(|| digits.parse().ok()).flatten()
+}
+
+fn staged_result_row_index(edits: &[StagedResultEdit], edit_index: usize) -> usize {
+    let Some(target) = edits.get(edit_index) else {
+        return 0;
+    };
+    let mut rows: Vec<&[(String, sift_protocol::Value)]> = Vec::new();
+    for edit in edits.iter().take(edit_index + 1) {
+        if !rows.contains(&edit.original_row.as_slice()) {
+            rows.push(&edit.original_row);
+        }
+        if edit.original_row == target.original_row {
+            return rows.len().saturating_sub(1);
+        }
+    }
+    0
+}
+
 /// One coalescing window for keystroke-driven reanalysis. Long enough that a
 /// fast typist produces one request per pause, short enough that diagnostics
 /// feel attached to the edit that caused them.
@@ -3377,7 +3417,9 @@ pub struct WorkspaceShell {
     saved_queries_loading: bool,
     saved_queries_error: Option<String>,
     saved_query_editing: Option<sift_api_types::SavedQueryId>,
-    staged_result_edit: Option<StagedResultEdit>,
+    result_cell_edit_target: Option<ResultCellEditTarget>,
+    staged_result_edits: Vec<StagedResultEdit>,
+    result_edit_conflicts: HashMap<usize, String>,
     pending_edit_set: Option<sift_protocol::EditSet>,
     result_edit_plan: Option<sift_protocol::EditPlan>,
     result_edit_pending: bool,
@@ -3807,7 +3849,9 @@ impl WorkspaceShell {
             saved_queries_loading: false,
             saved_queries_error: None,
             saved_query_editing: None,
-            staged_result_edit: None,
+            result_cell_edit_target: None,
+            staged_result_edits: Vec::new(),
+            result_edit_conflicts: HashMap::new(),
             pending_edit_set: None,
             result_edit_plan: None,
             result_edit_pending: false,
@@ -4658,7 +4702,7 @@ impl WorkspaceShell {
                 edit_set,
                 result,
             } => {
-                if self.staged_result_edit.as_ref().map(|edit| edit.item_id) != Some(item_id) {
+                if self.staged_result_edits.first().map(|edit| edit.item_id) != Some(item_id) {
                     return;
                 }
                 self.result_edit_pending = false;
@@ -4666,6 +4710,7 @@ impl WorkspaceShell {
                     Ok(plan) => {
                         self.pending_edit_set = Some(edit_set);
                         self.result_edit_plan = Some(plan);
+                        self.result_edit_conflicts.clear();
                         self.result_edit_error = None;
                     }
                     Err(message) => self.result_edit_error = Some(message),
@@ -4673,7 +4718,7 @@ impl WorkspaceShell {
                 cx.notify();
             }
             ExecutorEvent::ResultEditsApplied { item_id, result } => {
-                if self.staged_result_edit.as_ref().map(|edit| edit.item_id) != Some(item_id) {
+                if self.staged_result_edits.first().map(|edit| edit.item_id) != Some(item_id) {
                     return;
                 }
                 self.result_edit_pending = false;
@@ -4685,13 +4730,30 @@ impl WorkspaceShell {
                             .map(|outcome| outcome.affected_rows)
                             .sum::<u64>();
                         self.modal = None;
-                        self.staged_result_edit = None;
+                        self.result_cell_edit_target = None;
+                        self.staged_result_edits.clear();
+                        self.result_edit_conflicts.clear();
                         self.pending_edit_set = None;
                         self.result_edit_plan = None;
                         self.show_toast(format!("Applied edit to {affected} row(s)"), cx);
                         self.refresh_database_item(item_id, cx);
                     }
-                    Err(message) => self.result_edit_error = Some(message),
+                    Err(message) => {
+                        let conflict = result_edit_conflict_index(&message);
+                        self.result_edit_conflicts.clear();
+                        if let Some(index) = conflict {
+                            self.result_edit_conflicts.insert(index, message.clone());
+                        } else if message.to_ascii_lowercase().contains("conflict") {
+                            let row_count = self
+                                .pending_edit_set
+                                .as_ref()
+                                .map_or(0, |edit_set| edit_set.edits.len());
+                            for index in 0..row_count {
+                                self.result_edit_conflicts.insert(index, message.clone());
+                            }
+                        }
+                        self.result_edit_error = Some(message);
+                    }
                 }
                 cx.notify();
             }
@@ -10088,18 +10150,36 @@ impl WorkspaceShell {
             self.show_toast("Select one result cell to edit".into(), cx);
             return;
         };
-        let text = render_value(&selected.original).text;
+        if self
+            .staged_result_edits
+            .first()
+            .is_some_and(|edit| edit.item_id != item_id)
+        {
+            self.staged_result_edits.clear();
+            self.result_edit_conflicts.clear();
+            self.pending_edit_set = None;
+            self.result_edit_plan = None;
+        }
+        let staged_value = self
+            .staged_result_edits
+            .iter()
+            .find(|edit| {
+                edit.item_id == item_id
+                    && edit.column == selected.column
+                    && edit.original_row == selected.original_row
+            })
+            .map(|edit| &edit.value)
+            .unwrap_or(&selected.original);
+        let text = render_value(staged_value).text;
         self.result_cell_edit_input
             .update(cx, |input, cx| input.set_text(text, cx));
-        self.staged_result_edit = Some(StagedResultEdit {
+        self.result_cell_edit_target = Some(ResultCellEditTarget {
             item_id,
             column: selected.column,
             original: selected.original,
             original_row: selected.original_row,
             source,
         });
-        self.pending_edit_set = None;
-        self.result_edit_plan = None;
         self.result_edit_pending = false;
         self.result_edit_error = None;
         self.modal = Some(Modal::EditResultCell);
@@ -10142,46 +10222,116 @@ impl WorkspaceShell {
         }
     }
 
-    fn preview_result_cell_edit(&mut self, cx: &mut Context<Self>) {
-        let Some(staged) = self.staged_result_edit.clone() else {
-            return;
+    fn stage_current_result_edit(&mut self, cx: &mut Context<Self>) -> bool {
+        let Some(target) = self.result_cell_edit_target.clone() else {
+            return !self.staged_result_edits.is_empty();
         };
         let text = self.result_cell_edit_input.read(cx).text().to_string();
-        let value = match Self::parse_result_cell_value(&staged.original, &text) {
+        let value = match Self::parse_result_cell_value(&target.original, &text) {
             Ok(value) => value,
             Err(message) => {
                 self.result_edit_error = Some(message);
                 cx.notify();
-                return;
+                return false;
             }
         };
-        let original = staged
-            .original_row
-            .iter()
-            .map(|(column, value)| sift_protocol::CellEdit {
-                column: column.clone(),
-                value: value.clone(),
-            })
-            .collect::<Vec<_>>();
-        let edit_set = sift_protocol::EditSet {
+        let existing = self.staged_result_edits.iter().position(|edit| {
+            edit.item_id == target.item_id
+                && edit.column == target.column
+                && edit.original_row == target.original_row
+        });
+        if let Some(index) = existing {
+            self.staged_result_edits.remove(index);
+        }
+        if value != target.original {
+            self.staged_result_edits.push(StagedResultEdit {
+                item_id: target.item_id,
+                column: target.column,
+                original: target.original,
+                value,
+                original_row: target.original_row,
+                source: target.source,
+            });
+        }
+        self.pending_edit_set = None;
+        self.result_edit_plan = None;
+        self.result_edit_conflicts.clear();
+        self.result_edit_error = None;
+        cx.notify();
+        true
+    }
+
+    fn stage_result_cell_edit_and_close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.stage_current_result_edit(cx) {
+            return;
+        }
+        self.result_cell_edit_target = None;
+        self.modal = None;
+        self.focus_active_pane(window, cx);
+        cx.notify();
+    }
+
+    fn staged_result_edit_set(&self) -> Option<sift_protocol::EditSet> {
+        let first = self.staged_result_edits.first()?;
+        let mut rows: Vec<StagedResultRow> = Vec::new();
+        for edit in &self.staged_result_edits {
+            if let Some(row) = rows
+                .iter_mut()
+                .find(|row| row.original == edit.original_row)
+            {
+                row.changes.push(sift_protocol::CellEdit {
+                    column: edit.column.clone(),
+                    value: edit.value.clone(),
+                });
+            } else {
+                rows.push(StagedResultRow {
+                    original: edit.original_row.clone(),
+                    changes: vec![sift_protocol::CellEdit {
+                        column: edit.column.clone(),
+                        value: edit.value.clone(),
+                    }],
+                });
+            }
+        }
+        Some(sift_protocol::EditSet {
             table: sift_protocol::ObjectPath {
-                catalog: staged.source.catalog.clone(),
-                schema: Some(staged.source.schema.clone()),
-                name: staged.source.object.clone(),
-                kind: Some(staged.source.object_kind),
+                catalog: first.source.catalog.clone(),
+                schema: Some(first.source.schema.clone()),
+                name: first.source.object.clone(),
+                kind: Some(first.source.object_kind),
                 routine_args: None,
             },
-            edits: vec![sift_protocol::RowEdit::Update {
-                key: sift_protocol::RowKey {
-                    columns: original.clone(),
-                },
-                changes: vec![sift_protocol::CellEdit {
-                    column: staged.column,
-                    value,
-                }],
-                expected: original,
-            }],
+            edits: rows
+                .into_iter()
+                .map(|row| {
+                    let original = row
+                        .original
+                        .into_iter()
+                        .map(|(column, value)| sift_protocol::CellEdit { column, value })
+                        .collect::<Vec<_>>();
+                    sift_protocol::RowEdit::Update {
+                        key: sift_protocol::RowKey {
+                            columns: original.clone(),
+                        },
+                        changes: row.changes,
+                        expected: original,
+                    }
+                })
+                .collect(),
+        })
+    }
+
+    fn preview_result_cell_edit(&mut self, cx: &mut Context<Self>) {
+        if !self.stage_current_result_edit(cx) {
+            return;
+        }
+        let Some(edit_set) = self.staged_result_edit_set() else {
+            self.result_edit_error =
+                Some("Stage at least one changed cell before previewing".into());
+            cx.notify();
+            return;
         };
+        let item_id = self.staged_result_edits[0].item_id;
         let Some(sender) = &self.executor_sender else {
             self.result_edit_error = Some("The database executor is unavailable".into());
             cx.notify();
@@ -10192,10 +10342,7 @@ impl WorkspaceShell {
         self.result_edit_plan = None;
         self.pending_edit_set = None;
         if sender
-            .send(ExecutorCommand::PreviewResultEdits {
-                item_id: staged.item_id,
-                edit_set,
-            })
+            .send(ExecutorCommand::PreviewResultEdits { item_id, edit_set })
             .is_err()
         {
             self.result_edit_pending = false;
@@ -10206,7 +10353,7 @@ impl WorkspaceShell {
 
     fn apply_result_cell_edit(&mut self, cx: &mut Context<Self>) {
         let (Some(staged), Some(edit_set), Some(sender)) = (
-            self.staged_result_edit.as_ref(),
+            self.staged_result_edits.first(),
             self.pending_edit_set.clone(),
             self.executor_sender.as_ref(),
         ) else {
@@ -10224,6 +10371,18 @@ impl WorkspaceShell {
             self.result_edit_pending = false;
             self.result_edit_error = Some("The database executor stopped".into());
         }
+        cx.notify();
+    }
+
+    fn revert_staged_result_edit(&mut self, index: usize, cx: &mut Context<Self>) {
+        if index >= self.staged_result_edits.len() {
+            return;
+        }
+        self.staged_result_edits.remove(index);
+        self.pending_edit_set = None;
+        self.result_edit_plan = None;
+        self.result_edit_conflicts.clear();
+        self.result_edit_error = None;
         cx.notify();
     }
 
@@ -10881,7 +11040,9 @@ impl WorkspaceShell {
             self.pending_connection_change = None;
         }
         if self.modal == Some(Modal::EditResultCell) {
-            self.staged_result_edit = None;
+            self.result_cell_edit_target = None;
+            self.staged_result_edits.clear();
+            self.result_edit_conflicts.clear();
             self.pending_edit_set = None;
             self.result_edit_plan = None;
             self.result_edit_pending = false;
@@ -14713,7 +14874,8 @@ impl WorkspaceShell {
                         .into_any_element()
                 }
                 Modal::EditResultCell => {
-                    let staged = self.staged_result_edit.as_ref();
+                    let target = self.result_cell_edit_target.as_ref();
+                    let staged_edits = self.staged_result_edits.clone();
                     let pending = self.result_edit_pending;
                     let plan = self.result_edit_plan.as_ref();
                     let can_apply = plan.is_some() && self.pending_edit_set.is_some() && !pending;
@@ -14737,7 +14899,7 @@ impl WorkspaceShell {
                                         .min_w_0()
                                         .truncate()
                                         .font_weight(gpui::FontWeight::SEMIBOLD)
-                                        .child(staged.map_or_else(
+                                        .child(target.map_or_else(
                                             || "Edit result cell".into(),
                                             |edit| format!("Edit {}.{}", edit.source.object, edit.column),
                                         )),
@@ -14776,13 +14938,95 @@ impl WorkspaceShell {
                                         )
                                         .child(self.result_cell_edit_input.clone()),
                                 )
-                                .children(staged.map(|edit| {
+                                .children(target.map(|edit| {
                                     div()
                                         .text_xs()
                                         .text_color(colors.muted_text)
                                         .child(format!(
                                             "Original: {} · Enter NULL to store a null value",
                                             render_value(&edit.original).text
+                                        ))
+                                }))
+                                .children((!staged_edits.is_empty()).then(|| {
+                                    div()
+                                        .flex()
+                                        .flex_col()
+                                        .gap_1()
+                                        .child(
+                                            div()
+                                                .text_xs()
+                                                .font_weight(gpui::FontWeight::SEMIBOLD)
+                                                .text_color(colors.muted_text)
+                                                .child(format!(
+                                                    "Staged changes ({})",
+                                                    staged_edits.len()
+                                                )),
+                                        )
+                                        .children(staged_edits.iter().enumerate().map(
+                                            |(index, edit)| {
+                                                let row_index = staged_result_row_index(
+                                                    &staged_edits,
+                                                    index,
+                                                );
+                                                let conflict = self
+                                                    .result_edit_conflicts
+                                                    .get(&row_index)
+                                                    .cloned();
+                                                div()
+                                                    .id(("staged-result-edit", index))
+                                                    .p_2()
+                                                    .flex()
+                                                    .flex_col()
+                                                    .gap_1()
+                                                    .rounded_sm()
+                                                    .border_1()
+                                                    .border_color(if conflict.is_some() {
+                                                        colors.danger
+                                                    } else {
+                                                        colors.subtle_border
+                                                    })
+                                                    .child(
+                                                        div()
+                                                            .flex()
+                                                            .items_center()
+                                                            .justify_between()
+                                                            .gap_2()
+                                                            .child(
+                                                                div()
+                                                                    .min_w_0()
+                                                                    .truncate()
+                                                                    .text_sm()
+                                                                    .child(format!(
+                                                                        "Row {} · {}: {} → {}",
+                                                                        row_index + 1,
+                                                                        edit.column,
+                                                                        render_value(&edit.original).text,
+                                                                        render_value(&edit.value).text,
+                                                                    )),
+                                                            )
+                                                            .child(
+                                                                Button::new(
+                                                                    ("revert-result-edit", index),
+                                                                    "Revert",
+                                                                )
+                                                                .tone(ButtonTone::Ghost)
+                                                                .on_click(cx.listener(
+                                                                    move |shell, _, _, cx| {
+                                                                        shell.revert_staged_result_edit(
+                                                                            index, cx,
+                                                                        )
+                                                                    },
+                                                                )),
+                                                            ),
+                                                    )
+                                                    .children(conflict.map(|message| {
+                                                        div()
+                                                            .text_xs()
+                                                            .text_color(colors.danger)
+                                                            .whitespace_normal()
+                                                            .child(message)
+                                                    }))
+                                            },
                                         ))
                                 }))
                                 .children(plan.map(|plan| {
@@ -14842,14 +15086,22 @@ impl WorkspaceShell {
                                 .border_t_1()
                                 .border_color(colors.subtle_border)
                                 .child(
-                                    Button::new("cancel-result-cell-edit", "Cancel")
+                                    Button::new("cancel-result-cell-edit", "Discard all")
                                         .tone(ButtonTone::Neutral)
                                         .on_click(cx.listener(|shell, _, window, cx| {
                                             shell.dismiss_modal(&DismissModal, window, cx)
                                         })),
                                 )
                                 .child(
-                                    Button::new("preview-result-cell-edit", "Preview SQL")
+                                    Button::new("stage-result-cell-edit", "Stage and close")
+                                        .tone(ButtonTone::Neutral)
+                                        .disabled(pending)
+                                        .on_click(cx.listener(|shell, _, window, cx| {
+                                            shell.stage_result_cell_edit_and_close(window, cx)
+                                        })),
+                                )
+                                .child(
+                                    Button::new("preview-result-cell-edit", "Preview all")
                                         .tone(ButtonTone::Neutral)
                                         .loading(pending && plan.is_none())
                                         .disabled(pending)
@@ -22802,6 +23054,78 @@ mod tests {
             shell.toggle_plan_capture_selection(second, cx);
             assert_eq!(shell.selected_plan_captures, vec![third]);
         });
+    }
+
+    #[gpui::test]
+    fn result_edits_stage_multiple_cells_group_rows_and_revert(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        let source = DatabaseObjectSource {
+            instance_id: "local".into(),
+            tenant_id: 1,
+            profile_id: 2,
+            profile_name: "demo/postgres".into(),
+            provider_id: sift_protocol::ProviderId::new("sift/postgres").unwrap(),
+            catalog: Some("sifttest".into()),
+            schema: "audit".into(),
+            object: "events".into(),
+            object_kind: sift_protocol::ObjectKind::Table,
+            last_refreshed_at_ms: None,
+        };
+        let first_row = vec![
+            ("id".into(), sift_protocol::Value::Int64(1)),
+            ("action".into(), sift_protocol::Value::Text("open".into())),
+        ];
+        let second_row = vec![
+            ("id".into(), sift_protocol::Value::Int64(2)),
+            ("action".into(), sift_protocol::Value::Text("close".into())),
+        ];
+
+        workspace.update(&mut cx, |shell, cx| {
+            shell.staged_result_edits = vec![
+                StagedResultEdit {
+                    item_id: 1,
+                    column: "action".into(),
+                    original: sift_protocol::Value::Text("open".into()),
+                    value: sift_protocol::Value::Text("review".into()),
+                    original_row: first_row.clone(),
+                    source: source.clone(),
+                },
+                StagedResultEdit {
+                    item_id: 1,
+                    column: "id".into(),
+                    original: sift_protocol::Value::Int64(1),
+                    value: sift_protocol::Value::Int64(10),
+                    original_row: first_row,
+                    source: source.clone(),
+                },
+                StagedResultEdit {
+                    item_id: 1,
+                    column: "action".into(),
+                    original: sift_protocol::Value::Text("close".into()),
+                    value: sift_protocol::Value::Text("archived".into()),
+                    original_row: second_row,
+                    source,
+                },
+            ];
+            let edit_set = shell.staged_result_edit_set().unwrap();
+            assert_eq!(edit_set.edits.len(), 2);
+            let sift_protocol::RowEdit::Update { changes, .. } = &edit_set.edits[0] else {
+                panic!("staged changes produce updates")
+            };
+            assert_eq!(changes.len(), 2);
+            assert_eq!(staged_result_row_index(&shell.staged_result_edits, 1), 0);
+            assert_eq!(staged_result_row_index(&shell.staged_result_edits, 2), 1);
+            shell.revert_staged_result_edit(1, cx);
+            assert_eq!(shell.staged_result_edits.len(), 2);
+        });
+        assert_eq!(
+            result_edit_conflict_index(
+                "edit 1 affected 0 rows (expected 1); the row changed or no longer matches"
+            ),
+            Some(1)
+        );
     }
 
     #[test]
