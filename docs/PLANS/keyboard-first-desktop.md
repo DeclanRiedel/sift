@@ -15,10 +15,11 @@ from the standard keymap. Insert-mode Space stays literal. `:` in normal mode
 always opens Sift's searchable command palette; Sift does not expose a separate
 ModalKit Ex prompt.
 
-Pending workspace chords are observed directly from GPUI, so discovery appears
-on the first key without waiting for the chord timeout. The status bar's
-`BUFFER` segment mirrors that chord, falling back to the active editor's pending
-Vim sequence.
+Workspace chords use a transient IDE command state owned by the workspace, not
+GPUI's timed multi-stroke replay. Once leader is pressed, every following key is
+consumed by the IDE until a command completes or Escape cancels, so delayed or
+invalid input can never mutate SQL. Status chrome displays the SQL Vim mode and
+local input separately from the active `IDE <leader> …` sequence.
 
 Families stay small and mnemonic:
 
@@ -65,6 +66,8 @@ prefixes display a compact which-key strip generated from the same vocabulary.
       insert-mode characters.
 - [x] Add Space leader, Ctrl+K fallback, core find/view/execute/tab/edit/
       database/workspace sequences, and which-key prefix hints.
+- [x] Isolate leader input in a timeout-free IDE command state; never replay
+      incomplete IDE keys into the focused editor.
 - [x] Search command labels, stable command ids, and mnemonic sequences in one
       palette.
 - [x] Remove advertised/default F-key dependencies.

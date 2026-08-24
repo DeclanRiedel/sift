@@ -2,9 +2,9 @@ use std::path::PathBuf;
 
 use gpui::KeyBinding;
 use sift_workspace_ui::{
-    CloseActiveItem, CloseActivePane, DismissModal, FocusNextPane, OpenCommandPalette,
-    OpenServerConnection, PaletteConfirm, PaletteDown, PaletteUp, SaveActiveItem, SplitPane,
-    ToggleBottomDock, ToggleLeftDock, ToggleRightDock,
+    CloseActiveItem, CloseActivePane, DismissModal, OpenCommandPalette, PaletteConfirm,
+    PaletteDown, PaletteUp, SaveActiveItem, SplitPane, ToggleBottomDock, ToggleLeftDock,
+    ToggleRightDock,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -106,11 +106,6 @@ pub fn shell_key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("down", PaletteDown, context),
         KeyBinding::new("enter", PaletteConfirm, context),
         KeyBinding::new(&format!("{primary}-\\"), SplitPane, context),
-        KeyBinding::new(
-            &format!("{primary}-k {primary}-right"),
-            FocusNextPane,
-            context,
-        ),
         KeyBinding::new(&format!("{primary}-w"), CloseActiveItem, context),
         KeyBinding::new(&format!("{primary}-shift-w"), CloseActivePane, context),
         KeyBinding::new(&format!("{primary}-s"), SaveActiveItem, context),
@@ -123,101 +118,6 @@ pub fn shell_key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new(&format!("{primary}-shift-i"), ToggleRightDock, context),
         KeyBinding::new(&format!("{primary}-j"), ToggleBottomDock, context),
     ];
-
-    // Vim-like Sift command language. Space is leader only in Vim normal
-    // mode or non-text UI surfaces. Ctrl+K is the standard-keymap fallback.
-    // The workspace observes GPUI's pending input directly, so prefix help is
-    // visible immediately without binding exact prefixes and waiting for the
-    // multi-keystroke timeout.
-    for (leader, language_context) in [
-        ("space", "vim_mode == normal"),
-        ("space", "SiftWorkspace && !SiftEditor && !SiftTextInput"),
-        ("ctrl-k", "SiftWorkspace && !SiftTextInput"),
-    ] {
-        bindings.extend([
-            KeyBinding::new(
-                &format!("{leader} f c"),
-                OpenCommandPalette,
-                Some(language_context),
-            ),
-            KeyBinding::new(
-                &format!("{leader} f d"),
-                sift_workspace_ui::OpenSchemaSearch,
-                Some(language_context),
-            ),
-            KeyBinding::new(
-                &format!("{leader} f u"),
-                sift_workspace_ui::editor::FindUsages,
-                Some(language_context),
-            ),
-            KeyBinding::new(
-                &format!("{leader} v d"),
-                ToggleLeftDock,
-                Some(language_context),
-            ),
-            KeyBinding::new(
-                &format!("{leader} v i"),
-                ToggleRightDock,
-                Some(language_context),
-            ),
-            KeyBinding::new(
-                &format!("{leader} v b"),
-                ToggleBottomDock,
-                Some(language_context),
-            ),
-            KeyBinding::new(
-                &format!("{leader} x s"),
-                sift_workspace_ui::editor::ExecuteStatement,
-                Some(language_context),
-            ),
-            KeyBinding::new(
-                &format!("{leader} x q"),
-                sift_workspace_ui::editor::ExecuteDocument,
-                Some(language_context),
-            ),
-            KeyBinding::new(
-                &format!("{leader} x c"),
-                sift_workspace_ui::CancelExecution,
-                Some(language_context),
-            ),
-            KeyBinding::new(
-                &format!("{leader} t c"),
-                CloseActiveItem,
-                Some(language_context),
-            ),
-            KeyBinding::new(
-                &format!("{leader} t s"),
-                SaveActiveItem,
-                Some(language_context),
-            ),
-            KeyBinding::new(
-                &format!("{leader} e f"),
-                sift_workspace_ui::editor::FormatDocument,
-                Some(language_context),
-            ),
-            KeyBinding::new(
-                &format!("{leader} e q"),
-                sift_workspace_ui::editor::ApplyQuickFix,
-                Some(language_context),
-            ),
-            KeyBinding::new(
-                &format!("{leader} d c"),
-                OpenServerConnection,
-                Some(language_context),
-            ),
-            KeyBinding::new(&format!("{leader} w s"), SplitPane, Some(language_context)),
-            KeyBinding::new(
-                &format!("{leader} w n"),
-                FocusNextPane,
-                Some(language_context),
-            ),
-            KeyBinding::new(
-                &format!("{leader} w c"),
-                CloseActivePane,
-                Some(language_context),
-            ),
-        ]);
-    }
 
     bindings.extend([
         KeyBinding::new(
@@ -248,6 +148,6 @@ mod tests {
 
     #[test]
     fn keymap_has_stable_action_coverage() {
-        assert_eq!(shell_key_bindings().len(), 67);
+        assert_eq!(shell_key_bindings().len(), 15);
     }
 }

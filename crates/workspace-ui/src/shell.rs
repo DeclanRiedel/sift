@@ -5,7 +5,7 @@ use std::sync::Arc;
 use gpui::{
     actions, deferred, div, img, prelude::*, px, uniform_list, App, Bounds, Context, CursorStyle,
     DefiniteLength, Div, Entity, EventEmitter, FocusHandle, Focusable, Hsla, IntoElement,
-    Keystroke, MouseButton, PathPromptOptions, Pixels, ResizeEdge, Role, ScrollHandle,
+    KeystrokeEvent, MouseButton, PathPromptOptions, Pixels, ResizeEdge, Role, ScrollHandle,
     ScrollStrategy, SharedString, Subscription, Task, UniformListScrollHandle, Window,
     WindowBounds, WindowControlArea,
 };
@@ -42,7 +42,10 @@ mod items;
 mod pane_layout;
 mod status_bar;
 
-pub use commands::{CommandContext, CommandDefinition, CommandId, CommandRegistry, CommandSpec};
+pub use commands::{
+    CommandContext, CommandDefinition, CommandId, CommandLanguageMatch, CommandRegistry,
+    CommandSpec,
+};
 pub use docks::{Dock, DockDefinition, DockId, DockPlacement, DockRegistry};
 pub use items::{ItemDefinition, ItemRegistry, ItemRuntimeKind};
 pub use status_bar::StatusBar;
@@ -650,32 +653,17 @@ enum KeyLanguageHint {
     Workspace,
 }
 
-fn format_pending_keys(keys: &[Keystroke]) -> String {
-    keys.iter()
-        .map(|key| match key.unparse().as_str() {
-            "space" | "ctrl-k" => "<leader>".to_owned(),
-            _ => key.unparse(),
-        })
-        .collect::<Vec<_>>()
-        .join(" ")
-}
-
-fn key_language_hint(keys: &[Keystroke]) -> Option<KeyLanguageHint> {
-    match keys.first()?.unparse().as_str() {
-        "space" | "ctrl-k" => {}
-        _ => return None,
-    }
-
-    match keys.get(1).map(Keystroke::unparse).as_deref() {
-        None => Some(KeyLanguageHint::Root),
-        Some("f") => Some(KeyLanguageHint::Find),
-        Some("v") => Some(KeyLanguageHint::View),
-        Some("x") => Some(KeyLanguageHint::Execute),
-        Some("t") => Some(KeyLanguageHint::Tab),
-        Some("e") => Some(KeyLanguageHint::Edit),
-        Some("d") => Some(KeyLanguageHint::Database),
-        Some("w") => Some(KeyLanguageHint::Workspace),
-        Some(_) => None,
+fn key_language_hint(keys: &[String]) -> KeyLanguageHint {
+    match keys.first().map(String::as_str) {
+        None => KeyLanguageHint::Root,
+        Some("f") => KeyLanguageHint::Find,
+        Some("v") => KeyLanguageHint::View,
+        Some("x") => KeyLanguageHint::Execute,
+        Some("t") => KeyLanguageHint::Tab,
+        Some("e") => KeyLanguageHint::Edit,
+        Some("d") => KeyLanguageHint::Database,
+        Some("w") => KeyLanguageHint::Workspace,
+        Some(_) => KeyLanguageHint::Root,
     }
 }
 
@@ -2948,8 +2936,7 @@ pub struct WorkspaceShell {
     active_left_panel: LeftPanel,
     active_bottom_tool: BottomTool,
     modal: Option<Modal>,
-    key_language_hint: Option<KeyLanguageHint>,
-    key_buffer: String,
+    ide_input: Option<Vec<String>>,
     app_bar_expanded: bool,
     app_bar_menu: Option<AppBarMenu>,
     toasts: Vec<Toast>,
@@ -3015,6 +3002,7 @@ pub struct WorkspaceShell {
     database_connection_pending: bool,
     database_connection_error: Option<String>,
     store: Option<Arc<PresentationStore>>,
+    _key_interceptor_subscription: Subscription,
     _bounds_subscription: Subscription,
     next_id: u64,
 }
@@ -3236,10 +3224,16 @@ impl WorkspaceShell {
             .collect::<Vec<_>>();
         let pane_layout =
             pane_layout::repair(workspace.pane_layout, &pane_ids, workspace.pane_flexes);
-        cx.observe_pending_input(window, |shell, window, cx| {
-            shell.sync_pending_input(window, cx);
-        })
-        .detach();
+        let shell = cx.weak_entity();
+        let shell_window = window.window_handle();
+        let key_interceptor_subscription = cx.intercept_keystrokes(move |event, window, cx| {
+            if window.window_handle() != shell_window {
+                return;
+            }
+            let _ = shell.update(cx, |shell, cx| {
+                shell.intercept_ide_input(event, window, cx);
+            });
+        });
         Self {
             focus_handle: cx.focus_handle(),
             query_input,
@@ -3292,8 +3286,7 @@ impl WorkspaceShell {
             active_left_panel: workspace.left_panel,
             active_bottom_tool: workspace.bottom_tool,
             modal: None,
-            key_language_hint: None,
-            key_buffer: String::new(),
+            ide_input: None,
             app_bar_expanded: false,
             app_bar_menu: None,
             toasts: Vec::new(),
@@ -3352,6 +3345,7 @@ impl WorkspaceShell {
             database_connection_pending: false,
             database_connection_error: None,
             store,
+            _key_interceptor_subscription: key_interceptor_subscription,
             _bounds_subscription: bounds_subscription,
             next_id,
         }
@@ -7694,7 +7688,7 @@ impl WorkspaceShell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.key_language_hint = None;
+        self.ide_input = None;
         self.modal = Some(Modal::CommandPalette);
         self.palette_selected = 0;
         self.palette_scroll_handle
@@ -7709,15 +7703,100 @@ impl WorkspaceShell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.key_language_hint = None;
+        self.ide_input = None;
         self.open_schema_search(window, cx);
     }
 
-    fn sync_pending_input(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let pending = window.pending_input_keystrokes().unwrap_or_default();
-        self.key_buffer = format_pending_keys(pending);
-        self.key_language_hint = key_language_hint(pending);
-        cx.notify();
+    fn intercept_ide_input(
+        &mut self,
+        event: &KeystrokeEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let key = event.keystroke.unparse();
+        if self.ide_input.is_none() {
+            let has_context = |name: &str| {
+                event
+                    .context_stack
+                    .iter()
+                    .any(|context| context.contains(name))
+            };
+            let vim_normal = event.context_stack.iter().any(|context| {
+                context
+                    .get("vim_mode")
+                    .is_some_and(|mode| mode.as_ref() == "normal")
+            });
+            let workspace = has_context("SiftWorkspace");
+            let editor = has_context("SiftEditor");
+            let text_input = has_context("SiftTextInput");
+            let modal = has_context("SiftModal");
+            let starts_ide_command = workspace
+                && !modal
+                && ((key == "space" && (vim_normal || (!editor && !text_input)))
+                    || (key == "ctrl-k" && !text_input));
+            if !starts_ide_command {
+                return;
+            }
+            self.ide_input = Some(Vec::new());
+            cx.stop_propagation();
+            cx.notify();
+            return;
+        }
+
+        cx.stop_propagation();
+        if key == "escape" {
+            self.ide_input = None;
+            cx.notify();
+            return;
+        }
+        if key == "backspace" {
+            let keys = self.ide_input.as_mut().expect("IDE command is active");
+            if keys.pop().is_none() {
+                self.ide_input = None;
+            }
+            cx.notify();
+            return;
+        }
+
+        let plain_key = event.keystroke.modifiers.number_of_modifiers() == 0
+            && key.chars().count() == 1
+            && key
+                .chars()
+                .all(|character| character.is_ascii_alphanumeric());
+        if !plain_key {
+            let entered = self.ide_key_buffer();
+            self.ide_input = None;
+            self.show_toast(format!("Unknown IDE command: {entered} {key}"), cx);
+            return;
+        }
+
+        let keys = self.ide_input.as_mut().expect("IDE command is active");
+        keys.push(key);
+        match CommandRegistry::resolve_language(keys) {
+            CommandLanguageMatch::Prefix => cx.notify(),
+            CommandLanguageMatch::Command(command) => {
+                self.ide_input = None;
+                let spec = CommandRegistry::spec(command, self.command_context(cx));
+                if let Some(reason) = spec.disabled_reason {
+                    self.show_toast(format!("{}: {reason}", spec.label), cx);
+                } else {
+                    self.run_command(command, window, cx);
+                }
+            }
+            CommandLanguageMatch::Invalid => {
+                let entered = self.ide_key_buffer();
+                self.ide_input = None;
+                self.show_toast(format!("Unknown IDE command: {entered}"), cx);
+            }
+        }
+    }
+
+    fn ide_key_buffer(&self) -> String {
+        match self.ide_input.as_deref() {
+            Some([]) => "<leader>".into(),
+            Some(keys) => format!("<leader> {}", keys.join(" ")),
+            None => String::new(),
+        }
     }
 
     fn open_schema_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -8379,7 +8458,7 @@ impl WorkspaceShell {
     }
 
     fn dismiss_modal(&mut self, _: &DismissModal, window: &mut Window, cx: &mut Context<Self>) {
-        self.key_language_hint = None;
+        self.ide_input = None;
         if cx.stop_active_drag(window) {
             self.clear_tab_drag_previews(cx);
             cx.notify();
@@ -13572,7 +13651,8 @@ impl WorkspaceShell {
     }
 
     fn render_key_language_hint(&self, cx: &App) -> Option<gpui::AnyElement> {
-        let hint = self.key_language_hint?;
+        let keys = self.ide_input.as_ref()?;
+        let hint = key_language_hint(keys);
         let (prefix, choices): (&str, &[(&str, &str)]) = match hint {
             KeyLanguageHint::Root => (
                 "<leader>",
@@ -13584,7 +13664,6 @@ impl WorkspaceShell {
                     ("e", "edit"),
                     ("d", "database"),
                     ("w", "workspace"),
-                    ("?", "help"),
                 ],
             ),
             KeyLanguageHint::Find => (
@@ -15530,17 +15609,64 @@ mod tests {
     }
 
     #[test]
-    fn pending_keys_drive_key_language_and_buffer() {
-        let root = [Keystroke::parse("space").unwrap()];
-        assert_eq!(key_language_hint(&root), Some(KeyLanguageHint::Root));
-        assert_eq!(format_pending_keys(&root), "<leader>");
+    fn ide_keys_drive_contextual_discovery() {
+        assert_eq!(key_language_hint(&[]), KeyLanguageHint::Root);
+        assert_eq!(key_language_hint(&["f".into()]), KeyLanguageHint::Find);
+    }
 
-        let find = [
-            Keystroke::parse("ctrl-k").unwrap(),
-            Keystroke::parse("f").unwrap(),
-        ];
-        assert_eq!(key_language_hint(&find), Some(KeyLanguageHint::Find));
-        assert_eq!(format_pending_keys(&find), "<leader> f");
+    #[gpui::test]
+    fn delayed_ide_command_never_replays_into_the_sql_editor(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let any_window = window.into();
+        let mut cx = VisualTestContext::from_window(any_window, cx);
+        let workspace = window.root(&mut cx).unwrap();
+        let (sender, mut commands) = tokio::sync::mpsc::unbounded_channel();
+        let (_events, events) = tokio::sync::mpsc::unbounded_channel();
+        let editor = workspace.read_with(&cx, |workspace, cx| {
+            let pane = workspace.panes[workspace.active_pane].read(cx);
+            let item_id = pane.active_item().expect("active query item").id;
+            pane.editor(item_id).expect("active query editor")
+        });
+        workspace.update(&mut cx, |shell, cx| {
+            shell.attach_executor(sender, events, cx)
+        });
+        editor.update_in(&mut cx, |editor, window, cx| {
+            editor.replace_text_from_owner("select 1", cx);
+            editor.toggle_keymap(cx);
+            editor.focus_handle(cx).focus(window, cx);
+        });
+        let original = editor.read_with(&cx, |editor, _| editor.document().text().to_owned());
+
+        cx.simulate_keystrokes("space");
+        assert_eq!(
+            workspace.read_with(&cx, |shell, _| shell.ide_key_buffer()),
+            "<leader>"
+        );
+        cx.background_executor
+            .advance_clock(std::time::Duration::from_secs(2));
+        cx.run_until_parked();
+
+        cx.simulate_keystrokes("x");
+        assert_eq!(
+            workspace.read_with(&cx, |shell, _| shell.ide_key_buffer()),
+            "<leader> x"
+        );
+        assert_eq!(
+            editor.read_with(&cx, |editor, _| editor.document().text().to_owned()),
+            original
+        );
+
+        cx.simulate_keystrokes("s");
+        assert!(std::iter::from_fn(|| commands.try_recv().ok())
+            .any(|command| matches!(command, ExecutorCommand::Execute { .. })));
+        assert_eq!(
+            workspace.read_with(&cx, |shell, _| shell.ide_key_buffer()),
+            ""
+        );
+        assert_eq!(
+            editor.read_with(&cx, |editor, _| editor.document().text().to_owned()),
+            original
+        );
     }
 
     #[gpui::test]

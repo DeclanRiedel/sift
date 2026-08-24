@@ -66,47 +66,44 @@ pub(super) fn render_status_bar(
     );
     let (mode_label, mode_tooltip, vim_entered) = match shell.active_editor_mode(cx) {
         Some((EditorKeymap::Vim, VimMode::Normal, entered)) => (
-            "VIM NORMAL",
+            "SQL NORMAL",
             "Vim normal mode; click to use the standard keymap",
             Some(entered),
         ),
         Some((EditorKeymap::Vim, VimMode::Insert, entered)) => (
-            "VIM INSERT",
+            "SQL INSERT",
             "Vim insert mode; Escape returns to normal mode",
             Some(entered),
         ),
         Some((EditorKeymap::Vim, VimMode::Visual, entered)) => (
-            "VIM VISUAL",
+            "SQL VISUAL",
             "Vim visual mode; Escape returns to normal mode",
             Some(entered),
         ),
         Some((EditorKeymap::Vim, VimMode::Select, entered)) => (
-            "VIM SELECT",
+            "SQL SELECT",
             "Vim select mode; Escape returns to normal mode",
             Some(entered),
         ),
         Some((EditorKeymap::Vim, VimMode::OperatorPending, entered)) => {
-            ("VIM OPERATOR", "Vim operator-pending mode", Some(entered))
+            ("SQL OPERATOR", "Vim operator-pending mode", Some(entered))
         }
         Some((EditorKeymap::Vim, VimMode::Command, entered)) => {
-            ("VIM COMMAND", "Vim command mode", Some(entered))
+            ("SQL COMMAND", "Vim command mode", Some(entered))
         }
         Some((EditorKeymap::Standard, _, _)) => (
-            "STANDARD",
+            "SQL STANDARD",
             "Standard editor keymap; click to enable Vim mode",
             None,
         ),
-        None => ("-", "No active editor", None),
+        None => ("NO SQL EDITOR", "No active editor", None),
     };
-    let key_buffer = if shell.key_buffer.is_empty() {
-        vim_entered.unwrap_or_default()
-    } else {
-        shell.key_buffer.clone()
-    };
-    let key_buffer_label = if key_buffer.is_empty() {
+    let editor_buffer = vim_entered.unwrap_or_default();
+    let ide_buffer = shell.ide_key_buffer();
+    let ide_buffer_label = if ide_buffer.is_empty() {
         "—".to_owned()
     } else {
-        key_buffer.clone()
+        ide_buffer.clone()
     };
 
     div()
@@ -297,13 +294,31 @@ pub(super) fn render_status_bar(
                         .child(mode_label)
                         .tooltip(move |_, cx| cx.new(|_| Tooltip::new(mode_tooltip)).into())
                 })
+                .children((!editor_buffer.is_empty()).then(|| {
+                    div()
+                        .id("footer-editor-buffer")
+                        .aria_label(format!("Pending SQL editor keys: {editor_buffer}"))
+                        .h(theme.metrics.compact_control_height)
+                        .px_1()
+                        .flex()
+                        .items_center()
+                        .gap_1()
+                        .child(div().text_color(colors.muted_text).child("INPUT"))
+                        .child(
+                            div()
+                                .font_family("monospace")
+                                .text_color(colors.accent)
+                                .child(editor_buffer),
+                        )
+                }))
+                .child(separator())
                 .child({
                     div()
-                        .id("footer-key-buffer")
-                        .aria_label(if key_buffer.is_empty() {
-                            "Key buffer is empty".to_owned()
+                        .id("footer-ide-buffer")
+                        .aria_label(if ide_buffer.is_empty() {
+                            "IDE command input is inactive".to_owned()
                         } else {
-                            format!("Key buffer: {key_buffer}")
+                            format!("IDE command input: {ide_buffer}")
                         })
                         .h(theme.metrics.compact_control_height)
                         .min_w(px(64.))
@@ -311,16 +326,19 @@ pub(super) fn render_status_bar(
                         .flex()
                         .items_center()
                         .gap_1()
-                        .child(div().text_color(colors.muted_text).child("BUFFER"))
+                        .child(div().text_color(colors.muted_text).child("IDE"))
                         .child(
                             div()
                                 .font_family("monospace")
-                                .text_color(colors.accent)
-                                .child(key_buffer_label),
+                                .text_color(if ide_buffer.is_empty() {
+                                    colors.muted_text
+                                } else {
+                                    colors.accent
+                                })
+                                .child(ide_buffer_label),
                         )
                         .tooltip({
-                            let message: SharedString =
-                                "Pending IDE chord or Vim key sequence".into();
+                            let message: SharedString = "Pending IDE command sequence".into();
                             move |_, cx| cx.new(|_| Tooltip::new(message.clone())).into()
                         })
                 })

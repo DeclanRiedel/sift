@@ -112,6 +112,13 @@ impl CommandSpec {
 
 pub struct CommandRegistry;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CommandLanguageMatch {
+    Prefix,
+    Command(CommandId),
+    Invalid,
+}
+
 impl CommandRegistry {
     pub fn definition(id: CommandId) -> &'static CommandDefinition {
         DEFINITIONS
@@ -155,6 +162,30 @@ impl CommandRegistry {
             .filter(|definition| definition.palette_visible)
             .map(|definition| Self::spec(definition.id, context))
             .collect()
+    }
+
+    /// Resolve a workspace-owned leader sequence without relying on GPUI's
+    /// timed multi-stroke replay. `keys` excludes the leader itself.
+    pub fn resolve_language(keys: &[String]) -> CommandLanguageMatch {
+        if keys.is_empty() {
+            return CommandLanguageMatch::Prefix;
+        }
+        let entered = format!("<leader> {}", keys.join(" "));
+        if let Some(command) = DEFINITIONS
+            .iter()
+            .find(|definition| definition.language == entered)
+        {
+            return CommandLanguageMatch::Command(command.id);
+        }
+
+        let prefix = format!("{entered} ");
+        if DEFINITIONS.iter().any(|definition| {
+            definition.language.starts_with("<leader>") && definition.language.starts_with(&prefix)
+        }) {
+            CommandLanguageMatch::Prefix
+        } else {
+            CommandLanguageMatch::Invalid
+        }
     }
 }
 
@@ -266,7 +297,7 @@ const DEFINITIONS: &[CommandDefinition] = &[
     command(
         CommandId::FocusNextPane,
         "Focus Next Pane",
-        "Ctrl+K Ctrl+→",
+        "",
         "<leader> w n",
         true,
         AvailabilityRule::MultiplePanes,
@@ -474,5 +505,25 @@ mod tests {
             }
         )
         .enabled());
+    }
+
+    #[test]
+    fn leader_language_distinguishes_prefix_command_and_invalid_input() {
+        assert_eq!(
+            CommandRegistry::resolve_language(&[]),
+            CommandLanguageMatch::Prefix
+        );
+        assert_eq!(
+            CommandRegistry::resolve_language(&["x".into()]),
+            CommandLanguageMatch::Prefix
+        );
+        assert_eq!(
+            CommandRegistry::resolve_language(&["x".into(), "s".into()]),
+            CommandLanguageMatch::Command(CommandId::ExecuteStatement)
+        );
+        assert_eq!(
+            CommandRegistry::resolve_language(&["x".into(), "z".into()]),
+            CommandLanguageMatch::Invalid
+        );
     }
 }
