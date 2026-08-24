@@ -1994,7 +1994,7 @@ impl Pane {
         self.clean_documents
             .insert(item_id, editor.read(cx).document().text().to_owned());
         self.editors.insert(item_id, editor);
-        self.results.insert(item_id, results);
+        self.attach_results(item_id, results, cx);
         if matches!(
             self.items.last().and_then(|item| item.source.as_ref()),
             Some(ItemSource::DatabaseObject(_))
@@ -17383,6 +17383,169 @@ mod tests {
         });
         assert!(cx.debug_bounds("result-row-0").is_some());
         assert!(cx.update(|window, cx| workspace.read(cx).active_editor_focused(window, cx)));
+    }
+
+    #[gpui::test]
+    fn demo_postgres_object_wires_explain_history_and_large_data(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+
+        workspace.update_in(&mut cx, |shell, window, cx| {
+            shell.executor_sender = Some(sender);
+            shell.connection_status = ConnectionStatus::Connected {
+                profile_id: 2,
+                name: "demo/postgres".into(),
+            };
+            shell.open_table_preview(
+                DatabaseObjectTarget {
+                    connection: ConnectionNavEntry {
+                        id: 2,
+                        tenant_id: 1,
+                        name: "demo/postgres".into(),
+                        provider_id: sift_protocol::ProviderId::new("sift/postgres").unwrap(),
+                    },
+                    catalog: "sifttest".into(),
+                    schema: "lab".into(),
+                    object: "audit_events".into(),
+                    object_kind: sift_protocol::ObjectKind::Table,
+                },
+                window,
+                cx,
+            );
+        });
+        let (item_id, preview_sql) = match receiver.try_recv().unwrap() {
+            ExecutorCommand::Execute { item_id, sql, .. } => (item_id, sql),
+            _ => panic!("expected preview execution"),
+        };
+        assert!(matches!(
+            receiver.try_recv(),
+            Ok(ExecutorCommand::LoadTableDefinition { .. })
+        ));
+        assert_eq!(
+            preview_sql,
+            "SELECT * FROM \"lab\".\"audit_events\" LIMIT 100;"
+        );
+        workspace.update(&mut cx, |shell, cx| {
+            shell.route_result(
+                item_id,
+                ResultState::Ready(crate::results::ResultData {
+                    columns: vec![crate::results::ResultColumn {
+                        name: "id".into(),
+                        type_label: "int64".into(),
+                        nullable: false,
+                    }],
+                    rows: vec![sift_protocol::Row::new(vec![sift_protocol::Value::Int64(
+                        1,
+                    )])],
+                    ..Default::default()
+                }),
+                cx,
+            );
+        });
+        cx.run_until_parked();
+
+        let explain_tab = cx.debug_bounds("result-tab-explain").unwrap();
+        cx.simulate_click(explain_tab.center(), Modifiers::default());
+        cx.run_until_parked();
+        let estimated = cx.debug_bounds("explain-estimated-plan").unwrap();
+        cx.simulate_click(estimated.center(), Modifiers::default());
+        cx.run_until_parked();
+        workspace.read_with(&cx, |shell, _| {
+            assert_eq!(
+                shell.running_explains.len(),
+                1,
+                "{}",
+                shell.status.execution
+            );
+        });
+        let request_id = match receiver.try_recv().unwrap() {
+            ExecutorCommand::Explain {
+                item_id: explained_item,
+                request_id,
+                sql,
+                analyze,
+                ..
+            } => {
+                assert_eq!(explained_item, item_id);
+                assert_eq!(sql, preview_sql);
+                assert!(!analyze);
+                request_id
+            }
+            _ => panic!("expected estimated plan request"),
+        };
+        workspace.update(&mut cx, |shell, cx| {
+            shell.on_executor_event(
+                ExecutorEvent::ExplainFinished {
+                    item_id,
+                    request_id,
+                    response: Ok(Box::new(sift_protocol::ExplainResponse {
+                        engine: sift_protocol::Engine::Postgres,
+                        analyzed: false,
+                        root: sift_protocol::PlanNode::new("Seq Scan"),
+                        raw: "{\"Plan\":{}}".into(),
+                        warnings: Vec::new(),
+                    })),
+                },
+                cx,
+            );
+        });
+        cx.run_until_parked();
+        assert_eq!(
+            workspace.read_with(&cx, |shell, _| shell.status.execution.clone()),
+            "Ready"
+        );
+
+        let history_tab = cx.debug_bounds("result-tab-history").unwrap();
+        cx.simulate_click(history_tab.center(), Modifiers::default());
+        cx.run_until_parked();
+        assert!(matches!(
+            receiver.try_recv(),
+            Ok(ExecutorCommand::LoadHistory {
+                item_id: history_item,
+                cursor: None,
+            }) if history_item == item_id
+        ));
+        workspace.update(&mut cx, |shell, cx| {
+            shell.on_executor_event(
+                ExecutorEvent::HistoryLoaded {
+                    item_id,
+                    append: false,
+                    page: Ok(sift_protocol::CursorPage {
+                        items: vec![sift_api_types::QueryHistory {
+                            id: sift_api_types::QueryHistoryId(1),
+                            principal_id: sift_api_types::PrincipalId(1),
+                            room_id: None,
+                            connection_profile_id: Some(sift_api_types::ConnectionProfileId(2)),
+                            sql_text: "sqlfp:redacted".into(),
+                            started_at: "2026-08-24T10:00:00Z".parse().unwrap(),
+                            duration_ms: Some(1),
+                            row_count: Some(1),
+                            status: sift_api_types::QueryStatus::Ok,
+                            error_code: None,
+                            error_message: None,
+                        }],
+                        next_cursor: None,
+                    }),
+                },
+                cx,
+            );
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("result-history-row-0").is_some());
+
+        let data_tab = cx.debug_bounds("result-tab-data").unwrap();
+        cx.simulate_click(data_tab.center(), Modifiers::default());
+        cx.run_until_parked();
+        let expand = cx.debug_bounds("open-result-data-modal").unwrap();
+        cx.simulate_click(expand.center(), Modifiers::default());
+        cx.run_until_parked();
+        assert_eq!(
+            workspace.read_with(&cx, |shell, _| shell.modal.clone()),
+            Some(Modal::DataResults(item_id))
+        );
+        assert!(cx.debug_bounds("data-results-modal-body").is_some());
     }
 
     #[gpui::test]

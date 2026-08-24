@@ -967,6 +967,10 @@ impl ResultsView {
         cx.notify();
     }
 
+    fn refresh_history(&mut self, cx: &mut Context<Self>) {
+        self.request_history(None, cx);
+    }
+
     pub fn set_history_page(
         &mut self,
         page: Result<sift_protocol::CursorPage<QueryHistory>, String>,
@@ -1397,6 +1401,7 @@ impl ResultsView {
     fn tab_row(tab: ResultTab, selected: bool, colors: ThemeColors) -> Stateful<Div> {
         div()
             .id(("result-tab", tab as usize))
+            .debug_selector(move || format!("result-tab-{}", tab.label().to_lowercase()))
             .flex_none()
             .flex()
             .items_center()
@@ -2046,6 +2051,7 @@ impl ResultsView {
         let colors = cx.theme().colors;
         let pending = matches!(self.explain, ExplainState::Pending { .. });
         div()
+            .debug_selector(|| "result-explain-toolbar".into())
             .h(cx.theme().metrics.toolbar_height)
             .flex_none()
             .flex()
@@ -2056,11 +2062,16 @@ impl ResultsView {
             .border_color(colors.subtle_border)
             .bg(colors.panel)
             .child(
-                Button::new("explain-estimated-plan", "Estimated plan")
-                    .tone(ButtonTone::Accent)
-                    .start_icon(IconName::View)
-                    .disabled(pending)
-                    .on_click(cx.listener(|view, _, _, cx| view.request_explain(false, cx))),
+                div()
+                    .debug_selector(|| "explain-estimated-plan".into())
+                    .child(
+                        Button::new("explain-estimated-plan", "Estimated plan")
+                            .tone(ButtonTone::Accent)
+                            .disabled(pending)
+                            .on_click(
+                                cx.listener(|view, _, _, cx| view.request_explain(false, cx)),
+                            ),
+                    ),
             )
             .child(
                 Button::new("explain-analyzed-plan", "Analyze query")
@@ -2119,7 +2130,9 @@ impl ResultsView {
                 .items_center()
                 .justify_center()
                 .gap_2()
-                .child(icon(IconName::Activity, colors.accent, 22.))
+                .children(
+                    analyze.then(|| icon(IconName::Activity, colors.accent, 22.)),
+                )
                 .child(
                     div()
                         .font_weight(gpui::FontWeight::SEMIBOLD)
@@ -2426,7 +2439,12 @@ impl ResultsView {
             .overflow_y_scroll()
             .children(self.history.rows.iter().enumerate().map(|(index, entry)| {
                 let sql = entry.sql_text.clone();
-                let display_sql = sql.replace(['\n', '\r'], " ");
+                let redacted = sql.starts_with("sqlfp:");
+                let display_sql = if redacted {
+                    "Query text not stored".into()
+                } else {
+                    sql.replace(['\n', '\r'], " ")
+                };
                 let status = match entry.status {
                     sift_api_types::QueryStatus::Ok => "OK",
                     sift_api_types::QueryStatus::Error => "ERROR",
@@ -2472,6 +2490,7 @@ impl ResultsView {
                     .child(
                         Button::new(("rerun-history", index), "Run")
                             .tone(ButtonTone::Ghost)
+                            .disabled(redacted)
                             .on_click(cx.listener(move |_, _, _, cx| {
                                 cx.emit(ResultsEvent::RerunHistory { sql: sql.clone() })
                             })),
@@ -2487,6 +2506,48 @@ impl ResultsView {
                 )
             }))
             .into_any_element()
+    }
+
+    fn render_history_toolbar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let colors = cx.theme().colors;
+        div()
+            .debug_selector(|| "result-history-toolbar".into())
+            .h(cx.theme().metrics.toolbar_height)
+            .flex_none()
+            .flex()
+            .items_center()
+            .gap_1()
+            .px_2()
+            .border_b_1()
+            .border_color(colors.subtle_border)
+            .bg(colors.panel)
+            .child(
+                div()
+                    .debug_selector(|| "refresh-query-history".into())
+                    .child(
+                        Button::new("refresh-query-history", "Refresh")
+                            .tone(ButtonTone::Ghost)
+                            .disabled(self.history.loading)
+                            .on_click(cx.listener(|view, _, _, cx| view.refresh_history(cx))),
+                    ),
+            )
+            .children(self.history.loading.then(|| {
+                div()
+                    .ml_2()
+                    .text_xs()
+                    .text_color(colors.muted_text)
+                    .child("Loading history…")
+            }))
+            .child(div().flex_1())
+            .child(div().text_xs().text_color(colors.muted_text).child(format!(
+                "{} quer{}",
+                self.history.rows.len(),
+                if self.history.rows.len() == 1 {
+                    "y"
+                } else {
+                    "ies"
+                }
+            )))
     }
 }
 
@@ -2550,6 +2611,9 @@ impl gpui::Render for ResultsView {
                     .children(
                         (self.tab == ResultTab::Explain).then(|| self.render_explain_toolbar(cx)),
                     )
+                    .children(
+                        (self.tab == ResultTab::History).then(|| self.render_history_toolbar(cx)),
+                    )
                     .child(div().flex().flex_1().min_w_0().min_h_0().child(body))
                     .children(
                         (self.tab == ResultTab::Data)
@@ -2565,7 +2629,7 @@ impl gpui::EventEmitter<ResultsEvent> for ResultsView {}
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gpui::{Entity, TestAppContext, VisualTestContext};
+    use gpui::{Entity, Modifiers, TestAppContext, VisualTestContext};
     use sift_protocol::{Code, DriverError, PrimitiveType};
 
     struct ResultsHost(Entity<ResultsView>);
@@ -3084,6 +3148,69 @@ mod tests {
 
         assert!(cx.debug_bounds("result-message-toolbar").is_some());
         assert!(cx.debug_bounds("result-message-0").is_some());
+    }
+
+    #[gpui::test]
+    fn explain_and_history_tabs_are_clickable_and_share_toolbar_height(cx: &mut TestAppContext) {
+        let window = cx
+            .update(|cx| {
+                cx.open_window(Default::default(), |_window, cx| {
+                    let view = cx.new(ResultsView::new);
+                    cx.new(|_| ResultsHost(view))
+                })
+            })
+            .unwrap();
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let host = window.root(&mut cx).unwrap();
+        let view = host.read_with(&cx, |host, _| host.0.clone());
+
+        let explain_tab = cx.debug_bounds("result-tab-explain").expect("Explain tab");
+        cx.simulate_click(explain_tab.center(), Modifiers::default());
+        cx.run_until_parked();
+        assert_eq!(
+            view.read_with(&cx, |view, _| view.active_tab()),
+            ResultTab::Explain
+        );
+        let explain_toolbar = cx
+            .debug_bounds("result-explain-toolbar")
+            .expect("Explain toolbar");
+
+        let estimated = cx
+            .debug_bounds("explain-estimated-plan")
+            .expect("Estimated plan action");
+        cx.simulate_click(estimated.center(), Modifiers::default());
+        cx.run_until_parked();
+        assert!(view.read_with(&cx, |view, _| matches!(
+            view.explain,
+            ExplainState::Pending { analyze: false }
+        )));
+
+        let history_tab = cx.debug_bounds("result-tab-history").expect("History tab");
+        cx.simulate_click(history_tab.center(), Modifiers::default());
+        cx.run_until_parked();
+        assert_eq!(
+            view.read_with(&cx, |view, _| view.active_tab()),
+            ResultTab::History
+        );
+        assert!(view.read_with(&cx, |view, _| view.history.loading));
+        let history_toolbar = cx
+            .debug_bounds("result-history-toolbar")
+            .expect("History toolbar");
+        assert_eq!(explain_toolbar.size.height, history_toolbar.size.height);
+
+        view.update(&mut cx, |view, cx| {
+            view.set_history_page(
+                Ok(sift_protocol::CursorPage {
+                    items: vec![history_entry(1, "sqlfp:redacted")],
+                    next_cursor: None,
+                }),
+                false,
+                cx,
+            )
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("result-history-row-0").is_some());
+        assert!(cx.debug_bounds("refresh-query-history").is_some());
     }
 
     #[gpui::test]
