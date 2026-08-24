@@ -8205,7 +8205,34 @@ impl WorkspaceShell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.close_pane_at(self.active_pane, window, cx);
+        let Some(target) = self.panes.get(self.active_pane).cloned() else {
+            return;
+        };
+        while let Some(pane_index) = self.panes.iter().position(|pane| pane == &target) {
+            let clean_item = target.read(cx).items.iter().position(|item| !item.dirty);
+            let Some(item_index) = clean_item else {
+                break;
+            };
+            self.active_pane = pane_index;
+            target.update(cx, |pane, _| pane.activate_item(item_index, false));
+            self.remove_active_item(window, cx);
+        }
+        if let Some(pane_index) = self.panes.iter().position(|pane| pane == &target) {
+            self.active_pane = pane_index;
+            let dirty_count = target
+                .read(cx)
+                .items
+                .iter()
+                .filter(|item| item.dirty)
+                .count();
+            if dirty_count > 0 {
+                self.show_toast(
+                    format!("Kept {dirty_count} tab(s) with unsaved changes"),
+                    cx,
+                );
+                self.focus_active_pane(window, cx);
+            }
+        }
     }
 
     fn focus_next_pane(&mut self, _: &FocusNextPane, window: &mut Window, cx: &mut Context<Self>) {
@@ -16975,6 +17002,58 @@ mod tests {
             workspace.read_with(&cx, |workspace, _| workspace.active_pane()),
             0
         );
+    }
+
+    #[gpui::test]
+    fn close_pane_command_removes_clean_tabs_and_keeps_dirty_tabs(cx: &mut TestAppContext) {
+        let mut state = PresentationState::default();
+        state.workspace.panes[0].items.extend([
+            ItemPresentation {
+                id: 2,
+                kind: ItemKind::Query,
+                title: "dirty.sql".into(),
+                dirty: false,
+                source: None,
+                last_result: None,
+            },
+            ItemPresentation {
+                id: 3,
+                kind: ItemKind::Query,
+                title: "clean.sql".into(),
+                dirty: false,
+                source: None,
+                last_result: None,
+            },
+        ]);
+        let window = shell_with_state(state, cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        workspace.update(&mut cx, |shell, cx| {
+            let pane = shell.panes[0].clone();
+            pane.update(cx, |pane, _| {
+                pane.items[1].dirty = true;
+                pane.activate_item(1, false);
+            });
+        });
+
+        let focus = workspace.read_with(&cx, |shell, cx| shell.focus_handle(cx));
+        cx.update(|window, cx| focus.dispatch_action(&CloseActivePane, window, cx));
+        workspace.read_with(&cx, |shell, cx| {
+            let pane = shell.panes[0].read(cx);
+            assert_eq!(pane.items.len(), 1);
+            assert_eq!(pane.items[0].id, 2);
+            assert!(pane.items[0].dirty);
+        });
+
+        workspace.update(&mut cx, |shell, cx| {
+            shell.panes[0].update(cx, |pane, _| pane.items[0].dirty = false)
+        });
+        cx.update(|window, cx| focus.dispatch_action(&CloseActivePane, window, cx));
+        assert_eq!(
+            workspace.read_with(&cx, |shell, cx| shell.active_item_count(cx)),
+            0
+        );
+        assert_eq!(workspace.read_with(&cx, |shell, _| shell.pane_count()), 1);
     }
 
     #[gpui::test]

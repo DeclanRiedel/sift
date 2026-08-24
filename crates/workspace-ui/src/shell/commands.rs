@@ -456,7 +456,7 @@ const DEFINITIONS: &[CommandDefinition] = &[
     ),
     command(
         CommandId::ClosePane,
-        "Close Pane",
+        "Close Tabs in Pane",
         "Ctrl+Shift+W",
         "<leader> w c",
         true,
