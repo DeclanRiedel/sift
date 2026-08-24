@@ -722,6 +722,7 @@ pub enum Modal {
     SchemaSearch,
     DataSearch,
     DataResults(u64),
+    EditResultCell,
     ServerPicker,
     ServerConnection,
     InstanceSetup,
@@ -958,6 +959,9 @@ pub enum PaneEvent {
     OpenDataResultsRequested {
         item_id: u64,
     },
+    EditResultCellRequested {
+        item_id: u64,
+    },
     ExplainRequested {
         item_id: u64,
         sql: String,
@@ -1093,6 +1097,15 @@ struct TableDesignerState {
     error: Option<String>,
 }
 
+#[derive(Debug, Clone)]
+struct StagedResultEdit {
+    item_id: u64,
+    column: String,
+    original: sift_protocol::Value,
+    original_row: Vec<(String, sift_protocol::Value)>,
+    source: DatabaseObjectSource,
+}
+
 /// Shell → executor. The executor owns the SDK client, session, and
 /// connection; the shell only reports intent (connect / disconnect / run).
 #[derive(Clone)]
@@ -1177,6 +1190,14 @@ pub enum ExecutorCommand {
     DeleteSavedQuery {
         id: sift_api_types::SavedQueryId,
         expected_revision: u64,
+    },
+    PreviewResultEdits {
+        item_id: u64,
+        edit_set: sift_protocol::EditSet,
+    },
+    ApplyResultEdits {
+        item_id: u64,
+        edit_set: sift_protocol::EditSet,
     },
     /// Run one semantic request for `item_id`. `text` is the exact buffer the
     /// revision names, so the executor can resynchronize the server document
@@ -1300,6 +1321,15 @@ pub enum ExecutorEvent {
     SavedQueryDeleted {
         id: sift_api_types::SavedQueryId,
         result: Result<(), String>,
+    },
+    ResultEditsPreviewed {
+        item_id: u64,
+        edit_set: sift_protocol::EditSet,
+        result: Result<sift_protocol::EditPlan, String>,
+    },
+    ResultEditsApplied {
+        item_id: u64,
+        result: Result<sift_protocol::ApplyEditsResult, String>,
     },
     Semantic {
         item_id: u64,
@@ -1541,6 +1571,9 @@ impl Pane {
             }
             ResultsEvent::OpenDataModalRequested => {
                 cx.emit(PaneEvent::OpenDataResultsRequested { item_id })
+            }
+            ResultsEvent::EditSelectedCellRequested => {
+                cx.emit(PaneEvent::EditResultCellRequested { item_id })
             }
             ResultsEvent::ExplainRequested { analyze } => {
                 let sql = self
@@ -3031,6 +3064,7 @@ pub struct WorkspaceShell {
     connections_scroll_handle: ScrollHandle,
     query_input: Entity<TextInput>,
     saved_query_name_input: Entity<TextInput>,
+    result_cell_edit_input: Entity<TextInput>,
     schema_search_input: Entity<TextInput>,
     data_search_input: Entity<TextInput>,
     server_name_input: Entity<TextInput>,
@@ -3123,6 +3157,11 @@ pub struct WorkspaceShell {
     saved_queries_loading: bool,
     saved_queries_error: Option<String>,
     saved_query_editing: Option<sift_api_types::SavedQueryId>,
+    staged_result_edit: Option<StagedResultEdit>,
+    pending_edit_set: Option<sift_protocol::EditSet>,
+    result_edit_plan: Option<sift_protocol::EditPlan>,
+    result_edit_pending: bool,
+    result_edit_error: Option<String>,
     pending_database_execution: Option<PendingDatabaseExecution>,
     pending_database_explain: Option<PendingDatabaseExplain>,
     instance_sender: Option<tokio::sync::mpsc::UnboundedSender<InstanceCommand>>,
@@ -3303,6 +3342,7 @@ impl WorkspaceShell {
             .collect();
         let query_input = cx.new(|cx| TextInput::new("", "Search commands…", cx));
         let saved_query_name_input = cx.new(|cx| TextInput::new("", "Saved query name…", cx));
+        let result_cell_edit_input = cx.new(|cx| TextInput::new("", "New value…", cx));
         let schema_search_input = cx.new(|cx| {
             TextInput::new("", "Search schema…", cx).aria_label("Search database schema")
         });
@@ -3447,6 +3487,7 @@ impl WorkspaceShell {
             connections_scroll_handle: ScrollHandle::new(),
             query_input,
             saved_query_name_input,
+            result_cell_edit_input,
             schema_search_input,
             data_search_input,
             server_name_input,
@@ -3533,6 +3574,11 @@ impl WorkspaceShell {
             saved_queries_loading: false,
             saved_queries_error: None,
             saved_query_editing: None,
+            staged_result_edit: None,
+            pending_edit_set: None,
+            result_edit_plan: None,
+            result_edit_pending: false,
+            result_edit_error: None,
             pending_database_execution: None,
             pending_database_explain: None,
             instance_sender: None,
@@ -4344,6 +4390,48 @@ impl WorkspaceShell {
                         );
                     }
                     Err(message) => self.show_error_toast(message, cx),
+                }
+                cx.notify();
+            }
+            ExecutorEvent::ResultEditsPreviewed {
+                item_id,
+                edit_set,
+                result,
+            } => {
+                if self.staged_result_edit.as_ref().map(|edit| edit.item_id) != Some(item_id) {
+                    return;
+                }
+                self.result_edit_pending = false;
+                match result {
+                    Ok(plan) => {
+                        self.pending_edit_set = Some(edit_set);
+                        self.result_edit_plan = Some(plan);
+                        self.result_edit_error = None;
+                    }
+                    Err(message) => self.result_edit_error = Some(message),
+                }
+                cx.notify();
+            }
+            ExecutorEvent::ResultEditsApplied { item_id, result } => {
+                if self.staged_result_edit.as_ref().map(|edit| edit.item_id) != Some(item_id) {
+                    return;
+                }
+                self.result_edit_pending = false;
+                match result {
+                    Ok(applied) => {
+                        let affected = applied
+                            .applied
+                            .iter()
+                            .map(|outcome| outcome.affected_rows)
+                            .sum::<u64>();
+                        self.modal = None;
+                        self.staged_result_edit = None;
+                        self.pending_edit_set = None;
+                        self.result_edit_plan = None;
+                        self.show_toast(format!("Applied edit to {affected} row(s)"), cx);
+                        self.refresh_database_item(item_id, cx);
+                    }
+                    Err(message) => self.result_edit_error = Some(message),
                 }
                 cx.notify();
             }
@@ -8562,6 +8650,10 @@ impl WorkspaceShell {
                 self.active_pane = index;
                 self.open_data_results_modal(emitter, *item_id, window, cx);
             }
+            PaneEvent::EditResultCellRequested { item_id } => {
+                self.active_pane = index;
+                self.open_result_cell_editor(emitter, *item_id, window, cx);
+            }
             PaneEvent::ExplainRequested {
                 item_id,
                 sql,
@@ -9468,6 +9560,169 @@ impl WorkspaceShell {
         cx.notify();
     }
 
+    fn open_result_cell_editor(
+        &mut self,
+        pane: &Entity<Pane>,
+        item_id: u64,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(source) = pane.read(cx).database_source(item_id) else {
+            self.show_error_toast("Only database table results can be edited".into(), cx);
+            return;
+        };
+        if source.object_kind != sift_protocol::ObjectKind::Table {
+            self.show_error_toast("Only base-table results can be edited".into(), cx);
+            return;
+        }
+        let Some(selected) = pane
+            .read(cx)
+            .results
+            .get(&item_id)
+            .and_then(|results| results.read(cx).selected_cell_edit())
+        else {
+            self.show_toast("Select one result cell to edit".into(), cx);
+            return;
+        };
+        let text = render_value(&selected.original).text;
+        self.result_cell_edit_input
+            .update(cx, |input, cx| input.set_text(text, cx));
+        self.staged_result_edit = Some(StagedResultEdit {
+            item_id,
+            column: selected.column,
+            original: selected.original,
+            original_row: selected.original_row,
+            source,
+        });
+        self.pending_edit_set = None;
+        self.result_edit_plan = None;
+        self.result_edit_pending = false;
+        self.result_edit_error = None;
+        self.modal = Some(Modal::EditResultCell);
+        self.result_cell_edit_input
+            .focus_handle(cx)
+            .focus(window, cx);
+        cx.notify();
+    }
+
+    fn parse_result_cell_value(
+        original: &sift_protocol::Value,
+        text: &str,
+    ) -> Result<sift_protocol::Value, String> {
+        use sift_protocol::Value;
+        if text.eq_ignore_ascii_case("NULL") {
+            return Ok(Value::Null);
+        }
+        let invalid = || format!("{text:?} is not a valid {} value", original.type_category());
+        match original {
+            Value::Null | Value::TypedNull { .. } | Value::Text(_) | Value::Native { .. } => {
+                Ok(Value::Text(text.to_owned()))
+            }
+            Value::Bool(_) => text.parse().map(Value::Bool).map_err(|_| invalid()),
+            Value::Int16(_) => text.parse().map(Value::Int16).map_err(|_| invalid()),
+            Value::Int32(_) => text.parse().map(Value::Int32).map_err(|_| invalid()),
+            Value::Int64(_) => text.parse().map(Value::Int64).map_err(|_| invalid()),
+            Value::Float32(_) => text.parse().map(Value::Float32).map_err(|_| invalid()),
+            Value::Float64(_) => text.parse().map(Value::Float64).map_err(|_| invalid()),
+            Value::Decimal(_) => Ok(Value::Decimal(text.to_owned())),
+            Value::Blob(_) => Err("Binary cells cannot be edited as text".into()),
+            Value::Date(_) => text.parse().map(Value::Date).map_err(|_| invalid()),
+            Value::Time(_) => text.parse().map(Value::Time).map_err(|_| invalid()),
+            Value::Timestamp(_) => text.parse().map(Value::Timestamp).map_err(|_| invalid()),
+            Value::TimestampTz(_) => text.parse().map(Value::TimestampTz).map_err(|_| invalid()),
+            Value::Interval(_) => Err("Interval cells cannot be edited as text yet".into()),
+            Value::Uuid(_) => text.parse().map(Value::Uuid).map_err(|_| invalid()),
+            Value::Json(_) => serde_json::from_str(text)
+                .map(Value::Json)
+                .map_err(|_| invalid()),
+        }
+    }
+
+    fn preview_result_cell_edit(&mut self, cx: &mut Context<Self>) {
+        let Some(staged) = self.staged_result_edit.clone() else {
+            return;
+        };
+        let text = self.result_cell_edit_input.read(cx).text().to_string();
+        let value = match Self::parse_result_cell_value(&staged.original, &text) {
+            Ok(value) => value,
+            Err(message) => {
+                self.result_edit_error = Some(message);
+                cx.notify();
+                return;
+            }
+        };
+        let original = staged
+            .original_row
+            .iter()
+            .map(|(column, value)| sift_protocol::CellEdit {
+                column: column.clone(),
+                value: value.clone(),
+            })
+            .collect::<Vec<_>>();
+        let edit_set = sift_protocol::EditSet {
+            table: sift_protocol::ObjectPath {
+                catalog: staged.source.catalog.clone(),
+                schema: Some(staged.source.schema.clone()),
+                name: staged.source.object.clone(),
+                kind: Some(staged.source.object_kind),
+                routine_args: None,
+            },
+            edits: vec![sift_protocol::RowEdit::Update {
+                key: sift_protocol::RowKey {
+                    columns: original.clone(),
+                },
+                changes: vec![sift_protocol::CellEdit {
+                    column: staged.column,
+                    value,
+                }],
+                expected: original,
+            }],
+        };
+        let Some(sender) = &self.executor_sender else {
+            self.result_edit_error = Some("The database executor is unavailable".into());
+            cx.notify();
+            return;
+        };
+        self.result_edit_pending = true;
+        self.result_edit_error = None;
+        self.result_edit_plan = None;
+        self.pending_edit_set = None;
+        if sender
+            .send(ExecutorCommand::PreviewResultEdits {
+                item_id: staged.item_id,
+                edit_set,
+            })
+            .is_err()
+        {
+            self.result_edit_pending = false;
+            self.result_edit_error = Some("The database executor stopped".into());
+        }
+        cx.notify();
+    }
+
+    fn apply_result_cell_edit(&mut self, cx: &mut Context<Self>) {
+        let (Some(staged), Some(edit_set), Some(sender)) = (
+            self.staged_result_edit.as_ref(),
+            self.pending_edit_set.clone(),
+            self.executor_sender.as_ref(),
+        ) else {
+            return;
+        };
+        self.result_edit_pending = true;
+        self.result_edit_error = None;
+        if sender
+            .send(ExecutorCommand::ApplyResultEdits {
+                item_id: staged.item_id,
+                edit_set,
+            })
+            .is_err()
+        {
+            self.result_edit_pending = false;
+            self.result_edit_error = Some("The database executor stopped".into());
+        }
+        cx.notify();
+    }
+
     fn data_results_modal_target(
         &self,
         item_id: u64,
@@ -10112,6 +10367,13 @@ impl WorkspaceShell {
         if self.modal == Some(Modal::DataSearch) {
             self.data_search_input
                 .update(cx, |input, cx| input.set_text("", cx));
+        }
+        if self.modal == Some(Modal::EditResultCell) {
+            self.staged_result_edit = None;
+            self.pending_edit_set = None;
+            self.result_edit_plan = None;
+            self.result_edit_pending = false;
+            self.result_edit_error = None;
         }
         self.modal = None;
         // Return focus to the workspace so keybindings keep routing.
@@ -13265,10 +13527,11 @@ impl WorkspaceShell {
             let schema_search = matches!(modal, Modal::SchemaSearch);
             let data_search = matches!(modal, Modal::DataSearch);
             let data_results = matches!(modal, Modal::DataResults(_));
+            let result_cell_edit = matches!(modal, Modal::EditResultCell);
             let instance_setup = matches!(modal, Modal::InstanceSetup);
             let card_width = if data_results {
                 0.0
-            } else if settings || keymaps || schema_search {
+            } else if settings || keymaps || schema_search || result_cell_edit {
                 720.0
             } else if data_search {
                 900.0
@@ -13762,6 +14025,163 @@ impl WorkspaceShell {
                                 .text_color(colors.muted_text)
                                 .child(summary.unwrap_or_else(|| "Bounded to 20 tables".into()))
                                 .child("Esc close"),
+                        )
+                        .into_any_element()
+                }
+                Modal::EditResultCell => {
+                    let staged = self.staged_result_edit.as_ref();
+                    let pending = self.result_edit_pending;
+                    let plan = self.result_edit_plan.as_ref();
+                    let can_apply = plan.is_some() && self.pending_edit_set.is_some() && !pending;
+                    div()
+                        .flex()
+                        .flex_col()
+                        .max_h(px(640.))
+                        .child(
+                            div()
+                                .h(px(42.))
+                                .px_3()
+                                .flex()
+                                .items_center()
+                                .justify_between()
+                                .gap_2()
+                                .border_b_1()
+                                .border_color(colors.subtle_border)
+                                .bg(colors.toolbar)
+                                .child(
+                                    div()
+                                        .min_w_0()
+                                        .truncate()
+                                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                                        .child(staged.map_or_else(
+                                            || "Edit result cell".into(),
+                                            |edit| format!("Edit {}.{}", edit.source.object, edit.column),
+                                        )),
+                                )
+                                .child(
+                                    IconButton::new(
+                                        "close-result-cell-edit",
+                                        IconName::Close,
+                                        "Cancel result edit",
+                                    )
+                                    .square(px(26.))
+                                    .icon_size(13.)
+                                    .on_click(cx.listener(|shell, _, window, cx| {
+                                        shell.dismiss_modal(&DismissModal, window, cx)
+                                    })),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .id("result-cell-edit-body")
+                                .p_3()
+                                .flex()
+                                .flex_col()
+                                .gap_3()
+                                .overflow_y_scroll()
+                                .child(
+                                    div()
+                                        .flex()
+                                        .flex_col()
+                                        .gap_1()
+                                        .child(
+                                            div()
+                                                .text_xs()
+                                                .text_color(colors.muted_text)
+                                                .child("New value"),
+                                        )
+                                        .child(self.result_cell_edit_input.clone()),
+                                )
+                                .children(staged.map(|edit| {
+                                    div()
+                                        .text_xs()
+                                        .text_color(colors.muted_text)
+                                        .child(format!(
+                                            "Original: {} · Enter NULL to store a null value",
+                                            render_value(&edit.original).text
+                                        ))
+                                }))
+                                .children(plan.map(|plan| {
+                                    let identity = match &plan.identity {
+                                        sift_protocol::IdentitySource::PrimaryKey { columns } => {
+                                            format!("Primary key: {}", columns.join(", "))
+                                        }
+                                        sift_protocol::IdentitySource::UniqueIndex {
+                                            name,
+                                            columns,
+                                        } => format!(
+                                            "Unique index {name}: {}",
+                                            columns.join(", ")
+                                        ),
+                                    };
+                                    div()
+                                        .flex()
+                                        .flex_col()
+                                        .gap_2()
+                                        .child(
+                                            div()
+                                                .text_xs()
+                                                .font_weight(gpui::FontWeight::SEMIBOLD)
+                                                .text_color(colors.muted_text)
+                                                .child(format!("Preview · {identity}")),
+                                        )
+                                        .children(plan.statements.iter().enumerate().map(
+                                            |(index, statement)| {
+                                                div()
+                                                    .id(("result-edit-statement", index))
+                                                    .p_2()
+                                                    .rounded_sm()
+                                                    .border_1()
+                                                    .border_color(colors.subtle_border)
+                                                    .bg(colors.surface)
+                                                    .font_family("monospace")
+                                                    .text_xs()
+                                                    .whitespace_normal()
+                                                    .child(statement.sql.clone())
+                                            },
+                                        ))
+                                }))
+                                .children(
+                                    self.result_edit_error
+                                        .as_ref()
+                                        .map(|message| ErrorBanner::new(message.clone())),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .px_3()
+                                .py_2()
+                                .flex()
+                                .items_center()
+                                .justify_end()
+                                .gap_2()
+                                .border_t_1()
+                                .border_color(colors.subtle_border)
+                                .child(
+                                    Button::new("cancel-result-cell-edit", "Cancel")
+                                        .tone(ButtonTone::Neutral)
+                                        .on_click(cx.listener(|shell, _, window, cx| {
+                                            shell.dismiss_modal(&DismissModal, window, cx)
+                                        })),
+                                )
+                                .child(
+                                    Button::new("preview-result-cell-edit", "Preview SQL")
+                                        .tone(ButtonTone::Neutral)
+                                        .loading(pending && plan.is_none())
+                                        .disabled(pending)
+                                        .on_click(cx.listener(|shell, _, _, cx| {
+                                            shell.preview_result_cell_edit(cx)
+                                        })),
+                                )
+                                .child(
+                                    Button::new("apply-result-cell-edit", "Apply safely")
+                                        .tone(ButtonTone::Accent)
+                                        .loading(pending && plan.is_some())
+                                        .disabled(!can_apply)
+                                        .on_click(cx.listener(|shell, _, _, cx| {
+                                            shell.apply_result_cell_edit(cx)
+                                        })),
+                                ),
                         )
                         .into_any_element()
                 }
@@ -15960,6 +16380,7 @@ impl WorkspaceShell {
                     | Modal::SchemaSearch
                     | Modal::DataSearch
                     | Modal::DataResults(_)
+                    | Modal::EditResultCell
                     | Modal::DatabaseConnection
                     | Modal::ConfirmDeleteConnection(_)
             );

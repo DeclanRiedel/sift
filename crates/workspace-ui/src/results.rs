@@ -94,6 +94,12 @@ pub(crate) struct ResultFieldInspectorRow {
     pub included: bool,
 }
 
+pub(crate) struct SelectedCellEdit {
+    pub column: String,
+    pub original: Value,
+    pub original_row: Vec<(String, Value)>,
+}
+
 #[derive(Debug, Clone)]
 struct ColumnDrag {
     index: usize,
@@ -460,6 +466,7 @@ pub enum ResultsEvent {
     LoadNextWindowRequested,
     /// Present this live Data grid in the workspace's near-fullscreen modal.
     OpenDataModalRequested,
+    EditSelectedCellRequested,
     /// Explain the editor's targeted statement. Analyze is explicit because it
     /// executes the statement to collect runtime counters.
     ExplainRequested {
@@ -638,6 +645,26 @@ impl ResultsView {
 
     pub(crate) fn placement(&self) -> ResultPlacement {
         self.placement
+    }
+
+    pub(crate) fn selected_cell_edit(&self) -> Option<SelectedCellEdit> {
+        let GridSelection::Cell { row, column } = self.selected? else {
+            return None;
+        };
+        let data = self.state.ready()?;
+        let selected = data.rows.get(row)?.values.get(column)?.clone();
+        let column_name = data.columns.get(column)?.name.clone();
+        let original_row = data
+            .columns
+            .iter()
+            .zip(data.rows.get(row)?.values.iter())
+            .map(|(column, value)| (column.name.clone(), value.clone()))
+            .collect();
+        Some(SelectedCellEdit {
+            column: column_name,
+            original: selected,
+            original_row,
+        })
     }
 
     pub(crate) fn extent(&self) -> f32 {
@@ -1499,6 +1526,23 @@ impl ResultsView {
                             }))
                             .child(
                                 IconButton::new(
+                                    "edit-result-cell",
+                                    IconName::Edit,
+                                    "Edit selected cell",
+                                )
+                                .square(px(24.))
+                                .icon_size(13.)
+                                .disabled(!matches!(
+                                    self.selected,
+                                    Some(GridSelection::Cell { .. })
+                                ))
+                                .tooltip("Edit selected cell")
+                                .on_click(cx.listener(
+                                    |_, _, _, cx| cx.emit(ResultsEvent::EditSelectedCellRequested),
+                                )),
+                            )
+                            .child(
+                                IconButton::new(
                                     "copy-result-cell",
                                     IconName::Copy,
                                     "Copy highlighted fields",
@@ -1586,6 +1630,23 @@ impl ResultsView {
                                     |_, _, _, cx| cx.emit(ResultsEvent::OpenDataModalRequested),
                                 ))
                             }))
+                            .child(
+                                IconButton::new(
+                                    "edit-result-cell-vertical",
+                                    IconName::Edit,
+                                    "Edit selected cell",
+                                )
+                                .icon_size(13.)
+                                .text("Edit")
+                                .disabled(!matches!(
+                                    self.selected,
+                                    Some(GridSelection::Cell { .. })
+                                ))
+                                .tooltip("Edit selected cell")
+                                .on_click(cx.listener(
+                                    |_, _, _, cx| cx.emit(ResultsEvent::EditSelectedCellRequested),
+                                )),
+                            )
                             .child(
                                 IconButton::new(
                                     "copy-result-cell-vertical",

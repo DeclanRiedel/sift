@@ -1039,6 +1039,66 @@ async fn run_query_executor(
                     return;
                 }
             }
+            ExecutorCommand::PreviewResultEdits { item_id, edit_set } => {
+                let event = match context.as_ref() {
+                    Some(opened) => opened
+                        .client
+                        .preview_edits(
+                            opened.session,
+                            opened.connection,
+                            sift_protocol::PreviewEditsRequest {
+                                connection: opened.connection,
+                                edit_set: edit_set.clone(),
+                            },
+                        )
+                        .await
+                        .map_err(|error| format!("previewing result edit failed: {error}")),
+                    None => Err("Connect to this table before previewing an edit".into()),
+                };
+                if events
+                    .send(ExecutorEvent::ResultEditsPreviewed {
+                        item_id,
+                        edit_set,
+                        result: event,
+                    })
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            ExecutorCommand::ApplyResultEdits { item_id, edit_set } => {
+                let event = match context.as_ref() {
+                    Some(opened) => opened
+                        .client
+                        .apply_edits(
+                            opened.session,
+                            opened.connection,
+                            sift_protocol::ApplyEditsRequest {
+                                connection: opened.connection,
+                                edit_set,
+                                tx: opened.transaction.as_ref().map(|transaction| {
+                                    sift_protocol::TxHandleRef {
+                                        tx_id: transaction.tx_id,
+                                        connection: transaction.connection,
+                                        mode: transaction.mode,
+                                    }
+                                }),
+                            },
+                        )
+                        .await
+                        .map_err(|error| format!("applying result edit failed: {error}")),
+                    None => Err("Connect to this table before applying an edit".into()),
+                };
+                if events
+                    .send(ExecutorEvent::ResultEditsApplied {
+                        item_id,
+                        result: event,
+                    })
+                    .is_err()
+                {
+                    return;
+                }
+            }
             ExecutorCommand::LoadObjectDdl { item_id, source } => {
                 let event = match context.as_ref() {
                     Some(opened) if opened.profile_id == source.profile_id => {
