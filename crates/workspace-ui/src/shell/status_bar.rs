@@ -143,6 +143,20 @@ pub(super) fn render_status_bar(
                 .gap_1()
                 .child(
                     button(
+                        "footer-saved-queries",
+                        IconName::Folder,
+                        "Saved queries".into(),
+                        shell.left_dock.presentation.open
+                            && shell.active_left_panel == LeftPanel::SavedQueries,
+                        None,
+                        false,
+                    )
+                    .on_click(cx.listener(|shell, _, _, cx| {
+                        shell.select_left_panel(LeftPanel::SavedQueries, cx)
+                    })),
+                )
+                .child(
+                    button(
                         "footer-connections",
                         IconName::Database,
                         "Connections".into(),

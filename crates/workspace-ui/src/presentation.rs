@@ -58,6 +58,7 @@ pub enum LeftPanel {
     Git,
     Collaboration,
     QueryOutline,
+    SavedQueries,
 }
 
 impl LeftPanel {
@@ -67,6 +68,7 @@ impl LeftPanel {
             Self::Git => "Git",
             Self::Collaboration => "Collab",
             Self::QueryOutline => "Query Outline",
+            Self::SavedQueries => "Saved Queries",
         }
     }
 }

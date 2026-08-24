@@ -1161,6 +1161,20 @@ pub enum ExecutorCommand {
         item_id: u64,
         request: sift_protocol::ApplyMigrationRequest,
     },
+    LoadSavedQueries {
+        tenant_id: i64,
+    },
+    CreateSavedQuery {
+        request: sift_api_types::CreateSavedQueryRequest,
+    },
+    UpdateSavedQuery {
+        id: sift_api_types::SavedQueryId,
+        request: sift_api_types::UpdateSavedQueryRequest,
+    },
+    DeleteSavedQuery {
+        id: sift_api_types::SavedQueryId,
+        expected_revision: u64,
+    },
     /// Run one semantic request for `item_id`. `text` is the exact buffer the
     /// revision names, so the executor can resynchronize the server document
     /// before running the request instead of relying on message ordering.
@@ -1273,6 +1287,15 @@ pub enum ExecutorEvent {
     TableMigrationFailed {
         item_id: u64,
         message: String,
+    },
+    SavedQueriesLoaded {
+        tenant_id: i64,
+        result: Result<Vec<sift_api_types::SavedQuery>, String>,
+    },
+    SavedQuerySaved(Result<sift_api_types::SavedQuery, String>),
+    SavedQueryDeleted {
+        id: sift_api_types::SavedQueryId,
+        result: Result<(), String>,
     },
     Semantic {
         item_id: u64,
@@ -3003,6 +3026,7 @@ pub struct WorkspaceShell {
     inspector_focus_handle: FocusHandle,
     connections_scroll_handle: ScrollHandle,
     query_input: Entity<TextInput>,
+    saved_query_name_input: Entity<TextInput>,
     schema_search_input: Entity<TextInput>,
     data_search_input: Entity<TextInput>,
     server_name_input: Entity<TextInput>,
@@ -3088,6 +3112,11 @@ pub struct WorkspaceShell {
     next_execution_id: u64,
     running_explains: HashMap<u64, u64>,
     next_explain_id: u64,
+    saved_queries: Vec<sift_api_types::SavedQuery>,
+    saved_queries_tenant: Option<i64>,
+    saved_queries_loading: bool,
+    saved_queries_error: Option<String>,
+    saved_query_editing: Option<sift_api_types::SavedQueryId>,
     pending_database_execution: Option<PendingDatabaseExecution>,
     pending_database_explain: Option<PendingDatabaseExplain>,
     instance_sender: Option<tokio::sync::mpsc::UnboundedSender<InstanceCommand>>,
@@ -3267,6 +3296,7 @@ impl WorkspaceShell {
             })
             .collect();
         let query_input = cx.new(|cx| TextInput::new("", "Search commands…", cx));
+        let saved_query_name_input = cx.new(|cx| TextInput::new("", "Saved query name…", cx));
         let schema_search_input = cx.new(|cx| {
             TextInput::new("", "Search schema…", cx).aria_label("Search database schema")
         });
@@ -3410,6 +3440,7 @@ impl WorkspaceShell {
             inspector_focus_handle: cx.focus_handle(),
             connections_scroll_handle: ScrollHandle::new(),
             query_input,
+            saved_query_name_input,
             schema_search_input,
             data_search_input,
             server_name_input,
@@ -3489,6 +3520,11 @@ impl WorkspaceShell {
             next_execution_id: 1,
             running_explains: HashMap::new(),
             next_explain_id: 1,
+            saved_queries: Vec::new(),
+            saved_queries_tenant: None,
+            saved_queries_loading: false,
+            saved_queries_error: None,
+            saved_query_editing: None,
             pending_database_execution: None,
             pending_database_explain: None,
             instance_sender: None,
@@ -4678,6 +4714,54 @@ impl WorkspaceShell {
             ExecutorEvent::ProfileCreationFailed(message) => {
                 self.database_connection_pending = false;
                 self.database_connection_error = Some(message.clone());
+                cx.notify();
+            }
+            ExecutorEvent::SavedQueriesLoaded { tenant_id, result } => {
+                if self.saved_queries_tenant != Some(tenant_id) {
+                    return;
+                }
+                self.saved_queries_loading = false;
+                match result {
+                    Ok(queries) => {
+                        self.saved_queries = queries;
+                        self.saved_queries_error = None;
+                    }
+                    Err(message) => self.saved_queries_error = Some(message),
+                }
+                cx.notify();
+            }
+            ExecutorEvent::SavedQuerySaved(result) => {
+                self.saved_queries_loading = false;
+                match result {
+                    Ok(saved) => {
+                        if let Some(existing) = self
+                            .saved_queries
+                            .iter_mut()
+                            .find(|query| query.id == saved.id)
+                        {
+                            *existing = saved;
+                        } else {
+                            self.saved_queries.push(saved);
+                        }
+                        self.saved_queries.sort_by(|a, b| a.name.cmp(&b.name));
+                        self.saved_query_editing = None;
+                        self.saved_queries_error = None;
+                        self.show_toast("Saved query".into(), cx);
+                    }
+                    Err(message) => self.saved_queries_error = Some(message),
+                }
+                cx.notify();
+            }
+            ExecutorEvent::SavedQueryDeleted { id, result } => {
+                self.saved_queries_loading = false;
+                match result {
+                    Ok(()) => {
+                        self.saved_queries.retain(|query| query.id != id);
+                        self.saved_query_editing = None;
+                        self.saved_queries_error = None;
+                    }
+                    Err(message) => self.saved_queries_error = Some(message),
+                }
                 cx.notify();
             }
             ExecutorEvent::ProfileDeleted {
@@ -7524,7 +7608,235 @@ impl WorkspaceShell {
             self.active_left_panel = panel;
             self.left_dock.presentation.open = true;
         }
+        if panel == LeftPanel::SavedQueries && self.left_dock.presentation.open {
+            self.request_saved_queries(cx);
+        }
         self.fit_side_docks_to_width(self.window_presentation.bounds.width);
+        self.persist(cx);
+        cx.notify();
+    }
+
+    fn selected_tenant_id(&self) -> Option<i64> {
+        if let ConnectionStatus::Connected { profile_id, .. } = self.connection_status {
+            if let Some(tenant) = self.lifecycle.tenants.iter().find(|tenant| {
+                tenant
+                    .connections
+                    .iter()
+                    .any(|entry| entry.id == profile_id)
+            }) {
+                return Some(tenant.id.0);
+            }
+        }
+        self.lifecycle.tenants.first().map(|tenant| tenant.id.0)
+    }
+
+    fn request_saved_queries(&mut self, cx: &mut Context<Self>) {
+        if self.saved_queries_loading {
+            return;
+        }
+        let Some(tenant_id) = self.selected_tenant_id() else {
+            self.saved_queries_error = Some("No tenant is available".into());
+            cx.notify();
+            return;
+        };
+        let Some(sender) = &self.executor_sender else {
+            self.saved_queries_error = Some("Saved-query executor is unavailable".into());
+            cx.notify();
+            return;
+        };
+        self.saved_queries_loading = sender
+            .send(ExecutorCommand::LoadSavedQueries { tenant_id })
+            .is_ok();
+        self.saved_queries_tenant = Some(tenant_id);
+        self.saved_queries_error =
+            (!self.saved_queries_loading).then(|| "Saved-query executor stopped".into());
+        cx.notify();
+    }
+
+    fn active_query_snapshot(&self, cx: &App) -> Option<(String, String, Option<i64>)> {
+        let pane = self.panes.get(self.active_pane)?.read(cx);
+        let item = pane.active_item()?;
+        if item.kind != ItemKind::Query {
+            return None;
+        }
+        let sql = pane.editor(item.id)?.read(cx).document().text().to_owned();
+        let profile_id = match item.source.as_ref() {
+            Some(ItemSource::DatabaseObject(source)) => Some(source.profile_id),
+            _ => match self.connection_status {
+                ConnectionStatus::Connected { profile_id, .. } => Some(profile_id),
+                _ => None,
+            },
+        };
+        Some((
+            item.title.trim_end_matches(".sql").to_owned(),
+            sql,
+            profile_id,
+        ))
+    }
+
+    fn save_active_query(&mut self, cx: &mut Context<Self>) {
+        let Some((name, sql_text, connection_profile_id)) = self.active_query_snapshot(cx) else {
+            self.show_toast("Focus a query tab before saving".into(), cx);
+            return;
+        };
+        let Some(tenant_id) = self.selected_tenant_id() else {
+            self.show_toast("No tenant is available".into(), cx);
+            return;
+        };
+        let owner_principal_id = self
+            .lifecycle
+            .identity
+            .as_ref()
+            .map(|identity| identity.principal.id);
+        let Some(sender) = &self.executor_sender else {
+            self.show_toast("Saved-query executor is unavailable".into(), cx);
+            return;
+        };
+        self.saved_queries_loading = sender
+            .send(ExecutorCommand::CreateSavedQuery {
+                request: sift_api_types::CreateSavedQueryRequest {
+                    tenant_id,
+                    owner_principal_id,
+                    name,
+                    sql_text,
+                    connection_profile_id,
+                    tags: Vec::new(),
+                },
+            })
+            .is_ok();
+        cx.notify();
+    }
+
+    fn update_saved_query_from_active(
+        &mut self,
+        id: sift_api_types::SavedQueryId,
+        revision: u64,
+        cx: &mut Context<Self>,
+    ) {
+        let Some((_, sql_text, connection_profile_id)) = self.active_query_snapshot(cx) else {
+            self.show_toast("Focus the query version to save".into(), cx);
+            return;
+        };
+        let Some(sender) = &self.executor_sender else {
+            return;
+        };
+        self.saved_queries_loading = sender
+            .send(ExecutorCommand::UpdateSavedQuery {
+                id,
+                request: sift_api_types::UpdateSavedQueryRequest {
+                    expected_revision: revision,
+                    sql_text: Some(sql_text),
+                    connection_profile_id: Some(connection_profile_id),
+                    ..Default::default()
+                },
+            })
+            .is_ok();
+        cx.notify();
+    }
+
+    fn begin_rename_saved_query(
+        &mut self,
+        id: sift_api_types::SavedQueryId,
+        name: String,
+        cx: &mut Context<Self>,
+    ) {
+        self.saved_query_editing = Some(id);
+        self.saved_query_name_input
+            .update(cx, |input, cx| input.set_text(name, cx));
+        cx.notify();
+    }
+
+    fn finish_rename_saved_query(
+        &mut self,
+        id: sift_api_types::SavedQueryId,
+        revision: u64,
+        cx: &mut Context<Self>,
+    ) {
+        let name = self
+            .saved_query_name_input
+            .read(cx)
+            .text()
+            .trim()
+            .to_owned();
+        if name.is_empty() {
+            self.saved_queries_error = Some("Saved query name cannot be empty".into());
+            cx.notify();
+            return;
+        }
+        let Some(sender) = &self.executor_sender else {
+            return;
+        };
+        self.saved_queries_loading = sender
+            .send(ExecutorCommand::UpdateSavedQuery {
+                id,
+                request: sift_api_types::UpdateSavedQueryRequest {
+                    expected_revision: revision,
+                    name: Some(name),
+                    ..Default::default()
+                },
+            })
+            .is_ok();
+        cx.notify();
+    }
+
+    fn delete_saved_query(
+        &mut self,
+        id: sift_api_types::SavedQueryId,
+        expected_revision: u64,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(sender) = &self.executor_sender else {
+            return;
+        };
+        self.saved_queries_loading = sender
+            .send(ExecutorCommand::DeleteSavedQuery {
+                id,
+                expected_revision,
+            })
+            .is_ok();
+        cx.notify();
+    }
+
+    fn open_saved_query(
+        &mut self,
+        query: sift_api_types::SavedQuery,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let title = format!("{}.sql", query.name);
+        if self.focus_open_item(ItemKind::Query, &title, window, cx) {
+            return;
+        }
+        let item_id = self.next_id;
+        self.next_id = self.next_id.saturating_add(1);
+        let keymap = if self.vim_mode_default() {
+            EditorKeymap::Vim
+        } else {
+            EditorKeymap::Standard
+        };
+        let editor = cx.new(|cx| {
+            QueryEditor::new(QueryDocument::with_random_peer(&query.sql_text), cx)
+                .with_keymap(keymap)
+        });
+        let results = cx.new(ResultsView::new);
+        if let Some(pane) = self.panes.get(self.active_pane) {
+            pane.update(cx, |pane, cx| {
+                pane.open_query(
+                    ItemPresentation {
+                        id: item_id,
+                        kind: ItemKind::Query,
+                        title,
+                        dirty: false,
+                        source: None,
+                        last_result: None,
+                    },
+                    editor,
+                    results,
+                    cx,
+                )
+            });
+        }
+        self.focus_active_pane(window, cx);
         self.persist(cx);
         cx.notify();
     }
@@ -12666,6 +12978,166 @@ impl WorkspaceShell {
                                     .child("Statements, CTEs, parameters, and referenced objects appear here when desktop semantic diagnostics land."),
                             ),
                     )
+                },
+            )
+            .when(
+                dock.id == DockId::Left && self.active_left_panel == LeftPanel::SavedQueries,
+                |dock_view| {
+                    let rows = self.saved_queries.iter().cloned().map(|query| {
+                        let id = query.id;
+                        let revision = query.revision;
+                        let editing = self.saved_query_editing == Some(id);
+                        if editing {
+                            return div()
+                                .id(("saved-query-edit", id.0 as usize))
+                                .mx_2()
+                                .py_1()
+                                .flex()
+                                .items_center()
+                                .gap_1()
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .child(self.saved_query_name_input.clone()),
+                                )
+                                .child(
+                                    Button::new(("save-saved-query-name", id.0 as usize), "Save")
+                                        .tone(ButtonTone::Accent)
+                                        .on_click(cx.listener(move |shell, _, _, cx| {
+                                            shell.finish_rename_saved_query(id, revision, cx)
+                                        })),
+                                )
+                                .child(
+                                    Button::new(("cancel-saved-query-name", id.0 as usize), "Cancel")
+                                        .tone(ButtonTone::Ghost)
+                                        .on_click(cx.listener(|shell, _, _, cx| {
+                                            shell.saved_query_editing = None;
+                                            cx.notify();
+                                        })),
+                                )
+                                .into_any_element();
+                        }
+                        let open_query = query.clone();
+                        let rename_name = query.name.clone();
+                        div()
+                            .id(("saved-query", id.0 as usize))
+                            .mx_2()
+                            .py_1()
+                            .px_2()
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .rounded_sm()
+                            .border_b_1()
+                            .border_color(colors.subtle_border)
+                            .child(
+                                div()
+                                    .min_w_0()
+                                    .truncate()
+                                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                                    .child(query.name),
+                            )
+                            .child(
+                                div()
+                                    .truncate()
+                                    .font_family("monospace")
+                                    .text_xs()
+                                    .text_color(colors.muted_text)
+                                    .child(query.sql_text.replace(['\n', '\r'], " ")),
+                            )
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_1()
+                                    .child(
+                                        Button::new(("open-saved-query", id.0 as usize), "Open")
+                                            .tone(ButtonTone::Ghost)
+                                            .on_click(cx.listener(move |shell, _, window, cx| {
+                                                shell.open_saved_query(open_query.clone(), window, cx)
+                                            })),
+                                    )
+                                    .child(
+                                        Button::new(("update-saved-query", id.0 as usize), "Update")
+                                            .tone(ButtonTone::Ghost)
+                                            .on_click(cx.listener(move |shell, _, _, cx| {
+                                                shell.update_saved_query_from_active(id, revision, cx)
+                                            })),
+                                    )
+                                    .child(
+                                        Button::new(("rename-saved-query", id.0 as usize), "Rename")
+                                            .tone(ButtonTone::Ghost)
+                                            .on_click(cx.listener(move |shell, _, _, cx| {
+                                                shell.begin_rename_saved_query(id, rename_name.clone(), cx)
+                                            })),
+                                    )
+                                    .child(
+                                        Button::new(("delete-saved-query", id.0 as usize), "Delete")
+                                            .tone(ButtonTone::DangerGhost)
+                                            .on_click(cx.listener(move |shell, _, _, cx| {
+                                                shell.delete_saved_query(id, revision, cx)
+                                            })),
+                                    ),
+                            )
+                            .into_any_element()
+                    });
+                    dock_view
+                        .child(
+                            div()
+                                .px_2()
+                                .pb_2()
+                                .flex()
+                                .items_center()
+                                .gap_1()
+                                .child(
+                                    Button::new("save-active-query", "Save current")
+                                        .tone(ButtonTone::Accent)
+                                        .disabled(self.active_query_snapshot(cx).is_none())
+                                        .on_click(cx.listener(|shell, _, _, cx| {
+                                            shell.save_active_query(cx)
+                                        })),
+                                )
+                                .child(
+                                    Button::new("refresh-saved-queries", "Refresh")
+                                        .tone(ButtonTone::Ghost)
+                                        .disabled(self.saved_queries_loading)
+                                        .on_click(cx.listener(|shell, _, _, cx| {
+                                            shell.request_saved_queries(cx)
+                                        })),
+                                ),
+                        )
+                        .children(self.saved_queries_error.as_ref().map(|message| {
+                            div()
+                                .mx_2()
+                                .mb_2()
+                                .child(ErrorBanner::new(message.clone()))
+                        }))
+                        .when(self.saved_queries_loading && self.saved_queries.is_empty(), |panel| {
+                            panel.child(
+                                div()
+                                    .p_3()
+                                    .text_color(colors.muted_text)
+                                    .child("Loading saved queries…"),
+                            )
+                        })
+                        .when(!self.saved_queries_loading && self.saved_queries.is_empty(), |panel| {
+                            panel.child(
+                                div()
+                                    .p_3()
+                                    .text_color(colors.muted_text)
+                                    .child("No saved queries yet."),
+                            )
+                        })
+                        .child(
+                            div()
+                                .id("saved-queries-scroll")
+                                .debug_selector(|| "saved-queries-scroll".into())
+                                .flex_1()
+                                .min_h_0()
+                                .overflow_y_scroll()
+                                .children(rows),
+                        )
                 },
             )
             .when(dock.id == DockId::Inspector, |dock_view| {
@@ -20498,6 +20970,100 @@ mod tests {
             assert!(!snapshot.workspace.bottom_dock.open);
             assert!(!snapshot.workspace.right_dock.open);
         });
+    }
+
+    #[gpui::test]
+    fn saved_queries_panel_routes_crud_and_reopens_sql(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let saved = sift_api_types::SavedQuery {
+            id: sift_api_types::SavedQueryId(7),
+            tenant_id: sift_api_types::TenantId(1),
+            owner_principal_id: Some(sift_api_types::PrincipalId(1)),
+            name: "Recent events".into(),
+            sql_text: "select * from lab.audit_events".into(),
+            connection_profile_id: Some(sift_api_types::ConnectionProfileId(2)),
+            tags: Vec::new(),
+            created_at: "2026-08-24T10:00:00Z".parse().unwrap(),
+            updated_at: "2026-08-24T10:00:00Z".parse().unwrap(),
+            revision: 3,
+        };
+
+        workspace.update(&mut cx, |shell, cx| {
+            shell.executor_sender = Some(sender);
+            shell.lifecycle.tenants = vec![crate::TenantNavEntry {
+                id: sift_api_types::TenantId(1),
+                name: "demo".into(),
+                rooms: Vec::new(),
+                connections: Vec::new(),
+            }];
+            shell.select_left_panel(LeftPanel::SavedQueries, cx);
+        });
+        assert!(matches!(
+            receiver.try_recv(),
+            Ok(ExecutorCommand::LoadSavedQueries { tenant_id: 1 })
+        ));
+        workspace.update(&mut cx, |shell, cx| {
+            shell.on_executor_event(
+                ExecutorEvent::SavedQueriesLoaded {
+                    tenant_id: 1,
+                    result: Ok(vec![saved.clone()]),
+                },
+                cx,
+            )
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("saved-queries-scroll").is_some());
+
+        workspace.update_in(&mut cx, |shell, window, cx| {
+            shell.open_saved_query(saved.clone(), window, cx)
+        });
+        workspace.read_with(&cx, |shell, cx| {
+            let pane = shell.panes[shell.active_pane].read(cx);
+            let item = pane.active_item().unwrap();
+            assert_eq!(item.title, "Recent events.sql");
+            assert_eq!(
+                pane.editor(item.id).unwrap().read(cx).document().text(),
+                saved.sql_text
+            );
+        });
+
+        workspace.update(&mut cx, |shell, cx| shell.save_active_query(cx));
+        assert!(matches!(
+            receiver.try_recv(),
+            Ok(ExecutorCommand::CreateSavedQuery { request })
+                if request.name == "Recent events" && request.sql_text == saved.sql_text
+        ));
+        workspace.update(&mut cx, |shell, cx| {
+            shell.update_saved_query_from_active(saved.id, saved.revision, cx)
+        });
+        assert!(matches!(
+            receiver.try_recv(),
+            Ok(ExecutorCommand::UpdateSavedQuery { id, request })
+                if id == saved.id && request.sql_text.as_deref() == Some(saved.sql_text.as_str())
+        ));
+        workspace.update(&mut cx, |shell, cx| {
+            shell.begin_rename_saved_query(saved.id, saved.name.clone(), cx);
+            shell
+                .saved_query_name_input
+                .update(cx, |input, cx| input.set_text("Audit trail", cx));
+            shell.finish_rename_saved_query(saved.id, saved.revision, cx);
+        });
+        assert!(matches!(
+            receiver.try_recv(),
+            Ok(ExecutorCommand::UpdateSavedQuery { id, request })
+                if id == saved.id && request.name.as_deref() == Some("Audit trail")
+        ));
+        workspace.update(&mut cx, |shell, cx| {
+            shell.delete_saved_query(saved.id, saved.revision, cx)
+        });
+        assert!(matches!(
+            receiver.try_recv(),
+            Ok(ExecutorCommand::DeleteSavedQuery { id, expected_revision: 3 })
+                if id == saved.id
+        ));
     }
 
     #[gpui::test]

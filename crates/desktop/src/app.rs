@@ -896,6 +896,79 @@ async fn run_query_executor(
                     });
                 }));
             }
+            ExecutorCommand::LoadSavedQueries { tenant_id } => {
+                let server = targets.borrow().clone();
+                let result = async {
+                    let client = server.client().await?;
+                    client
+                        .saved_queries(
+                            TenantId(tenant_id),
+                            None,
+                            &[],
+                            Some(sift_api_types::SavedQueryScope::All),
+                        )
+                        .await
+                        .map_err(|error| format!("loading saved queries failed: {error}"))
+                }
+                .await;
+                if events
+                    .send(ExecutorEvent::SavedQueriesLoaded { tenant_id, result })
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            ExecutorCommand::CreateSavedQuery { request } => {
+                let server = targets.borrow().clone();
+                let result = async {
+                    server
+                        .client()
+                        .await?
+                        .create_saved_query(request)
+                        .await
+                        .map_err(|error| format!("saving query failed: {error}"))
+                }
+                .await;
+                if events.send(ExecutorEvent::SavedQuerySaved(result)).is_err() {
+                    return;
+                }
+            }
+            ExecutorCommand::UpdateSavedQuery { id, request } => {
+                let server = targets.borrow().clone();
+                let result = async {
+                    server
+                        .client()
+                        .await?
+                        .update_saved_query(id, request)
+                        .await
+                        .map_err(|error| format!("updating saved query failed: {error}"))
+                }
+                .await;
+                if events.send(ExecutorEvent::SavedQuerySaved(result)).is_err() {
+                    return;
+                }
+            }
+            ExecutorCommand::DeleteSavedQuery {
+                id,
+                expected_revision,
+            } => {
+                let server = targets.borrow().clone();
+                let result = async {
+                    server
+                        .client()
+                        .await?
+                        .delete_saved_query(id, expected_revision)
+                        .await
+                        .map_err(|error| format!("deleting saved query failed: {error}"))
+                }
+                .await;
+                if events
+                    .send(ExecutorEvent::SavedQueryDeleted { id, result })
+                    .is_err()
+                {
+                    return;
+                }
+            }
             ExecutorCommand::LoadObjectDdl { item_id, source } => {
                 let event = match context.as_ref() {
                     Some(opened) if opened.profile_id == source.profile_id => {
