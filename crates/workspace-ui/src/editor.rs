@@ -2412,8 +2412,6 @@ struct EditorPrepaint {
     line_numbers: Vec<(usize, ShapedLine)>,
     line_starts: Arc<Vec<usize>>,
     visible_line_start: usize,
-    gutter_background: Option<PaintQuad>,
-    gutter_separator: Option<PaintQuad>,
     gutter_diagnostics: Vec<PaintQuad>,
     active_line: Option<PaintQuad>,
     find_matches: Vec<PaintQuad>,
@@ -2747,17 +2745,6 @@ impl Element for QueryEditorElement {
             line_numbers,
             line_starts,
             visible_line_start: visible_start,
-            gutter_background: Some(fill(
-                Bounds::new(bounds.origin, size(EDITOR_GUTTER_WIDTH, bounds.size.height)),
-                theme.colors.toolbar,
-            )),
-            gutter_separator: Some(fill(
-                Bounds::new(
-                    point(bounds.left() + EDITOR_GUTTER_WIDTH - px(1.), bounds.top()),
-                    size(px(1.), bounds.size.height),
-                ),
-                theme.colors.subtle_border,
-            )),
             gutter_diagnostics: gutter_diagnostic_quads,
             active_line: active_line_quad,
             find_matches: find_quads,
@@ -2786,14 +2773,8 @@ impl Element for QueryEditorElement {
             ElementInputHandler::new(prepaint.text_bounds, self.editor.clone()),
             cx,
         );
-        if let Some(background) = prepaint.gutter_background.take() {
-            window.paint_quad(background);
-        }
         if let Some(active_line) = prepaint.active_line.take() {
             window.paint_quad(active_line);
-        }
-        if let Some(separator) = prepaint.gutter_separator.take() {
-            window.paint_quad(separator);
         }
         for found in prepaint.find_matches.drain(..) {
             window.paint_quad(found);
