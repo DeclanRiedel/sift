@@ -89,7 +89,8 @@ prefixes display a compact which-key strip generated from the same vocabulary.
 - [ ] Add editable-result `i`, `dd`, `o`, undo/redo, Preview, Apply, Revert.
 - [ ] Add generated keyboard-equivalence tests proving every visible action has
       a command path.
-- [ ] Add user keymap overrides only after default grammar stabilizes.
+- [x] Add versioned `keymaps.json` overrides with compact modal and full-file
+      editors; validate command ids, leader syntax, and duplicate sequences.
 
 ## Development reference
 

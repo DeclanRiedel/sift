@@ -3,6 +3,8 @@
 //! Commands stay compile-time Rust values. Extensions may expose governed
 //! server operations, but cannot register desktop commands or render UI.
 
+use std::collections::BTreeMap;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum CommandId {
     ConnectServer,
@@ -115,12 +117,12 @@ pub struct CommandContext {
     pub database_connected: bool,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommandSpec {
     pub id: CommandId,
     pub label: &'static str,
     pub shortcut: &'static str,
-    pub language: &'static str,
+    pub language: String,
     pub disabled_reason: Option<&'static str>,
 }
 
@@ -153,7 +155,7 @@ impl CommandRegistry {
             id,
             label: definition.label,
             shortcut: definition.shortcut,
-            language: definition.language,
+            language: definition.language.into(),
             disabled_reason: match definition.availability {
                 AvailabilityRule::Always => None,
                 AvailabilityRule::ActiveItem if !context.has_active_item => Some("No active item"),
@@ -184,23 +186,61 @@ impl CommandRegistry {
             .collect()
     }
 
+    pub fn palette_with(
+        context: CommandContext,
+        bindings: &BTreeMap<String, String>,
+    ) -> Vec<CommandSpec> {
+        Self::palette(context)
+            .into_iter()
+            .map(|mut spec| {
+                if let Some(language) = bindings.get(spec.id.as_str()) {
+                    spec.language.clone_from(language);
+                }
+                spec
+            })
+            .collect()
+    }
+
+    pub const fn definitions() -> &'static [CommandDefinition] {
+        DEFINITIONS
+    }
+
+    pub fn id_from_str(id: &str) -> Option<CommandId> {
+        DEFINITIONS
+            .iter()
+            .find(|definition| definition.id.as_str() == id)
+            .map(|definition| definition.id)
+    }
+
     /// Resolve a workspace-owned leader sequence without relying on GPUI's
     /// timed multi-stroke replay. `keys` excludes the leader itself.
     pub fn resolve_language(keys: &[String]) -> CommandLanguageMatch {
+        Self::resolve_language_with(keys, &BTreeMap::new())
+    }
+
+    pub fn resolve_language_with(
+        keys: &[String],
+        bindings: &BTreeMap<String, String>,
+    ) -> CommandLanguageMatch {
         if keys.is_empty() {
             return CommandLanguageMatch::Prefix;
         }
         let entered = format!("<leader> {}", keys.join(" "));
-        if let Some(command) = DEFINITIONS
-            .iter()
-            .find(|definition| definition.language == entered)
-        {
+        if let Some(command) = DEFINITIONS.iter().find(|definition| {
+            bindings
+                .get(definition.id.as_str())
+                .map_or(definition.language, String::as_str)
+                == entered
+        }) {
             return CommandLanguageMatch::Command(command.id);
         }
 
         let prefix = format!("{entered} ");
         if DEFINITIONS.iter().any(|definition| {
-            definition.language.starts_with("<leader>") && definition.language.starts_with(&prefix)
+            let language = bindings
+                .get(definition.id.as_str())
+                .map_or(definition.language, String::as_str);
+            language.starts_with("<leader>") && language.starts_with(&prefix)
         }) {
             CommandLanguageMatch::Prefix
         } else {
@@ -624,6 +664,19 @@ mod tests {
         assert_eq!(
             CommandRegistry::resolve_language(&["x".into(), "z".into()]),
             CommandLanguageMatch::Invalid
+        );
+
+        let bindings = BTreeMap::from([(
+            CommandId::ExecuteStatement.as_str().to_owned(),
+            "<leader> z s".to_owned(),
+        )]);
+        assert_eq!(
+            CommandRegistry::resolve_language_with(&["x".into(), "s".into()], &bindings),
+            CommandLanguageMatch::Invalid
+        );
+        assert_eq!(
+            CommandRegistry::resolve_language_with(&["z".into(), "s".into()], &bindings),
+            CommandLanguageMatch::Command(CommandId::ExecuteStatement)
         );
     }
 }

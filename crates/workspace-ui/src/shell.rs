@@ -21,7 +21,7 @@ use crate::editor::{
     SemanticRequestKind, VimMode, EDITOR_GUTTER_WIDTH,
 };
 use crate::results::{ResultPlacement, ResultState, ResultsEvent, ResultsView, StreamProgress};
-use crate::settings::{EditorMode, KeyboardProfile, SettingsStore, UserSettings};
+use crate::settings::{EditorMode, KeyboardProfile, KeymapSettings, SettingsStore, UserSettings};
 
 use crate::presentation::{
     BottomTool, DatabaseObjectSource, ItemKind, ItemPresentation, ItemSource, LeftPanel, PaneAxis,
@@ -66,6 +66,39 @@ const ROOT_PANE_DROP_TARGET_SIZE: f32 = 48.0;
 const RESULT_RESIZE_HANDLE_SIZE: f32 = 7.0;
 const RESULT_MIN_EXTENT: f32 = 140.0;
 const EDITOR_MIN_EXTENT: f32 = 160.0;
+
+fn default_keymaps() -> KeymapSettings {
+    KeymapSettings {
+        bindings: CommandRegistry::definitions()
+            .iter()
+            .filter(|definition| definition.language.starts_with("<leader>"))
+            .map(|definition| {
+                (
+                    definition.id.as_str().to_owned(),
+                    definition.language.to_owned(),
+                )
+            })
+            .collect(),
+        ..KeymapSettings::default()
+    }
+}
+
+fn validate_keymap_commands(keymaps: &KeymapSettings) -> Result<(), String> {
+    for command in keymaps.bindings.keys() {
+        let Some(id) = CommandRegistry::id_from_str(command) else {
+            return Err(format!(
+                "keymaps.json contains unknown command id {command:?}"
+            ));
+        };
+        if !CommandRegistry::definition(id)
+            .language
+            .starts_with("<leader>")
+        {
+            return Err(format!("{command} is not an editable IDE leader command"));
+        }
+    }
+    Ok(())
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ProblemSeverity {
@@ -680,34 +713,6 @@ actions!(
         ToggleBottomDock
     ]
 );
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum KeyLanguageHint {
-    Root,
-    Find,
-    Go,
-    View,
-    Execute,
-    Tab,
-    Edit,
-    Database,
-    Workspace,
-}
-
-fn key_language_hint(keys: &[String]) -> KeyLanguageHint {
-    match keys.first().map(String::as_str) {
-        None => KeyLanguageHint::Root,
-        Some("f") => KeyLanguageHint::Find,
-        Some("g") => KeyLanguageHint::Go,
-        Some("v") => KeyLanguageHint::View,
-        Some("x") => KeyLanguageHint::Execute,
-        Some("t") => KeyLanguageHint::Tab,
-        Some("e") => KeyLanguageHint::Edit,
-        Some("d") => KeyLanguageHint::Database,
-        Some("w") => KeyLanguageHint::Workspace,
-        Some(_) => KeyLanguageHint::Root,
-    }
-}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Modal {
@@ -1359,6 +1364,7 @@ impl Pane {
             };
             let document = QueryDocument::with_random_peer(&restored_text);
             let language = match item.kind {
+                ItemKind::Configuration if item.title.ends_with(".json") => EditorLanguage::Json,
                 ItemKind::Configuration => EditorLanguage::Toml,
                 ItemKind::Problems => EditorLanguage::PlainText,
                 ItemKind::Query | ItemKind::Schema | ItemKind::Welcome => EditorLanguage::Sql,
@@ -2964,6 +2970,10 @@ pub struct WorkspaceShell {
     settings: UserSettings,
     settings_store: Option<Arc<SettingsStore>>,
     settings_item: Option<u64>,
+    keymaps: KeymapSettings,
+    keymap_inputs: HashMap<CommandId, Entity<TextInput>>,
+    keymaps_item: Option<u64>,
+    keymaps_error: Option<String>,
     window_presentation: WindowPresentation,
     panes: Vec<Entity<Pane>>,
     active_tab_drop_pane: Option<Entity<Pane>>,
@@ -3152,6 +3162,42 @@ impl WorkspaceShell {
             .max()
             .unwrap_or(0)
             + 1;
+        let (keymaps, keymaps_error) = match settings_store
+            .as_ref()
+            .map(|store| store.load_keymaps())
+            .transpose()
+        {
+            Ok(Some(mut keymaps)) => {
+                if keymaps.bindings.is_empty() {
+                    keymaps = default_keymaps();
+                    if let Some(store) = &settings_store {
+                        let _ = store.save_keymaps(&keymaps);
+                    }
+                }
+                match validate_keymap_commands(&keymaps) {
+                    Ok(()) => (keymaps, None),
+                    Err(error) => (default_keymaps(), Some(error)),
+                }
+            }
+            Ok(None) => (default_keymaps(), None),
+            Err(error) => (default_keymaps(), Some(error)),
+        };
+        let keymap_inputs = CommandRegistry::definitions()
+            .iter()
+            .filter(|definition| definition.language.starts_with("<leader>"))
+            .map(|definition| {
+                let sequence = keymaps
+                    .bindings
+                    .get(definition.id.as_str())
+                    .map_or(definition.language, String::as_str)
+                    .to_owned();
+                let input = cx.new(|cx| {
+                    TextInput::new(sequence, "Disabled", cx)
+                        .aria_label(format!("Keymap for {}", definition.label))
+                });
+                (definition.id, input)
+            })
+            .collect();
         let query_input = cx.new(|cx| TextInput::new("", "Search commands…", cx));
         let schema_search_input = cx.new(|cx| {
             TextInput::new("", "Search schema…", cx).aria_label("Search database schema")
@@ -3321,6 +3367,10 @@ impl WorkspaceShell {
             settings,
             settings_store,
             settings_item: None,
+            keymaps,
+            keymap_inputs,
+            keymaps_item: None,
+            keymaps_error,
             window_presentation,
             panes,
             active_tab_drop_pane: None,
@@ -3409,7 +3459,7 @@ impl WorkspaceShell {
     }
 
     pub fn command_specs(&self, cx: &App) -> Vec<CommandSpec> {
-        CommandRegistry::palette(self.command_context(cx))
+        CommandRegistry::palette_with(self.command_context(cx), &self.keymaps.bindings)
     }
 
     fn command_context(&self, cx: &App) -> CommandContext {
@@ -6510,6 +6560,132 @@ impl WorkspaceShell {
         cx.notify();
     }
 
+    fn sync_keymap_inputs(&mut self, keymaps: &KeymapSettings, cx: &mut Context<Self>) {
+        for definition in CommandRegistry::definitions()
+            .iter()
+            .filter(|definition| definition.language.starts_with("<leader>"))
+        {
+            let sequence = keymaps
+                .bindings
+                .get(definition.id.as_str())
+                .map_or(definition.language, String::as_str);
+            if let Some(input) = self.keymap_inputs.get(&definition.id) {
+                input.update(cx, |input, cx| input.set_text(sequence, cx));
+            }
+        }
+    }
+
+    fn open_keymaps_modal(&mut self, cx: &mut Context<Self>) {
+        let keymaps_file_is_open = self.keymaps_item.is_some_and(|item_id| {
+            self.panes
+                .iter()
+                .any(|pane| pane.read(cx).contains_item(item_id))
+        });
+        if keymaps_file_is_open {
+            self.show_toast(
+                "Save or close keymaps.json before editing keymaps here".into(),
+                cx,
+            );
+            return;
+        }
+        let keymaps = self.keymaps.clone();
+        self.sync_keymap_inputs(&keymaps, cx);
+        self.keymaps_error = None;
+        self.modal = Some(Modal::Keymaps);
+        cx.notify();
+    }
+
+    fn save_keymaps_modal(&mut self, cx: &mut Context<Self>) {
+        let mut keymaps = KeymapSettings::default();
+        for definition in CommandRegistry::definitions()
+            .iter()
+            .filter(|definition| definition.language.starts_with("<leader>"))
+        {
+            let Some(input) = self.keymap_inputs.get(&definition.id) else {
+                continue;
+            };
+            keymaps.bindings.insert(
+                definition.id.as_str().to_owned(),
+                input.read(cx).text().trim().to_owned(),
+            );
+        }
+        let Some(store) = self.settings_store.clone() else {
+            self.keymaps_error = Some("keymaps.json is unavailable in this session".into());
+            cx.notify();
+            return;
+        };
+        if let Err(error) = validate_keymap_commands(&keymaps).and_then(|()| {
+            let source = keymaps.encode()?;
+            KeymapSettings::decode(&source)?;
+            store.save_keymaps(&keymaps)
+        }) {
+            self.keymaps_error = Some(error);
+            cx.notify();
+            return;
+        }
+        self.keymaps = keymaps;
+        self.keymaps_error = None;
+        self.ide_input = None;
+        self.show_toast("Saved keymaps.json".into(), cx);
+        cx.notify();
+    }
+
+    fn reset_keymaps_modal(&mut self, cx: &mut Context<Self>) {
+        let defaults = default_keymaps();
+        self.sync_keymap_inputs(&defaults, cx);
+        self.keymaps_error = None;
+        cx.notify();
+    }
+
+    fn open_user_keymaps(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(store) = self.settings_store.clone() else {
+            self.show_toast("keymaps.json is unavailable in this session".into(), cx);
+            return;
+        };
+        let source = match store.read_keymaps_text() {
+            Ok(source) => source,
+            Err(error) => {
+                self.show_toast(error, cx);
+                return;
+            }
+        };
+        self.modal = None;
+        if self.focus_open_item(ItemKind::Configuration, "keymaps.json", window, cx) {
+            return;
+        }
+        let item_id = self.next_id;
+        self.next_id += 1;
+        let keymap = if self.vim_mode_default() {
+            EditorKeymap::Vim
+        } else {
+            EditorKeymap::Standard
+        };
+        let editor = cx.new(|cx| {
+            QueryEditor::new(QueryDocument::with_random_peer(&source), cx)
+                .with_language(EditorLanguage::Json)
+                .with_keymap(keymap)
+        });
+        if let Some(pane) = self.panes.get(self.active_pane) {
+            pane.update(cx, |pane, cx| {
+                pane.open_configuration(
+                    ItemPresentation {
+                        id: item_id,
+                        kind: ItemKind::Configuration,
+                        title: "keymaps.json".into(),
+                        dirty: false,
+                        source: None,
+                        last_result: None,
+                    },
+                    editor,
+                    cx,
+                )
+            });
+        }
+        self.keymaps_item = Some(item_id);
+        self.focus_active_pane(window, cx);
+        cx.notify();
+    }
+
     fn request_delete_connection(&mut self, entry: &ConnectionNavEntry, cx: &mut Context<Self>) {
         self.modal = Some(Modal::ConfirmDeleteConnection(entry.clone()));
         cx.notify();
@@ -8149,6 +8325,31 @@ impl WorkspaceShell {
                 .and_then(|item| pane.editor(item.id).map(|editor| (item.id, editor)))
         });
         if let Some((item_id, editor)) = active_configuration {
+            if self.keymaps_item == Some(item_id) {
+                let Some(store) = self.settings_store.clone() else {
+                    self.show_toast("keymaps.json is unavailable in this session".into(), cx);
+                    return;
+                };
+                let source = editor.read(cx).document().text().to_owned();
+                match KeymapSettings::decode(&source).and_then(|keymaps| {
+                    validate_keymap_commands(&keymaps)?;
+                    store.save_keymaps_text(&source)?;
+                    Ok(keymaps)
+                }) {
+                    Ok(keymaps) => {
+                        self.keymaps = keymaps.clone();
+                        self.sync_keymap_inputs(&keymaps, cx);
+                        if let Some(pane) = self.panes.get(self.active_pane) {
+                            pane.update(cx, |pane, cx| pane.mark_clean(item_id, cx));
+                        }
+                        self.show_toast("Saved keymaps.json".into(), cx);
+                    }
+                    Err(error) => self.show_toast(error, cx),
+                }
+                self.focus_active_pane(window, cx);
+                cx.notify();
+                return;
+            }
             if self.settings_item == Some(item_id) {
                 let Some(store) = self.settings_store.clone() else {
                     self.show_toast(
@@ -8384,7 +8585,7 @@ impl WorkspaceShell {
 
         let keys = self.ide_input.as_mut().expect("IDE command is active");
         keys.push(key);
-        match CommandRegistry::resolve_language(keys) {
+        match CommandRegistry::resolve_language_with(keys, &self.keymaps.bindings) {
             CommandLanguageMatch::Prefix => cx.notify(),
             CommandLanguageMatch::Command(command) => {
                 self.ide_input = None;
@@ -9171,8 +9372,7 @@ impl WorkspaceShell {
                 cx.notify();
             }
             CommandId::OpenKeymaps => {
-                self.modal = Some(Modal::Keymaps);
-                cx.notify();
+                self.open_keymaps_modal(cx);
             }
             CommandId::OpenServerConfiguration => self.open_current_configuration(cx),
             CommandId::ToggleTheme => self.toggle_theme(cx),
@@ -12173,13 +12373,16 @@ impl WorkspaceShell {
                                                 let enabled = command.enabled();
                                                 let id = command.id;
                                                 let selected = idx == selected_idx;
-                                                let right = command.disabled_reason.unwrap_or({
-                                                    if command.language.is_empty() {
-                                                        command.shortcut
-                                                    } else {
-                                                        command.language
-                                                    }
-                                                });
+                                                let right = command
+                                                    .disabled_reason
+                                                    .map(str::to_owned)
+                                                    .unwrap_or_else(|| {
+                                                        if command.language.is_empty() {
+                                                            command.shortcut.into()
+                                                        } else {
+                                                            command.language.clone()
+                                                        }
+                                                    });
                                                 let mut row = div()
                                                     .id(id.as_str())
                                                     .flex()
@@ -13511,6 +13714,11 @@ impl WorkspaceShell {
                 Modal::Keymaps => {
                     let profile = self.keyboard_profile();
                     let vim_editor = self.vim_mode_default();
+                    let keymaps_path = self
+                        .settings_store
+                        .as_ref()
+                        .map(|store| store.keymaps_path().display().to_string())
+                        .unwrap_or_else(|| "keymaps.json unavailable".into());
                     let profile_button = |id: &'static str,
                                           label: &'static str,
                                           selected: bool,
@@ -13523,7 +13731,6 @@ impl WorkspaceShell {
                             } else {
                                 ButtonTone::Neutral
                             })
-                            .wide(true)
                             .on_click(cx.listener(move |shell, _, _, cx| {
                                 shell.set_keyboard_profile(profile, cx)
                             }))
@@ -13531,23 +13738,33 @@ impl WorkspaceShell {
                     div()
                         .flex()
                         .flex_col()
-                        .gap_4()
+                        .gap_2()
                         .child(
                             div()
                                 .flex()
-                                .flex_col()
-                                .gap_1()
+                                .items_center()
+                                .gap_2()
                                 .child(
                                     div()
-                                        .text_lg()
                                         .font_weight(gpui::FontWeight::SEMIBOLD)
                                         .child("Keymaps"),
                                 )
                                 .child(
                                     div()
-                                        .text_sm()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .truncate()
+                                        .text_xs()
                                         .text_color(colors.muted_text)
-                                        .child("Choose how IDE commands and SQL editing share the keyboard."),
+                                        .child(keymaps_path),
+                                )
+                                .child(
+                                    Button::new("open-keymaps-file", "Open JSON")
+                                        .tone(ButtonTone::Ghost)
+                                        .debug_selector("open-keymaps-file")
+                                        .on_click(cx.listener(|shell, _, window, cx| {
+                                            shell.open_user_keymaps(window, cx)
+                                        })),
                                 ),
                         )
                         .child(
@@ -13558,8 +13775,7 @@ impl WorkspaceShell {
                                 .child(SectionLabel::new("IDE shortcuts"))
                                 .child(
                                     div()
-                                        .grid()
-                                        .grid_cols(3)
+                                        .flex()
                                         .gap_2()
                                         .child(profile_button(
                                             "keymap-profile-vim",
@@ -13641,14 +13857,123 @@ impl WorkspaceShell {
                                         .child("This controls new SQL tabs. The status-bar mode button still switches the active editor only."),
                                 ),
                         )
+                        .children(self.keymaps_error.clone().map(|error| {
+                            ErrorBanner::new(error).into_any_element()
+                        }))
                         .child(
                             div()
-                                .pt_3()
+                                .pt_2()
                                 .border_t_1()
                                 .border_color(colors.subtle_border)
+                                .flex()
+                                .items_center()
+                                .justify_between()
+                                .child(SectionLabel::new("IDE leader bindings"))
+                                .child(
+                                    Button::new("reset-keymaps", "Reset defaults")
+                                        .tone(ButtonTone::Ghost)
+                                        .on_click(cx.listener(|shell, _, _, cx| {
+                                            shell.reset_keymaps_modal(cx)
+                                        })),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .h(px(26.))
+                                .px_2()
+                                .flex()
+                                .items_center()
                                 .text_xs()
+                                .font_weight(gpui::FontWeight::SEMIBOLD)
                                 .text_color(colors.muted_text)
-                                .child("Vim: Space opens IDE commands in SQL normal mode; Ctrl+K is the fallback elsewhere. Press : for the command palette."),
+                                .child(div().flex_1().child("COMMAND"))
+                                .child(div().w(px(205.)).child("BINDING"))
+                                .child(div().w(px(112.)).child("DEFAULT")),
+                        )
+                        .child(
+                            div()
+                                .id("keymap-bindings-scroll")
+                                .max_h(px(360.))
+                                .overflow_y_scroll()
+                                .children(
+                                    CommandRegistry::definitions()
+                                        .iter()
+                                        .filter(|definition| {
+                                            definition.language.starts_with("<leader>")
+                                        })
+                                        .filter_map(|definition| {
+                                            let input =
+                                                self.keymap_inputs.get(&definition.id)?.clone();
+                                            Some(
+                                                div()
+                                                    .h(px(34.))
+                                                    .px_2()
+                                                    .flex()
+                                                    .items_center()
+                                                    .gap_2()
+                                                    .border_t_1()
+                                                    .border_color(colors.subtle_border)
+                                                    .child(
+                                                        div()
+                                                            .flex_1()
+                                                            .min_w_0()
+                                                            .flex()
+                                                            .items_center()
+                                                            .gap_2()
+                                                            .child(
+                                                                div()
+                                                                    .min_w_0()
+                                                                    .truncate()
+                                                                    .child(definition.label),
+                                                            )
+                                                            .child(
+                                                                div()
+                                                                    .min_w_0()
+                                                                    .truncate()
+                                                                    .text_xs()
+                                                                    .text_color(
+                                                                        colors.disabled_text,
+                                                                    )
+                                                                    .child(definition.id.as_str()),
+                                                            ),
+                                                    )
+                                                    .child(div().w(px(205.)).child(input))
+                                                    .child(
+                                                        div()
+                                                            .w(px(112.))
+                                                            .truncate()
+                                                            .font_family("monospace")
+                                                            .text_xs()
+                                                            .text_color(colors.muted_text)
+                                                            .child(definition.language),
+                                                    ),
+                                            )
+                                        }),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .pt_2()
+                                .border_t_1()
+                                .border_color(colors.subtle_border)
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .text_xs()
+                                        .text_color(colors.muted_text)
+                                        .child("Empty binding disables a command."),
+                                )
+                                .child(
+                                    Button::new("save-keymaps", "Save")
+                                        .tone(ButtonTone::Accent)
+                                        .debug_selector("save-keymaps")
+                                        .on_click(cx.listener(|shell, _, _, cx| {
+                                            shell.save_keymaps_modal(cx)
+                                        })),
+                                ),
                         )
                         .into_any_element()
                 }
@@ -14590,63 +14915,36 @@ impl WorkspaceShell {
 
     fn render_key_language_hint(&self, cx: &App) -> Option<gpui::AnyElement> {
         let keys = self.ide_input.as_ref()?;
-        let hint = key_language_hint(keys);
-        let (prefix, choices): (&str, &[(&str, &str)]) = match hint {
-            KeyLanguageHint::Root => (
-                "<leader>",
-                &[
-                    ("f", "find"),
-                    ("g", "go / focus"),
-                    ("v", "view"),
-                    ("x", "execute"),
-                    ("t", "tab"),
-                    ("e", "edit"),
-                    ("d", "database"),
-                    ("w", "workspace"),
-                ],
-            ),
-            KeyLanguageHint::Find => (
-                "<leader> f",
-                &[("c", "commands"), ("d", "schema"), ("u", "usages")],
-            ),
-            KeyLanguageHint::Go => (
-                "<leader> g",
-                &[
-                    ("c", "Connections"),
-                    ("e", "editor"),
-                    ("i", "Inspector"),
-                    ("r", "results"),
-                    ("p", "Problems"),
-                ],
-            ),
-            KeyLanguageHint::View => (
-                "<leader> v",
-                &[
-                    ("d", "Connections"),
-                    ("i", "Inspector"),
-                    ("b", "bottom panel"),
-                ],
-            ),
-            KeyLanguageHint::Execute => (
-                "<leader> x",
-                &[("s", "statement"), ("q", "query"), ("c", "cancel")],
-            ),
-            KeyLanguageHint::Tab => ("<leader> t", &[("c", "close"), ("s", "save")]),
-            KeyLanguageHint::Edit => (
-                "<leader> e",
-                &[("f", "format SQL"), ("q", "quick fix"), ("k", "keymaps")],
-            ),
-            KeyLanguageHint::Database => ("<leader> d", &[("c", "connect server")]),
-            KeyLanguageHint::Workspace => (
-                "<leader> w",
-                &[
-                    ("h/j/k/l", "focus pane"),
-                    ("s", "split"),
-                    ("n", "next pane"),
-                    ("c", "close pane"),
-                ],
-            ),
+        let prefix = if keys.is_empty() {
+            "<leader>".to_owned()
+        } else {
+            format!("<leader> {}", keys.join(" "))
         };
+        let mut choices = std::collections::BTreeMap::<String, Vec<&str>>::new();
+        for definition in CommandRegistry::definitions() {
+            let language = self
+                .keymaps
+                .bindings
+                .get(definition.id.as_str())
+                .map_or(definition.language, String::as_str);
+            if language.is_empty() {
+                continue;
+            }
+            let tokens = language.split_whitespace().skip(1).collect::<Vec<_>>();
+            if tokens.len() <= keys.len()
+                || !tokens
+                    .iter()
+                    .take(keys.len())
+                    .zip(keys)
+                    .all(|(token, key)| *token == key)
+            {
+                continue;
+            }
+            choices
+                .entry(tokens[keys.len()].to_owned())
+                .or_default()
+                .push(definition.label);
+        }
         let colors = cx.theme().colors;
         Some(
             div()
@@ -14678,13 +14976,18 @@ impl WorkspaceShell {
                                 .text_color(colors.accent)
                                 .child(prefix),
                         )
-                        .children(choices.iter().map(|(key, label)| {
+                        .children(choices.into_iter().map(|(key, labels)| {
+                            let label = if labels.len() == 1 {
+                                labels[0].to_owned()
+                            } else {
+                                format!("{} commands", labels.len())
+                            };
                             div()
                                 .flex()
                                 .items_center()
                                 .gap_1()
-                                .child(KeyBinding::new(*key))
-                                .child(div().text_xs().text_color(colors.muted_text).child(*label))
+                                .child(KeyBinding::new(key))
+                                .child(div().text_xs().text_color(colors.muted_text).child(label))
                         })),
                 )
                 .into_any_element(),
@@ -16628,12 +16931,6 @@ mod tests {
             .any(|command| command.id == CommandId::SearchSchema));
     }
 
-    #[test]
-    fn ide_keys_drive_contextual_discovery() {
-        assert_eq!(key_language_hint(&[]), KeyLanguageHint::Root);
-        assert_eq!(key_language_hint(&["f".into()]), KeyLanguageHint::Find);
-    }
-
     #[gpui::test]
     fn delayed_ide_command_never_replays_into_the_sql_editor(cx: &mut TestAppContext) {
         let window = shell(cx);
@@ -16809,7 +17106,25 @@ mod tests {
 
     #[gpui::test]
     fn keymaps_page_controls_the_three_state_ide_profile(cx: &mut TestAppContext) {
-        let window = shell(cx);
+        let directory = tempfile::tempdir().unwrap();
+        let settings_store = Arc::new(SettingsStore::new(directory.path().join("settings.toml")));
+        settings_store.save(&UserSettings::default()).unwrap();
+        let store_for_window = settings_store.clone();
+        let window = cx.update(|cx| {
+            cx.open_window(Default::default(), |window, cx| {
+                cx.new(|cx| {
+                    WorkspaceShell::new(
+                        PresentationState::default(),
+                        UserSettings::default(),
+                        None,
+                        Some(store_for_window),
+                        window,
+                        cx,
+                    )
+                })
+            })
+            .unwrap()
+        });
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         let workspace = window.root(&mut cx).unwrap();
 
@@ -16820,6 +17135,8 @@ mod tests {
         assert!(cx.debug_bounds("keymap-profile-vim").is_some());
         assert!(cx.debug_bounds("keymap-profile-hybrid").is_some());
         assert!(cx.debug_bounds("keymap-profile-standard").is_some());
+        assert!(cx.debug_bounds("open-keymaps-file").is_some());
+        assert!(cx.debug_bounds("save-keymaps").is_some());
         assert_eq!(
             workspace.read_with(&cx, |workspace, _| workspace.keyboard_profile()),
             KeyboardProfile::Vim
@@ -16835,6 +17152,61 @@ mod tests {
         assert_eq!(
             workspace.read_with(&cx, |workspace, _| workspace.modal().cloned()),
             Some(Modal::Keymaps)
+        );
+
+        workspace.update(&mut cx, |workspace, cx| {
+            workspace
+                .keymap_inputs
+                .get(&CommandId::ExecuteStatement)
+                .unwrap()
+                .update(cx, |input, cx| input.set_text("<leader> z s", cx));
+            workspace.save_keymaps_modal(cx);
+        });
+        assert_eq!(
+            settings_store
+                .load_keymaps()
+                .unwrap()
+                .bindings
+                .get(CommandId::ExecuteStatement.as_str())
+                .map(String::as_str),
+            Some("<leader> z s")
+        );
+        assert_eq!(
+            workspace.read_with(&cx, |workspace, _| CommandRegistry::resolve_language_with(
+                &["z".into(), "s".into()],
+                &workspace.keymaps.bindings,
+            )),
+            CommandLanguageMatch::Command(CommandId::ExecuteStatement)
+        );
+
+        workspace.update_in(&mut cx, |workspace, window, cx| {
+            workspace.open_user_keymaps(window, cx)
+        });
+        let editor = workspace.read_with(&cx, |workspace, cx| {
+            let pane = workspace.panes[workspace.active_pane].read(cx);
+            let item = pane.active_item().unwrap();
+            assert_eq!(item.title, "keymaps.json");
+            pane.editor(item.id).unwrap()
+        });
+        let json = format!(
+            "{{\n  \"version\": 1,\n  \"bindings\": {{\n    \"{}\": \"<leader> z q\"\n  }}\n}}\n",
+            CommandId::ExecuteStatement.as_str()
+        );
+        editor.update_in(&mut cx, |editor, window, cx| {
+            let end = editor.document().text().encode_utf16().count();
+            editor.replace_text_in_range(Some(0..end), &json, window, cx);
+        });
+        workspace.update_in(&mut cx, |workspace, window, cx| {
+            workspace.save_active_item(&SaveActiveItem, window, cx)
+        });
+        assert_eq!(
+            settings_store
+                .load_keymaps()
+                .unwrap()
+                .bindings
+                .get(CommandId::ExecuteStatement.as_str())
+                .map(String::as_str),
+            Some("<leader> z q")
         );
     }
 

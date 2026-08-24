@@ -671,6 +671,7 @@ pub enum EditorEvent {
 pub enum EditorLanguage {
     Sql,
     Toml,
+    Json,
     PlainText,
 }
 
@@ -1598,6 +1599,7 @@ impl QueryEditor {
         let runs = match self.language {
             EditorLanguage::Sql => sql_text_runs(line_text, style.font(), theme),
             EditorLanguage::Toml => toml_text_runs(line_text, style.font(), theme),
+            EditorLanguage::Json => plain_text_runs(line_text, style.font(), theme),
             EditorLanguage::PlainText => plain_text_runs(line_text, style.font(), theme),
         };
         let layout =
@@ -1921,6 +1923,7 @@ impl gpui::Render for QueryEditor {
             .aria_label(match self.language {
                 EditorLanguage::Sql => "SQL query editor",
                 EditorLanguage::Toml => "TOML configuration editor",
+                EditorLanguage::Json => "JSON keymap editor",
                 EditorLanguage::PlainText => "Read-only text editor",
             })
             .track_focus(&self.focus_handle)
@@ -1979,20 +1982,22 @@ impl gpui::Render for QueryEditor {
             .on_action(cx.listener(Self::find_usages))
             .on_action(cx.listener(Self::go_to_next_diagnostic))
             .children(
-                (self.language == EditorLanguage::Toml)
-                    .then(|| toml_diagnostic(self.document.text()))
-                    .flatten()
-                    .map(|diagnostic| {
-                        div()
-                            .px_3()
-                            .py_1()
-                            .border_b_1()
-                            .border_color(colors.danger)
-                            .bg(colors.danger_muted)
-                            .text_xs()
-                            .text_color(colors.danger)
-                            .child(diagnostic)
-                    }),
+                match self.language {
+                    EditorLanguage::Toml => toml_diagnostic(self.document.text()),
+                    EditorLanguage::Json => json_diagnostic(self.document.text()),
+                    EditorLanguage::Sql | EditorLanguage::PlainText => None,
+                }
+                .map(|diagnostic| {
+                    div()
+                        .px_3()
+                        .py_1()
+                        .border_b_1()
+                        .border_color(colors.danger)
+                        .bg(colors.danger_muted)
+                        .text_xs()
+                        .text_color(colors.danger)
+                        .child(diagnostic)
+                }),
             )
             .children(self.semantic_status().map(|(message, is_error)| {
                 let (text, background) = if is_error {
@@ -2171,6 +2176,7 @@ impl Element for QueryEditorElement {
                 let runs = match language {
                     EditorLanguage::Sql => sql_text_runs(line, style.font(), theme),
                     EditorLanguage::Toml => toml_text_runs(line, style.font(), theme),
+                    EditorLanguage::Json => plain_text_runs(line, style.font(), theme),
                     EditorLanguage::PlainText => plain_text_runs(line, style.font(), theme),
                 };
                 let shaped = window.text_system().shape_line(
@@ -2481,6 +2487,12 @@ fn toml_diagnostic(source: &str) -> Option<String> {
         });
         format!("Invalid TOML near line {line}")
     })
+}
+
+fn json_diagnostic(source: &str) -> Option<String> {
+    serde_json::from_str::<serde_json::Value>(source)
+        .err()
+        .map(|error| format!("Invalid JSON near line {}", error.line()))
 }
 
 fn toml_text_runs(line: &str, font: gpui::Font, theme: Theme) -> Vec<TextRun> {

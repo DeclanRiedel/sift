@@ -1,3 +1,4 @@
+use std::collections::{BTreeMap, HashSet};
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -6,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use toml_edit::{DocumentMut, Item, Value};
 
 const SETTINGS_VERSION: u32 = 1;
+const KEYMAPS_VERSION: u32 = 1;
 
 const fn settings_version() -> u32 {
     SETTINGS_VERSION
@@ -75,6 +77,80 @@ impl Default for KeyboardSettings {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KeymapSettings {
+    #[serde(default = "keymaps_version")]
+    pub version: u32,
+    #[serde(default)]
+    pub bindings: BTreeMap<String, String>,
+}
+
+const fn keymaps_version() -> u32 {
+    KEYMAPS_VERSION
+}
+
+impl Default for KeymapSettings {
+    fn default() -> Self {
+        Self {
+            version: KEYMAPS_VERSION,
+            bindings: BTreeMap::new(),
+        }
+    }
+}
+
+impl KeymapSettings {
+    pub fn decode(source: &str) -> Result<Self, String> {
+        let keymaps: Self = serde_json::from_str(source)
+            .map_err(|error| format!("keymaps.json is invalid: {error}"))?;
+        if keymaps.version != KEYMAPS_VERSION {
+            return Err(format!(
+                "keymaps.json version {} is unsupported; expected {KEYMAPS_VERSION}",
+                keymaps.version
+            ));
+        }
+        let mut sequences = HashSet::new();
+        for (command, sequence) in &keymaps.bindings {
+            if command.trim().is_empty() {
+                return Err("keymaps.json contains an empty command id".into());
+            }
+            validate_leader_sequence(sequence)?;
+            if !sequence.is_empty() && !sequences.insert(sequence) {
+                return Err(format!("keymaps.json assigns {sequence:?} more than once"));
+            }
+        }
+        Ok(keymaps)
+    }
+
+    pub fn encode(&self) -> Result<String, String> {
+        serde_json::to_string_pretty(self)
+            .map(|source| format!("{source}\n"))
+            .map_err(|error| format!("serializing keymaps.json failed: {error}"))
+    }
+}
+
+fn validate_leader_sequence(sequence: &str) -> Result<(), String> {
+    if sequence.is_empty() {
+        return Ok(());
+    }
+    let tokens = sequence.split_whitespace().collect::<Vec<_>>();
+    if tokens.len() < 3 || tokens.first() != Some(&"<leader>") {
+        return Err(format!(
+            "keymap sequence {sequence:?} must look like \"<leader> g c\""
+        ));
+    }
+    if tokens[1..].iter().any(|token| {
+        token.len() != 1
+            || !token
+                .chars()
+                .all(|character| character.is_ascii_alphanumeric())
+    }) {
+        return Err(format!(
+            "keymap sequence {sequence:?} may only contain single ASCII letters or digits after <leader>"
+        ));
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct UserSettings {
     #[serde(default = "settings_version")]
@@ -130,6 +206,41 @@ impl SettingsStore {
 
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    pub fn keymaps_path(&self) -> PathBuf {
+        self.path.with_file_name("keymaps.json")
+    }
+
+    pub fn load_keymaps(&self) -> Result<KeymapSettings, String> {
+        let path = self.keymaps_path();
+        match std::fs::read_to_string(&path) {
+            Ok(source) => KeymapSettings::decode(&source),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                let keymaps = KeymapSettings::default();
+                self.save_keymaps(&keymaps)?;
+                Ok(keymaps)
+            }
+            Err(error) => Err(format!("reading {} failed: {error}", path.display())),
+        }
+    }
+
+    pub fn read_keymaps_text(&self) -> Result<String, String> {
+        self.load_keymaps()?.encode()
+    }
+
+    pub fn save_keymaps(&self, keymaps: &KeymapSettings) -> Result<(), String> {
+        self.save_keymaps_text(&keymaps.encode()?).map(|_| ())
+    }
+
+    pub fn save_keymaps_text(&self, source: &str) -> Result<KeymapSettings, String> {
+        let keymaps = KeymapSettings::decode(source)?;
+        let _guard = self
+            .write_lock
+            .lock()
+            .map_err(|_| "settings write lock poisoned".to_string())?;
+        write_atomic(&self.keymaps_path(), source, "json")?;
+        Ok(keymaps)
     }
 
     pub fn load(&self) -> Result<UserSettings, String> {
@@ -216,33 +327,37 @@ impl SettingsStore {
     }
 
     fn write_source(&self, source: &str) -> Result<(), String> {
-        if let Some(parent) = self.path.parent() {
-            std::fs::create_dir_all(parent)
-                .map_err(|error| format!("creating {} failed: {error}", parent.display()))?;
-        }
-        let temporary = self.path.with_extension("toml.tmp");
-        let mut options = std::fs::OpenOptions::new();
-        options.create(true).truncate(true).write(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt as _;
-            options.mode(0o600);
-        }
-        let mut file = options
-            .open(&temporary)
-            .map_err(|error| format!("opening {} failed: {error}", temporary.display()))?;
-        file.write_all(source.as_bytes())
-            .and_then(|()| file.sync_all())
-            .map_err(|error| format!("writing {} failed: {error}", temporary.display()))?;
-        drop(file);
-        #[cfg(windows)]
-        if self.path.exists() {
-            std::fs::remove_file(&self.path)
-                .map_err(|error| format!("replacing {} failed: {error}", self.path.display()))?;
-        }
-        std::fs::rename(&temporary, &self.path)
-            .map_err(|error| format!("installing {} failed: {error}", self.path.display()))
+        write_atomic(&self.path, source, "toml")
     }
+}
+
+fn write_atomic(path: &Path, source: &str, extension: &str) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|error| format!("creating {} failed: {error}", parent.display()))?;
+    }
+    let temporary = path.with_extension(format!("{extension}.tmp"));
+    let mut options = std::fs::OpenOptions::new();
+    options.create(true).truncate(true).write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(0o600);
+    }
+    let mut file = options
+        .open(&temporary)
+        .map_err(|error| format!("opening {} failed: {error}", temporary.display()))?;
+    file.write_all(source.as_bytes())
+        .and_then(|()| file.sync_all())
+        .map_err(|error| format!("writing {} failed: {error}", temporary.display()))?;
+    drop(file);
+    #[cfg(windows)]
+    if path.exists() {
+        std::fs::remove_file(path)
+            .map_err(|error| format!("replacing {} failed: {error}", path.display()))?;
+    }
+    std::fs::rename(&temporary, path)
+        .map_err(|error| format!("installing {} failed: {error}", path.display()))
 }
 
 #[cfg(test)]
@@ -304,5 +419,29 @@ mod tests {
             let settings = store.save_keyboard_profile(profile).unwrap();
             assert_eq!(settings.keyboard.profile, profile);
         }
+    }
+
+    #[test]
+    fn keymaps_json_round_trips_and_rejects_duplicate_sequences() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = SettingsStore::new(directory.path().join("settings.toml"));
+        let mut keymaps = KeymapSettings::default();
+        keymaps
+            .bindings
+            .insert("workspace.focus-connections".into(), "<leader> g c".into());
+
+        store.save_keymaps(&keymaps).unwrap();
+        assert_eq!(store.load_keymaps().unwrap(), keymaps);
+        assert_eq!(store.keymaps_path(), directory.path().join("keymaps.json"));
+
+        let invalid = r#"{
+          "version": 1,
+          "bindings": {
+            "workspace.focus-connections": "<leader> g c",
+            "workspace.focus-editor": "<leader> g c"
+          }
+        }"#;
+        assert!(store.save_keymaps_text(invalid).is_err());
+        assert_eq!(store.load_keymaps().unwrap(), keymaps);
     }
 }
