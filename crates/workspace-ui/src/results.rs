@@ -472,6 +472,8 @@ pub enum ResultsEvent {
     ExplainRequested {
         analyze: bool,
     },
+    CapturePlanRequested,
+    OpenPlanCapturesRequested,
     HistoryRequested {
         cursor: Option<String>,
     },
@@ -2150,10 +2152,29 @@ impl ResultsView {
             }))
             .child(div().flex_1())
             .children(matches!(self.explain, ExplainState::Ready(_)).then(|| {
-                Button::new("copy-raw-plan", "Copy raw")
-                    .tone(ButtonTone::Ghost)
-                    .start_icon(IconName::Copy)
-                    .on_click(cx.listener(|view, _, _, cx| view.copy_raw_plan(cx)))
+                div()
+                    .flex()
+                    .gap_1()
+                    .child(
+                        Button::new("save-plan-capture", "Save capture")
+                            .tone(ButtonTone::Accent)
+                            .on_click(cx.listener(|_, _, _, cx| {
+                                cx.emit(ResultsEvent::CapturePlanRequested)
+                            })),
+                    )
+                    .child(
+                        Button::new("open-plan-captures", "Captures")
+                            .tone(ButtonTone::Ghost)
+                            .on_click(cx.listener(|_, _, _, cx| {
+                                cx.emit(ResultsEvent::OpenPlanCapturesRequested)
+                            })),
+                    )
+                    .child(
+                        Button::new("copy-raw-plan", "Copy raw")
+                            .tone(ButtonTone::Ghost)
+                            .start_icon(IconName::Copy)
+                            .on_click(cx.listener(|view, _, _, cx| view.copy_raw_plan(cx))),
+                    )
             }))
     }
 

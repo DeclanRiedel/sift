@@ -1115,6 +1115,65 @@ async fn run_query_executor(
                     return;
                 }
             }
+            ExecutorCommand::CapturePlan { item_id, sql } => {
+                let result = match context.as_ref() {
+                    Some(opened) => capture_plan(opened, sql).await,
+                    None => Err("Connect before saving a plan capture".into()),
+                };
+                if events
+                    .send(ExecutorEvent::PlanCaptured { item_id, result })
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            ExecutorCommand::LoadPlanCaptures { item_id, tenant_id } => {
+                let result = match context.as_ref() {
+                    Some(opened) => opened
+                        .client
+                        .plan_captures(
+                            TenantId(tenant_id),
+                            sift_protocol::ListPlanCapturesRequest {
+                                limit: Some(50),
+                                ..Default::default()
+                            },
+                        )
+                        .await
+                        .map(|page| page.items)
+                        .map_err(|error| format!("loading plan captures failed: {error}")),
+                    None => Err("Connect before loading plan captures".into()),
+                };
+                if events
+                    .send(ExecutorEvent::PlanCapturesLoaded { item_id, result })
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            ExecutorCommand::ComparePlanCaptures {
+                item_id,
+                tenant_id,
+                left,
+                right,
+            } => {
+                let result = match context.as_ref() {
+                    Some(opened) => opened
+                        .client
+                        .compare_plan_captures(
+                            TenantId(tenant_id),
+                            sift_protocol::ComparePlanCapturesRequest { left, right },
+                        )
+                        .await
+                        .map_err(|error| format!("comparing plan captures failed: {error}")),
+                    None => Err("Connect before comparing plan captures".into()),
+                };
+                if events
+                    .send(ExecutorEvent::PlanCapturesCompared { item_id, result })
+                    .is_err()
+                {
+                    return;
+                }
+            }
             ExecutorCommand::LoadObjectDdl { item_id, source } => {
                 let event = match context.as_ref() {
                     Some(opened) if opened.profile_id == source.profile_id => {
@@ -1288,6 +1347,76 @@ async fn load_schema(context: &QueryContext) -> ExecutorEvent {
             message: format!("loading database schema failed: {error}"),
         },
     }
+}
+
+async fn capture_plan(
+    context: &QueryContext,
+    sql: String,
+) -> Result<sift_protocol::PlanCapture, String> {
+    let state = context
+        .client
+        .open_semantic_document(
+            context.session,
+            context.plan_connection,
+            sift_protocol::CreateSemanticDocumentRequest {
+                text: sql,
+                source: None,
+            },
+        )
+        .await
+        .map_err(|error| format!("opening plan source failed: {error}"))?;
+    let result = async {
+        let graph = context
+            .client
+            .catalog_graph(
+                context.session,
+                context.plan_connection,
+                sift_protocol::CatalogGraphRequest::default(),
+            )
+            .await
+            .map_err(|error| format!("loading catalog revision failed: {error}"))?;
+        let selection = context
+            .client
+            .select_semantic_statement(
+                context.session,
+                context.plan_connection,
+                state.document_id,
+                sift_protocol::SelectStatementRequest {
+                    revision: state.revision,
+                    cursor: 0,
+                    selection: None,
+                },
+            )
+            .await
+            .map_err(|error| format!("selecting plan statement failed: {error}"))?;
+        let statement = selection
+            .statements
+            .first()
+            .ok_or_else(|| "No statement is available to capture".to_owned())?;
+        context
+            .client
+            .capture_semantic_plan(
+                context.session,
+                context.plan_connection,
+                sift_protocol::CaptureSemanticPlanRequest {
+                    document_id: state.document_id,
+                    revision: state.revision,
+                    statement_id: statement.statement_id.clone(),
+                    catalog_revision: graph.revision,
+                    analyze: false,
+                    params: Vec::new(),
+                    include_raw_response: false,
+                },
+            )
+            .await
+            .map_err(|error| format!("saving plan capture failed: {error}"))
+    }
+    .await;
+    let _ = context
+        .client
+        .close_semantic_document(context.session, context.plan_connection, state.document_id)
+        .await;
+    result
 }
 
 async fn load_table_definition(

@@ -723,6 +723,7 @@ pub enum Modal {
     DataSearch,
     DataResults(u64),
     EditResultCell,
+    PlanCaptures,
     ServerPicker,
     ServerConnection,
     InstanceSetup,
@@ -960,6 +961,13 @@ pub enum PaneEvent {
         item_id: u64,
     },
     EditResultCellRequested {
+        item_id: u64,
+    },
+    CapturePlanRequested {
+        item_id: u64,
+        sql: String,
+    },
+    OpenPlanCapturesRequested {
         item_id: u64,
     },
     ExplainRequested {
@@ -1200,6 +1208,20 @@ pub enum ExecutorCommand {
         item_id: u64,
         edit_set: sift_protocol::EditSet,
     },
+    CapturePlan {
+        item_id: u64,
+        sql: String,
+    },
+    LoadPlanCaptures {
+        item_id: u64,
+        tenant_id: i64,
+    },
+    ComparePlanCaptures {
+        item_id: u64,
+        tenant_id: i64,
+        left: sift_protocol::PlanCaptureId,
+        right: sift_protocol::PlanCaptureId,
+    },
     /// Run one semantic request for `item_id`. `text` is the exact buffer the
     /// revision names, so the executor can resynchronize the server document
     /// before running the request instead of relying on message ordering.
@@ -1332,6 +1354,18 @@ pub enum ExecutorEvent {
     ResultEditsApplied {
         item_id: u64,
         result: Result<sift_protocol::ApplyEditsResult, String>,
+    },
+    PlanCaptured {
+        item_id: u64,
+        result: Result<sift_protocol::PlanCapture, String>,
+    },
+    PlanCapturesLoaded {
+        item_id: u64,
+        result: Result<Vec<sift_protocol::PlanCaptureSummary>, String>,
+    },
+    PlanCapturesCompared {
+        item_id: u64,
+        result: Result<sift_protocol::PlanCaptureComparison, String>,
     },
     Semantic {
         item_id: u64,
@@ -1600,6 +1634,17 @@ impl Pane {
                     sql,
                     analyze: *analyze,
                 });
+            }
+            ResultsEvent::CapturePlanRequested => {
+                let sql = self
+                    .editors
+                    .get(&item_id)
+                    .map(|editor| editor.read(cx).document().text().trim().to_owned())
+                    .unwrap_or_default();
+                cx.emit(PaneEvent::CapturePlanRequested { item_id, sql });
+            }
+            ResultsEvent::OpenPlanCapturesRequested => {
+                cx.emit(PaneEvent::OpenPlanCapturesRequested { item_id });
             }
             ResultsEvent::HistoryRequested { cursor } => cx.emit(PaneEvent::HistoryRequested {
                 item_id,
@@ -3242,6 +3287,10 @@ pub struct WorkspaceShell {
     result_edit_plan: Option<sift_protocol::EditPlan>,
     result_edit_pending: bool,
     result_edit_error: Option<String>,
+    plan_capture_item: Option<u64>,
+    plan_captures: Vec<sift_protocol::PlanCaptureSummary>,
+    plan_capture_comparison: Option<sift_protocol::PlanCaptureComparison>,
+    plan_capture_error: Option<String>,
     pending_database_execution: Option<PendingDatabaseExecution>,
     pending_database_explain: Option<PendingDatabaseExplain>,
     instance_sender: Option<tokio::sync::mpsc::UnboundedSender<InstanceCommand>>,
@@ -3660,6 +3709,10 @@ impl WorkspaceShell {
             result_edit_plan: None,
             result_edit_pending: false,
             result_edit_error: None,
+            plan_capture_item: None,
+            plan_captures: Vec::new(),
+            plan_capture_comparison: None,
+            plan_capture_error: None,
             pending_database_execution: None,
             pending_database_explain: None,
             instance_sender: None,
@@ -4519,6 +4572,48 @@ impl WorkspaceShell {
                         self.refresh_database_item(item_id, cx);
                     }
                     Err(message) => self.result_edit_error = Some(message),
+                }
+                cx.notify();
+            }
+            ExecutorEvent::PlanCaptured { item_id, result } => match result {
+                Ok(_) => {
+                    self.show_toast("Estimated plan capture saved".into(), cx);
+                    if self.modal == Some(Modal::PlanCaptures) {
+                        if let Some(source) = self.database_source(item_id, cx) {
+                            if let Some(sender) = &self.executor_sender {
+                                let _ = sender.send(ExecutorCommand::LoadPlanCaptures {
+                                    item_id,
+                                    tenant_id: source.tenant_id,
+                                });
+                            }
+                        }
+                    }
+                }
+                Err(message) => self.show_error_toast(message, cx),
+            },
+            ExecutorEvent::PlanCapturesLoaded { item_id, result } => {
+                if self.plan_capture_item != Some(item_id) {
+                    return;
+                }
+                match result {
+                    Ok(captures) => {
+                        self.plan_captures = captures;
+                        self.plan_capture_error = None;
+                    }
+                    Err(message) => self.plan_capture_error = Some(message),
+                }
+                cx.notify();
+            }
+            ExecutorEvent::PlanCapturesCompared { item_id, result } => {
+                if self.plan_capture_item != Some(item_id) {
+                    return;
+                }
+                match result {
+                    Ok(comparison) => {
+                        self.plan_capture_comparison = Some(comparison);
+                        self.plan_capture_error = None;
+                    }
+                    Err(message) => self.plan_capture_error = Some(message),
                 }
                 cx.notify();
             }
@@ -8748,6 +8843,31 @@ impl WorkspaceShell {
             PaneEvent::EditResultCellRequested { item_id } => {
                 self.active_pane = index;
                 self.open_result_cell_editor(emitter, *item_id, window, cx);
+            }
+            PaneEvent::CapturePlanRequested { item_id, sql } => {
+                if let Some(sender) = &self.executor_sender {
+                    let _ = sender.send(ExecutorCommand::CapturePlan {
+                        item_id: *item_id,
+                        sql: sql.clone(),
+                    });
+                    self.show_toast("Saving estimated plan capture…".into(), cx);
+                }
+            }
+            PaneEvent::OpenPlanCapturesRequested { item_id } => {
+                let Some(source) = self.database_source(*item_id, cx) else {
+                    return;
+                };
+                self.plan_capture_item = Some(*item_id);
+                self.plan_capture_error = None;
+                self.plan_capture_comparison = None;
+                self.modal = Some(Modal::PlanCaptures);
+                if let Some(sender) = &self.executor_sender {
+                    let _ = sender.send(ExecutorCommand::LoadPlanCaptures {
+                        item_id: *item_id,
+                        tenant_id: source.tenant_id,
+                    });
+                }
+                cx.notify();
             }
             PaneEvent::ExplainRequested {
                 item_id,
@@ -13623,10 +13743,11 @@ impl WorkspaceShell {
             let data_search = matches!(modal, Modal::DataSearch);
             let data_results = matches!(modal, Modal::DataResults(_));
             let result_cell_edit = matches!(modal, Modal::EditResultCell);
+            let plan_captures = matches!(modal, Modal::PlanCaptures);
             let instance_setup = matches!(modal, Modal::InstanceSetup);
             let card_width = if data_results {
                 0.0
-            } else if settings || keymaps || schema_search || result_cell_edit {
+            } else if settings || keymaps || schema_search || result_cell_edit || plan_captures {
                 720.0
             } else if data_search {
                 900.0
@@ -14279,6 +14400,37 @@ impl WorkspaceShell {
                                 ),
                         )
                         .into_any_element()
+                }
+                Modal::PlanCaptures => {
+                    let captures = self.plan_captures.clone();
+                    let comparison = self.plan_capture_comparison.as_ref();
+                    div().flex().flex_col().max_h(px(640.)).child(
+                        div().h(px(42.)).px_3().flex().items_center().justify_between()
+                            .border_b_1().border_color(colors.subtle_border).bg(colors.toolbar)
+                            .child(div().font_weight(gpui::FontWeight::SEMIBOLD).child("Plan captures"))
+                            .child(Button::new("compare-latest-plans", "Compare latest two")
+                                .tone(ButtonTone::Accent).disabled(captures.len() < 2)
+                                .on_click(cx.listener(|shell, _, _, cx| {
+                                    let (Some(item_id), Some(left), Some(right)) = (shell.plan_capture_item, shell.plan_captures.get(1), shell.plan_captures.first()) else { return };
+                                    let Some(source) = shell.database_source(item_id, cx) else { return };
+                                    if let Some(sender) = &shell.executor_sender {
+                                        let _ = sender.send(ExecutorCommand::ComparePlanCaptures { item_id, tenant_id: source.tenant_id, left: left.id, right: right.id });
+                                    }
+                                }))),
+                    ).child(
+                        div().id("plan-capture-list").p_3().flex().flex_col().gap_2().overflow_y_scroll()
+                            .children(captures.into_iter().map(|capture| {
+                                div().p_2().rounded_sm().border_1().border_color(colors.subtle_border)
+                                    .child(format!("{} · {} · {} ms", capture.root_operator, if capture.analyzed { "analyzed" } else { "estimated" }, capture.duration_ms))
+                                    .child(div().text_xs().text_color(colors.muted_text).child(capture.captured_at.to_rfc3339()))
+                            }))
+                            .children(comparison.map(|comparison| div().p_2().rounded_sm().bg(colors.active_surface).child(format!(
+                                "Comparison: {} operator · {} cardinality · {} cost · {} runtime changes{}",
+                                comparison.operator_changes, comparison.cardinality_changes, comparison.cost_changes, comparison.runtime_changes,
+                                if comparison.truncated { " · truncated" } else { "" }
+                            ))))
+                            .children(self.plan_capture_error.as_ref().map(|message| ErrorBanner::new(message.clone()))),
+                    ).into_any_element()
                 }
                 Modal::DataResults(item_id) => match self.data_results_modal_target(*item_id, cx) {
                     Some((title, results)) => div()
@@ -16476,6 +16628,7 @@ impl WorkspaceShell {
                     | Modal::DataSearch
                     | Modal::DataResults(_)
                     | Modal::EditResultCell
+                    | Modal::PlanCaptures
                     | Modal::DatabaseConnection
                     | Modal::ConfirmDeleteConnection(_)
             );
