@@ -675,6 +675,19 @@ pub enum EditorLanguage {
     PlainText,
 }
 
+#[derive(Debug, Clone)]
+pub enum JsonSchema {
+    Keymaps { command_ids: Arc<[String]> },
+}
+
+impl JsonSchema {
+    pub fn keymaps(command_ids: impl IntoIterator<Item = String>) -> Self {
+        Self::Keymaps {
+            command_ids: command_ids.into_iter().collect(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EditorKeymap {
     Standard,
@@ -819,6 +832,7 @@ pub struct QueryEditor {
     scroll_handle: ScrollHandle,
     read_only: bool,
     semantic: SemanticState,
+    json_schema: Option<JsonSchema>,
 }
 
 impl QueryEditor {
@@ -848,11 +862,18 @@ impl QueryEditor {
             scroll_handle: ScrollHandle::new(),
             read_only: false,
             semantic: SemanticState::default(),
+            json_schema: None,
         }
     }
 
     pub fn with_language(mut self, language: EditorLanguage) -> Self {
         self.language = language;
+        self
+    }
+
+    pub fn with_json_schema(mut self, schema: JsonSchema) -> Self {
+        self.json_schema = Some(schema);
+        self.refresh_local_diagnostics();
         self
     }
 
@@ -880,7 +901,11 @@ impl QueryEditor {
         self.revision = self.revision.wrapping_add(1);
         self.line_cache.borrow_mut().lines.clear();
         self.semantic.invalidate();
-        self.request_semantic(SemanticRequestKind::Analyze, cx);
+        if self.language == EditorLanguage::Json {
+            self.refresh_local_diagnostics();
+        } else {
+            self.request_semantic(SemanticRequestKind::Analyze, cx);
+        }
         cx.notify();
     }
 
@@ -1078,6 +1103,10 @@ impl QueryEditor {
     }
 
     fn complete(&mut self, _: &Complete, _: &mut Window, cx: &mut Context<Self>) {
+        if self.language == EditorLanguage::Json {
+            self.open_json_completion(cx);
+            return;
+        }
         if !self.semantic_enabled() {
             return;
         }
@@ -1215,12 +1244,51 @@ impl QueryEditor {
         // narrows a stale candidate list itself.
         let reopen_completion = self.semantic.completion().is_some();
         self.semantic.invalidate();
-        self.request_semantic(SemanticRequestKind::Analyze, cx);
-        if reopen_completion {
-            self.semantic.expect_completion(self.revision);
-            let cursor = self.document.cursor() as u32;
-            self.request_semantic(SemanticRequestKind::Complete { cursor }, cx);
+        if self.language == EditorLanguage::Json {
+            self.refresh_local_diagnostics();
+        } else {
+            self.request_semantic(SemanticRequestKind::Analyze, cx);
         }
+        if reopen_completion {
+            if self.language == EditorLanguage::Json {
+                self.open_json_completion(cx);
+            } else {
+                self.semantic.expect_completion(self.revision);
+                let cursor = self.document.cursor() as u32;
+                self.request_semantic(SemanticRequestKind::Complete { cursor }, cx);
+            }
+        }
+        cx.notify();
+    }
+
+    fn refresh_local_diagnostics(&mut self) {
+        let diagnostics = json_schema_diagnostics(self.document.text(), self.json_schema.as_ref());
+        self.semantic.set_diagnostics(
+            self.document.text(),
+            self.revision,
+            self.revision,
+            diagnostics,
+            false,
+        );
+    }
+
+    fn open_json_completion(&mut self, cx: &mut Context<Self>) {
+        let Some(schema) = self.json_schema.as_ref() else {
+            return;
+        };
+        let cursor = self.document.cursor();
+        let (replaced, candidates) = json_schema_completions(self.document.text(), cursor, schema);
+        self.semantic.expect_completion(self.revision);
+        self.semantic.set_completions(
+            self.document.text(),
+            self.revision,
+            self.revision,
+            sift_protocol::TextRange {
+                start: replaced.start as u32,
+                end: replaced.end as u32,
+            },
+            candidates,
+        );
         cx.notify();
     }
 
@@ -2013,8 +2081,7 @@ impl gpui::Render for QueryEditor {
             .children(
                 match self.language {
                     EditorLanguage::Toml => toml_diagnostic(self.document.text()),
-                    EditorLanguage::Json => json_diagnostic(self.document.text()),
-                    EditorLanguage::Sql | EditorLanguage::PlainText => None,
+                    EditorLanguage::Json | EditorLanguage::Sql | EditorLanguage::PlainText => None,
                 }
                 .map(|diagnostic| {
                     div()
@@ -2518,10 +2585,306 @@ fn toml_diagnostic(source: &str) -> Option<String> {
     })
 }
 
-fn json_diagnostic(source: &str) -> Option<String> {
-    serde_json::from_str::<serde_json::Value>(source)
-        .err()
-        .map(|error| format!("Invalid JSON near line {}", error.line()))
+fn json_schema_diagnostics(
+    source: &str,
+    schema: Option<&JsonSchema>,
+) -> Vec<sift_protocol::SemanticDiagnostic> {
+    let value = match serde_json::from_str::<serde_json::Value>(source) {
+        Ok(value) => value,
+        Err(error) => {
+            let start = json_error_token_start(
+                source,
+                json_error_offset(source, error.line(), error.column()),
+            );
+            return vec![json_diagnostic_at(
+                "json.syntax",
+                error.to_string(),
+                start..next_char_boundary(source, start),
+            )];
+        }
+    };
+    let Some(schema) = schema else {
+        return Vec::new();
+    };
+    match schema {
+        JsonSchema::Keymaps { command_ids } => {
+            let Some(root) = value.as_object() else {
+                return vec![json_diagnostic_at(
+                    "json.schema.root",
+                    "keymaps.json must contain an object".into(),
+                    0..source.len(),
+                )];
+            };
+            let mut diagnostics = Vec::new();
+            for key in root.keys() {
+                if !matches!(key.as_str(), "version" | "bindings") {
+                    diagnostics.push(json_diagnostic_at(
+                        "json.schema.unknown-property",
+                        format!("Unknown keymaps.json property {key:?}"),
+                        json_key_span(source, key).unwrap_or(0..0),
+                    ));
+                }
+            }
+            match root.get("version") {
+                None => diagnostics.push(json_diagnostic_at(
+                    "json.schema.required",
+                    "Missing required property \"version\"".into(),
+                    0..0,
+                )),
+                Some(serde_json::Value::Number(version)) if version.as_u64() == Some(1) => {}
+                Some(_) => diagnostics.push(json_diagnostic_at(
+                    "json.schema.version",
+                    "version must be the integer 1".into(),
+                    json_value_span(source, "version").unwrap_or(0..0),
+                )),
+            }
+            match root.get("bindings") {
+                None => diagnostics.push(json_diagnostic_at(
+                    "json.schema.required",
+                    "Missing required property \"bindings\"".into(),
+                    0..0,
+                )),
+                Some(serde_json::Value::Object(bindings)) => {
+                    for (command, sequence) in bindings {
+                        let range = json_key_span(source, command).unwrap_or(0..0);
+                        if !command_ids.iter().any(|known| known == command) {
+                            diagnostics.push(json_diagnostic_at(
+                                "json.schema.command",
+                                format!("Unknown command id {command:?}"),
+                                range,
+                            ));
+                        }
+                        if !sequence.is_string() {
+                            diagnostics.push(json_diagnostic_at(
+                                "json.schema.binding",
+                                format!("Binding for {command:?} must be a string"),
+                                json_value_span(source, command).unwrap_or(0..0),
+                            ));
+                        }
+                    }
+                }
+                Some(_) => diagnostics.push(json_diagnostic_at(
+                    "json.schema.bindings",
+                    "bindings must be an object".into(),
+                    json_value_span(source, "bindings").unwrap_or(0..0),
+                )),
+            }
+            diagnostics
+        }
+    }
+}
+
+fn json_schema_completions(
+    source: &str,
+    cursor: usize,
+    schema: &JsonSchema,
+) -> (
+    Range<usize>,
+    Vec<sift_protocol::completion::CompletionCandidate>,
+) {
+    let cursor = cursor.min(source.len());
+    let string_range = json_string_contents_at(source, cursor);
+    let replace = string_range.clone().unwrap_or(cursor..cursor);
+    let bare_key = string_range.is_some();
+    let object_start = innermost_json_object(source, cursor);
+    let object_name = object_start.and_then(|start| json_object_property_name(source, start));
+    let parsed = serde_json::from_str::<serde_json::Value>(source).ok();
+
+    match schema {
+        JsonSchema::Keymaps { command_ids } if object_name.as_deref() == Some("bindings") => {
+            let used = parsed
+                .as_ref()
+                .and_then(|value| value.get("bindings"))
+                .and_then(serde_json::Value::as_object);
+            let candidates = command_ids
+                .iter()
+                .filter(|command| !used.is_some_and(|used| used.contains_key(command.as_str())))
+                .map(|command| {
+                    json_completion_candidate(
+                        command,
+                        if bare_key {
+                            command.clone()
+                        } else {
+                            format!("\"{command}\": \"\"")
+                        },
+                        "Command binding",
+                    )
+                })
+                .collect();
+            (replace, candidates)
+        }
+        JsonSchema::Keymaps { .. } => {
+            let root = parsed.as_ref().and_then(serde_json::Value::as_object);
+            let candidates = [
+                ("version", "\"version\": 1", "Keymap schema version"),
+                ("bindings", "\"bindings\": {}", "Command bindings"),
+            ]
+            .into_iter()
+            .filter(|(key, _, _)| !root.is_some_and(|root| root.contains_key(*key)))
+            .map(|(label, insert, detail)| {
+                json_completion_candidate(label, if bare_key { label } else { insert }, detail)
+            })
+            .collect();
+            (replace, candidates)
+        }
+    }
+}
+
+fn json_completion_candidate(
+    label: impl Into<String>,
+    insert: impl Into<String>,
+    detail: &str,
+) -> sift_protocol::completion::CompletionCandidate {
+    let label = label.into();
+    sift_protocol::completion::CompletionCandidate {
+        label: label.clone().into(),
+        insert: insert.into().into(),
+        kind: sift_protocol::completion::CompletionKind::Keyword,
+        detail: Some(detail.into()),
+        qualified_name: None,
+        score: 0,
+    }
+}
+
+fn json_diagnostic_at(
+    code: &str,
+    message: String,
+    range: Range<usize>,
+) -> sift_protocol::SemanticDiagnostic {
+    sift_protocol::SemanticDiagnostic {
+        id: format!("{code}:{}", range.start),
+        severity: sift_protocol::DiagnosticSeverity::Error,
+        code: code.into(),
+        message,
+        range: sift_protocol::TextRange {
+            start: range.start.min(u32::MAX as usize) as u32,
+            end: range.end.min(u32::MAX as usize) as u32,
+        },
+        related_ranges: Vec::new(),
+        source: "json".into(),
+        quick_fix_ids: Vec::new(),
+    }
+}
+
+fn json_error_offset(source: &str, line: usize, column: usize) -> usize {
+    let line_start = source
+        .match_indices('\n')
+        .nth(line.saturating_sub(2))
+        .map_or(0, |(offset, _)| offset + 1);
+    let mut offset = line_start;
+    for _ in 0..column.saturating_sub(1) {
+        let Some(character) = source[offset..].chars().next() else {
+            break;
+        };
+        if character == '\n' {
+            break;
+        }
+        offset += character.len_utf8();
+    }
+    offset.min(source.len())
+}
+
+fn json_error_token_start(source: &str, mut offset: usize) -> usize {
+    while offset > 0 {
+        let Some((previous, character)) = source[..offset].char_indices().next_back() else {
+            break;
+        };
+        if !character.is_ascii_alphanumeric() && character != '_' {
+            break;
+        }
+        offset = previous;
+    }
+    offset
+}
+
+fn next_char_boundary(source: &str, start: usize) -> usize {
+    source[start..]
+        .chars()
+        .next()
+        .map_or(start, |character| start + character.len_utf8())
+}
+
+fn json_key_span(source: &str, key: &str) -> Option<Range<usize>> {
+    let needle = serde_json::to_string(key).ok()?;
+    source
+        .match_indices(&needle)
+        .find(|(start, matched)| {
+            source[start + matched.len()..]
+                .trim_start()
+                .starts_with(':')
+        })
+        .map(|(start, matched)| start..start + matched.len())
+}
+
+fn json_value_span(source: &str, key: &str) -> Option<Range<usize>> {
+    let key = json_key_span(source, key)?;
+    let colon = source[key.end..].find(':')? + key.end;
+    let start = source[colon + 1..].find(|character: char| !character.is_whitespace())? + colon + 1;
+    Some(start..next_char_boundary(source, start))
+}
+
+fn json_string_contents_at(source: &str, cursor: usize) -> Option<Range<usize>> {
+    let mut in_string = false;
+    let mut escaped = false;
+    let mut start = 0;
+    for (index, character) in source.char_indices() {
+        if index > cursor {
+            break;
+        }
+        if character == '"' && !escaped {
+            if in_string {
+                if cursor <= index {
+                    return Some(start..index);
+                }
+                in_string = false;
+            } else {
+                in_string = true;
+                start = index + 1;
+            }
+        }
+        escaped = character == '\\' && !escaped;
+        if character != '\\' {
+            escaped = false;
+        }
+    }
+    in_string.then_some(start..cursor)
+}
+
+fn innermost_json_object(source: &str, cursor: usize) -> Option<usize> {
+    let mut stack = Vec::new();
+    let mut in_string = false;
+    let mut escaped = false;
+    for (index, character) in source[..cursor].char_indices() {
+        if in_string {
+            if character == '"' && !escaped {
+                in_string = false;
+            }
+            escaped = character == '\\' && !escaped;
+            if character != '\\' {
+                escaped = false;
+            }
+            continue;
+        }
+        match character {
+            '"' => in_string = true,
+            '{' => stack.push(index),
+            '}' => {
+                stack.pop();
+            }
+            _ => {}
+        }
+    }
+    stack.last().copied()
+}
+
+fn json_object_property_name(source: &str, object_start: usize) -> Option<String> {
+    let prefix = source[..object_start].trim_end();
+    let colon = prefix.strip_suffix(':')?.trim_end();
+    let end = colon.len().checked_sub(1)?;
+    (colon.as_bytes().get(end) == Some(&b'"'))
+        .then(|| colon[..end].rfind('"'))
+        .flatten()
+        .map(|start| colon[start + 1..end].to_owned())
 }
 
 fn format_json_document(source: &str) -> Result<String, String> {
@@ -3622,4 +3985,61 @@ fn json_newlines_follow_two_space_nesting_and_split_paired_delimiters() {
         json_newline("{\n  \"items\": []\n}", 14),
         ("\n    \n  ".into(), 3)
     );
+}
+
+#[test]
+fn keymaps_json_schema_reports_precise_syntax_and_property_errors() {
+    let schema = JsonSchema::keymaps(["workspace.focus-editor".into()]);
+    let syntax = json_schema_diagnostics("{\n  \"version\": nope\n}", Some(&schema));
+    assert_eq!(syntax.len(), 1);
+    assert_eq!(syntax[0].code, "json.syntax");
+    assert_eq!(syntax[0].range.start, 15);
+
+    let source = r#"{
+  "version": 2,
+  "bindings": {
+    "workspace.unknown": 4
+  },
+  "extra": true
+}"#;
+    let diagnostics = json_schema_diagnostics(source, Some(&schema));
+    assert!(diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.code == "json.schema.version"));
+    assert!(diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.code == "json.schema.command"));
+    assert!(diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.code == "json.schema.binding"));
+    assert!(diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.code == "json.schema.unknown-property"));
+    assert!(diagnostics
+        .iter()
+        .all(|diagnostic| diagnostic.range.start <= diagnostic.range.end));
+}
+
+#[test]
+fn keymaps_json_completion_follows_the_current_object_schema() {
+    let schema = JsonSchema::keymaps([
+        "workspace.focus-editor".into(),
+        "workspace.focus-results".into(),
+    ]);
+    let source = "{\n  \"ver\"\n}";
+    let cursor = source.find("ver").unwrap() + 3;
+    let (replace, candidates) = json_schema_completions(source, cursor, &schema);
+    assert_eq!(&source[replace], "ver");
+    assert!(candidates
+        .iter()
+        .any(|candidate| candidate.label == "version"));
+
+    let source = "{\n  \"version\": 1,\n  \"bindings\": {\n    \"work\"\n  }\n}";
+    let cursor = source.find("work").unwrap() + 4;
+    let (replace, candidates) = json_schema_completions(source, cursor, &schema);
+    assert_eq!(&source[replace], "work");
+    assert_eq!(candidates.len(), 2);
+    assert!(candidates
+        .iter()
+        .any(|candidate| candidate.label == "workspace.focus-editor"));
 }

@@ -17,8 +17,8 @@ use sift_ui::{
 };
 
 use crate::editor::{
-    EditorEvent, EditorKeymap, EditorLanguage, QueryDocument, QueryEditor, SemanticOutcome,
-    SemanticRequestKind, VimMode, EDITOR_GUTTER_WIDTH,
+    EditorEvent, EditorKeymap, EditorLanguage, JsonSchema, QueryDocument, QueryEditor,
+    SemanticOutcome, SemanticRequestKind, VimMode, EDITOR_GUTTER_WIDTH,
 };
 use crate::results::{ResultPlacement, ResultState, ResultsEvent, ResultsView, StreamProgress};
 use crate::settings::{EditorMode, KeyboardProfile, KeymapSettings, SettingsStore, UserSettings};
@@ -1379,6 +1379,15 @@ impl Pane {
                 let editor = QueryEditor::new(document, cx)
                     .with_language(language)
                     .with_keymap(keymap);
+                let editor = if item.title == "keymaps.json" {
+                    editor.with_json_schema(JsonSchema::keymaps(
+                        CommandRegistry::definitions()
+                            .iter()
+                            .map(|definition| definition.id.as_str().to_owned()),
+                    ))
+                } else {
+                    editor
+                };
                 if read_only {
                     editor.read_only()
                 } else {
@@ -6663,6 +6672,11 @@ impl WorkspaceShell {
         let editor = cx.new(|cx| {
             QueryEditor::new(QueryDocument::with_random_peer(&source), cx)
                 .with_language(EditorLanguage::Json)
+                .with_json_schema(JsonSchema::keymaps(
+                    CommandRegistry::definitions()
+                        .iter()
+                        .map(|definition| definition.id.as_str().to_owned()),
+                ))
                 .with_keymap(keymap)
         });
         if let Some(pane) = self.panes.get(self.active_pane) {
