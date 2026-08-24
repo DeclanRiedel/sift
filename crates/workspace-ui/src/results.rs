@@ -1882,8 +1882,8 @@ impl ResultsView {
                         div()
                             .debug_selector(move || format!("result-row-{row_index}"))
                             .flex()
-                            .w_full()
-                            .min_w(grid_min_width)
+                            .w(grid_min_width)
+                            .flex_none()
                             .h(px(ROW_HEIGHT))
                             .when(row_index % 2 == 1, |el| el.bg(colors.grid_stripe))
                             .child(
@@ -3151,6 +3151,12 @@ mod tests {
             cx.debug_bounds("result-row-0")
                 .is_some_and(|bounds| bounds.size.height > px(0.)),
             "ready result rows should receive a visible layout"
+        );
+        assert_eq!(
+            cx.debug_bounds("result-row-0")
+                .map(|bounds| bounds.size.width),
+            Some(px(ROW_NUMBER_WIDTH + DEFAULT_COLUMN_WIDTH * 2.0)),
+            "row striping should stop after the final visible field"
         );
         assert_eq!(
             cx.debug_bounds("result-header")

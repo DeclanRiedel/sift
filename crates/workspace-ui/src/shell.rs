@@ -17321,7 +17321,10 @@ mod tests {
             .expect("large Data body");
         let row = cx.debug_bounds("result-row-0").expect("live grid row");
         assert!(body.contains(&row.center()));
-        assert!(f32::from(row.size.width) > f32::from(card.size.width) * 0.9);
+        assert!(
+            row.right() < body.right(),
+            "unused Data viewport width should remain blank"
+        );
         assert!(cx.update(|window, cx| workspace.read(cx).active_results_focused(window, cx)));
 
         let close = cx
