@@ -52,6 +52,15 @@ const COMPLETION_MENU_WIDTH: Pixels = px(340.);
 const COMPLETION_ROW_HEIGHT: Pixels = px(22.);
 const COMPLETION_VISIBLE_ROWS: usize = 9;
 
+fn line_starts(text: &str) -> Vec<usize> {
+    let mut starts = vec![0];
+    starts.extend(
+        text.match_indices('\n')
+            .map(|(offset, _)| offset.saturating_add(1)),
+    );
+    starts
+}
+
 /// Pixel bounds of the part of `range` that falls on the line starting at
 /// `line_start`, or `None` when the range misses this line entirely.
 fn span_bounds(
@@ -1838,6 +1847,26 @@ impl QueryEditor {
         Some(line_start + within.min(line_text.len()))
     }
 
+    fn line_range_for_gutter_point(&self, position: gpui::Point<Pixels>) -> Option<Range<usize>> {
+        let viewport = self.scroll_handle.bounds();
+        if !viewport.contains(&position) || position.x >= viewport.left() + EDITOR_GUTTER_WIDTH {
+            return None;
+        }
+        let content_y =
+            position.y - viewport.top() - self.scroll_handle.offset().y - EDITOR_VERTICAL_INSET;
+        if content_y < px(0.) {
+            return None;
+        }
+        let line = (f32::from(content_y) / f32::from(EDITOR_LINE_HEIGHT)) as usize;
+        let starts = line_starts(self.document.text());
+        let start = *starts.get(line)?;
+        let end = starts
+            .get(line + 1)
+            .copied()
+            .unwrap_or(self.document.text().len());
+        Some(start..end)
+    }
+
     fn offset_to_utf16(&self, offset: usize) -> usize {
         offset_to_utf16(self.document.text(), offset)
     }
@@ -2265,6 +2294,11 @@ impl gpui::Render for QueryEditor {
                 MouseButton::Left,
                 cx.listener(|editor, event: &gpui::MouseDownEvent, window, cx| {
                     editor.focus_handle.clone().focus(window, cx);
+                    if let Some(range) = editor.line_range_for_gutter_point(event.position) {
+                        editor.document.set_selection(range, false);
+                        editor.selection_changed(cx);
+                        return;
+                    }
                     let Some(cursor) =
                         editor.byte_index_for_point(event.position, cx.theme(), window)
                     else {
@@ -2378,6 +2412,9 @@ struct EditorPrepaint {
     line_numbers: Vec<(usize, ShapedLine)>,
     line_starts: Arc<Vec<usize>>,
     visible_line_start: usize,
+    gutter_background: Option<PaintQuad>,
+    gutter_separator: Option<PaintQuad>,
+    gutter_diagnostics: Vec<PaintQuad>,
     active_line: Option<PaintQuad>,
     find_matches: Vec<PaintQuad>,
     selections: Vec<PaintQuad>,
@@ -2457,12 +2494,7 @@ impl Element for QueryEditorElement {
             let mut cache = editor.line_cache.borrow_mut();
             if cache.revision != editor.revision || cache.line_starts.is_empty() {
                 cache.revision = editor.revision;
-                let mut line_starts = vec![0];
-                line_starts.extend(
-                    text.match_indices('\n')
-                        .map(|(offset, _)| offset.saturating_add(1)),
-                );
-                cache.line_starts = Arc::new(line_starts);
+                cache.line_starts = Arc::new(line_starts(text));
             }
             cache.line_starts.clone()
         };
@@ -2470,6 +2502,7 @@ impl Element for QueryEditorElement {
         let mut find_quads = Vec::new();
         let mut usage_quads = Vec::new();
         let mut diagnostic_quads = Vec::new();
+        let mut gutter_diagnostic_quads = Vec::new();
         let mut cursor_quad = None;
         let mut active_line_quad = None;
         let text_top = bounds.top() + EDITOR_VERTICAL_INSET;
@@ -2530,7 +2563,7 @@ impl Element for QueryEditorElement {
                 shaped
             };
             let number_color = if cursor >= offset && cursor <= line_end {
-                theme.colors.muted_text
+                theme.colors.accent
             } else {
                 theme.colors.disabled_text
             };
@@ -2550,6 +2583,34 @@ impl Element for QueryEditorElement {
                     .shape_line(number.into(), font_size, &number_runs, None),
             ));
             let top = text_top + line_height * line_index as f32;
+
+            if let Some(diagnostic) = editor
+                .semantic
+                .diagnostics()
+                .iter()
+                .filter(|diagnostic| {
+                    diagnostic.range.start <= line_end && diagnostic.range.end >= offset
+                })
+                .min_by_key(|diagnostic| match diagnostic.severity {
+                    sift_protocol::DiagnosticSeverity::Error => 0,
+                    sift_protocol::DiagnosticSeverity::Warning => 1,
+                    sift_protocol::DiagnosticSeverity::Information => 2,
+                    sift_protocol::DiagnosticSeverity::Hint => 3,
+                })
+            {
+                let color = match diagnostic.severity {
+                    sift_protocol::DiagnosticSeverity::Error => theme.colors.danger,
+                    sift_protocol::DiagnosticSeverity::Warning => theme.colors.warning,
+                    _ => theme.colors.muted_text,
+                };
+                gutter_diagnostic_quads.push(fill(
+                    Bounds::new(
+                        point(bounds.left() + px(4.), top + px(5.)),
+                        size(px(3.), line_height - px(10.)),
+                    ),
+                    color,
+                ));
+            }
 
             if cursor >= offset && cursor <= line_end {
                 active_line_quad = Some(fill(
@@ -2686,6 +2747,18 @@ impl Element for QueryEditorElement {
             line_numbers,
             line_starts,
             visible_line_start: visible_start,
+            gutter_background: Some(fill(
+                Bounds::new(bounds.origin, size(EDITOR_GUTTER_WIDTH, bounds.size.height)),
+                theme.colors.toolbar,
+            )),
+            gutter_separator: Some(fill(
+                Bounds::new(
+                    point(bounds.left() + EDITOR_GUTTER_WIDTH - px(1.), bounds.top()),
+                    size(px(1.), bounds.size.height),
+                ),
+                theme.colors.subtle_border,
+            )),
+            gutter_diagnostics: gutter_diagnostic_quads,
             active_line: active_line_quad,
             find_matches: find_quads,
             selections,
@@ -2713,8 +2786,14 @@ impl Element for QueryEditorElement {
             ElementInputHandler::new(prepaint.text_bounds, self.editor.clone()),
             cx,
         );
+        if let Some(background) = prepaint.gutter_background.take() {
+            window.paint_quad(background);
+        }
         if let Some(active_line) = prepaint.active_line.take() {
             window.paint_quad(active_line);
+        }
+        if let Some(separator) = prepaint.gutter_separator.take() {
+            window.paint_quad(separator);
         }
         for found in prepaint.find_matches.drain(..) {
             window.paint_quad(found);
@@ -2742,6 +2821,9 @@ impl Element for QueryEditorElement {
             number
                 .paint(origin, line_height, gpui::TextAlign::Left, None, window, cx)
                 .expect("line number paint succeeds");
+        }
+        for marker in prepaint.gutter_diagnostics.drain(..) {
+            window.paint_quad(marker);
         }
         for diagnostic in prepaint.diagnostics.drain(..) {
             window.paint_quad(diagnostic);
@@ -3839,6 +3921,49 @@ mod tests {
         assert_eq!(
             editor.read_with(&cx, |editor, _| editor.cursor_position().0),
             expected_line
+        );
+    }
+
+    #[gpui::test]
+    fn clicking_the_scrolled_gutter_selects_the_visible_line(cx: &mut TestAppContext) {
+        let text = (0..300)
+            .map(|line| format!("select {line};"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let expected_text = text.clone();
+        let window = cx
+            .update(|cx| {
+                cx.open_window(Default::default(), |_window, cx| {
+                    cx.new(|cx| QueryEditor::new(doc(&text), cx))
+                })
+            })
+            .unwrap();
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let editor = window.root(&mut cx).unwrap();
+        cx.run_until_parked();
+        let viewport = editor.read_with(&cx, |editor, _| editor.scroll_handle.bounds());
+        cx.simulate_event(gpui::ScrollWheelEvent {
+            position: viewport.center(),
+            delta: gpui::ScrollDelta::Pixels(point(px(0.), px(-720.))),
+            ..Default::default()
+        });
+        cx.run_until_parked();
+        let (position, expected) = editor.read_with(&cx, |editor, _| {
+            let viewport = editor.scroll_handle.bounds();
+            let y = viewport.top() + px(42.);
+            let content_y =
+                y - viewport.top() - editor.scroll_handle.offset().y - EDITOR_VERTICAL_INSET;
+            let line = (f32::from(content_y) / f32::from(EDITOR_LINE_HEIGHT)) as usize;
+            let starts = line_starts(&expected_text);
+            (
+                point(viewport.left() + px(12.), y),
+                starts[line]..starts.get(line + 1).copied().unwrap_or(expected_text.len()),
+            )
+        });
+        cx.simulate_click(position, gpui::Modifiers::default());
+        assert_eq!(
+            editor.read_with(&cx, |editor, _| editor.document.selection()),
+            expected
         );
     }
 

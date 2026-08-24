@@ -83,7 +83,7 @@ surfaces, then admin/platform. Within P0, the connection experience comes first.
 ### Editor depth (polish of the built editor)
 
 - [x] find/replace bar with case sensitivity, match navigation, and highlights
-- [ ] gutter + line numbers, current-line highlight, vertical scroll, empty placeholder
+- [x] gutter with line numbers, active-line emphasis, diagnostic markers, and scrolling
 - [x] `explain` — estimated and analyzed plans with normalized tree + raw copy (M3/M4)
 
 ---
