@@ -73,7 +73,7 @@ surfaces, then admin/platform. Within P0, the connection experience comes first.
 
 ### Query history & saved queries — History tab, saved queries
 
-- [ ] `history`, `history_page` — populate the History result tab (currently a placeholder) (M4)
+- [x] `history_page` — paginated History result tab with query status, timing, row count, and rerun (M4)
 - [ ] `saved_queries`, `saved_query`, `create_saved_query`, `update_saved_query`, `delete_saved_query` — saved queries panel (M4)
 
 ### Capability gating — command availability

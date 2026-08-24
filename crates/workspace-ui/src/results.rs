@@ -11,6 +11,7 @@ use gpui::{
     Div, DragMoveEvent, FocusHandle, Focusable, IntoElement, MouseButton, Pixels, ScrollStrategy,
     ShapedLine, SharedString, Stateful, TextAlign, TextRun, UniformListScrollHandle, Window,
 };
+use sift_api_types::QueryHistory;
 use sift_protocol::{
     ColumnMetadata, DriverWarning, ExecuteResponse, ExplainResponse, Nullability, Page, PlanNode,
     Row, TypeRef, Value,
@@ -453,7 +454,7 @@ pub enum StreamProgress {
 
 /// Raised for the owning query tab. The results surface never reaches the
 /// executor itself; it reports intent and the workspace dispatches.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ResultsEvent {
     /// Discard the retained window and consume the held page onwards.
     LoadNextWindowRequested,
@@ -461,7 +462,24 @@ pub enum ResultsEvent {
     OpenDataModalRequested,
     /// Explain the editor's targeted statement. Analyze is explicit because it
     /// executes the statement to collect runtime counters.
-    ExplainRequested { analyze: bool },
+    ExplainRequested {
+        analyze: bool,
+    },
+    HistoryRequested {
+        cursor: Option<String>,
+    },
+    RerunHistory {
+        sql: String,
+    },
+}
+
+#[derive(Debug, Clone, Default)]
+struct HistoryState {
+    rows: Vec<QueryHistory>,
+    next_cursor: Option<String>,
+    loading: bool,
+    error: Option<String>,
+    loaded: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -554,6 +572,7 @@ pub struct ResultsView {
     rendered_plan_nodes: Vec<RenderedPlanNode>,
     plan_scroll_handle: UniformListScrollHandle,
     large_view: bool,
+    history: HistoryState,
 }
 
 impl ResultsView {
@@ -582,6 +601,7 @@ impl ResultsView {
             rendered_plan_nodes: Vec::new(),
             plan_scroll_handle: UniformListScrollHandle::new(),
             large_view: false,
+            history: HistoryState::default(),
         }
     }
 
@@ -931,6 +951,42 @@ impl ResultsView {
         } else {
             tab
         };
+        if self.tab == ResultTab::History && !self.history.loaded && !self.history.loading {
+            self.request_history(None, cx);
+        }
+        cx.notify();
+    }
+
+    fn request_history(&mut self, cursor: Option<String>, cx: &mut Context<Self>) {
+        if self.history.loading {
+            return;
+        }
+        self.history.loading = true;
+        self.history.error = None;
+        cx.emit(ResultsEvent::HistoryRequested { cursor });
+        cx.notify();
+    }
+
+    pub fn set_history_page(
+        &mut self,
+        page: Result<sift_protocol::CursorPage<QueryHistory>, String>,
+        append: bool,
+        cx: &mut Context<Self>,
+    ) {
+        self.history.loading = false;
+        self.history.loaded = true;
+        match page {
+            Ok(page) => {
+                if append {
+                    self.history.rows.extend(page.items);
+                } else {
+                    self.history.rows = page.items;
+                }
+                self.history.next_cursor = page.next_cursor;
+                self.history.error = None;
+            }
+            Err(message) => self.history.error = Some(message),
+        }
         cx.notify();
     }
 
@@ -2315,6 +2371,108 @@ impl ResultsView {
             }))
             .into_any_element()
     }
+
+    fn render_history(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let colors = cx.theme().colors;
+        if self.history.loading && self.history.rows.is_empty() {
+            return div()
+                .size_full()
+                .flex()
+                .items_center()
+                .justify_center()
+                .text_color(colors.muted_text)
+                .child("Loading query history…")
+                .into_any_element();
+        }
+        if let Some(error) = self.history.error.as_ref() {
+            return div()
+                .size_full()
+                .flex()
+                .items_center()
+                .justify_center()
+                .p_4()
+                .text_color(colors.danger)
+                .child(error.clone())
+                .into_any_element();
+        }
+        if self.history.loaded && self.history.rows.is_empty() {
+            return div()
+                .size_full()
+                .flex()
+                .items_center()
+                .justify_center()
+                .text_color(colors.muted_text)
+                .child("No query history yet.")
+                .into_any_element();
+        }
+        div()
+            .id("result-history-scroll")
+            .size_full()
+            .overflow_y_scroll()
+            .children(self.history.rows.iter().enumerate().map(|(index, entry)| {
+                let sql = entry.sql_text.clone();
+                let display_sql = sql.replace(['\n', '\r'], " ");
+                let status = match entry.status {
+                    sift_api_types::QueryStatus::Ok => "OK",
+                    sift_api_types::QueryStatus::Error => "ERROR",
+                    sift_api_types::QueryStatus::Canceled => "CANCELED",
+                };
+                let detail = match (entry.duration_ms, entry.row_count) {
+                    (Some(duration), Some(rows)) => format!("{duration} ms · {rows} row(s)"),
+                    (Some(duration), None) => format!("{duration} ms"),
+                    (None, Some(rows)) => format!("{rows} row(s)"),
+                    (None, None) => "No timing recorded".into(),
+                };
+                div()
+                    .id(("result-history-row", index))
+                    .debug_selector(move || format!("result-history-row-{index}"))
+                    .min_h(px(46.))
+                    .px_3()
+                    .py_1()
+                    .flex()
+                    .items_center()
+                    .gap_3()
+                    .border_b_1()
+                    .border_color(colors.subtle_border)
+                    .child(
+                        div()
+                            .w(px(72.))
+                            .flex_none()
+                            .text_xs()
+                            .text_color(colors.muted_text)
+                            .child(entry.started_at.format("%H:%M:%S").to_string()),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .child(div().truncate().child(display_sql))
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(colors.muted_text)
+                                    .child(format!("{status} · {detail}")),
+                            ),
+                    )
+                    .child(
+                        Button::new(("rerun-history", index), "Run")
+                            .tone(ButtonTone::Ghost)
+                            .on_click(cx.listener(move |_, _, _, cx| {
+                                cx.emit(ResultsEvent::RerunHistory { sql: sql.clone() })
+                            })),
+                    )
+            }))
+            .children(self.history.next_cursor.clone().map(|cursor| {
+                div().p_2().flex().justify_center().child(
+                    Button::new("load-more-history", "Load More")
+                        .tone(ButtonTone::Neutral)
+                        .on_click(cx.listener(move |view, _, _, cx| {
+                            view.request_history(Some(cursor.clone()), cx)
+                        })),
+                )
+            }))
+            .into_any_element()
+    }
 }
 
 impl Focusable for ResultsView {
@@ -2330,16 +2488,7 @@ impl gpui::Render for ResultsView {
             ResultTab::Data => self.render_grid(cx),
             ResultTab::Messages => self.render_messages(cx).into_any_element(),
             ResultTab::Explain => self.render_explain(cx),
-            ResultTab::History => div()
-                .size_full()
-                .flex()
-                .items_center()
-                .justify_center()
-                .p_4()
-                .text_center()
-                .text_color(colors.muted_text)
-                .child("Query history appears here.")
-                .into_any_element(),
+            ResultTab::History => self.render_history(cx),
         };
 
         div()
@@ -2428,6 +2577,57 @@ mod tests {
         let mut column = ColumnMetadata::new(name, TypeRef::Primitive(primitive));
         column.nullable = nullable;
         column
+    }
+
+    fn history_entry(id: i64, sql: &str) -> QueryHistory {
+        QueryHistory {
+            id: sift_api_types::QueryHistoryId(id),
+            principal_id: sift_api_types::PrincipalId(1),
+            room_id: None,
+            connection_profile_id: None,
+            sql_text: sql.into(),
+            started_at: "2026-08-24T10:00:00Z".parse().expect("valid timestamp"),
+            duration_ms: Some(12),
+            row_count: Some(1),
+            status: sift_api_types::QueryStatus::Ok,
+            error_code: None,
+            error_message: None,
+        }
+    }
+
+    #[gpui::test]
+    fn history_pages_append_and_keep_the_next_cursor(cx: &mut TestAppContext) {
+        let view = cx.update(|cx| cx.new(ResultsView::new));
+        view.update(cx, |view, cx| view.select_tab(ResultTab::History, cx));
+        assert!(view.read_with(cx, |view, _| view.history.loading));
+
+        view.update(cx, |view, cx| {
+            view.set_history_page(
+                Ok(sift_protocol::CursorPage {
+                    items: vec![history_entry(1, "select 1")],
+                    next_cursor: Some("next".into()),
+                }),
+                false,
+                cx,
+            )
+        });
+        view.update(cx, |view, cx| {
+            view.set_history_page(
+                Ok(sift_protocol::CursorPage {
+                    items: vec![history_entry(2, "select 2")],
+                    next_cursor: None,
+                }),
+                true,
+                cx,
+            )
+        });
+
+        view.read_with(cx, |view, _| {
+            assert_eq!(view.history.rows.len(), 2);
+            assert_eq!(view.history.rows[1].sql_text, "select 2");
+            assert_eq!(view.history.next_cursor, None);
+            assert!(!view.history.loading);
+        });
     }
 
     #[gpui::test]

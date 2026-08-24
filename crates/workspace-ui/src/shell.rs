@@ -960,6 +960,14 @@ pub enum PaneEvent {
         sql: String,
         analyze: bool,
     },
+    HistoryRequested {
+        item_id: u64,
+        cursor: Option<String>,
+    },
+    RerunHistoryRequested {
+        item_id: u64,
+        sql: String,
+    },
     /// An editor wants semantic work done for one of its revisions. The
     /// workspace owns the connection and the debounce policy.
     SemanticRequested {
@@ -1119,6 +1127,10 @@ pub enum ExecutorCommand {
         generation: u64,
         request: sift_protocol::SchemaSearchRequest,
     },
+    LoadHistory {
+        item_id: u64,
+        cursor: Option<String>,
+    },
     LoadObjectDdl {
         item_id: u64,
         source: DatabaseObjectSource,
@@ -1207,6 +1219,11 @@ pub enum ExecutorEvent {
     SchemaSearchFailed {
         generation: u64,
         message: String,
+    },
+    HistoryLoaded {
+        item_id: u64,
+        append: bool,
+        page: Result<sift_protocol::CursorPage<sift_api_types::QueryHistory>, String>,
     },
     ObjectDdlLoaded {
         item_id: u64,
@@ -1493,6 +1510,14 @@ impl Pane {
                     analyze: *analyze,
                 });
             }
+            ResultsEvent::HistoryRequested { cursor } => cx.emit(PaneEvent::HistoryRequested {
+                item_id,
+                cursor: cursor.clone(),
+            }),
+            ResultsEvent::RerunHistory { sql } => cx.emit(PaneEvent::RerunHistoryRequested {
+                item_id,
+                sql: sql.clone(),
+            }),
         }
     }
 
@@ -4407,6 +4432,20 @@ impl WorkspaceShell {
                     }
                 }
                 cx.notify();
+            }
+            ExecutorEvent::HistoryLoaded {
+                item_id,
+                append,
+                page,
+            } => {
+                for pane in &self.panes {
+                    let results = pane.read(cx).results.get(&item_id).cloned();
+                    if let Some(results) = results {
+                        results
+                            .update(cx, |results, cx| results.set_history_page(page, append, cx));
+                        break;
+                    }
+                }
             }
             ExecutorEvent::ObjectDdlFailed { item_id, message } => {
                 if !self.pending_object_ddl.remove(&item_id) {
@@ -7884,6 +7923,28 @@ impl WorkspaceShell {
                 sql,
                 analyze,
             } => self.explain_database_item(*item_id, sql.clone(), *analyze, cx),
+            PaneEvent::HistoryRequested { item_id, cursor } => {
+                if let Some(sender) = &self.executor_sender {
+                    let _ = sender.send(ExecutorCommand::LoadHistory {
+                        item_id: *item_id,
+                        cursor: cursor.clone(),
+                    });
+                } else if let Some(results) = emitter.read(cx).results.get(item_id).cloned() {
+                    results.update(cx, |results, cx| {
+                        results.set_history_page(
+                            Err(
+                                "Query history is unavailable until the desktop executor starts"
+                                    .into(),
+                            ),
+                            cursor.is_some(),
+                            cx,
+                        )
+                    });
+                }
+            }
+            PaneEvent::RerunHistoryRequested { item_id, sql } => {
+                self.execute_database_item(*item_id, sql.clone(), cx)
+            }
             PaneEvent::SemanticRequested {
                 item_id,
                 revision,

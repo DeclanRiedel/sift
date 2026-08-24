@@ -816,6 +816,27 @@ async fn run_query_executor(
                     return;
                 }
             }
+            ExecutorCommand::LoadHistory { item_id, cursor } => {
+                let append = cursor.is_some();
+                let page = match context.as_ref() {
+                    Some(opened) => opened
+                        .client
+                        .history_page(None, cursor.as_deref(), Some(50))
+                        .await
+                        .map_err(|error| format!("loading query history failed: {error}")),
+                    None => Err("Connect to a database before loading query history".into()),
+                };
+                if events
+                    .send(ExecutorEvent::HistoryLoaded {
+                        item_id,
+                        append,
+                        page,
+                    })
+                    .is_err()
+                {
+                    return;
+                }
+            }
             ExecutorCommand::LoadObjectDdl { item_id, source } => {
                 let event = match context.as_ref() {
                     Some(opened) if opened.profile_id == source.profile_id => {
