@@ -3,163 +3,152 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <meta name="color-scheme" content="dark light" />
-    <title>Sift keyboard language</title>
+    <title>Sift keyboard defaults</title>
     <link rel="stylesheet" href="styles.css" />
   </head>
   <body>
-    <aside>
-      <a class="brand" href="#top"><span>S</span> Sift keys</a>
-      <nav aria-label="Page sections">
-        <a href="#model">Model</a>
-        <a href="#language">Leader language</a>
+    <main>
+      <header>
+        <h1>Sift keyboard defaults</h1>
+        <p>
+          Local Vim keys control focused content. Leader commands control the IDE.
+          Press <kbd>:</kbd> in normal mode to open the command palette.
+        </p>
+        <p>
+          Leader: <kbd>Space</kbd> in Vim/UI normal mode or <kbd>Ctrl+K</kbd> as fallback.
+          Press <kbd>Esc</kbd> to cancel or return toward normal mode.
+        </p>
+      </header>
+
+      <nav>
+        <a href="#leader">Leader commands</a>
         <a href="#editor">Editor</a>
         <a href="#results">Results</a>
         <a href="#connections">Connections</a>
         <a href="#inspector">Inspector</a>
-        <a href="#editing">Editing rollout</a>
+        <a href="#editing">Editing</a>
       </nav>
-      <p class="aside-note">Defaults track current desktop behavior. Planned rows carry a badge.</p>
-    </aside>
 
-    <main id="top">
-      <header>
-        <p class="eyebrow">Keyboard-first database IDE</p>
-        <h1>Sift command language</h1>
-        <p class="lede">
-          Local Vim motions manipulate focused content. Leader sequences perform IDE actions.
-          Press <kbd>:</kbd> from normal mode for the searchable command palette.
-        </p>
-        <div class="callout">
-          <div><kbd>Space</kbd><span>leader in Vim/UI normal mode</span></div>
-          <div><kbd>Ctrl</kbd><b>+</b><kbd>K</kbd><span>fallback leader</span></div>
-          <div><kbd>Esc</kbd><span>return toward normal mode</span></div>
-        </div>
-      </header>
+      <section id="leader">
+        <h2>Leader families</h2>
+        <table>
+          <thead><tr><th>Key</th><th>Family</th><th>Purpose</th></tr></thead>
+          <tbody>
+            <tr><td><kbd>f</kbd></td><td>Find</td><td>Commands, schema, usages</td></tr>
+            <tr><td><kbd>v</kbd></td><td>View</td><td>Docks and panels</td></tr>
+            <tr><td><kbd>x</kbd></td><td>Execute</td><td>Statement, query, cancel</td></tr>
+            <tr><td><kbd>t</kbd></td><td>Tab</td><td>Save and close tabs</td></tr>
+            <tr><td><kbd>e</kbd></td><td>Edit</td><td>Formatting, fixes, staged edits</td></tr>
+            <tr><td><kbd>d</kbd></td><td>Database</td><td>Connections</td></tr>
+            <tr><td><kbd>w</kbd></td><td>Workspace</td><td>Panes and splits</td></tr>
+          </tbody>
+        </table>
 
-      <section id="model">
-        <h2>Mode model</h2>
-        <div class="mode-grid">
-          <article><strong>NORMAL</strong><p>Navigate surfaces and enter leader commands.</p></article>
-          <article><strong>INSERT</strong><p>Edit SQL, text fields, or cell values.</p></article>
-          <article><strong>VISUAL</strong><p>Select text, cells, rows, or objects.</p></article>
-          <article><strong>COMMAND</strong><p>Resolve leader sequences or search commands.</p></article>
-        </div>
-        <p><kbd>Esc</kbd> cancels one layer: prompt → component → normal. Literal Space and colon remain available while inserting text.</p>
-      </section>
-
-      <section id="language">
-        <div class="section-heading">
-          <div><p class="eyebrow">Available now</p><h2>Leader language</h2></div>
-          <code>&lt;leader&gt; family action</code>
-        </div>
-        <div class="family-grid">
-          <article><kbd>f</kbd><strong>find</strong><span>commands, schema, usages</span></article>
-          <article><kbd>v</kbd><strong>view</strong><span>docks and panels</span></article>
-          <article><kbd>x</kbd><strong>execute</strong><span>statement, query, cancel</span></article>
-          <article><kbd>t</kbd><strong>tab</strong><span>close and save</span></article>
-          <article><kbd>e</kbd><strong>edit</strong><span>format and quick fixes</span></article>
-          <article><kbd>d</kbd><strong>database</strong><span>connection actions</span></article>
-          <article><kbd>w</kbd><strong>workspace</strong><span>panes and splits</span></article>
-        </div>
-
-        <div class="tables">
-          <table>
-            <thead><tr><th>Sequence</th><th>Action</th></tr></thead>
-            <tbody>
-              <tr><td><code>&lt;leader&gt; f c</code></td><td>Command palette</td></tr>
-              <tr><td><code>&lt;leader&gt; f d</code></td><td>Find database object</td></tr>
-              <tr><td><code>&lt;leader&gt; f u</code></td><td>Find SQL usages</td></tr>
-              <tr><td><code>&lt;leader&gt; v d</code></td><td>Toggle Connections</td></tr>
-              <tr><td><code>&lt;leader&gt; v i</code></td><td>Toggle Inspector</td></tr>
-              <tr><td><code>&lt;leader&gt; v b</code></td><td>Toggle bottom panel</td></tr>
-              <tr><td><code>&lt;leader&gt; x s</code></td><td>Execute statement</td></tr>
-              <tr><td><code>&lt;leader&gt; x q</code></td><td>Execute query tab</td></tr>
-              <tr><td><code>&lt;leader&gt; x c</code></td><td>Cancel execution</td></tr>
-            </tbody>
-          </table>
-          <table>
-            <thead><tr><th>Sequence</th><th>Action</th></tr></thead>
-            <tbody>
-              <tr><td><code>&lt;leader&gt; t c</code></td><td>Close active tab</td></tr>
-              <tr><td><code>&lt;leader&gt; t s</code></td><td>Save active tab</td></tr>
-              <tr><td><code>&lt;leader&gt; e f</code></td><td>Format SQL</td></tr>
-              <tr><td><code>&lt;leader&gt; e q</code></td><td>Apply quick fix</td></tr>
-              <tr><td><code>&lt;leader&gt; d c</code></td><td>Connect to Sift server</td></tr>
-              <tr><td><code>&lt;leader&gt; w s</code></td><td>Split pane</td></tr>
-              <tr><td><code>&lt;leader&gt; w n</code></td><td>Focus next pane</td></tr>
-              <tr><td><code>&lt;leader&gt; w c</code></td><td>Close pane</td></tr>
-              <tr><td><code>] d</code></td><td>Next SQL problem</td></tr>
-            </tbody>
-          </table>
-        </div>
-        <p class="note">Leader prefixes show an in-app which-key strip. Disabled commands remain searchable and explain why they cannot run.</p>
+        <h2>Available commands</h2>
+        <table>
+          <thead><tr><th>Sequence</th><th>Action</th></tr></thead>
+          <tbody>
+            <tr><td><code>&lt;leader&gt; f c</code></td><td>Command palette</td></tr>
+            <tr><td><code>&lt;leader&gt; f d</code></td><td>Find database object</td></tr>
+            <tr><td><code>&lt;leader&gt; f u</code></td><td>Find SQL usages</td></tr>
+            <tr><td><code>&lt;leader&gt; v d</code></td><td>Toggle Connections</td></tr>
+            <tr><td><code>&lt;leader&gt; v i</code></td><td>Toggle Inspector</td></tr>
+            <tr><td><code>&lt;leader&gt; v b</code></td><td>Toggle bottom panel</td></tr>
+            <tr><td><code>&lt;leader&gt; x s</code></td><td>Execute statement</td></tr>
+            <tr><td><code>&lt;leader&gt; x q</code></td><td>Execute query tab</td></tr>
+            <tr><td><code>&lt;leader&gt; x c</code></td><td>Cancel execution</td></tr>
+            <tr><td><code>&lt;leader&gt; t c</code></td><td>Close active tab</td></tr>
+            <tr><td><code>&lt;leader&gt; t s</code></td><td>Save active tab</td></tr>
+            <tr><td><code>&lt;leader&gt; e f</code></td><td>Format SQL</td></tr>
+            <tr><td><code>&lt;leader&gt; e q</code></td><td>Apply quick fix</td></tr>
+            <tr><td><code>&lt;leader&gt; d c</code></td><td>Connect to Sift server</td></tr>
+            <tr><td><code>&lt;leader&gt; w s</code></td><td>Split pane</td></tr>
+            <tr><td><code>&lt;leader&gt; w n</code></td><td>Focus next pane</td></tr>
+            <tr><td><code>&lt;leader&gt; w c</code></td><td>Close pane</td></tr>
+          </tbody>
+        </table>
       </section>
 
       <section id="editor">
         <h2>Editor</h2>
-        <p>ModalKit supplies standard Vim editing and motions. Sift reserves <kbd>:</kbd> for its command palette instead of a separate Ex prompt.</p>
-        <div class="key-list">
-          <div><code>:</code><span>command palette</span></div>
-          <div><code>u</code><span>undo</span></div>
-          <div><code>Ctrl+R</code><span>redo</span></div>
-          <div><code>] d</code><span>next diagnostic</span></div>
-          <div><code>Ctrl+Space</code><span>completion while inserting</span></div>
-          <div><code>Esc</code><span>normal mode</span></div>
-        </div>
+        <table>
+          <thead><tr><th>Key</th><th>Action</th></tr></thead>
+          <tbody>
+            <tr><td><code>:</code></td><td>Open command palette</td></tr>
+            <tr><td><code>u</code></td><td>Undo</td></tr>
+            <tr><td><code>Ctrl+R</code></td><td>Redo</td></tr>
+            <tr><td><code>] d</code></td><td>Next SQL problem</td></tr>
+            <tr><td><code>Ctrl+Space</code></td><td>Completion while inserting</td></tr>
+            <tr><td><code>Esc</code></td><td>Return to normal mode</td></tr>
+          </tbody>
+        </table>
       </section>
 
       <section id="results">
-        <div class="section-heading"><h2>Results grid</h2><span class="badge planned">rollout</span></div>
-        <div class="key-list">
-          <div><code>h j k l</code><span>move between cells</span></div>
-          <div><code>gg / G</code><span>first / last row</span></div>
-          <div><code>0 / $</code><span>first / last column</span></div>
-          <div><code>v / V</code><span>cell / row selection</span></div>
-          <div><code>y c / yy</code><span>copy cell / row to system clipboard</span></div>
-          <div><code>p</code><span>stage clipboard paste when editable</span></div>
-          <div><code>/ · n · N</code><span>search and navigate matches</span></div>
-        </div>
+        <h2>Results <small>planned rollout</small></h2>
+        <table>
+          <thead><tr><th>Key</th><th>Action</th></tr></thead>
+          <tbody>
+            <tr><td><code>h j k l</code></td><td>Move between cells</td></tr>
+            <tr><td><code>gg / G</code></td><td>First / last row</td></tr>
+            <tr><td><code>0 / $</code></td><td>First / last column</td></tr>
+            <tr><td><code>v / V</code></td><td>Select cells / rows</td></tr>
+            <tr><td><code>y c / yy</code></td><td>Copy cell / row</td></tr>
+            <tr><td><code>p</code></td><td>Stage clipboard paste when editable</td></tr>
+            <tr><td><code>/ · n · N</code></td><td>Search results</td></tr>
+          </tbody>
+        </table>
       </section>
 
       <section id="connections">
-        <div class="section-heading"><h2>Connections</h2><span class="badge planned">rollout</span></div>
-        <div class="key-list">
-          <div><code>j / k</code><span>next / previous object</span></div>
-          <div><code>h / l</code><span>collapse / expand</span></div>
-          <div><code>gg / G</code><span>first / last object</span></div>
-          <div><code>Enter</code><span>open focused object</span></div>
-          <div><code>/</code><span>schema search</span></div>
-          <div><code>r</code><span>refresh focused object</span></div>
-        </div>
+        <h2>Connections <small>planned rollout</small></h2>
+        <table>
+          <thead><tr><th>Key</th><th>Action</th></tr></thead>
+          <tbody>
+            <tr><td><code>j / k</code></td><td>Next / previous object</td></tr>
+            <tr><td><code>h / l</code></td><td>Collapse / expand</td></tr>
+            <tr><td><code>gg / G</code></td><td>First / last object</td></tr>
+            <tr><td><code>Enter</code></td><td>Open focused object</td></tr>
+            <tr><td><code>/</code></td><td>Schema search</td></tr>
+            <tr><td><code>r</code></td><td>Refresh focused object</td></tr>
+          </tbody>
+        </table>
       </section>
 
       <section id="inspector">
-        <div class="section-heading"><h2>Inspector</h2><span class="badge planned">rollout</span></div>
-        <div class="key-list">
-          <div><code>j / k</code><span>next / previous row</span></div>
-          <div><code>h / l</code><span>collapse / expand section</span></div>
-          <div><code>[ i / ] i</code><span>previous / next section</span></div>
-          <div><code>Enter</code><span>open definition</span></div>
-          <div><code>i / a</code><span>edit focused field / add row</span></div>
-          <div><code>J / K</code><span>reorder down / up</span></div>
-        </div>
+        <h2>Inspector <small>planned rollout</small></h2>
+        <table>
+          <thead><tr><th>Key</th><th>Action</th></tr></thead>
+          <tbody>
+            <tr><td><code>j / k</code></td><td>Next / previous row</td></tr>
+            <tr><td><code>h / l</code></td><td>Collapse / expand section</td></tr>
+            <tr><td><code>[ i / ] i</code></td><td>Previous / next section</td></tr>
+            <tr><td><code>Enter</code></td><td>Open definition</td></tr>
+            <tr><td><code>i / a</code></td><td>Edit field / add row</td></tr>
+            <tr><td><code>J / K</code></td><td>Reorder down / up</td></tr>
+          </tbody>
+        </table>
       </section>
 
       <section id="editing">
-        <div class="section-heading"><h2>Editable-result language</h2><span class="badge planned">next feature</span></div>
-        <div class="key-list">
-          <div><code>i</code><span>edit current cell</span></div>
-          <div><code>dd / o</code><span>stage row deletion / insertion</span></div>
-          <div><code>&lt;leader&gt; e p</code><span>preview staged changes</span></div>
-          <div><code>&lt;leader&gt; e a</code><span>apply approved changes</span></div>
-          <div><code>&lt;leader&gt; e r</code><span>revert staged changes</span></div>
-          <div><code>u / Ctrl+R</code><span>undo / redo staging</span></div>
-        </div>
-        <p class="note">Mutation keys stage or preview work. They never bypass capability checks, conflict detection, or approval.</p>
+        <h2>Editable results <small>planned next feature</small></h2>
+        <table>
+          <thead><tr><th>Key</th><th>Action</th></tr></thead>
+          <tbody>
+            <tr><td><code>i</code></td><td>Edit current cell</td></tr>
+            <tr><td><code>dd / o</code></td><td>Stage row deletion / insertion</td></tr>
+            <tr><td><code>&lt;leader&gt; e p</code></td><td>Preview staged changes</td></tr>
+            <tr><td><code>&lt;leader&gt; e a</code></td><td>Apply approved changes</td></tr>
+            <tr><td><code>&lt;leader&gt; e r</code></td><td>Revert staged changes</td></tr>
+            <tr><td><code>u / Ctrl+R</code></td><td>Undo / redo staged changes</td></tr>
+          </tbody>
+        </table>
+        <p>Mutation commands stage or preview changes. They never bypass approval or conflict checks.</p>
       </section>
 
-      <footer>Run beside Sift with <code>nix run .#sift-desktop-demo-wiki</code>.</footer>
+      <footer>
+        Run with <code>nix run .#sift-desktop-demo-wiki</code>.
+      </footer>
     </main>
   </body>
 </html>
