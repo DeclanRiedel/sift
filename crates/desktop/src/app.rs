@@ -1127,20 +1127,13 @@ async fn run_query_executor(
                     return;
                 }
             }
-            ExecutorCommand::LoadPlanCaptures { item_id, tenant_id } => {
+            ExecutorCommand::LoadPlanCaptures {
+                item_id,
+                tenant_id,
+                sql,
+            } => {
                 let result = match context.as_ref() {
-                    Some(opened) => opened
-                        .client
-                        .plan_captures(
-                            TenantId(tenant_id),
-                            sift_protocol::ListPlanCapturesRequest {
-                                limit: Some(50),
-                                ..Default::default()
-                            },
-                        )
-                        .await
-                        .map(|page| page.items)
-                        .map_err(|error| format!("loading plan captures failed: {error}")),
+                    Some(opened) => load_plan_captures(opened, tenant_id, sql).await,
                     None => Err("Connect before loading plan captures".into()),
                 };
                 if events
@@ -1412,6 +1405,49 @@ async fn capture_plan(
             .map_err(|error| format!("saving plan capture failed: {error}"))
     }
     .await;
+    let _ = context
+        .client
+        .close_semantic_document(context.session, context.plan_connection, state.document_id)
+        .await;
+    result
+}
+
+async fn load_plan_captures(
+    context: &QueryContext,
+    tenant_id: i64,
+    sql: String,
+) -> Result<Vec<sift_protocol::PlanCaptureSummary>, String> {
+    let state = context
+        .client
+        .open_semantic_document(
+            context.session,
+            context.plan_connection,
+            sift_protocol::CreateSemanticDocumentRequest {
+                text: sql.clone(),
+                source: None,
+            },
+        )
+        .await
+        .map_err(|error| format!("opening plan capture filter failed: {error}"))?;
+    let fingerprint = sift_server::fingerprint::sql(&sql);
+    let result = context
+        .client
+        .plan_captures(
+            TenantId(tenant_id),
+            sift_protocol::ListPlanCapturesRequest {
+                source_digest: Some(state.source_digest),
+                limit: Some(100),
+                ..Default::default()
+            },
+        )
+        .await
+        .map(|page| {
+            page.items
+                .into_iter()
+                .filter(|capture| capture.statement_fingerprint == fingerprint)
+                .collect()
+        })
+        .map_err(|error| format!("loading plan captures failed: {error}"));
     let _ = context
         .client
         .close_semantic_document(context.session, context.plan_connection, state.document_id)

@@ -970,6 +970,7 @@ pub enum PaneEvent {
     },
     OpenPlanCapturesRequested {
         item_id: u64,
+        sql: String,
     },
     ExplainRequested {
         item_id: u64,
@@ -1228,6 +1229,7 @@ pub enum ExecutorCommand {
     LoadPlanCaptures {
         item_id: u64,
         tenant_id: i64,
+        sql: String,
     },
     ComparePlanCaptures {
         item_id: u64,
@@ -1613,6 +1615,13 @@ impl Pane {
         self.results.insert(item_id, view);
     }
 
+    fn targeted_query_sql(&self, item_id: u64, cx: &App) -> String {
+        self.editors
+            .get(&item_id)
+            .map(|editor| targeted_query_text(editor.read(cx).document()))
+            .unwrap_or_default()
+    }
+
     fn on_results_event(&mut self, item_id: u64, event: &ResultsEvent, cx: &mut Context<Self>) {
         match event {
             ResultsEvent::LoadNextWindowRequested => {
@@ -1625,23 +1634,7 @@ impl Pane {
                 cx.emit(PaneEvent::EditResultCellRequested { item_id })
             }
             ResultsEvent::ExplainRequested { analyze } => {
-                let sql = self
-                    .editors
-                    .get(&item_id)
-                    .map(|editor| {
-                        let editor = editor.read(cx);
-                        let document = editor.document();
-                        let selected = document.selected_text().trim();
-                        if !selected.is_empty() {
-                            return selected.to_owned();
-                        }
-                        document
-                            .active_statement()
-                            .map(|range| document.text()[range].trim().to_owned())
-                            .filter(|sql| !sql.is_empty())
-                            .unwrap_or_else(|| document.text().trim().to_owned())
-                    })
-                    .unwrap_or_default();
+                let sql = self.targeted_query_sql(item_id, cx);
                 cx.emit(PaneEvent::ExplainRequested {
                     item_id,
                     sql,
@@ -1649,15 +1642,14 @@ impl Pane {
                 });
             }
             ResultsEvent::CapturePlanRequested => {
-                let sql = self
-                    .editors
-                    .get(&item_id)
-                    .map(|editor| editor.read(cx).document().text().trim().to_owned())
-                    .unwrap_or_default();
+                let sql = self.targeted_query_sql(item_id, cx);
                 cx.emit(PaneEvent::CapturePlanRequested { item_id, sql });
             }
             ResultsEvent::OpenPlanCapturesRequested => {
-                cx.emit(PaneEvent::OpenPlanCapturesRequested { item_id });
+                cx.emit(PaneEvent::OpenPlanCapturesRequested {
+                    item_id,
+                    sql: self.targeted_query_sql(item_id, cx),
+                });
             }
             ResultsEvent::HistoryRequested { cursor } => cx.emit(PaneEvent::HistoryRequested {
                 item_id,
@@ -3104,6 +3096,18 @@ struct HeldResultPage {
     acknowledge: tokio::sync::oneshot::Sender<()>,
 }
 
+fn targeted_query_text(document: &QueryDocument) -> String {
+    let selected = document.selected_text().trim();
+    if !selected.is_empty() {
+        return selected.to_owned();
+    }
+    document
+        .active_statement()
+        .map(|range| document.text()[range].trim().to_owned())
+        .filter(|sql| !sql.is_empty())
+        .unwrap_or_else(|| document.text().trim().to_owned())
+}
+
 /// Wall-clock milliseconds, used only to stamp result references. A clock that
 /// cannot be read yields 0, which reads as "unknown" rather than failing a run.
 fn epoch_millis() -> u64 {
@@ -3370,6 +3374,7 @@ pub struct WorkspaceShell {
     result_edit_error: Option<String>,
     plan_capture_item: Option<u64>,
     plan_captures: Vec<sift_protocol::PlanCaptureSummary>,
+    selected_plan_captures: Vec<sift_protocol::PlanCaptureId>,
     plan_capture_comparison: Option<sift_protocol::PlanCaptureComparison>,
     plan_capture_error: Option<String>,
     pending_parameter_run: Option<PendingParameterRun>,
@@ -3796,6 +3801,7 @@ impl WorkspaceShell {
             result_edit_error: None,
             plan_capture_item: None,
             plan_captures: Vec::new(),
+            selected_plan_captures: Vec::new(),
             plan_capture_comparison: None,
             plan_capture_error: None,
             pending_parameter_run: None,
@@ -4675,6 +4681,7 @@ impl WorkspaceShell {
                                 let _ = sender.send(ExecutorCommand::LoadPlanCaptures {
                                     item_id,
                                     tenant_id: source.tenant_id,
+                                    sql: self.targeted_query_sql(item_id, cx),
                                 });
                             }
                         }
@@ -4689,6 +4696,9 @@ impl WorkspaceShell {
                 match result {
                     Ok(captures) => {
                         self.plan_captures = captures;
+                        self.selected_plan_captures.retain(|id| {
+                            self.plan_captures.iter().any(|capture| capture.id == *id)
+                        });
                         self.plan_capture_error = None;
                     }
                     Err(message) => self.plan_capture_error = Some(message),
@@ -5263,6 +5273,14 @@ impl WorkspaceShell {
             .find_map(|pane| pane.read(cx).database_source(item_id))
     }
 
+    fn targeted_query_sql(&self, item_id: u64, cx: &App) -> String {
+        self.panes
+            .iter()
+            .find(|pane| pane.read(cx).items.iter().any(|item| item.id == item_id))
+            .map(|pane| pane.read(cx).targeted_query_sql(item_id, cx))
+            .unwrap_or_default()
+    }
+
     fn sync_database_item_states(&mut self, cx: &mut Context<Self>) {
         let status = self.connection_status.clone();
         for pane in &self.panes {
@@ -5651,6 +5669,27 @@ impl WorkspaceShell {
         for item_id in item_ids {
             self.route_explain(item_id, Err(reason.into()), cx);
         }
+    }
+
+    fn toggle_plan_capture_selection(
+        &mut self,
+        capture_id: sift_protocol::PlanCaptureId,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(index) = self
+            .selected_plan_captures
+            .iter()
+            .position(|selected| *selected == capture_id)
+        {
+            self.selected_plan_captures.remove(index);
+        } else {
+            if self.selected_plan_captures.len() == 2 {
+                self.selected_plan_captures.remove(0);
+            }
+            self.selected_plan_captures.push(capture_id);
+        }
+        self.plan_capture_comparison = None;
+        cx.notify();
     }
 
     /// Editor semantic entry point. `Analyze` is debounced because it fires on
@@ -9014,18 +9053,20 @@ impl WorkspaceShell {
                     self.show_toast("Saving estimated plan capture…".into(), cx);
                 }
             }
-            PaneEvent::OpenPlanCapturesRequested { item_id } => {
+            PaneEvent::OpenPlanCapturesRequested { item_id, sql } => {
                 let Some(source) = self.database_source(*item_id, cx) else {
                     return;
                 };
                 self.plan_capture_item = Some(*item_id);
                 self.plan_capture_error = None;
                 self.plan_capture_comparison = None;
+                self.selected_plan_captures.clear();
                 self.modal = Some(Modal::PlanCaptures);
                 if let Some(sender) = &self.executor_sender {
                     let _ = sender.send(ExecutorCommand::LoadPlanCaptures {
                         item_id: *item_id,
                         tenant_id: source.tenant_id,
+                        sql: sql.clone(),
                     });
                 }
                 cx.notify();
@@ -14741,25 +14782,36 @@ impl WorkspaceShell {
                 Modal::PlanCaptures => {
                     let captures = self.plan_captures.clone();
                     let comparison = self.plan_capture_comparison.as_ref();
+                    let selected = self.selected_plan_captures.clone();
                     div().flex().flex_col().max_h(px(640.)).child(
                         div().h(px(42.)).px_3().flex().items_center().justify_between()
                             .border_b_1().border_color(colors.subtle_border).bg(colors.toolbar)
                             .child(div().font_weight(gpui::FontWeight::SEMIBOLD).child("Plan captures"))
-                            .child(Button::new("compare-latest-plans", "Compare latest two")
-                                .tone(ButtonTone::Accent).disabled(captures.len() < 2)
+                            .child(Button::new("compare-selected-plans", "Compare selected")
+                                .tone(ButtonTone::Accent).disabled(selected.len() != 2)
                                 .on_click(cx.listener(|shell, _, _, cx| {
-                                    let (Some(item_id), Some(left), Some(right)) = (shell.plan_capture_item, shell.plan_captures.get(1), shell.plan_captures.first()) else { return };
+                                    let (Some(item_id), Some(left), Some(right)) = (shell.plan_capture_item, shell.selected_plan_captures.first().copied(), shell.selected_plan_captures.get(1).copied()) else { return };
                                     let Some(source) = shell.database_source(item_id, cx) else { return };
                                     if let Some(sender) = &shell.executor_sender {
-                                        let _ = sender.send(ExecutorCommand::ComparePlanCaptures { item_id, tenant_id: source.tenant_id, left: left.id, right: right.id });
+                                        let _ = sender.send(ExecutorCommand::ComparePlanCaptures { item_id, tenant_id: source.tenant_id, left, right });
                                     }
                                 }))),
                     ).child(
                         div().id("plan-capture-list").p_3().flex().flex_col().gap_2().overflow_y_scroll()
-                            .children(captures.into_iter().map(|capture| {
-                                div().p_2().rounded_sm().border_1().border_color(colors.subtle_border)
+                            .children(captures.into_iter().enumerate().map(|(index, capture)| {
+                                let capture_id = capture.id;
+                                let is_selected = selected.contains(&capture_id);
+                                div().id(("plan-capture", index)).p_2().rounded_sm().border_1()
+                                    .cursor(CursorStyle::PointingHand)
+                                    .border_color(if is_selected { colors.accent } else { colors.subtle_border })
+                                    .when(is_selected, |row| row.bg(colors.active_surface))
+                                    .on_click(cx.listener(move |shell, _, _, cx| {
+                                        shell.toggle_plan_capture_selection(capture_id, cx)
+                                    }))
                                     .child(format!("{} · {} · {} ms", capture.root_operator, if capture.analyzed { "analyzed" } else { "estimated" }, capture.duration_ms))
-                                    .child(div().text_xs().text_color(colors.muted_text).child(capture.captured_at.to_rfc3339()))
+                                    .child(div().flex().items_center().justify_between().text_xs().text_color(colors.muted_text)
+                                        .child(capture.captured_at.to_rfc3339())
+                                        .child(if is_selected { "Selected" } else { "Select" }))
                             }))
                             .children(comparison.map(|comparison| div().p_2().rounded_sm().bg(colors.active_surface).child(format!(
                                 "Comparison: {} operator · {} cardinality · {} cost · {} runtime changes{}",
@@ -19071,6 +19123,45 @@ mod tests {
             "Ready"
         );
 
+        workspace.update_in(&mut cx, |shell, window, cx| {
+            let pane = shell.panes[shell.active_pane].clone();
+            shell.on_pane_event(
+                &pane,
+                &PaneEvent::CapturePlanRequested {
+                    item_id,
+                    sql: preview_sql.clone(),
+                },
+                window,
+                cx,
+            );
+        });
+        assert!(matches!(
+            receiver.try_recv(),
+            Ok(ExecutorCommand::CapturePlan { item_id: capture_item, sql })
+                if capture_item == item_id && sql == preview_sql
+        ));
+        workspace.update_in(&mut cx, |shell, window, cx| {
+            let pane = shell.panes[shell.active_pane].clone();
+            shell.on_pane_event(
+                &pane,
+                &PaneEvent::OpenPlanCapturesRequested {
+                    item_id,
+                    sql: preview_sql.clone(),
+                },
+                window,
+                cx,
+            );
+        });
+        assert!(matches!(
+            receiver.try_recv(),
+            Ok(ExecutorCommand::LoadPlanCaptures { item_id: capture_item, tenant_id: 1, sql })
+                if capture_item == item_id && sql == preview_sql
+        ));
+        workspace.update_in(&mut cx, |shell, window, cx| {
+            shell.dismiss_modal(&DismissModal, window, cx)
+        });
+        cx.run_until_parked();
+
         let history_tab = cx.debug_bounds("result-tab-history").unwrap();
         cx.simulate_click(history_tab.center(), Modifiers::default());
         cx.run_until_parked();
@@ -22478,6 +22569,45 @@ mod tests {
             detect_query_parameters("select * from audit.events where id = @P1 and state = @p2"),
             vec!["@p1", "@p2"]
         );
+    }
+
+    #[test]
+    fn plan_capture_target_prefers_selection_then_active_statement() {
+        let mut document =
+            QueryDocument::with_random_peer("select 1;\nselect * from audit.events where id = 2;");
+        document.set_selection(10..10, false);
+        assert_eq!(
+            targeted_query_text(&document),
+            "select * from audit.events where id = 2"
+        );
+        document.set_selection(19..42, false);
+        assert_eq!(targeted_query_text(&document), "from audit.events where");
+    }
+
+    #[gpui::test]
+    fn plan_capture_selection_keeps_any_two_choices(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        let capture_id = |suffix| {
+            serde_json::from_str::<sift_protocol::PlanCaptureId>(&format!(
+                "\"00000000-0000-0000-0000-{suffix:012}\""
+            ))
+            .unwrap()
+        };
+        let first = capture_id(1);
+        let second = capture_id(2);
+        let third = capture_id(3);
+
+        workspace.update(&mut cx, |shell, cx| {
+            shell.toggle_plan_capture_selection(first, cx);
+            shell.toggle_plan_capture_selection(second, cx);
+            assert_eq!(shell.selected_plan_captures, vec![first, second]);
+            shell.toggle_plan_capture_selection(third, cx);
+            assert_eq!(shell.selected_plan_captures, vec![second, third]);
+            shell.toggle_plan_capture_selection(second, cx);
+            assert_eq!(shell.selected_plan_captures, vec![third]);
+        });
     }
 
     #[test]
