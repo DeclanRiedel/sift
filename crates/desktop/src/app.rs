@@ -1564,6 +1564,30 @@ struct QueryRun {
 
 async fn run_streamed_query(
     run: QueryRun,
+    controls: tokio::sync::mpsc::UnboundedReceiver<QueryControl>,
+    events: tokio::sync::mpsc::UnboundedSender<ExecutorEvent>,
+) {
+    let client = run.client.clone();
+    let session = run.session;
+    let transaction = run.transaction.clone();
+    run_streamed_query_inner(run, controls, events.clone()).await;
+    let Some(transaction) = transaction else {
+        return;
+    };
+    let state = client
+        .list_transactions(session)
+        .await
+        .map(|states| {
+            states
+                .into_iter()
+                .find(|state| state.transaction.tx_id == transaction.tx_id)
+        })
+        .map_err(|error| format!("refreshing transaction state failed: {error}"));
+    let _ = events.send(ExecutorEvent::TransactionStateRefreshed(state));
+}
+
+async fn run_streamed_query_inner(
+    run: QueryRun,
     mut controls: tokio::sync::mpsc::UnboundedReceiver<QueryControl>,
     events: tokio::sync::mpsc::UnboundedSender<ExecutorEvent>,
 ) {

@@ -21,6 +21,18 @@ pub struct SavepointInfo {
 pub struct TransactionState {
     pub transaction: TransactionInfo,
     pub savepoints: Vec<SavepointInfo>,
+    #[serde(default)]
+    pub condition: TransactionCondition,
+}
+
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum TransactionCondition {
+    #[default]
+    Active,
+    Failed,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]

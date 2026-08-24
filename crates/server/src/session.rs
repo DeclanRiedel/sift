@@ -2730,6 +2730,7 @@ impl SessionStore {
         operation: sift_protocol::OperationKind,
     ) -> ApiResult<ExecuteResponse> {
         let conn_id = req.connection;
+        let tx_id = req.tx.as_ref().map(|tx| tx.tx_id);
         self.validate_execute_tx(session_id, conn_id, req.tx.as_ref())?;
         let entry = self.authorize_connection_operation(
             session_id,
@@ -2815,6 +2816,8 @@ impl SessionStore {
                 response.columns.clone(),
                 response.rows.clone(),
             );
+        } else if let Some(tx_id) = tx_id {
+            self.mark_transaction_failed(session_id, tx_id);
         }
         result
     }
@@ -3205,6 +3208,7 @@ impl SessionStore {
             handle,
             savepoints: Mutex::new(Vec::new()),
             ending: AtomicBool::new(false),
+            failed: AtomicBool::new(false),
         };
         let session = self
             .inner
@@ -3235,6 +3239,11 @@ impl SessionStore {
         operation: sift_protocol::OperationKind,
     ) -> ApiResult<()> {
         self.authorize_connection_operation(session_id, req.connection, operation, None, &[])?;
+        if self.transaction_failed(session_id, req.connection, req.tx_id)? {
+            return Err(ApiError::Conflict(
+                "failed transaction must be rolled back before it can be closed".into(),
+            ));
+        }
         let tx = self.claim_tx_end(session_id, req.connection, req.tx_id)?;
         let entry = self.get_conn_entry(session_id, req.connection)?;
         let driver = entry.driver.clone();
@@ -3299,6 +3308,11 @@ impl SessionStore {
             .map(|entry| TransactionState {
                 transaction: entry.info.clone(),
                 savepoints: entry.savepoints.lock().unwrap().clone(),
+                condition: if entry.failed.load(Ordering::Acquire) {
+                    sift_protocol::TransactionCondition::Failed
+                } else {
+                    sift_protocol::TransactionCondition::Active
+                },
             })
             .collect();
         for transaction in &transactions {
@@ -3359,6 +3373,39 @@ impl SessionStore {
             closes_savepoints: active_savepoints,
             destructive: req.action == TransactionEndAction::Rollback,
         })
+    }
+
+    pub(crate) fn mark_transaction_failed(&self, session_id: SessionId, tx_id: TxId) {
+        if let Some(session) = self.inner.sessions.get(&session_id) {
+            if let Some(transaction) = session.transactions.get(&tx_id) {
+                transaction.failed.store(true, Ordering::Release);
+            }
+        }
+    }
+
+    fn transaction_failed(
+        &self,
+        session_id: SessionId,
+        connection: ConnectionId,
+        tx_id: TxId,
+    ) -> ApiResult<bool> {
+        let session = self
+            .inner
+            .sessions
+            .get(&session_id)
+            .ok_or(ApiError::SessionNotFound(session_id))?;
+        let transaction = session.transactions.get(&tx_id).ok_or_else(|| {
+            ApiError::Driver(DriverError::new(
+                Code::TransactionNotFound,
+                "transaction not active",
+            ))
+        })?;
+        if transaction.info.connection != connection {
+            return Err(ApiError::BadRequest(
+                "transaction belongs to another connection".into(),
+            ));
+        }
+        Ok(transaction.failed.load(Ordering::Acquire))
     }
 
     pub async fn create_savepoint(
@@ -5799,6 +5846,7 @@ pub struct TransactionEntry {
     pub handle: RuntimeTransactionHandle,
     pub savepoints: Mutex<Vec<SavepointInfo>>,
     ending: AtomicBool,
+    failed: AtomicBool,
 }
 
 /// Strip secrets and bind values from an operation before it is recorded on

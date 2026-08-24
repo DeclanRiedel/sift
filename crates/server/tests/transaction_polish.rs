@@ -1,7 +1,7 @@
 use sift_driver_api::mock::MockDriver;
 use sift_protocol::{
     BeginTransactionRequest, Code, ConnectionSpec, DriverError, EndTransactionRequest, Engine,
-    OpenSessionRequest, SslMode, TxMode,
+    ExecuteRequestHttp, OpenSessionRequest, SslMode, TransactionCondition, TxHandleRef, TxMode,
 };
 use sift_server::{DriverRegistry, SessionStore};
 use std::time::Duration;
@@ -16,6 +16,69 @@ fn spec() -> ConnectionSpec {
         ssl_mode: Some(SslMode::Disable),
         engine_specific: None,
     }
+}
+
+#[tokio::test]
+async fn failed_statement_marks_transaction_and_blocks_commit() {
+    let driver = MockDriver::builder()
+        .engine(Engine::Postgres)
+        .execute_err(DriverError::new(Code::SyntaxError, "bad statement"))
+        .build();
+    let store = SessionStore::new(DriverRegistry::builder().register(driver).build());
+    let session = store.open_session(OpenSessionRequest {
+        tag: None,
+        tenant_id: None,
+    });
+    let connection = store
+        .open_connection(session.id, Engine::Postgres, spec())
+        .await
+        .unwrap();
+    let transaction = store
+        .begin_transaction(
+            session.id,
+            BeginTransactionRequest {
+                connection: connection.id,
+                mode: TxMode::default(),
+            },
+        )
+        .await
+        .unwrap();
+    let tx = TxHandleRef {
+        tx_id: transaction.tx_id,
+        connection: transaction.connection,
+        mode: transaction.mode,
+    };
+
+    assert!(store
+        .execute_http(
+            session.id,
+            ExecuteRequestHttp {
+                connection: connection.id,
+                sql: "broken".into(),
+                params: Vec::new(),
+                tx: Some(tx),
+                room_id: None,
+                connection_profile_id: None,
+            },
+        )
+        .await
+        .is_err());
+    assert_eq!(
+        store.list_transactions(session.id).unwrap()[0].condition,
+        TransactionCondition::Failed
+    );
+    let request = EndTransactionRequest {
+        connection: connection.id,
+        tx_id: transaction.tx_id,
+    };
+    assert!(store
+        .commit_transaction(session.id, request.clone())
+        .await
+        .is_err());
+    store
+        .rollback_transaction(session.id, request)
+        .await
+        .unwrap();
 }
 
 #[tokio::test]

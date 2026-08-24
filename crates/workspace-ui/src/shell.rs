@@ -1028,10 +1028,15 @@ struct ParameterBindingInput {
     input: Entity<TextInput>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 enum PendingConnectionChange {
     Disconnect,
     Connect(ConnectionNavEntry),
+    SwitchServer {
+        command: InstanceCommand,
+        label: String,
+    },
+    Quit,
 }
 
 #[derive(Debug, Clone)]
@@ -1405,6 +1410,7 @@ pub enum ExecutorEvent {
         item_id: u64,
         result: Result<sift_protocol::ApplyEditsResult, ResultEditApplyFailure>,
     },
+    TransactionStateRefreshed(Result<Option<sift_protocol::TransactionState>, String>),
     PlanCaptured {
         item_id: u64,
         result: Result<sift_protocol::PlanCapture, String>,
@@ -4800,6 +4806,29 @@ impl WorkspaceShell {
                 }
                 cx.notify();
             }
+            ExecutorEvent::TransactionStateRefreshed(result) => {
+                match result {
+                    Ok(Some(state)) => {
+                        self.transaction = Some(state.transaction);
+                        self.transaction_aborted =
+                            state.condition == sift_protocol::TransactionCondition::Failed;
+                        self.transaction_error = None;
+                        self.status.transaction = if self.transaction_aborted {
+                            "TX: Failed".into()
+                        } else {
+                            "TX: Active".into()
+                        };
+                    }
+                    Ok(None) => {
+                        self.transaction = None;
+                        self.transaction_aborted = false;
+                        self.transaction_error = None;
+                        self.status.transaction = "TX: None".into();
+                    }
+                    Err(message) => self.transaction_error = Some(message),
+                }
+                cx.notify();
+            }
             ExecutorEvent::PlanCaptured { item_id, result } => match result {
                 Ok(_) => {
                     self.show_toast("Estimated plan capture saved".into(), cx);
@@ -5006,7 +5035,6 @@ impl WorkspaceShell {
                 if progress == StreamProgress::Terminal {
                     self.running_queries.remove(&item_id);
                     self.held_result_pages.remove(&item_id);
-                    self.track_transaction_outcome(&state);
                     self.replace_global_problems(item_id, &state, cx);
                     self.record_result_reference(item_id, &state, Some(cursor_id.0), cx);
                 }
@@ -6154,12 +6182,17 @@ impl WorkspaceShell {
         self.disconnect_now(cx);
     }
 
-    fn confirm_transaction_disconnect(&mut self, cx: &mut Context<Self>) {
+    fn confirm_transaction_disconnect(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let change = self.pending_connection_change.take();
         self.modal = None;
         self.disconnect_now(cx);
-        if let Some(PendingConnectionChange::Connect(entry)) = change {
-            self.connect_now(&entry, cx);
+        match change {
+            Some(PendingConnectionChange::Connect(entry)) => self.connect_now(&entry, cx),
+            Some(PendingConnectionChange::SwitchServer { command, .. }) => {
+                self.send_server_change(command, cx)
+            }
+            Some(PendingConnectionChange::Quit) => window.remove_window(),
+            Some(PendingConnectionChange::Disconnect) | None => {}
         }
     }
 
@@ -8134,7 +8167,6 @@ impl WorkspaceShell {
 
     /// Deliver an execution outcome to whichever pane owns the query item.
     fn route_result(&mut self, item_id: u64, state: ResultState, cx: &mut Context<Self>) {
-        self.track_transaction_outcome(&state);
         let refreshed = matches!(state, ResultState::Ready(_));
         self.status.execution = match &state {
             ResultState::Ready(_) | ResultState::Idle => "Ready".into(),
@@ -8155,21 +8187,6 @@ impl WorkspaceShell {
         // Bounded HTTP results have no cursor to correlate with.
         self.record_result_reference(item_id, &state, None, cx);
         cx.notify();
-    }
-
-    fn track_transaction_outcome(&mut self, state: &ResultState) {
-        if self.transaction.is_some()
-            && matches!(
-                state,
-                ResultState::Failed(_)
-                    | ResultState::Cancelled
-                    | ResultState::TimedOut
-                    | ResultState::OutcomeUnknown
-            )
-        {
-            self.transaction_aborted = true;
-            self.status.transaction = "TX: Aborted".into();
-        }
     }
 
     fn query_item_title(&self, item_id: u64, cx: &App) -> String {
@@ -10826,17 +10843,30 @@ impl WorkspaceShell {
         if self.server_connection_pending {
             return;
         }
-        let Some(sender) = &self.instance_sender else {
-            self.server_connection_error = Some("Desktop connection manager is unavailable".into());
-            cx.notify();
-            return;
-        };
         let command = InstanceCommand::Connect {
             profile_id: Some(profile.id.clone()),
             name: profile.name.clone(),
             base_url: profile.base_url.clone(),
             bearer_token: None,
             remember_token: profile.has_saved_token,
+        };
+        if self.transaction.is_some() {
+            self.pending_connection_change = Some(PendingConnectionChange::SwitchServer {
+                command,
+                label: format!("switch to {}", profile.name),
+            });
+            self.modal = Some(Modal::ConfirmTransactionDisconnect);
+            cx.notify();
+            return;
+        }
+        self.send_server_change(command, cx);
+    }
+
+    fn send_server_change(&mut self, command: InstanceCommand, cx: &mut Context<Self>) {
+        let Some(sender) = &self.instance_sender else {
+            self.server_connection_error = Some("Desktop connection manager is unavailable".into());
+            cx.notify();
+            return;
         };
         if sender.send(command).is_err() {
             self.server_connection_error = Some("Desktop connection manager stopped".into());
@@ -10882,11 +10912,6 @@ impl WorkspaceShell {
         if self.server_connection_pending {
             return;
         }
-        let Some(sender) = &self.instance_sender else {
-            self.server_connection_error = Some("Desktop connection manager is unavailable".into());
-            cx.notify();
-            return;
-        };
         let name = self.server_name_input.read(cx).text().trim().to_owned();
         let base_url = self.server_url_input.read(cx).text().trim().to_owned();
         let token = self.server_token_input.read(cx).text().to_owned();
@@ -10902,13 +10927,16 @@ impl WorkspaceShell {
             bearer_token: (!token.is_empty()).then_some(token),
             remember_token: self.remember_server_token,
         };
-        if sender.send(command).is_err() {
-            self.server_connection_error = Some("Desktop connection manager stopped".into());
-        } else {
-            self.server_connection_pending = true;
-            self.server_connection_error = None;
+        if self.transaction.is_some() {
+            self.pending_connection_change = Some(PendingConnectionChange::SwitchServer {
+                command,
+                label: "switch servers".into(),
+            });
+            self.modal = Some(Modal::ConfirmTransactionDisconnect);
+            cx.notify();
+            return;
         }
-        cx.notify();
+        self.send_server_change(command, cx);
     }
 
     fn use_local_server(&mut self, cx: &mut Context<Self>) {
@@ -10920,18 +10948,17 @@ impl WorkspaceShell {
         {
             return;
         }
-        let Some(sender) = &self.instance_sender else {
-            self.server_connection_error = Some("Desktop connection manager is unavailable".into());
+        let command = InstanceCommand::UseLocal;
+        if self.transaction.is_some() {
+            self.pending_connection_change = Some(PendingConnectionChange::SwitchServer {
+                command,
+                label: "switch to local server".into(),
+            });
+            self.modal = Some(Modal::ConfirmTransactionDisconnect);
             cx.notify();
             return;
-        };
-        if sender.send(InstanceCommand::UseLocal).is_err() {
-            self.server_connection_error = Some("Desktop connection manager stopped".into());
-        } else {
-            self.server_connection_pending = true;
-            self.server_connection_error = None;
         }
-        cx.notify();
+        self.send_server_change(command, cx);
     }
 
     fn forget_selected_server(&mut self, cx: &mut Context<Self>) {
@@ -11227,7 +11254,15 @@ impl WorkspaceShell {
             CommandId::OpenCommandPalette => {
                 self.open_command_palette(&OpenCommandPalette, window, cx)
             }
-            CommandId::Quit => window.remove_window(),
+            CommandId::Quit => {
+                if self.transaction.is_some() {
+                    self.pending_connection_change = Some(PendingConnectionChange::Quit);
+                    self.modal = Some(Modal::ConfirmTransactionDisconnect);
+                    cx.notify();
+                } else {
+                    window.remove_window();
+                }
+            }
         }
     }
 
@@ -17389,6 +17424,8 @@ impl WorkspaceShell {
                         Some(PendingConnectionChange::Connect(entry)) => {
                             format!("switch to {}", entry.name)
                         }
+                        Some(PendingConnectionChange::SwitchServer { label, .. }) => label.clone(),
+                        Some(PendingConnectionChange::Quit) => "quit Sift".into(),
                         Some(PendingConnectionChange::Disconnect) | None => "disconnect".into(),
                     };
                     div()
@@ -17434,8 +17471,8 @@ impl WorkspaceShell {
                                     )
                                     .tone(ButtonTone::DangerMuted)
                                     .wide(true)
-                                    .on_click(cx.listener(|shell, _, _, cx| {
-                                        shell.confirm_transaction_disconnect(cx)
+                                    .on_click(cx.listener(|shell, _, window, cx| {
+                                        shell.confirm_transaction_disconnect(window, cx)
                                     })),
                                 ),
                         )
@@ -22838,9 +22875,18 @@ mod tests {
             shell.finish_transaction(true, cx);
             assert!(receiver.try_recv().is_err());
             shell.running_queries.clear();
-            shell.route_result(1, ResultState::Failed("statement failed".into()), cx);
+            shell.on_executor_event(
+                ExecutorEvent::TransactionStateRefreshed(Ok(Some(
+                    sift_protocol::TransactionState {
+                        transaction: shell.transaction.clone().unwrap(),
+                        savepoints: Vec::new(),
+                        condition: sift_protocol::TransactionCondition::Failed,
+                    },
+                ))),
+                cx,
+            );
             assert!(shell.transaction_aborted);
-            assert_eq!(shell.status.transaction, "TX: Aborted");
+            assert_eq!(shell.status.transaction, "TX: Failed");
             shell.finish_transaction(true, cx);
             assert!(receiver.try_recv().is_err());
             shell.finish_transaction(false, cx);
@@ -22850,12 +22896,12 @@ mod tests {
             Ok(ExecutorCommand::RollbackTransaction)
         ));
 
-        workspace.update(&mut cx, |shell, cx| {
+        workspace.update_in(&mut cx, |shell, window, cx| {
             shell.transaction_pending = false;
             shell.disconnect(cx);
             assert_eq!(shell.modal, Some(Modal::ConfirmTransactionDisconnect));
             assert!(receiver.try_recv().is_err());
-            shell.confirm_transaction_disconnect(cx);
+            shell.confirm_transaction_disconnect(window, cx);
         });
         assert!(matches!(
             receiver.try_recv(),

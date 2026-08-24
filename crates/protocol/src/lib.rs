@@ -135,7 +135,7 @@ pub use session::{
     WsServerMessage,
 };
 pub use transaction_panel::{
-    SavepointInfo, SavepointState, TransactionEndAction, TransactionPreview,
+    SavepointInfo, SavepointState, TransactionCondition, TransactionEndAction, TransactionPreview,
     TransactionPreviewRequest, TransactionState,
 };
 pub use transfer::*;
