@@ -278,7 +278,52 @@ pub(super) fn render_status_bar(
                         ))
                         .child(div().min_w_0().truncate().child(target_label)),
                 )
-                .child(div().flex_none().child(shell.status.transaction.clone())),
+                .child(
+                    div()
+                        .flex_none()
+                        .flex()
+                        .items_center()
+                        .gap_1()
+                        .child(shell.status.transaction.clone())
+                        .when(shell.transaction.is_none(), |controls| {
+                            controls.child(
+                                Button::new("footer-begin-transaction", "Begin")
+                                    .debug_selector("footer-begin-transaction")
+                                    .tone(ButtonTone::Ghost)
+                                    .disabled(
+                                        shell.transaction_pending
+                                            || !matches!(
+                                                shell.connection_status,
+                                                ConnectionStatus::Connected { .. }
+                                            ),
+                                    )
+                                    .on_click(
+                                        cx.listener(|shell, _, _, cx| shell.begin_transaction(cx)),
+                                    ),
+                            )
+                        })
+                        .when(shell.transaction.is_some(), |controls| {
+                            controls
+                                .child(
+                                    Button::new("footer-commit-transaction", "Commit")
+                                        .debug_selector("footer-commit-transaction")
+                                        .tone(ButtonTone::Accent)
+                                        .disabled(shell.transaction_pending)
+                                        .on_click(cx.listener(|shell, _, _, cx| {
+                                            shell.finish_transaction(true, cx)
+                                        })),
+                                )
+                                .child(
+                                    Button::new("footer-rollback-transaction", "Rollback")
+                                        .debug_selector("footer-rollback-transaction")
+                                        .tone(ButtonTone::DangerGhost)
+                                        .disabled(shell.transaction_pending)
+                                        .on_click(cx.listener(|shell, _, _, cx| {
+                                            shell.finish_transaction(false, cx)
+                                        })),
+                                )
+                        }),
+                ),
         )
         .child(separator())
         .child(

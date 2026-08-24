@@ -1103,6 +1103,9 @@ pub enum ExecutorCommand {
         name: String,
     },
     Disconnect,
+    BeginTransaction,
+    CommitTransaction,
+    RollbackTransaction,
     RefreshSchema,
     Execute {
         item_id: u64,
@@ -1195,6 +1198,7 @@ pub enum ExecutorCommand {
 #[derive(Debug)]
 pub enum ExecutorEvent {
     Connection(ConnectionStatus),
+    TransactionChanged(Result<Option<sift_protocol::TransactionInfo>, String>),
     CapabilitiesLoaded {
         profile_id: i64,
         capabilities: Result<Vec<sift_protocol::OperationCapability>, String>,
@@ -3101,6 +3105,8 @@ pub struct WorkspaceShell {
     executor_sender: Option<tokio::sync::mpsc::UnboundedSender<ExecutorCommand>>,
     room_document_sender: Option<tokio::sync::mpsc::UnboundedSender<RoomDocumentCommand>>,
     running_queries: HashMap<u64, u64>,
+    transaction: Option<sift_protocol::TransactionInfo>,
+    transaction_pending: bool,
     /// Pages withheld because their tab's retained window is full. Holding the
     /// acknowledgement holds the whole server stream, which is the backpressure
     /// that keeps a huge result from being pulled through and thrown away.
@@ -3515,6 +3521,8 @@ impl WorkspaceShell {
             executor_sender: None,
             room_document_sender: None,
             running_queries: HashMap::new(),
+            transaction: None,
+            transaction_pending: false,
             held_result_pages: HashMap::new(),
             semantic_analyze_generation: HashMap::new(),
             next_execution_id: 1,
@@ -4259,6 +4267,9 @@ impl WorkspaceShell {
                     status,
                     ConnectionStatus::Disconnected | ConnectionStatus::Failed { .. }
                 ) {
+                    self.transaction = None;
+                    self.transaction_pending = false;
+                    self.status.transaction = "TX: None".into();
                     self.connection_schema = ConnectionSchemaState::Unavailable;
                     self.operation_capabilities.clear();
                 }
@@ -4319,6 +4330,20 @@ impl WorkspaceShell {
                         }
                     }
                     ConnectionStatus::Disconnected | ConnectionStatus::Connecting { .. } => {}
+                }
+                cx.notify();
+            }
+            ExecutorEvent::TransactionChanged(result) => {
+                self.transaction_pending = false;
+                match result {
+                    Ok(transaction) => {
+                        self.transaction = transaction;
+                        self.status.transaction = self.transaction.as_ref().map_or_else(
+                            || "TX: None".into(),
+                            |transaction| format!("TX: {}", transaction.tx_id),
+                        );
+                    }
+                    Err(message) => self.show_error_toast(message, cx),
                 }
                 cx.notify();
             }
@@ -7849,6 +7874,50 @@ impl WorkspaceShell {
             self.bottom_dock.presentation.open = true;
         }
         self.persist(cx);
+        cx.notify();
+    }
+
+    fn begin_transaction(&mut self, cx: &mut Context<Self>) {
+        if self.transaction.is_some() || self.transaction_pending {
+            return;
+        }
+        if !matches!(self.connection_status, ConnectionStatus::Connected { .. }) {
+            self.show_toast(
+                "Connect to a database before beginning a transaction".into(),
+                cx,
+            );
+            return;
+        }
+        self.transaction_pending = self
+            .executor_sender
+            .as_ref()
+            .is_some_and(|sender| sender.send(ExecutorCommand::BeginTransaction).is_ok());
+        if self.transaction_pending {
+            self.status.transaction = "TX: Beginning…".into();
+        }
+        cx.notify();
+    }
+
+    fn finish_transaction(&mut self, commit: bool, cx: &mut Context<Self>) {
+        if self.transaction.is_none() || self.transaction_pending {
+            return;
+        }
+        self.transaction_pending = self.executor_sender.as_ref().is_some_and(|sender| {
+            sender
+                .send(if commit {
+                    ExecutorCommand::CommitTransaction
+                } else {
+                    ExecutorCommand::RollbackTransaction
+                })
+                .is_ok()
+        });
+        if self.transaction_pending {
+            self.status.transaction = if commit {
+                "TX: Committing…".into()
+            } else {
+                "TX: Rolling back…".into()
+            };
+        }
         cx.notify();
     }
 
@@ -21063,6 +21132,77 @@ mod tests {
             receiver.try_recv(),
             Ok(ExecutorCommand::DeleteSavedQuery { id, expected_revision: 3 })
                 if id == saved.id
+        ));
+    }
+
+    #[gpui::test]
+    fn footer_transaction_controls_track_begin_commit_and_rollback(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let transaction = sift_protocol::TransactionInfo {
+            tx_id: sift_protocol::TxId::new(9),
+            connection: sift_protocol::ConnectionId(2),
+            mode: sift_protocol::TxMode::default(),
+            opened_at: "2026-08-24T10:00:00Z".parse().unwrap(),
+        };
+        workspace.update(&mut cx, |shell, cx| {
+            shell.executor_sender = Some(sender);
+            shell.on_executor_event(
+                ExecutorEvent::Connection(ConnectionStatus::Connected {
+                    profile_id: 2,
+                    name: "demo/postgres".into(),
+                }),
+                cx,
+            );
+        });
+        cx.run_until_parked();
+
+        let begin = cx.debug_bounds("footer-begin-transaction").unwrap();
+        cx.simulate_click(begin.center(), Modifiers::default());
+        assert!(matches!(
+            receiver.try_recv(),
+            Ok(ExecutorCommand::BeginTransaction)
+        ));
+        workspace.update(&mut cx, |shell, cx| {
+            shell.on_executor_event(
+                ExecutorEvent::TransactionChanged(Ok(Some(transaction.clone()))),
+                cx,
+            )
+        });
+        cx.run_until_parked();
+        assert_eq!(
+            workspace.read_with(&cx, |shell, _| shell.status.transaction.clone()),
+            "TX: 9"
+        );
+
+        let commit = cx.debug_bounds("footer-commit-transaction").unwrap();
+        cx.simulate_click(commit.center(), Modifiers::default());
+        assert!(matches!(
+            receiver.try_recv(),
+            Ok(ExecutorCommand::CommitTransaction)
+        ));
+        workspace.update(&mut cx, |shell, cx| {
+            shell.on_executor_event(ExecutorEvent::TransactionChanged(Ok(None)), cx)
+        });
+        cx.run_until_parked();
+
+        let begin = cx.debug_bounds("footer-begin-transaction").unwrap();
+        cx.simulate_click(begin.center(), Modifiers::default());
+        assert!(matches!(
+            receiver.try_recv(),
+            Ok(ExecutorCommand::BeginTransaction)
+        ));
+        workspace.update(&mut cx, |shell, cx| {
+            shell.on_executor_event(ExecutorEvent::TransactionChanged(Ok(Some(transaction))), cx)
+        });
+        cx.run_until_parked();
+        let rollback = cx.debug_bounds("footer-rollback-transaction").unwrap();
+        cx.simulate_click(rollback.center(), Modifiers::default());
+        assert!(matches!(
+            receiver.try_recv(),
+            Ok(ExecutorCommand::RollbackTransaction)
         ));
     }
 

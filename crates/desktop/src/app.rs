@@ -470,6 +470,7 @@ struct QueryContext {
     client: Client,
     session: SessionId,
     connection: ConnectionId,
+    transaction: Option<sift_protocol::TransactionInfo>,
     metadata_connection: ConnectionId,
     /// Execution plans get their own persistent lane. Opening a physical
     /// database connection for every Explain click made a cheap estimated plan
@@ -573,6 +574,73 @@ async fn run_query_executor(
                     return;
                 }
             }
+            ExecutorCommand::BeginTransaction => {
+                let result = match context.as_mut() {
+                    Some(opened) if opened.transaction.is_none() => opened
+                        .client
+                        .begin_transaction(
+                            opened.session,
+                            opened.connection,
+                            sift_protocol::TxMode::default(),
+                        )
+                        .await
+                        .map(|transaction| {
+                            opened.transaction = Some(transaction.clone());
+                            Some(transaction)
+                        })
+                        .map_err(|error| format!("beginning transaction failed: {error}")),
+                    Some(_) => Err("A transaction is already open".into()),
+                    None => Err("Connect to a database before beginning a transaction".into()),
+                };
+                if events
+                    .send(ExecutorEvent::TransactionChanged(result))
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            ExecutorCommand::CommitTransaction | ExecutorCommand::RollbackTransaction => {
+                let commit = matches!(command, ExecutorCommand::CommitTransaction);
+                let result = match context.as_mut() {
+                    Some(opened) => match opened.transaction.clone() {
+                        Some(transaction) => {
+                            let ended = if commit {
+                                opened
+                                    .client
+                                    .commit_transaction(
+                                        opened.session,
+                                        transaction.connection,
+                                        transaction.tx_id,
+                                    )
+                                    .await
+                            } else {
+                                opened
+                                    .client
+                                    .rollback_transaction(
+                                        opened.session,
+                                        transaction.connection,
+                                        transaction.tx_id,
+                                    )
+                                    .await
+                            };
+                            ended
+                                .map(|()| {
+                                    opened.transaction = None;
+                                    None
+                                })
+                                .map_err(|error| format!("ending transaction failed: {error}"))
+                        }
+                        None => Err("No transaction is open".into()),
+                    },
+                    None => Err("No database connection is open".into()),
+                };
+                if events
+                    .send(ExecutorEvent::TransactionChanged(result))
+                    .is_err()
+                {
+                    return;
+                }
+            }
             ExecutorCommand::RefreshSchema => {
                 let Some(opened) = context.as_ref() else {
                     continue;
@@ -609,6 +677,7 @@ async fn run_query_executor(
                 let client = opened.client.clone();
                 let session = opened.session;
                 let connection = opened.connection;
+                let transaction = opened.transaction.clone();
                 let events = events.clone();
                 std::mem::drop(tokio::spawn(async move {
                     run_streamed_query(
@@ -616,6 +685,7 @@ async fn run_query_executor(
                             client,
                             session,
                             connection,
+                            transaction,
                             item_id,
                             execution_id,
                             sql,
@@ -1208,6 +1278,7 @@ struct QueryRun {
     client: Client,
     session: SessionId,
     connection: ConnectionId,
+    transaction: Option<sift_protocol::TransactionInfo>,
     item_id: u64,
     execution_id: u64,
     sql: String,
@@ -1222,12 +1293,23 @@ async fn run_streamed_query(
         client,
         session,
         connection,
+        transaction,
         item_id,
         execution_id,
         sql,
     } = run;
     let started = tokio::select! {
-        stream = client.start_query_stream(session, connection, sql) => stream,
+        stream = client.start_query_stream_with(
+            session,
+            connection,
+            sql,
+            Vec::new(),
+            transaction.map(|transaction| sift_protocol::TxHandleRef {
+                tx_id: transaction.tx_id,
+                connection: transaction.connection,
+                mode: transaction.mode,
+            }),
+        ) => stream,
         control = controls.recv() => {
             if matches!(control, Some(QueryControl::Cancel)) {
                 let _ = events.send(ExecutorEvent::Execution {
@@ -1982,6 +2064,7 @@ async fn open_query_context(
         client,
         session,
         connection,
+        transaction: None,
         metadata_connection,
         plan_connection,
         plan_lock: Arc::new(tokio::sync::Mutex::new(())),

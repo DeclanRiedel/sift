@@ -3524,6 +3524,18 @@ impl Client {
         connection: ConnectionId,
         sql: impl Into<String>,
     ) -> Result<QueryStream> {
+        self.start_query_stream_with(session, connection, sql, Vec::new(), None)
+            .await
+    }
+
+    pub async fn start_query_stream_with(
+        &self,
+        session: SessionId,
+        connection: ConnectionId,
+        sql: impl Into<String>,
+        params: Vec<Value>,
+        tx: Option<TxHandleRef>,
+    ) -> Result<QueryStream> {
         let mut socket = self.connect_session_websocket(session).await?;
         let request_id = "sdk-stream-query".to_string();
         socket
@@ -3531,8 +3543,8 @@ impl Client {
                 request_id: request_id.clone(),
                 connection,
                 sql: sql.into(),
-                params: Vec::new(),
-                tx: None,
+                params,
+                tx,
             })
             .await?;
 
