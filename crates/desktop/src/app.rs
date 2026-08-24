@@ -653,6 +653,7 @@ async fn run_query_executor(
                 item_id,
                 execution_id,
                 sql,
+                params,
             } => {
                 let Some(opened) = context.as_ref() else {
                     if events
@@ -689,6 +690,7 @@ async fn run_query_executor(
                             item_id,
                             execution_id,
                             sql,
+                            params,
                         },
                         control_receiver,
                         events,
@@ -1342,6 +1344,7 @@ struct QueryRun {
     item_id: u64,
     execution_id: u64,
     sql: String,
+    params: Vec<sift_protocol::Value>,
 }
 
 async fn run_streamed_query(
@@ -1357,13 +1360,14 @@ async fn run_streamed_query(
         item_id,
         execution_id,
         sql,
+        params,
     } = run;
     let started = tokio::select! {
         stream = client.start_query_stream_with(
             session,
             connection,
             sql,
-            Vec::new(),
+            params,
             transaction.map(|transaction| sift_protocol::TxHandleRef {
                 tx_id: transaction.tx_id,
                 connection: transaction.connection,

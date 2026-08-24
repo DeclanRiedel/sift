@@ -1124,6 +1124,7 @@ pub enum ExecutorCommand {
         item_id: u64,
         execution_id: u64,
         sql: String,
+        params: Vec<sift_protocol::Value>,
     },
     Explain {
         item_id: u64,
@@ -3050,6 +3051,84 @@ fn epoch_millis() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |elapsed| elapsed.as_millis() as u64)
+}
+
+/// Bind provider placeholders from a visible, portable query directive:
+/// `-- sift-params: [42, "active"]`. Keeping values outside SQL prevents the
+/// editor from encouraging interpolated strings while working for `$1` and
+/// `@p1` providers alike.
+fn parse_query_parameters(sql: &str) -> Result<(String, Vec<sift_protocol::Value>), String> {
+    let placeholder_count = sql
+        .as_bytes()
+        .windows(2)
+        .filter_map(|pair| match pair {
+            [b'$', digit] if digit.is_ascii_digit() => Some((digit - b'0') as usize),
+            [b'@', b'p' | b'P'] => Some(0),
+            _ => None,
+        })
+        .max()
+        .unwrap_or(0)
+        .max(
+            sql.as_bytes()
+                .windows(3)
+                .filter_map(|window| match window {
+                    [b'@', b'p' | b'P', digit] if digit.is_ascii_digit() => {
+                        Some((digit - b'0') as usize)
+                    }
+                    _ => None,
+                })
+                .max()
+                .unwrap_or(0),
+        );
+    let Some((directive_index, directive)) = sql
+        .lines()
+        .enumerate()
+        .find(|(_, line)| !line.trim().is_empty())
+        .filter(|(_, line)| line.trim_start().starts_with("-- sift-params:"))
+    else {
+        if placeholder_count > 0 {
+            return Err(format!(
+                "This query needs {placeholder_count} parameter(s). Add `-- sift-params: [value, ...]` as its first line."
+            ));
+        }
+        return Ok((sql.to_owned(), Vec::new()));
+    };
+    let json = directive
+        .trim_start()
+        .strip_prefix("-- sift-params:")
+        .unwrap_or_default()
+        .trim();
+    let values: Vec<serde_json::Value> = serde_json::from_str(json)
+        .map_err(|error| format!("Invalid sift parameter array: {error}"))?;
+    if values.len() != placeholder_count {
+        return Err(format!(
+            "Query has {placeholder_count} placeholder(s), but the sift parameter array has {} value(s)",
+            values.len()
+        ));
+    }
+    let params = values
+        .into_iter()
+        .map(|value| match value {
+            serde_json::Value::Null => sift_protocol::Value::Null,
+            serde_json::Value::Bool(value) => sift_protocol::Value::Bool(value),
+            serde_json::Value::Number(value) => value.as_i64().map_or_else(
+                || sift_protocol::Value::Decimal(value.to_string()),
+                sift_protocol::Value::Int64,
+            ),
+            serde_json::Value::String(value) => sift_protocol::Value::Text(value),
+            value @ (serde_json::Value::Array(_) | serde_json::Value::Object(_)) => {
+                sift_protocol::Value::Json(value)
+            }
+        })
+        .collect();
+    let sql = sql
+        .lines()
+        .enumerate()
+        .filter(|(index, _)| *index != directive_index)
+        .map(|(_, line)| line)
+        .collect::<Vec<_>>()
+        .join("\n");
+    Ok((sql, params))
 }
 
 /// One coalescing window for keystroke-driven reanalysis. Long enough that a
@@ -5094,6 +5173,13 @@ impl WorkspaceShell {
     }
 
     fn send_execution(&mut self, item_id: u64, sql: String, cx: &mut Context<Self>) {
+        let (sql, params) = match parse_query_parameters(&sql) {
+            Ok(run) => run,
+            Err(message) => {
+                self.route_result(item_id, ResultState::Failed(message), cx);
+                return;
+            }
+        };
         let Some(sender) = &self.executor_sender else {
             self.route_result(
                 item_id,
@@ -5109,6 +5195,7 @@ impl WorkspaceShell {
                 item_id,
                 execution_id,
                 sql,
+                params,
             })
             .is_ok()
         {
@@ -21855,5 +21942,32 @@ mod tests {
                 "No problems."
             );
         });
+    }
+
+    #[test]
+    fn parameter_directive_binds_values_without_interpolating_sql() {
+        let (sql, params) = parse_query_parameters(
+            "-- sift-params: [42, \"open\", true, null]\nselect * from audit.events where id = $1 and state = $2 and visible = $3 and owner = $4",
+        )
+        .unwrap();
+        assert!(sql.starts_with("select * from audit.events"));
+        assert_eq!(
+            params,
+            vec![
+                sift_protocol::Value::Int64(42),
+                sift_protocol::Value::Text("open".into()),
+                sift_protocol::Value::Bool(true),
+                sift_protocol::Value::Null,
+            ]
+        );
+    }
+
+    #[test]
+    fn placeholders_without_bindings_fail_before_execution() {
+        assert!(
+            parse_query_parameters("select * from audit.events where id = @p1")
+                .unwrap_err()
+                .contains("sift-params")
+        );
     }
 }
