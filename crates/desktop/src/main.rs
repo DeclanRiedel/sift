@@ -74,6 +74,11 @@ fn editor_key_bindings() -> Vec<gpui::KeyBinding> {
             res::CopySelectedCell,
             Some("SiftResults"),
         ),
+        gpui::KeyBinding::new(
+            &format!("{primary}-shift-c"),
+            res::CopySelectedWithHeaders,
+            Some("SiftResults"),
+        ),
         gpui::KeyBinding::new("left", res::MoveCellLeft, Some("SiftResults")),
         gpui::KeyBinding::new("right", res::MoveCellRight, Some("SiftResults")),
         gpui::KeyBinding::new("up", res::MoveCellUp, Some("SiftResults")),

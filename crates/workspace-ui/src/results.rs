@@ -134,7 +134,16 @@ pub struct ResultColumn {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum GridSelection {
-    Cell { row: usize, column: usize },
+    Cell {
+        row: usize,
+        column: usize,
+    },
+    Range {
+        anchor_row: usize,
+        anchor_column: usize,
+        focus_row: usize,
+        focus_column: usize,
+    },
     Row(usize),
     Column(usize),
     All,
@@ -150,7 +159,8 @@ impl GridSelection {
         matches!(
             self,
             Self::Cell { row: selected, .. } | Self::Row(selected) if selected == row
-        ) || self == Self::All
+        ) || matches!(self, Self::Range { anchor_row, focus_row, .. } if (anchor_row.min(focus_row)..=anchor_row.max(focus_row)).contains(&row))
+            || self == Self::All
     }
 
     fn highlights_column(self, column: usize) -> bool {
@@ -160,7 +170,8 @@ impl GridSelection {
                 column: selected,
                 ..
             } | Self::Column(selected) if selected == column
-        ) || self == Self::All
+        ) || matches!(self, Self::Range { anchor_column, focus_column, .. } if (anchor_column.min(focus_column)..=anchor_column.max(focus_column)).contains(&column))
+            || self == Self::All
     }
 }
 
@@ -435,6 +446,7 @@ actions!(
     sift_results,
     [
         CopySelectedCell,
+        CopySelectedWithHeaders,
         MoveCellLeft,
         MoveCellRight,
         MoveCellUp,
@@ -1108,6 +1120,30 @@ impl ResultsView {
         self.toggle_selection(GridSelection::Cell { row, column }, cx);
     }
 
+    fn extend_cell_selection(&mut self, row: usize, column: usize, cx: &mut Context<Self>) {
+        let (anchor_row, anchor_column) = match self.selected {
+            Some(GridSelection::Cell { row, column }) => (row, column),
+            Some(GridSelection::Range {
+                anchor_row,
+                anchor_column,
+                ..
+            }) => (anchor_row, anchor_column),
+            _ => {
+                self.set_selection(GridSelection::Cell { row, column }, cx);
+                return;
+            }
+        };
+        self.set_selection(
+            GridSelection::Range {
+                anchor_row,
+                anchor_column,
+                focus_row: row,
+                focus_column: column,
+            },
+            cx,
+        );
+    }
+
     fn select_row(&mut self, row: usize, cx: &mut Context<Self>) {
         self.toggle_selection(GridSelection::Row(row), cx);
     }
@@ -1188,9 +1224,9 @@ impl ResultsView {
         }
         *current = included;
         if !included
-            && self.selected.is_some_and(|selection| {
-                matches!(selection, GridSelection::Cell { column: selected, .. } | GridSelection::Column(selected) if selected == column)
-            })
+            && self
+                .selected
+                .is_some_and(|selection| selection.highlights_column(column))
         {
             self.selected = None;
         }
@@ -1202,7 +1238,11 @@ impl ResultsView {
         if !included
             && matches!(
                 self.selected,
-                Some(GridSelection::Cell { .. } | GridSelection::Column(_))
+                Some(
+                    GridSelection::Cell { .. }
+                        | GridSelection::Range { .. }
+                        | GridSelection::Column(_)
+                )
             )
         {
             self.selected = None;
@@ -1266,6 +1306,11 @@ impl ResultsView {
         }
         let (row, column) = match self.selected {
             Some(GridSelection::Cell { row, column }) => (row, column),
+            Some(GridSelection::Range {
+                focus_row,
+                focus_column,
+                ..
+            }) => (focus_row, focus_column),
             Some(GridSelection::Row(row)) => (row, visible_columns[0]),
             Some(GridSelection::Column(column)) => (0, column),
             Some(GridSelection::All) | None => (0, visible_columns[0]),
@@ -1339,6 +1384,39 @@ impl ResultsView {
         }
     }
 
+    fn copy_selected_with_headers(
+        &mut self,
+        _: &CopySelectedWithHeaders,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(text) = self.selected_text_with_headers() {
+            cx.write_to_clipboard(ClipboardItem::new_string(text));
+        }
+    }
+
+    fn range_coordinates(
+        &self,
+        anchor_row: usize,
+        anchor_column: usize,
+        focus_row: usize,
+        focus_column: usize,
+    ) -> (std::ops::RangeInclusive<usize>, Vec<usize>) {
+        let visible = self.visible_column_indices();
+        let anchor = visible
+            .iter()
+            .position(|column| *column == anchor_column)
+            .unwrap_or(0);
+        let focus = visible
+            .iter()
+            .position(|column| *column == focus_column)
+            .unwrap_or(anchor);
+        (
+            anchor_row.min(focus_row)..=anchor_row.max(focus_row),
+            visible[anchor.min(focus)..=anchor.max(focus)].to_vec(),
+        )
+    }
+
     fn selected_text(&self) -> Option<String> {
         let visible_columns = self.visible_column_indices();
         let row_text = |row: &[CachedCellRender]| {
@@ -1355,6 +1433,28 @@ impl ResultsView {
                 .get(row)?
                 .get(column)
                 .map(|cell| cell.text.to_string()),
+            GridSelection::Range {
+                anchor_row,
+                anchor_column,
+                focus_row,
+                focus_column,
+            } => {
+                let (rows, columns) =
+                    self.range_coordinates(anchor_row, anchor_column, focus_row, focus_column);
+                Some(
+                    rows.filter_map(|row| self.rendered_rows.get(row))
+                        .map(|row| {
+                            columns
+                                .iter()
+                                .filter_map(|column| row.get(*column))
+                                .map(|cell| cell.text.to_string())
+                                .collect::<Vec<_>>()
+                                .join("\t")
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n"),
+                )
+            }
             GridSelection::Row(row) if !visible_columns.is_empty() => {
                 self.rendered_rows.get(row).map(|row| row_text(row))
             }
@@ -1376,6 +1476,33 @@ impl ResultsView {
                     .join("\n")
             }),
         }
+    }
+
+    fn selected_text_with_headers(&self) -> Option<String> {
+        let columns = match self.selected? {
+            GridSelection::Cell { column, .. } | GridSelection::Column(column) => vec![column],
+            GridSelection::Range {
+                anchor_row,
+                anchor_column,
+                focus_row,
+                focus_column,
+            } => {
+                self.range_coordinates(anchor_row, anchor_column, focus_row, focus_column)
+                    .1
+            }
+            GridSelection::Row(_) | GridSelection::All => self.visible_column_indices(),
+        };
+        if columns.is_empty() {
+            return None;
+        }
+        let headers = columns
+            .iter()
+            .filter_map(|column| self.rendered_columns.get(*column))
+            .map(|column| column.name.to_string())
+            .collect::<Vec<_>>()
+            .join("\t");
+        self.selected_text()
+            .map(|values| format!("{headers}\n{values}"))
     }
 
     fn cell_color(colors: ThemeColors, class: CellClass) -> gpui::Hsla {
@@ -1544,6 +1671,18 @@ impl ResultsView {
                                 )),
                             )
                             .child(
+                                Button::new("copy-result-with-headers", "Copy + headers")
+                                    .tone(ButtonTone::Neutral)
+                                    .disabled(self.selected.is_none())
+                                    .on_click(cx.listener(|view, _, window, cx| {
+                                        view.copy_selected_with_headers(
+                                            &CopySelectedWithHeaders,
+                                            window,
+                                            cx,
+                                        )
+                                    })),
+                            )
+                            .child(
                                 IconButton::new(
                                     "copy-result-cell",
                                     IconName::Copy,
@@ -1663,6 +1802,18 @@ impl ResultsView {
                                         view.copy_selected_cell(&CopySelectedCell, window, cx)
                                     },
                                 )),
+                            )
+                            .child(
+                                Button::new("copy-result-with-headers-vertical", "Copy + headers")
+                                    .tone(ButtonTone::Neutral)
+                                    .disabled(self.selected.is_none())
+                                    .on_click(cx.listener(|view, _, window, cx| {
+                                        view.copy_selected_with_headers(
+                                            &CopySelectedWithHeaders,
+                                            window,
+                                            cx,
+                                        )
+                                    })),
                             )
                     })),
             )
@@ -1886,19 +2037,34 @@ impl ResultsView {
                             .copied()
                             .enumerate()
                             .map(|(display_column, source_column)| {
-                                let rendered = view
-                                    .rendered_rows
-                                    .get_mut(row_index)
-                                    .and_then(|row| row.get_mut(source_column));
                                 let is_selected = match selected {
                                     Some(GridSelection::Cell { row, column }) => {
                                         row == row_index && column == source_column
+                                    }
+                                    Some(GridSelection::Range {
+                                        anchor_row,
+                                        anchor_column,
+                                        focus_row,
+                                        focus_column,
+                                    }) => {
+                                        let (rows, columns) = view.range_coordinates(
+                                            anchor_row,
+                                            anchor_column,
+                                            focus_row,
+                                            focus_column,
+                                        );
+                                        rows.contains(&row_index)
+                                            && columns.contains(&source_column)
                                     }
                                     Some(GridSelection::Row(row)) => row == row_index,
                                     Some(GridSelection::Column(column)) => column == source_column,
                                     Some(GridSelection::All) => true,
                                     None => false,
                                 };
+                                let rendered = view
+                                    .rendered_rows
+                                    .get_mut(row_index)
+                                    .and_then(|row| row.get_mut(source_column));
                                 let (shaped, color, is_number) = match rendered {
                                     Some(cell) => {
                                         let color = Self::cell_color(colors, cell.class);
@@ -1926,10 +2092,23 @@ impl ResultsView {
                                     .when(is_selected, |el| el.bg(colors.selected_surface))
                                     .on_mouse_down(
                                         MouseButton::Left,
-                                        cx.listener(move |view, _, window, cx| {
-                                            view.focus_handle.focus(window, cx);
-                                            view.select_cell(row_index, source_column, cx)
-                                        }),
+                                        cx.listener(
+                                            move |view,
+                                                  event: &gpui::MouseDownEvent,
+                                                  window,
+                                                  cx| {
+                                                view.focus_handle.focus(window, cx);
+                                                if event.modifiers.shift {
+                                                    view.extend_cell_selection(
+                                                        row_index,
+                                                        source_column,
+                                                        cx,
+                                                    )
+                                                } else {
+                                                    view.select_cell(row_index, source_column, cx)
+                                                }
+                                            },
+                                        ),
                                     )
                                     .children(shaped.map(|line| {
                                         canvas(
@@ -2658,6 +2837,7 @@ impl gpui::Render for ResultsView {
                 cx.listener(|view, _, window, cx| view.focus_handle.focus(window, cx)),
             )
             .on_action(cx.listener(Self::copy_selected_cell))
+            .on_action(cx.listener(Self::copy_selected_with_headers))
             .on_action(cx.listener(Self::move_cell_left))
             .on_action(cx.listener(Self::move_cell_right))
             .on_action(cx.listener(Self::move_cell_up))
@@ -3486,6 +3666,22 @@ mod tests {
             assert_eq!(view.selected, None);
             view.select_all(cx);
             assert_eq!(view.selected_text().as_deref(), Some("neo\t1\ntrinity\t2"));
+            view.select_cell(0, 0, cx);
+            view.extend_cell_selection(1, 1, cx);
+            assert_eq!(
+                view.selected,
+                Some(GridSelection::Range {
+                    anchor_row: 0,
+                    anchor_column: 0,
+                    focus_row: 1,
+                    focus_column: 1,
+                })
+            );
+            assert_eq!(view.selected_text().as_deref(), Some("neo\t1\ntrinity\t2"));
+            assert_eq!(
+                view.selected_text_with_headers().as_deref(),
+                Some("name\trank\nneo\t1\ntrinity\t2")
+            );
             assert_eq!(view.placement(), ResultPlacement::Bottom);
             view.set_extent(300.0, cx);
             assert_eq!(view.extent(), 300.0);

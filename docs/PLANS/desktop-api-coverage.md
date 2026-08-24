@@ -122,8 +122,8 @@ surfaces, then admin/platform. Within P0, the connection experience comes first.
 
 ### Results depth (polish of the built grid)
 
-- [ ] keyboard cell navigation; copy row / range / with-headers
-- [ ] column resize / reorder (fixed 184px today); row numbers
+- [x] keyboard cell navigation; copy cell / row / column / range / all, with headers
+- [x] column resize / reorder; row numbers
 
 ---
 
