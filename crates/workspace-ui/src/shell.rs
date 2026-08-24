@@ -7676,6 +7676,27 @@ impl WorkspaceShell {
         cx.notify();
     }
 
+    fn focus_tab_delta(&mut self, delta: isize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(pane) = self.panes.get(self.active_pane) else {
+            return;
+        };
+        let changed = pane.update(cx, |pane, _| {
+            let Some(next) = pane.active_item.checked_add_signed(delta) else {
+                return false;
+            };
+            if next >= pane.items.len() {
+                return false;
+            }
+            pane.activate_item(next, true);
+            true
+        });
+        if changed {
+            self.focus_active_pane(window, cx);
+            self.persist(cx);
+            cx.notify();
+        }
+    }
+
     #[cfg(test)]
     fn active_editor_focused(&self, window: &Window, cx: &App) -> bool {
         self.panes
@@ -9365,6 +9386,8 @@ impl WorkspaceShell {
             CommandId::FocusInspector => self.focus_inspector(window, cx),
             CommandId::FocusResults => self.focus_results(window, cx),
             CommandId::FocusProblems => self.show_global_problems(window, cx),
+            CommandId::PreviousTab => self.focus_tab_delta(-1, window, cx),
+            CommandId::NextTab => self.focus_tab_delta(1, window, cx),
             CommandId::ClosePane => self.close_active_pane(&CloseActivePane, window, cx),
             CommandId::SaveItem => self.save_active_item(&SaveActiveItem, window, cx),
             CommandId::CloseItem => self.close_active_item(&CloseActiveItem, window, cx),
@@ -16572,6 +16595,46 @@ mod tests {
             assert!(!pane.backward_items.contains(&2));
             assert!(!pane.forward_items.contains(&2));
         });
+    }
+
+    #[gpui::test]
+    fn short_leader_tab_commands_stay_in_the_active_pane(cx: &mut TestAppContext) {
+        let mut state = PresentationState::default();
+        state.workspace.panes[0].items.extend([
+            ItemPresentation {
+                id: 2,
+                kind: ItemKind::Query,
+                title: "two.sql".into(),
+                dirty: false,
+                source: None,
+                last_result: None,
+            },
+            ItemPresentation {
+                id: 3,
+                kind: ItemKind::Query,
+                title: "three.sql".into(),
+                dirty: false,
+                source: None,
+                last_result: None,
+            },
+        ]);
+        let window = shell_with_state(state, cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+
+        workspace.update_in(&mut cx, |shell, window, cx| {
+            shell.run_command(CommandId::PreviousTab, window, cx);
+            assert_eq!(shell.focused_item_title(cx).as_deref(), Some("query.sql"));
+            shell.run_command(CommandId::NextTab, window, cx);
+            assert_eq!(shell.focused_item_title(cx).as_deref(), Some("two.sql"));
+            shell.run_command(CommandId::NextTab, window, cx);
+            shell.run_command(CommandId::NextTab, window, cx);
+            assert_eq!(shell.focused_item_title(cx).as_deref(), Some("three.sql"));
+            shell.run_command(CommandId::PreviousTab, window, cx);
+            assert_eq!(shell.focused_item_title(cx).as_deref(), Some("two.sql"));
+            assert_eq!(shell.active_pane, 0);
+        });
+        assert!(cx.update(|window, cx| workspace.read(cx).active_editor_focused(window, cx)));
     }
 
     #[gpui::test]

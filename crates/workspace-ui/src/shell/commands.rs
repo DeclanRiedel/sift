@@ -30,6 +30,8 @@ pub enum CommandId {
     FocusInspector,
     FocusResults,
     FocusProblems,
+    PreviousTab,
+    NextTab,
     ClosePane,
     SaveItem,
     CloseItem,
@@ -70,6 +72,8 @@ impl CommandId {
             Self::FocusInspector => "workspace.focus-inspector",
             Self::FocusResults => "workspace.focus-results",
             Self::FocusProblems => "workspace.focus-problems",
+            Self::PreviousTab => "workspace.previous-tab",
+            Self::NextTab => "workspace.next-tab",
             Self::ClosePane => "workspace.close-pane",
             Self::SaveItem => "workspace.save-item",
             Self::CloseItem => "workspace.close-item",
@@ -435,6 +439,22 @@ const DEFINITIONS: &[CommandDefinition] = &[
         AvailabilityRule::Always,
     ),
     command(
+        CommandId::PreviousTab,
+        "Focus Tab Left",
+        "",
+        "<leader> h",
+        true,
+        AvailabilityRule::ActiveItem,
+    ),
+    command(
+        CommandId::NextTab,
+        "Focus Tab Right",
+        "",
+        "<leader> l",
+        true,
+        AvailabilityRule::ActiveItem,
+    ),
+    command(
         CommandId::ClosePane,
         "Close Pane",
         "Ctrl+Shift+W",
@@ -664,6 +684,14 @@ mod tests {
         assert_eq!(
             CommandRegistry::resolve_language(&["x".into(), "z".into()]),
             CommandLanguageMatch::Invalid
+        );
+        assert_eq!(
+            CommandRegistry::resolve_language(&["h".into()]),
+            CommandLanguageMatch::Command(CommandId::PreviousTab)
+        );
+        assert_eq!(
+            CommandRegistry::resolve_language(&["l".into()]),
+            CommandLanguageMatch::Command(CommandId::NextTab)
         );
 
         let bindings = BTreeMap::from([(

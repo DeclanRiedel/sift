@@ -132,9 +132,9 @@ fn validate_leader_sequence(sequence: &str) -> Result<(), String> {
         return Ok(());
     }
     let tokens = sequence.split_whitespace().collect::<Vec<_>>();
-    if tokens.len() < 3 || tokens.first() != Some(&"<leader>") {
+    if tokens.len() < 2 || tokens.first() != Some(&"<leader>") {
         return Err(format!(
-            "keymap sequence {sequence:?} must look like \"<leader> g c\""
+            "keymap sequence {sequence:?} must look like \"<leader> h\" or \"<leader> g c\""
         ));
     }
     if tokens[1..].iter().any(|token| {
@@ -429,6 +429,9 @@ mod tests {
         keymaps
             .bindings
             .insert("workspace.focus-connections".into(), "<leader> g c".into());
+        keymaps
+            .bindings
+            .insert("workspace.previous-tab".into(), "<leader> h".into());
 
         store.save_keymaps(&keymaps).unwrap();
         assert_eq!(store.load_keymaps().unwrap(), keymaps);
