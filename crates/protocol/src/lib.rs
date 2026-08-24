@@ -80,8 +80,8 @@ pub use csv_import::{
     CsvConflictPolicy, CsvImportRequest, CsvImportResponse, InferredCsvColumn, InferredCsvType,
 };
 pub use edit::{
-    ApplyEditsRequest, ApplyEditsResult, CellEdit, EditOutcome, EditPlan, EditSet, EditStatement,
-    EditStatementKind, IdentitySource, PreviewEditsRequest, RowEdit, RowKey,
+    ApplyEditsRequest, ApplyEditsResult, CellEdit, EditConflict, EditOutcome, EditPlan, EditSet,
+    EditStatement, EditStatementKind, IdentitySource, PreviewEditsRequest, RowEdit, RowKey,
 };
 pub use engine::Engine;
 pub use error::{Code, DriverError, DriverWarning};

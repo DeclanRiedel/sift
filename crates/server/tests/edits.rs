@@ -216,6 +216,16 @@ async fn apply_update_conflict_when_zero_rows_affected() {
         .await
         .unwrap();
     assert_eq!(res.status(), StatusCode::CONFLICT);
+    let error: sift_protocol::ApiErrorResponse = body_json(res.into_body()).await;
+    assert_eq!(error.kind, "edit_conflict");
+    assert_eq!(
+        error.edit_conflict,
+        Some(sift_protocol::EditConflict {
+            edit_index: 0,
+            affected_rows: 0,
+            expected_rows: 1,
+        })
+    );
 }
 
 #[tokio::test]

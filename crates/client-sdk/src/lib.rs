@@ -3851,6 +3851,7 @@ async fn server_error(response: reqwest::Response) -> Error {
         message: body,
         correlation_id: None,
         retry_after_secs: None,
+        edit_conflict: None,
     });
     error.retry_after_secs = error.retry_after_secs.or(retry_after_secs);
     Error::Server { status, error }

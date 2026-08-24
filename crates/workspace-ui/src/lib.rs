@@ -33,7 +33,7 @@ pub use shell::{
     InstanceConfigurationPresentation, InstanceCredentialKind, InstanceCredentialPresentation,
     InstanceManagerEvent, InstancePlanPresentation, ItemDefinition, ItemRegistry, ItemRuntimeKind,
     Modal, OpenCommandPalette, OpenSchemaSearch, OpenServerConnection, PaletteConfirm, PaletteDown,
-    PaletteUp, Pane, PaneEvent, RoomDocumentCommand, RoomDocumentEvent, SaveActiveItem,
-    SavedInstanceRoot, SavedServerProfile, SplitPane, StatusBar, Toast, ToastTone,
+    PaletteUp, Pane, PaneEvent, ResultEditApplyFailure, RoomDocumentCommand, RoomDocumentEvent,
+    SaveActiveItem, SavedInstanceRoot, SavedServerProfile, SplitPane, StatusBar, Toast, ToastTone,
     ToggleBottomDock, ToggleLeftDock, ToggleRightDock, WorkspaceShell,
 };

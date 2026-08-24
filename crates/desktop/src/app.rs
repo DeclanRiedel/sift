@@ -1124,8 +1124,22 @@ async fn run_query_executor(
                             },
                         )
                         .await
-                        .map_err(|error| format!("applying result edit failed: {error}")),
-                    None => Err("Connect to this table before applying an edit".into()),
+                        .map_err(|error| {
+                            let conflict = match &error {
+                                sift_client_sdk::Error::Server { error, .. } => {
+                                    error.edit_conflict.clone()
+                                }
+                                _ => None,
+                            };
+                            sift_workspace_ui::ResultEditApplyFailure {
+                                message: format!("applying result edit failed: {error}"),
+                                conflict,
+                            }
+                        }),
+                    None => Err(sift_workspace_ui::ResultEditApplyFailure {
+                        message: "Connect to this table before applying an edit".into(),
+                        conflict: None,
+                    }),
                 };
                 if events
                     .send(ExecutorEvent::ResultEditsApplied {

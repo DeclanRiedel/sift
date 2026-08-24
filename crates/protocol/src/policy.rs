@@ -16,6 +16,10 @@ pub struct ApiErrorResponse {
     /// Mirrors the HTTP `Retry-After` header when retry timing is known.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retry_after_secs: Option<u64>,
+    /// Present for `edit_conflict`, allowing clients to mark the exact staged
+    /// row without parsing human-readable error text.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub edit_conflict: Option<crate::EditConflict>,
 }
 
 #[derive(

@@ -136,3 +136,12 @@ pub struct ApplyEditsResult {
     pub applied: Vec<EditOutcome>,
     pub committed: bool,
 }
+
+/// Structured optimistic-concurrency failure for one edit in an apply batch.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct EditConflict {
+    /// Index into [`EditSet::edits`].
+    pub edit_index: usize,
+    pub affected_rows: u64,
+    pub expected_rows: u64,
+}

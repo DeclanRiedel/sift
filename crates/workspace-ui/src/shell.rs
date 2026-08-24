@@ -1403,7 +1403,7 @@ pub enum ExecutorEvent {
     },
     ResultEditsApplied {
         item_id: u64,
-        result: Result<sift_protocol::ApplyEditsResult, String>,
+        result: Result<sift_protocol::ApplyEditsResult, ResultEditApplyFailure>,
     },
     PlanCaptured {
         item_id: u64,
@@ -3297,13 +3297,10 @@ fn parse_parameter_value(text: &str) -> Result<sift_protocol::Value, String> {
     })
 }
 
-fn result_edit_conflict_index(message: &str) -> Option<usize> {
-    let marker = message.find("edit ")? + "edit ".len();
-    let digits = message[marker..]
-        .chars()
-        .take_while(char::is_ascii_digit)
-        .collect::<String>();
-    (!digits.is_empty()).then(|| digits.parse().ok()).flatten()
+#[derive(Debug, Clone)]
+pub struct ResultEditApplyFailure {
+    pub message: String,
+    pub conflict: Option<sift_protocol::EditConflict>,
 }
 
 fn staged_result_row_index(edits: &[StagedResultEdit], edit_index: usize) -> usize {
@@ -4757,21 +4754,13 @@ impl WorkspaceShell {
                         self.show_toast(format!("Applied edit to {affected} row(s)"), cx);
                         self.refresh_database_item(item_id, cx);
                     }
-                    Err(message) => {
-                        let conflict = result_edit_conflict_index(&message);
+                    Err(failure) => {
                         self.result_edit_conflicts.clear();
-                        if let Some(index) = conflict {
-                            self.result_edit_conflicts.insert(index, message.clone());
-                        } else if message.to_ascii_lowercase().contains("conflict") {
-                            let row_count = self
-                                .pending_edit_set
-                                .as_ref()
-                                .map_or(0, |edit_set| edit_set.edits.len());
-                            for index in 0..row_count {
-                                self.result_edit_conflicts.insert(index, message.clone());
-                            }
+                        if let Some(conflict) = failure.conflict {
+                            self.result_edit_conflicts
+                                .insert(conflict.edit_index, failure.message.clone());
                         }
-                        self.result_edit_error = Some(message);
+                        self.result_edit_error = Some(failure.message);
                     }
                 }
                 cx.notify();
@@ -23247,12 +23236,6 @@ mod tests {
             shell.revert_staged_result_edit(1, cx);
             assert_eq!(shell.staged_result_edits.len(), 2);
         });
-        assert_eq!(
-            result_edit_conflict_index(
-                "edit 1 affected 0 rows (expected 1); the row changed or no longer matches"
-            ),
-            Some(1)
-        );
     }
 
     #[test]

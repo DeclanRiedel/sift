@@ -25,6 +25,15 @@ pub enum ApiError {
     #[error("conflict: {0}")]
     Conflict(String),
 
+    #[error(
+        "edit {edit_index} affected {affected_rows} rows (expected {expected_rows}); the row changed or no longer matches"
+    )]
+    EditConflict {
+        edit_index: usize,
+        affected_rows: u64,
+        expected_rows: u64,
+    },
+
     #[error("unauthorized")]
     Unauthorized,
 
@@ -120,6 +129,7 @@ impl ApiError {
             }
             ApiError::BadRequest(_) => (StatusCode::BAD_REQUEST, "bad_request"),
             ApiError::Conflict(_) => (StatusCode::CONFLICT, "conflict"),
+            ApiError::EditConflict { .. } => (StatusCode::CONFLICT, "edit_conflict"),
             ApiError::Unauthorized => (StatusCode::UNAUTHORIZED, "unauthorized"),
             ApiError::Forbidden(_) => (StatusCode::FORBIDDEN, "forbidden"),
             ApiError::TooManyAuthAttempts => {
@@ -343,11 +353,24 @@ impl IntoResponse for ApiError {
         let correlation_id = crate::correlation::current();
         tracing::warn!(%status, %kind, %message, correlation_id = ?correlation_id, "api error");
         let retry_after = self.retry_after_secs();
+        let edit_conflict = match &self {
+            Self::EditConflict {
+                edit_index,
+                affected_rows,
+                expected_rows,
+            } => Some(sift_protocol::EditConflict {
+                edit_index: *edit_index,
+                affected_rows: *affected_rows,
+                expected_rows: *expected_rows,
+            }),
+            _ => None,
+        };
         let body = sift_protocol::ApiErrorResponse {
             kind: kind.to_string(),
             message,
             correlation_id,
             retry_after_secs: retry_after,
+            edit_conflict,
         };
         let mut response = (status, Json(body)).into_response();
         if let Some(seconds) = retry_after {

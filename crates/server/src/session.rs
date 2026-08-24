@@ -3904,14 +3904,11 @@ impl SessionStore {
                             self.rollback_edits_tx(session_id, conn_id, tx_ref.tx_id)
                                 .await;
                         }
-                        return Err(ApiError::Driver(DriverError::new(
-                            Code::EditConflict,
-                            format!(
-                                "edit {} affected {affected} rows (expected 1); the row \
-                                 changed or no longer matches",
-                                stmt.edit_index
-                            ),
-                        )));
+                        return Err(ApiError::EditConflict {
+                            edit_index: stmt.edit_index,
+                            affected_rows: affected,
+                            expected_rows: 1,
+                        });
                     }
                     // Insert-with-RETURNING is row-producing, so the driver may
                     // report no `affected_rows`; treat returned keys as the count.
