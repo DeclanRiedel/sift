@@ -21,7 +21,9 @@ pub use presentation::{
     LeftPanel, PanePresentation, PresentationState, PresentationStore, Rect, ResultReference,
     RoomDocumentSource, WindowPresentation, WorkspacePresentation,
 };
-pub use settings::{EditorMode, EditorSettings, SettingsStore, UserSettings};
+pub use settings::{
+    EditorMode, EditorSettings, KeyboardProfile, KeyboardSettings, SettingsStore, UserSettings,
+};
 pub use shell::{
     CancelExecution, CloseActiveItem, CloseActivePane, CommandDefinition, CommandId,
     CommandRegistry, CommandSpec, ConnectionStatus, DismissModal, Dock, DockDefinition, DockId,

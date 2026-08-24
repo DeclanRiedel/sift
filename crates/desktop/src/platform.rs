@@ -99,36 +99,53 @@ pub fn primary_modifier() -> &'static str {
 pub fn shell_key_bindings() -> Vec<KeyBinding> {
     let primary = primary_modifier();
     let context = Some("SiftWorkspace");
+    let standard_context = Some("SiftWorkspace && keymap_profile != vim");
     let mut bindings = vec![
-        KeyBinding::new(&format!("{primary}-shift-p"), OpenCommandPalette, context),
         KeyBinding::new("escape", DismissModal, context),
         KeyBinding::new("up", PaletteUp, context),
         KeyBinding::new("down", PaletteDown, context),
         KeyBinding::new("enter", PaletteConfirm, context),
-        KeyBinding::new(&format!("{primary}-\\"), SplitPane, context),
-        KeyBinding::new(&format!("{primary}-w"), CloseActiveItem, context),
-        KeyBinding::new(&format!("{primary}-shift-w"), CloseActivePane, context),
-        KeyBinding::new(&format!("{primary}-s"), SaveActiveItem, context),
+        KeyBinding::new(
+            &format!("{primary}-shift-p"),
+            OpenCommandPalette,
+            standard_context,
+        ),
+        KeyBinding::new(&format!("{primary}-\\"), SplitPane, standard_context),
+        KeyBinding::new(&format!("{primary}-w"), CloseActiveItem, standard_context),
+        KeyBinding::new(
+            &format!("{primary}-shift-w"),
+            CloseActivePane,
+            standard_context,
+        ),
+        KeyBinding::new(&format!("{primary}-s"), SaveActiveItem, standard_context),
         KeyBinding::new(
             &format!("{primary}-alt-c"),
             sift_workspace_ui::CancelExecution,
-            context,
+            standard_context,
         ),
-        KeyBinding::new(&format!("{primary}-shift-b"), ToggleLeftDock, context),
-        KeyBinding::new(&format!("{primary}-shift-i"), ToggleRightDock, context),
-        KeyBinding::new(&format!("{primary}-j"), ToggleBottomDock, context),
+        KeyBinding::new(
+            &format!("{primary}-shift-b"),
+            ToggleLeftDock,
+            standard_context,
+        ),
+        KeyBinding::new(
+            &format!("{primary}-shift-i"),
+            ToggleRightDock,
+            standard_context,
+        ),
+        KeyBinding::new(&format!("{primary}-j"), ToggleBottomDock, standard_context),
     ];
 
     bindings.extend([
         KeyBinding::new(
             ":",
             OpenCommandPalette,
-            Some("vim_mode == normal || (SiftWorkspace && !SiftEditor && !SiftTextInput)"),
+            Some("keymap_profile != standard && (vim_mode == normal || (SiftWorkspace && !SiftEditor && !SiftTextInput))"),
         ),
         KeyBinding::new(
             "] d",
             sift_workspace_ui::editor::GoToNextDiagnostic,
-            Some("vim_mode == normal"),
+            Some("keymap_profile != standard && vim_mode == normal"),
         ),
     ]);
     bindings

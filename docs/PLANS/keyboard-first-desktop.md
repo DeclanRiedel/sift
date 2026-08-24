@@ -21,6 +21,11 @@ consumed by the IDE until a command completes or Escape cancels, so delayed or
 invalid input can never mutate SQL. Status chrome displays the SQL Vim mode and
 local input separately from the active `IDE <leader> …` sequence.
 
+The Keymaps page keeps IDE and editor choices explicit. Its IDE profile is
+tri-state: Vim enables only the leader language, Hybrid enables leader and
+conventional IDE shortcuts, and Standard disables leader commands. The SQL
+editor default remains a separate Vim/Standard choice.
+
 Families stay small and mnemonic:
 
 - `f` find
@@ -68,6 +73,8 @@ prefixes display a compact which-key strip generated from the same vocabulary.
       database/workspace sequences, and which-key prefix hints.
 - [x] Isolate leader input in a timeout-free IDE command state; never replay
       incomplete IDE keys into the focused editor.
+- [x] Add a Keymaps page with Vim, Hybrid, and Standard IDE profiles, separate
+      from the SQL editor's default mode.
 - [x] Search command labels, stable command ids, and mnemonic sequences in one
       palette.
 - [x] Remove advertised/default F-key dependencies.

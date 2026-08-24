@@ -9,7 +9,14 @@ version = 1
 
 [editor]
 default_mode = "vim" # "standard" or "vim"
+
+[keyboard]
+profile = "vim" # "vim", "hybrid", or "standard"
 ```
+
+The keyboard profile controls IDE commands independently from the SQL editor's
+default mode. Vim enables the leader language, Standard enables conventional
+IDE shortcuts, and Hybrid enables both. Vim is the default profile.
 
 Open the profile menu, choose **Settings**, then use **Open settings.toml** to
 edit the file in Sift. Saving validates the complete document before replacing

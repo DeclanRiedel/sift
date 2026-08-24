@@ -33,12 +33,54 @@ impl Default for EditorSettings {
     }
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum KeyboardProfile {
+    #[default]
+    Vim,
+    Hybrid,
+    Standard,
+}
+
+impl KeyboardProfile {
+    pub const fn vim_enabled(self) -> bool {
+        matches!(self, Self::Vim | Self::Hybrid)
+    }
+
+    pub const fn standard_enabled(self) -> bool {
+        matches!(self, Self::Standard | Self::Hybrid)
+    }
+
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Vim => "vim",
+            Self::Hybrid => "hybrid",
+            Self::Standard => "standard",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct KeyboardSettings {
+    pub profile: KeyboardProfile,
+}
+
+impl Default for KeyboardSettings {
+    fn default() -> Self {
+        Self {
+            profile: KeyboardProfile::Vim,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct UserSettings {
     #[serde(default = "settings_version")]
     pub version: u32,
     pub editor: EditorSettings,
+    pub keyboard: KeyboardSettings,
 }
 
 impl Default for UserSettings {
@@ -46,6 +88,7 @@ impl Default for UserSettings {
         Self {
             version: SETTINGS_VERSION,
             editor: EditorSettings::default(),
+            keyboard: KeyboardSettings::default(),
         }
     }
 }
@@ -139,6 +182,31 @@ impl SettingsStore {
         Ok(settings)
     }
 
+    /// Update the IDE keymap profile while preserving hand-written settings.
+    pub fn save_keyboard_profile(&self, profile: KeyboardProfile) -> Result<UserSettings, String> {
+        let _guard = self
+            .write_lock
+            .lock()
+            .map_err(|_| "settings write lock poisoned".to_string())?;
+        let source = std::fs::read_to_string(&self.path)
+            .map_err(|error| format!("reading {} failed: {error}", self.path.display()))?;
+        let mut document = source
+            .parse::<DocumentMut>()
+            .map_err(|error| format!("settings.toml is invalid: {error}"))?;
+        let decor = document["keyboard"]["profile"]
+            .as_value()
+            .map(|value| value.decor().clone());
+        let mut profile_value = Value::from(profile.as_str());
+        if let Some(decor) = decor {
+            *profile_value.decor_mut() = decor;
+        }
+        document["keyboard"]["profile"] = Item::Value(profile_value);
+        let updated = document.to_string();
+        let settings = UserSettings::decode(&updated)?;
+        self.write_source(&updated)?;
+        Ok(settings)
+    }
+
     fn write_validated(&self, source: &str) -> Result<(), String> {
         let _guard = self
             .write_lock
@@ -191,6 +259,7 @@ mod tests {
         };
         let source = settings.encode().unwrap();
         assert!(source.contains("default_mode = \"vim\""));
+        assert!(source.contains("profile = \"vim\""));
         assert_eq!(UserSettings::decode(&source).unwrap(), settings);
     }
 
@@ -219,5 +288,21 @@ mod tests {
         assert!(updated.contains("# Personal settings"));
         assert!(updated.contains("custom = \"keep\""));
         assert!(updated.contains("# modal"));
+    }
+
+    #[test]
+    fn keyboard_profile_update_supports_all_three_states() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = SettingsStore::new(directory.path().join("settings.toml"));
+        store.save(&UserSettings::default()).unwrap();
+
+        for profile in [
+            KeyboardProfile::Vim,
+            KeyboardProfile::Hybrid,
+            KeyboardProfile::Standard,
+        ] {
+            let settings = store.save_keyboard_profile(profile).unwrap();
+            assert_eq!(settings.keyboard.profile, profile);
+        }
     }
 }

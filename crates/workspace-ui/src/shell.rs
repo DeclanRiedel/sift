@@ -21,7 +21,7 @@ use crate::editor::{
     SemanticRequestKind, VimMode, EDITOR_GUTTER_WIDTH,
 };
 use crate::results::{ResultPlacement, ResultState, ResultsEvent, ResultsView, StreamProgress};
-use crate::settings::{EditorMode, SettingsStore, UserSettings};
+use crate::settings::{EditorMode, KeyboardProfile, SettingsStore, UserSettings};
 
 use crate::presentation::{
     BottomTool, DatabaseObjectSource, ItemKind, ItemPresentation, ItemSource, LeftPanel, PaneAxis,
@@ -676,6 +676,7 @@ pub enum Modal {
     ServerConnection,
     InstanceSetup,
     Settings,
+    Keymaps,
     Account,
     DatabaseConnection,
     ConfirmDeleteConnection(ConnectionNavEntry),
@@ -6710,6 +6711,42 @@ impl WorkspaceShell {
         self.settings.editor.default_mode == EditorMode::Vim
     }
 
+    fn keyboard_profile(&self) -> KeyboardProfile {
+        self.settings.keyboard.profile
+    }
+
+    fn set_keyboard_profile(&mut self, profile: KeyboardProfile, cx: &mut Context<Self>) {
+        if self.keyboard_profile() == profile {
+            return;
+        }
+        let settings_is_open = self.settings_item.is_some_and(|item_id| {
+            self.panes
+                .iter()
+                .any(|pane| pane.read(cx).contains_item(item_id))
+        });
+        if settings_is_open {
+            self.show_toast(
+                "Save or close settings.toml before changing the keymap profile here".into(),
+                cx,
+            );
+            return;
+        }
+        let mut settings = self.settings.clone();
+        settings.keyboard.profile = profile;
+        if let Some(store) = &self.settings_store {
+            settings = match store.save_keyboard_profile(profile) {
+                Ok(settings) => settings,
+                Err(error) => {
+                    self.show_toast(error, cx);
+                    return;
+                }
+            };
+        }
+        self.settings = settings;
+        self.ide_input = None;
+        cx.notify();
+    }
+
     /// Swap the process-wide theme and persist the preference. Views read the
     /// palette through `ActiveTheme`, so the refresh is automatic.
     fn toggle_theme(&mut self, cx: &mut Context<Self>) {
@@ -7715,6 +7752,9 @@ impl WorkspaceShell {
     ) {
         let key = event.keystroke.unparse();
         if self.ide_input.is_none() {
+            if !self.keyboard_profile().vim_enabled() {
+                return;
+            }
             let has_context = |name: &str| {
                 event
                     .context_stack
@@ -8542,6 +8582,10 @@ impl WorkspaceShell {
             CommandId::ToggleBottomDock => self.toggle_bottom_dock(&ToggleBottomDock, window, cx),
             CommandId::OpenSettings => {
                 self.modal = Some(Modal::Settings);
+                cx.notify();
+            }
+            CommandId::OpenKeymaps => {
+                self.modal = Some(Modal::Keymaps);
                 cx.notify();
             }
             CommandId::OpenServerConfiguration => self.open_current_configuration(cx),
@@ -11292,6 +11336,7 @@ impl WorkspaceShell {
             let server_picker = matches!(modal, Modal::ServerPicker);
             let account = matches!(modal, Modal::Account);
             let settings = matches!(modal, Modal::Settings);
+            let keymaps = matches!(modal, Modal::Keymaps);
             let app_bar_modal = matches!(
                 modal,
                 Modal::ServerPicker | Modal::ServerConnection | Modal::Account
@@ -11303,7 +11348,7 @@ impl WorkspaceShell {
             let instance_setup = matches!(modal, Modal::InstanceSetup);
             let card_width = if data_results {
                 0.0
-            } else if settings || schema_search {
+            } else if settings || keymaps || schema_search {
                 720.0
             } else if server_picker || account {
                 360.0
@@ -12716,6 +12761,150 @@ impl WorkspaceShell {
                         )
                         .into_any_element()
                 }
+                Modal::Keymaps => {
+                    let profile = self.keyboard_profile();
+                    let vim_editor = self.vim_mode_default();
+                    let profile_button = |id: &'static str,
+                                          label: &'static str,
+                                          selected: bool,
+                                          profile: KeyboardProfile,
+                                          cx: &mut Context<Self>| {
+                        Button::new(id, label)
+                            .debug_selector(id)
+                            .tone(if selected {
+                                ButtonTone::Accent
+                            } else {
+                                ButtonTone::Neutral
+                            })
+                            .wide(true)
+                            .on_click(cx.listener(move |shell, _, _, cx| {
+                                shell.set_keyboard_profile(profile, cx)
+                            }))
+                    };
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_4()
+                        .child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .gap_1()
+                                .child(
+                                    div()
+                                        .text_lg()
+                                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                                        .child("Keymaps"),
+                                )
+                                .child(
+                                    div()
+                                        .text_sm()
+                                        .text_color(colors.muted_text)
+                                        .child("Choose how IDE commands and SQL editing share the keyboard."),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .gap_2()
+                                .child(SectionLabel::new("IDE shortcuts"))
+                                .child(
+                                    div()
+                                        .grid()
+                                        .grid_cols(3)
+                                        .gap_2()
+                                        .child(profile_button(
+                                            "keymap-profile-vim",
+                                            "Vim",
+                                            profile == KeyboardProfile::Vim,
+                                            KeyboardProfile::Vim,
+                                            cx,
+                                        ))
+                                        .child(profile_button(
+                                            "keymap-profile-hybrid",
+                                            "Hybrid",
+                                            profile == KeyboardProfile::Hybrid,
+                                            KeyboardProfile::Hybrid,
+                                            cx,
+                                        ))
+                                        .child(profile_button(
+                                            "keymap-profile-standard",
+                                            "Standard",
+                                            profile == KeyboardProfile::Standard,
+                                            KeyboardProfile::Standard,
+                                            cx,
+                                        )),
+                                )
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(colors.muted_text)
+                                        .child(match profile {
+                                            KeyboardProfile::Vim => "Leader commands enabled; conventional IDE shortcuts disabled.",
+                                            KeyboardProfile::Hybrid => "Leader commands and conventional IDE shortcuts are both enabled.",
+                                            KeyboardProfile::Standard => "Conventional IDE shortcuts enabled; leader commands disabled.",
+                                        }),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .pt_3()
+                                .border_t_1()
+                                .border_color(colors.subtle_border)
+                                .flex()
+                                .flex_col()
+                                .gap_2()
+                                .child(SectionLabel::new("SQL editor default"))
+                                .child(
+                                    div()
+                                        .flex()
+                                        .gap_2()
+                                        .child(
+                                            Button::new("keymap-editor-vim", "Vim")
+                                                .tone(if vim_editor {
+                                                    ButtonTone::Accent
+                                                } else {
+                                                    ButtonTone::Neutral
+                                                })
+                                                .on_click(cx.listener(|shell, _, _, cx| {
+                                                    if !shell.vim_mode_default() {
+                                                        shell.toggle_vim_mode_default(cx)
+                                                    }
+                                                })),
+                                        )
+                                        .child(
+                                            Button::new("keymap-editor-standard", "Standard")
+                                                .tone(if vim_editor {
+                                                    ButtonTone::Neutral
+                                                } else {
+                                                    ButtonTone::Accent
+                                                })
+                                                .on_click(cx.listener(|shell, _, _, cx| {
+                                                    if shell.vim_mode_default() {
+                                                        shell.toggle_vim_mode_default(cx)
+                                                    }
+                                                })),
+                                        ),
+                                )
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(colors.muted_text)
+                                        .child("This controls new SQL tabs. The status-bar mode button still switches the active editor only."),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .pt_3()
+                                .border_t_1()
+                                .border_color(colors.subtle_border)
+                                .text_xs()
+                                .text_color(colors.muted_text)
+                                .child("Vim: Space opens IDE commands in SQL normal mode; Ctrl+K is the fallback elsewhere. Press : for the command palette."),
+                        )
+                        .into_any_element()
+                }
                 Modal::Account => {
                     let server_name = self.active_server_name();
                     let identity = self.lifecycle.identity.as_ref();
@@ -13550,6 +13739,7 @@ impl WorkspaceShell {
                 modal,
                 Modal::ServerPicker
                     | Modal::Settings
+                    | Modal::Keymaps
                     | Modal::Account
                     | Modal::CommandPalette
                     | Modal::SchemaSearch
@@ -13588,7 +13778,7 @@ impl WorkspaceShell {
                     layer.justify_start().pt_1().pl(px(38.))
                 })
                 .when(account, |layer| layer.justify_end().pt_1().pr_2())
-                .when(settings || database_connection, |layer| {
+                .when(settings || keymaps || database_connection, |layer| {
                     layer
                         .items_center()
                         .justify_center()
@@ -13602,6 +13792,7 @@ impl WorkspaceShell {
                 .when(
                     !server_picker
                         && !settings
+                        && !keymaps
                         && !account
                         && !database_connection
                         && !data_results,
@@ -13683,7 +13874,10 @@ impl WorkspaceShell {
                 &[("s", "statement"), ("q", "query"), ("c", "cancel")],
             ),
             KeyLanguageHint::Tab => ("<leader> t", &[("c", "close"), ("s", "save")]),
-            KeyLanguageHint::Edit => ("<leader> e", &[("f", "format SQL"), ("q", "quick fix")]),
+            KeyLanguageHint::Edit => (
+                "<leader> e",
+                &[("f", "format SQL"), ("q", "quick fix"), ("k", "keymaps")],
+            ),
             KeyLanguageHint::Database => ("<leader> d", &[("c", "connect server")]),
             KeyLanguageHint::Workspace => (
                 "<leader> w",
@@ -14012,6 +14206,11 @@ impl WorkspaceShell {
 impl gpui::Render for WorkspaceShell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = cx.theme().colors;
+        let keymap_context = match self.keyboard_profile() {
+            KeyboardProfile::Vim => "SiftWorkspace keymap_profile=vim",
+            KeyboardProfile::Hybrid => "SiftWorkspace keymap_profile=hybrid",
+            KeyboardProfile::Standard => "SiftWorkspace keymap_profile=standard",
+        };
         // Docks are built before the element chain so each borrows `cx`
         // sequentially rather than two `when` closures capturing it at once.
         let left_dock = self
@@ -14092,7 +14291,7 @@ impl gpui::Render for WorkspaceShell {
         });
         div()
             .id("sift-shell")
-            .key_context("SiftWorkspace")
+            .key_context(keymap_context)
             .role(Role::Application)
             .aria_label("Sift database workspace")
             .track_focus(&self.focus_handle)
@@ -15670,6 +15869,52 @@ mod tests {
     }
 
     #[gpui::test]
+    fn standard_profile_disables_leader_while_hybrid_enables_it(cx: &mut TestAppContext) {
+        let settings = UserSettings {
+            keyboard: crate::settings::KeyboardSettings {
+                profile: KeyboardProfile::Standard,
+            },
+            ..UserSettings::default()
+        };
+        let window = cx.update(|cx| {
+            cx.open_window(Default::default(), |window, cx| {
+                cx.new(|cx| {
+                    WorkspaceShell::new(
+                        PresentationState::default(),
+                        settings,
+                        None,
+                        None,
+                        window,
+                        cx,
+                    )
+                })
+            })
+            .unwrap()
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        let editor = workspace.read_with(&cx, |workspace, cx| {
+            let pane = workspace.panes[workspace.active_pane].read(cx);
+            pane.editor(pane.active_item().unwrap().id).unwrap()
+        });
+        editor.update_in(&mut cx, |editor, window, cx| {
+            editor.focus_handle(cx).focus(window, cx);
+        });
+
+        cx.simulate_keystrokes("space");
+        assert!(workspace.read_with(&cx, |shell, _| shell.ide_input.is_none()));
+
+        workspace.update(&mut cx, |shell, cx| {
+            shell.set_keyboard_profile(KeyboardProfile::Hybrid, cx)
+        });
+        cx.simulate_keystrokes("ctrl-k");
+        assert_eq!(
+            workspace.read_with(&cx, |shell, _| shell.ide_key_buffer()),
+            "<leader>"
+        );
+    }
+
+    #[gpui::test]
     fn vim_colon_opens_workspace_command_palette(cx: &mut TestAppContext) {
         let window = shell(cx);
         let mut cx = VisualTestContext::from_window(window.into(), cx);
@@ -15739,6 +15984,37 @@ mod tests {
             assert!(!workspace.vim_mode_default());
             assert!(!workspace.snapshot(cx).legacy_vim_mode_default);
         });
+    }
+
+    #[gpui::test]
+    fn keymaps_page_controls_the_three_state_ide_profile(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+
+        workspace.update_in(&mut cx, |workspace, window, cx| {
+            workspace.run_command(CommandId::OpenKeymaps, window, cx);
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("keymap-profile-vim").is_some());
+        assert!(cx.debug_bounds("keymap-profile-hybrid").is_some());
+        assert!(cx.debug_bounds("keymap-profile-standard").is_some());
+        assert_eq!(
+            workspace.read_with(&cx, |workspace, _| workspace.keyboard_profile()),
+            KeyboardProfile::Vim
+        );
+
+        workspace.update(&mut cx, |workspace, cx| {
+            workspace.set_keyboard_profile(KeyboardProfile::Hybrid, cx)
+        });
+        assert_eq!(
+            workspace.read_with(&cx, |workspace, _| workspace.keyboard_profile()),
+            KeyboardProfile::Hybrid
+        );
+        assert_eq!(
+            workspace.read_with(&cx, |workspace, _| workspace.modal().cloned()),
+            Some(Modal::Keymaps)
+        );
     }
 
     #[gpui::test]
@@ -16006,9 +16282,9 @@ mod tests {
             ]
         );
         assert_eq!(profile[0].command, Some(CommandId::OpenSettings));
+        assert_eq!(profile[1].command, Some(CommandId::OpenKeymaps));
         assert_eq!(profile[2].command, Some(CommandId::ToggleTheme));
         assert_eq!(profile[3].command, Some(CommandId::OpenServerConfiguration));
-        assert!(profile[1].command.is_none());
 
         for menu in [
             AppBarMenu::Main,
