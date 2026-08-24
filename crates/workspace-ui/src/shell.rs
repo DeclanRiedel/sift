@@ -13851,7 +13851,7 @@ impl WorkspaceShell {
                                 .flex()
                                 .flex_col()
                                 .gap_2()
-                                .child(SectionLabel::new("SQL editor default"))
+                                .child(SectionLabel::new("Editor default"))
                                 .child(
                                     div()
                                         .flex()

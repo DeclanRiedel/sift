@@ -19,7 +19,7 @@ use sift_workspace_ui::{
     ToggleLeftDock, ToggleRightDock,
 };
 
-/// Keymap for the SQL editor. Bound under the `SiftEditor` focus context so
+/// Keymap for document editors. Bound under the `SiftEditor` focus context so
 /// these never intercept workspace or text-field commands. Character and IME
 /// input arrive through the editor's input handler, not these bindings.
 fn editor_key_bindings() -> Vec<gpui::KeyBinding> {

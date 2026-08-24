@@ -14,7 +14,7 @@ default_mode = "vim" # "standard" or "vim"
 profile = "vim" # "vim", "hybrid", or "standard"
 ```
 
-The keyboard profile controls IDE commands independently from the SQL editor's
+The keyboard profile controls IDE commands independently from the editor's
 default mode. Vim enables the leader language, Standard enables conventional
 IDE shortcuts, and Hybrid enables both. Vim is the default profile.
 

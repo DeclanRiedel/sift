@@ -66,37 +66,37 @@ pub(super) fn render_status_bar(
     );
     let (mode_label, mode_tooltip, vim_entered) = match shell.active_editor_mode(cx) {
         Some((EditorKeymap::Vim, VimMode::Normal, entered)) => (
-            "SQL NORMAL",
+            "NORMAL",
             "Vim normal mode; click to use the standard keymap",
             Some(entered),
         ),
         Some((EditorKeymap::Vim, VimMode::Insert, entered)) => (
-            "SQL INSERT",
+            "INSERT",
             "Vim insert mode; Escape returns to normal mode",
             Some(entered),
         ),
         Some((EditorKeymap::Vim, VimMode::Visual, entered)) => (
-            "SQL VISUAL",
+            "VISUAL",
             "Vim visual mode; Escape returns to normal mode",
             Some(entered),
         ),
         Some((EditorKeymap::Vim, VimMode::Select, entered)) => (
-            "SQL SELECT",
+            "SELECT",
             "Vim select mode; Escape returns to normal mode",
             Some(entered),
         ),
         Some((EditorKeymap::Vim, VimMode::OperatorPending, entered)) => {
-            ("SQL OPERATOR", "Vim operator-pending mode", Some(entered))
+            ("OPERATOR", "Vim operator-pending mode", Some(entered))
         }
         Some((EditorKeymap::Vim, VimMode::Command, entered)) => {
-            ("SQL COMMAND", "Vim command mode", Some(entered))
+            ("COMMAND", "Vim command mode", Some(entered))
         }
         Some((EditorKeymap::Standard, _, _)) => (
-            "SQL STANDARD",
+            "STANDARD",
             "Standard editor keymap; click to enable Vim mode",
             None,
         ),
-        None => ("NO SQL EDITOR", "No active editor", None),
+        None => ("NO EDITOR", "No active editor", None),
     };
     let editor_buffer = vim_entered.unwrap_or_default();
     let ide_buffer = shell.ide_key_buffer();
@@ -297,7 +297,7 @@ pub(super) fn render_status_bar(
                 .children((!editor_buffer.is_empty()).then(|| {
                     div()
                         .id("footer-editor-buffer")
-                        .aria_label(format!("Pending SQL editor keys: {editor_buffer}"))
+                        .aria_label(format!("Pending editor keys: {editor_buffer}"))
                         .h(theme.metrics.compact_control_height)
                         .px_1()
                         .flex()
