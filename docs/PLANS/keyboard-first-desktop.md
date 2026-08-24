@@ -76,7 +76,7 @@ prefixes display a compact which-key strip generated from the same vocabulary.
 
 ## Development reference
 
-Run beside the desktop:
+Run the seeded desktop demo and wiki together:
 
 ```sh
 nix run .#sift-desktop-demo-wiki

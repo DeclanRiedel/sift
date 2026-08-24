@@ -517,9 +517,19 @@
 
             bind="''${SIFT_DESKTOP_DEMO_WIKI_BIND:-127.0.0.1}"
             port="''${SIFT_DESKTOP_DEMO_WIKI_PORT:-8787}"
+            python3 -m http.server "$port" --bind "$bind" --directory "$wiki" &
+            wiki_pid=$!
+            cleanup() {
+              kill "$wiki_pid" >/dev/null 2>&1 || true
+              wait "$wiki_pid" >/dev/null 2>&1 || true
+            }
+            trap cleanup EXIT
+            trap 'exit 130' INT
+            trap 'exit 143' TERM
+
             echo "Sift keyboard wiki: http://$bind:$port"
-            echo "Run the desktop demo in another terminal: nix run .#desktop-demo"
-            exec python3 -m http.server "$port" --bind "$bind" --directory "$wiki"
+            echo "Starting seeded Sift desktop demo..."
+            "${desktopDemo}/bin/sift-desktop-demo" "$@"
           '';
         };
 
@@ -560,7 +570,7 @@
               sift-check                Run cargo check for the whole workspace.
               sift-desktop              Run the native GPUI desktop client.
               sift-desktop-demo         Seeded Postgres + real backend + registered connection + desktop.
-              sift-desktop-demo-wiki    Serve the keyboard-language wiki beside the desktop demo.
+              sift-desktop-demo-wiki    Run desktop demo + keyboard-language wiki together.
               sift-dev-secret-key       Generate the ignored local metadata secret key file.
               sift-dev-mssql            Manage a local SQL Server docker container for live-mssql tests.
                                         Sub: start | stop | reset | password | status. Password is
