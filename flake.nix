@@ -417,14 +417,41 @@
         # real (non-mock) server from that root.
         desktopDemo = pkgs.writeShellApplication {
           name = "sift-desktop-demo";
-          runtimeInputs = with pkgs; [ coreutils gnused jq nix openssl postgresql ];
+          runtimeInputs = with pkgs; [ coreutils gnugrep gnused jq nix openssl postgresql util-linux ];
           text = ''
-            set -euo pipefail
+            set -Eeuo pipefail
 
+            phase_name="launcher validation"
+            phase() {
+              phase_name="$2"
+              echo "[$1/6] $2"
+            }
+            demo_error() {
+              status=$?
+              echo "Desktop demo failed during: $phase_name (exit $status)." >&2
+              echo "Resolve the error above, then rerun the launcher." >&2
+              exit "$status"
+            }
+            trap demo_error ERR
+
+            phase 1 "Validate checkout and reserve the demo"
             repo="''${SIFT_REPO:-$PWD}"
             if [ ! -f "$repo/flake.nix" ] || [ ! -f "$repo/Cargo.toml" ]; then
               echo "Run this from the sift checkout, or set SIFT_REPO=/path/to/sift." >&2
               exit 1
+            fi
+
+            lock_file="''${TMPDIR:-/tmp}/sift-desktop-demo-$(id -u).lock"
+            if [ "''${SIFT_DESKTOP_DEMO_LOCK_HELD:-0}" != "1" ]; then
+              exec 9>>"$lock_file"
+              if ! flock -n 9; then
+                existing="$(head -n 1 "$lock_file" 2>/dev/null || true)"
+                echo "A Sift desktop demo is already running''${existing:+ (launcher PID $existing)}." >&2
+                echo "Stop that demo before starting another; this is the demo-process lock, not Cargo's build lock." >&2
+                exit 1
+              fi
+              : >"$lock_file"
+              printf '%s\n' "$$" >&9
             fi
 
             pgdata="''${SIFT_DEMO_PGDATA:-/tmp/sift-demo-pg}"
@@ -448,13 +475,6 @@
               fi
             }
 
-            pgport="$(SIFT_DEMO_RESET=1 sh "$repo/examples/reproducible-instance/scripts/dev-seed-postgres.sh")"
-
-            cd "$repo"
-            # Build first, in the foreground: a cold GPUI build takes minutes,
-            # and the desktop must be able to resolve its sibling server binary.
-            run_in_dev cargo build --profile release-dev -p sift-server -p sift-desktop
-
             cleanup() {
               if [ "''${SIFT_DEMO_KEEP_POSTGRES:-0}" != "1" ]; then
                 pg_ctl -D "$pgdata" -m fast -w stop >/dev/null 2>&1 || true
@@ -463,6 +483,16 @@
             }
             trap cleanup EXIT
 
+            phase 2 "Seed demo Postgres"
+            pgport="$(SIFT_DEMO_RESET=1 sh "$repo/examples/reproducible-instance/scripts/dev-seed-postgres.sh")"
+
+            cd "$repo"
+            # Build first, in the foreground: a cold GPUI build takes minutes,
+            # and the desktop must be able to resolve its sibling server binary.
+            phase 3 "Build the server and desktop (Cargo may wait for its own build lock)"
+            run_in_dev cargo build --profile release-dev -p sift-server -p sift-desktop
+
+            phase 4 "Prepare the reproducible instance"
             cp "$repo/examples/reproducible-instance/sift.toml" "$instance_root/sift.toml"
             rm -f -- "$instance_root/sift.lock"
             sed -i \
@@ -477,6 +507,7 @@
             printf "ALTER ROLE sift PASSWORD '%s';\n" "$db_password" | \
               psql -q -h 127.0.0.1 -p "$pgport" -U sift -d sifttest
 
+            phase 5 "Apply the instance and import its local credential"
             run_in_dev cargo run -q --profile release-dev -p sift-server --bin sift -- instance lock "$instance_root"
             run_in_dev cargo run -q --profile release-dev -p sift-server --bin sift -- instance apply "$instance_root"
             if grep -q 'credential = "credential:demo/postgres/shared"' "$instance_root/sift.toml"; then
@@ -495,15 +526,28 @@
             echo "Desktop: supervising the applied auto-loopback instance"
             echo "The desktop can edit this run's sift.toml through the current-instance API."
 
+            phase 6 "Start the desktop and supervised Sift server"
             run_in_dev cargo run --profile release-dev -p sift-desktop -- --instance-root "$instance_root" "$@"
           '';
         };
 
         desktopDemoWiki = pkgs.writeShellApplication {
           name = "sift-desktop-demo-wiki";
-          runtimeInputs = [ pkgs.python3 ];
+          runtimeInputs = with pkgs; [ coreutils curl python3 util-linux ];
           text = ''
-            set -euo pipefail
+            set -Eeuo pipefail
+
+            phase_name="wiki launcher validation"
+            wiki_error() {
+              status=$?
+              echo "Desktop demo + wiki failed during: $phase_name (exit $status)." >&2
+              if [ -n "''${wiki_log:-}" ] && [ -s "$wiki_log" ]; then
+                echo "Keyboard wiki server log:" >&2
+                tail -n 40 "$wiki_log" >&2
+              fi
+              exit "$status"
+            }
+            trap wiki_error ERR
 
             repo="''${SIFT_REPO:-$PWD}"
             wiki="$repo/docs/keyboard-wiki"
@@ -514,7 +558,31 @@
 
             bind="''${SIFT_DESKTOP_DEMO_WIKI_BIND:-127.0.0.1}"
             port="''${SIFT_DESKTOP_DEMO_WIKI_PORT:-8787}"
-            python3 -m http.server "$port" --bind "$bind" --directory "$wiki" &
+            lock_file="''${TMPDIR:-/tmp}/sift-desktop-demo-$(id -u).lock"
+            exec 9>>"$lock_file"
+            if ! flock -n 9; then
+              existing="$(head -n 1 "$lock_file" 2>/dev/null || true)"
+              echo "A Sift desktop demo or demo wiki is already running''${existing:+ (launcher PID $existing)}." >&2
+              echo "Stop the existing launcher before starting another." >&2
+              exit 1
+            fi
+            : >"$lock_file"
+            printf '%s\n' "$$" >&9
+
+            phase_name="checking keyboard wiki port $bind:$port"
+            if ! python3 -c 'import socket,sys; s=socket.socket(); s.bind((sys.argv[1], int(sys.argv[2]))); s.close()' "$bind" "$port" 2>/dev/null; then
+              if curl -fsS --max-time 1 "http://$bind:$port/index.html" >/dev/null 2>&1; then
+                echo "A keyboard wiki is already listening at http://$bind:$port." >&2
+              else
+                echo "Port $bind:$port is already used by another process." >&2
+              fi
+              echo "Set SIFT_DESKTOP_DEMO_WIKI_PORT to choose another port." >&2
+              exit 1
+            fi
+
+            phase_name="starting keyboard wiki"
+            wiki_log="''${TMPDIR:-/tmp}/sift-desktop-demo-wiki-$(id -u).log"
+            python3 -m http.server "$port" --bind "$bind" --directory "$wiki" >"$wiki_log" 2>&1 &
             wiki_pid=$!
             cleanup() {
               kill "$wiki_pid" >/dev/null 2>&1 || true
@@ -524,9 +592,26 @@
             trap 'exit 130' INT
             trap 'exit 143' TERM
 
+            ready=0
+            for _ in $(seq 1 50); do
+              if curl -fsS --max-time 1 "http://$bind:$port/index.html" >/dev/null 2>&1; then
+                ready=1
+                break
+              fi
+              if ! kill -0 "$wiki_pid" >/dev/null 2>&1; then
+                wait "$wiki_pid"
+              fi
+              sleep 0.1
+            done
+            if [ "$ready" != "1" ]; then
+              echo "Keyboard wiki did not become ready at http://$bind:$port." >&2
+              exit 1
+            fi
+
             echo "Sift keyboard wiki: http://$bind:$port"
             echo "Starting seeded Sift desktop demo..."
-            "${desktopDemo}/bin/sift-desktop-demo" "$@"
+            phase_name="running seeded desktop demo"
+            SIFT_DESKTOP_DEMO_LOCK_HELD=1 "${desktopDemo}/bin/sift-desktop-demo" "$@"
           '';
         };
 
