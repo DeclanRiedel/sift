@@ -14,7 +14,9 @@ use gpui::{
 };
 use modalkit::editing::{application::EmptyInfo, store::SharedStore};
 use sift_doc::{random_peer_id, TextReplica};
-use sift_ui::{ActiveTheme, Theme};
+use sift_ui::{
+    ActiveTheme, Button, ButtonTone, Clickable, Disableable, IconButton, IconName, TextInput, Theme,
+};
 
 mod semantic;
 mod vim;
@@ -734,7 +736,13 @@ actions!(
         FormatDocument,
         ApplyQuickFix,
         FindUsages,
-        GoToNextDiagnostic
+        GoToNextDiagnostic,
+        OpenFind,
+        FindNext,
+        FindPrevious,
+        ReplaceNext,
+        ReplaceAll,
+        CloseFind
     ]
 );
 
@@ -833,12 +841,21 @@ pub struct QueryEditor {
     read_only: bool,
     semantic: SemanticState,
     json_schema: Option<JsonSchema>,
+    find_open: bool,
+    find_query: Entity<TextInput>,
+    replace_query: Entity<TextInput>,
+    find_case_sensitive: bool,
 }
 
 impl QueryEditor {
     pub fn new(document: QueryDocument, cx: &mut Context<Self>) -> Self {
         let cursor_blink = cx.new(|_| CursorBlink::new());
         cx.observe(&cursor_blink, |_, _, cx| cx.notify()).detach();
+        let find_query = cx.new(|cx| TextInput::new("", "Find", cx).aria_label("Find text"));
+        let replace_query =
+            cx.new(|cx| TextInput::new("", "Replace", cx).aria_label("Replacement text"));
+        cx.observe(&find_query, |_, _, cx| cx.notify()).detach();
+        cx.observe(&replace_query, |_, _, cx| cx.notify()).detach();
         let vim_store = shared_vim_store(cx);
         Self {
             focus_handle: cx.focus_handle(),
@@ -863,6 +880,10 @@ impl QueryEditor {
             read_only: false,
             semantic: SemanticState::default(),
             json_schema: None,
+            find_open: false,
+            find_query,
+            replace_query,
+            find_case_sensitive: false,
         }
     }
 
@@ -1189,6 +1210,108 @@ impl QueryEditor {
     fn find_usages(&mut self, _: &FindUsages, _: &mut Window, cx: &mut Context<Self>) {
         let position = self.document.cursor() as u32;
         self.request_semantic(SemanticRequestKind::Usages { position }, cx);
+    }
+
+    fn open_find(&mut self, _: &OpenFind, window: &mut Window, cx: &mut Context<Self>) {
+        self.find_open = true;
+        let selected = self.document.selected_text();
+        if !selected.is_empty() && !selected.contains('\n') {
+            self.find_query
+                .update(cx, |input, cx| input.set_text(selected, cx));
+        }
+        self.find_query.focus_handle(cx).focus(window, cx);
+        cx.notify();
+    }
+
+    fn close_find(&mut self, _: &CloseFind, window: &mut Window, cx: &mut Context<Self>) {
+        self.find_open = false;
+        self.focus_handle.focus(window, cx);
+        cx.notify();
+    }
+
+    fn find_next(&mut self, _: &FindNext, _: &mut Window, cx: &mut Context<Self>) {
+        self.move_find_selection(1, cx);
+    }
+
+    fn find_previous(&mut self, _: &FindPrevious, _: &mut Window, cx: &mut Context<Self>) {
+        self.move_find_selection(-1, cx);
+    }
+
+    fn move_find_selection(&mut self, delta: isize, cx: &mut Context<Self>) -> bool {
+        let matches = self.current_find_matches(cx);
+        if matches.is_empty() {
+            return false;
+        }
+        let selection = self.document.selection();
+        let current = matches.iter().position(|range| *range == selection);
+        let index = match current {
+            Some(index) => (index as isize + delta).rem_euclid(matches.len() as isize) as usize,
+            None if delta < 0 => matches
+                .iter()
+                .rposition(|range| range.start < self.document.cursor())
+                .unwrap_or(matches.len() - 1),
+            None => matches
+                .iter()
+                .position(|range| range.start >= self.document.cursor())
+                .unwrap_or(0),
+        };
+        self.document.set_selection(matches[index].clone(), false);
+        self.selection_changed(cx);
+        true
+    }
+
+    fn replace_next(&mut self, _: &ReplaceNext, _: &mut Window, cx: &mut Context<Self>) {
+        if self.read_only {
+            return;
+        }
+        let matches = self.current_find_matches(cx);
+        if matches.is_empty() {
+            return;
+        }
+        let selection = self.document.selection();
+        let target = matches
+            .iter()
+            .find(|range| **range == selection)
+            .cloned()
+            .or_else(|| {
+                matches
+                    .iter()
+                    .find(|range| range.start >= self.document.cursor())
+                    .cloned()
+            })
+            .unwrap_or_else(|| matches[0].clone());
+        let replacement = self.replace_query.read(cx).text().to_owned();
+        self.document.replace_range(target, &replacement);
+        self.edited(cx);
+        self.move_find_selection(1, cx);
+    }
+
+    fn replace_all(&mut self, _: &ReplaceAll, _: &mut Window, cx: &mut Context<Self>) {
+        if self.read_only {
+            return;
+        }
+        let matches = self.current_find_matches(cx);
+        if matches.is_empty() {
+            return;
+        }
+        let replacement = self.replace_query.read(cx).text().to_owned();
+        let mut updated = self.document.text().to_owned();
+        for range in matches.into_iter().rev() {
+            updated.replace_range(range, &replacement);
+        }
+        let length = self.document.text().len();
+        self.document.replace_range(0..length, &updated);
+        self.edited(cx);
+    }
+
+    fn current_find_matches(&self, cx: &App) -> Vec<Range<usize>> {
+        self.document
+            .find_matches(self.find_query.read(cx).text(), self.find_case_sensitive)
+    }
+
+    fn toggle_find_case(&mut self, cx: &mut Context<Self>) {
+        self.find_case_sensitive = !self.find_case_sensitive;
+        cx.notify();
     }
 
     /// Move the caret to the next diagnostic, wrapping once. Keeps a
@@ -1800,6 +1923,110 @@ impl QueryEditor {
         )
     }
 
+    fn render_find_bar(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+        if !self.find_open {
+            return None;
+        }
+        let colors = cx.theme().colors;
+        let matches = self.current_find_matches(cx);
+        let current = matches
+            .iter()
+            .position(|range| *range == self.document.selection())
+            .map_or(0, |index| index + 1);
+        Some(
+            div()
+                .id("editor-find-bar")
+                .debug_selector(|| "editor-find-bar".into())
+                .flex()
+                .items_center()
+                .gap_1()
+                .px_2()
+                .py_1()
+                .border_b_1()
+                .border_color(colors.subtle_border)
+                .bg(colors.toolbar)
+                .on_key_down(
+                    cx.listener(|editor, event: &gpui::KeyDownEvent, window, cx| {
+                        match event.keystroke.key.as_str() {
+                            "escape" => editor.close_find(&CloseFind, window, cx),
+                            "enter" if event.keystroke.modifiers.shift => {
+                                editor.find_previous(&FindPrevious, window, cx)
+                            }
+                            "enter" => editor.find_next(&FindNext, window, cx),
+                            _ => return,
+                        }
+                        cx.stop_propagation();
+                    }),
+                )
+                .child(div().w(px(220.)).child(self.find_query.clone()))
+                .child(
+                    div()
+                        .w(px(180.))
+                        .children((!self.read_only).then(|| self.replace_query.clone())),
+                )
+                .child(
+                    Button::new("editor-find-case", "Aa")
+                        .tone(if self.find_case_sensitive {
+                            ButtonTone::Accent
+                        } else {
+                            ButtonTone::Ghost
+                        })
+                        .on_click(cx.listener(|editor, _, _, cx| editor.toggle_find_case(cx))),
+                )
+                .child(
+                    div()
+                        .w(px(58.))
+                        .text_xs()
+                        .text_center()
+                        .text_color(colors.muted_text)
+                        .child(format!("{current}/{}", matches.len())),
+                )
+                .child(
+                    IconButton::new(
+                        "editor-find-previous",
+                        IconName::ChevronLeft,
+                        "Previous match",
+                    )
+                    .square(px(24.))
+                    .on_click(cx.listener(|editor, _, window, cx| {
+                        editor.find_previous(&FindPrevious, window, cx)
+                    })),
+                )
+                .child(
+                    IconButton::new("editor-find-next", IconName::ChevronRight, "Next match")
+                        .square(px(24.))
+                        .on_click(cx.listener(|editor, _, window, cx| {
+                            editor.find_next(&FindNext, window, cx)
+                        })),
+                )
+                .child(
+                    Button::new("editor-replace-next", "Replace")
+                        .tone(ButtonTone::Ghost)
+                        .disabled(self.read_only || matches.is_empty())
+                        .on_click(cx.listener(|editor, _, window, cx| {
+                            editor.replace_next(&ReplaceNext, window, cx)
+                        })),
+                )
+                .child(
+                    Button::new("editor-replace-all", "All")
+                        .tone(ButtonTone::Ghost)
+                        .disabled(self.read_only || matches.is_empty())
+                        .on_click(cx.listener(|editor, _, window, cx| {
+                            editor.replace_all(&ReplaceAll, window, cx)
+                        })),
+                )
+                .child(div().flex_1())
+                .child(
+                    IconButton::new("editor-find-close", IconName::Close, "Close find")
+                        .square(px(24.))
+                        .on_click(cx.listener(|editor, _, window, cx| {
+                            editor.close_find(&CloseFind, window, cx)
+                        })),
+                )
+                .into_any_element(),
+        )
+    }
+
     /// One-line semantic status: the diagnostic under the caret if there is
     /// one, else the last notice, else the aggregate counts. Never blocks
     /// editing and never claims freshness it does not have.
@@ -2078,6 +2305,12 @@ impl gpui::Render for QueryEditor {
             .on_action(cx.listener(Self::apply_quick_fix))
             .on_action(cx.listener(Self::find_usages))
             .on_action(cx.listener(Self::go_to_next_diagnostic))
+            .on_action(cx.listener(Self::open_find))
+            .on_action(cx.listener(Self::find_next))
+            .on_action(cx.listener(Self::find_previous))
+            .on_action(cx.listener(Self::replace_next))
+            .on_action(cx.listener(Self::replace_all))
+            .on_action(cx.listener(Self::close_find))
             .children(
                 match self.language {
                     EditorLanguage::Toml => toml_diagnostic(self.document.text()),
@@ -2111,6 +2344,7 @@ impl gpui::Render for QueryEditor {
                     .text_color(text)
                     .child(message)
             }))
+            .children(self.render_find_bar(cx))
             .child(
                 div()
                     .id("editor-scroll")
@@ -2145,6 +2379,7 @@ struct EditorPrepaint {
     line_starts: Arc<Vec<usize>>,
     visible_line_start: usize,
     active_line: Option<PaintQuad>,
+    find_matches: Vec<PaintQuad>,
     selections: Vec<PaintQuad>,
     usages: Vec<PaintQuad>,
     diagnostics: Vec<PaintQuad>,
@@ -2206,6 +2441,11 @@ impl Element for QueryEditorElement {
         let block_cursor = editor.keymap == EditorKeymap::Vim && editor.vim_mode == VimMode::Normal;
         let cursor_visible = editor.cursor_blink.read(cx).visible;
         let editor_focused = editor.focus_handle.is_focused(window);
+        let find_matches = if editor.find_open {
+            editor.current_find_matches(cx)
+        } else {
+            Vec::new()
+        };
         let viewport = editor.scroll_handle.bounds();
         let style = window.text_style();
         let font_size = style.font_size.to_pixels(window.rem_size());
@@ -2227,6 +2467,7 @@ impl Element for QueryEditorElement {
             cache.line_starts.clone()
         };
         let mut selections = Vec::new();
+        let mut find_quads = Vec::new();
         let mut usage_quads = Vec::new();
         let mut diagnostic_quads = Vec::new();
         let mut cursor_quad = None;
@@ -2321,6 +2562,22 @@ impl Element for QueryEditorElement {
             }
 
             // Selection rectangle for the portion of this line inside the range.
+            if editor.find_open {
+                for range in &find_matches {
+                    if let Some(bounds) = span_bounds(
+                        range,
+                        offset,
+                        line_end,
+                        &shaped,
+                        text_left,
+                        top,
+                        line_height,
+                    ) {
+                        find_quads.push(fill(bounds, theme.colors.accent_muted));
+                    }
+                }
+            }
+
             if !selection.is_empty() {
                 let sel_start = selection.start.clamp(offset, line_end);
                 let sel_end = selection.end.clamp(offset, line_end);
@@ -2430,6 +2687,7 @@ impl Element for QueryEditorElement {
             line_starts,
             visible_line_start: visible_start,
             active_line: active_line_quad,
+            find_matches: find_quads,
             selections,
             usages: usage_quads,
             diagnostics: diagnostic_quads,
@@ -2457,6 +2715,9 @@ impl Element for QueryEditorElement {
         );
         if let Some(active_line) = prepaint.active_line.take() {
             window.paint_quad(active_line);
+        }
+        for found in prepaint.find_matches.drain(..) {
+            window.paint_quad(found);
         }
         for selection in prepaint.selections.drain(..) {
             window.paint_quad(selection);
@@ -3454,6 +3715,52 @@ mod tests {
             editor.read_with(&cx, |editor, _| editor.document().text().to_string()),
             "select 1\n"
         );
+    }
+
+    #[gpui::test]
+    fn find_bar_navigates_and_replaces_through_document_edits(cx: &mut TestAppContext) {
+        let window = cx
+            .update(|cx| {
+                cx.open_window(Default::default(), |_window, cx| {
+                    cx.new(|cx| QueryEditor::new(doc("one two one"), cx))
+                })
+            })
+            .unwrap();
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let editor = window.root(&mut cx).unwrap();
+        editor.update_in(&mut cx, |editor, window, cx| {
+            editor.open_find(&OpenFind, window, cx);
+            editor
+                .find_query
+                .update(cx, |input, cx| input.set_text("one", cx));
+            editor
+                .replace_query
+                .update(cx, |input, cx| input.set_text("three", cx));
+            editor.find_next(&FindNext, window, cx);
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("editor-find-bar").is_some());
+        assert_eq!(
+            editor.read_with(&cx, |editor, _| editor.document.selection()),
+            0..3
+        );
+
+        editor.update_in(&mut cx, |editor, window, cx| {
+            editor.replace_next(&ReplaceNext, window, cx)
+        });
+        assert_eq!(
+            editor.read_with(&cx, |editor, _| editor.document.text().to_owned()),
+            "three two one"
+        );
+        editor.update_in(&mut cx, |editor, window, cx| {
+            editor.replace_all(&ReplaceAll, window, cx);
+            editor.close_find(&CloseFind, window, cx);
+        });
+        assert_eq!(
+            editor.read_with(&cx, |editor, _| editor.document.text().to_owned()),
+            "three two three"
+        );
+        assert!(editor.read_with(&cx, |editor, _| !editor.find_open));
     }
 
     #[gpui::test]

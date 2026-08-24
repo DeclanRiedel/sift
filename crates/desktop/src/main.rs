@@ -60,6 +60,9 @@ fn editor_key_bindings() -> Vec<gpui::KeyBinding> {
             standard_ctx,
         ),
         gpui::KeyBinding::new("ctrl-space", ed::Complete, insert_ctx),
+        gpui::KeyBinding::new(&format!("{primary}-f"), ed::OpenFind, ctx),
+        gpui::KeyBinding::new("f3", ed::FindNext, ctx),
+        gpui::KeyBinding::new("shift-f3", ed::FindPrevious, ctx),
         gpui::KeyBinding::new(
             &format!("{primary}-alt-l"),
             ed::FormatDocument,
@@ -106,6 +109,11 @@ fn main() {
                     MenuItem::separator(),
                     MenuItem::action("Save Item", SaveActiveItem),
                     MenuItem::action("Close Item", CloseActiveItem),
+                ]),
+                Menu::new("Edit").items([
+                    MenuItem::action("Find and Replace…", ed::OpenFind),
+                    MenuItem::action("Find Next", ed::FindNext),
+                    MenuItem::action("Find Previous", ed::FindPrevious),
                 ]),
                 Menu::new("Query").items([
                     MenuItem::action("Run Statement", ed::ExecuteStatement),

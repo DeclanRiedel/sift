@@ -57,7 +57,7 @@ Legend: `[x]` usable in desktop Â· `[~]` server/API exists, desktop incomplete Â
 - [~] SQL formatting
 - [~] Query history
 - [~] Saved queries
-- [ ] Find and replace UI
+- [x] Find and replace UI
 - [ ] Line numbers and editor gutter
 - [ ] Split editor
 - [ ] Scratch SQL files
