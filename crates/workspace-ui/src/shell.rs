@@ -12732,7 +12732,16 @@ impl WorkspaceShell {
                                         ),
                                 ),
                         )
-                        .child(div().flex_1().min_h_0().min_w_0().child(results))
+                        .child(
+                            div()
+                                .debug_selector(|| "data-results-modal-body".into())
+                                .flex()
+                                .flex_1()
+                                .min_h_0()
+                                .min_w_0()
+                                .overflow_hidden()
+                                .child(results),
+                        )
                         .into_any_element(),
                     None => div()
                         .size_full()
@@ -16699,6 +16708,23 @@ mod tests {
         let window = shell(cx);
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         let workspace = window.root(&mut cx).unwrap();
+        workspace.update(&mut cx, |shell, cx| {
+            shell.route_result(
+                1,
+                ResultState::Ready(crate::results::ResultData {
+                    columns: vec![crate::results::ResultColumn {
+                        name: "id".into(),
+                        type_label: "int64".into(),
+                        nullable: false,
+                    }],
+                    rows: vec![sift_protocol::Row::new(vec![sift_protocol::Value::Int64(
+                        1,
+                    )])],
+                    ..Default::default()
+                }),
+                cx,
+            );
+        });
         cx.run_until_parked();
         let expand = cx
             .debug_bounds("open-result-data-modal")
@@ -16715,14 +16741,25 @@ mod tests {
         assert!((f32::from(card.size.width) / f32::from(layer.size.width) - 0.985).abs() < 0.01);
         assert!((f32::from(card.size.height) / f32::from(layer.size.height) - 0.985).abs() < 0.01);
         assert!(cx.debug_bounds("close-data-results-modal").is_some());
+        let body = cx
+            .debug_bounds("data-results-modal-body")
+            .expect("large Data body");
+        let row = cx.debug_bounds("result-row-0").expect("live grid row");
+        assert!(body.contains(&row.center()));
+        assert!(f32::from(row.size.width) > f32::from(card.size.width) * 0.9);
+        assert!(cx.update(|window, cx| workspace.read(cx).active_results_focused(window, cx)));
 
-        workspace.update_in(&mut cx, |shell, window, cx| {
-            shell.dismiss_modal(&DismissModal, window, cx)
-        });
+        let close = cx
+            .debug_bounds("close-data-results-modal")
+            .expect("large Data close button");
+        cx.simulate_click(close.center(), Modifiers::default());
+        cx.run_until_parked();
         workspace.read_with(&cx, |shell, cx| {
             assert!(shell.modal.is_none());
             assert_eq!(shell.panes[0].read(cx).expanded_result_item, None);
         });
+        assert!(cx.debug_bounds("result-row-0").is_some());
+        assert!(cx.update(|window, cx| workspace.read(cx).active_editor_focused(window, cx)));
     }
 
     #[gpui::test]
