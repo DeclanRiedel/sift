@@ -1,6 +1,8 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
+const HISTORY_LOAD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
 use gpui::{prelude::*, App, Context, Entity, IntoElement, Window};
 use sift_api_types::{
     ConnectionProfileId, CredentialMode, RoomId, TenantId, UpsertConnectionProfileRequest,
@@ -849,24 +851,31 @@ async fn run_query_executor(
             }
             ExecutorCommand::LoadHistory { item_id, cursor } => {
                 let append = cursor.is_some();
-                let page = match context.as_ref() {
-                    Some(opened) => opened
-                        .client
-                        .history_page(None, cursor.as_deref(), Some(50))
+                let connected_client = context.as_ref().map(|opened| opened.client.clone());
+                let server = targets.borrow().clone();
+                let events = events.clone();
+                std::mem::drop(tokio::spawn(async move {
+                    let load = async {
+                        let client = match connected_client {
+                            Some(client) => client,
+                            None => server.client().await?,
+                        };
+                        client
+                            .history_page(None, cursor.as_deref(), Some(50))
+                            .await
+                            .map_err(|error| format!("loading query history failed: {error}"))
+                    };
+                    let page = tokio::time::timeout(HISTORY_LOAD_TIMEOUT, load)
                         .await
-                        .map_err(|error| format!("loading query history failed: {error}")),
-                    None => Err("Connect to a database before loading query history".into()),
-                };
-                if events
-                    .send(ExecutorEvent::HistoryLoaded {
+                        .unwrap_or_else(|_| {
+                            Err("Loading query history timed out after 10 seconds".into())
+                        });
+                    let _ = events.send(ExecutorEvent::HistoryLoaded {
                         item_id,
                         append,
                         page,
-                    })
-                    .is_err()
-                {
-                    return;
-                }
+                    });
+                }));
             }
             ExecutorCommand::LoadObjectDdl { item_id, source } => {
                 let event = match context.as_ref() {

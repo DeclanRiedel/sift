@@ -8131,10 +8131,23 @@ impl WorkspaceShell {
             } => self.explain_database_item(*item_id, sql.clone(), *analyze, cx),
             PaneEvent::HistoryRequested { item_id, cursor } => {
                 if let Some(sender) = &self.executor_sender {
-                    let _ = sender.send(ExecutorCommand::LoadHistory {
-                        item_id: *item_id,
-                        cursor: cursor.clone(),
-                    });
+                    if sender
+                        .send(ExecutorCommand::LoadHistory {
+                            item_id: *item_id,
+                            cursor: cursor.clone(),
+                        })
+                        .is_err()
+                    {
+                        if let Some(results) = emitter.read(cx).results.get(item_id).cloned() {
+                            results.update(cx, |results, cx| {
+                                results.set_history_page(
+                                    Err("Query history executor stopped".into()),
+                                    cursor.is_some(),
+                                    cx,
+                                )
+                            });
+                        }
+                    }
                 } else if let Some(results) = emitter.read(cx).results.get(item_id).cloned() {
                     results.update(cx, |results, cx| {
                         results.set_history_page(

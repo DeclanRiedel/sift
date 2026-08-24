@@ -2388,11 +2388,18 @@ impl ResultsView {
             return div()
                 .size_full()
                 .flex()
+                .flex_col()
+                .gap_2()
                 .items_center()
                 .justify_center()
                 .p_4()
                 .text_color(colors.danger)
                 .child(error.clone())
+                .child(
+                    Button::new("retry-query-history", "Retry")
+                        .tone(ButtonTone::Neutral)
+                        .on_click(cx.listener(|view, _, _, cx| view.request_history(None, cx))),
+                )
                 .into_any_element();
         }
         if self.history.loaded && self.history.rows.is_empty() {
