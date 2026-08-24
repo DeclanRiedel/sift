@@ -816,6 +816,32 @@ async fn run_query_executor(
                     return;
                 }
             }
+            ExecutorCommand::SearchData {
+                generation,
+                request,
+            } => {
+                let event = match context.as_ref() {
+                    Some(opened) => opened
+                        .client
+                        .search_data(opened.session, opened.metadata_connection, request)
+                        .await
+                        .map(|response| ExecutorEvent::DataSearchLoaded {
+                            generation,
+                            response: Box::new(response),
+                        })
+                        .unwrap_or_else(|error| ExecutorEvent::DataSearchFailed {
+                            generation,
+                            message: format!("searching table data failed: {error}"),
+                        }),
+                    None => ExecutorEvent::DataSearchFailed {
+                        generation,
+                        message: "Connect to a database before searching table data".into(),
+                    },
+                };
+                if events.send(event).is_err() {
+                    return;
+                }
+            }
             ExecutorCommand::LoadHistory { item_id, cursor } => {
                 let append = cursor.is_some();
                 let page = match context.as_ref() {

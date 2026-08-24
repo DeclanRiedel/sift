@@ -68,7 +68,7 @@ surfaces, then admin/platform. Within P0, the connection experience comes first.
 - [x] `object_ddl` — canonical object DDL replaces the immediate catalog-derived preview (M4)
 - [ ] `providers` — engine/provider hints for rendering (M4)
 - [x] `search_schema` — filtered schema search in the Connections dock (M4)
-- [ ] `search_data` — data search (M4)
+- [x] `search_data` — bounded table-data search modal with per-row field previews (M4)
 - [x] `catalog_graph` — dependency/usages section in the object inspector (M4/M5)
 
 ### Query history & saved queries — History tab, saved queries

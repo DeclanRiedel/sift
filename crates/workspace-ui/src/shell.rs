@@ -20,7 +20,9 @@ use crate::editor::{
     EditorEvent, EditorKeymap, EditorLanguage, JsonSchema, QueryDocument, QueryEditor,
     SemanticOutcome, SemanticRequestKind, VimMode, EDITOR_GUTTER_WIDTH,
 };
-use crate::results::{ResultPlacement, ResultState, ResultsEvent, ResultsView, StreamProgress};
+use crate::results::{
+    render_value, ResultPlacement, ResultState, ResultsEvent, ResultsView, StreamProgress,
+};
 use crate::settings::{EditorMode, KeyboardProfile, KeymapSettings, SettingsStore, UserSettings};
 
 use crate::presentation::{
@@ -718,6 +720,7 @@ actions!(
 pub enum Modal {
     CommandPalette,
     SchemaSearch,
+    DataSearch,
     DataResults(u64),
     ServerPicker,
     ServerConnection,
@@ -1052,6 +1055,16 @@ enum SchemaSearchState {
     Failed(String),
 }
 
+#[derive(Debug, Clone)]
+enum DataSearchState {
+    Idle,
+    Loading,
+    Ready {
+        response: Box<sift_protocol::DataSearchResponse>,
+    },
+    Failed(String),
+}
+
 #[derive(Debug)]
 enum TableDefinitionState {
     Loading {
@@ -1126,6 +1139,10 @@ pub enum ExecutorCommand {
     SearchSchema {
         generation: u64,
         request: sift_protocol::SchemaSearchRequest,
+    },
+    SearchData {
+        generation: u64,
+        request: sift_protocol::DataSearchRequest,
     },
     LoadHistory {
         item_id: u64,
@@ -1217,6 +1234,14 @@ pub enum ExecutorEvent {
         response: Box<sift_protocol::SchemaSearchResponse>,
     },
     SchemaSearchFailed {
+        generation: u64,
+        message: String,
+    },
+    DataSearchLoaded {
+        generation: u64,
+        response: Box<sift_protocol::DataSearchResponse>,
+    },
+    DataSearchFailed {
         generation: u64,
         message: String,
     },
@@ -2975,6 +3000,7 @@ pub struct WorkspaceShell {
     connections_scroll_handle: ScrollHandle,
     query_input: Entity<TextInput>,
     schema_search_input: Entity<TextInput>,
+    data_search_input: Entity<TextInput>,
     server_name_input: Entity<TextInput>,
     server_url_input: Entity<TextInput>,
     server_token_input: Entity<TextInput>,
@@ -3079,6 +3105,8 @@ pub struct WorkspaceShell {
     connection_schema: ConnectionSchemaState,
     schema_search_generation: u64,
     schema_search_state: SchemaSearchState,
+    data_search_generation: u64,
+    data_search_state: DataSearchState,
     table_definitions: HashMap<u64, TableDefinitionState>,
     table_definition_sections: HashMap<u64, TableDefinitionSection>,
     pending_object_ddl: HashSet<u64>,
@@ -3236,6 +3264,8 @@ impl WorkspaceShell {
         let schema_search_input = cx.new(|cx| {
             TextInput::new("", "Search schema…", cx).aria_label("Search database schema")
         });
+        let data_search_input = cx
+            .new(|cx| TextInput::new("", "Search table rows…", cx).aria_label("Search table data"));
         let server_name_input = cx.new(|cx| TextInput::new("", "Display name", cx));
         let server_url_input = cx.new(|cx| TextInput::new("", "http://192.168.1.20:7474", cx));
         let server_token_input =
@@ -3308,6 +3338,10 @@ impl WorkspaceShell {
             shell.request_schema_search(cx);
         })
         .detach();
+        cx.observe(&data_search_input, |shell, _, cx| {
+            shell.request_data_search(cx);
+        })
+        .detach();
         for input in [&table_column_name_input, &table_column_type_input] {
             cx.observe(input, |shell, _, cx| {
                 if let Some(designer) = shell.table_designer.as_mut() {
@@ -3371,6 +3405,7 @@ impl WorkspaceShell {
             connections_scroll_handle: ScrollHandle::new(),
             query_input,
             schema_search_input,
+            data_search_input,
             server_name_input,
             server_url_input,
             server_token_input,
@@ -3469,6 +3504,8 @@ impl WorkspaceShell {
             connection_schema: ConnectionSchemaState::Unavailable,
             schema_search_generation: 0,
             schema_search_state: SchemaSearchState::Idle,
+            data_search_generation: 0,
+            data_search_state: DataSearchState::Idle,
             table_definitions: HashMap::new(),
             table_definition_sections: HashMap::new(),
             pending_object_ddl: HashSet::new(),
@@ -4433,6 +4470,24 @@ impl WorkspaceShell {
                 }
                 cx.notify();
             }
+            ExecutorEvent::DataSearchLoaded {
+                generation,
+                response,
+            } => {
+                if generation == self.data_search_generation {
+                    self.data_search_state = DataSearchState::Ready { response };
+                    cx.notify();
+                }
+            }
+            ExecutorEvent::DataSearchFailed {
+                generation,
+                message,
+            } => {
+                if generation == self.data_search_generation {
+                    self.data_search_state = DataSearchState::Failed(message);
+                    cx.notify();
+                }
+            }
             ExecutorEvent::HistoryLoaded {
                 item_id,
                 append,
@@ -5176,6 +5231,80 @@ impl WorkspaceShell {
         cx.notify();
     }
 
+    fn searchable_tables(&self) -> Vec<sift_protocol::ObjectPath> {
+        let ConnectionSchemaState::Ready { snapshot, .. } = &self.connection_schema else {
+            return Vec::new();
+        };
+        snapshot
+            .trees
+            .iter()
+            .flat_map(|catalog| {
+                catalog.schemas.iter().flat_map(move |schema| {
+                    schema
+                        .objects
+                        .iter()
+                        .filter(|object| {
+                            matches!(
+                                object.kind,
+                                sift_protocol::ObjectKind::Table
+                                    | sift_protocol::ObjectKind::View
+                                    | sift_protocol::ObjectKind::MaterializedView
+                                    | sift_protocol::ObjectKind::ForeignTable
+                                    | sift_protocol::ObjectKind::PartitionedTable
+                            )
+                        })
+                        .map(move |object| sift_protocol::ObjectPath {
+                            catalog: Some(catalog.name.clone()),
+                            schema: Some(schema.name.clone()),
+                            name: object.name.clone(),
+                            kind: Some(object.kind),
+                            routine_args: None,
+                        })
+                })
+            })
+            .collect()
+    }
+
+    fn request_data_search(&mut self, cx: &mut Context<Self>) {
+        let query = self.data_search_input.read(cx).text().trim().to_owned();
+        self.data_search_generation = self.data_search_generation.wrapping_add(1);
+        let generation = self.data_search_generation;
+        if query.is_empty() {
+            self.data_search_state = DataSearchState::Idle;
+            cx.notify();
+            return;
+        }
+        let tables = self.searchable_tables();
+        if tables.is_empty() {
+            self.data_search_state = DataSearchState::Failed(
+                "No searchable tables are available in the loaded schema".into(),
+            );
+            cx.notify();
+            return;
+        }
+        let request = sift_protocol::DataSearchRequest {
+            scope: sift_protocol::DataSearchScope::Tables { tables },
+            query,
+            per_table_limit: Some(10),
+            max_tables: Some(20),
+            columns: None,
+        };
+        let sent = self.executor_sender.as_ref().is_some_and(|sender| {
+            sender
+                .send(ExecutorCommand::SearchData {
+                    generation,
+                    request,
+                })
+                .is_ok()
+        });
+        self.data_search_state = if sent {
+            DataSearchState::Loading
+        } else {
+            DataSearchState::Failed("Database executor is unavailable".into())
+        };
+        cx.notify();
+    }
+
     fn disconnect(&mut self, cx: &mut Context<Self>) {
         if let Some(sender) = &self.executor_sender {
             let _ = sender.send(ExecutorCommand::Disconnect);
@@ -5184,6 +5313,7 @@ impl WorkspaceShell {
         self.connection_status = ConnectionStatus::Disconnected;
         self.connection_schema = ConnectionSchemaState::Unavailable;
         self.schema_search_state = SchemaSearchState::Idle;
+        self.data_search_state = DataSearchState::Idle;
         self.status.database = "No database".into();
         self.sync_database_item_states(cx);
         cx.notify();
@@ -8760,6 +8890,25 @@ impl WorkspaceShell {
         cx.notify();
     }
 
+    fn open_data_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !matches!(self.connection_status, ConnectionStatus::Connected { .. }) {
+            self.show_toast(
+                "Connect to a database before searching table data".into(),
+                cx,
+            );
+            return;
+        }
+        if self.searchable_tables().is_empty() {
+            self.show_toast("Refresh the schema before searching table data".into(), cx);
+            return;
+        }
+        self.modal = Some(Modal::DataSearch);
+        self.data_search_input
+            .update(cx, |input, cx| input.set_text("", cx));
+        self.data_search_input.focus_handle(cx).focus(window, cx);
+        cx.notify();
+    }
+
     fn open_data_results_modal(
         &mut self,
         pane: &Entity<Pane>,
@@ -9432,6 +9581,10 @@ impl WorkspaceShell {
             self.schema_search_input
                 .update(cx, |input, cx| input.set_text("", cx));
         }
+        if self.modal == Some(Modal::DataSearch) {
+            self.data_search_input
+                .update(cx, |input, cx| input.set_text("", cx));
+        }
         self.modal = None;
         // Return focus to the workspace so keybindings keep routing.
         self.focus_active_pane(window, cx);
@@ -9472,6 +9625,7 @@ impl WorkspaceShell {
                 self.dispatch_active_editor_action(&crate::editor::FindUsages, window, cx)
             }
             CommandId::SearchSchema => self.open_schema_search(window, cx),
+            CommandId::SearchData => self.open_data_search(window, cx),
             CommandId::NextSqlProblem => {
                 self.dispatch_active_editor_action(&crate::editor::GoToNextDiagnostic, window, cx)
             }
@@ -12420,12 +12574,15 @@ impl WorkspaceShell {
             let database_connection = matches!(modal, Modal::DatabaseConnection);
             let command_palette = matches!(modal, Modal::CommandPalette);
             let schema_search = matches!(modal, Modal::SchemaSearch);
+            let data_search = matches!(modal, Modal::DataSearch);
             let data_results = matches!(modal, Modal::DataResults(_));
             let instance_setup = matches!(modal, Modal::InstanceSetup);
             let card_width = if data_results {
                 0.0
             } else if settings || keymaps || schema_search {
                 720.0
+            } else if data_search {
+                900.0
             } else if server_picker || account {
                 360.0
             } else if instance_setup {
@@ -12762,6 +12919,159 @@ impl WorkspaceShell {
                                 .text_xs()
                                 .text_color(colors.muted_text)
                                 .child("↑/↓ navigate  ·  Enter open")
+                                .child("Esc close"),
+                        )
+                        .into_any_element()
+                }
+                Modal::DataSearch => {
+                    let state = self.data_search_state.clone();
+                    let (hits, summary) = match &state {
+                        DataSearchState::Ready { response, .. } => (
+                            response.hits.clone(),
+                            Some(format!(
+                                "{} match(es) across {} table(s){}",
+                                response.hits.len(),
+                                response.tables_searched,
+                                if response.truncated { " · capped" } else { "" }
+                            )),
+                        ),
+                        _ => (Vec::new(), None),
+                    };
+                    let has_hits = !hits.is_empty();
+                    div()
+                        .flex()
+                        .flex_col()
+                        .max_h(px(640.))
+                        .child(
+                            div()
+                                .h(px(42.))
+                                .px_2()
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .border_b_1()
+                                .border_color(colors.subtle_border)
+                                .bg(colors.toolbar)
+                                .child(icon(IconName::Search, colors.muted_text, 15.))
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .overflow_hidden()
+                                        .child(self.data_search_input.clone()),
+                                )
+                                .child(
+                                    IconButton::new(
+                                        "close-data-search",
+                                        IconName::Close,
+                                        "Close data search",
+                                    )
+                                    .square(px(26.))
+                                    .icon_size(13.)
+                                    .on_click(cx.listener(|shell, _, window, cx| {
+                                        shell.dismiss_modal(&DismissModal, window, cx)
+                                    })),
+                                ),
+                        )
+                        .when(has_hits, |modal| {
+                            modal.child(
+                                div()
+                                    .id("data-search-results")
+                                    .flex_1()
+                                    .min_h_0()
+                                    .overflow_y_scroll()
+                                    .p_2()
+                                    .flex()
+                                    .flex_col()
+                                    .gap_2()
+                                    .children(hits.into_iter().enumerate().map(|(index, hit)| {
+                                        let table = [
+                                            hit.table.catalog.as_deref(),
+                                            hit.table.schema.as_deref(),
+                                            Some(hit.table.name.as_str()),
+                                        ]
+                                        .into_iter()
+                                        .flatten()
+                                        .collect::<Vec<_>>()
+                                        .join(".");
+                                        let matched = hit.matched_columns.clone();
+                                        div()
+                                            .id(("data-search-hit", index))
+                                            .p_2()
+                                            .rounded_sm()
+                                            .border_1()
+                                            .border_color(colors.subtle_border)
+                                            .child(
+                                                div()
+                                                    .mb_1()
+                                                    .text_xs()
+                                                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                                                    .text_color(colors.muted_text)
+                                                    .child(table),
+                                            )
+                                            .child(
+                                                div()
+                                                    .flex()
+                                                    .flex_wrap()
+                                                    .gap_1()
+                                                    .children(hit.columns.into_iter().zip(hit.row.values).map(
+                                                        |(column, value)| {
+                                                            let is_match = matched.contains(&column);
+                                                            div()
+                                                                .px_1()
+                                                                .rounded_sm()
+                                                                .bg(if is_match {
+                                                                    colors.active_surface
+                                                                } else {
+                                                                    colors.surface
+                                                                })
+                                                                .child(format!(
+                                                                    "{column}: {}",
+                                                                    render_value(&value).text
+                                                                ))
+                                                        },
+                                                    )),
+                                            )
+                                    })),
+                            )
+                        })
+                        .when(!has_hits, |modal| {
+                            let (message, color) = match state {
+                                DataSearchState::Idle => (
+                                    "Type to search text-like columns across loaded tables".into(),
+                                    colors.muted_text,
+                                ),
+                                DataSearchState::Loading => {
+                                    ("Searching table data…".into(), colors.muted_text)
+                                }
+                                DataSearchState::Failed(message) => (message, colors.danger),
+                                DataSearchState::Ready { .. } => {
+                                    ("No matching rows".into(), colors.muted_text)
+                                }
+                            };
+                            modal.child(
+                                div()
+                                    .h(px(PALETTE_ROW_HEIGHT * 3.0))
+                                    .px_3()
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .text_color(color)
+                                    .child(message),
+                            )
+                        })
+                        .child(
+                            div()
+                                .h(px(28.))
+                                .px_2()
+                                .flex()
+                                .items_center()
+                                .justify_between()
+                                .border_t_1()
+                                .border_color(colors.subtle_border)
+                                .text_xs()
+                                .text_color(colors.muted_text)
+                                .child(summary.unwrap_or_else(|| "Bounded to 20 tables".into()))
                                 .child("Esc close"),
                         )
                         .into_any_element()
@@ -14959,6 +15269,7 @@ impl WorkspaceShell {
                     | Modal::Account
                     | Modal::CommandPalette
                     | Modal::SchemaSearch
+                    | Modal::DataSearch
                     | Modal::DataResults(_)
                     | Modal::DatabaseConnection
                     | Modal::ConfirmDeleteConnection(_)
@@ -16116,6 +16427,84 @@ mod tests {
             assert!(matches!(
                 shell.schema_search_state,
                 SchemaSearchState::Ready { .. }
+            ));
+        });
+    }
+
+    #[gpui::test]
+    fn data_search_uses_loaded_tables_and_ignores_stale_results(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let mut snapshot =
+            sift_protocol::SchemaSnapshot::empty(sift_protocol::SchemaScope::shallow());
+        snapshot.trees.push(sift_protocol::CatalogTree {
+            name: "warehouse".into(),
+            schemas: vec![sift_protocol::SchemaTree {
+                name: "public".into(),
+                objects: vec![sift_protocol::ObjectInfo::new(
+                    "customers",
+                    sift_protocol::ObjectKind::Table,
+                )],
+            }],
+        });
+
+        workspace.update(&mut cx, |shell, cx| {
+            shell.executor_sender = Some(sender);
+            shell.connection_schema = ConnectionSchemaState::Ready {
+                profile_id: 7,
+                snapshot: Box::new(snapshot),
+            };
+            shell
+                .data_search_input
+                .update(cx, |input, cx| input.set_text("Ada", cx));
+        });
+        let mut latest = None;
+        while let Ok(command) = receiver.try_recv() {
+            if let ExecutorCommand::SearchData {
+                generation,
+                request,
+            } = command
+            {
+                latest = Some((generation, request));
+            }
+        }
+        let (generation, request) = latest.expect("data search command");
+        assert_eq!(request.query, "Ada");
+        let sift_protocol::DataSearchScope::Tables { tables } = request.scope else {
+            panic!("expected explicit table scope");
+        };
+        assert_eq!(tables.len(), 1);
+        assert_eq!(tables[0].name, "customers");
+
+        workspace.update(&mut cx, |shell, cx| {
+            shell.on_executor_event(
+                ExecutorEvent::DataSearchLoaded {
+                    generation: generation.saturating_sub(1),
+                    response: Box::new(sift_protocol::DataSearchResponse {
+                        hits: Vec::new(),
+                        truncated: false,
+                        tables_searched: 1,
+                    }),
+                },
+                cx,
+            );
+            assert!(matches!(shell.data_search_state, DataSearchState::Loading));
+            shell.on_executor_event(
+                ExecutorEvent::DataSearchLoaded {
+                    generation,
+                    response: Box::new(sift_protocol::DataSearchResponse {
+                        hits: Vec::new(),
+                        truncated: false,
+                        tables_searched: 1,
+                    }),
+                },
+                cx,
+            );
+            assert!(matches!(
+                shell.data_search_state,
+                DataSearchState::Ready { .. }
             ));
         });
     }
