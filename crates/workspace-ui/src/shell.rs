@@ -1,14 +1,13 @@
 use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 use std::sync::Arc;
-use std::time::Duration;
 
 use gpui::{
     actions, deferred, div, img, prelude::*, px, uniform_list, App, Bounds, Context, CursorStyle,
     DefiniteLength, Div, Entity, EventEmitter, FocusHandle, Focusable, Hsla, IntoElement,
-    MouseButton, PathPromptOptions, Pixels, ResizeEdge, Role, ScrollHandle, ScrollStrategy,
-    SharedString, Subscription, Task, UniformListScrollHandle, Window, WindowBounds,
-    WindowControlArea,
+    Keystroke, MouseButton, PathPromptOptions, Pixels, ResizeEdge, Role, ScrollHandle,
+    ScrollStrategy, SharedString, Subscription, Task, UniformListScrollHandle, Window,
+    WindowBounds, WindowControlArea,
 };
 use sift_api_types::RoomId;
 use sift_ui::{
@@ -623,14 +622,6 @@ actions!(
         OpenCommandPalette,
         OpenSchemaSearch,
         OpenServerConnection,
-        KeyLanguageRoot,
-        KeyLanguageFind,
-        KeyLanguageView,
-        KeyLanguageExecute,
-        KeyLanguageTab,
-        KeyLanguageEdit,
-        KeyLanguageDatabase,
-        KeyLanguageWorkspace,
         DismissModal,
         PaletteUp,
         PaletteDown,
@@ -657,6 +648,35 @@ enum KeyLanguageHint {
     Edit,
     Database,
     Workspace,
+}
+
+fn format_pending_keys(keys: &[Keystroke]) -> String {
+    keys.iter()
+        .map(|key| match key.unparse().as_str() {
+            "space" | "ctrl-k" => "<leader>".to_owned(),
+            _ => key.unparse(),
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn key_language_hint(keys: &[Keystroke]) -> Option<KeyLanguageHint> {
+    match keys.first()?.unparse().as_str() {
+        "space" | "ctrl-k" => {}
+        _ => return None,
+    }
+
+    match keys.get(1).map(Keystroke::unparse).as_deref() {
+        None => Some(KeyLanguageHint::Root),
+        Some("f") => Some(KeyLanguageHint::Find),
+        Some("v") => Some(KeyLanguageHint::View),
+        Some("x") => Some(KeyLanguageHint::Execute),
+        Some("t") => Some(KeyLanguageHint::Tab),
+        Some("e") => Some(KeyLanguageHint::Edit),
+        Some("d") => Some(KeyLanguageHint::Database),
+        Some("w") => Some(KeyLanguageHint::Workspace),
+        Some(_) => None,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2929,7 +2949,7 @@ pub struct WorkspaceShell {
     active_bottom_tool: BottomTool,
     modal: Option<Modal>,
     key_language_hint: Option<KeyLanguageHint>,
-    key_language_hint_epoch: u64,
+    key_buffer: String,
     app_bar_expanded: bool,
     app_bar_menu: Option<AppBarMenu>,
     toasts: Vec<Toast>,
@@ -3216,6 +3236,10 @@ impl WorkspaceShell {
             .collect::<Vec<_>>();
         let pane_layout =
             pane_layout::repair(workspace.pane_layout, &pane_ids, workspace.pane_flexes);
+        cx.observe_pending_input(window, |shell, window, cx| {
+            shell.sync_pending_input(window, cx);
+        })
+        .detach();
         Self {
             focus_handle: cx.focus_handle(),
             query_input,
@@ -3269,7 +3293,7 @@ impl WorkspaceShell {
             active_bottom_tool: workspace.bottom_tool,
             modal: None,
             key_language_hint: None,
-            key_language_hint_epoch: 0,
+            key_buffer: String::new(),
             app_bar_expanded: false,
             app_bar_menu: None,
             toasts: Vec::new(),
@@ -7689,22 +7713,10 @@ impl WorkspaceShell {
         self.open_schema_search(window, cx);
     }
 
-    fn show_key_language(&mut self, hint: KeyLanguageHint, cx: &mut Context<Self>) {
-        self.key_language_hint = Some(hint);
-        self.key_language_hint_epoch = self.key_language_hint_epoch.wrapping_add(1);
-        let epoch = self.key_language_hint_epoch;
-        cx.spawn(async move |shell, cx| {
-            cx.background_executor()
-                .timer(Duration::from_millis(2200))
-                .await;
-            let _ = shell.update(cx, |shell, cx| {
-                if shell.key_language_hint_epoch == epoch {
-                    shell.key_language_hint = None;
-                    cx.notify();
-                }
-            });
-        })
-        .detach();
+    fn sync_pending_input(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let pending = window.pending_input_keystrokes().unwrap_or_default();
+        self.key_buffer = format_pending_keys(pending);
+        self.key_language_hint = key_language_hint(pending);
         cx.notify();
     }
 
@@ -14050,30 +14062,6 @@ impl gpui::Render for WorkspaceShell {
                     )
                 }),
             )
-            .on_action(cx.listener(|shell, _: &KeyLanguageRoot, _, cx| {
-                shell.show_key_language(KeyLanguageHint::Root, cx)
-            }))
-            .on_action(cx.listener(|shell, _: &KeyLanguageFind, _, cx| {
-                shell.show_key_language(KeyLanguageHint::Find, cx)
-            }))
-            .on_action(cx.listener(|shell, _: &KeyLanguageView, _, cx| {
-                shell.show_key_language(KeyLanguageHint::View, cx)
-            }))
-            .on_action(cx.listener(|shell, _: &KeyLanguageExecute, _, cx| {
-                shell.show_key_language(KeyLanguageHint::Execute, cx)
-            }))
-            .on_action(cx.listener(|shell, _: &KeyLanguageTab, _, cx| {
-                shell.show_key_language(KeyLanguageHint::Tab, cx)
-            }))
-            .on_action(cx.listener(|shell, _: &KeyLanguageEdit, _, cx| {
-                shell.show_key_language(KeyLanguageHint::Edit, cx)
-            }))
-            .on_action(cx.listener(|shell, _: &KeyLanguageDatabase, _, cx| {
-                shell.show_key_language(KeyLanguageHint::Database, cx)
-            }))
-            .on_action(cx.listener(|shell, _: &KeyLanguageWorkspace, _, cx| {
-                shell.show_key_language(KeyLanguageHint::Workspace, cx)
-            }))
             .on_action(cx.listener(Self::dismiss_modal))
             .on_action(cx.listener(Self::palette_up))
             .on_action(cx.listener(Self::palette_down))
@@ -15541,23 +15529,18 @@ mod tests {
             .any(|command| command.id == CommandId::SearchSchema));
     }
 
-    #[gpui::test]
-    fn key_language_prefix_actions_drive_discovery_strip(cx: &mut TestAppContext) {
-        let window = shell(cx);
-        let mut cx = VisualTestContext::from_window(window.into(), cx);
-        let workspace = window.root(&mut cx).unwrap();
-        let focus = workspace.read_with(&cx, |shell, cx| shell.focus_handle(cx));
-        cx.update(|window, cx| focus.dispatch_action(&KeyLanguageRoot, window, cx));
-        assert_eq!(
-            workspace.read_with(&cx, |shell, _| shell.key_language_hint),
-            Some(KeyLanguageHint::Root)
-        );
-        cx.update(|window, cx| focus.dispatch_action(&KeyLanguageFind, window, cx));
-        assert_eq!(
-            workspace.read_with(&cx, |shell, _| shell.key_language_hint),
-            Some(KeyLanguageHint::Find)
-        );
-        assert!(cx.debug_bounds("key-language-hint").is_some());
+    #[test]
+    fn pending_keys_drive_key_language_and_buffer() {
+        let root = [Keystroke::parse("space").unwrap()];
+        assert_eq!(key_language_hint(&root), Some(KeyLanguageHint::Root));
+        assert_eq!(format_pending_keys(&root), "<leader>");
+
+        let find = [
+            Keystroke::parse("ctrl-k").unwrap(),
+            Keystroke::parse("f").unwrap(),
+        ];
+        assert_eq!(key_language_hint(&find), Some(KeyLanguageHint::Find));
+        assert_eq!(format_pending_keys(&find), "<leader> f");
     }
 
     #[gpui::test]

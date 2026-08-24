@@ -126,54 +126,15 @@ pub fn shell_key_bindings() -> Vec<KeyBinding> {
 
     // Vim-like Sift command language. Space is leader only in Vim normal
     // mode or non-text UI surfaces. Ctrl+K is the standard-keymap fallback.
-    // Exact prefix actions keep the compact which-key guide synchronized with
-    // GPUI's multi-keystroke resolver.
+    // The workspace observes GPUI's pending input directly, so prefix help is
+    // visible immediately without binding exact prefixes and waiting for the
+    // multi-keystroke timeout.
     for (leader, language_context) in [
         ("space", "vim_mode == normal"),
         ("space", "SiftWorkspace && !SiftEditor && !SiftTextInput"),
         ("ctrl-k", "SiftWorkspace && !SiftTextInput"),
     ] {
         bindings.extend([
-            KeyBinding::new(
-                leader,
-                sift_workspace_ui::KeyLanguageRoot,
-                Some(language_context),
-            ),
-            KeyBinding::new(
-                &format!("{leader} f"),
-                sift_workspace_ui::KeyLanguageFind,
-                Some(language_context),
-            ),
-            KeyBinding::new(
-                &format!("{leader} v"),
-                sift_workspace_ui::KeyLanguageView,
-                Some(language_context),
-            ),
-            KeyBinding::new(
-                &format!("{leader} x"),
-                sift_workspace_ui::KeyLanguageExecute,
-                Some(language_context),
-            ),
-            KeyBinding::new(
-                &format!("{leader} t"),
-                sift_workspace_ui::KeyLanguageTab,
-                Some(language_context),
-            ),
-            KeyBinding::new(
-                &format!("{leader} e"),
-                sift_workspace_ui::KeyLanguageEdit,
-                Some(language_context),
-            ),
-            KeyBinding::new(
-                &format!("{leader} d"),
-                sift_workspace_ui::KeyLanguageDatabase,
-                Some(language_context),
-            ),
-            KeyBinding::new(
-                &format!("{leader} w"),
-                sift_workspace_ui::KeyLanguageWorkspace,
-                Some(language_context),
-            ),
             KeyBinding::new(
                 &format!("{leader} f c"),
                 OpenCommandPalette,
@@ -287,6 +248,6 @@ mod tests {
 
     #[test]
     fn keymap_has_stable_action_coverage() {
-        assert_eq!(shell_key_bindings().len(), 91);
+        assert_eq!(shell_key_bindings().len(), 67);
     }
 }

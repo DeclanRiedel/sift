@@ -15,6 +15,11 @@ from the standard keymap. Insert-mode Space stays literal. `:` in normal mode
 always opens Sift's searchable command palette; Sift does not expose a separate
 ModalKit Ex prompt.
 
+Pending workspace chords are observed directly from GPUI, so discovery appears
+on the first key without waiting for the chord timeout. The status bar's
+`BUFFER` segment mirrors that chord, falling back to the active editor's pending
+Vim sequence.
+
 Families stay small and mnemonic:
 
 - `f` find

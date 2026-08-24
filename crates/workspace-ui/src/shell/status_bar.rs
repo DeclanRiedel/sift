@@ -98,6 +98,16 @@ pub(super) fn render_status_bar(
         ),
         None => ("-", "No active editor", None),
     };
+    let key_buffer = if shell.key_buffer.is_empty() {
+        vim_entered.unwrap_or_default()
+    } else {
+        shell.key_buffer.clone()
+    };
+    let key_buffer_label = if key_buffer.is_empty() {
+        "—".to_owned()
+    } else {
+        key_buffer.clone()
+    };
 
     div()
         .id("status-bar")
@@ -287,28 +297,33 @@ pub(super) fn render_status_bar(
                         .child(mode_label)
                         .tooltip(move |_, cx| cx.new(|_| Tooltip::new(mode_tooltip)).into())
                 })
-                .children(vim_entered.map(|entered| {
+                .child({
                     div()
-                        .id("footer-vim-entered")
-                        .aria_label(if entered.is_empty() {
-                            "No pending Vim keys".to_owned()
+                        .id("footer-key-buffer")
+                        .aria_label(if key_buffer.is_empty() {
+                            "Key buffer is empty".to_owned()
                         } else {
-                            format!("Pending Vim keys: {entered}")
+                            format!("Key buffer: {key_buffer}")
                         })
                         .h(theme.metrics.compact_control_height)
-                        .min_w(px(28.))
+                        .min_w(px(64.))
                         .px_1()
                         .flex()
                         .items_center()
-                        .justify_end()
-                        .font_family("monospace")
-                        .text_color(colors.accent)
-                        .child(entered)
+                        .gap_1()
+                        .child(div().text_color(colors.muted_text).child("BUFFER"))
+                        .child(
+                            div()
+                                .font_family("monospace")
+                                .text_color(colors.accent)
+                                .child(key_buffer_label),
+                        )
                         .tooltip({
-                            let message: SharedString = "Pending Vim key sequence".into();
+                            let message: SharedString =
+                                "Pending IDE chord or Vim key sequence".into();
                             move |_, cx| cx.new(|_| Tooltip::new(message.clone())).into()
                         })
-                }))
+                })
                 .child(separator())
                 .child(
                     button(
