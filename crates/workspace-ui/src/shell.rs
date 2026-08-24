@@ -1220,6 +1220,7 @@ pub enum ExecutorCommand {
 #[derive(Debug)]
 pub enum ExecutorEvent {
     Connection(ConnectionStatus),
+    ConnectionHealth(Result<(), String>),
     TransactionChanged(Result<Option<sift_protocol::TransactionInfo>, String>),
     CapabilitiesLoaded {
         profile_id: i64,
@@ -3259,6 +3260,7 @@ pub struct WorkspaceShell {
     account_pending: bool,
     account_error: Option<String>,
     connection_status: ConnectionStatus,
+    connection_health_error: Option<String>,
     operation_capabilities:
         HashMap<sift_protocol::OperationKind, sift_protocol::OperationCapability>,
     connection_schema: ConnectionSchemaState,
@@ -3676,6 +3678,7 @@ impl WorkspaceShell {
             account_pending: false,
             account_error: None,
             connection_status: ConnectionStatus::Disconnected,
+            connection_health_error: None,
             operation_capabilities: HashMap::new(),
             connection_schema: ConnectionSchemaState::Unavailable,
             schema_search_generation: 0,
@@ -4379,6 +4382,7 @@ impl WorkspaceShell {
     fn on_executor_event(&mut self, event: ExecutorEvent, cx: &mut Context<Self>) {
         match event {
             ExecutorEvent::Connection(status) => {
+                self.connection_health_error = None;
                 if let ConnectionStatus::Connected { profile_id, .. } = &status {
                     self.expanded_connections.insert(*profile_id);
                 }
@@ -4456,6 +4460,10 @@ impl WorkspaceShell {
                     }
                     ConnectionStatus::Disconnected | ConnectionStatus::Connecting { .. } => {}
                 }
+                cx.notify();
+            }
+            ExecutorEvent::ConnectionHealth(result) => {
+                self.connection_health_error = result.err();
                 cx.notify();
             }
             ExecutorEvent::TransactionChanged(result) => {

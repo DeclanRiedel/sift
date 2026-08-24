@@ -496,11 +496,25 @@ async fn run_query_executor(
     events: tokio::sync::mpsc::UnboundedSender<ExecutorEvent>,
 ) {
     let mut context: Option<QueryContext> = None;
+    let mut health_tick = tokio::time::interval(std::time::Duration::from_secs(15));
+    health_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut active_queries: HashMap<u64, (u64, tokio::sync::mpsc::UnboundedSender<QueryControl>)> =
         HashMap::new();
     loop {
         let command = tokio::select! {
             command = commands.recv() => command,
+            _ = health_tick.tick(), if context.is_some() => {
+                let opened = context.as_ref().expect("guarded by context");
+                let result = opened.client
+                    .ping_connection(opened.session, opened.metadata_connection)
+                    .await
+                    .map(|_| ())
+                    .map_err(|error| format!("database ping failed: {error}"));
+                if events.send(ExecutorEvent::ConnectionHealth(result)).is_err() {
+                    return;
+                }
+                continue;
+            }
             changed = targets.changed() => {
                 if changed.is_err() {
                     return;

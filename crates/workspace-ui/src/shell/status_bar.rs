@@ -50,9 +50,16 @@ pub(super) fn render_status_bar(
             .bg(colors.border)
     };
     let target_label = match &shell.connection_status {
-        ConnectionStatus::Connected { .. } => {
-            format!("{} · {}", shell.status.database, shell.status.room)
-        }
+        ConnectionStatus::Connected { .. } => match &shell.connection_health_error {
+            Some(_) => format!(
+                "{} · Degraded · {}",
+                shell.status.database, shell.status.room
+            ),
+            None => format!(
+                "{} · Healthy · {}",
+                shell.status.database, shell.status.room
+            ),
+        },
         _ => shell.status.database.clone(),
     };
     let (cursor_label, cursor_tooltip) = shell.active_cursor_position(cx).map_or_else(
@@ -270,6 +277,11 @@ pub(super) fn render_status_bar(
                         .gap_1()
                         .child(div().size(px(6.)).flex_none().rounded_full().bg(
                             match &shell.connection_status {
+                                ConnectionStatus::Connected { .. }
+                                    if shell.connection_health_error.is_some() =>
+                                {
+                                    colors.warning
+                                }
                                 ConnectionStatus::Connected { .. } => colors.success,
                                 ConnectionStatus::Connecting { .. } => colors.warning,
                                 ConnectionStatus::Failed { .. } => colors.danger,
@@ -277,6 +289,21 @@ pub(super) fn render_status_bar(
                             },
                         ))
                         .child(div().min_w_0().truncate().child(target_label)),
+                )
+                .children(
+                    matches!(shell.connection_status, ConnectionStatus::Connected { .. }).then(
+                        || {
+                            button(
+                                "footer-disconnect-database",
+                                IconName::Close,
+                                "Disconnect the active database session".into(),
+                                false,
+                                None,
+                                false,
+                            )
+                            .on_click(cx.listener(|shell, _, _, cx| shell.disconnect(cx)))
+                        },
+                    ),
                 )
                 .child(
                     div()
