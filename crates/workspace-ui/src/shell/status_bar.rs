@@ -150,20 +150,6 @@ pub(super) fn render_status_bar(
                 .gap_1()
                 .child(
                     button(
-                        "footer-saved-queries",
-                        IconName::Folder,
-                        "Saved queries".into(),
-                        shell.left_dock.presentation.open
-                            && shell.active_left_panel == LeftPanel::SavedQueries,
-                        None,
-                        false,
-                    )
-                    .on_click(cx.listener(|shell, _, _, cx| {
-                        shell.select_left_panel(LeftPanel::SavedQueries, cx)
-                    })),
-                )
-                .child(
-                    button(
                         "footer-connections",
                         IconName::Database,
                         "Connections".into(),
@@ -208,18 +194,44 @@ pub(super) fn render_status_bar(
                     })),
                 )
                 .child(
-                    button(
-                        "footer-query-outline",
-                        IconName::Outline,
-                        "Query outline".into(),
-                        shell.left_dock.presentation.open
-                            && shell.active_left_panel == LeftPanel::QueryOutline,
-                        None,
-                        false,
-                    )
-                    .on_click(cx.listener(|shell, _, _, cx| {
-                        shell.select_left_panel(LeftPanel::QueryOutline, cx)
-                    })),
+                    div()
+                        .debug_selector(|| "footer-query-outline".into())
+                        .child(
+                            button(
+                                "footer-query-outline",
+                                IconName::Outline,
+                                "Query outline".into(),
+                                shell.left_dock.presentation.open
+                                    && shell.active_left_panel == LeftPanel::QueryOutline,
+                                None,
+                                false,
+                            )
+                            .on_click(cx.listener(
+                                |shell, _, _, cx| {
+                                    shell.select_left_panel(LeftPanel::QueryOutline, cx)
+                                },
+                            )),
+                        ),
+                )
+                .child(
+                    div()
+                        .debug_selector(|| "footer-saved-queries".into())
+                        .child(
+                            button(
+                                "footer-saved-queries",
+                                IconName::Folder,
+                                "Saved queries".into(),
+                                shell.left_dock.presentation.open
+                                    && shell.active_left_panel == LeftPanel::SavedQueries,
+                                None,
+                                false,
+                            )
+                            .on_click(cx.listener(
+                                |shell, _, _, cx| {
+                                    shell.select_left_panel(LeftPanel::SavedQueries, cx)
+                                },
+                            )),
+                        ),
                 ),
         )
         .child(separator())
@@ -231,17 +243,6 @@ pub(super) fn render_status_bar(
                 .overflow_x_hidden()
                 .items_center()
                 .gap_1()
-                .child(
-                    button(
-                        "footer-project-search",
-                        IconName::Search,
-                        "Search project".into(),
-                        false,
-                        None,
-                        false,
-                    )
-                    .on_click(cx.listener(|shell, _, _, cx| shell.show_project_search(cx))),
-                )
                 .child(
                     button(
                         "footer-problems",
@@ -305,52 +306,32 @@ pub(super) fn render_status_bar(
                         },
                     ),
                 )
-                .child(
+                .children(shell.transaction.as_ref().map(|_| {
                     div()
                         .flex_none()
                         .flex()
                         .items_center()
                         .gap_1()
                         .child(shell.status.transaction.clone())
-                        .when(shell.transaction.is_none(), |controls| {
-                            controls.child(
-                                Button::new("footer-begin-transaction", "Begin")
-                                    .debug_selector("footer-begin-transaction")
-                                    .tone(ButtonTone::Ghost)
-                                    .disabled(
-                                        shell.transaction_pending
-                                            || !matches!(
-                                                shell.connection_status,
-                                                ConnectionStatus::Connected { .. }
-                                            ),
-                                    )
-                                    .on_click(
-                                        cx.listener(|shell, _, _, cx| shell.begin_transaction(cx)),
-                                    ),
-                            )
-                        })
-                        .when(shell.transaction.is_some(), |controls| {
-                            controls
-                                .child(
-                                    Button::new("footer-commit-transaction", "Commit")
-                                        .debug_selector("footer-commit-transaction")
-                                        .tone(ButtonTone::Accent)
-                                        .disabled(shell.transaction_pending)
-                                        .on_click(cx.listener(|shell, _, _, cx| {
-                                            shell.finish_transaction(true, cx)
-                                        })),
-                                )
-                                .child(
-                                    Button::new("footer-rollback-transaction", "Rollback")
-                                        .debug_selector("footer-rollback-transaction")
-                                        .tone(ButtonTone::DangerGhost)
-                                        .disabled(shell.transaction_pending)
-                                        .on_click(cx.listener(|shell, _, _, cx| {
-                                            shell.finish_transaction(false, cx)
-                                        })),
-                                )
-                        }),
-                ),
+                        .child(
+                            Button::new("footer-commit-transaction", "Commit")
+                                .debug_selector("footer-commit-transaction")
+                                .tone(ButtonTone::Accent)
+                                .disabled(shell.transaction_pending)
+                                .on_click(cx.listener(|shell, _, _, cx| {
+                                    shell.finish_transaction(true, cx)
+                                })),
+                        )
+                        .child(
+                            Button::new("footer-rollback-transaction", "Rollback")
+                                .debug_selector("footer-rollback-transaction")
+                                .tone(ButtonTone::DangerGhost)
+                                .disabled(shell.transaction_pending)
+                                .on_click(cx.listener(|shell, _, _, cx| {
+                                    shell.finish_transaction(false, cx)
+                                })),
+                        )
+                })),
         )
         .child(separator())
         .child(

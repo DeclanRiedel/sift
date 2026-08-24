@@ -3824,6 +3824,8 @@ impl WorkspaceShell {
                 self.connection_status,
                 ConnectionStatus::Connected { .. }
             ),
+            transaction_active: self.transaction.is_some(),
+            transaction_pending: self.transaction_pending,
         }
     }
 
@@ -8199,10 +8201,6 @@ impl WorkspaceShell {
         cx.notify();
     }
 
-    fn show_project_search(&mut self, cx: &mut Context<Self>) {
-        self.show_toast("Project search is not wired to the desktop yet".into(), cx);
-    }
-
     fn active_cursor_position(&self, cx: &App) -> Option<(usize, usize)> {
         self.panes
             .get(self.active_pane)
@@ -10617,6 +10615,14 @@ impl WorkspaceShell {
             CommandId::RedoQuery => {
                 self.dispatch_active_editor_action(&crate::editor::Redo, window, cx)
             }
+            CommandId::Cut => self.dispatch_active_editor_action(&crate::editor::Cut, window, cx),
+            CommandId::Copy => self.dispatch_active_editor_action(&crate::editor::Copy, window, cx),
+            CommandId::Paste => {
+                self.dispatch_active_editor_action(&crate::editor::Paste, window, cx)
+            }
+            CommandId::SelectAll => {
+                self.dispatch_active_editor_action(&crate::editor::SelectAll, window, cx)
+            }
             CommandId::CompleteSql => {
                 self.dispatch_active_editor_action(&crate::editor::Complete, window, cx)
             }
@@ -10631,6 +10637,9 @@ impl WorkspaceShell {
             }
             CommandId::SearchSchema => self.open_schema_search(window, cx),
             CommandId::SearchData => self.open_data_search(window, cx),
+            CommandId::BeginTransaction => self.begin_transaction(cx),
+            CommandId::CommitTransaction => self.finish_transaction(true, cx),
+            CommandId::RollbackTransaction => self.finish_transaction(false, cx),
             CommandId::NextSqlProblem => {
                 self.dispatch_active_editor_action(&crate::editor::GoToNextDiagnostic, window, cx)
             }
@@ -10990,8 +10999,8 @@ impl WorkspaceShell {
             .then(|| self.render_app_bar_menu_button(AppBarMenu::Go, "Go", false, cx));
         let run_menu = navigation_expanded
             .then(|| self.render_app_bar_menu_button(AppBarMenu::Run, "Run", false, cx));
-        let window_menu = navigation_expanded
-            .then(|| self.render_app_bar_menu_button(AppBarMenu::Window, "Window", false, cx));
+        let terminal_menu = navigation_expanded
+            .then(|| self.render_app_bar_menu_button(AppBarMenu::Terminal, "Terminal", false, cx));
         let help_menu = navigation_expanded
             .then(|| self.render_app_bar_menu_button(AppBarMenu::Help, "Help", false, cx));
 
@@ -11139,7 +11148,7 @@ impl WorkspaceShell {
                     .children(view_menu)
                     .children(go_menu)
                     .children(run_menu)
-                    .children(window_menu)
+                    .children(terminal_menu)
                     .children(help_menu)
                     .child(
                         div()
@@ -13747,7 +13756,13 @@ impl WorkspaceShell {
             let instance_setup = matches!(modal, Modal::InstanceSetup);
             let card_width = if data_results {
                 0.0
-            } else if settings || keymaps || schema_search || result_cell_edit || plan_captures {
+            } else if settings
+                || keymaps
+                || command_palette
+                || schema_search
+                || result_cell_edit
+                || plan_captures
+            {
                 720.0
             } else if data_search {
                 900.0
@@ -13775,7 +13790,7 @@ impl WorkspaceShell {
                         .flex_col()
                         .child(
                             div()
-                                .h(px(38.))
+                                .h(px(42.))
                                 .px_2()
                                 .flex()
                                 .items_center()
@@ -13790,6 +13805,22 @@ impl WorkspaceShell {
                                         .min_w_0()
                                         .overflow_hidden()
                                         .child(self.query_input.clone()),
+                                )
+                                .child(
+                                    div()
+                                        .debug_selector(|| "close-command-palette".into())
+                                        .child(
+                                            IconButton::new(
+                                                "close-command-palette",
+                                                IconName::Close,
+                                                "Close command palette",
+                                            )
+                                            .square(px(26.))
+                                            .icon_size(13.)
+                                            .on_click(cx.listener(|shell, _, window, cx| {
+                                                shell.dismiss_modal(&DismissModal, window, cx)
+                                            })),
+                                        ),
                                 ),
                         )
                         .when(commands.is_empty(), |palette| {
@@ -13839,6 +13870,7 @@ impl WorkspaceShell {
                                                     });
                                                 let mut row = div()
                                                     .id(id.as_str())
+                                                    .w_full()
                                                     .flex()
                                                     .items_center()
                                                     .justify_between()
@@ -13894,9 +13926,24 @@ impl WorkspaceShell {
                                     }),
                                 )
                                 .h(px(palette_height))
+                                .w_full()
                                 .track_scroll(&self.palette_scroll_handle),
                             )
                         })
+                        .child(
+                            div()
+                                .h(px(28.))
+                                .px_2()
+                                .flex()
+                                .items_center()
+                                .justify_between()
+                                .border_t_1()
+                                .border_color(colors.subtle_border)
+                                .text_xs()
+                                .text_color(colors.muted_text)
+                                .child("↑/↓ navigate  ·  Enter run")
+                                .child("Esc close"),
+                        )
                         .into_any_element()
                 }
                 Modal::SchemaSearch => {
@@ -19744,13 +19791,12 @@ mod tests {
     }
 
     #[test]
-    fn app_bar_scaffold_marks_unimplemented_entries() {
+    fn app_bar_menus_only_expose_real_actions() {
         let main = app_bar::menu_items(AppBarMenu::Main);
         assert_eq!(
             main.iter().map(|item| item.label).collect::<Vec<_>>(),
-            vec!["About Sift", "Check for Updates…", "Quit Sift"]
+            vec!["Command Palette…", "Settings", "Quit Sift"]
         );
-        assert!(main[..2].iter().all(|item| item.command.is_none()));
         assert_eq!(main[2].command, Some(CommandId::Quit));
 
         let profile = app_bar::menu_items(AppBarMenu::Profile);
@@ -19776,10 +19822,12 @@ mod tests {
             AppBarMenu::View,
             AppBarMenu::Go,
             AppBarMenu::Run,
-            AppBarMenu::Window,
+            AppBarMenu::Terminal,
             AppBarMenu::Help,
         ] {
-            assert!(!app_bar::menu_items(menu).is_empty());
+            let items = app_bar::menu_items(menu);
+            assert!(!items.is_empty());
+            assert!(items.iter().all(|item| item.command.is_some()));
         }
     }
 
@@ -21673,6 +21721,11 @@ mod tests {
         let window = shell(cx);
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         let workspace = window.root(&mut cx).unwrap();
+        cx.run_until_parked();
+        let outline = cx.debug_bounds("footer-query-outline").unwrap();
+        let saved = cx.debug_bounds("footer-saved-queries").unwrap();
+        assert!(saved.left() >= outline.right());
+        assert!(cx.debug_bounds("footer-project-search").is_none());
 
         workspace.update_in(&mut cx, |shell, window, cx| {
             shell.select_left_panel(LeftPanel::Collaboration, cx);
@@ -21708,6 +21761,19 @@ mod tests {
             assert!(!snapshot.workspace.bottom_dock.open);
             assert!(!snapshot.workspace.right_dock.open);
         });
+    }
+
+    #[gpui::test]
+    fn command_palette_matches_schema_search_modal_chrome(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        let focus = workspace.read_with(&cx, |shell, cx| shell.focus_handle(cx));
+        cx.update(|window, cx| focus.dispatch_action(&OpenCommandPalette, window, cx));
+        cx.run_until_parked();
+
+        assert_eq!(cx.debug_bounds("modal-card").unwrap().size.width, px(720.));
+        assert!(cx.debug_bounds("close-command-palette").is_some());
     }
 
     #[gpui::test]
@@ -21828,8 +21894,10 @@ mod tests {
         });
         cx.run_until_parked();
 
-        let begin = cx.debug_bounds("footer-begin-transaction").unwrap();
-        cx.simulate_click(begin.center(), Modifiers::default());
+        assert!(cx.debug_bounds("footer-begin-transaction").is_none());
+        workspace.update_in(&mut cx, |shell, window, cx| {
+            shell.run_command(CommandId::BeginTransaction, window, cx)
+        });
         assert!(matches!(
             receiver.try_recv(),
             Ok(ExecutorCommand::BeginTransaction)
@@ -21857,8 +21925,10 @@ mod tests {
         });
         cx.run_until_parked();
 
-        let begin = cx.debug_bounds("footer-begin-transaction").unwrap();
-        cx.simulate_click(begin.center(), Modifiers::default());
+        assert!(cx.debug_bounds("footer-begin-transaction").is_none());
+        workspace.update_in(&mut cx, |shell, window, cx| {
+            shell.run_command(CommandId::BeginTransaction, window, cx)
+        });
         assert!(matches!(
             receiver.try_recv(),
             Ok(ExecutorCommand::BeginTransaction)

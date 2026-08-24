@@ -97,25 +97,34 @@ fn main() {
         .run(move |cx| {
             cx.bind_keys(shell_key_bindings());
             cx.set_menus([
-                Menu::new("Sift").items([
-                    MenuItem::action("Connect to Server…", OpenServerConnection),
-                    MenuItem::separator(),
-                    MenuItem::action("Command Palette…", OpenCommandPalette),
-                ]),
-                Menu::new("Workspace").items([
-                    MenuItem::action("Split Pane", SplitPane),
-                    MenuItem::action("Focus Next Pane", FocusNextPane),
-                    MenuItem::action("Close Pane", CloseActivePane),
-                    MenuItem::separator(),
+                Menu::new("File").items([
                     MenuItem::action("Save Item", SaveActiveItem),
                     MenuItem::action("Close Item", CloseActiveItem),
+                    MenuItem::action("Close Pane", CloseActivePane),
                 ]),
                 Menu::new("Edit").items([
+                    MenuItem::action("Undo", ed::Undo),
+                    MenuItem::action("Redo", ed::Redo),
+                    MenuItem::separator(),
+                    MenuItem::action("Cut", ed::Cut),
+                    MenuItem::action("Copy", ed::Copy),
+                    MenuItem::action("Paste", ed::Paste),
+                    MenuItem::separator(),
                     MenuItem::action("Find and Replace…", ed::OpenFind),
                     MenuItem::action("Find Next", ed::FindNext),
                     MenuItem::action("Find Previous", ed::FindPrevious),
                 ]),
-                Menu::new("Query").items([
+                Menu::new("Selection").items([MenuItem::action("Select All", ed::SelectAll)]),
+                Menu::new("View").items([
+                    MenuItem::action("Connections Dock", ToggleLeftDock),
+                    MenuItem::action("Inspector Dock", ToggleRightDock),
+                    MenuItem::action("Bottom Dock", ToggleBottomDock),
+                ]),
+                Menu::new("Go").items([
+                    MenuItem::action("Focus Next Pane", FocusNextPane),
+                    MenuItem::action("Split Pane", SplitPane),
+                ]),
+                Menu::new("Run").items([
                     MenuItem::action("Run Statement", ed::ExecuteStatement),
                     MenuItem::action("Run Document", ed::ExecuteDocument),
                     MenuItem::action("Cancel Query", CancelExecution),
@@ -126,10 +135,11 @@ fn main() {
                     MenuItem::action("Find Usages", ed::FindUsages),
                     MenuItem::action("Go to Next Problem", ed::GoToNextDiagnostic),
                 ]),
-                Menu::new("View").items([
-                    MenuItem::action("Connections Dock", ToggleLeftDock),
-                    MenuItem::action("Inspector Dock", ToggleRightDock),
-                    MenuItem::action("Results Dock", ToggleBottomDock),
+                Menu::new("Terminal")
+                    .items([MenuItem::action("Toggle Bottom Dock", ToggleBottomDock)]),
+                Menu::new("Help").items([
+                    MenuItem::action("Command Palette…", OpenCommandPalette),
+                    MenuItem::action("Connect to Server…", OpenServerConnection),
                 ]),
             ]);
             let text = Some("SiftTextInput");

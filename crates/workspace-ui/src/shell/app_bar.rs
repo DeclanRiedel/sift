@@ -11,7 +11,7 @@ pub(super) enum AppBarMenu {
     View,
     Go,
     Run,
-    Window,
+    Terminal,
     Help,
     Profile,
 }
@@ -32,77 +32,64 @@ impl AppBarMenuItem {
             command: Some(definition.id),
         }
     }
-
-    const fn unimplemented(label: &'static str) -> Self {
-        Self {
-            label,
-            shortcut: "",
-            command: None,
-        }
-    }
 }
 
 pub(super) fn menu_items(menu: AppBarMenu) -> Vec<AppBarMenuItem> {
     use AppBarMenuItem as Item;
     match menu {
         AppBarMenu::Main => vec![
-            Item::unimplemented("About Sift"),
-            Item::unimplemented("Check for Updates…"),
+            Item::available(CommandId::OpenCommandPalette),
+            Item::available(CommandId::OpenSettings),
             Item::available(CommandId::Quit),
         ],
         AppBarMenu::File => vec![
-            Item::unimplemented("New Query"),
-            Item::unimplemented("Open…"),
             Item::available(CommandId::SaveItem),
             Item::available(CommandId::CloseItem),
+            Item::available(CommandId::ClosePane),
         ],
         AppBarMenu::Edit => vec![
             Item::available(CommandId::UndoQuery),
             Item::available(CommandId::RedoQuery),
-            Item::unimplemented("Cut"),
-            Item::unimplemented("Copy"),
-            Item::unimplemented("Paste"),
+            Item::available(CommandId::Cut),
+            Item::available(CommandId::Copy),
+            Item::available(CommandId::Paste),
         ],
-        AppBarMenu::Selection => vec![
-            Item::unimplemented("Select All"),
-            Item::unimplemented("Expand Selection"),
-            Item::unimplemented("Shrink Selection"),
-            Item::unimplemented("Add Cursor Above"),
-            Item::unimplemented("Add Cursor Below"),
-        ],
+        AppBarMenu::Selection => vec![Item::available(CommandId::SelectAll)],
         AppBarMenu::View => vec![
             Item::available(CommandId::ToggleLeftDock),
             Item::available(CommandId::ToggleInspectorDock),
             Item::available(CommandId::ToggleBottomDock),
-            Item::unimplemented("Appearance"),
-            Item::unimplemented("Full Screen"),
+            Item::available(CommandId::ToggleTheme),
         ],
         AppBarMenu::Go => vec![
+            Item::available(CommandId::PreviousTab),
+            Item::available(CommandId::NextTab),
             Item::available(CommandId::FocusNextPane),
-            Item::unimplemented("Go to Query"),
-            Item::unimplemented("Go to Symbol"),
-            Item::unimplemented("Back"),
-            Item::unimplemented("Forward"),
+            Item::available(CommandId::FocusPaneLeft),
+            Item::available(CommandId::FocusPaneDown),
+            Item::available(CommandId::FocusPaneUp),
+            Item::available(CommandId::FocusPaneRight),
+            Item::available(CommandId::FocusConnections),
+            Item::available(CommandId::FocusEditor),
+            Item::available(CommandId::FocusResults),
+            Item::available(CommandId::FocusInspector),
         ],
         AppBarMenu::Run => vec![
             Item::available(CommandId::ExecuteStatement),
             Item::available(CommandId::ExecuteDocument),
-            Item::unimplemented("Run Configuration…"),
-            Item::unimplemented("Stop"),
+            Item::available(CommandId::CancelExecution),
+            Item::available(CommandId::BeginTransaction),
+            Item::available(CommandId::CommitTransaction),
+            Item::available(CommandId::RollbackTransaction),
         ],
-        AppBarMenu::Window => vec![
-            Item::available(CommandId::SplitPane),
-            Item::available(CommandId::ClosePane),
-            Item::unimplemented("New Window"),
-            Item::unimplemented("Previous Window"),
-            Item::unimplemented("Next Window"),
+        AppBarMenu::Terminal => vec![
+            Item::available(CommandId::ToggleBottomDock),
+            Item::available(CommandId::FocusProblems),
         ],
         AppBarMenu::Help => vec![
             Item::available(CommandId::OpenCommandPalette),
-            Item::unimplemented("Sift Documentation"),
-            Item::unimplemented("Keyboard Shortcuts"),
-            Item::unimplemented("Report Issue"),
-            Item::unimplemented("About Sift"),
+            Item::available(CommandId::OpenKeymaps),
+            Item::available(CommandId::OpenSettings),
         ],
         AppBarMenu::Profile => vec![
             Item::available(CommandId::OpenSettings),

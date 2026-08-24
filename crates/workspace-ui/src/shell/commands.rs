@@ -13,12 +13,19 @@ pub enum CommandId {
     CancelExecution,
     UndoQuery,
     RedoQuery,
+    Cut,
+    Copy,
+    Paste,
+    SelectAll,
     CompleteSql,
     FormatSql,
     ApplySqlQuickFix,
     FindSqlUsages,
     SearchSchema,
     SearchData,
+    BeginTransaction,
+    CommitTransaction,
+    RollbackTransaction,
     NextSqlProblem,
     SplitPane,
     FocusNextPane,
@@ -56,12 +63,19 @@ impl CommandId {
             Self::CancelExecution => "query.cancel",
             Self::UndoQuery => "query.undo",
             Self::RedoQuery => "query.redo",
+            Self::Cut => "editor.cut",
+            Self::Copy => "editor.copy",
+            Self::Paste => "editor.paste",
+            Self::SelectAll => "editor.select-all",
             Self::CompleteSql => "query.complete",
             Self::FormatSql => "query.format",
             Self::ApplySqlQuickFix => "query.quick-fix",
             Self::FindSqlUsages => "query.find-usages",
             Self::SearchSchema => "database.search-schema",
             Self::SearchData => "database.search-data",
+            Self::BeginTransaction => "database.begin-transaction",
+            Self::CommitTransaction => "database.commit-transaction",
+            Self::RollbackTransaction => "database.rollback-transaction",
             Self::NextSqlProblem => "query.next-problem",
             Self::SplitPane => "workspace.split-pane",
             Self::FocusNextPane => "workspace.focus-next-pane",
@@ -100,6 +114,8 @@ enum AvailabilityRule {
     EditableInstance,
     RunningQuery,
     ConnectedDatabase,
+    NoActiveTransaction,
+    ActiveTransaction,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -121,6 +137,8 @@ pub struct CommandContext {
     pub has_editable_instance: bool,
     pub active_query_running: bool,
     pub database_connected: bool,
+    pub transaction_active: bool,
+    pub transaction_pending: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -179,11 +197,26 @@ impl CommandRegistry {
                 AvailabilityRule::ConnectedDatabase if !context.database_connected => {
                     Some("No database connected".into())
                 }
+                AvailabilityRule::NoActiveTransaction if !context.database_connected => {
+                    Some("No database connected".into())
+                }
+                AvailabilityRule::NoActiveTransaction
+                    if context.transaction_active || context.transaction_pending =>
+                {
+                    Some("A transaction is already active".into())
+                }
+                AvailabilityRule::ActiveTransaction
+                    if !context.transaction_active || context.transaction_pending =>
+                {
+                    Some("No active transaction".into())
+                }
                 AvailabilityRule::ActiveItem
                 | AvailabilityRule::MultiplePanes
                 | AvailabilityRule::EditableInstance
                 | AvailabilityRule::RunningQuery
-                | AvailabilityRule::ConnectedDatabase => None,
+                | AvailabilityRule::ConnectedDatabase
+                | AvailabilityRule::NoActiveTransaction
+                | AvailabilityRule::ActiveTransaction => None,
             },
         }
     }
@@ -309,6 +342,38 @@ const DEFINITIONS: &[CommandDefinition] = &[
         AvailabilityRule::ActiveItem,
     ),
     command(
+        CommandId::Cut,
+        "Cut",
+        "Ctrl+X",
+        "",
+        false,
+        AvailabilityRule::ActiveItem,
+    ),
+    command(
+        CommandId::Copy,
+        "Copy",
+        "Ctrl+C",
+        "",
+        false,
+        AvailabilityRule::ActiveItem,
+    ),
+    command(
+        CommandId::Paste,
+        "Paste",
+        "Ctrl+V",
+        "",
+        false,
+        AvailabilityRule::ActiveItem,
+    ),
+    command(
+        CommandId::SelectAll,
+        "Select All",
+        "Ctrl+A",
+        "",
+        false,
+        AvailabilityRule::ActiveItem,
+    ),
+    command(
         CommandId::CompleteSql,
         "Suggest Completions",
         "Ctrl+Space",
@@ -355,6 +420,30 @@ const DEFINITIONS: &[CommandDefinition] = &[
         "<leader> f r",
         true,
         AvailabilityRule::ConnectedDatabase,
+    ),
+    command(
+        CommandId::BeginTransaction,
+        "Begin Transaction",
+        "",
+        "",
+        true,
+        AvailabilityRule::NoActiveTransaction,
+    ),
+    command(
+        CommandId::CommitTransaction,
+        "Commit Transaction",
+        "",
+        "",
+        true,
+        AvailabilityRule::ActiveTransaction,
+    ),
+    command(
+        CommandId::RollbackTransaction,
+        "Rollback Transaction",
+        "",
+        "",
+        true,
+        AvailabilityRule::ActiveTransaction,
     ),
     command(
         CommandId::NextSqlProblem,
@@ -641,6 +730,8 @@ mod tests {
             has_editable_instance: false,
             active_query_running: false,
             database_connected: false,
+            transaction_active: false,
+            transaction_pending: false,
         };
         assert_eq!(
             CommandRegistry::spec(CommandId::ExecuteStatement, empty)
