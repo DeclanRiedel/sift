@@ -460,7 +460,7 @@ const DEFINITIONS: &[CommandDefinition] = &[
         "Ctrl+Shift+W",
         "<leader> w c",
         true,
-        AvailabilityRule::MultiplePanes,
+        AvailabilityRule::ActiveItem,
     ),
     command(
         CommandId::SaveItem,
@@ -634,8 +634,16 @@ mod tests {
         );
         assert_eq!(
             CommandRegistry::spec(CommandId::ClosePane, empty).disabled_reason,
-            Some("Only one pane")
+            Some("No active item")
         );
+        assert!(CommandRegistry::spec(
+            CommandId::ClosePane,
+            CommandContext {
+                has_active_item: true,
+                ..empty
+            }
+        )
+        .enabled());
         assert!(CommandRegistry::spec(CommandId::SplitPane, empty).enabled());
         assert_eq!(
             CommandRegistry::spec(CommandId::OpenServerConfiguration, empty).disabled_reason,

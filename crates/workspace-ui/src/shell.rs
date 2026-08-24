@@ -17072,9 +17072,15 @@ mod tests {
                 pane.activate_item(1, false);
             });
         });
+        let editor = workspace.read_with(&cx, |shell, cx| {
+            shell.panes[0].read(cx).editor(2).expect("dirty tab editor")
+        });
+        editor.update_in(&mut cx, |editor, window, cx| {
+            editor.focus_handle(cx).focus(window, cx)
+        });
 
-        let focus = workspace.read_with(&cx, |shell, cx| shell.focus_handle(cx));
-        cx.update(|window, cx| focus.dispatch_action(&CloseActivePane, window, cx));
+        cx.run_until_parked();
+        cx.simulate_keystrokes("ctrl-k w c");
         workspace.read_with(&cx, |shell, cx| {
             let pane = shell.panes[0].read(cx);
             assert_eq!(pane.items.len(), 1);
@@ -17085,7 +17091,7 @@ mod tests {
         workspace.update(&mut cx, |shell, cx| {
             shell.panes[0].update(cx, |pane, _| pane.items[0].dirty = false)
         });
-        cx.update(|window, cx| focus.dispatch_action(&CloseActivePane, window, cx));
+        cx.simulate_keystrokes("ctrl-k w c");
         assert_eq!(
             workspace.read_with(&cx, |shell, cx| shell.active_item_count(cx)),
             0
