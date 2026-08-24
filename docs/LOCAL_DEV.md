@@ -92,7 +92,8 @@ examples/reproducible-instance/scripts/dev-register-demo-connection.sh http://12
 ```
 
 The seed helper and desktop demo are idempotent. Rerunning reuses the existing
-cluster and applies a fresh instance generation only when configuration changed.
+cluster and the stable desktop-demo identity. Older throwaway desktop-demo
+inventory entries are replaced automatically instead of accumulating.
 
 Useful overrides:
 

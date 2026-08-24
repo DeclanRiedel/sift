@@ -417,7 +417,7 @@
         # real (non-mock) server from that root.
         desktopDemo = pkgs.writeShellApplication {
           name = "sift-desktop-demo";
-          runtimeInputs = with pkgs; [ gnused jq nix openssl postgresql util-linux ];
+          runtimeInputs = with pkgs; [ coreutils gnused jq nix openssl postgresql ];
           text = ''
             set -euo pipefail
 
@@ -429,15 +429,15 @@
 
             pgdata="''${SIFT_DEMO_PGDATA:-/tmp/sift-demo-pg}"
             pglog="''${SIFT_DEMO_PG_LOG:-/tmp/sift-demo-pg.log}"
-            temporary_instance=0
             if [ -n "''${SIFT_DESKTOP_DEMO_INSTANCE_ROOT:-}" ]; then
               instance_root="$SIFT_DESKTOP_DEMO_INSTANCE_ROOT"
-              mkdir -p "$instance_root"
             else
-              instance_root="$(mktemp -d "''${TMPDIR:-/tmp}/sift-desktop-demo-instance.XXXXXX")"
-              temporary_instance=1
+              instance_root="''${TMPDIR:-/tmp}/sift-desktop-demo-instance-$(id -u)"
             fi
-            manifest_id="$(uuidgen)"
+            mkdir -p "$instance_root"
+            # Stable identity makes repeated demo launches replace the same
+            # desktop inventory entry instead of accumulating throwaway roots.
+            manifest_id="''${SIFT_DESKTOP_DEMO_MANIFEST_ID:-d35fd35e-3144-4dc2-98cf-38fb44db851b}"
             instance_state="''${XDG_STATE_HOME:-$HOME/.local/state}/sift/instances/$manifest_id"
 
             run_in_dev() {
@@ -460,9 +460,6 @@
                 pg_ctl -D "$pgdata" -m fast -w stop >/dev/null 2>&1 || true
               fi
               rm -rf -- "$instance_state"
-              if [ "$temporary_instance" = "1" ]; then
-                rm -rf -- "$instance_root"
-              fi
             }
             trap cleanup EXIT
 

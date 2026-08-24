@@ -229,15 +229,7 @@ impl SiftApp {
                     name: instance.name.clone(),
                     root,
                 };
-                if let Some(index) = instance_roots
-                    .iter()
-                    .position(|candidate| candidate.manifest_id == saved.manifest_id)
-                {
-                    instance_roots[index] = saved;
-                } else {
-                    instance_roots.push(saved);
-                }
-                instance_roots.sort_by(|left, right| left.name.cmp(&right.name));
+                reconcile_configured_root(&mut instance_roots, saved.clone());
                 let _ = instance_store.save_roots(&saved_servers, &instance_roots);
             }
         }
@@ -289,6 +281,26 @@ impl SiftApp {
             restored_profile_id: restored_profile.map(|profile| profile.id),
         }
     }
+}
+
+fn reconcile_configured_root(
+    roots: &mut Vec<sift_workspace_ui::SavedInstanceRoot>,
+    saved: sift_workspace_ui::SavedInstanceRoot,
+) {
+    if saved.name == "desktop-demo" {
+        roots.retain(|candidate| {
+            candidate.name != saved.name || candidate.manifest_id == saved.manifest_id
+        });
+    }
+    if let Some(index) = roots
+        .iter()
+        .position(|candidate| candidate.manifest_id == saved.manifest_id)
+    {
+        roots[index] = saved;
+    } else {
+        roots.push(saved);
+    }
+    roots.sort_by(|left, right| left.name.cmp(&right.name));
 }
 
 fn load_user_settings(store: &SettingsStore, presentation: &PresentationState) -> UserSettings {
@@ -2272,6 +2284,30 @@ mod tests {
             restored_server_profile(Some("hosted:server-one"), &[profile], true),
             None
         );
+    }
+
+    #[test]
+    fn desktop_demo_root_replaces_legacy_demo_inventory_entries() {
+        let root = |manifest_id: &str, name: &str| sift_workspace_ui::SavedInstanceRoot {
+            manifest_id: manifest_id.into(),
+            name: name.into(),
+            root: std::path::PathBuf::from(format!("/tmp/{manifest_id}")),
+        };
+        let mut roots = vec![
+            root("old-demo-one", "desktop-demo"),
+            root("old-demo-two", "desktop-demo"),
+            root("team", "Team"),
+        ];
+
+        reconcile_configured_root(&mut roots, root("stable-demo", "desktop-demo"));
+
+        assert_eq!(roots.len(), 2);
+        assert!(roots
+            .iter()
+            .any(|candidate| candidate.manifest_id == "stable-demo"));
+        assert!(roots
+            .iter()
+            .any(|candidate| candidate.manifest_id == "team"));
     }
 
     #[test]
