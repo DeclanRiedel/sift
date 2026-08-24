@@ -36,11 +36,12 @@ surfaces, then admin/platform. Within P0, the connection experience comes first.
 - [ ] `open_session_for_tenant` — tenant-scoped session when multi-tenant (M2)
 - [ ] `list_sessions` — session list panel (M4)
 - [ ] `open_connection` (explicit spec) — ad-hoc connection dialog (M4)
-- [ ] `ping_connection` — live connection health chip (M4)
+- [x] `ping_connection` — periodic connection health chip with latency, failure
+  classification, last-success time, and explicit reconnect (M4)
 - [ ] `close_connection`, `disconnect_connection_profile` — finer-grained disconnect (M4)
-- [~] **footer/status bar** — connection target and execution outcome are live;
-  transaction remains a placeholder. Exclusive, client-local left-panel and
-  bottom-tool selection is landed; semantic search/diagnostics remain M3 work.
+- [x] **footer/status bar** — connection target, execution outcome, and live
+  transaction status are wired. Exclusive, client-local left-panel and
+  bottom-tool selection is landed.
 
 ### Sign-in enough to connect — sign-in modal, account state
 
@@ -53,10 +54,10 @@ surfaces, then admin/platform. Within P0, the connection experience comes first.
 ### Execute — finish the run path
 
 - [x] `execute` — Run Statement/Document → virtualized grid (M3)
-- [ ] `stream_query` — streamed/paged cursor + live status (replaces bounded HTTP first page) (M3)
-- [ ] `cancel` — cancel a running query (M3)
-- [ ] `read_spilled_pages`, `delete_spilled_cursor` — paging/resume for large results (M3/M4)
-- [ ] `execute_with_params` — parameterized run / bind-params UI (M3)
+- [x] `stream_query` — streamed/paged cursor + live status (M3)
+- [x] `cancel` — cancel a running query (M3)
+- [x] `read_spilled_pages`, `delete_spilled_cursor` — paging/resume for large results (M3/M4)
+- [x] `execute_with_params` — detected-parameter dialog with typed/null bindings (M3)
 
 ---
 
@@ -64,7 +65,7 @@ surfaces, then admin/platform. Within P0, the connection experience comes first.
 
 ### Schema & catalog navigation — Schema tree, object details
 
-- [ ] `schema` — lazy schema tree in the left dock (M4)
+- [x] `schema` — schema tree in the Connections dock (M4)
 - [x] `object_ddl` — canonical object DDL replaces the immediate catalog-derived preview (M4)
 - [ ] `providers` — engine/provider hints for rendering (M4)
 - [x] `search_schema` — filtered schema search in the Connections dock (M4)
@@ -74,7 +75,7 @@ surfaces, then admin/platform. Within P0, the connection experience comes first.
 ### Query history & saved queries — History tab, saved queries
 
 - [x] `history_page` — paginated History result tab with query status, timing, row count, and rerun (M4)
-- [ ] `saved_queries`, `saved_query`, `create_saved_query`, `update_saved_query`, `delete_saved_query` — saved queries panel (M4)
+- [x] `saved_queries`, `saved_query`, `create_saved_query`, `update_saved_query`, `delete_saved_query` — saved queries panel (M4)
 
 ### Capability gating — command availability
 
@@ -90,12 +91,12 @@ surfaces, then admin/platform. Within P0, the connection experience comes first.
 
 ## P2 — SQL intelligence (editor becomes real)
 
-- [ ] `open_semantic_document`, `update_semantic_document`, `close_semantic_document` — editor↔semantic doc lifecycle (M3)
-- [ ] `complete`, `complete_semantic_document` — completion popup (M3)
-- [ ] `semantic_diagnostics`, `semantic_diagnostics_with_catalog` — inline diagnostics (M3)
-- [ ] `format_semantic_document` — Format action (M3)
-- [ ] `prepare_semantic_quick_fix` — quick-fix menu (M3)
-- [ ] `find_semantic_usages` — usages panel (M3/M4)
+- [x] `open_semantic_document`, `update_semantic_document`, `close_semantic_document` — editor↔semantic doc lifecycle (M3)
+- [x] `complete`, `complete_semantic_document` — completion popup (M3)
+- [x] `semantic_diagnostics`, `semantic_diagnostics_with_catalog` — inline diagnostics (M3)
+- [x] `format_semantic_document` — Format action (M3)
+- [x] `prepare_semantic_quick_fix` — quick-fix menu (M3)
+- [x] `find_semantic_usages` — usages panel (M3/M4)
 - [ ] `prepare_semantic_refactor` — rename/refactor (M4)
 - [ ] `select_semantic_statement` — server-side statement targeting (currently client-side) (M3)
 - [ ] `capture_semantic_plan` — plan capture from the editor (M5)
@@ -106,15 +107,15 @@ surfaces, then admin/platform. Within P0, the connection experience comes first.
 
 ### Data editing — editable grid
 
-- [ ] `preview_edits` — staged-edit preview with conflict display (M4)
-- [ ] `apply_edits` — apply typed edits (M4)
+- [x] `preview_edits` — multi-cell staged-edit preview with conflict display (M4)
+- [x] `apply_edits` — apply typed edits with staged-edit revert controls (M4)
 - [ ] `bulk_insert` — bulk insert flow (M5)
 - [ ] `import_csv` — CSV import (M5)
 
 ### Transactions & process control — transaction bar, process list
 
-- [ ] `begin_transaction`, `commit_transaction`, `rollback_transaction` — transaction controls (M4)
-- [ ] `execute_in_tx` — run inside an open transaction (M4)
+- [x] `begin_transaction`, `commit_transaction`, `rollback_transaction` — transaction controls (M4)
+- [x] `execute_in_tx` — run inside an open transaction (M4)
 - [ ] `list_transactions`, `preview_transaction` — transaction state panel (M4)
 - [ ] `create_savepoint`, `rollback_to_savepoint`, `release_savepoint` — savepoint controls (M4)
 - [ ] `list_processes`, `kill_process` — process/activity monitor (M4)
@@ -165,7 +166,8 @@ surfaces, then admin/platform. Within P0, the connection experience comes first.
 
 ### Plan captures
 
-- [ ] `plan_capture`, `plan_captures`, `compare_plan_captures`, `delete_plan_capture` — plan-capture panel (M5)
+- [~] `plan_capture`, `plan_captures`, `compare_plan_captures` — capture and
+  fingerprint-filtered two-capture comparison are wired; deletion remains (M5)
 
 ### Runs & scheduling — Runs dock
 
