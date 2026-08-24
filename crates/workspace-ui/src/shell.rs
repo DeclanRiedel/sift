@@ -7671,6 +7671,7 @@ impl WorkspaceShell {
             return;
         };
         self.focused_surface = WorkspaceSurface::Results;
+        results.update(cx, ResultsView::focus_data);
         results.focus_handle(cx).focus(window, cx);
         cx.notify();
     }
@@ -17583,6 +17584,18 @@ mod tests {
         });
         cx.run_until_parked();
 
+        let results = workspace.read_with(&cx, |shell, cx| {
+            let pane = shell.panes[shell.active_pane].read(cx);
+            pane.results.get(&1).unwrap().clone()
+        });
+        results.update(&mut cx, |results, cx| results.select_relative_tab(1, cx));
+        workspace.update_in(&mut cx, |shell, window, cx| shell.focus_results(window, cx));
+        assert_eq!(
+            results.read_with(&cx, |results, _| results.active_tab()),
+            crate::results::ResultTab::Data
+        );
+        assert!(cx.update(|window, cx| workspace.read(cx).active_results_focused(window, cx)));
+
         let row = cx.debug_bounds("result-row-0").expect("visible result row");
         cx.simulate_mouse_down(
             point(
@@ -17595,10 +17608,6 @@ mod tests {
 
         assert!(cx.update(|window, cx| workspace.read(cx).active_results_focused(window, cx)));
         assert!(!cx.update(|window, cx| workspace.read(cx).active_editor_focused(window, cx)));
-        let results = workspace.read_with(&cx, |shell, cx| {
-            let pane = shell.panes[shell.active_pane].read(cx);
-            pane.results.get(&1).unwrap().clone()
-        });
         let result_focus = results.read_with(&cx, |results, cx| results.focus_handle(cx));
         cx.update(|window, cx| {
             result_focus.dispatch_action(&crate::results::MoveCellRight, window, cx)

@@ -431,7 +431,9 @@ actions!(
         MoveCellLeft,
         MoveCellRight,
         MoveCellUp,
-        MoveCellDown
+        MoveCellDown,
+        PreviousResultTab,
+        NextResultTab
     ]
 );
 
@@ -589,6 +591,10 @@ impl ResultsView {
 
     pub fn active_tab(&self) -> ResultTab {
         self.tab
+    }
+
+    pub(crate) fn focus_data(&mut self, cx: &mut Context<Self>) {
+        self.select_tab(ResultTab::Data, cx);
     }
 
     pub fn set_large_view(&mut self, active: bool, cx: &mut Context<Self>) {
@@ -928,6 +934,15 @@ impl ResultsView {
         cx.notify();
     }
 
+    pub(crate) fn select_relative_tab(&mut self, delta: isize, cx: &mut Context<Self>) {
+        let current = ResultTab::ALL
+            .iter()
+            .position(|tab| *tab == self.tab)
+            .unwrap_or(0);
+        let next = (current as isize + delta).rem_euclid(ResultTab::ALL.len() as isize) as usize;
+        self.select_tab(ResultTab::ALL[next], cx);
+    }
+
     fn request_explain(&mut self, analyze: bool, cx: &mut Context<Self>) {
         if matches!(self.explain, ExplainState::Pending { .. }) {
             return;
@@ -1206,6 +1221,19 @@ impl ResultsView {
 
     fn move_cell_down(&mut self, _: &MoveCellDown, _: &mut Window, cx: &mut Context<Self>) {
         self.move_selection(1, 0, cx);
+    }
+
+    fn previous_result_tab(
+        &mut self,
+        _: &PreviousResultTab,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.select_relative_tab(-1, cx);
+    }
+
+    fn next_result_tab(&mut self, _: &NextResultTab, _: &mut Window, cx: &mut Context<Self>) {
+        self.select_relative_tab(1, cx);
     }
 
     fn copy_selected_cell(&mut self, _: &CopySelectedCell, _: &mut Window, cx: &mut Context<Self>) {
@@ -2327,6 +2355,8 @@ impl gpui::Render for ResultsView {
             .on_action(cx.listener(Self::move_cell_right))
             .on_action(cx.listener(Self::move_cell_up))
             .on_action(cx.listener(Self::move_cell_down))
+            .on_action(cx.listener(Self::previous_result_tab))
+            .on_action(cx.listener(Self::next_result_tab))
             .flex()
             .when(self.placement == ResultPlacement::Bottom, |view| {
                 view.flex_col()
@@ -2991,6 +3021,12 @@ mod tests {
         view.update(&mut cx, |view, cx| {
             view.select_tab(ResultTab::Messages, cx);
             assert_eq!(view.active_tab(), ResultTab::Messages);
+            view.select_relative_tab(1, cx);
+            assert_eq!(view.active_tab(), ResultTab::Explain);
+            view.select_relative_tab(-1, cx);
+            assert_eq!(view.active_tab(), ResultTab::Messages);
+            view.focus_data(cx);
+            assert_eq!(view.active_tab(), ResultTab::Data);
             view.select_cell(0, 0, cx);
             assert_eq!(view.selected_text().as_deref(), Some("neo"));
             view.row_scroll_handle
