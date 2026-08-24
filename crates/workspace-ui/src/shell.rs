@@ -12515,20 +12515,20 @@ impl WorkspaceShell {
                                                             sift_protocol::ObjectKind::Table,
                                                         ),
                                                 };
-                                                let detail = match (
-                                                    hit.column.as_deref(),
-                                                    hit.type_display.as_deref(),
-                                                ) {
-                                                    (Some(column), Some(data_type)) => {
-                                                        format!("{column}  ·  {data_type}")
-                                                    }
-                                                    (Some(column), None) => column.to_owned(),
-                                                    _ => format!("{object_kind:?}")
-                                                        .replace('_', " ")
-                                                        .to_lowercase(),
-                                                };
+                                                let detail = hit
+                                                    .type_display
+                                                    .clone()
+                                                    .unwrap_or_else(|| {
+                                                        format!("{object_kind:?}")
+                                                            .replace('_', " ")
+                                                            .to_lowercase()
+                                                    });
                                                 div()
                                                     .id(("schema-palette-hit", index))
+                                                    .debug_selector(move || {
+                                                        format!("schema-palette-hit-{index}")
+                                                    })
+                                                    .w_full()
                                                     .h(px(PALETTE_ROW_HEIGHT))
                                                     .px_2()
                                                     .flex()
@@ -12567,14 +12567,19 @@ impl WorkspaceShell {
                                                             .flex_1()
                                                             .min_w_0()
                                                             .flex()
-                                                            .flex_col()
+                                                            .items_center()
+                                                            .gap_2()
                                                             .child(
                                                                 div()
+                                                                    .flex_1()
+                                                                    .min_w_0()
                                                                     .truncate()
                                                                     .child(hit.display),
                                                             )
                                                             .child(
                                                                 div()
+                                                                    .flex_none()
+                                                                    .max_w(px(240.))
                                                                     .truncate()
                                                                     .text_xs()
                                                                     .text_color(
@@ -12587,6 +12592,7 @@ impl WorkspaceShell {
                                             .collect()
                                     }),
                                 )
+                                .w_full()
                                 .h(px(list_height.max(PALETTE_ROW_HEIGHT)))
                                 .track_scroll(&self.schema_search_scroll_handle),
                             )
@@ -16651,6 +16657,39 @@ mod tests {
         assert!(cx.debug_bounds("close-schema-search").is_some());
         assert!(cx.debug_bounds("open-schema-search").is_some());
         assert!(cx.debug_bounds("schema-search-filter-0").is_none());
+
+        workspace.update(&mut cx, |shell, cx| {
+            let generation = shell.schema_search_generation;
+            shell.schema_search_state = SchemaSearchState::Ready {
+                generation,
+                response: Box::new(sift_protocol::SchemaSearchResponse {
+                    hits: vec![sift_protocol::SearchHit {
+                        target: sift_protocol::SearchTarget::Column,
+                        path: sift_protocol::ObjectPath {
+                            catalog: Some("sifttest".into()),
+                            schema: Some("lab".into()),
+                            name: "people".into(),
+                            kind: Some(sift_protocol::ObjectKind::Table),
+                            routine_args: None,
+                        },
+                        column: Some("display_name".into()),
+                        display: "sifttest.lab.people.display_name".into(),
+                        score: 10,
+                        type_display: Some("character varying(255)".into()),
+                        match_ranges: vec![(20, 27)],
+                    }],
+                    index_state: sift_protocol::IndexState::Ready,
+                }),
+            };
+            cx.notify();
+        });
+        cx.run_until_parked();
+        let row = cx
+            .debug_bounds("schema-palette-hit-0")
+            .expect("schema search result row");
+        let card = cx.debug_bounds("modal-card").expect("schema search card");
+        assert!((f32::from(row.size.width) - f32::from(card.size.width)).abs() <= 2.0);
+        assert_eq!(row.size.height, px(PALETTE_ROW_HEIGHT));
     }
 
     #[gpui::test]
