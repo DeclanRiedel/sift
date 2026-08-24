@@ -5,6 +5,12 @@ const HISTORY_LOAD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs
 const ESTIMATED_PLAN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 const ANALYZED_PLAN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
 
+fn system_epoch_millis() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_millis() as u64)
+}
+
 use gpui::{prelude::*, App, Context, Entity, IntoElement, Window};
 use sift_api_types::{
     ConnectionProfileId, CredentialMode, RoomId, TenantId, UpsertConnectionProfileRequest,
@@ -15,9 +21,10 @@ use sift_client_sdk::{
 };
 use sift_protocol::{ConnectionId, SessionId};
 use sift_workspace_ui::{
-    ConnectionStatus, EditorMode, ExecutorCommand, ExecutorEvent, PresentationState,
-    PresentationStore, Rect, ResultState, RoomDocumentCommand, RoomDocumentEvent, SemanticOutcome,
-    SemanticRequestKind, SettingsStore, UserSettings, WorkspaceShell,
+    ConnectionHealthFailure, ConnectionHealthReport, ConnectionStatus, EditorMode, ExecutorCommand,
+    ExecutorEvent, PresentationState, PresentationStore, Rect, ResultState, RoomDocumentCommand,
+    RoomDocumentEvent, SemanticOutcome, SemanticRequestKind, SettingsStore, UserSettings,
+    WorkspaceShell,
 };
 
 use crate::config::DesktopConfig;
@@ -505,12 +512,22 @@ async fn run_query_executor(
             command = commands.recv() => command,
             _ = health_tick.tick(), if context.is_some() => {
                 let opened = context.as_ref().expect("guarded by context");
-                let result = opened.client
-                    .ping_connection(opened.session, opened.metadata_connection)
-                    .await
-                    .map(|_| ())
-                    .map_err(|error| format!("database ping failed: {error}"));
-                if events.send(ExecutorEvent::ConnectionHealth(result)).is_err() {
+                let started = std::time::Instant::now();
+                let failure = match opened.client.health().await {
+                    Ok(_) => opened
+                        .client
+                        .ping_connection(opened.session, opened.metadata_connection)
+                        .await
+                        .err()
+                        .map(|error| ConnectionHealthFailure::Database(format!("{error}"))),
+                    Err(error) => Some(ConnectionHealthFailure::Server(format!("{error}"))),
+                };
+                let report = ConnectionHealthReport {
+                    checked_at_ms: system_epoch_millis(),
+                    latency_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+                    failure,
+                };
+                if events.send(ExecutorEvent::ConnectionHealth(report)).is_err() {
                     return;
                 }
                 continue;

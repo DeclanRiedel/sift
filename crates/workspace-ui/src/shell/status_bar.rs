@@ -49,19 +49,66 @@ pub(super) fn render_status_bar(
             .mx_1()
             .bg(colors.border)
     };
+    let health_failure = shell
+        .connection_health
+        .as_ref()
+        .and_then(|report| report.failure.as_ref());
+    let last_success = shell.connection_last_success_ms.map(|checked_at| {
+        let seconds = epoch_millis().saturating_sub(checked_at) / 1_000;
+        if seconds < 2 {
+            "just now".to_owned()
+        } else if seconds < 60 {
+            format!("{seconds}s ago")
+        } else {
+            format!("{}m ago", seconds / 60)
+        }
+    });
     let target_label = match &shell.connection_status {
-        ConnectionStatus::Connected { .. } => match &shell.connection_health_error {
-            Some(_) => format!(
-                "{} · Degraded · {}",
-                shell.status.database, shell.status.room
+        ConnectionStatus::Connected { .. } => match health_failure {
+            Some(ConnectionHealthFailure::Server(_)) => format!(
+                "{} · Server unavailable · last good {}",
+                shell.status.database,
+                last_success.as_deref().unwrap_or("unknown")
             ),
-            None => format!(
-                "{} · Healthy · {}",
-                shell.status.database, shell.status.room
+            Some(ConnectionHealthFailure::Database(_)) => format!(
+                "{} · Database unavailable · last good {}",
+                shell.status.database,
+                last_success.as_deref().unwrap_or("unknown")
+            ),
+            None => shell.connection_health.as_ref().map_or_else(
+                || {
+                    format!(
+                        "{} · Checking… · {}",
+                        shell.status.database, shell.status.room
+                    )
+                },
+                |report| {
+                    format!(
+                        "{} · {} ms · checked {}",
+                        shell.status.database,
+                        report.latency_ms,
+                        last_success.as_deref().unwrap_or("just now")
+                    )
+                },
             ),
         },
         _ => shell.status.database.clone(),
     };
+    let reconnect_detail = health_failure
+        .map(|failure| match failure {
+            ConnectionHealthFailure::Server(message) => {
+                format!("Reconnect to the Sift server: {message}")
+            }
+            ConnectionHealthFailure::Database(message) => {
+                format!("Reconnect the database session: {message}")
+            }
+        })
+        .or_else(|| match &shell.connection_status {
+            ConnectionStatus::Failed { reason, .. } => {
+                Some(format!("Retry the failed database connection: {reason}"))
+            }
+            _ => None,
+        });
     let (cursor_label, cursor_tooltip) = shell.active_cursor_position(cx).map_or_else(
         || ("-:-".into(), "No active query cursor".into()),
         |(line, column)| {
@@ -278,9 +325,7 @@ pub(super) fn render_status_bar(
                         .gap_1()
                         .child(div().size(px(6.)).flex_none().rounded_full().bg(
                             match &shell.connection_status {
-                                ConnectionStatus::Connected { .. }
-                                    if shell.connection_health_error.is_some() =>
-                                {
+                                ConnectionStatus::Connected { .. } if health_failure.is_some() => {
                                     colors.warning
                                 }
                                 ConnectionStatus::Connected { .. } => colors.success,
@@ -291,6 +336,17 @@ pub(super) fn render_status_bar(
                         ))
                         .child(div().min_w_0().truncate().child(target_label)),
                 )
+                .children(reconnect_detail.map(|detail| {
+                    button(
+                        "footer-reconnect-database",
+                        IconName::Server,
+                        detail,
+                        false,
+                        None,
+                        false,
+                    )
+                    .on_click(cx.listener(|shell, _, _, cx| shell.reconnect(cx)))
+                }))
                 .children(
                     matches!(shell.connection_status, ConnectionStatus::Connected { .. }).then(
                         || {

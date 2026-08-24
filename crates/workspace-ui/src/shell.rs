@@ -1061,6 +1061,19 @@ pub enum ConnectionStatus {
     Failed { profile_id: i64, reason: String },
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConnectionHealthFailure {
+    Server(String),
+    Database(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConnectionHealthReport {
+    pub checked_at_ms: u64,
+    pub latency_ms: u64,
+    pub failure: Option<ConnectionHealthFailure>,
+}
+
 #[derive(Debug, Clone)]
 enum ConnectionSchemaState {
     Unavailable,
@@ -1279,7 +1292,7 @@ pub enum ExecutorCommand {
 #[derive(Debug)]
 pub enum ExecutorEvent {
     Connection(ConnectionStatus),
-    ConnectionHealth(Result<(), String>),
+    ConnectionHealth(ConnectionHealthReport),
     TransactionChanged(Result<Option<sift_protocol::TransactionInfo>, String>),
     CapabilitiesLoaded {
         profile_id: i64,
@@ -3451,7 +3464,8 @@ pub struct WorkspaceShell {
     account_pending: bool,
     account_error: Option<String>,
     connection_status: ConnectionStatus,
-    connection_health_error: Option<String>,
+    connection_health: Option<ConnectionHealthReport>,
+    connection_last_success_ms: Option<u64>,
     operation_capabilities:
         HashMap<sift_protocol::OperationKind, sift_protocol::OperationCapability>,
     connection_schema: ConnectionSchemaState,
@@ -3883,7 +3897,8 @@ impl WorkspaceShell {
             account_pending: false,
             account_error: None,
             connection_status: ConnectionStatus::Disconnected,
-            connection_health_error: None,
+            connection_health: None,
+            connection_last_success_ms: None,
             operation_capabilities: HashMap::new(),
             connection_schema: ConnectionSchemaState::Unavailable,
             schema_search_generation: 0,
@@ -4591,7 +4606,8 @@ impl WorkspaceShell {
     fn on_executor_event(&mut self, event: ExecutorEvent, cx: &mut Context<Self>) {
         match event {
             ExecutorEvent::Connection(status) => {
-                self.connection_health_error = None;
+                self.connection_health = None;
+                self.connection_last_success_ms = None;
                 if let ConnectionStatus::Connected { profile_id, .. } = &status {
                     self.expanded_connections.insert(*profile_id);
                 }
@@ -4673,8 +4689,11 @@ impl WorkspaceShell {
                 }
                 cx.notify();
             }
-            ExecutorEvent::ConnectionHealth(result) => {
-                self.connection_health_error = result.err();
+            ExecutorEvent::ConnectionHealth(report) => {
+                if report.failure.is_none() {
+                    self.connection_last_success_ms = Some(report.checked_at_ms);
+                }
+                self.connection_health = Some(report);
                 cx.notify();
             }
             ExecutorEvent::TransactionChanged(result) => {
@@ -6136,6 +6155,44 @@ impl WorkspaceShell {
         self.status.transaction = "TX: None".into();
         self.sync_database_item_states(cx);
         cx.notify();
+    }
+
+    fn reconnect(&mut self, cx: &mut Context<Self>) {
+        let profile_id = match self.connection_status {
+            ConnectionStatus::Connected { profile_id, .. }
+            | ConnectionStatus::Failed { profile_id, .. } => profile_id,
+            ConnectionStatus::Disconnected | ConnectionStatus::Connecting { .. } => return,
+        };
+        let entry = self
+            .lifecycle
+            .tenants
+            .iter()
+            .flat_map(|tenant| tenant.connections.iter())
+            .find(|connection| connection.id == profile_id)
+            .cloned()
+            .or_else(|| {
+                self.panes.iter().find_map(|pane| {
+                    pane.read(cx)
+                        .items
+                        .iter()
+                        .filter_map(|item| pane.read(cx).database_source(item.id))
+                        .find(|source| source.profile_id == profile_id)
+                        .map(|source| ConnectionNavEntry {
+                            id: source.profile_id,
+                            tenant_id: source.tenant_id,
+                            name: source.profile_name,
+                            provider_id: source.provider_id,
+                        })
+                })
+            });
+        if let Some(entry) = entry {
+            self.connect(&entry, cx);
+        } else {
+            self.show_error_toast(
+                "The active connection profile is no longer available".into(),
+                cx,
+            );
+        }
     }
 
     fn toggle_catalog_schema(&mut self, profile_id: i64, catalog: String, cx: &mut Context<Self>) {
@@ -22771,6 +22828,76 @@ mod tests {
             Ok(ExecutorCommand::Disconnect)
         ));
         assert!(workspace.read_with(&cx, |shell, _| shell.transaction.is_none()));
+    }
+
+    #[gpui::test]
+    fn connection_health_tracks_latency_failure_layer_and_reconnects(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        workspace.update_in(&mut cx, |shell, window, cx| {
+            shell.executor_sender = Some(sender);
+            shell.connection_status = ConnectionStatus::Connected {
+                profile_id: 2,
+                name: "demo/postgres".into(),
+            };
+            shell.open_table_preview(
+                DatabaseObjectTarget {
+                    connection: ConnectionNavEntry {
+                        id: 2,
+                        tenant_id: 1,
+                        name: "demo/postgres".into(),
+                        provider_id: sift_protocol::ProviderId::new("sift/postgres").unwrap(),
+                    },
+                    catalog: "sifttest".into(),
+                    schema: "audit".into(),
+                    object: "events".into(),
+                    object_kind: sift_protocol::ObjectKind::Table,
+                },
+                window,
+                cx,
+            );
+            shell.on_executor_event(
+                ExecutorEvent::ConnectionHealth(ConnectionHealthReport {
+                    checked_at_ms: 1_000,
+                    latency_ms: 7,
+                    failure: None,
+                }),
+                cx,
+            );
+            assert_eq!(shell.connection_last_success_ms, Some(1_000));
+            shell.on_executor_event(
+                ExecutorEvent::ConnectionHealth(ConnectionHealthReport {
+                    checked_at_ms: 2_000,
+                    latency_ms: 31,
+                    failure: Some(ConnectionHealthFailure::Database(
+                        "connection refused".into(),
+                    )),
+                }),
+                cx,
+            );
+            assert_eq!(shell.connection_last_success_ms, Some(1_000));
+        });
+        while receiver.try_recv().is_ok() {}
+        cx.run_until_parked();
+        assert!(matches!(
+            workspace.read_with(&cx, |shell, _| shell
+                .connection_health
+                .as_ref()
+                .and_then(|report| report.failure.as_ref())
+                .cloned()),
+            Some(ConnectionHealthFailure::Database(message)) if message == "connection refused"
+        ));
+        workspace.update(&mut cx, |shell, cx| shell.reconnect(cx));
+        assert!(matches!(
+            receiver.try_recv(),
+            Ok(ExecutorCommand::Connect {
+                tenant_id: 1,
+                profile_id: 2,
+                name,
+            }) if name == "demo/postgres"
+        ));
     }
 
     #[gpui::test]
