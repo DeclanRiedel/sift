@@ -455,6 +455,14 @@ struct QueryContext {
     session: SessionId,
     connection: ConnectionId,
     metadata_connection: ConnectionId,
+    /// Execution plans get their own persistent lane. Opening a physical
+    /// database connection for every Explain click made a cheap estimated plan
+    /// feel slower than running many queries, while sharing either lane can
+    /// block behind a streaming query or corrupt SQL Server SHOWPLAN state.
+    plan_connection: ConnectionId,
+    /// One explain sequence at a time. SQL Server's SHOWPLAN ON/query/OFF
+    /// sequence must not interleave when two tabs request plans together.
+    plan_lock: Arc<tokio::sync::Mutex<()>>,
     profile_id: i64,
     /// Semantic work runs on its own task; dropping this sender ends it and
     /// releases every server document it owns with the connection.
@@ -601,7 +609,7 @@ async fn run_query_executor(
             ExecutorCommand::Explain {
                 item_id,
                 request_id,
-                tenant_id,
+                tenant_id: _,
                 profile_id,
                 sql,
                 analyze,
@@ -626,41 +634,25 @@ async fn run_query_executor(
                 };
                 let client = opened.client.clone();
                 let session = opened.session;
+                let connection = opened.plan_connection;
+                let plan_lock = opened.plan_lock.clone();
                 let events = events.clone();
                 std::mem::drop(tokio::spawn(async move {
-                    let response = match client
-                        .open_connection_from_profile(
+                    let _plan_guard = plan_lock.lock().await;
+                    let response = client
+                        .explain(
                             session,
-                            OpenConnectionFromProfileRequest {
-                                tenant_id,
-                                profile_id,
+                            connection,
+                            sift_protocol::ExplainRequest {
+                                connection,
+                                sql,
+                                params: Vec::new(),
+                                analyze,
                             },
                         )
                         .await
-                    {
-                        Ok(connection) => {
-                            let connection_id = connection.id;
-                            let result = client
-                                .explain(
-                                    session,
-                                    connection_id,
-                                    sift_protocol::ExplainRequest {
-                                        connection: connection_id,
-                                        sql,
-                                        params: Vec::new(),
-                                        analyze,
-                                    },
-                                )
-                                .await
-                                .map(Box::new)
-                                .map_err(|error| format!("explaining query failed: {error}"));
-                            let _ = client.close_connection(session, connection_id).await;
-                            result
-                        }
-                        Err(error) => Err(format!(
-                            "opening an isolated explain connection failed: {error}"
-                        )),
-                    };
+                        .map(Box::new)
+                        .map_err(|error| format!("explaining query failed: {error}"));
                     let _ = events.send(ExecutorEvent::ExplainFinished {
                         item_id,
                         request_id,
@@ -1781,6 +1773,22 @@ async fn open_query_context(
             return Err(format!("opening a metadata connection failed: {error}"));
         }
     };
+    let plan_connection = match client
+        .open_connection_from_profile(
+            session,
+            OpenConnectionFromProfileRequest {
+                tenant_id,
+                profile_id,
+            },
+        )
+        .await
+    {
+        Ok(connection) => connection.id,
+        Err(error) => {
+            let _ = client.close_session(session).await;
+            return Err(format!("opening a plan connection failed: {error}"));
+        }
+    };
     let semantic_connection = match client
         .open_connection_from_profile(
             session,
@@ -1810,6 +1818,8 @@ async fn open_query_context(
         session,
         connection,
         metadata_connection,
+        plan_connection,
+        plan_lock: Arc::new(tokio::sync::Mutex::new(())),
         profile_id,
         semantic,
     })

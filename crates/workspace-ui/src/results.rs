@@ -16,8 +16,8 @@ use sift_protocol::{
     Row, TypeRef, Value,
 };
 use sift_ui::{
-    ActiveTheme, Badge, Button, ButtonTone, Clickable, Disableable, IconButton, IconName,
-    ThemeColors,
+    icon, ActiveTheme, Badge, Button, ButtonTone, Clickable, Disableable, ErrorBanner, IconButton,
+    IconName, ThemeColors,
 };
 
 use crate::presentation::ResultReference;
@@ -470,6 +470,56 @@ enum ExplainState {
     Failed(String),
 }
 
+#[derive(Debug, Clone)]
+struct RenderedPlanNode {
+    depth: usize,
+    op: SharedString,
+    relation: Option<SharedString>,
+    estimated: SharedString,
+    actual: Option<SharedString>,
+}
+
+fn flatten_plan(root: &PlanNode) -> Vec<RenderedPlanNode> {
+    let mut rows = Vec::new();
+    let mut stack = vec![(root, 0_usize)];
+    while let Some((node, depth)) = stack.pop() {
+        let estimated = [
+            node.est_rows
+                .map(|value| format!("{} rows", plan_number(value))),
+            node.est_cost
+                .map(|value| format!("cost {}", plan_number(value))),
+        ]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+        .join("  ·  ");
+        let actual = [
+            node.actual_rows
+                .map(|value| format!("{} actual", plan_number(value))),
+            node.actual_ms
+                .map(|value| format!("{} ms", plan_number(value))),
+        ]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+        .join("  ·  ");
+        rows.push(RenderedPlanNode {
+            depth,
+            op: node.op.clone().into(),
+            relation: node.relation.clone().map(Into::into),
+            estimated: estimated.into(),
+            actual: (!actual.is_empty()).then(|| actual.into()),
+        });
+        stack.extend(
+            node.children
+                .iter()
+                .rev()
+                .map(|child| (child, depth.saturating_add(1))),
+        );
+    }
+    rows
+}
+
 /// The query-owned results surface.
 pub struct ResultsView {
     focus_handle: FocusHandle,
@@ -499,6 +549,8 @@ pub struct ResultsView {
     /// A page is being held because the window is full.
     window_held: bool,
     explain: ExplainState,
+    rendered_plan_nodes: Vec<RenderedPlanNode>,
+    plan_scroll_handle: UniformListScrollHandle,
     large_view: bool,
 }
 
@@ -525,6 +577,8 @@ impl ResultsView {
             window_start: 0,
             window_held: false,
             explain: ExplainState::Empty,
+            rendered_plan_nodes: Vec::new(),
+            plan_scroll_handle: UniformListScrollHandle::new(),
             large_view: false,
         }
     }
@@ -889,6 +943,12 @@ impl ResultsView {
         result: Result<Box<ExplainResponse>, String>,
         cx: &mut Context<Self>,
     ) {
+        self.rendered_plan_nodes = result
+            .as_ref()
+            .map(|response| flatten_plan(&response.root))
+            .unwrap_or_default();
+        self.plan_scroll_handle
+            .scroll_to_item(0, ScrollStrategy::Top);
         self.explain = match result {
             Ok(response) => ExplainState::Ready(response),
             Err(message) => ExplainState::Failed(message),
@@ -1890,87 +1950,6 @@ impl ResultsView {
         )
     }
 
-    fn render_plan_node(
-        &self,
-        node: &PlanNode,
-        depth: usize,
-        colors: ThemeColors,
-    ) -> gpui::AnyElement {
-        let estimated = [
-            node.est_rows
-                .map(|value| format!("est rows {}", plan_number(value))),
-            node.est_cost
-                .map(|value| format!("cost {}", plan_number(value))),
-        ]
-        .into_iter()
-        .flatten()
-        .collect::<Vec<_>>()
-        .join("  ·  ");
-        let actual = [
-            node.actual_rows
-                .map(|value| format!("actual rows {}", plan_number(value))),
-            node.actual_ms
-                .map(|value| format!("{} ms", plan_number(value))),
-        ]
-        .into_iter()
-        .flatten()
-        .collect::<Vec<_>>()
-        .join("  ·  ");
-        div()
-            .flex()
-            .flex_col()
-            .child(
-                div()
-                    .min_h(px(40.))
-                    .pl(px(12. + depth as f32 * 18.))
-                    .pr_3()
-                    .py_1()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .border_b_1()
-                    .border_color(colors.subtle_border)
-                    .when(depth > 0, |row| row.border_l_1())
-                    .child(
-                        div()
-                            .min_w_0()
-                            .flex_1()
-                            .flex()
-                            .flex_col()
-                            .gap_0p5()
-                            .child(
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .gap_2()
-                                    .child(
-                                        div()
-                                            .font_weight(gpui::FontWeight::SEMIBOLD)
-                                            .child(node.op.clone()),
-                                    )
-                                    .children(node.relation.clone().map(Badge::new)),
-                            )
-                            .children((!estimated.is_empty()).then(|| {
-                                div()
-                                    .text_xs()
-                                    .text_color(colors.muted_text)
-                                    .child(estimated)
-                            }))
-                            .children(
-                                (!actual.is_empty()).then(|| {
-                                    div().text_xs().text_color(colors.accent).child(actual)
-                                }),
-                            ),
-                    ),
-            )
-            .children(
-                node.children
-                    .iter()
-                    .map(|child| self.render_plan_node(child, depth + 1, colors)),
-            )
-            .into_any_element()
-    }
-
     fn render_explain_toolbar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = cx.theme().colors;
         let pending = matches!(self.explain, ExplainState::Pending { .. });
@@ -1985,17 +1964,26 @@ impl ResultsView {
             .border_color(colors.subtle_border)
             .bg(colors.panel)
             .child(
-                Button::new("explain-estimated-plan", "Explain")
-                    .tone(ButtonTone::Ghost)
+                Button::new("explain-estimated-plan", "Estimated plan")
+                    .tone(ButtonTone::Accent)
+                    .start_icon(IconName::View)
                     .disabled(pending)
                     .on_click(cx.listener(|view, _, _, cx| view.request_explain(false, cx))),
             )
             .child(
-                Button::new("explain-analyzed-plan", "Analyze (runs query)")
-                    .tone(ButtonTone::DangerMuted)
+                Button::new("explain-analyzed-plan", "Analyze query")
+                    .tone(ButtonTone::Ghost)
+                    .start_icon(IconName::Activity)
                     .disabled(pending)
                     .on_click(cx.listener(|view, _, _, cx| view.request_explain(true, cx))),
             )
+            .children(pending.then(|| {
+                div()
+                    .ml_2()
+                    .text_xs()
+                    .text_color(colors.muted_text)
+                    .child("Collecting plan…")
+            }))
             .child(div().flex_1())
             .children(matches!(self.explain, ExplainState::Ready(_)).then(|| {
                 Button::new("copy-raw-plan", "Copy raw")
@@ -2011,57 +1999,168 @@ impl ResultsView {
             ExplainState::Empty => div()
                 .size_full()
                 .flex()
+                .flex_col()
                 .items_center()
                 .justify_center()
                 .p_4()
                 .text_center()
-                .text_color(colors.muted_text)
-                .child("Explain estimates a plan. Analyze runs the statement and adds runtime counters.")
+                .gap_2()
+                .child(icon(IconName::Activity, colors.accent, 24.))
+                .child(
+                    div()
+                        .text_color(colors.text)
+                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                        .child("Inspect query execution"),
+                )
+                .child(
+                    div()
+                        .max_w(px(460.))
+                        .text_sm()
+                        .text_color(colors.muted_text)
+                        .child("Estimated plan does not run the query. Analyze query runs it and adds real row counts and timing."),
+                )
                 .into_any_element(),
             ExplainState::Pending { analyze } => div()
                 .size_full()
                 .flex()
+                .flex_col()
                 .items_center()
                 .justify_center()
-                .text_color(colors.muted_text)
-                .child(if *analyze {
-                    "Running statement and collecting its plan…"
-                } else {
-                    "Estimating execution plan…"
-                })
+                .gap_2()
+                .child(icon(IconName::Activity, colors.accent, 22.))
+                .child(
+                    div()
+                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                        .child(if *analyze {
+                            "Running query"
+                        } else {
+                            "Building estimated plan"
+                        }),
+                )
+                .child(
+                    div()
+                        .text_sm()
+                        .text_color(colors.muted_text)
+                        .child(if *analyze {
+                            "Runtime depends on the query and database workload."
+                        } else {
+                            "Waiting for the database optimizer…"
+                        }),
+                )
                 .into_any_element(),
             ExplainState::Failed(message) => div()
                 .size_full()
                 .p_3()
-                .whitespace_normal()
-                .text_color(colors.danger)
-                .child(message.clone())
+                .child(ErrorBanner::new(message.clone()))
                 .into_any_element(),
             ExplainState::Ready(response) => {
                 let engine = match response.engine {
                     sift_protocol::Engine::Postgres => "PostgreSQL",
                     sift_protocol::Engine::SqlServer => "SQL Server",
                 };
+                let node_count = self.rendered_plan_nodes.len();
+                let analyzed = response.analyzed;
+                let list = uniform_list(
+                    "execution-plan-nodes",
+                    node_count,
+                    cx.processor(move |view, range: Range<usize>, _, cx| {
+                        let colors = cx.theme().colors;
+                        range
+                            .filter_map(|index| {
+                                view.rendered_plan_nodes
+                                    .get(index)
+                                    .cloned()
+                                    .map(|node| (index, node))
+                            })
+                            .map(|(index, node)| {
+                                div()
+                                    .id(("execution-plan-node", index))
+                                    .h(px(58.))
+                                    .w_full()
+                                    .pl(px(12. + node.depth.min(24) as f32 * 20.))
+                                    .pr_3()
+                                    .flex()
+                                    .items_center()
+                                    .gap_2()
+                                    .border_b_1()
+                                    .border_color(colors.subtle_border)
+                                    .when(index % 2 == 1, |row| row.bg(colors.grid_stripe))
+                                    .child(
+                                        div()
+                                            .w(px(3.))
+                                            .h(px(30.))
+                                            .rounded(cx.theme().metrics.radius)
+                                            .bg(if node.actual.is_some() {
+                                                colors.accent
+                                            } else {
+                                                colors.strong_border
+                                            }),
+                                    )
+                                    .child(
+                                        div()
+                                            .min_w_0()
+                                            .flex_1()
+                                            .flex()
+                                            .flex_col()
+                                            .gap_0p5()
+                                            .child(
+                                                div()
+                                                    .flex()
+                                                    .items_center()
+                                                    .gap_2()
+                                                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                                                    .child(node.op)
+                                                    .children(node.relation.map(Badge::new)),
+                                            )
+                                            .children((!node.estimated.is_empty()).then(|| {
+                                                div()
+                                                    .text_xs()
+                                                    .text_color(colors.muted_text)
+                                                    .child(node.estimated)
+                                            })),
+                                    )
+                                    .children(node.actual.map(|actual| {
+                                        div()
+                                            .flex_none()
+                                            .px_2()
+                                            .py_1()
+                                            .rounded(cx.theme().metrics.radius)
+                                            .bg(colors.accent_muted)
+                                            .text_xs()
+                                            .text_color(colors.accent_hover)
+                                            .child(actual)
+                                    }))
+                            })
+                            .collect()
+                    }),
+                )
+                .size_full()
+                .overflow_hidden()
+                .track_scroll(&self.plan_scroll_handle);
                 div()
-                    .id("execution-plan-scroll")
                     .size_full()
-                    .overflow_y_scroll()
+                    .flex()
+                    .flex_col()
                     .child(
                         div()
-                            .min_h(px(30.))
+                            .min_h(px(42.))
                             .px_3()
                             .flex()
                             .items_center()
                             .gap_2()
                             .bg(colors.toolbar)
-                            .text_xs()
-                            .text_color(colors.muted_text)
-                            .child(engine)
-                            .child(if response.analyzed {
-                                "Analyzed plan"
-                            } else {
-                                "Estimated plan"
-                            }),
+                            .border_b_1()
+                            .border_color(colors.subtle_border)
+                            .child(icon(IconName::Database, colors.muted_text, 14.))
+                            .child(div().text_sm().child(engine))
+                            .child(Badge::new(if analyzed { "Analyzed" } else { "Estimated" }))
+                            .child(div().flex_1())
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(colors.muted_text)
+                                    .child(format!("{node_count} plan nodes")),
+                            ),
                     )
                     .children(response.warnings.iter().map(|warning| {
                         div()
@@ -2072,7 +2171,7 @@ impl ResultsView {
                             .text_color(colors.warning)
                             .child(warning.message.clone())
                     }))
-                    .child(self.render_plan_node(&response.root, 0, colors))
+                    .child(div().flex_1().min_h_0().child(list))
                     .into_any_element()
             }
         }
@@ -2330,6 +2429,8 @@ mod tests {
             ExplainState::Ready(response) => {
                 assert_eq!(response.root.op, "Index Scan");
                 assert!(!response.analyzed);
+                assert_eq!(view.rendered_plan_nodes.len(), 1);
+                assert_eq!(view.rendered_plan_nodes[0].op, "Index Scan");
             }
             state => panic!("expected ready plan, got {state:?}"),
         });
@@ -2339,6 +2440,28 @@ mod tests {
             view.explain,
             ExplainState::Pending { analyze: true }
         )));
+    }
+
+    #[test]
+    fn plan_nodes_flatten_in_display_order_with_depth() {
+        let mut root = PlanNode::new("Hash Join");
+        let mut scan = PlanNode::new("Seq Scan");
+        scan.relation = Some("orders".into());
+        scan.children.push(PlanNode::new("Filter"));
+        root.children.push(scan);
+        root.children.push(PlanNode::new("Index Scan"));
+
+        let rows = flatten_plan(&root);
+        assert_eq!(rows.len(), 4);
+        assert_eq!(rows[0].op, "Hash Join");
+        assert_eq!(rows[0].depth, 0);
+        assert_eq!(rows[1].op, "Seq Scan");
+        assert_eq!(rows[1].relation.as_deref(), Some("orders"));
+        assert_eq!(rows[1].depth, 1);
+        assert_eq!(rows[2].op, "Filter");
+        assert_eq!(rows[2].depth, 2);
+        assert_eq!(rows[3].op, "Index Scan");
+        assert_eq!(rows[3].depth, 1);
     }
 
     #[gpui::test]
