@@ -476,6 +476,7 @@ struct QueryContext {
     /// sequence must not interleave when two tabs request plans together.
     plan_lock: Arc<tokio::sync::Mutex<()>>,
     profile_id: i64,
+    tenant_id: i64,
     /// Semantic work runs on its own task; dropping this sender ends it and
     /// releases every server document it owns with the connection.
     semantic: tokio::sync::mpsc::UnboundedSender<SemanticControl>,
@@ -532,6 +533,9 @@ async fn run_query_executor(
                             }))
                             .is_err()
                         {
+                            return;
+                        }
+                        if events.send(load_capabilities(&opened).await).is_err() {
                             return;
                         }
                         let schema_event = load_schema(&opened).await;
@@ -716,6 +720,7 @@ async fn run_query_executor(
                                             name: entry.name.clone(),
                                         },
                                     ));
+                                    let _ = events.send(load_capabilities(&opened).await);
                                     let schema_event = load_schema(&opened).await;
                                     context = Some(opened);
                                     let _ = events.send(schema_event);
@@ -1880,8 +1885,29 @@ async fn open_query_context(
         plan_connection,
         plan_lock: Arc::new(tokio::sync::Mutex::new(())),
         profile_id,
+        tenant_id,
         semantic,
     })
+}
+
+async fn load_capabilities(opened: &QueryContext) -> ExecutorEvent {
+    let context = sift_protocol::OperationCapabilityContext {
+        tenant_id: Some(opened.tenant_id),
+        room_id: None,
+        connection_profile_id: Some(opened.profile_id),
+        session: Some(opened.session),
+        connection: Some(opened.connection),
+        transaction: None,
+        workspace_id: None,
+    };
+    ExecutorEvent::CapabilitiesLoaded {
+        profile_id: opened.profile_id,
+        capabilities: opened
+            .client
+            .available_operations(&context)
+            .await
+            .map_err(|error| error.to_string()),
+    }
 }
 
 async fn supervise_instances(

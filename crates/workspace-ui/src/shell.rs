@@ -1181,6 +1181,10 @@ pub enum ExecutorCommand {
 #[derive(Debug)]
 pub enum ExecutorEvent {
     Connection(ConnectionStatus),
+    CapabilitiesLoaded {
+        profile_id: i64,
+        capabilities: Result<Vec<sift_protocol::OperationCapability>, String>,
+    },
     SchemaLoaded {
         profile_id: i64,
         snapshot: Box<sift_protocol::SchemaSnapshot>,
@@ -3102,6 +3106,8 @@ pub struct WorkspaceShell {
     account_pending: bool,
     account_error: Option<String>,
     connection_status: ConnectionStatus,
+    operation_capabilities:
+        HashMap<sift_protocol::OperationKind, sift_protocol::OperationCapability>,
     connection_schema: ConnectionSchemaState,
     schema_search_generation: u64,
     schema_search_state: SchemaSearchState,
@@ -3501,6 +3507,7 @@ impl WorkspaceShell {
             account_pending: false,
             account_error: None,
             connection_status: ConnectionStatus::Disconnected,
+            operation_capabilities: HashMap::new(),
             connection_schema: ConnectionSchemaState::Unavailable,
             schema_search_generation: 0,
             schema_search_state: SchemaSearchState::Idle,
@@ -3531,6 +3538,43 @@ impl WorkspaceShell {
 
     pub fn command_specs(&self, cx: &App) -> Vec<CommandSpec> {
         CommandRegistry::palette_with(self.command_context(cx), &self.keymaps.bindings)
+            .into_iter()
+            .map(|spec| self.apply_operation_capability(spec))
+            .collect()
+    }
+
+    fn command_spec(&self, id: CommandId, cx: &App) -> CommandSpec {
+        self.apply_operation_capability(CommandRegistry::spec(id, self.command_context(cx)))
+    }
+
+    fn apply_operation_capability(&self, mut spec: CommandSpec) -> CommandSpec {
+        if spec.disabled_reason.is_some() {
+            return spec;
+        }
+        let operation = match spec.id {
+            CommandId::ExecuteStatement | CommandId::ExecuteDocument => {
+                sift_protocol::OperationKind::ExecuteQuery
+            }
+            CommandId::CancelExecution => sift_protocol::OperationKind::CancelQuery,
+            CommandId::CompleteSql => sift_protocol::OperationKind::Complete,
+            CommandId::FormatSql => sift_protocol::OperationKind::FormatSql,
+            CommandId::ApplySqlQuickFix => sift_protocol::OperationKind::SqlQuickFix,
+            CommandId::FindSqlUsages => sift_protocol::OperationKind::FindSqlUsages,
+            CommandId::SearchSchema => sift_protocol::OperationKind::SearchSchema,
+            CommandId::SearchData => sift_protocol::OperationKind::SearchData,
+            _ => return spec,
+        };
+        if let Some(capability) = self.operation_capabilities.get(&operation) {
+            if !capability.available {
+                spec.disabled_reason = Some(
+                    capability
+                        .reason
+                        .clone()
+                        .unwrap_or_else(|| "Operation is unavailable".into()),
+                );
+            }
+        }
+        spec
     }
 
     fn command_context(&self, cx: &App) -> CommandContext {
@@ -4180,6 +4224,7 @@ impl WorkspaceShell {
                     ConnectionStatus::Disconnected | ConnectionStatus::Failed { .. }
                 ) {
                     self.connection_schema = ConnectionSchemaState::Unavailable;
+                    self.operation_capabilities.clear();
                 }
                 self.connection_status = status.clone();
                 self.sync_database_item_states(cx);
@@ -4228,6 +4273,36 @@ impl WorkspaceShell {
                         }
                     }
                     ConnectionStatus::Disconnected | ConnectionStatus::Connecting { .. } => {}
+                }
+                cx.notify();
+            }
+            ExecutorEvent::CapabilitiesLoaded {
+                profile_id,
+                capabilities,
+            } => {
+                if !matches!(
+                    self.connection_status,
+                    ConnectionStatus::Connected {
+                        profile_id: connected,
+                        ..
+                    } if connected == profile_id
+                ) {
+                    return;
+                }
+                match capabilities {
+                    Ok(capabilities) => {
+                        self.operation_capabilities = capabilities
+                            .into_iter()
+                            .map(|capability| (capability.operation, capability))
+                            .collect();
+                    }
+                    Err(message) => {
+                        self.operation_capabilities.clear();
+                        self.show_toast(
+                            format!("Could not load operation availability: {message}"),
+                            cx,
+                        );
+                    }
                 }
                 cx.notify();
             }
@@ -5311,6 +5386,7 @@ impl WorkspaceShell {
         }
         self.held_result_pages.clear();
         self.connection_status = ConnectionStatus::Disconnected;
+        self.operation_capabilities.clear();
         self.connection_schema = ConnectionSchemaState::Unavailable;
         self.schema_search_state = SchemaSearchState::Idle;
         self.data_search_state = DataSearchState::Idle;
@@ -8846,7 +8922,7 @@ impl WorkspaceShell {
             CommandLanguageMatch::Prefix => cx.notify(),
             CommandLanguageMatch::Command(command) => {
                 self.ide_input = None;
-                let spec = CommandRegistry::spec(command, self.command_context(cx));
+                let spec = self.command_spec(command, cx);
                 if let Some(reason) = spec.disabled_reason {
                     self.show_toast(format!("{}: {reason}", spec.label), cx);
                 } else {
@@ -9824,9 +9900,10 @@ impl WorkspaceShell {
             .into_iter()
             .enumerate()
             .map(|(index, item)| {
-                let disabled_reason = item.command.map_or(Some("Not implemented"), |command| {
-                    CommandRegistry::spec(command, self.command_context(cx)).disabled_reason
-                });
+                let disabled_reason = item.command.map_or_else(
+                    || Some("Not implemented".into()),
+                    |command| self.command_spec(command, cx).disabled_reason,
+                );
                 let available = disabled_reason.is_none();
                 let row = div()
                     .id(("app-bar-menu-item", index))
@@ -12661,7 +12738,7 @@ impl WorkspaceShell {
                                                 let selected = idx == selected_idx;
                                                 let right = command
                                                     .disabled_reason
-                                                    .map(str::to_owned)
+                                                    .clone()
                                                     .unwrap_or_else(|| {
                                                         if command.language.is_empty() {
                                                             command.shortcut.into()
@@ -16506,6 +16583,40 @@ mod tests {
                 shell.data_search_state,
                 DataSearchState::Ready { .. }
             ));
+        });
+    }
+
+    #[gpui::test]
+    fn server_capabilities_disable_commands_with_the_server_reason(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+
+        workspace.update(&mut cx, |shell, cx| {
+            shell.connection_status = ConnectionStatus::Connected {
+                profile_id: 7,
+                name: "Warehouse".into(),
+            };
+            shell.on_executor_event(
+                ExecutorEvent::CapabilitiesLoaded {
+                    profile_id: 7,
+                    capabilities: Ok(vec![sift_protocol::OperationCapability {
+                        operation: sift_protocol::OperationKind::SearchData,
+                        available: false,
+                        reason: Some("operation is not supported by this provider".into()),
+                        destructive: false,
+                        provider_id: None,
+                    }]),
+                },
+                cx,
+            );
+            assert_eq!(
+                shell
+                    .command_spec(CommandId::SearchData, cx)
+                    .disabled_reason
+                    .as_deref(),
+                Some("operation is not supported by this provider")
+            );
         });
     }
 

@@ -78,7 +78,7 @@ surfaces, then admin/platform. Within P0, the connection experience comes first.
 
 ### Capability gating — command availability
 
-- [ ] `available_operations` — capability-aware command enable/disable + disabled reasons across the UI (M4)
+- [x] `available_operations` — server capability-aware command enable/disable with provider/policy reasons (M4)
 
 ### Editor depth (polish of the built editor)
 

@@ -129,7 +129,7 @@ pub struct CommandSpec {
     pub label: &'static str,
     pub shortcut: &'static str,
     pub language: String,
-    pub disabled_reason: Option<&'static str>,
+    pub disabled_reason: Option<String>,
 }
 
 impl CommandSpec {
@@ -164,16 +164,20 @@ impl CommandRegistry {
             language: definition.language.into(),
             disabled_reason: match definition.availability {
                 AvailabilityRule::Always => None,
-                AvailabilityRule::ActiveItem if !context.has_active_item => Some("No active item"),
-                AvailabilityRule::MultiplePanes if context.pane_count < 2 => Some("Only one pane"),
+                AvailabilityRule::ActiveItem if !context.has_active_item => {
+                    Some("No active item".into())
+                }
+                AvailabilityRule::MultiplePanes if context.pane_count < 2 => {
+                    Some("Only one pane".into())
+                }
                 AvailabilityRule::EditableInstance if !context.has_editable_instance => {
-                    Some("Bundled Local Sift has no sift.toml")
+                    Some("Bundled Local Sift has no sift.toml".into())
                 }
                 AvailabilityRule::RunningQuery if !context.active_query_running => {
-                    Some("Active query is not running")
+                    Some("Active query is not running".into())
                 }
                 AvailabilityRule::ConnectedDatabase if !context.database_connected => {
-                    Some("No database connected")
+                    Some("No database connected".into())
                 }
                 AvailabilityRule::ActiveItem
                 | AvailabilityRule::MultiplePanes
@@ -639,11 +643,15 @@ mod tests {
             database_connected: false,
         };
         assert_eq!(
-            CommandRegistry::spec(CommandId::ExecuteStatement, empty).disabled_reason,
+            CommandRegistry::spec(CommandId::ExecuteStatement, empty)
+                .disabled_reason
+                .as_deref(),
             Some("No active item")
         );
         assert_eq!(
-            CommandRegistry::spec(CommandId::ClosePane, empty).disabled_reason,
+            CommandRegistry::spec(CommandId::ClosePane, empty)
+                .disabled_reason
+                .as_deref(),
             Some("No active item")
         );
         assert!(CommandRegistry::spec(
@@ -656,15 +664,21 @@ mod tests {
         .enabled());
         assert!(CommandRegistry::spec(CommandId::SplitPane, empty).enabled());
         assert_eq!(
-            CommandRegistry::spec(CommandId::OpenServerConfiguration, empty).disabled_reason,
+            CommandRegistry::spec(CommandId::OpenServerConfiguration, empty)
+                .disabled_reason
+                .as_deref(),
             Some("Bundled Local Sift has no sift.toml")
         );
         assert_eq!(
-            CommandRegistry::spec(CommandId::CancelExecution, empty).disabled_reason,
+            CommandRegistry::spec(CommandId::CancelExecution, empty)
+                .disabled_reason
+                .as_deref(),
             Some("Active query is not running")
         );
         assert_eq!(
-            CommandRegistry::spec(CommandId::SearchSchema, empty).disabled_reason,
+            CommandRegistry::spec(CommandId::SearchSchema, empty)
+                .disabled_reason
+                .as_deref(),
             Some("No database connected")
         );
         assert!(CommandRegistry::spec(
