@@ -966,6 +966,13 @@ impl QueryEditor {
             EditorKeymap::Standard => EditorKeymap::Vim,
             EditorKeymap::Vim => EditorKeymap::Standard,
         };
+        self.set_keymap(keymap, cx);
+    }
+
+    pub fn set_keymap(&mut self, keymap: EditorKeymap, cx: &mut Context<Self>) {
+        if self.keymap == keymap {
+            return;
+        }
         self.apply_keymap(keymap);
         cx.emit(EditorEvent::VimStateChanged);
         self.selection_changed(cx);

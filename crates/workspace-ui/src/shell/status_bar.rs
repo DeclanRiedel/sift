@@ -98,6 +98,19 @@ pub(super) fn render_status_bar(
         ),
         None => ("NO EDITOR", "No active editor", None),
     };
+    let mode_can_toggle = shell.keyboard_profile() == KeyboardProfile::Hybrid
+        && shell.active_editor_mode(cx).is_some();
+    let mode_tooltip = if mode_can_toggle {
+        mode_tooltip.to_owned()
+    } else {
+        match shell.keyboard_profile() {
+            KeyboardProfile::Vim => "Vim editor keymap is fixed by the Vim keyboard profile".into(),
+            KeyboardProfile::Standard => {
+                "Standard editor keymap is fixed by the Standard keyboard profile".into()
+            }
+            KeyboardProfile::Hybrid => mode_tooltip.to_owned(),
+        }
+    };
     let editor_buffer = vim_entered.unwrap_or_default();
     let ide_buffer = shell.ide_key_buffer();
     let ide_buffer_label = if ide_buffer.is_empty() {
@@ -280,19 +293,24 @@ pub(super) fn render_status_bar(
                 .child({
                     div()
                         .id("footer-editor-mode")
-                        .role(Role::Button)
-                        .aria_label(mode_tooltip)
+                        .debug_selector(|| "footer-editor-mode".into())
+                        .aria_label(mode_tooltip.clone())
                         .h(theme.metrics.compact_control_height)
                         .px_1()
                         .flex()
                         .items_center()
                         .text_color(colors.muted_text)
-                        .hover(|button| button.bg(colors.hovered_surface).text_color(colors.text))
-                        .on_click(
-                            cx.listener(|shell, _, _, cx| shell.toggle_active_editor_keymap(cx)),
-                        )
+                        .when(mode_can_toggle, |mode| {
+                            mode.role(Role::Button)
+                                .hover(|button| {
+                                    button.bg(colors.hovered_surface).text_color(colors.text)
+                                })
+                                .on_click(cx.listener(|shell, _, _, cx| {
+                                    shell.toggle_active_editor_keymap(cx)
+                                }))
+                        })
                         .child(mode_label)
-                        .tooltip(move |_, cx| cx.new(|_| Tooltip::new(mode_tooltip)).into())
+                        .tooltip(move |_, cx| cx.new(|_| Tooltip::new(mode_tooltip.clone())).into())
                 })
                 .children((!editor_buffer.is_empty()).then(|| {
                     div()

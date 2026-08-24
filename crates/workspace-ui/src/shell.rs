@@ -7557,6 +7557,9 @@ impl WorkspaceShell {
     }
 
     fn toggle_active_editor_keymap(&mut self, cx: &mut Context<Self>) {
+        if self.keyboard_profile() != KeyboardProfile::Hybrid {
+            return;
+        }
         let editor = self.panes.get(self.active_pane).and_then(|pane| {
             let pane = pane.read(cx);
             pane.active_item().and_then(|item| pane.editor(item.id))
@@ -7567,11 +7570,32 @@ impl WorkspaceShell {
     }
 
     fn vim_mode_default(&self) -> bool {
-        self.settings.editor.default_mode == EditorMode::Vim
+        match self.keyboard_profile() {
+            KeyboardProfile::Vim => true,
+            KeyboardProfile::Standard => false,
+            KeyboardProfile::Hybrid => self.settings.editor.default_mode == EditorMode::Vim,
+        }
     }
 
     fn keyboard_profile(&self) -> KeyboardProfile {
         self.settings.keyboard.profile
+    }
+
+    fn sync_editor_keymaps_to_profile(&mut self, cx: &mut Context<Self>) {
+        let keymap = match self.keyboard_profile() {
+            KeyboardProfile::Vim => Some(EditorKeymap::Vim),
+            KeyboardProfile::Standard => Some(EditorKeymap::Standard),
+            KeyboardProfile::Hybrid => None,
+        };
+        let Some(keymap) = keymap else {
+            return;
+        };
+        for pane in &self.panes {
+            let editors = pane.read(cx).editors.values().cloned().collect::<Vec<_>>();
+            for editor in editors {
+                editor.update(cx, |editor, cx| editor.set_keymap(keymap, cx));
+            }
+        }
     }
 
     fn set_keyboard_profile(&mut self, profile: KeyboardProfile, cx: &mut Context<Self>) {
@@ -7602,6 +7626,7 @@ impl WorkspaceShell {
             };
         }
         self.settings = settings;
+        self.sync_editor_keymaps_to_profile(cx);
         self.ide_input = None;
         cx.notify();
     }
@@ -7634,7 +7659,7 @@ impl WorkspaceShell {
             return;
         }
         let mut settings = self.settings.clone();
-        settings.editor.default_mode = if self.vim_mode_default() {
+        settings.editor.default_mode = if settings.editor.default_mode == EditorMode::Vim {
             EditorMode::Standard
         } else {
             EditorMode::Vim
@@ -8736,6 +8761,7 @@ impl WorkspaceShell {
                 match store.save_text(editor.read(cx).document().text()) {
                     Ok(settings) => {
                         self.settings = settings;
+                        self.sync_editor_keymaps_to_profile(cx);
                         if let Some(pane) = self.panes.get(self.active_pane) {
                             pane.update(cx, |pane, cx| pane.mark_clean(item_id, cx));
                         }
@@ -18032,9 +18058,48 @@ mod tests {
         editor.update_in(&mut cx, |editor, window, cx| {
             editor.focus_handle(cx).focus(window, cx);
         });
+        assert_eq!(
+            editor.read_with(&cx, |editor, _| editor.keymap()),
+            EditorKeymap::Standard
+        );
+
+        let footer_mode = cx.debug_bounds("footer-editor-mode").unwrap();
+        cx.simulate_click(footer_mode.center(), Modifiers::default());
+        assert_eq!(
+            editor.read_with(&cx, |editor, _| editor.keymap()),
+            EditorKeymap::Standard,
+            "a fixed Standard profile must not toggle from the footer"
+        );
 
         cx.simulate_keystrokes("space");
         assert!(workspace.read_with(&cx, |shell, _| shell.ide_input.is_none()));
+
+        workspace.update(&mut cx, |shell, cx| {
+            shell.set_keyboard_profile(KeyboardProfile::Hybrid, cx)
+        });
+        cx.run_until_parked();
+        let footer_mode = cx.debug_bounds("footer-editor-mode").unwrap();
+        cx.simulate_click(footer_mode.center(), Modifiers::default());
+        assert_eq!(
+            editor.read_with(&cx, |editor, _| editor.keymap()),
+            EditorKeymap::Vim,
+            "Hybrid must unlock the footer toggle"
+        );
+
+        workspace.update(&mut cx, |shell, cx| {
+            shell.set_keyboard_profile(KeyboardProfile::Standard, cx);
+            assert_eq!(editor.read(cx).keymap(), EditorKeymap::Standard);
+            shell.set_keyboard_profile(KeyboardProfile::Vim, cx);
+            assert_eq!(editor.read(cx).keymap(), EditorKeymap::Vim);
+        });
+        cx.run_until_parked();
+        let footer_mode = cx.debug_bounds("footer-editor-mode").unwrap();
+        cx.simulate_click(footer_mode.center(), Modifiers::default());
+        assert_eq!(
+            editor.read_with(&cx, |editor, _| editor.keymap()),
+            EditorKeymap::Vim,
+            "a fixed Vim profile must not toggle from the footer"
+        );
 
         workspace.update(&mut cx, |shell, cx| {
             shell.set_keyboard_profile(KeyboardProfile::Hybrid, cx)
@@ -18113,7 +18178,8 @@ mod tests {
         });
         workspace.read_with(&cx, |workspace, cx| {
             assert_eq!(workspace.modal(), Some(&Modal::Settings));
-            assert!(!workspace.vim_mode_default());
+            assert_eq!(workspace.settings.editor.default_mode, EditorMode::Standard);
+            assert!(workspace.vim_mode_default());
             assert!(!workspace.snapshot(cx).legacy_vim_mode_default);
         });
     }
@@ -18265,9 +18331,8 @@ mod tests {
             (item.id, pane.editor(item.id).unwrap())
         });
         let updated = "version = 1\n\n[editor]\ndefault_mode = \"vim\"\n";
-        editor.update_in(&mut cx, |editor, window, cx| {
-            let end = editor.document().text().encode_utf16().count();
-            editor.replace_text_in_range(Some(0..end), updated, window, cx);
+        editor.update(&mut cx, |editor, cx| {
+            editor.replace_text_from_owner(updated, cx);
         });
         workspace.update_in(&mut cx, |workspace, window, cx| {
             workspace.save_active_item(&SaveActiveItem, window, cx)
