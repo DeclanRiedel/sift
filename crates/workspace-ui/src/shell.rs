@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 use std::sync::Arc;
+use std::time::Duration;
 
 use gpui::{
     actions, deferred, div, img, prelude::*, px, uniform_list, App, Bounds, Context, CursorStyle,
@@ -620,7 +621,16 @@ actions!(
     sift_shell,
     [
         OpenCommandPalette,
+        OpenSchemaSearch,
         OpenServerConnection,
+        KeyLanguageRoot,
+        KeyLanguageFind,
+        KeyLanguageView,
+        KeyLanguageExecute,
+        KeyLanguageTab,
+        KeyLanguageEdit,
+        KeyLanguageDatabase,
+        KeyLanguageWorkspace,
         DismissModal,
         PaletteUp,
         PaletteDown,
@@ -636,6 +646,18 @@ actions!(
         ToggleBottomDock
     ]
 );
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum KeyLanguageHint {
+    Root,
+    Find,
+    View,
+    Execute,
+    Tab,
+    Edit,
+    Database,
+    Workspace,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Modal {
@@ -2906,6 +2928,8 @@ pub struct WorkspaceShell {
     active_left_panel: LeftPanel,
     active_bottom_tool: BottomTool,
     modal: Option<Modal>,
+    key_language_hint: Option<KeyLanguageHint>,
+    key_language_hint_epoch: u64,
     app_bar_expanded: bool,
     app_bar_menu: Option<AppBarMenu>,
     toasts: Vec<Toast>,
@@ -3244,6 +3268,8 @@ impl WorkspaceShell {
             active_left_panel: workspace.left_panel,
             active_bottom_tool: workspace.bottom_tool,
             modal: None,
+            key_language_hint: None,
+            key_language_hint_epoch: 0,
             app_bar_expanded: false,
             app_bar_menu: None,
             toasts: Vec::new(),
@@ -7644,11 +7670,41 @@ impl WorkspaceShell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.key_language_hint = None;
         self.modal = Some(Modal::CommandPalette);
         self.palette_selected = 0;
         self.palette_scroll_handle
             .scroll_to_item(0, ScrollStrategy::Top);
         self.query_input.focus_handle(cx).focus(window, cx);
+        cx.notify();
+    }
+
+    fn open_schema_search_action(
+        &mut self,
+        _: &OpenSchemaSearch,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.key_language_hint = None;
+        self.open_schema_search(window, cx);
+    }
+
+    fn show_key_language(&mut self, hint: KeyLanguageHint, cx: &mut Context<Self>) {
+        self.key_language_hint = Some(hint);
+        self.key_language_hint_epoch = self.key_language_hint_epoch.wrapping_add(1);
+        let epoch = self.key_language_hint_epoch;
+        cx.spawn(async move |shell, cx| {
+            cx.background_executor()
+                .timer(Duration::from_millis(2200))
+                .await;
+            let _ = shell.update(cx, |shell, cx| {
+                if shell.key_language_hint_epoch == epoch {
+                    shell.key_language_hint = None;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
         cx.notify();
     }
 
@@ -8176,10 +8232,28 @@ impl WorkspaceShell {
 
     /// Commands matching the palette search text (case-insensitive substring).
     fn filtered_commands(&self, cx: &App) -> Vec<CommandSpec> {
-        let query = self.query_input.read(cx).text().to_lowercase();
+        let query = self.query_input.read(cx).text().trim().to_lowercase();
+        let compact_query = query
+            .chars()
+            .filter(|character| !character.is_whitespace())
+            .collect::<String>();
         self.command_specs(cx)
             .into_iter()
-            .filter(|command| query.is_empty() || command.label.to_lowercase().contains(&query))
+            .filter(|command| {
+                if query.is_empty() {
+                    return true;
+                }
+                let compact_language = command
+                    .language
+                    .to_lowercase()
+                    .replace("<leader>", "")
+                    .chars()
+                    .filter(|character| !character.is_whitespace())
+                    .collect::<String>();
+                command.label.to_lowercase().contains(&query)
+                    || command.id.as_str().contains(&query)
+                    || (!compact_query.is_empty() && compact_language.contains(&compact_query))
+            })
             .collect()
     }
 
@@ -8293,6 +8367,7 @@ impl WorkspaceShell {
     }
 
     fn dismiss_modal(&mut self, _: &DismissModal, window: &mut Window, cx: &mut Context<Self>) {
+        self.key_language_hint = None;
         if cx.stop_active_drag(window) {
             self.clear_tab_drag_previews(cx);
             cx.notify();
@@ -11215,9 +11290,13 @@ impl WorkspaceShell {
                                                 let enabled = command.enabled();
                                                 let id = command.id;
                                                 let selected = idx == selected_idx;
-                                                let right = command
-                                                    .disabled_reason
-                                                    .unwrap_or(command.shortcut);
+                                                let right = command.disabled_reason.unwrap_or({
+                                                    if command.language.is_empty() {
+                                                        command.shortcut
+                                                    } else {
+                                                        command.language
+                                                    }
+                                                });
                                                 let mut row = div()
                                                     .id(id.as_str())
                                                     .flex()
@@ -13479,6 +13558,90 @@ impl WorkspaceShell {
                 )
         })
     }
+
+    fn render_key_language_hint(&self, cx: &App) -> Option<gpui::AnyElement> {
+        let hint = self.key_language_hint?;
+        let (prefix, choices): (&str, &[(&str, &str)]) = match hint {
+            KeyLanguageHint::Root => (
+                "<leader>",
+                &[
+                    ("f", "find"),
+                    ("v", "view"),
+                    ("x", "execute"),
+                    ("t", "tab"),
+                    ("e", "edit"),
+                    ("d", "database"),
+                    ("w", "workspace"),
+                    ("?", "help"),
+                ],
+            ),
+            KeyLanguageHint::Find => (
+                "<leader> f",
+                &[("c", "commands"), ("d", "schema"), ("u", "usages")],
+            ),
+            KeyLanguageHint::View => (
+                "<leader> v",
+                &[
+                    ("d", "Connections"),
+                    ("i", "Inspector"),
+                    ("b", "bottom panel"),
+                ],
+            ),
+            KeyLanguageHint::Execute => (
+                "<leader> x",
+                &[("s", "statement"), ("q", "query"), ("c", "cancel")],
+            ),
+            KeyLanguageHint::Tab => ("<leader> t", &[("c", "close"), ("s", "save")]),
+            KeyLanguageHint::Edit => ("<leader> e", &[("f", "format SQL"), ("q", "quick fix")]),
+            KeyLanguageHint::Database => ("<leader> d", &[("c", "connect server")]),
+            KeyLanguageHint::Workspace => (
+                "<leader> w",
+                &[("s", "split"), ("n", "next pane"), ("c", "close pane")],
+            ),
+        };
+        let colors = cx.theme().colors;
+        Some(
+            div()
+                .id("key-language-hint")
+                .debug_selector(|| "key-language-hint".into())
+                .absolute()
+                .left_3()
+                .right_3()
+                .bottom(px(34.))
+                .flex()
+                .justify_center()
+                .child(
+                    div()
+                        .max_w(px(900.))
+                        .px_2()
+                        .py_1()
+                        .flex()
+                        .items_center()
+                        .gap_3()
+                        .rounded(cx.theme().metrics.radius_large)
+                        .border_1()
+                        .border_color(colors.strong_border)
+                        .bg(colors.elevated_surface)
+                        .shadow_lg()
+                        .occlude()
+                        .child(
+                            div()
+                                .font_family("monospace")
+                                .text_color(colors.accent)
+                                .child(prefix),
+                        )
+                        .children(choices.iter().map(|(key, label)| {
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_1()
+                                .child(KeyBinding::new(*key))
+                                .child(div().text_xs().text_color(colors.muted_text).child(*label))
+                        })),
+                )
+                .into_any_element(),
+        )
+    }
 }
 
 impl Focusable for WorkspaceShell {
@@ -13847,7 +14010,70 @@ impl gpui::Render for WorkspaceShell {
                 cx.listener(|shell, _, _, cx| shell.collapse_app_bar_navigation(cx)),
             )
             .on_action(cx.listener(Self::open_command_palette))
+            .on_action(cx.listener(Self::open_schema_search_action))
             .on_action(cx.listener(Self::open_server_connection))
+            .on_action(
+                cx.listener(|shell, _: &crate::editor::ExecuteStatement, window, cx| {
+                    shell.dispatch_active_editor_action(
+                        &crate::editor::ExecuteStatement,
+                        window,
+                        cx,
+                    )
+                }),
+            )
+            .on_action(
+                cx.listener(|shell, _: &crate::editor::ExecuteDocument, window, cx| {
+                    shell.dispatch_active_editor_action(&crate::editor::ExecuteDocument, window, cx)
+                }),
+            )
+            .on_action(
+                cx.listener(|shell, _: &crate::editor::FormatDocument, window, cx| {
+                    shell.dispatch_active_editor_action(&crate::editor::FormatDocument, window, cx)
+                }),
+            )
+            .on_action(
+                cx.listener(|shell, _: &crate::editor::ApplyQuickFix, window, cx| {
+                    shell.dispatch_active_editor_action(&crate::editor::ApplyQuickFix, window, cx)
+                }),
+            )
+            .on_action(
+                cx.listener(|shell, _: &crate::editor::FindUsages, window, cx| {
+                    shell.dispatch_active_editor_action(&crate::editor::FindUsages, window, cx)
+                }),
+            )
+            .on_action(
+                cx.listener(|shell, _: &crate::editor::GoToNextDiagnostic, window, cx| {
+                    shell.dispatch_active_editor_action(
+                        &crate::editor::GoToNextDiagnostic,
+                        window,
+                        cx,
+                    )
+                }),
+            )
+            .on_action(cx.listener(|shell, _: &KeyLanguageRoot, _, cx| {
+                shell.show_key_language(KeyLanguageHint::Root, cx)
+            }))
+            .on_action(cx.listener(|shell, _: &KeyLanguageFind, _, cx| {
+                shell.show_key_language(KeyLanguageHint::Find, cx)
+            }))
+            .on_action(cx.listener(|shell, _: &KeyLanguageView, _, cx| {
+                shell.show_key_language(KeyLanguageHint::View, cx)
+            }))
+            .on_action(cx.listener(|shell, _: &KeyLanguageExecute, _, cx| {
+                shell.show_key_language(KeyLanguageHint::Execute, cx)
+            }))
+            .on_action(cx.listener(|shell, _: &KeyLanguageTab, _, cx| {
+                shell.show_key_language(KeyLanguageHint::Tab, cx)
+            }))
+            .on_action(cx.listener(|shell, _: &KeyLanguageEdit, _, cx| {
+                shell.show_key_language(KeyLanguageHint::Edit, cx)
+            }))
+            .on_action(cx.listener(|shell, _: &KeyLanguageDatabase, _, cx| {
+                shell.show_key_language(KeyLanguageHint::Database, cx)
+            }))
+            .on_action(cx.listener(|shell, _: &KeyLanguageWorkspace, _, cx| {
+                shell.show_key_language(KeyLanguageHint::Workspace, cx)
+            }))
             .on_action(cx.listener(Self::dismiss_modal))
             .on_action(cx.listener(Self::palette_up))
             .on_action(cx.listener(Self::palette_down))
@@ -13969,6 +14195,7 @@ impl gpui::Render for WorkspaceShell {
                             .child(icon(IconName::Close, colors.muted_text, 12.))
                     }))
             }))
+            .children(self.render_key_language_hint(cx))
             .children(self.render_modal(cx))
             .children(
                 edge_resize_enabled(window.is_maximized(), window.is_fullscreen())
@@ -15293,6 +15520,44 @@ mod tests {
             workspace.read_with(&cx, |workspace, _| workspace.modal().cloned()),
             Some(Modal::CommandPalette)
         );
+    }
+
+    #[gpui::test]
+    fn command_palette_searches_mnemonic_language(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        workspace.update(&mut cx, |shell, cx| {
+            shell
+                .query_input
+                .update(cx, |input, cx| input.set_text("xs", cx));
+        });
+        let matches = workspace.read_with(&cx, |shell, cx| shell.filtered_commands(cx));
+        assert!(matches
+            .iter()
+            .any(|command| command.id == CommandId::ExecuteStatement));
+        assert!(!matches
+            .iter()
+            .any(|command| command.id == CommandId::SearchSchema));
+    }
+
+    #[gpui::test]
+    fn key_language_prefix_actions_drive_discovery_strip(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        let focus = workspace.read_with(&cx, |shell, cx| shell.focus_handle(cx));
+        cx.update(|window, cx| focus.dispatch_action(&KeyLanguageRoot, window, cx));
+        assert_eq!(
+            workspace.read_with(&cx, |shell, _| shell.key_language_hint),
+            Some(KeyLanguageHint::Root)
+        );
+        cx.update(|window, cx| focus.dispatch_action(&KeyLanguageFind, window, cx));
+        assert_eq!(
+            workspace.read_with(&cx, |shell, _| shell.key_language_hint),
+            Some(KeyLanguageHint::Find)
+        );
+        assert!(cx.debug_bounds("key-language-hint").is_some());
     }
 
     #[gpui::test]

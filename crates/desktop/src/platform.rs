@@ -3,8 +3,8 @@ use std::path::PathBuf;
 use gpui::KeyBinding;
 use sift_workspace_ui::{
     CloseActiveItem, CloseActivePane, DismissModal, FocusNextPane, OpenCommandPalette,
-    PaletteConfirm, PaletteDown, PaletteUp, SaveActiveItem, SplitPane, ToggleBottomDock,
-    ToggleLeftDock, ToggleRightDock,
+    OpenServerConnection, PaletteConfirm, PaletteDown, PaletteUp, SaveActiveItem, SplitPane,
+    ToggleBottomDock, ToggleLeftDock, ToggleRightDock,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -99,7 +99,7 @@ pub fn primary_modifier() -> &'static str {
 pub fn shell_key_bindings() -> Vec<KeyBinding> {
     let primary = primary_modifier();
     let context = Some("SiftWorkspace");
-    vec![
+    let mut bindings = vec![
         KeyBinding::new(&format!("{primary}-shift-p"), OpenCommandPalette, context),
         KeyBinding::new("escape", DismissModal, context),
         KeyBinding::new("up", PaletteUp, context),
@@ -122,7 +122,155 @@ pub fn shell_key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new(&format!("{primary}-shift-b"), ToggleLeftDock, context),
         KeyBinding::new(&format!("{primary}-shift-i"), ToggleRightDock, context),
         KeyBinding::new(&format!("{primary}-j"), ToggleBottomDock, context),
-    ]
+    ];
+
+    // Vim-like Sift command language. Space is leader only in Vim normal
+    // mode or non-text UI surfaces. Ctrl+K is the standard-keymap fallback.
+    // Exact prefix actions keep the compact which-key guide synchronized with
+    // GPUI's multi-keystroke resolver.
+    for (leader, language_context) in [
+        ("space", "vim_mode == normal"),
+        ("space", "SiftWorkspace && !SiftEditor && !SiftTextInput"),
+        ("ctrl-k", "SiftWorkspace && !SiftTextInput"),
+    ] {
+        bindings.extend([
+            KeyBinding::new(
+                leader,
+                sift_workspace_ui::KeyLanguageRoot,
+                Some(language_context),
+            ),
+            KeyBinding::new(
+                &format!("{leader} f"),
+                sift_workspace_ui::KeyLanguageFind,
+                Some(language_context),
+            ),
+            KeyBinding::new(
+                &format!("{leader} v"),
+                sift_workspace_ui::KeyLanguageView,
+                Some(language_context),
+            ),
+            KeyBinding::new(
+                &format!("{leader} x"),
+                sift_workspace_ui::KeyLanguageExecute,
+                Some(language_context),
+            ),
+            KeyBinding::new(
+                &format!("{leader} t"),
+                sift_workspace_ui::KeyLanguageTab,
+                Some(language_context),
+            ),
+            KeyBinding::new(
+                &format!("{leader} e"),
+                sift_workspace_ui::KeyLanguageEdit,
+                Some(language_context),
+            ),
+            KeyBinding::new(
+                &format!("{leader} d"),
+                sift_workspace_ui::KeyLanguageDatabase,
+                Some(language_context),
+            ),
+            KeyBinding::new(
+                &format!("{leader} w"),
+                sift_workspace_ui::KeyLanguageWorkspace,
+                Some(language_context),
+            ),
+            KeyBinding::new(
+                &format!("{leader} f c"),
+                OpenCommandPalette,
+                Some(language_context),
+            ),
+            KeyBinding::new(
+                &format!("{leader} f d"),
+                sift_workspace_ui::OpenSchemaSearch,
+                Some(language_context),
+            ),
+            KeyBinding::new(
+                &format!("{leader} f u"),
+                sift_workspace_ui::editor::FindUsages,
+                Some(language_context),
+            ),
+            KeyBinding::new(
+                &format!("{leader} v d"),
+                ToggleLeftDock,
+                Some(language_context),
+            ),
+            KeyBinding::new(
+                &format!("{leader} v i"),
+                ToggleRightDock,
+                Some(language_context),
+            ),
+            KeyBinding::new(
+                &format!("{leader} v b"),
+                ToggleBottomDock,
+                Some(language_context),
+            ),
+            KeyBinding::new(
+                &format!("{leader} x s"),
+                sift_workspace_ui::editor::ExecuteStatement,
+                Some(language_context),
+            ),
+            KeyBinding::new(
+                &format!("{leader} x q"),
+                sift_workspace_ui::editor::ExecuteDocument,
+                Some(language_context),
+            ),
+            KeyBinding::new(
+                &format!("{leader} x c"),
+                sift_workspace_ui::CancelExecution,
+                Some(language_context),
+            ),
+            KeyBinding::new(
+                &format!("{leader} t c"),
+                CloseActiveItem,
+                Some(language_context),
+            ),
+            KeyBinding::new(
+                &format!("{leader} t s"),
+                SaveActiveItem,
+                Some(language_context),
+            ),
+            KeyBinding::new(
+                &format!("{leader} e f"),
+                sift_workspace_ui::editor::FormatDocument,
+                Some(language_context),
+            ),
+            KeyBinding::new(
+                &format!("{leader} e q"),
+                sift_workspace_ui::editor::ApplyQuickFix,
+                Some(language_context),
+            ),
+            KeyBinding::new(
+                &format!("{leader} d c"),
+                OpenServerConnection,
+                Some(language_context),
+            ),
+            KeyBinding::new(&format!("{leader} w s"), SplitPane, Some(language_context)),
+            KeyBinding::new(
+                &format!("{leader} w n"),
+                FocusNextPane,
+                Some(language_context),
+            ),
+            KeyBinding::new(
+                &format!("{leader} w c"),
+                CloseActivePane,
+                Some(language_context),
+            ),
+        ]);
+    }
+
+    bindings.extend([
+        KeyBinding::new(
+            ":",
+            OpenCommandPalette,
+            Some("vim_mode == normal || (SiftWorkspace && !SiftEditor && !SiftTextInput)"),
+        ),
+        KeyBinding::new(
+            "] d",
+            sift_workspace_ui::editor::GoToNextDiagnostic,
+            Some("vim_mode == normal"),
+        ),
+    ]);
+    bindings
 }
 
 #[cfg(test)]
@@ -139,6 +287,6 @@ mod tests {
 
     #[test]
     fn keymap_has_stable_action_coverage() {
-        assert_eq!(shell_key_bindings().len(), 14);
+        assert_eq!(shell_key_bindings().len(), 91);
     }
 }

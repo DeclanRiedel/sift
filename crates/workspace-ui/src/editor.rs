@@ -1905,9 +1905,18 @@ impl gpui::Render for QueryEditor {
                 self.cursor_blink.update(cx, CursorBlink::disable);
             }
         }
+        let key_context = match (self.keymap, self.vim_mode) {
+            (EditorKeymap::Vim, VimMode::Normal) => "SiftEditor vim_mode=normal",
+            (EditorKeymap::Vim, VimMode::Visual | VimMode::Select) => "SiftEditor vim_mode=visual",
+            (EditorKeymap::Vim, VimMode::OperatorPending) => "SiftEditor vim_mode=operator_pending",
+            (EditorKeymap::Vim, VimMode::Command) => "SiftEditor vim_mode=command",
+            (EditorKeymap::Vim, VimMode::Insert) | (EditorKeymap::Standard, _) => {
+                "SiftEditor vim_mode=insert"
+            }
+        };
         div()
             .id("sift-query-editor")
-            .key_context("SiftEditor")
+            .key_context(key_context)
             .role(Role::TextInput)
             .aria_label(match self.language {
                 EditorLanguage::Sql => "SQL query editor",

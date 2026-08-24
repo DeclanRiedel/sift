@@ -34,3 +34,5 @@ Desktop preferences are stored in a local `settings.toml`. See
 - [`docs/REMOTE-AND-UPDATES.md`](docs/REMOTE-AND-UPDATES.md) — remote use and
   updates
 - [`docs/EXTENSIONS.md`](docs/EXTENSIONS.md) — extensions
+- [`docs/keyboard-wiki/index.html`](docs/keyboard-wiki/index.html) — keyboard
+  language defaults and rollout reference

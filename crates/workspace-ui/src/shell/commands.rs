@@ -79,6 +79,9 @@ pub struct CommandDefinition {
     pub id: CommandId,
     pub label: &'static str,
     pub shortcut: &'static str,
+    /// Sift's mnemonic command-language spelling. `<leader>` is Space in
+    /// Vim/UI normal mode and Ctrl+K from the standard keymap.
+    pub language: &'static str,
     pub palette_visible: bool,
     availability: AvailabilityRule,
 }
@@ -97,6 +100,7 @@ pub struct CommandSpec {
     pub id: CommandId,
     pub label: &'static str,
     pub shortcut: &'static str,
+    pub language: &'static str,
     pub disabled_reason: Option<&'static str>,
 }
 
@@ -122,6 +126,7 @@ impl CommandRegistry {
             id,
             label: definition.label,
             shortcut: definition.shortcut,
+            language: definition.language,
             disabled_reason: match definition.availability {
                 AvailabilityRule::Always => None,
                 AvailabilityRule::ActiveItem if !context.has_active_item => Some("No active item"),
@@ -158,6 +163,7 @@ const DEFINITIONS: &[CommandDefinition] = &[
         CommandId::ConnectServer,
         "Connect to Server…",
         "",
+        "<leader> d c",
         true,
         AvailabilityRule::Always,
     ),
@@ -165,6 +171,7 @@ const DEFINITIONS: &[CommandDefinition] = &[
         CommandId::ExecuteStatement,
         "Run Current Statement",
         "Ctrl+Enter",
+        "<leader> x s",
         true,
         AvailabilityRule::ActiveItem,
     ),
@@ -172,6 +179,7 @@ const DEFINITIONS: &[CommandDefinition] = &[
         CommandId::ExecuteDocument,
         "Run Entire Query Tab",
         "Ctrl+Shift+Enter",
+        "<leader> x q",
         true,
         AvailabilityRule::ActiveItem,
     ),
@@ -179,6 +187,7 @@ const DEFINITIONS: &[CommandDefinition] = &[
         CommandId::CancelExecution,
         "Cancel Query",
         "Ctrl+Alt+C",
+        "<leader> x c",
         true,
         AvailabilityRule::RunningQuery,
     ),
@@ -186,6 +195,7 @@ const DEFINITIONS: &[CommandDefinition] = &[
         CommandId::UndoQuery,
         "Undo Query Edit",
         "Ctrl+Z",
+        "u",
         true,
         AvailabilityRule::ActiveItem,
     ),
@@ -193,12 +203,14 @@ const DEFINITIONS: &[CommandDefinition] = &[
         CommandId::RedoQuery,
         "Redo Query Edit",
         "Ctrl+Shift+Z",
+        "Ctrl+R",
         true,
         AvailabilityRule::ActiveItem,
     ),
     command(
         CommandId::CompleteSql,
         "Suggest Completions",
+        "Ctrl+Space",
         "Ctrl+Space",
         true,
         AvailabilityRule::ActiveItem,
@@ -207,6 +219,7 @@ const DEFINITIONS: &[CommandDefinition] = &[
         CommandId::FormatSql,
         "Format SQL",
         "Ctrl+Alt+L",
+        "<leader> e f",
         true,
         AvailabilityRule::ActiveItem,
     ),
@@ -214,13 +227,15 @@ const DEFINITIONS: &[CommandDefinition] = &[
         CommandId::ApplySqlQuickFix,
         "Apply Quick Fix at Caret",
         "Alt+Enter",
+        "<leader> e q",
         true,
         AvailabilityRule::ActiveItem,
     ),
     command(
         CommandId::FindSqlUsages,
         "Find Usages at Caret",
-        "Shift+F12",
+        "",
+        "<leader> f u",
         true,
         AvailabilityRule::ActiveItem,
     ),
@@ -228,13 +243,15 @@ const DEFINITIONS: &[CommandDefinition] = &[
         CommandId::SearchSchema,
         "Search Database Schema…",
         "",
+        "<leader> f d",
         true,
         AvailabilityRule::ConnectedDatabase,
     ),
     command(
         CommandId::NextSqlProblem,
         "Go to Next Problem",
-        "F8",
+        "",
+        "] d",
         true,
         AvailabilityRule::ActiveItem,
     ),
@@ -242,6 +259,7 @@ const DEFINITIONS: &[CommandDefinition] = &[
         CommandId::SplitPane,
         "Split Pane",
         "Ctrl+\\",
+        "<leader> w s",
         true,
         AvailabilityRule::Always,
     ),
@@ -249,6 +267,7 @@ const DEFINITIONS: &[CommandDefinition] = &[
         CommandId::FocusNextPane,
         "Focus Next Pane",
         "Ctrl+K Ctrl+→",
+        "<leader> w n",
         true,
         AvailabilityRule::MultiplePanes,
     ),
@@ -256,6 +275,7 @@ const DEFINITIONS: &[CommandDefinition] = &[
         CommandId::ClosePane,
         "Close Pane",
         "Ctrl+Shift+W",
+        "<leader> w c",
         true,
         AvailabilityRule::MultiplePanes,
     ),
@@ -263,6 +283,7 @@ const DEFINITIONS: &[CommandDefinition] = &[
         CommandId::SaveItem,
         "Save Active Item",
         "Ctrl+S",
+        "<leader> t s",
         true,
         AvailabilityRule::ActiveItem,
     ),
@@ -270,6 +291,7 @@ const DEFINITIONS: &[CommandDefinition] = &[
         CommandId::CloseItem,
         "Close Active Item",
         "Ctrl+W",
+        "<leader> t c",
         true,
         AvailabilityRule::ActiveItem,
     ),
@@ -277,6 +299,7 @@ const DEFINITIONS: &[CommandDefinition] = &[
         CommandId::ToggleLeftDock,
         "Toggle Left Dock",
         "Ctrl+Shift+B",
+        "<leader> v d",
         true,
         AvailabilityRule::Always,
     ),
@@ -284,6 +307,7 @@ const DEFINITIONS: &[CommandDefinition] = &[
         CommandId::ToggleInspectorDock,
         "Toggle Inspector Dock",
         "Ctrl+Shift+I",
+        "<leader> v i",
         true,
         AvailabilityRule::Always,
     ),
@@ -291,12 +315,14 @@ const DEFINITIONS: &[CommandDefinition] = &[
         CommandId::ToggleBottomDock,
         "Toggle Bottom Dock",
         "Ctrl+J",
+        "<leader> v b",
         true,
         AvailabilityRule::Always,
     ),
     command(
         CommandId::OpenSettings,
         "Settings",
+        "",
         "",
         false,
         AvailabilityRule::Always,
@@ -305,6 +331,7 @@ const DEFINITIONS: &[CommandDefinition] = &[
         CommandId::OpenServerConfiguration,
         "Edit Current sift.toml…",
         "",
+        "",
         false,
         AvailabilityRule::EditableInstance,
     ),
@@ -312,6 +339,7 @@ const DEFINITIONS: &[CommandDefinition] = &[
         CommandId::OpenCommandPalette,
         "Command Palette…",
         "Ctrl+Shift+P",
+        ":",
         false,
         AvailabilityRule::Always,
     ),
@@ -319,12 +347,14 @@ const DEFINITIONS: &[CommandDefinition] = &[
         CommandId::ToggleTheme,
         "Toggle Light/Dark Theme",
         "",
+        "",
         true,
         AvailabilityRule::Always,
     ),
     command(
         CommandId::Quit,
         "Quit Sift",
+        "",
         "",
         false,
         AvailabilityRule::Always,
@@ -335,6 +365,7 @@ const fn command(
     id: CommandId,
     label: &'static str,
     shortcut: &'static str,
+    language: &'static str,
     palette_visible: bool,
     availability: AvailabilityRule,
 ) -> CommandDefinition {
@@ -342,6 +373,7 @@ const fn command(
         id,
         label,
         shortcut,
+        language,
         palette_visible,
         availability,
     }
@@ -358,6 +390,41 @@ mod tests {
         for definition in DEFINITIONS {
             assert!(ids.insert(definition.id.as_str()));
             assert_eq!(CommandRegistry::definition(definition.id), definition);
+        }
+    }
+
+    #[test]
+    fn defaults_have_no_function_key_dependency() {
+        for definition in DEFINITIONS {
+            assert!(
+                !definition
+                    .shortcut
+                    .split('+')
+                    .any(|part| part.starts_with('F')
+                        && part[1..].chars().all(|c| c.is_ascii_digit())),
+                "{} still advertises a function-key shortcut",
+                definition.id.as_str()
+            );
+        }
+    }
+
+    #[test]
+    fn wiki_covers_every_available_leader_command() {
+        let wiki = include_str!("../../../../docs/keyboard-wiki/index.html");
+        for definition in DEFINITIONS
+            .iter()
+            .filter(|definition| definition.language.starts_with("<leader>"))
+        {
+            let encoded = definition
+                .language
+                .replace('<', "&lt;")
+                .replace('>', "&gt;");
+            assert!(
+                wiki.contains(&encoded),
+                "keyboard wiki is missing {} ({})",
+                definition.id.as_str(),
+                definition.language
+            );
         }
     }
 

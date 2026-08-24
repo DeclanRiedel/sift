@@ -52,8 +52,6 @@ fn editor_key_bindings() -> Vec<gpui::KeyBinding> {
         gpui::KeyBinding::new("ctrl-space", ed::Complete, ctx),
         gpui::KeyBinding::new(&format!("{primary}-alt-l"), ed::FormatDocument, ctx),
         gpui::KeyBinding::new("alt-enter", ed::ApplyQuickFix, ctx),
-        gpui::KeyBinding::new("shift-f12", ed::FindUsages, ctx),
-        gpui::KeyBinding::new("f8", ed::GoToNextDiagnostic, ctx),
         gpui::KeyBinding::new(
             &format!("{primary}-c"),
             res::CopySelectedCell,

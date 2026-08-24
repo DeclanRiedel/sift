@@ -502,6 +502,27 @@
           '';
         };
 
+        desktopDemoWiki = pkgs.writeShellApplication {
+          name = "sift-desktop-demo-wiki";
+          runtimeInputs = [ pkgs.python3 ];
+          text = ''
+            set -euo pipefail
+
+            repo="''${SIFT_REPO:-$PWD}"
+            wiki="$repo/docs/keyboard-wiki"
+            if [ ! -f "$repo/flake.nix" ] || [ ! -f "$wiki/index.html" ]; then
+              echo "Run this from the sift checkout, or set SIFT_REPO=/path/to/sift." >&2
+              exit 1
+            fi
+
+            bind="''${SIFT_DESKTOP_DEMO_WIKI_BIND:-127.0.0.1}"
+            port="''${SIFT_DESKTOP_DEMO_WIKI_PORT:-8787}"
+            echo "Sift keyboard wiki: http://$bind:$port"
+            echo "Run the desktop demo in another terminal: nix run .#desktop-demo"
+            exec python3 -m http.server "$port" --bind "$bind" --directory "$wiki"
+          '';
+        };
+
         devSecretKey = pkgs.writeShellApplication {
           name = "sift-dev-secret-key";
           runtimeInputs = with pkgs; [ coreutils openssl ];
@@ -539,6 +560,7 @@
               sift-check                Run cargo check for the whole workspace.
               sift-desktop              Run the native GPUI desktop client.
               sift-desktop-demo         Seeded Postgres + real backend + registered connection + desktop.
+              sift-desktop-demo-wiki    Serve the keyboard-language wiki beside the desktop demo.
               sift-dev-secret-key       Generate the ignored local metadata secret key file.
               sift-dev-mssql            Manage a local SQL Server docker container for live-mssql tests.
                                         Sub: start | stop | reset | password | status. Password is
@@ -583,6 +605,7 @@
             check
             desktop
             desktopDemo
+            desktopDemoWiki
             devSecretKey
             devMssql
           ];
@@ -652,6 +675,10 @@
           desktop-demo = {
             type = "app";
             program = "${desktopDemo}/bin/sift-desktop-demo";
+          };
+          sift-desktop-demo-wiki = {
+            type = "app";
+            program = "${desktopDemoWiki}/bin/sift-desktop-demo-wiki";
           };
           health = {
             type = "app";
