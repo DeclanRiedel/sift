@@ -1396,7 +1396,16 @@ impl QueryEditor {
         if self.vim_key(modalkit::crossterm::event::KeyCode::Enter, cx) {
             return;
         }
-        self.document.insert("\n");
+        if self.language == EditorLanguage::Json && self.document.selection().is_empty() {
+            let (insert, caret_back) = json_newline(self.document.text(), self.document.cursor());
+            self.document.insert(&insert);
+            if caret_back > 0 {
+                let cursor = self.document.cursor().saturating_sub(caret_back);
+                self.document.set_selection(cursor..cursor, false);
+            }
+        } else {
+            self.document.insert("\n");
+        }
         self.edited(cx);
     }
 
@@ -2516,11 +2525,100 @@ fn json_diagnostic(source: &str) -> Option<String> {
 }
 
 fn format_json_document(source: &str) -> Result<String, String> {
-    let value = serde_json::from_str::<serde_json::Value>(source)
+    serde_json::from_str::<serde_json::Value>(source)
         .map_err(|error| format!("Cannot format invalid JSON near line {}.", error.line()))?;
-    serde_json::to_string_pretty(&value)
-        .map(|formatted| format!("{formatted}\n"))
-        .map_err(|_| "Cannot format JSON.".into())
+    let mut formatted = String::with_capacity(source.len() + source.len() / 4);
+    let mut depth = 0usize;
+    let mut index = 0usize;
+    while index < source.len() {
+        let character = source[index..].chars().next().expect("index is in bounds");
+        let width = character.len_utf8();
+        match character {
+            '"' => {
+                let start = index;
+                index += width;
+                let mut escaped = false;
+                while index < source.len() {
+                    let current = source[index..].chars().next().expect("index is in bounds");
+                    index += current.len_utf8();
+                    if current == '"' && !escaped {
+                        break;
+                    }
+                    escaped = current == '\\' && !escaped;
+                    if current != '\\' {
+                        escaped = false;
+                    }
+                }
+                formatted.push_str(&source[start..index]);
+                continue;
+            }
+            '{' | '[' => {
+                formatted.push(character);
+                depth += 1;
+                let next = source[index + width..]
+                    .chars()
+                    .find(|next| !next.is_whitespace());
+                let empty = matches!((character, next), ('{', Some('}')) | ('[', Some(']')));
+                if !empty {
+                    formatted.push('\n');
+                    push_json_indent(&mut formatted, depth);
+                }
+            }
+            '}' | ']' => {
+                depth = depth.saturating_sub(1);
+                let open = if character == '}' { '{' } else { '[' };
+                if !formatted.ends_with(open) {
+                    formatted.push('\n');
+                    push_json_indent(&mut formatted, depth);
+                }
+                formatted.push(character);
+            }
+            ',' => {
+                formatted.push(',');
+                formatted.push('\n');
+                push_json_indent(&mut formatted, depth);
+            }
+            ':' => formatted.push_str(": "),
+            whitespace if whitespace.is_whitespace() => {}
+            _ => formatted.push(character),
+        }
+        index += width;
+    }
+    formatted.push('\n');
+    Ok(formatted)
+}
+
+fn push_json_indent(output: &mut String, depth: usize) {
+    for _ in 0..depth {
+        output.push_str("  ");
+    }
+}
+
+fn json_newline(source: &str, cursor: usize) -> (String, usize) {
+    let line_start = source[..cursor].rfind('\n').map_or(0, |index| index + 1);
+    let base_indent = source[line_start..cursor]
+        .chars()
+        .take_while(|character| matches!(character, ' ' | '\t'))
+        .collect::<String>();
+    let before = source[line_start..cursor].trim_end();
+    let next = source[cursor..].trim_start().chars().next();
+    let opening = before.ends_with('{') || before.ends_with('[');
+    let paired = matches!(
+        (before.chars().last(), next),
+        (Some('{'), Some('}')) | (Some('['), Some(']'))
+    );
+    let inner_indent = if opening {
+        format!("{base_indent}  ")
+    } else {
+        base_indent.clone()
+    };
+    if paired {
+        let insert = format!("\n{inner_indent}\n{base_indent}");
+        let caret_back = 1 + base_indent.len();
+        (insert, caret_back)
+    } else {
+        (format!("\n{inner_indent}"), 0)
+    }
 }
 
 fn json_text_runs(line: &str, font: gpui::Font, theme: Theme) -> Vec<TextRun> {
@@ -3502,10 +3600,10 @@ fn json_presentation_classifies_keys_values_and_literals() {
 
 #[test]
 fn json_formatting_is_pretty_stable_and_source_safe_on_errors() {
-    let formatted = format_json_document(r#"{"items":[1,true],"name":"demo"}"#).unwrap();
+    let formatted = format_json_document(r#"{"z":0,"items":[1,true],"name":"demo"}"#).unwrap();
     assert_eq!(
         formatted,
-        "{\n  \"items\": [\n    1,\n    true\n  ],\n  \"name\": \"demo\"\n}\n"
+        "{\n  \"z\": 0,\n  \"items\": [\n    1,\n    true\n  ],\n  \"name\": \"demo\"\n}\n"
     );
     assert_eq!(format_json_document(&formatted).unwrap(), formatted);
     assert!(format_json_document("{\"secret\": nope}")
@@ -3514,4 +3612,14 @@ fn json_formatting_is_pretty_stable_and_source_safe_on_errors() {
     assert!(!format_json_document("{\"secret\": nope}")
         .unwrap_err()
         .contains("secret"));
+}
+
+#[test]
+fn json_newlines_follow_two_space_nesting_and_split_paired_delimiters() {
+    assert_eq!(json_newline("{", 1), ("\n  ".into(), 0));
+    assert_eq!(json_newline("{\n  \"items\": [", 14), ("\n    ".into(), 0));
+    assert_eq!(
+        json_newline("{\n  \"items\": []\n}", 14),
+        ("\n    \n  ".into(), 3)
+    );
 }
