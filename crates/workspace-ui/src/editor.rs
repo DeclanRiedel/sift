@@ -1111,6 +1111,26 @@ impl QueryEditor {
         if self.read_only {
             return;
         }
+        if self.language == EditorLanguage::Json {
+            match format_json_document(self.document.text()) {
+                Ok(formatted) if formatted != self.document.text() => {
+                    let length = self.document.text().len();
+                    self.document.replace_range(0..length, &formatted);
+                    self.semantic.set_notice(Some("Formatted JSON.".into()));
+                    self.edited(cx);
+                }
+                Ok(_) => {
+                    self.semantic
+                        .set_notice(Some("JSON is already formatted.".into()));
+                    cx.notify();
+                }
+                Err(message) => {
+                    self.semantic.set_notice(Some(message));
+                    cx.notify();
+                }
+            }
+            return;
+        }
         let selection = self.document.selection();
         let range = (!selection.is_empty()).then_some(sift_protocol::TextRange {
             start: selection.start as u32,
@@ -1599,7 +1619,7 @@ impl QueryEditor {
         let runs = match self.language {
             EditorLanguage::Sql => sql_text_runs(line_text, style.font(), theme),
             EditorLanguage::Toml => toml_text_runs(line_text, style.font(), theme),
-            EditorLanguage::Json => plain_text_runs(line_text, style.font(), theme),
+            EditorLanguage::Json => json_text_runs(line_text, style.font(), theme),
             EditorLanguage::PlainText => plain_text_runs(line_text, style.font(), theme),
         };
         let layout =
@@ -1923,7 +1943,7 @@ impl gpui::Render for QueryEditor {
             .aria_label(match self.language {
                 EditorLanguage::Sql => "SQL query editor",
                 EditorLanguage::Toml => "TOML configuration editor",
-                EditorLanguage::Json => "JSON keymap editor",
+                EditorLanguage::Json => "JSON editor",
                 EditorLanguage::PlainText => "Read-only text editor",
             })
             .track_focus(&self.focus_handle)
@@ -2176,7 +2196,7 @@ impl Element for QueryEditorElement {
                 let runs = match language {
                     EditorLanguage::Sql => sql_text_runs(line, style.font(), theme),
                     EditorLanguage::Toml => toml_text_runs(line, style.font(), theme),
-                    EditorLanguage::Json => plain_text_runs(line, style.font(), theme),
+                    EditorLanguage::Json => json_text_runs(line, style.font(), theme),
                     EditorLanguage::PlainText => plain_text_runs(line, style.font(), theme),
                 };
                 let shaped = window.text_system().shape_line(
@@ -2493,6 +2513,78 @@ fn json_diagnostic(source: &str) -> Option<String> {
     serde_json::from_str::<serde_json::Value>(source)
         .err()
         .map(|error| format!("Invalid JSON near line {}", error.line()))
+}
+
+fn format_json_document(source: &str) -> Result<String, String> {
+    let value = serde_json::from_str::<serde_json::Value>(source)
+        .map_err(|error| format!("Cannot format invalid JSON near line {}.", error.line()))?;
+    serde_json::to_string_pretty(&value)
+        .map(|formatted| format!("{formatted}\n"))
+        .map_err(|_| "Cannot format JSON.".into())
+}
+
+fn json_text_runs(line: &str, font: gpui::Font, theme: Theme) -> Vec<TextRun> {
+    let mut runs = Vec::new();
+    let bytes = line.as_bytes();
+    let mut start = 0;
+    while start < bytes.len() {
+        let (end, color) = if bytes[start] == b'"' {
+            let mut end = start + 1;
+            let mut escaped = false;
+            while end < bytes.len() {
+                match bytes[end] {
+                    b'"' if !escaped => {
+                        end += 1;
+                        break;
+                    }
+                    b'\\' if !escaped => escaped = true,
+                    _ => escaped = false,
+                }
+                end += line[end..].chars().next().map_or(1, char::len_utf8);
+            }
+            let is_key = line[end..].trim_start().starts_with(':');
+            let color = if is_key {
+                theme.colors.syntax_keyword
+            } else {
+                theme.colors.syntax_string
+            };
+            (end, color)
+        } else if bytes[start].is_ascii_digit()
+            || (bytes[start] == b'-' && bytes.get(start + 1).is_some_and(u8::is_ascii_digit))
+        {
+            let end = bytes[start + 1..]
+                .iter()
+                .position(|byte| !matches!(*byte, b'0'..=b'9' | b'.' | b'e' | b'E' | b'+' | b'-'))
+                .map_or(bytes.len(), |offset| start + 1 + offset);
+            (end, theme.colors.syntax_number)
+        } else if ["true", "false", "null"].into_iter().any(|keyword| {
+            line[start..].starts_with(keyword)
+                && bytes
+                    .get(start + keyword.len())
+                    .is_none_or(|byte| !byte.is_ascii_alphanumeric() && *byte != b'_')
+        }) {
+            let end = ["true", "false", "null"]
+                .into_iter()
+                .find(|keyword| line[start..].starts_with(keyword))
+                .map_or(start + 1, |keyword| start + keyword.len());
+            (end, theme.colors.syntax_keyword)
+        } else {
+            (
+                start + line[start..].chars().next().map_or(1, char::len_utf8),
+                theme.colors.text,
+            )
+        };
+        runs.push(TextRun {
+            len: end - start,
+            font: font.clone(),
+            color,
+            background_color: None,
+            underline: None,
+            strikethrough: None,
+        });
+        start = end;
+    }
+    runs
 }
 
 fn toml_text_runs(line: &str, font: gpui::Font, theme: Theme) -> Vec<TextRun> {
@@ -3386,4 +3478,40 @@ fn toml_presentation_and_diagnostics_are_lightweight_and_source_safe() {
         })
     );
     assert!(toml_diagnostic("name = \"demo\"").is_none());
+}
+
+#[test]
+fn json_presentation_classifies_keys_values_and_literals() {
+    let theme = Theme::dark();
+    let text = r#"{"name": "demo", "enabled": true, "count": -2.5, "empty": null}"#;
+    let runs = json_text_runs(text, gpui::font("monospace"), theme);
+    assert_eq!(runs.iter().map(|run| run.len).sum::<usize>(), text.len());
+    assert!(runs
+        .iter()
+        .any(|run| run.color == theme.colors.syntax_string));
+    assert!(runs
+        .iter()
+        .any(|run| run.color == theme.colors.syntax_number));
+    assert!(
+        runs.iter()
+            .filter(|run| run.color == theme.colors.syntax_keyword)
+            .count()
+            >= 6
+    );
+}
+
+#[test]
+fn json_formatting_is_pretty_stable_and_source_safe_on_errors() {
+    let formatted = format_json_document(r#"{"items":[1,true],"name":"demo"}"#).unwrap();
+    assert_eq!(
+        formatted,
+        "{\n  \"items\": [\n    1,\n    true\n  ],\n  \"name\": \"demo\"\n}\n"
+    );
+    assert_eq!(format_json_document(&formatted).unwrap(), formatted);
+    assert!(format_json_document("{\"secret\": nope}")
+        .unwrap_err()
+        .contains("line 1"));
+    assert!(!format_json_document("{\"secret\": nope}")
+        .unwrap_err()
+        .contains("secret"));
 }

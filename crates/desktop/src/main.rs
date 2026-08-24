@@ -107,7 +107,7 @@ fn main() {
                     MenuItem::action("Cancel Query", CancelExecution),
                     MenuItem::separator(),
                     MenuItem::action("Suggest Completions", ed::Complete),
-                    MenuItem::action("Format SQL", ed::FormatDocument),
+                    MenuItem::action("Format Document", ed::FormatDocument),
                     MenuItem::action("Apply Quick Fix", ed::ApplyQuickFix),
                     MenuItem::action("Find Usages", ed::FindUsages),
                     MenuItem::action("Go to Next Problem", ed::GoToNextDiagnostic),
