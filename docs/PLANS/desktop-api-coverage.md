@@ -166,8 +166,9 @@ surfaces, then admin/platform. Within P0, the connection experience comes first.
 
 ### Plan captures
 
-- [~] `plan_capture`, `plan_captures`, `compare_plan_captures` — capture and
-  fingerprint-filtered two-capture comparison are wired; deletion remains (M5)
+- [x] `plan_capture`, `plan_captures`, `compare_plan_captures`,
+  `delete_plan_capture` — parameter-aware capture, paginated fingerprint-filtered
+  listing, two-capture comparison, and deletion are wired (M5)
 
 ### Runs & scheduling — Runs dock
 

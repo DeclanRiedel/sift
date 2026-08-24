@@ -1265,6 +1265,7 @@ pub enum ExecutorCommand {
     CapturePlan {
         item_id: u64,
         sql: String,
+        params: Vec<sift_protocol::Value>,
     },
     LoadPlanCaptures {
         item_id: u64,
@@ -1276,6 +1277,12 @@ pub enum ExecutorCommand {
         tenant_id: i64,
         left: sift_protocol::PlanCaptureId,
         right: sift_protocol::PlanCaptureId,
+    },
+    DeletePlanCapture {
+        item_id: u64,
+        tenant_id: i64,
+        capture_id: sift_protocol::PlanCaptureId,
+        expected_revision: u64,
     },
     /// Run one semantic request for `item_id`. `text` is the exact buffer the
     /// revision names, so the executor can resynchronize the server document
@@ -1422,6 +1429,11 @@ pub enum ExecutorEvent {
     PlanCapturesCompared {
         item_id: u64,
         result: Result<sift_protocol::PlanCaptureComparison, String>,
+    },
+    PlanCaptureDeleted {
+        item_id: u64,
+        capture_id: sift_protocol::PlanCaptureId,
+        result: Result<(), String>,
     },
     Semantic {
         item_id: u64,
@@ -4875,6 +4887,27 @@ impl WorkspaceShell {
                 }
                 cx.notify();
             }
+            ExecutorEvent::PlanCaptureDeleted {
+                item_id,
+                capture_id,
+                result,
+            } => {
+                if self.plan_capture_item != Some(item_id) {
+                    return;
+                }
+                match result {
+                    Ok(()) => {
+                        self.plan_captures
+                            .retain(|capture| capture.id != capture_id);
+                        self.selected_plan_captures.retain(|id| *id != capture_id);
+                        self.plan_capture_comparison = None;
+                        self.plan_capture_error = None;
+                        self.show_toast("Plan capture deleted".into(), cx);
+                    }
+                    Err(message) => self.plan_capture_error = Some(message),
+                }
+                cx.notify();
+            }
             ExecutorEvent::CapabilitiesLoaded {
                 profile_id,
                 capabilities,
@@ -5517,6 +5550,29 @@ impl WorkspaceShell {
             return;
         }
         self.execute_database_item_with_params(item_id, sql, Vec::new(), cx);
+    }
+
+    fn remembered_query_params(&self, sql: &str) -> Result<Vec<sift_protocol::Value>, String> {
+        let parameters = detect_query_parameters(sql);
+        if parameters.is_empty() {
+            return Ok(Vec::new());
+        }
+        let values = self
+            .remembered_parameter_bindings
+            .get(&parameter_binding_key(sql))
+            .ok_or_else(|| {
+                "Run this parameterized statement before capturing its plan".to_owned()
+            })?;
+        if values.len() < parameters.len() {
+            return Err("Run this statement again to supply every plan parameter".into());
+        }
+        parameters
+            .iter()
+            .zip(values)
+            .map(|(label, value)| {
+                parse_parameter_value(value).map_err(|error| format!("{label}: {error}"))
+            })
+            .collect()
     }
 
     fn submit_query_parameters(&mut self, cx: &mut Context<Self>) {
@@ -9302,10 +9358,18 @@ impl WorkspaceShell {
                 self.open_result_cell_editor(emitter, *item_id, window, cx);
             }
             PaneEvent::CapturePlanRequested { item_id, sql } => {
+                let params = match self.remembered_query_params(sql) {
+                    Ok(params) => params,
+                    Err(message) => {
+                        self.show_error_toast(message, cx);
+                        return;
+                    }
+                };
                 if let Some(sender) = &self.executor_sender {
                     let _ = sender.send(ExecutorCommand::CapturePlan {
                         item_id: *item_id,
                         sql: sql.clone(),
+                        params,
                     });
                     self.show_toast("Saving estimated plan capture…".into(), cx);
                 }
@@ -15268,6 +15332,8 @@ impl WorkspaceShell {
                         div().id("plan-capture-list").p_3().flex().flex_col().gap_2().overflow_y_scroll()
                             .children(captures.into_iter().enumerate().map(|(index, capture)| {
                                 let capture_id = capture.id;
+                                let tenant_id = capture.tenant_id;
+                                let expected_revision = capture.revision;
                                 let is_selected = selected.contains(&capture_id);
                                 div().id(("plan-capture", index)).p_2().rounded_sm().border_1()
                                     .cursor(CursorStyle::PointingHand)
@@ -15276,7 +15342,22 @@ impl WorkspaceShell {
                                     .on_click(cx.listener(move |shell, _, _, cx| {
                                         shell.toggle_plan_capture_selection(capture_id, cx)
                                     }))
-                                    .child(format!("{} · {} · {} ms", capture.root_operator, if capture.analyzed { "analyzed" } else { "estimated" }, capture.duration_ms))
+                                    .child(div().flex().items_center().justify_between().gap_2()
+                                        .child(format!("{} · {} · {} ms", capture.root_operator, if capture.analyzed { "analyzed" } else { "estimated" }, capture.duration_ms))
+                                        .child(Button::new(("delete-plan-capture", index), "Delete")
+                                            .tone(ButtonTone::DangerMuted)
+                                            .on_click(cx.listener(move |shell, _, _, cx| {
+                                                cx.stop_propagation();
+                                                let Some(item_id) = shell.plan_capture_item else { return };
+                                                if let Some(sender) = &shell.executor_sender {
+                                                    let _ = sender.send(ExecutorCommand::DeletePlanCapture {
+                                                        item_id,
+                                                        tenant_id,
+                                                        capture_id,
+                                                        expected_revision,
+                                                    });
+                                                }
+                                            }))))
                                     .child(div().flex().items_center().justify_between().text_xs().text_color(colors.muted_text)
                                         .child(capture.captured_at.to_rfc3339())
                                         .child(if is_selected { "Selected" } else { "Select" }))
@@ -19665,8 +19746,8 @@ mod tests {
         });
         assert!(matches!(
             receiver.try_recv(),
-            Ok(ExecutorCommand::CapturePlan { item_id: capture_item, sql })
-                if capture_item == item_id && sql == preview_sql
+            Ok(ExecutorCommand::CapturePlan { item_id: capture_item, sql, params })
+                if capture_item == item_id && sql == preview_sql && params.is_empty()
         ));
         workspace.update_in(&mut cx, |shell, window, cx| {
             let pane = shell.panes[shell.active_pane].clone();

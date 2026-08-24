@@ -1151,9 +1151,13 @@ async fn run_query_executor(
                     return;
                 }
             }
-            ExecutorCommand::CapturePlan { item_id, sql } => {
+            ExecutorCommand::CapturePlan {
+                item_id,
+                sql,
+                params,
+            } => {
                 let result = match context.as_ref() {
-                    Some(opened) => capture_plan(opened, sql).await,
+                    Some(opened) => capture_plan(opened, sql, params).await,
                     None => Err("Connect before saving a plan capture".into()),
                 };
                 if events
@@ -1198,6 +1202,31 @@ async fn run_query_executor(
                 };
                 if events
                     .send(ExecutorEvent::PlanCapturesCompared { item_id, result })
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            ExecutorCommand::DeletePlanCapture {
+                item_id,
+                tenant_id,
+                capture_id,
+                expected_revision,
+            } => {
+                let result = match context.as_ref() {
+                    Some(opened) => opened
+                        .client
+                        .delete_plan_capture(TenantId(tenant_id), capture_id, expected_revision)
+                        .await
+                        .map_err(|error| format!("deleting plan capture failed: {error}")),
+                    None => Err("Connect before deleting a plan capture".into()),
+                };
+                if events
+                    .send(ExecutorEvent::PlanCaptureDeleted {
+                        item_id,
+                        capture_id,
+                        result,
+                    })
                     .is_err()
                 {
                     return;
@@ -1381,6 +1410,7 @@ async fn load_schema(context: &QueryContext) -> ExecutorEvent {
 async fn capture_plan(
     context: &QueryContext,
     sql: String,
+    params: Vec<sift_protocol::Value>,
 ) -> Result<sift_protocol::PlanCapture, String> {
     let state = context
         .client
@@ -1433,7 +1463,7 @@ async fn capture_plan(
                     statement_id: statement.statement_id.clone(),
                     catalog_revision: graph.revision,
                     analyze: false,
-                    params: Vec::new(),
+                    params,
                     include_raw_response: false,
                 },
             )
@@ -1466,24 +1496,42 @@ async fn load_plan_captures(
         .await
         .map_err(|error| format!("opening plan capture filter failed: {error}"))?;
     let fingerprint = sift_server::fingerprint::sql(&sql);
-    let result = context
-        .client
-        .plan_captures(
-            TenantId(tenant_id),
-            sift_protocol::ListPlanCapturesRequest {
-                source_digest: Some(state.source_digest),
-                limit: Some(100),
-                ..Default::default()
-            },
-        )
-        .await
-        .map(|page| {
-            page.items
-                .into_iter()
-                .filter(|capture| capture.statement_fingerprint == fingerprint)
-                .collect()
-        })
-        .map_err(|error| format!("loading plan captures failed: {error}"));
+    let result = async {
+        let mut captures = Vec::new();
+        let mut cursor = None;
+        loop {
+            let page = context
+                .client
+                .plan_captures(
+                    TenantId(tenant_id),
+                    sift_protocol::ListPlanCapturesRequest {
+                        source_digest: Some(state.source_digest.clone()),
+                        cursor,
+                        limit: Some(100),
+                    },
+                )
+                .await
+                .map_err(|error| format!("loading plan captures failed: {error}"))?;
+            captures.extend(
+                page.items
+                    .into_iter()
+                    .filter(|capture| capture.statement_fingerprint == fingerprint),
+            );
+            let Some(next) = page.next_cursor else {
+                break;
+            };
+            let next = next
+                .parse::<uuid::Uuid>()
+                .map(sift_protocol::PlanCaptureId)
+                .map_err(|_| "loading plan captures returned an invalid cursor".to_owned())?;
+            if cursor == Some(next) {
+                return Err("loading plan captures returned a repeated cursor".into());
+            }
+            cursor = Some(next);
+        }
+        Ok(captures)
+    }
+    .await;
     let _ = context
         .client
         .close_semantic_document(context.session, context.plan_connection, state.document_id)
