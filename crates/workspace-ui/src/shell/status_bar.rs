@@ -317,7 +317,12 @@ pub(super) fn render_status_bar(
                             Button::new("footer-commit-transaction", "Commit")
                                 .debug_selector("footer-commit-transaction")
                                 .tone(ButtonTone::Accent)
-                                .disabled(shell.transaction_pending)
+                                .disabled(
+                                    shell.transaction_pending
+                                        || !shell.running_queries.is_empty()
+                                        || shell.transaction_aborted
+                                        || shell.transaction_error.is_some(),
+                                )
                                 .on_click(cx.listener(|shell, _, _, cx| {
                                     shell.finish_transaction(true, cx)
                                 })),

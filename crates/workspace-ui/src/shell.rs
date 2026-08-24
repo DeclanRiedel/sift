@@ -725,6 +725,7 @@ pub enum Modal {
     QueryParameters,
     EditResultCell,
     PlanCaptures,
+    ConfirmTransactionDisconnect,
     ServerPicker,
     ServerConnection,
     InstanceSetup,
@@ -1025,6 +1026,12 @@ struct PendingParameterRun {
 struct ParameterBindingInput {
     label: String,
     input: Entity<TextInput>,
+}
+
+#[derive(Debug, Clone)]
+enum PendingConnectionChange {
+    Disconnect,
+    Connect(ConnectionNavEntry),
 }
 
 #[derive(Debug, Clone)]
@@ -3351,6 +3358,9 @@ pub struct WorkspaceShell {
     running_queries: HashMap<u64, u64>,
     transaction: Option<sift_protocol::TransactionInfo>,
     transaction_pending: bool,
+    transaction_aborted: bool,
+    transaction_error: Option<String>,
+    pending_connection_change: Option<PendingConnectionChange>,
     /// Pages withheld because their tab's retained window is full. Holding the
     /// acknowledgement holds the whole server stream, which is the backpressure
     /// that keeps a huge result from being pulled through and thrown away.
@@ -3784,6 +3794,9 @@ impl WorkspaceShell {
             running_queries: HashMap::new(),
             transaction: None,
             transaction_pending: false,
+            transaction_aborted: false,
+            transaction_error: None,
+            pending_connection_change: None,
             held_result_pages: HashMap::new(),
             semantic_analyze_generation: HashMap::new(),
             next_execution_id: 1,
@@ -3915,12 +3928,14 @@ impl WorkspaceShell {
                 .get(self.active_pane)
                 .and_then(|pane| pane.read(cx).active_item())
                 .is_some_and(|item| self.running_queries.contains_key(&item.id)),
+            any_query_running: !self.running_queries.is_empty(),
             database_connected: matches!(
                 self.connection_status,
                 ConnectionStatus::Connected { .. }
             ),
             transaction_active: self.transaction.is_some(),
             transaction_pending: self.transaction_pending,
+            transaction_aborted: self.transaction_aborted || self.transaction_error.is_some(),
         }
     }
 
@@ -4548,6 +4563,8 @@ impl WorkspaceShell {
                 ) {
                     self.transaction = None;
                     self.transaction_pending = false;
+                    self.transaction_aborted = false;
+                    self.transaction_error = None;
                     self.status.transaction = "TX: None".into();
                     self.connection_schema = ConnectionSchemaState::Unavailable;
                     self.operation_capabilities.clear();
@@ -4621,12 +4638,18 @@ impl WorkspaceShell {
                 match result {
                     Ok(transaction) => {
                         self.transaction = transaction;
+                        self.transaction_aborted = false;
+                        self.transaction_error = None;
                         self.status.transaction = self.transaction.as_ref().map_or_else(
                             || "TX: None".into(),
                             |transaction| format!("TX: {}", transaction.tx_id),
                         );
                     }
-                    Err(message) => self.show_error_toast(message, cx),
+                    Err(message) => {
+                        self.transaction_error = Some(message.clone());
+                        self.status.transaction = "TX: Failed".into();
+                        self.show_error_toast(message, cx);
+                    }
                 }
                 cx.notify();
             }
@@ -4878,6 +4901,7 @@ impl WorkspaceShell {
                 if progress == StreamProgress::Terminal {
                     self.running_queries.remove(&item_id);
                     self.held_result_pages.remove(&item_id);
+                    self.track_transaction_outcome(&state);
                     self.replace_global_problems(item_id, &state, cx);
                     self.record_result_reference(item_id, &state, Some(cursor_id.0), cx);
                 }
@@ -5236,6 +5260,16 @@ impl WorkspaceShell {
 
     /// Ask the executor to open `entry`. Optimistically shows connecting.
     fn connect(&mut self, entry: &ConnectionNavEntry, cx: &mut Context<Self>) {
+        if self.transaction.is_some() {
+            self.pending_connection_change = Some(PendingConnectionChange::Connect(entry.clone()));
+            self.modal = Some(Modal::ConfirmTransactionDisconnect);
+            cx.notify();
+            return;
+        }
+        self.connect_now(entry, cx);
+    }
+
+    fn connect_now(&mut self, entry: &ConnectionNavEntry, cx: &mut Context<Self>) {
         let Some(sender) = self.executor_sender.clone() else {
             return;
         };
@@ -5996,6 +6030,25 @@ impl WorkspaceShell {
     }
 
     fn disconnect(&mut self, cx: &mut Context<Self>) {
+        if self.transaction.is_some() {
+            self.pending_connection_change = Some(PendingConnectionChange::Disconnect);
+            self.modal = Some(Modal::ConfirmTransactionDisconnect);
+            cx.notify();
+            return;
+        }
+        self.disconnect_now(cx);
+    }
+
+    fn confirm_transaction_disconnect(&mut self, cx: &mut Context<Self>) {
+        let change = self.pending_connection_change.take();
+        self.modal = None;
+        self.disconnect_now(cx);
+        if let Some(PendingConnectionChange::Connect(entry)) = change {
+            self.connect_now(&entry, cx);
+        }
+    }
+
+    fn disconnect_now(&mut self, cx: &mut Context<Self>) {
         if let Some(sender) = &self.executor_sender {
             let _ = sender.send(ExecutorCommand::Disconnect);
         }
@@ -6014,6 +6067,11 @@ impl WorkspaceShell {
         self.schema_search_state = SchemaSearchState::Idle;
         self.data_search_state = DataSearchState::Idle;
         self.status.database = "No database".into();
+        self.transaction = None;
+        self.transaction_pending = false;
+        self.transaction_aborted = false;
+        self.transaction_error = None;
+        self.status.transaction = "TX: None".into();
         self.sync_database_item_states(cx);
         cx.notify();
     }
@@ -7923,6 +7981,7 @@ impl WorkspaceShell {
 
     /// Deliver an execution outcome to whichever pane owns the query item.
     fn route_result(&mut self, item_id: u64, state: ResultState, cx: &mut Context<Self>) {
+        self.track_transaction_outcome(&state);
         let refreshed = matches!(state, ResultState::Ready(_));
         self.status.execution = match &state {
             ResultState::Ready(_) | ResultState::Idle => "Ready".into(),
@@ -7943,6 +8002,21 @@ impl WorkspaceShell {
         // Bounded HTTP results have no cursor to correlate with.
         self.record_result_reference(item_id, &state, None, cx);
         cx.notify();
+    }
+
+    fn track_transaction_outcome(&mut self, state: &ResultState) {
+        if self.transaction.is_some()
+            && matches!(
+                state,
+                ResultState::Failed(_)
+                    | ResultState::Cancelled
+                    | ResultState::TimedOut
+                    | ResultState::OutcomeUnknown
+            )
+        {
+            self.transaction_aborted = true;
+            self.status.transaction = "TX: Aborted".into();
+        }
     }
 
     fn query_item_title(&self, item_id: u64, cx: &App) -> String {
@@ -8370,6 +8444,8 @@ impl WorkspaceShell {
             );
             return;
         }
+        self.transaction_aborted = false;
+        self.transaction_error = None;
         self.transaction_pending = self
             .executor_sender
             .as_ref()
@@ -8382,6 +8458,17 @@ impl WorkspaceShell {
 
     fn finish_transaction(&mut self, commit: bool, cx: &mut Context<Self>) {
         if self.transaction.is_none() || self.transaction_pending {
+            return;
+        }
+        if commit && !self.running_queries.is_empty() {
+            self.show_error_toast("Wait for running queries before committing".into(), cx);
+            return;
+        }
+        if commit && (self.transaction_aborted || self.transaction_error.is_some()) {
+            self.show_error_toast(
+                "This transaction cannot be committed; roll it back".into(),
+                cx,
+            );
             return;
         }
         self.transaction_pending = self.executor_sender.as_ref().is_some_and(|sender| {
@@ -10789,6 +10876,9 @@ impl WorkspaceShell {
             self.pending_parameter_run = None;
             self.parameter_binding_inputs.clear();
             self.parameter_binding_error = None;
+        }
+        if self.modal == Some(Modal::ConfirmTransactionDisconnect) {
+            self.pending_connection_change = None;
         }
         if self.modal == Some(Modal::EditResultCell) {
             self.staged_result_edit = None;
@@ -16951,6 +17041,63 @@ impl WorkspaceShell {
                         )
                         .into_any_element()
                 }
+                Modal::ConfirmTransactionDisconnect => {
+                    let action = match self.pending_connection_change.as_ref() {
+                        Some(PendingConnectionChange::Connect(entry)) => {
+                            format!("switch to {}", entry.name)
+                        }
+                        Some(PendingConnectionChange::Disconnect) | None => "disconnect".into(),
+                    };
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_4()
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .font_weight(gpui::FontWeight::SEMIBOLD)
+                                .child(icon(IconName::Warning, colors.warning, 16.))
+                                .child("Open transaction"),
+                        )
+                        .child(
+                            div()
+                                .text_sm()
+                                .text_color(colors.muted_text)
+                                .whitespace_normal()
+                                .child(format!(
+                                    "The current transaction will be rolled back if you {action}. Continue?"
+                                )),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .justify_end()
+                                .gap_2()
+                                .child(
+                                    Button::new("cancel-transaction-disconnect", "Keep working")
+                                        .tone(ButtonTone::Neutral)
+                                        .wide(true)
+                                        .on_click(cx.listener(|shell, _, window, cx| {
+                                            shell.dismiss_modal(&DismissModal, window, cx)
+                                        })),
+                                )
+                                .child(
+                                    Button::new(
+                                        "confirm-transaction-disconnect",
+                                        "Roll back and continue",
+                                    )
+                                    .tone(ButtonTone::DangerMuted)
+                                    .wide(true)
+                                    .on_click(cx.listener(|shell, _, _, cx| {
+                                        shell.confirm_transaction_disconnect(cx)
+                                    })),
+                                ),
+                        )
+                        .into_any_element()
+                }
                 Modal::ConfirmDeleteConnection(entry) => {
                     let entry = entry.clone();
                     let entry_for_delete = entry.clone();
@@ -17020,6 +17167,7 @@ impl WorkspaceShell {
                     | Modal::EditResultCell
                     | Modal::PlanCaptures
                     | Modal::DatabaseConnection
+                    | Modal::ConfirmTransactionDisconnect
                     | Modal::ConfirmDeleteConnection(_)
             );
             div()
@@ -22325,6 +22473,52 @@ mod tests {
             receiver.try_recv(),
             Ok(ExecutorCommand::RollbackTransaction)
         ));
+    }
+
+    #[gpui::test]
+    fn transaction_blocks_ambiguous_commits_and_warns_before_disconnect(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let transaction = sift_protocol::TransactionInfo {
+            tx_id: sift_protocol::TxId::new(11),
+            connection: sift_protocol::ConnectionId(2),
+            mode: sift_protocol::TxMode::default(),
+            opened_at: "2026-08-24T10:00:00Z".parse().unwrap(),
+        };
+
+        workspace.update(&mut cx, |shell, cx| {
+            shell.executor_sender = Some(sender);
+            shell.transaction = Some(transaction);
+            shell.running_queries.insert(1, 9);
+            shell.finish_transaction(true, cx);
+            assert!(receiver.try_recv().is_err());
+            shell.running_queries.clear();
+            shell.route_result(1, ResultState::Failed("statement failed".into()), cx);
+            assert!(shell.transaction_aborted);
+            assert_eq!(shell.status.transaction, "TX: Aborted");
+            shell.finish_transaction(true, cx);
+            assert!(receiver.try_recv().is_err());
+            shell.finish_transaction(false, cx);
+        });
+        assert!(matches!(
+            receiver.try_recv(),
+            Ok(ExecutorCommand::RollbackTransaction)
+        ));
+
+        workspace.update(&mut cx, |shell, cx| {
+            shell.transaction_pending = false;
+            shell.disconnect(cx);
+            assert_eq!(shell.modal, Some(Modal::ConfirmTransactionDisconnect));
+            assert!(receiver.try_recv().is_err());
+            shell.confirm_transaction_disconnect(cx);
+        });
+        assert!(matches!(
+            receiver.try_recv(),
+            Ok(ExecutorCommand::Disconnect)
+        ));
+        assert!(workspace.read_with(&cx, |shell, _| shell.transaction.is_none()));
     }
 
     #[gpui::test]

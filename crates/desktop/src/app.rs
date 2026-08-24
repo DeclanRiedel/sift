@@ -615,38 +615,43 @@ async fn run_query_executor(
             }
             ExecutorCommand::CommitTransaction | ExecutorCommand::RollbackTransaction => {
                 let commit = matches!(command, ExecutorCommand::CommitTransaction);
-                let result = match context.as_mut() {
-                    Some(opened) => match opened.transaction.clone() {
-                        Some(transaction) => {
-                            let ended = if commit {
-                                opened
-                                    .client
-                                    .commit_transaction(
-                                        opened.session,
-                                        transaction.connection,
-                                        transaction.tx_id,
-                                    )
-                                    .await
-                            } else {
-                                opened
-                                    .client
-                                    .rollback_transaction(
-                                        opened.session,
-                                        transaction.connection,
-                                        transaction.tx_id,
-                                    )
-                                    .await
-                            };
-                            ended
-                                .map(|()| {
-                                    opened.transaction = None;
-                                    None
-                                })
-                                .map_err(|error| format!("ending transaction failed: {error}"))
-                        }
-                        None => Err("No transaction is open".into()),
-                    },
-                    None => Err("No database connection is open".into()),
+                active_queries.retain(|_, (_, control)| !control.is_closed());
+                let result = if commit && !active_queries.is_empty() {
+                    Err("Wait for running queries before committing the transaction".into())
+                } else {
+                    match context.as_mut() {
+                        Some(opened) => match opened.transaction.clone() {
+                            Some(transaction) => {
+                                let ended = if commit {
+                                    opened
+                                        .client
+                                        .commit_transaction(
+                                            opened.session,
+                                            transaction.connection,
+                                            transaction.tx_id,
+                                        )
+                                        .await
+                                } else {
+                                    opened
+                                        .client
+                                        .rollback_transaction(
+                                            opened.session,
+                                            transaction.connection,
+                                            transaction.tx_id,
+                                        )
+                                        .await
+                                };
+                                ended
+                                    .map(|()| {
+                                        opened.transaction = None;
+                                        None
+                                    })
+                                    .map_err(|error| format!("ending transaction failed: {error}"))
+                            }
+                            None => Err("No transaction is open".into()),
+                        },
+                        None => Err("No database connection is open".into()),
+                    }
                 };
                 if events
                     .send(ExecutorEvent::TransactionChanged(result))

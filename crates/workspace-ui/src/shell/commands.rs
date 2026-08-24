@@ -116,6 +116,7 @@ enum AvailabilityRule {
     ConnectedDatabase,
     NoActiveTransaction,
     ActiveTransaction,
+    CommittableTransaction,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -136,9 +137,11 @@ pub struct CommandContext {
     pub pane_count: usize,
     pub has_editable_instance: bool,
     pub active_query_running: bool,
+    pub any_query_running: bool,
     pub database_connected: bool,
     pub transaction_active: bool,
     pub transaction_pending: bool,
+    pub transaction_aborted: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -210,13 +213,26 @@ impl CommandRegistry {
                 {
                     Some("No active transaction".into())
                 }
+                AvailabilityRule::CommittableTransaction if !context.transaction_active => {
+                    Some("No active transaction".into())
+                }
+                AvailabilityRule::CommittableTransaction if context.transaction_pending => {
+                    Some("A transaction operation is already running".into())
+                }
+                AvailabilityRule::CommittableTransaction if context.any_query_running => {
+                    Some("Wait for running queries before committing".into())
+                }
+                AvailabilityRule::CommittableTransaction if context.transaction_aborted => {
+                    Some("The transaction is aborted; roll it back".into())
+                }
                 AvailabilityRule::ActiveItem
                 | AvailabilityRule::MultiplePanes
                 | AvailabilityRule::EditableInstance
                 | AvailabilityRule::RunningQuery
                 | AvailabilityRule::ConnectedDatabase
                 | AvailabilityRule::NoActiveTransaction
-                | AvailabilityRule::ActiveTransaction => None,
+                | AvailabilityRule::ActiveTransaction
+                | AvailabilityRule::CommittableTransaction => None,
             },
         }
     }
@@ -435,7 +451,7 @@ const DEFINITIONS: &[CommandDefinition] = &[
         "",
         "",
         true,
-        AvailabilityRule::ActiveTransaction,
+        AvailabilityRule::CommittableTransaction,
     ),
     command(
         CommandId::RollbackTransaction,
@@ -729,9 +745,11 @@ mod tests {
             pane_count: 1,
             has_editable_instance: false,
             active_query_running: false,
+            any_query_running: false,
             database_connected: false,
             transaction_active: false,
             transaction_pending: false,
+            transaction_aborted: false,
         };
         assert_eq!(
             CommandRegistry::spec(CommandId::ExecuteStatement, empty)
