@@ -1038,6 +1038,9 @@ pub enum PaneEvent {
     EditResultCellRequested {
         item_id: u64,
     },
+    ReviewStagedResultEditsRequested {
+        item_id: u64,
+    },
     SubmitResultCellEditRequested {
         item_id: u64,
         text: String,
@@ -1778,6 +1781,9 @@ impl Pane {
             }
             ResultsEvent::EditSelectedCellRequested => {
                 cx.emit(PaneEvent::EditResultCellRequested { item_id })
+            }
+            ResultsEvent::ReviewStagedEditsRequested => {
+                cx.emit(PaneEvent::ReviewStagedResultEditsRequested { item_id })
             }
             ResultsEvent::SubmitCellEdit { text } => {
                 cx.emit(PaneEvent::SubmitResultCellEditRequested {
@@ -3119,7 +3125,7 @@ impl gpui::Render for Pane {
                                             .children(json_selected.then(|| {
                                                 Button::new(
                                                     ("preview-json-result-edit", item_id as usize),
-                                                    "Preview changes",
+                                                    "Stage & review",
                                                 )
                                                 .tone(ButtonTone::Ghost)
                                                 .on_click(cx.listener(move |_, _, _, cx| {
@@ -3139,7 +3145,7 @@ impl gpui::Render for Pane {
                                             .children(json_selected.then(|| {
                                                 Button::new(
                                                     ("save-json-result-edit", item_id as usize),
-                                                    "Save changes",
+                                                    "Stage change",
                                                 )
                                                 .tone(ButtonTone::Accent)
                                                 .key_binding("Mod Enter")
@@ -6011,6 +6017,17 @@ impl WorkspaceShell {
         params: Vec<sift_protocol::Value>,
         cx: &mut Context<Self>,
     ) {
+        if self
+            .staged_result_edits
+            .iter()
+            .any(|edit| edit.item_id == item_id)
+        {
+            self.show_toast(
+                "Apply or discard the staged table changes before re-running this result".into(),
+                cx,
+            );
+            return;
+        }
         let Some(sender) = &self.executor_sender else {
             self.route_result(
                 item_id,
@@ -8574,6 +8591,7 @@ impl WorkspaceShell {
                 break;
             }
         }
+        self.sync_staged_result_cells(item_id, cx);
         // Bounded HTTP results have no cursor to correlate with.
         self.record_result_reference(item_id, &state, None, cx);
         cx.notify();
@@ -9744,6 +9762,10 @@ impl WorkspaceShell {
                 self.active_pane = index;
                 self.open_result_cell_editor(emitter, *item_id, window, cx);
             }
+            PaneEvent::ReviewStagedResultEditsRequested { item_id } => {
+                self.active_pane = index;
+                self.open_staged_result_edits(*item_id, window, cx);
+            }
             PaneEvent::SubmitResultCellEditRequested { item_id, text } => {
                 self.submit_result_cell_edit(emitter, *item_id, text, window, cx);
             }
@@ -10743,10 +10765,11 @@ impl WorkspaceShell {
             .first()
             .is_some_and(|edit| edit.item_id != item_id)
         {
-            self.staged_result_edits.clear();
-            self.result_edit_conflicts.clear();
-            self.pending_edit_set = None;
-            self.result_edit_plan = None;
+            self.show_toast(
+                "Apply or discard the staged table changes before editing another result".into(),
+                cx,
+            );
+            return;
         }
         let staged_value = self
             .staged_result_edits
@@ -10829,21 +10852,15 @@ impl WorkspaceShell {
             cx.notify();
             return;
         }
+        self.sync_staged_result_cells(item_id, cx);
         if let Some(results) = pane.read(cx).results.get(&item_id).cloned() {
-            results.update(cx, |results, cx| {
-                results.set_inline_cell_edit_text(&text, cx);
-                results.set_inline_cell_edit_pending(true, cx);
-            });
+            results.update(cx, |results, cx| results.finish_inline_cell_edit(cx));
         }
-        self.apply_result_cell_edit(cx);
-        if !self.result_edit_pending {
-            if let Some(results) = pane.read(cx).results.get(&item_id).cloned() {
-                results.update(cx, |results, cx| results.set_inline_cell_edit_error(cx));
-                if let Some(message) = self.result_edit_error.clone() {
-                    self.show_error_toast(message, cx);
-                }
-            }
-        }
+        self.result_cell_edit_target = None;
+        self.show_toast(
+            format!("{} table change(s) staged", self.staged_result_edits.len()),
+            cx,
+        );
         cx.notify();
     }
 
@@ -10948,12 +10965,29 @@ impl WorkspaceShell {
             self.show_toast("No changes to save".into(), cx);
             return;
         }
+        self.sync_staged_result_cells(item_id, cx);
         if preview {
-            self.modal = Some(Modal::EditResultCell);
-            self.focus_handle.focus(window, cx);
-            self.preview_result_cell_edit(cx);
+            self.open_staged_result_edits(item_id, window, cx);
         } else {
-            self.apply_result_cell_edit(cx);
+            for pane in &self.panes {
+                let owns_item = pane.read(cx).contains_item(item_id);
+                if !owns_item {
+                    continue;
+                }
+                pane.update(cx, |pane, cx| {
+                    pane.show_database_item_view(item_id, DatabaseItemView::Query, None, cx);
+                    pane.mark_clean(item_id, cx);
+                    if let Some(results) = pane.results.get(&item_id) {
+                        results.update(cx, |results, cx| results.finish_inline_cell_edit(cx));
+                    }
+                });
+                break;
+            }
+            self.result_cell_edit_target = None;
+            self.show_toast(
+                format!("{} table change(s) staged", self.staged_result_edits.len()),
+                cx,
+            );
         }
         cx.notify();
     }
@@ -11016,6 +11050,73 @@ impl WorkspaceShell {
         self.result_edit_error = None;
         cx.notify();
         true
+    }
+
+    fn sync_staged_result_cells(&mut self, item_id: u64, cx: &mut Context<Self>) {
+        let edits = self
+            .staged_result_edits
+            .iter()
+            .filter(|edit| edit.item_id == item_id)
+            .cloned()
+            .collect::<Vec<_>>();
+        for pane in &self.panes {
+            let results = pane.read(cx).results.get(&item_id).cloned();
+            let Some(results) = results else { continue };
+            results.update(cx, |results, cx| {
+                results.clear_staged_cells(cx);
+                for edit in &edits {
+                    results.stage_cell_value(
+                        &edit.original_row,
+                        &edit.column,
+                        edit.value.clone(),
+                        cx,
+                    );
+                }
+            });
+        }
+    }
+
+    fn open_staged_result_edits(
+        &mut self,
+        item_id: u64,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self
+            .staged_result_edits
+            .iter()
+            .any(|edit| edit.item_id == item_id)
+        {
+            self.show_toast("No table changes are staged".into(), cx);
+            return;
+        }
+        self.result_cell_edit_target = None;
+        self.modal = Some(Modal::EditResultCell);
+        self.focus_handle.focus(window, cx);
+        self.preview_result_cell_edit(cx);
+        cx.notify();
+    }
+
+    fn discard_staged_result_edits(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let item_ids = self
+            .staged_result_edits
+            .iter()
+            .map(|edit| edit.item_id)
+            .collect::<HashSet<_>>();
+        self.staged_result_edits.clear();
+        self.result_cell_edit_target = None;
+        self.result_edit_conflicts.clear();
+        self.pending_edit_set = None;
+        self.result_edit_plan = None;
+        self.result_edit_pending = false;
+        self.result_edit_error = None;
+        for item_id in item_ids {
+            self.sync_staged_result_cells(item_id, cx);
+        }
+        self.modal = None;
+        self.focus_active_pane(window, cx);
+        self.show_toast("Discarded staged table changes".into(), cx);
+        cx.notify();
     }
 
     fn staged_result_edit_set(&self) -> Option<sift_protocol::EditSet> {
@@ -11144,11 +11245,12 @@ impl WorkspaceShell {
         if index >= self.staged_result_edits.len() {
             return;
         }
-        self.staged_result_edits.remove(index);
+        let item_id = self.staged_result_edits.remove(index).item_id;
         self.pending_edit_set = None;
         self.result_edit_plan = None;
         self.result_edit_conflicts.clear();
         self.result_edit_error = None;
+        self.sync_staged_result_cells(item_id, cx);
         cx.notify();
     }
 
@@ -11768,7 +11870,7 @@ impl WorkspaceShell {
                 }
             }
             Some(Modal::EditResultCell) => {
-                if self.result_edit_pending {
+                if self.result_edit_pending || self.result_edit_plan.is_none() {
                     return;
                 }
                 self.apply_result_cell_edit(cx);
@@ -11822,20 +11924,7 @@ impl WorkspaceShell {
             self.pending_connection_change = None;
         }
         if self.modal == Some(Modal::EditResultCell) {
-            let json_edit_active = self.result_cell_edit_target.as_ref().is_some_and(|target| {
-                self.panes.iter().any(|pane| {
-                    let pane = pane.read(cx);
-                    pane.database_item_views.get(&target.item_id) == Some(&DatabaseItemView::Json)
-                })
-            });
-            if !json_edit_active {
-                self.result_cell_edit_target = None;
-                self.staged_result_edits.clear();
-                self.result_edit_conflicts.clear();
-                self.pending_edit_set = None;
-                self.result_edit_plan = None;
-            }
-            self.result_edit_pending = false;
+            self.result_cell_edit_target = None;
             self.result_edit_error = None;
         }
         self.modal = None;
@@ -16216,7 +16305,7 @@ impl WorkspaceShell {
                     let staged_edits = self.staged_result_edits.clone();
                     let pending = self.result_edit_pending;
                     let plan = self.result_edit_plan.as_ref();
-                    let can_apply = !staged_edits.is_empty() && !pending;
+                    let can_apply = !staged_edits.is_empty() && !pending && plan.is_some();
                     div()
                         .on_key_down(cx.listener(
                             |shell, event: &gpui::KeyDownEvent, window, cx| {
@@ -16246,7 +16335,7 @@ impl WorkspaceShell {
                                         .truncate()
                                         .font_weight(gpui::FontWeight::SEMIBOLD)
                                         .child(target.map_or_else(
-                                            || "Review edits".into(),
+                                            || "Review staged table changes".into(),
                                             |edit| format!("Edit {}.{}", edit.source.object, edit.column),
                                         )),
                                 )
@@ -16254,7 +16343,7 @@ impl WorkspaceShell {
                                     IconButton::new(
                                         "close-result-cell-edit",
                                         IconName::Close,
-                                        "Cancel result edit",
+                                        "Keep staged changes and close review",
                                     )
                                     .square(px(26.))
                                     .icon_size(13.)
@@ -16390,6 +16479,9 @@ impl WorkspaceShell {
                                             |(index, statement)| {
                                                 div()
                                                     .id(("result-edit-statement", index))
+                                                    .debug_selector(move || {
+                                                        format!("result-edit-statement-{index}")
+                                                    })
                                                     .p_2()
                                                     .rounded_sm()
                                                     .border_1()
@@ -16419,7 +16511,7 @@ impl WorkspaceShell {
                                 .border_t_1()
                                 .border_color(colors.subtle_border)
                                 .child(
-                                    Button::new("cancel-result-cell-edit", "Discard changes")
+                                    Button::new("cancel-result-cell-edit", "Keep staged")
                                         .tone(ButtonTone::Neutral)
                                         .key_binding("Esc")
                                         .on_click(cx.listener(|shell, _, window, cx| {
@@ -16427,7 +16519,18 @@ impl WorkspaceShell {
                                         })),
                                 )
                                 .child(
-                                    Button::new("preview-result-cell-edit", "Preview changes")
+                                    Button::new("discard-result-cell-edits", "Discard all")
+                                        .tone(ButtonTone::DangerGhost)
+                                        .disabled(pending)
+                                        .on_click(cx.listener(|shell, _, window, cx| {
+                                            shell.discard_staged_result_edits(window, cx)
+                                        })),
+                                )
+                                .child(
+                                    Button::new(
+                                        "preview-result-cell-edit",
+                                        if plan.is_some() { "Refresh SQL" } else { "View SQL" },
+                                    )
                                         .tone(ButtonTone::Neutral)
                                         .loading(pending && plan.is_none())
                                         .disabled(pending)
@@ -16436,7 +16539,11 @@ impl WorkspaceShell {
                                         })),
                                 )
                                 .child(
-                                    Button::new("apply-result-cell-edit", "Save changes")
+                                    Button::new(
+                                        "apply-result-cell-edit",
+                                        "Apply staged changes",
+                                    )
+                                        .debug_selector("apply-result-cell-edit")
                                         .tone(ButtonTone::Accent)
                                         .key_binding("Enter")
                                         .loading(pending && plan.is_some())
@@ -24777,7 +24884,7 @@ mod tests {
             ("action".into(), sift_protocol::Value::Text("close".into())),
         ];
 
-        workspace.update(&mut cx, |shell, cx| {
+        workspace.update_in(&mut cx, |shell, window, cx| {
             shell.staged_result_edits = vec![
                 StagedResultEdit {
                     item_id: 1,
@@ -24819,11 +24926,20 @@ mod tests {
             assert_eq!(staged_result_row_index(&shell.staged_result_edits, 2), 1);
             shell.revert_staged_result_edit(1, cx);
             assert_eq!(shell.staged_result_edits.len(), 2);
+            shell.modal = Some(Modal::EditResultCell);
+            shell.dismiss_modal(&DismissModal, window, cx);
+            assert_eq!(
+                shell.staged_result_edits.len(),
+                2,
+                "closing review should keep staged changes"
+            );
+            shell.discard_staged_result_edits(window, cx);
+            assert!(shell.staged_result_edits.is_empty());
         });
     }
 
     #[gpui::test]
-    fn submitting_an_inline_result_edit_applies_without_opening_review(cx: &mut TestAppContext) {
+    fn inline_result_edits_stage_then_review_sql_before_apply(cx: &mut TestAppContext) {
         let window = shell(cx);
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         let workspace = window.root(&mut cx).unwrap();
@@ -24913,18 +25029,25 @@ mod tests {
         cx.run_until_parked();
 
         workspace.read_with(&cx, |shell, cx| {
-            assert!(shell.result_edit_pending);
+            assert!(!shell.result_edit_pending);
             assert!(!matches!(shell.modal, Some(Modal::EditResultCell)));
-            assert_eq!(
-                results.read(cx).inline_cell_edit_status(cx),
-                Some(("closed".into(), true)),
-                "the submitted value stays visible while the save is pending"
-            );
+            assert_eq!(shell.staged_result_edits.len(), 1);
+            assert_eq!(results.read(cx).staged_cell_count(), 1);
+            assert_eq!(results.read(cx).inline_cell_edit_status(cx), None);
         });
+        assert!(
+            receiver.try_recv().is_err(),
+            "Enter should only stage the edit"
+        );
+        let review = cx
+            .debug_bounds("review-staged-result-edits")
+            .expect("staged edit review button");
+        cx.simulate_click(review.center(), Modifiers::default());
+        cx.run_until_parked();
 
-        let ExecutorCommand::ApplyResultEdits { edit_set, .. } = receiver.try_recv().unwrap()
+        let ExecutorCommand::PreviewResultEdits { edit_set, .. } = receiver.try_recv().unwrap()
         else {
-            panic!("Enter should apply the inline edit directly")
+            panic!("review should request generated SQL")
         };
         let sift_protocol::RowEdit::Update { changes, .. } = &edit_set.edits[0] else {
             panic!("inline cell edit should be an update")
@@ -24933,6 +25056,42 @@ mod tests {
             changes[0].value,
             sift_protocol::Value::Text("closed".into())
         );
+        workspace.update(&mut cx, |shell, cx| {
+            shell.on_executor_event(
+                ExecutorEvent::ResultEditsPreviewed {
+                    item_id,
+                    edit_set: edit_set.clone(),
+                    result: Ok(sift_protocol::EditPlan {
+                        table: edit_set.table.clone(),
+                        identity: sift_protocol::IdentitySource::PrimaryKey {
+                            columns: vec!["action".into()],
+                        },
+                        statements: vec![sift_protocol::EditStatement {
+                            edit_index: 0,
+                            kind: sift_protocol::EditStatementKind::Update,
+                            sql: "UPDATE audit.events SET action = $1 WHERE action = $2".into(),
+                            params: vec![
+                                sift_protocol::Value::Text("closed".into()),
+                                sift_protocol::Value::Text("open".into()),
+                            ],
+                        }],
+                    }),
+                },
+                cx,
+            );
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("result-edit-statement-0").is_some());
+        let apply = cx
+            .debug_bounds("apply-result-cell-edit")
+            .expect("apply staged changes button");
+        cx.simulate_click(apply.center(), Modifiers::default());
+        cx.run_until_parked();
+        let ExecutorCommand::ApplyResultEdits { edit_set, .. } = receiver.try_recv().unwrap()
+        else {
+            panic!("confirmed staged changes should apply")
+        };
+        assert_eq!(edit_set.edits.len(), 1);
         workspace.update(&mut cx, |shell, cx| {
             shell.on_executor_event(
                 ExecutorEvent::ResultEditsApplied {
@@ -25067,15 +25226,19 @@ mod tests {
             );
         });
 
-        let ExecutorCommand::ApplyResultEdits { edit_set, .. } = receiver.try_recv().unwrap()
-        else {
-            panic!("saving JSON should apply without requiring preview")
-        };
-        let sift_protocol::RowEdit::Update { expected, .. } = &edit_set.edits[0] else {
-            panic!("JSON cell edit should be an update")
-        };
-        assert_eq!(expected.len(), 1);
-        assert_eq!(expected[0].column, "payload");
+        assert!(
+            receiver.try_recv().is_err(),
+            "staging JSON must not apply it immediately"
+        );
+        workspace.read_with(&cx, |shell, _| {
+            assert_eq!(shell.staged_result_edits.len(), 1);
+            let edit_set = shell.staged_result_edit_set().unwrap();
+            let sift_protocol::RowEdit::Update { expected, .. } = &edit_set.edits[0] else {
+                panic!("JSON cell edit should be an update")
+            };
+            assert_eq!(expected.len(), 1);
+            assert_eq!(expected[0].column, "payload");
+        });
     }
 
     #[test]

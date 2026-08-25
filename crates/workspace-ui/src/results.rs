@@ -4,6 +4,7 @@
 //! is GPUI-free so cell formatting and state transitions are unit-testable. The
 //! grid virtualizes rows so paint cost tracks the viewport, not cardinality.
 
+use std::collections::HashMap;
 use std::ops::Range;
 
 use gpui::{
@@ -531,6 +532,7 @@ pub enum ResultsEvent {
     /// Present this live Data grid in the workspace's near-fullscreen modal.
     OpenDataModalRequested,
     EditSelectedCellRequested,
+    ReviewStagedEditsRequested,
     SubmitCellEdit {
         text: String,
     },
@@ -646,6 +648,7 @@ pub struct ResultsView {
     selected: Option<GridSelection>,
     editing_cell: Option<(usize, usize)>,
     inline_cell_edit: Option<InlineCellEdit>,
+    staged_cells: HashMap<(usize, usize), Value>,
     restore_grid_focus: bool,
     query_started_at: Option<std::time::Instant>,
     row_json_filter_input: Entity<TextInput>,
@@ -698,6 +701,7 @@ impl ResultsView {
             selected: None,
             editing_cell: None,
             inline_cell_edit: None,
+            staged_cells: HashMap::new(),
             restore_grid_focus: false,
             query_started_at: None,
             row_json_filter_input,
@@ -768,6 +772,11 @@ impl ResultsView {
             .map(|edit| edit.input.focus_handle(cx))
     }
 
+    #[cfg(test)]
+    pub(crate) fn staged_cell_count(&self) -> usize {
+        self.staged_cells.len()
+    }
+
     pub(crate) fn placement(&self) -> ResultPlacement {
         self.placement
     }
@@ -830,23 +839,91 @@ impl ResultsView {
             return false;
         };
         data.rows[row_index].values[column_index] = value.clone();
-
-        let rendered = render_value(&value);
-        if let Some(cell) = self
-            .rendered_rows
-            .get_mut(row_index)
-            .and_then(|row| row.get_mut(column_index))
-        {
-            let text: SharedString = rendered.text.into();
-            *cell = CachedCellRender {
-                paint_text: single_line_text(&text),
-                text,
-                class: rendered.class,
-                shaped: None,
-            };
-        }
+        self.staged_cells.remove(&(row_index, column_index));
+        self.replace_rendered_cell(row_index, column_index, &value);
         cx.notify();
         true
+    }
+
+    pub(crate) fn stage_cell_value(
+        &mut self,
+        original_row: &[(String, Value)],
+        column: &str,
+        value: Value,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(data) = self.state.ready() else {
+            return false;
+        };
+        let Some(column_index) = data
+            .columns
+            .iter()
+            .position(|candidate| candidate.name == column)
+        else {
+            return false;
+        };
+        let expected_columns = original_row
+            .iter()
+            .map(|(name, expected)| {
+                data.columns
+                    .iter()
+                    .position(|column| column.name == *name)
+                    .map(|index| (index, expected))
+            })
+            .collect::<Option<Vec<_>>>();
+        let Some(expected_columns) = expected_columns else {
+            return false;
+        };
+        let Some(row_index) = data.rows.iter().position(|row| {
+            expected_columns
+                .iter()
+                .all(|(index, expected)| row.values.get(*index) == Some(*expected))
+        }) else {
+            return false;
+        };
+        self.staged_cells
+            .insert((row_index, column_index), value.clone());
+        self.replace_rendered_cell(row_index, column_index, &value);
+        cx.notify();
+        true
+    }
+
+    pub(crate) fn clear_staged_cells(&mut self, cx: &mut Context<Self>) {
+        let coordinates = self.staged_cells.keys().copied().collect::<Vec<_>>();
+        self.staged_cells.clear();
+        let originals = self.state.ready().map(|data| {
+            coordinates
+                .iter()
+                .filter_map(|(row, column)| {
+                    data.rows
+                        .get(*row)
+                        .and_then(|row| row.values.get(*column))
+                        .map(|value| (*row, *column, value.clone()))
+                })
+                .collect::<Vec<_>>()
+        });
+        for (row, column, value) in originals.unwrap_or_default() {
+            self.replace_rendered_cell(row, column, &value);
+        }
+        cx.notify();
+    }
+
+    fn replace_rendered_cell(&mut self, row: usize, column: usize, value: &Value) {
+        let Some(cell) = self
+            .rendered_rows
+            .get_mut(row)
+            .and_then(|row| row.get_mut(column))
+        else {
+            return;
+        };
+        let rendered = render_value(value);
+        let text: SharedString = rendered.text.into();
+        *cell = CachedCellRender {
+            paint_text: single_line_text(&text),
+            text,
+            class: rendered.class,
+            shaped: None,
+        };
     }
 
     pub fn selected_row_json(&self) -> Option<SelectedRowJson> {
@@ -928,6 +1005,7 @@ impl ResultsView {
         true
     }
 
+    #[cfg(test)]
     pub(crate) fn set_inline_cell_edit_pending(&mut self, pending: bool, cx: &mut Context<Self>) {
         if let Some(edit) = self.inline_cell_edit.as_mut() {
             if edit.pending != pending {
@@ -937,6 +1015,7 @@ impl ResultsView {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn set_inline_cell_edit_text(&mut self, text: &str, cx: &mut Context<Self>) {
         if let Some(edit) = self.inline_cell_edit.as_ref() {
             if edit.input.read(cx).text() != text {
@@ -957,8 +1036,9 @@ impl ResultsView {
     pub(crate) fn finish_inline_cell_edit(&mut self, cx: &mut Context<Self>) {
         let had_inline_edit = self.inline_cell_edit.take().is_some();
         let had_editing_cell = self.editing_cell.take().is_some();
-        if had_inline_edit || had_editing_cell {
-            self.restore_grid_focus = true;
+        let needs_notify = had_inline_edit || had_editing_cell || !self.restore_grid_focus;
+        self.restore_grid_focus = true;
+        if needs_notify {
             cx.notify();
         }
     }
@@ -1078,6 +1158,7 @@ impl ResultsView {
         self.window_held = false;
         self.selected = None;
         self.inline_cell_edit = None;
+        self.staged_cells.clear();
         cx.notify();
     }
 
@@ -2044,7 +2125,7 @@ impl ResultsView {
                 div()
                     .flex()
                     .flex_shrink_0()
-                    .max_w(px(320.))
+                    .max_w(px(460.))
                     .min_w_0()
                     .overflow_hidden()
                     .items_center()
@@ -2061,6 +2142,17 @@ impl ResultsView {
                             .flex()
                             .items_center()
                             .gap_1()
+                            .children((!self.staged_cells.is_empty()).then(|| {
+                                Button::new(
+                                    "review-staged-result-edits",
+                                    format!("Review {} staged", self.staged_cells.len()),
+                                )
+                                .debug_selector("review-staged-result-edits")
+                                .tone(ButtonTone::Neutral)
+                                .on_click(cx.listener(
+                                    |_, _, _, cx| cx.emit(ResultsEvent::ReviewStagedEditsRequested),
+                                ))
+                            }))
                             .children((!self.large_view).then(|| {
                                 div()
                                     .debug_selector(|| "open-result-data-modal".into())
@@ -2168,6 +2260,17 @@ impl ResultsView {
                             .flex()
                             .flex_col()
                             .gap_1()
+                            .children((!self.staged_cells.is_empty()).then(|| {
+                                Button::new(
+                                    "review-staged-result-edits-vertical",
+                                    format!("Review {} staged", self.staged_cells.len()),
+                                )
+                                .debug_selector("review-staged-result-edits-vertical")
+                                .tone(ButtonTone::Neutral)
+                                .on_click(cx.listener(
+                                    |_, _, _, cx| cx.emit(ResultsEvent::ReviewStagedEditsRequested),
+                                ))
+                            }))
                             .children((!self.large_view).then(|| {
                                 IconButton::new(
                                     "open-result-data-modal-vertical",
@@ -2456,6 +2559,8 @@ impl ResultsView {
                                 };
                                 let is_editing =
                                     view.editing_cell == Some((row_index, source_column));
+                                let is_staged =
+                                    view.staged_cells.contains_key(&(row_index, source_column));
                                 let rendered = view
                                     .rendered_rows
                                     .get_mut(row_index)
@@ -2492,6 +2597,9 @@ impl ResultsView {
                                     .border_color(colors.subtle_border)
                                     .text_color(color)
                                     .when(is_selected, |el| el.bg(colors.selected_surface))
+                                    .when(is_staged, |el| {
+                                        el.bg(colors.warning_muted).border_color(colors.warning)
+                                    })
                                     .when(is_editing && !is_inline_edit, |el| {
                                         el.border_1().border_color(colors.accent)
                                     })
@@ -3496,6 +3604,19 @@ mod tests {
                 view.selected,
                 Some(GridSelection::Cell { row: 0, column: 0 })
             );
+            let selected = view.selected_cell_edit().unwrap();
+            assert!(view.stage_cell_value(
+                &selected.original_row,
+                &selected.column,
+                Value::Int64(9),
+                cx,
+            ));
+            assert_eq!(view.staged_cells.get(&(0, 0)), Some(&Value::Int64(9)));
+            assert_eq!(view.rendered_rows[0][0].text, "9");
+            assert_eq!(view.selected_cell_edit().unwrap().original, Value::Int64(7));
+            view.clear_staged_cells(cx);
+            assert!(view.staged_cells.is_empty());
+            assert_eq!(view.rendered_rows[0][0].text, "7");
             assert!(view.begin_selected_cell_edit("7".into(), cx).is_some());
             let edit = view.inline_cell_edit.as_ref().expect("inline editor");
             assert_eq!((edit.row, edit.column), (0, 0));
