@@ -10840,9 +10840,18 @@ impl WorkspaceShell {
         }
         let invalid = || format!("{text:?} is not a valid {} value", original.type_category());
         match original {
-            Value::Null | Value::TypedNull { .. } | Value::Text(_) | Value::Native { .. } => {
+            Value::Null | Value::TypedNull { .. } | Value::Text(_) => {
                 Ok(Value::Text(text.to_owned()))
             }
+            Value::Native {
+                provider_id,
+                type_name,
+                ..
+            } => Ok(Value::Native {
+                provider_id: provider_id.clone(),
+                type_name: type_name.clone(),
+                display_text: text.to_owned(),
+            }),
             Value::Bool(_) => text.parse().map(Value::Bool).map_err(|_| invalid()),
             Value::Int16(_) => text.parse().map(Value::Int16).map_err(|_| invalid()),
             Value::Int32(_) => text.parse().map(Value::Int32).map_err(|_| invalid()),
@@ -19493,6 +19502,20 @@ mod tests {
             .expect_err("invalid JSON");
         assert!(error.contains("line 2"));
         assert!(error.contains("column"));
+
+        let native = sift_protocol::Value::Native {
+            provider_id: sift_protocol::Engine::Postgres.provider_id(),
+            type_name: "inet".into(),
+            display_text: "10.20.0.1".into(),
+        };
+        assert_eq!(
+            WorkspaceShell::parse_result_cell_value(&native, "10.20.0.2").unwrap(),
+            sift_protocol::Value::Native {
+                provider_id: sift_protocol::Engine::Postgres.provider_id(),
+                type_name: "inet".into(),
+                display_text: "10.20.0.2".into(),
+            }
+        );
     }
 
     fn table_graph() -> sift_protocol::CatalogGraph {
@@ -24773,8 +24796,16 @@ mod tests {
             });
             shell.open_result_cell_editor(&pane, item_id, window, cx);
             shell.executor_sender = Some(sender);
-            shell.submit_result_cell_edit(&pane, item_id, "closed", window, cx);
+            (item_id, results)
+        });
+        results.update(&mut cx, |results, cx| {
+            results.set_inline_cell_edit_text("closed", cx)
+        });
+        cx.run_until_parked();
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
 
+        workspace.read_with(&cx, |shell, cx| {
             assert!(shell.result_edit_pending);
             assert!(!matches!(shell.modal, Some(Modal::EditResultCell)));
             assert_eq!(
@@ -24782,7 +24813,6 @@ mod tests {
                 Some(("closed".into(), true)),
                 "the submitted value stays visible while the save is pending"
             );
-            (item_id, results)
         });
 
         let ExecutorCommand::ApplyResultEdits { edit_set, .. } = receiver.try_recv().unwrap()

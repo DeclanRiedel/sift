@@ -9,7 +9,7 @@ use futures::{FutureExt, StreamExt};
 use sift_driver_api::{ConnHandle, ResultSetStream};
 use sift_protocol::{Code, CursorId, DriverError, DriverWarning, ExecuteRequest, Page, Row, Value};
 use tokio::sync::mpsc;
-use tokio_postgres::types::{IsNull, ToSql, Type};
+use tokio_postgres::types::{Format, IsNull, ToSql, Type};
 use tokio_postgres::SimpleQueryMessage;
 
 use crate::conn::{CursorEntry, PgDriverInner, PooledConn, SlotKind};
@@ -323,7 +323,8 @@ fn params_to_pg(params: Vec<Value>) -> Result<Vec<Box<dyn ToSql + Sync + Send>>,
             Value::TimestampTz(v) => Box::new(v),
             Value::Uuid(v) => Box::new(v),
             Value::Json(v) => Box::new(v),
-            Value::Interval(_) | Value::Native { .. } => {
+            Value::Native { display_text, .. } => Box::new(PgNativeText(display_text)),
+            Value::Interval(_) => {
                 return Err(DriverError::new(
                     Code::UnsupportedForEngine,
                     "parameter type is not supported by Postgres driver yet",
@@ -334,6 +335,30 @@ fn params_to_pg(params: Vec<Value>) -> Result<Vec<Box<dyn ToSql + Sync + Send>>,
         out.push(param);
     }
     Ok(out)
+}
+
+#[derive(Debug)]
+struct PgNativeText(String);
+
+impl ToSql for PgNativeText {
+    fn to_sql(
+        &self,
+        _: &Type,
+        out: &mut BytesMut,
+    ) -> Result<IsNull, Box<dyn std::error::Error + Sync + Send>> {
+        out.extend_from_slice(self.0.as_bytes());
+        Ok(IsNull::No)
+    }
+
+    fn accepts(_: &Type) -> bool {
+        true
+    }
+
+    fn encode_format(&self, _: &Type) -> Format {
+        Format::Text
+    }
+
+    tokio_postgres::types::to_sql_checked!();
 }
 
 #[derive(Debug)]
@@ -515,5 +540,22 @@ mod tests {
         assert!(params[0]
             .to_sql_checked(&Type::BYTEA, &mut BytesMut::new())
             .is_err());
+    }
+
+    #[test]
+    fn postgres_native_parameter_uses_its_text_representation() {
+        let params = params_to_pg(vec![Value::Native {
+            provider_id: sift_protocol::Engine::Postgres.provider_id(),
+            type_name: "inet".into(),
+            display_text: "10.20.0.1".into(),
+        }])
+        .unwrap();
+        let mut bytes = BytesMut::new();
+        assert!(matches!(
+            params[0].to_sql_checked(&Type::INET, &mut bytes),
+            Ok(IsNull::No)
+        ));
+        assert_eq!(&bytes[..], b"10.20.0.1");
+        assert!(matches!(params[0].encode_format(&Type::INET), Format::Text));
     }
 }
