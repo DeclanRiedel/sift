@@ -459,6 +459,13 @@ enum WorkspaceSurface {
     Problems,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+enum ResultInspectorView {
+    #[default]
+    Fields,
+    RowJson,
+}
+
 #[derive(Debug, Clone)]
 struct ConnectionTreeItem {
     depth: usize,
@@ -3605,6 +3612,7 @@ pub struct WorkspaceShell {
     ide_input: Option<Vec<String>>,
     pane_input: bool,
     focused_surface: WorkspaceSurface,
+    result_inspector_views: HashMap<u64, ResultInspectorView>,
     connection_nav_selected: usize,
     connection_nav_g_pending: bool,
     app_bar_expanded: bool,
@@ -4054,6 +4062,7 @@ impl WorkspaceShell {
             ide_input: None,
             pane_input: false,
             focused_surface: WorkspaceSurface::Editor,
+            result_inspector_views: HashMap::new(),
             connection_nav_selected: 0,
             connection_nav_g_pending: false,
             app_bar_expanded: false,
@@ -12889,10 +12898,174 @@ impl WorkspaceShell {
             .into_any_element()
     }
 
+    fn render_result_row_json_inspector(
+        &self,
+        results: Entity<ResultsView>,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let colors = cx.theme().colors;
+        let selected = results.read(cx).selected_row_json();
+        let row_number = selected.as_ref().map(|row| row.row_index.saturating_add(1));
+        let pretty = selected
+            .and_then(|row| serde_json::to_string_pretty(&row.value).ok())
+            .unwrap_or_default();
+
+        div()
+            .debug_selector(|| "inspector-result-row-json".into())
+            .flex()
+            .flex_col()
+            .min_h_0()
+            .child(
+                div()
+                    .px_3()
+                    .h(cx.theme().metrics.row_height)
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .border_b_1()
+                    .border_color(colors.subtle_border)
+                    .child(SectionLabel::new("SELECTED ROW"))
+                    .children(row_number.map(|row| {
+                        div()
+                            .text_xs()
+                            .text_color(colors.muted_text)
+                            .child(format!("Row {row}"))
+                    })),
+            )
+            .child(
+                div()
+                    .id("inspector-result-row-json-scroll")
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_scroll()
+                    .when(pretty.is_empty(), |viewer| {
+                        viewer.child(
+                            div()
+                                .p_3()
+                                .text_color(colors.muted_text)
+                                .child("Select a result row to inspect it as JSON"),
+                        )
+                    })
+                    .when(!pretty.is_empty(), |viewer| {
+                        viewer.child(div().p_3().font_family("monospace").text_xs().children(
+                            pretty.lines().enumerate().map(|(line, text)| {
+                                div()
+                                    .id(("inspector-result-json-line", line))
+                                    .h(px(20.))
+                                    .flex()
+                                    .items_center()
+                                    .whitespace_nowrap()
+                                    .child(text.to_owned())
+                            }),
+                        ))
+                    }),
+            )
+            .into_any_element()
+    }
+
+    fn render_result_inspector(
+        &self,
+        item_id: u64,
+        results: Entity<ResultsView>,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let colors = cx.theme().colors;
+        let selected = self
+            .result_inspector_views
+            .get(&item_id)
+            .copied()
+            .unwrap_or_default();
+        let fields_pane = self.panes[self.active_pane].clone();
+        let json_pane = fields_pane.clone();
+        div()
+            .flex()
+            .flex_col()
+            .min_h_0()
+            .child(
+                div()
+                    .h(px(28.))
+                    .flex_none()
+                    .flex()
+                    .items_end()
+                    .gap_3()
+                    .px_3()
+                    .border_b_1()
+                    .border_color(colors.subtle_border)
+                    .child(
+                        div()
+                            .id("inspector-fields-view")
+                            .debug_selector(|| "inspector-fields-view".into())
+                            .role(Role::Tab)
+                            .aria_label("Show result fields")
+                            .h_full()
+                            .flex()
+                            .items_center()
+                            .text_xs()
+                            .text_color(if selected == ResultInspectorView::Fields {
+                                colors.text
+                            } else {
+                                colors.muted_text
+                            })
+                            .when(selected == ResultInspectorView::Fields, |tab| {
+                                tab.border_b_1().border_color(colors.accent)
+                            })
+                            .on_click(cx.listener(move |shell, _, _, cx| {
+                                if fields_pane.read(cx).contains_item(item_id) {
+                                    shell
+                                        .result_inspector_views
+                                        .insert(item_id, ResultInspectorView::Fields);
+                                    cx.notify();
+                                }
+                            }))
+                            .child("Fields"),
+                    )
+                    .child(
+                        div()
+                            .id("inspector-row-json-view")
+                            .debug_selector(|| "inspector-row-json-view".into())
+                            .role(Role::Tab)
+                            .aria_label("Show selected row as JSON")
+                            .h_full()
+                            .flex()
+                            .items_center()
+                            .text_xs()
+                            .text_color(if selected == ResultInspectorView::RowJson {
+                                colors.text
+                            } else {
+                                colors.muted_text
+                            })
+                            .when(selected == ResultInspectorView::RowJson, |tab| {
+                                tab.border_b_1().border_color(colors.accent)
+                            })
+                            .on_click(cx.listener(move |shell, _, _, cx| {
+                                if json_pane.read(cx).contains_item(item_id) {
+                                    shell
+                                        .result_inspector_views
+                                        .insert(item_id, ResultInspectorView::RowJson);
+                                    cx.notify();
+                                }
+                            }))
+                            .child("Row JSON"),
+                    ),
+            )
+            .child(match selected {
+                ResultInspectorView::Fields => self.render_result_fields_inspector(results, cx),
+                ResultInspectorView::RowJson => self.render_result_row_json_inspector(results, cx),
+            })
+            .into_any_element()
+    }
+
     fn focused_pane_results(&self, cx: &App) -> Option<Entity<ResultsView>> {
         self.panes
             .get(self.active_pane)
             .and_then(|pane| pane.read(cx).active_results())
+    }
+
+    fn focused_pane_results_item(&self, cx: &App) -> Option<(u64, Entity<ResultsView>)> {
+        let pane = self.panes.get(self.active_pane)?.read(cx);
+        let item_id = pane.active_item()?.id;
+        pane.active_results().map(|results| (item_id, results))
     }
 
     fn focused_item_title(&self, cx: &App) -> Option<String> {
@@ -14931,11 +15104,11 @@ impl WorkspaceShell {
                 },
             )
             .when(dock.id == DockId::Inspector, |dock_view| {
-                let results = self.focused_pane_results(cx);
+                let results = self.focused_pane_results_item(cx);
                 let database_item = self.focused_database_item(cx);
                 let has_fields = results
                     .as_ref()
-                    .is_some_and(|results| !results.read(cx).inspector_fields().is_empty());
+                    .is_some_and(|(_, results)| !results.read(cx).inspector_fields().is_empty());
                 if database_item.is_none() && !has_fields {
                     return dock_view.child(
                         div()
@@ -14964,8 +15137,8 @@ impl WorkspaceShell {
                     .children(database_item.map(|(item_id, _)| {
                         self.render_table_definition_inspector(item_id, cx)
                     }))
-                    .children(results.filter(|_| has_fields).map(|results| {
-                        self.render_result_fields_inspector(results, cx)
+                    .children(results.filter(|_| has_fields).map(|(item_id, results)| {
+                        self.render_result_inspector(item_id, results, cx)
                     }))
             })
     }
@@ -20645,6 +20818,52 @@ mod tests {
             assert_eq!(shell.active_pane, 1);
             assert_eq!(shell.focused_pane_results(cx), Some(second_results));
             assert_eq!(shell.focused_item_title(cx).as_deref(), Some("second.sql"));
+        });
+    }
+
+    #[gpui::test]
+    fn result_inspector_row_json_follows_the_selected_row(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        workspace.update(&mut cx, |shell, cx| {
+            shell.right_dock.presentation.open = true;
+            let pane = shell.panes[shell.active_pane].read(cx);
+            let results = pane.active_results().unwrap();
+            results.update(cx, |results, cx| {
+                results.set_state(
+                    ResultState::Ready(crate::results::ResultData {
+                        columns: vec![crate::results::ResultColumn {
+                            name: "payload".into(),
+                            type_label: "jsonb".into(),
+                            nullable: false,
+                        }],
+                        rows: vec![sift_protocol::Row::new(vec![sift_protocol::Value::Json(
+                            serde_json::json!({"event": "open"}),
+                        )])],
+                        ..Default::default()
+                    }),
+                    cx,
+                );
+                results.select_cell(0, 0, cx);
+            });
+            cx.notify();
+        });
+        cx.run_until_parked();
+
+        let json_tab = cx
+            .debug_bounds("inspector-row-json-view")
+            .expect("row JSON inspector tab");
+        cx.simulate_click(json_tab.center(), Modifiers::default());
+        cx.run_until_parked();
+
+        assert!(cx.debug_bounds("inspector-result-row-json").is_some());
+        workspace.read_with(&cx, |shell, cx| {
+            let (item_id, _) = shell.focused_pane_results_item(cx).unwrap();
+            assert_eq!(
+                shell.result_inspector_views.get(&item_id),
+                Some(&ResultInspectorView::RowJson)
+            );
         });
     }
 
