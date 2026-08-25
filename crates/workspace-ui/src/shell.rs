@@ -13605,6 +13605,153 @@ impl WorkspaceShell {
         }
     }
 
+    fn render_connections_footer(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let colors = cx.theme().colors;
+        let failure = self
+            .connection_health
+            .as_ref()
+            .and_then(|report| report.failure.as_ref());
+        let last_success = self.connection_last_success_ms.map(|checked_at| {
+            let seconds = epoch_millis().saturating_sub(checked_at) / 1_000;
+            if seconds < 2 {
+                "just now".to_owned()
+            } else if seconds < 60 {
+                format!("{seconds}s ago")
+            } else {
+                format!("{}m ago", seconds / 60)
+            }
+        });
+        let label = match (&self.connection_status, failure) {
+            (ConnectionStatus::Connected { .. }, Some(ConnectionHealthFailure::Server(_))) => {
+                format!(
+                    "Server unavailable · last good {}",
+                    last_success.as_deref().unwrap_or("unknown")
+                )
+            }
+            (ConnectionStatus::Connected { .. }, Some(ConnectionHealthFailure::Database(_))) => {
+                format!(
+                    "Database unavailable · last good {}",
+                    last_success.as_deref().unwrap_or("unknown")
+                )
+            }
+            (ConnectionStatus::Connected { .. }, None) => {
+                self.connection_health.as_ref().map_or_else(
+                    || "Checking…".into(),
+                    |report| {
+                        format!(
+                            "{} ms · checked {}",
+                            report.latency_ms,
+                            last_success.as_deref().unwrap_or("just now")
+                        )
+                    },
+                )
+            }
+            (ConnectionStatus::Connecting { .. }, _) => "Connecting…".into(),
+            (ConnectionStatus::Failed { reason, .. }, _) => format!("Failed · {reason}"),
+            (ConnectionStatus::Disconnected, _) => "No active connection".into(),
+        };
+        let reconnect_detail = failure
+            .map(|failure| match failure {
+                ConnectionHealthFailure::Server(message) => {
+                    format!("Reconnect to the Sift server: {message}")
+                }
+                ConnectionHealthFailure::Database(message) => {
+                    format!("Reconnect the database session: {message}")
+                }
+            })
+            .or_else(|| match &self.connection_status {
+                ConnectionStatus::Failed { reason, .. } => {
+                    Some(format!("Retry the failed database connection: {reason}"))
+                }
+                _ => None,
+            });
+        let status_color = match &self.connection_status {
+            ConnectionStatus::Connected { .. } if failure.is_some() => colors.warning,
+            ConnectionStatus::Connected { .. } => colors.success,
+            ConnectionStatus::Connecting { .. } => colors.warning,
+            ConnectionStatus::Failed { .. } => colors.danger,
+            ConnectionStatus::Disconnected => colors.muted_text,
+        };
+
+        div()
+            .id("connections-health-footer")
+            .debug_selector(|| "connections-health-footer".into())
+            .h(px(32.))
+            .flex_none()
+            .flex()
+            .items_center()
+            .gap_1()
+            .px_2()
+            .border_t_1()
+            .border_color(colors.subtle_border)
+            .bg(colors.toolbar)
+            .child(
+                div()
+                    .size(px(6.))
+                    .flex_none()
+                    .rounded_full()
+                    .bg(status_color),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .text_xs()
+                    .text_color(colors.muted_text)
+                    .child(label),
+            )
+            .children(reconnect_detail.map(|detail| {
+                div()
+                    .debug_selector(|| "connections-reconnect".into())
+                    .child(
+                        IconButton::new("connections-reconnect", IconName::Server, detail.clone())
+                            .square(px(24.))
+                            .icon_size(12.)
+                            .tooltip(detail)
+                            .on_click(cx.listener(|shell, _, _, cx| shell.reconnect(cx))),
+                    )
+            }))
+            .children(
+                matches!(self.connection_status, ConnectionStatus::Connected { .. }).then(|| {
+                    div()
+                        .debug_selector(|| "connections-check-connection".into())
+                        .child(
+                            IconButton::new(
+                                "connections-check-connection",
+                                IconName::Activity,
+                                "Check connection",
+                            )
+                            .square(px(24.))
+                            .icon_size(12.)
+                            .tooltip("Check connection")
+                            .disabled(!self.running_queries.is_empty())
+                            .on_click(
+                                cx.listener(|shell, _, _, cx| shell.check_connection_health(cx)),
+                            ),
+                        )
+                }),
+            )
+            .children(
+                matches!(self.connection_status, ConnectionStatus::Connected { .. }).then(|| {
+                    div()
+                        .debug_selector(|| "connections-disconnect".into())
+                        .child(
+                            IconButton::new(
+                                "connections-disconnect",
+                                IconName::Close,
+                                "Close connection",
+                            )
+                            .square(px(24.))
+                            .icon_size(12.)
+                            .tooltip("Close connection")
+                            .on_click(cx.listener(|shell, _, _, cx| shell.disconnect(cx))),
+                        )
+                }),
+            )
+            .into_any_element()
+    }
+
     fn render_dock(&self, dock: &Dock, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
         let colors = theme.colors;
@@ -14194,22 +14341,24 @@ impl WorkspaceShell {
                         }
                     }
                 }
-                dock_view.child(
-                    div()
-                        .id("connections-scroll")
-                        .on_mouse_down(
-                            MouseButton::Left,
-                            cx.listener(|shell, _, window, cx| {
-                                shell.focused_surface = WorkspaceSurface::Connections;
-                                shell.connections_focus_handle.focus(window, cx);
-                            }),
-                        )
-                        .flex_1()
-                        .min_h_0()
-                        .overflow_y_scroll()
-                        .track_scroll(&self.connections_scroll_handle)
-                        .children(rows),
-                )
+                dock_view
+                    .child(
+                        div()
+                            .id("connections-scroll")
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(|shell, _, window, cx| {
+                                    shell.focused_surface = WorkspaceSurface::Connections;
+                                    shell.connections_focus_handle.focus(window, cx);
+                                }),
+                            )
+                            .flex_1()
+                            .min_h_0()
+                            .overflow_y_scroll()
+                            .track_scroll(&self.connections_scroll_handle)
+                            .children(rows),
+                    )
+                    .child(self.render_connections_footer(cx))
                 },
             )
             .when(
@@ -23227,6 +23376,12 @@ mod tests {
         });
         while receiver.try_recv().is_ok() {}
         cx.run_until_parked();
+        assert!(cx.debug_bounds("connections-health-footer").is_some());
+        assert!(cx.debug_bounds("connections-reconnect").is_some());
+        assert!(cx.debug_bounds("connections-check-connection").is_some());
+        assert!(cx.debug_bounds("connections-disconnect").is_some());
+        assert!(cx.debug_bounds("footer-check-connection").is_none());
+        assert!(cx.debug_bounds("footer-disconnect-database").is_none());
         assert!(matches!(
             workspace.read_with(&cx, |shell, _| shell
                 .connection_health

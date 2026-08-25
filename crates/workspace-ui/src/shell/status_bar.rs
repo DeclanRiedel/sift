@@ -53,62 +53,6 @@ pub(super) fn render_status_bar(
         .connection_health
         .as_ref()
         .and_then(|report| report.failure.as_ref());
-    let last_success = shell.connection_last_success_ms.map(|checked_at| {
-        let seconds = epoch_millis().saturating_sub(checked_at) / 1_000;
-        if seconds < 2 {
-            "just now".to_owned()
-        } else if seconds < 60 {
-            format!("{seconds}s ago")
-        } else {
-            format!("{}m ago", seconds / 60)
-        }
-    });
-    let target_label = match &shell.connection_status {
-        ConnectionStatus::Connected { .. } => match health_failure {
-            Some(ConnectionHealthFailure::Server(_)) => format!(
-                "{} · Server unavailable · last good {}",
-                shell.status.database,
-                last_success.as_deref().unwrap_or("unknown")
-            ),
-            Some(ConnectionHealthFailure::Database(_)) => format!(
-                "{} · Database unavailable · last good {}",
-                shell.status.database,
-                last_success.as_deref().unwrap_or("unknown")
-            ),
-            None => shell.connection_health.as_ref().map_or_else(
-                || {
-                    format!(
-                        "{} · Checking… · {}",
-                        shell.status.database, shell.status.room
-                    )
-                },
-                |report| {
-                    format!(
-                        "{} · {} ms · checked {}",
-                        shell.status.database,
-                        report.latency_ms,
-                        last_success.as_deref().unwrap_or("just now")
-                    )
-                },
-            ),
-        },
-        _ => shell.status.database.clone(),
-    };
-    let reconnect_detail = health_failure
-        .map(|failure| match failure {
-            ConnectionHealthFailure::Server(message) => {
-                format!("Reconnect to the Sift server: {message}")
-            }
-            ConnectionHealthFailure::Database(message) => {
-                format!("Reconnect the database session: {message}")
-            }
-        })
-        .or_else(|| match &shell.connection_status {
-            ConnectionStatus::Failed { reason, .. } => {
-                Some(format!("Retry the failed database connection: {reason}"))
-            }
-            _ => None,
-        });
     let (cursor_label, cursor_tooltip) = shell.active_cursor_position(cx).map_or_else(
         || ("-:-".into(), "No active query cursor".into()),
         |(line, column)| {
@@ -334,51 +278,12 @@ pub(super) fn render_status_bar(
                                 ConnectionStatus::Disconnected => colors.muted_text,
                             },
                         ))
-                        .child(div().min_w_0().truncate().child(target_label)),
-                )
-                .children(reconnect_detail.map(|detail| {
-                    button(
-                        "footer-reconnect-database",
-                        IconName::Server,
-                        detail,
-                        false,
-                        None,
-                        false,
-                    )
-                    .on_click(cx.listener(|shell, _, _, cx| shell.reconnect(cx)))
-                }))
-                .children(
-                    matches!(shell.connection_status, ConnectionStatus::Connected { .. }).then(
-                        || {
-                            button(
-                                "footer-check-connection",
-                                IconName::Activity,
-                                "Check the active query connection now".into(),
-                                false,
-                                None,
-                                false,
-                            )
-                            .disabled(!shell.running_queries.is_empty())
-                            .on_click(
-                                cx.listener(|shell, _, _, cx| shell.check_connection_health(cx)),
-                            )
-                        },
-                    ),
-                )
-                .children(
-                    matches!(shell.connection_status, ConnectionStatus::Connected { .. }).then(
-                        || {
-                            button(
-                                "footer-disconnect-database",
-                                IconName::Close,
-                                "Disconnect the active database session".into(),
-                                false,
-                                None,
-                                false,
-                            )
-                            .on_click(cx.listener(|shell, _, _, cx| shell.disconnect(cx)))
-                        },
-                    ),
+                        .child(
+                            div()
+                                .min_w_0()
+                                .truncate()
+                                .child(shell.status.database.clone()),
+                        ),
                 )
                 .children(shell.transaction.as_ref().map(|_| {
                     div()
