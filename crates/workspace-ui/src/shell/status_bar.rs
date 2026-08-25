@@ -243,6 +243,7 @@ pub(super) fn render_status_bar(
                         Some(shell.global_problems.len()),
                         !shell.global_problems.is_empty(),
                     )
+                    .text("Problems")
                     .on_click(
                         cx.listener(|shell, _, window, cx| shell.show_global_problems(window, cx)),
                     ),
