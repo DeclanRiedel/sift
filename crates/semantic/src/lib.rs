@@ -1612,7 +1612,7 @@ pub fn detect_completion_context(
         "sift/tsql" => Flavor::Tsql,
         other => return Err(Error::DialectUnavailable(other.to_string())),
     };
-    let (prefix_start, prefix) = extract_prefix(sql, cursor);
+    let (prefix_start, prefix) = extract_prefix(sql, cursor, flavor);
     let dialect: Box<dyn Dialect> = match flavor {
         Flavor::Postgres => Box::new(PostgreSqlDialect {}),
         Flavor::Tsql => Box::new(MsSqlDialect {}),
@@ -1633,12 +1633,16 @@ pub fn detect_completion_context(
 }
 
 fn semantic_tokens(dialect: &dyn Dialect, source: &str) -> Vec<Token> {
-    Tokenizer::new(dialect, source)
-        .tokenize()
-        .unwrap_or_default()
-        .into_iter()
-        .filter(|token| !is_ignorable(token))
-        .collect()
+    match Tokenizer::new(dialect, source).tokenize() {
+        Ok(tokens) => tokens
+            .into_iter()
+            .filter(|token| !is_ignorable(token))
+            .collect(),
+        Err(error) => {
+            tracing::debug!(%error, "completion tokenization failed");
+            Vec::new()
+        }
+    }
 }
 
 fn completion_relations(tokens: &[Token]) -> Vec<CompletionRelation> {
@@ -1815,7 +1819,7 @@ fn classify_completion(tokens: &[Token]) -> CompletionContext {
     }
 }
 
-fn extract_prefix(sql: &str, cursor: usize) -> (usize, String) {
+fn extract_prefix(sql: &str, cursor: usize, flavor: Flavor) -> (usize, String) {
     let bytes = sql.as_bytes();
     let mut start = cursor;
     while start > 0 {
@@ -1826,7 +1830,12 @@ fn extract_prefix(sql: &str, cursor: usize) -> (usize, String) {
             break;
         }
     }
-    if start > 0 && matches!(bytes[start - 1], b'"' | b'[') {
+    let quoted = start > 0 && bytes[start - 1] == b'"';
+    let bracketed = flavor == Flavor::Tsql
+        && start > 0
+        && bytes[start - 1] == b'['
+        && !sql[cursor..].starts_with(']');
+    if quoted || bracketed {
         start -= 1;
     }
     (start, sql[start..cursor].to_string())

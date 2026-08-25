@@ -54,6 +54,12 @@ pub fn rank(
                         .unwrap_or(q);
                     if let Some(obj) = dict.resolve_by_name(target) {
                         push_columns(&mut out, obj, prefix, /*bonus=*/ 80);
+                    } else {
+                        // CTEs, temporary relations, and incomplete shallow
+                        // snapshots may not resolve to one catalog object.
+                        // Useful unqualified candidates beat an empty popup.
+                        push_all_columns(&mut out, dict, prefix, /*bonus=*/ 20);
+                        push_functions(&mut out, engine, prefix, /*bonus=*/ 10);
                     }
                 }
                 None => {

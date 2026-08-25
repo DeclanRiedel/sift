@@ -3,7 +3,7 @@
 //! context detection (FROM slot, dotted qualifier), ranking order
 //! (prefix > substring), engine-specific identifier quoting.
 
-use sift_completion::complete;
+use sift_completion::{complete, detect_context, Dictionary};
 use sift_protocol::completion::{CompletionContext, CompletionKind, CompletionRequest};
 use sift_protocol::{
     CatalogTree, ColumnMetadata, Engine, Nullability, ObjectInfo, ObjectKind, PrimitiveType,
@@ -167,4 +167,44 @@ fn statement_lead_shows_keywords() {
         .iter()
         .any(|c| c.label == "SELECT" && matches!(c.kind, CompletionKind::Keyword));
     assert!(has_select, "SELECT missing from {:?}", resp.candidates);
+}
+
+#[test]
+fn unresolved_cte_qualifier_falls_back_to_available_columns() {
+    let sql = "WITH recent AS (SELECT 1) SELECT recent.e";
+    let response = complete(
+        &CompletionRequest {
+            sql: sql.into(),
+            cursor: sql.len() as u32,
+            limit: None,
+        },
+        &snapshot(),
+        Engine::Postgres,
+    );
+    assert!(response
+        .candidates
+        .iter()
+        .any(|candidate| candidate.label == "email"));
+}
+
+#[test]
+fn dictionary_deduplicates_schema_names_case_insensitively() {
+    let mut snapshot = snapshot();
+    snapshot.trees.push(CatalogTree {
+        name: "other".into(),
+        schemas: vec![SchemaTree {
+            name: "PUBLIC".into(),
+            objects: Vec::new(),
+        }],
+    });
+    let dictionary = Dictionary::from_snapshot(&snapshot);
+    assert_eq!(dictionary.schemas, vec!["public"]);
+}
+
+#[test]
+fn mssql_array_subscript_does_not_become_a_bracketed_identifier_prefix() {
+    let sql = "SELECT arr[0]";
+    let cursor = sql.len() - 1;
+    let analysis = detect_context(sql, cursor, Engine::SqlServer);
+    assert_eq!(&sql[analysis.prefix_start..cursor], "0");
 }

@@ -75,13 +75,15 @@ pub fn complete_with_analysis(
     dict: &Dictionary,
     engine: Engine,
 ) -> CompletionResponse {
-    let limit = limit.map(|l| usize::min(l as usize, 200)).unwrap_or(50);
+    let limit = limit
+        .map(|limit| usize::try_from(limit).unwrap_or(usize::MAX).min(200))
+        .unwrap_or(50);
     let candidates = rank::rank(ctx, dict, engine, limit);
     CompletionResponse {
         candidates,
         replaced_range: sift_protocol::completion::Range {
-            start: ctx.prefix_start as u32,
-            end: ctx.cursor as u32,
+            start: u32::try_from(ctx.prefix_start).unwrap_or(u32::MAX),
+            end: u32::try_from(ctx.cursor).unwrap_or(u32::MAX),
         },
         context: ctx.context.clone(),
     }

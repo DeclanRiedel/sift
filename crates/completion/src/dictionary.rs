@@ -5,7 +5,7 @@
 //! upstream `SchemaCache` already deduplicates the expensive part
 //! (fetching the snapshot from the DB).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use sift_protocol::{ObjectInfo, ObjectKind, ObjectPath, SchemaSnapshot};
 
@@ -56,10 +56,11 @@ pub struct Dictionary {
 impl Dictionary {
     pub fn from_snapshot(snapshot: &SchemaSnapshot) -> Self {
         let mut schemas: Vec<String> = Vec::new();
+        let mut seen_schemas = HashSet::new();
         let mut objects: Vec<ObjectEntry> = Vec::new();
         for catalog in &snapshot.trees {
             for schema in &catalog.schemas {
-                if !schemas.iter().any(|s| s.eq_ignore_ascii_case(&schema.name)) {
+                if seen_schemas.insert(schema.name.to_ascii_lowercase()) {
                     schemas.push(schema.name.clone());
                 }
                 for obj in &schema.objects {
