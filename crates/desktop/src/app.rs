@@ -908,6 +908,49 @@ async fn run_query_executor(
                     }
                 }
             }
+            ExecutorCommand::LoadConnectionProfile {
+                tenant_id,
+                profile_id,
+            } => {
+                let server = targets.borrow().clone();
+                let result = match server.client().await {
+                    Ok(client) => client
+                        .connection_profiles(TenantId(tenant_id))
+                        .await
+                        .map_err(|error| format!("loading connection profile failed: {error}"))
+                        .and_then(|profiles| {
+                            profiles
+                                .into_iter()
+                                .find(|profile| profile.id.0 == profile_id)
+                                .map(Box::new)
+                                .ok_or_else(|| "Connection profile no longer exists".into())
+                        }),
+                    Err(error) => Err(error),
+                };
+                if events.send(ExecutorEvent::ProfileLoaded(result)).is_err() {
+                    return;
+                }
+            }
+            ExecutorCommand::TestConnectionProfile {
+                tenant_id,
+                provider_id,
+                configuration,
+                credentials,
+            } => {
+                let server = targets.borrow().clone();
+                let result = test_connection_profile(
+                    &server,
+                    tenant_id,
+                    provider_id,
+                    configuration,
+                    credentials,
+                    &events,
+                )
+                .await;
+                if events.send(ExecutorEvent::ProfileTested(result)).is_err() {
+                    return;
+                }
+            }
             ExecutorCommand::DeleteConnectionProfile {
                 tenant_id,
                 profile_id,
@@ -1196,14 +1239,16 @@ async fn run_query_executor(
                 let events = events.clone();
                 std::mem::drop(tokio::spawn(async move {
                     let result = stream_result_export(
-                        client,
-                        session,
-                        connection,
-                        request,
+                        ExportRun {
+                            client,
+                            session,
+                            connection,
+                            request,
+                            item_id,
+                        },
                         &destination,
                         cancelled,
                         &events,
-                        item_id,
                     )
                     .await;
                     let _ = events.send(ExecutorEvent::ResultExported {
@@ -1442,15 +1487,19 @@ fn cancel_active_queries(
     }
 }
 
-async fn stream_result_export(
+struct ExportRun {
     client: Client,
     session: SessionId,
     connection: ConnectionId,
     request: sift_protocol::ExportRequest,
+    item_id: u64,
+}
+
+async fn stream_result_export(
+    run: ExportRun,
     destination: &std::path::Path,
     mut cancelled: tokio::sync::oneshot::Receiver<()>,
     events: &tokio::sync::mpsc::UnboundedSender<ExecutorEvent>,
-    item_id: u64,
 ) -> Result<(), String> {
     let mut output = tokio::fs::OpenOptions::new()
         .write(true)
@@ -1460,8 +1509,9 @@ async fn stream_result_export(
         .map_err(|error| {
             format!("creating export (existing files are not overwritten): {error}")
         })?;
-    let mut stream = match client
-        .stream_export_query(session, connection, request)
+    let mut stream = match run
+        .client
+        .stream_export_query(run.session, run.connection, run.request)
         .await
     {
         Ok(stream) => stream,
@@ -1492,7 +1542,10 @@ async fn stream_result_export(
             return Err(format!("writing export failed: {error}"));
         }
         bytes = bytes.saturating_add(u64::try_from(chunk.len()).unwrap_or(u64::MAX));
-        let _ = events.send(ExecutorEvent::ResultExportProgress { item_id, bytes });
+        let _ = events.send(ExecutorEvent::ResultExportProgress {
+            item_id: run.item_id,
+            bytes,
+        });
     }
     if let Err(error) = output.flush().await {
         let _ = tokio::fs::remove_file(destination).await;
@@ -1718,6 +1771,43 @@ async fn create_connection_profile(
         name,
         provider_id: profile.provider_id,
     })
+}
+
+async fn test_connection_profile(
+    server: &DesktopServer,
+    tenant_id: i64,
+    provider_id: sift_protocol::ProviderId,
+    configuration: serde_json::Value,
+    credentials: Option<serde_json::Value>,
+    events: &tokio::sync::mpsc::UnboundedSender<ExecutorEvent>,
+) -> Result<(), String> {
+    let client = server.client().await?;
+    let name = format!("__sift_connection_test_{}", uuid::Uuid::new_v4());
+    let profile = client
+        .upsert_connection_profile(UpsertConnectionProfileRequest {
+            tenant_id,
+            name,
+            provider_id,
+            configuration,
+            credentials,
+            credential_mode: CredentialMode::Shared,
+            tags: vec!["sift:temporary-connection-test".into()],
+        })
+        .await
+        .map_err(|error| format!("preparing connection test failed: {error}"))?;
+    let opened = open_query_context(server, tenant_id, profile.id.0, events).await;
+    if let Ok(context) = &opened {
+        let _ = context.client.close_session(context.session).await;
+    }
+    let cleanup = client
+        .delete_connection_profile(TenantId(tenant_id), profile.id)
+        .await
+        .map_err(|error| format!("removing temporary test profile failed: {error}"));
+    match (opened, cleanup) {
+        (Ok(_), Ok(())) => Ok(()),
+        (Err(error), _) => Err(error),
+        (Ok(_), Err(error)) => Err(error),
+    }
 }
 
 const SEMANTIC_COMPLETION_LIMIT: u32 = 50;

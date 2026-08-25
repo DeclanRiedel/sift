@@ -1318,6 +1318,16 @@ pub enum ExecutorCommand {
         configuration: serde_json::Value,
         credentials: Option<serde_json::Value>,
     },
+    LoadConnectionProfile {
+        tenant_id: i64,
+        profile_id: i64,
+    },
+    TestConnectionProfile {
+        tenant_id: i64,
+        provider_id: sift_protocol::ProviderId,
+        configuration: serde_json::Value,
+        credentials: Option<serde_json::Value>,
+    },
     DeleteConnectionProfile {
         tenant_id: i64,
         profile_id: i64,
@@ -1464,6 +1474,8 @@ pub enum ExecutorEvent {
         connection_error: Option<String>,
     },
     ProfileCreationFailed(String),
+    ProfileLoaded(Result<Box<sift_api_types::ConnectionProfile>, String>),
+    ProfileTested(Result<(), String>),
     ProfileDeleted {
         tenant_id: i64,
         profile_id: i64,
@@ -3871,6 +3883,8 @@ pub struct WorkspaceShell {
     selected_database_ssl_mode: Option<String>,
     database_wizard_step: DatabaseWizardStep,
     database_connection_pending: bool,
+    editing_connection_profile: Option<i64>,
+    database_connection_tested: bool,
     database_connection_error: Option<String>,
     store: Option<Arc<PresentationStore>>,
     _key_interceptor_subscription: Subscription,
@@ -4314,6 +4328,8 @@ impl WorkspaceShell {
             selected_database_ssl_mode: Some("prefer".into()),
             database_wizard_step: DatabaseWizardStep::Provider,
             database_connection_pending: false,
+            editing_connection_profile: None,
+            database_connection_tested: false,
             database_connection_error: None,
             store,
             _key_interceptor_subscription: key_interceptor_subscription,
@@ -5700,12 +5716,21 @@ impl WorkspaceShell {
                     .iter_mut()
                     .find(|tenant| tenant.id.0 == entry.tenant_id)
                 {
-                    tenant.connections.push(entry.clone());
+                    if let Some(existing) = tenant
+                        .connections
+                        .iter_mut()
+                        .find(|existing| existing.id == entry.id)
+                    {
+                        *existing = entry.clone();
+                    } else {
+                        tenant.connections.push(entry.clone());
+                    }
                     tenant
                         .connections
                         .sort_by(|left, right| left.name.cmp(&right.name));
                 }
                 self.database_connection_pending = false;
+                let edited = self.editing_connection_profile.take().is_some();
                 self.database_connection_error = None;
                 self.modal = None;
                 self.database_password_input
@@ -5713,13 +5738,17 @@ impl WorkspaceShell {
                 match connection_error {
                     Some(error) => {
                         self.show_error_toast(
-                            format!("Added {}, but connection failed: {error}", entry.name),
+                            format!("Saved {}, but connection failed: {error}", entry.name),
                             cx,
                         );
                     }
                     None => {
                         self.show_success_toast(
-                            format!("Added and connected to {}", entry.name),
+                            format!(
+                                "{} and connected to {}",
+                                if edited { "Updated" } else { "Added" },
+                                entry.name
+                            ),
                             cx,
                         );
                     }
@@ -5728,6 +5757,31 @@ impl WorkspaceShell {
             ExecutorEvent::ProfileCreationFailed(message) => {
                 self.database_connection_pending = false;
                 self.database_connection_error = Some(message.clone());
+                cx.notify();
+            }
+            ExecutorEvent::ProfileLoaded(result) => {
+                self.database_connection_pending = false;
+                match result {
+                    Ok(profile) => self.populate_connection_profile(*profile, cx),
+                    Err(message) => {
+                        self.database_connection_error = Some(message);
+                        cx.notify();
+                    }
+                }
+            }
+            ExecutorEvent::ProfileTested(result) => {
+                self.database_connection_pending = false;
+                match result {
+                    Ok(()) => {
+                        self.database_connection_tested = true;
+                        self.database_connection_error = None;
+                        self.show_success_toast("Connection test succeeded".into(), cx);
+                    }
+                    Err(message) => {
+                        self.database_connection_tested = false;
+                        self.database_connection_error = Some(message);
+                    }
+                }
                 cx.notify();
             }
             ExecutorEvent::SavedQueriesLoaded { tenant_id, result } => {
@@ -8334,6 +8388,119 @@ impl WorkspaceShell {
         cx.notify();
     }
 
+    fn request_edit_connection(&mut self, entry: &ConnectionNavEntry, cx: &mut Context<Self>) {
+        let Some(sender) = &self.executor_sender else {
+            self.show_error_toast("Database connection manager is unavailable".into(), cx);
+            return;
+        };
+        self.editing_connection_profile = Some(entry.id);
+        self.database_connection_pending = true;
+        self.database_connection_error = None;
+        self.database_connection_tested = false;
+        self.modal = Some(Modal::DatabaseConnection);
+        let _ = sender.send(ExecutorCommand::LoadConnectionProfile {
+            tenant_id: entry.tenant_id,
+            profile_id: entry.id,
+        });
+        cx.notify();
+    }
+
+    fn populate_connection_profile(
+        &mut self,
+        profile: sift_api_types::ConnectionProfile,
+        cx: &mut Context<Self>,
+    ) {
+        let config = profile.configuration.as_object();
+        let text = |key: &str| {
+            config
+                .and_then(|config| config.get(key))
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default()
+                .to_owned()
+        };
+        let number = |key: &str| {
+            config
+                .and_then(|config| config.get(key))
+                .and_then(serde_json::Value::as_u64)
+                .map(|value| value.to_string())
+                .unwrap_or_default()
+        };
+        self.selected_database_tenant = Some(profile.tenant_id.0);
+        self.selected_database_provider = Some(profile.provider_id.as_str().to_owned());
+        self.database_wizard_step = DatabaseWizardStep::Details;
+        for (input, value) in [
+            (&self.database_name_input, profile.name),
+            (&self.database_host_input, text("host")),
+            (&self.database_port_input, number("port")),
+            (&self.database_catalog_input, text("database")),
+            (&self.database_user_input, text("user")),
+        ] {
+            input.update(cx, |input, cx| input.set_text(&value, cx));
+        }
+        self.database_password_input
+            .update(cx, |input, cx| input.set_text("", cx));
+        if let Some(engine) = config
+            .and_then(|config| config.get("engine_specific"))
+            .and_then(serde_json::Value::as_object)
+        {
+            let engine_text = |key: &str| {
+                engine
+                    .get(key)
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned()
+            };
+            let engine_number = |key: &str| {
+                engine
+                    .get(key)
+                    .and_then(serde_json::Value::as_u64)
+                    .map(|value| value.to_string())
+                    .unwrap_or_default()
+            };
+            self.database_search_path_input.update(cx, |input, cx| {
+                let value = engine
+                    .get("search_path")
+                    .and_then(serde_json::Value::as_array)
+                    .map(|values| {
+                        values
+                            .iter()
+                            .filter_map(serde_json::Value::as_str)
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    })
+                    .unwrap_or_default();
+                input.set_text(&value, cx)
+            });
+            for (input, value) in [
+                (
+                    &self.database_application_name_input,
+                    engine_text("application_name"),
+                ),
+                (
+                    &self.database_timeout_input,
+                    engine_number("connect_timeout_secs"),
+                ),
+                (
+                    &self.database_pool_min_input,
+                    engine_number("pool_min_size"),
+                ),
+                (
+                    &self.database_pool_max_input,
+                    engine_number("pool_max_size"),
+                ),
+            ] {
+                input.update(cx, |input, cx| input.set_text(&value, cx));
+            }
+        }
+        self.selected_database_ssl_mode = config
+            .and_then(|config| config.get("ssl_mode"))
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned)
+            .or_else(|| Some("prefer".into()));
+        self.configure_database_tab_order(cx);
+        cx.notify();
+    }
+
     fn confirm_delete_connection(&mut self, entry: &ConnectionNavEntry, cx: &mut Context<Self>) {
         let Some(sender) = &self.executor_sender else {
             self.show_toast("Database connection manager is unavailable".into(), cx);
@@ -8354,6 +8521,8 @@ impl WorkspaceShell {
     }
 
     fn open_database_connection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.editing_connection_profile = None;
+        self.database_connection_tested = false;
         self.selected_database_tenant = self.lifecycle.tenants.first().map(|tenant| tenant.id.0);
         self.selected_database_provider = None;
         self.database_wizard_step = DatabaseWizardStep::Provider;
@@ -8520,6 +8689,14 @@ impl WorkspaceShell {
     }
 
     fn submit_database_connection(&mut self, cx: &mut Context<Self>) {
+        self.submit_database_connection_action(false, cx);
+    }
+
+    fn test_database_connection(&mut self, cx: &mut Context<Self>) {
+        self.submit_database_connection_action(true, cx);
+    }
+
+    fn submit_database_connection_action(&mut self, test_only: bool, cx: &mut Context<Self>) {
         if self.database_connection_pending {
             return;
         }
@@ -8547,6 +8724,21 @@ impl WorkspaceShell {
             return;
         };
         let name = self.database_name_input.read(cx).text().trim().to_owned();
+        if let Some(profile_id) = self.editing_connection_profile {
+            let original_name = self
+                .lifecycle
+                .tenants
+                .iter()
+                .flat_map(|tenant| &tenant.connections)
+                .find(|connection| connection.id == profile_id)
+                .map(|connection| connection.name.as_str());
+            if original_name.is_some_and(|original| original != name) {
+                self.database_connection_error =
+                    Some("Connection names cannot be changed while editing".into());
+                cx.notify();
+                return;
+            }
+        }
         let host = self.database_host_input.read(cx).text().trim().to_owned();
         let user = self.database_user_input.read(cx).text().trim().to_owned();
         let port_text = self.database_port_input.read(cx).text().trim().to_owned();
@@ -8664,19 +8856,29 @@ impl WorkspaceShell {
             }
         }
         let credentials = (!password.is_empty()).then(|| serde_json::json!({"password": password}));
-        if sender
-            .send(ExecutorCommand::CreateConnectionProfile {
+        let command = if test_only {
+            ExecutorCommand::TestConnectionProfile {
+                tenant_id,
+                provider_id,
+                configuration: serde_json::Value::Object(configuration),
+                credentials,
+            }
+        } else {
+            ExecutorCommand::CreateConnectionProfile {
                 tenant_id,
                 name,
                 provider_id,
                 configuration: serde_json::Value::Object(configuration),
                 credentials,
-            })
-            .is_err()
-        {
+            }
+        };
+        if sender.send(command).is_err() {
             self.database_connection_error = Some("Database connection manager stopped".into());
         } else {
             self.database_connection_pending = true;
+            if test_only {
+                self.database_connection_tested = false;
+            }
             self.database_connection_error = None;
         }
         cx.notify();
@@ -15253,6 +15455,7 @@ impl WorkspaceShell {
                         }
                         let connection_id = conn.id;
                         let entry_for_delete = conn.clone();
+                        let entry_for_edit = conn.clone();
                         let (connection_color, connected) = match &self.connection_status {
                             ConnectionStatus::Connected { profile_id, .. }
                                 if *profile_id == conn.id =>
@@ -15397,6 +15600,23 @@ impl WorkspaceShell {
                                 shell.connect(&entry, cx)
                             }));
                         }
+                        row = row.child(
+                            div()
+                                .id(("edit-connection", conn.id as usize))
+                                .flex_none()
+                                .role(Role::Button)
+                                .aria_label(format!("Edit connection {}", conn.name))
+                                .p_1()
+                                .rounded_sm()
+                                .text_color(colors.muted_text)
+                                .hover(|button| button.bg(colors.hovered_surface).text_color(colors.text))
+                                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                                .on_click(cx.listener(move |shell, _, _, cx| {
+                                    cx.stop_propagation();
+                                    shell.request_edit_connection(&entry_for_edit, cx)
+                                }))
+                                .child(icon(IconName::Edit, colors.muted_text, 11.)),
+                        );
                         row = row.child(
                             div()
                                 .id(("delete-connection", conn.id as usize))
@@ -19116,6 +19336,14 @@ impl WorkspaceShell {
                                     div()
                                         .flex()
                                         .gap_2()
+                                        .child(
+                                            Button::new("database-wizard-test", if self.database_connection_tested { "Tested" } else { "Test connection" })
+                                                .tone(ButtonTone::Neutral)
+                                                .wide(true)
+                                                .loading(pending)
+                                                .disabled(step != DatabaseWizardStep::Review || pending)
+                                                .on_click(cx.listener(|shell, _, _, cx| shell.test_database_connection(cx))),
+                                        )
                                         .child(
                                             Button::new(
                                                 "database-wizard-secondary",
@@ -24134,6 +24362,40 @@ mod tests {
             shell.database_wizard_next(window, cx);
             assert_eq!(shell.database_wizard_step, DatabaseWizardStep::Review);
         });
+    }
+
+    #[gpui::test]
+    fn connection_test_uses_unsaved_form_values(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        workspace.update(&mut cx, |shell, cx| {
+            shell.executor_sender = Some(sender);
+            shell.selected_database_tenant = Some(7);
+            shell.select_database_provider("sift/postgres".into(), cx);
+            for (input, value) in [
+                (&shell.database_name_input, "Reporting"),
+                (&shell.database_host_input, "db.internal"),
+                (&shell.database_user_input, "sift"),
+                (&shell.database_password_input, "secret"),
+            ] {
+                input.update(cx, |input, cx| input.set_text(value, cx));
+            }
+            shell.test_database_connection(cx);
+        });
+        let ExecutorCommand::TestConnectionProfile {
+            tenant_id,
+            configuration,
+            credentials,
+            ..
+        } = receiver.try_recv().unwrap()
+        else {
+            panic!("connection test command")
+        };
+        assert_eq!(tenant_id, 7);
+        assert_eq!(configuration["host"], "db.internal");
+        assert_eq!(credentials.unwrap()["password"], "secret");
     }
 
     #[gpui::test]
