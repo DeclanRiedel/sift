@@ -709,6 +709,7 @@ actions!(
         CloseActivePane,
         CloseActiveItem,
         SaveActiveItem,
+        StageJsonResultEdit,
         CancelExecution,
         ToggleLeftDock,
         ToggleRightDock,
@@ -3436,6 +3437,7 @@ pub struct WorkspaceShell {
     query_input: Entity<TextInput>,
     saved_query_name_input: Entity<TextInput>,
     result_cell_edit_input: Entity<TextInput>,
+    result_json_edit_editor: Option<Entity<QueryEditor>>,
     schema_search_input: Entity<TextInput>,
     data_search_input: Entity<TextInput>,
     server_name_input: Entity<TextInput>,
@@ -3883,6 +3885,7 @@ impl WorkspaceShell {
             query_input,
             saved_query_name_input,
             result_cell_edit_input,
+            result_json_edit_editor: None,
             schema_search_input,
             data_search_input,
             server_name_input,
@@ -10436,9 +10439,9 @@ impl WorkspaceShell {
                     && edit.column == selected.column
                     && edit.original_row == selected.original_row
             })
-            .map(|edit| &edit.value)
-            .unwrap_or(&selected.original);
-        let text = render_value(staged_value).text;
+            .map(|edit| edit.value.clone())
+            .unwrap_or_else(|| selected.original.clone());
+        let json_cell = matches!(&selected.original, sift_protocol::Value::Json(_));
         self.result_cell_edit_target = Some(ResultCellEditTarget {
             item_id,
             column: selected.column,
@@ -10448,6 +10451,29 @@ impl WorkspaceShell {
         });
         self.result_edit_pending = false;
         self.result_edit_error = None;
+        if json_cell {
+            let text = match &staged_value {
+                sift_protocol::Value::Json(value) => {
+                    serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string())
+                }
+                sift_protocol::Value::Null | sift_protocol::Value::TypedNull { .. } => {
+                    "NULL".into()
+                }
+                _ => render_value(&staged_value).text,
+            };
+            let editor = cx.new(|cx| {
+                QueryEditor::new(QueryDocument::with_random_peer(&text), cx)
+                    .with_language(EditorLanguage::Json)
+                    .with_keymap(EditorKeymap::Vim)
+            });
+            let focus = editor.focus_handle(cx);
+            self.result_json_edit_editor = Some(editor);
+            self.modal = Some(Modal::EditResultCell);
+            focus.focus(window, cx);
+            cx.notify();
+            return;
+        }
+        let text = render_value(&staged_value).text;
         let focus = results.update(cx, |results, cx| results.begin_selected_cell_edit(text, cx));
         let Some(focus) = focus else {
             self.result_cell_edit_target = None;
@@ -10481,6 +10507,7 @@ impl WorkspaceShell {
             results.update(cx, |results, cx| results.finish_inline_cell_edit(cx));
         }
         self.result_cell_edit_target = None;
+        self.result_json_edit_editor = None;
         self.modal = Some(Modal::EditResultCell);
         self.focus_handle.focus(window, cx);
         cx.notify();
@@ -10511,7 +10538,9 @@ impl WorkspaceShell {
         text: &str,
     ) -> Result<sift_protocol::Value, String> {
         use sift_protocol::Value;
-        if text.eq_ignore_ascii_case("NULL") {
+        if text == "NULL"
+            || (!matches!(original, Value::Json(_)) && text.eq_ignore_ascii_case("NULL"))
+        {
             return Ok(Value::Null);
         }
         let invalid = || format!("{text:?} is not a valid {} value", original.type_category());
@@ -10535,7 +10564,44 @@ impl WorkspaceShell {
             Value::Uuid(_) => text.parse().map(Value::Uuid).map_err(|_| invalid()),
             Value::Json(_) => serde_json::from_str(text)
                 .map(Value::Json)
-                .map_err(|_| invalid()),
+                .map_err(|error| {
+                    format!(
+                        "Invalid JSON at line {}, column {}: {error}",
+                        error.line(),
+                        error.column()
+                    )
+                }),
+        }
+    }
+
+    fn stage_result_cell_text(&mut self, text: &str, cx: &mut Context<Self>) -> bool {
+        self.result_cell_edit_input
+            .update(cx, |input, cx| input.set_text(text, cx));
+        self.stage_current_result_edit(cx)
+    }
+
+    fn submit_json_result_cell_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(editor) = self.result_json_edit_editor.as_ref() else {
+            return;
+        };
+        let text = editor.read(cx).document().text().to_owned();
+        if !self.stage_result_cell_text(&text, cx) {
+            return;
+        }
+        self.result_cell_edit_target = None;
+        self.result_json_edit_editor = None;
+        self.focus_handle.focus(window, cx);
+        cx.notify();
+    }
+
+    fn stage_json_result_edit(
+        &mut self,
+        _: &StageJsonResultEdit,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.modal == Some(Modal::EditResultCell) && self.result_json_edit_editor.is_some() {
+            self.submit_json_result_cell_edit(window, cx);
         }
     }
 
@@ -11308,6 +11374,16 @@ impl WorkspaceShell {
                     self.open_schema_search_target(target, window, cx);
                 }
             }
+            Some(Modal::EditResultCell) if self.result_json_edit_editor.is_none() => {
+                if self.result_edit_pending {
+                    return;
+                }
+                if self.result_edit_plan.is_some() && self.pending_edit_set.is_some() {
+                    self.apply_result_cell_edit(cx);
+                } else {
+                    self.preview_result_cell_edit(cx);
+                }
+            }
             _ => {}
         }
     }
@@ -11358,11 +11434,14 @@ impl WorkspaceShell {
         }
         if self.modal == Some(Modal::EditResultCell) {
             self.result_cell_edit_target = None;
-            self.staged_result_edits.clear();
-            self.result_edit_conflicts.clear();
-            self.pending_edit_set = None;
-            self.result_edit_plan = None;
-            self.result_edit_pending = false;
+            if self.result_json_edit_editor.is_none() {
+                self.staged_result_edits.clear();
+                self.result_edit_conflicts.clear();
+                self.pending_edit_set = None;
+                self.result_edit_plan = None;
+                self.result_edit_pending = false;
+            }
+            self.result_json_edit_editor = None;
             self.result_edit_error = None;
         }
         self.modal = None;
@@ -15338,6 +15417,120 @@ impl WorkspaceShell {
                         .into_any_element()
                 }
                 Modal::EditResultCell => {
+                    if let Some(editor) = self.result_json_edit_editor.clone() {
+                        let target = self.result_cell_edit_target.as_ref();
+                        div()
+                            .key_context("SiftJsonResultEditor")
+                            .flex()
+                            .flex_col()
+                            .h(px(600.))
+                            .child(
+                                div()
+                                    .h(px(42.))
+                                    .px_3()
+                                    .flex()
+                                    .items_center()
+                                    .justify_between()
+                                    .gap_2()
+                                    .border_b_1()
+                                    .border_color(colors.subtle_border)
+                                    .bg(colors.toolbar)
+                                    .child(
+                                        div()
+                                            .min_w_0()
+                                            .truncate()
+                                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                                            .child(target.map_or_else(
+                                                || "Edit JSON value".into(),
+                                                |edit| {
+                                                    format!(
+                                                        "Edit JSON · {}.{}",
+                                                        edit.source.object, edit.column
+                                                    )
+                                                },
+                                            )),
+                                    )
+                                    .child(
+                                        IconButton::new(
+                                            "close-json-result-cell-edit",
+                                            IconName::Close,
+                                            "Cancel JSON edit",
+                                        )
+                                        .square(px(26.))
+                                        .icon_size(13.)
+                                        .on_click(cx.listener(|shell, _, window, cx| {
+                                            shell.dismiss_modal(&DismissModal, window, cx)
+                                        })),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_h_0()
+                                    .flex()
+                                    .flex_col()
+                                    .border_b_1()
+                                    .border_color(colors.subtle_border)
+                                    .child(div().flex_1().min_h_0().child(editor))
+                                    .children(self.result_edit_error.as_ref().map(|message| {
+                                        div()
+                                            .px_3()
+                                            .py_2()
+                                            .child(ErrorBanner::new(message.clone()))
+                                    })),
+                            )
+                            .child(
+                                div()
+                                    .px_3()
+                                    .py_2()
+                                    .flex()
+                                    .items_center()
+                                    .justify_between()
+                                    .gap_2()
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(colors.muted_text)
+                                            .child("Formatted JSON · Vim editing · validation on stage"),
+                                    )
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .items_center()
+                                            .gap_2()
+                                            .child(
+                                                Button::new("cancel-json-result-edit", "Cancel")
+                                                    .tone(ButtonTone::Neutral)
+                                                    .key_binding("Esc")
+                                                    .on_click(cx.listener(
+                                                        |shell, _, window, cx| {
+                                                            shell.dismiss_modal(
+                                                                &DismissModal,
+                                                                window,
+                                                                cx,
+                                                            )
+                                                        },
+                                                    )),
+                                            )
+                                            .child(
+                                                Button::new(
+                                                    "stage-json-result-edit",
+                                                    "Stage change",
+                                                )
+                                                .tone(ButtonTone::Accent)
+                                                .key_binding("Mod Enter")
+                                                .on_click(cx.listener(
+                                                    |shell, _, window, cx| {
+                                                        shell.submit_json_result_cell_edit(
+                                                            window, cx,
+                                                        )
+                                                    },
+                                                )),
+                                            ),
+                                    ),
+                            )
+                            .into_any_element()
+                    } else {
                     let target = self.result_cell_edit_target.as_ref();
                     let staged_edits = self.staged_result_edits.clone();
                     let pending = self.result_edit_pending;
@@ -15539,13 +15732,15 @@ impl WorkspaceShell {
                                 .child(
                                     Button::new("cancel-result-cell-edit", "Discard all")
                                         .tone(ButtonTone::Neutral)
+                                        .key_binding("Esc")
                                         .on_click(cx.listener(|shell, _, window, cx| {
                                             shell.dismiss_modal(&DismissModal, window, cx)
                                         })),
                                 )
                                 .child(
-                                    Button::new("preview-result-cell-edit", "Preview all")
+                                    Button::new("preview-result-cell-edit", "Preview changes")
                                         .tone(ButtonTone::Neutral)
+                                        .when(!can_apply, |button| button.key_binding("Enter"))
                                         .loading(pending && plan.is_none())
                                         .disabled(pending)
                                         .on_click(cx.listener(|shell, _, _, cx| {
@@ -15553,8 +15748,9 @@ impl WorkspaceShell {
                                         })),
                                 )
                                 .child(
-                                    Button::new("apply-result-cell-edit", "Apply safely")
+                                    Button::new("apply-result-cell-edit", "Save changes")
                                         .tone(ButtonTone::Accent)
+                                        .when(can_apply, |button| button.key_binding("Enter"))
                                         .loading(pending && plan.is_some())
                                         .disabled(!can_apply)
                                         .on_click(cx.listener(|shell, _, _, cx| {
@@ -15563,6 +15759,7 @@ impl WorkspaceShell {
                                 ),
                         )
                         .into_any_element()
+                    }
                 }
                 Modal::PlanCaptures => {
                     let captures = self.plan_captures.clone();
@@ -18483,6 +18680,7 @@ impl gpui::Render for WorkspaceShell {
             .on_action(cx.listener(Self::close_active_pane))
             .on_action(cx.listener(Self::close_active_item))
             .on_action(cx.listener(Self::save_active_item))
+            .on_action(cx.listener(Self::stage_json_result_edit))
             .on_action(cx.listener(Self::cancel_execution))
             .on_action(cx.listener(Self::toggle_left_dock))
             .on_action(cx.listener(Self::toggle_right_dock))
@@ -18638,6 +18836,24 @@ fn highlight_match(label: &'static str, query: &str, accent: gpui::Hsla) -> impl
 mod tests {
     use super::*;
     use gpui::{point, EntityInputHandler, Modifiers, TestAppContext, VisualTestContext};
+
+    #[test]
+    fn json_cell_parser_distinguishes_json_null_and_sql_null() {
+        let original = sift_protocol::Value::Json(serde_json::json!({"enabled": true}));
+        assert_eq!(
+            WorkspaceShell::parse_result_cell_value(&original, "null").unwrap(),
+            sift_protocol::Value::Json(serde_json::Value::Null)
+        );
+        assert_eq!(
+            WorkspaceShell::parse_result_cell_value(&original, "NULL").unwrap(),
+            sift_protocol::Value::Null
+        );
+
+        let error = WorkspaceShell::parse_result_cell_value(&original, "{\n  nope\n}")
+            .expect_err("invalid JSON");
+        assert!(error.contains("line 2"));
+        assert!(error.contains("column"));
+    }
 
     fn table_graph() -> sift_protocol::CatalogGraph {
         use sift_protocol::{

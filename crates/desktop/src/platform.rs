@@ -3,8 +3,8 @@ use std::path::PathBuf;
 use gpui::KeyBinding;
 use sift_workspace_ui::{
     CloseActiveItem, CloseActivePane, DismissModal, OpenCommandPalette, PaletteConfirm,
-    PaletteDown, PaletteUp, SaveActiveItem, SplitPane, ToggleBottomDock, ToggleLeftDock,
-    ToggleRightDock,
+    PaletteDown, PaletteUp, SaveActiveItem, SplitPane, StageJsonResultEdit, ToggleBottomDock,
+    ToggleLeftDock, ToggleRightDock,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -106,6 +106,11 @@ pub fn shell_key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("down", PaletteDown, context),
         KeyBinding::new("enter", PaletteConfirm, context),
         KeyBinding::new(
+            &format!("{primary}-enter"),
+            StageJsonResultEdit,
+            Some("SiftJsonResultEditor"),
+        ),
+        KeyBinding::new(
             &format!("{primary}-shift-p"),
             OpenCommandPalette,
             standard_context,
@@ -165,6 +170,6 @@ mod tests {
 
     #[test]
     fn keymap_has_stable_action_coverage() {
-        assert_eq!(shell_key_bindings().len(), 15);
+        assert_eq!(shell_key_bindings().len(), 16);
     }
 }

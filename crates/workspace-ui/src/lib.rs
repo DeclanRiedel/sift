@@ -34,6 +34,6 @@ pub use shell::{
     InstanceManagerEvent, InstancePlanPresentation, ItemDefinition, ItemRegistry, ItemRuntimeKind,
     Modal, OpenCommandPalette, OpenSchemaSearch, OpenServerConnection, PaletteConfirm, PaletteDown,
     PaletteUp, Pane, PaneEvent, ResultEditApplyFailure, RoomDocumentCommand, RoomDocumentEvent,
-    SaveActiveItem, SavedInstanceRoot, SavedServerProfile, SplitPane, StatusBar, Toast, ToastTone,
-    ToggleBottomDock, ToggleLeftDock, ToggleRightDock, WorkspaceShell,
+    SaveActiveItem, SavedInstanceRoot, SavedServerProfile, SplitPane, StageJsonResultEdit,
+    StatusBar, Toast, ToastTone, ToggleBottomDock, ToggleLeftDock, ToggleRightDock, WorkspaceShell,
 };

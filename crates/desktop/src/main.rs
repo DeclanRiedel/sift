@@ -87,6 +87,7 @@ fn editor_key_bindings() -> Vec<gpui::KeyBinding> {
         gpui::KeyBinding::new("l", res::MoveCellRight, Some("SiftResults")),
         gpui::KeyBinding::new("k", res::MoveCellUp, Some("SiftResults")),
         gpui::KeyBinding::new("j", res::MoveCellDown, Some("SiftResults")),
+        gpui::KeyBinding::new("enter", res::EditSelectedCell, Some("SiftResults")),
         gpui::KeyBinding::new("shift-h", res::PreviousResultTab, Some("SiftResults")),
         gpui::KeyBinding::new("shift-l", res::NextResultTab, Some("SiftResults")),
     ]

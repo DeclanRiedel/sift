@@ -448,6 +448,7 @@ actions!(
     [
         CopySelectedCell,
         CopySelectedWithHeaders,
+        EditSelectedCell,
         MoveCellLeft,
         MoveCellRight,
         MoveCellUp,
@@ -1184,6 +1185,7 @@ impl ResultsView {
         }
     }
 
+    #[cfg(test)]
     fn select_cell(&mut self, row: usize, column: usize, cx: &mut Context<Self>) {
         self.toggle_selection(GridSelection::Cell { row, column }, cx);
     }
@@ -1418,7 +1420,9 @@ impl ResultsView {
         } else if shift {
             self.extend_cell_selection(row, column, cx);
         } else {
-            self.select_cell(row, column, cx);
+            // Pointer selection is idempotent. Toggling the current cell off
+            // made a subsequent double-click lose its edit target.
+            self.set_selection(GridSelection::Cell { row, column }, cx);
         }
     }
 
@@ -1449,6 +1453,12 @@ impl ResultsView {
 
     fn move_cell_down(&mut self, _: &MoveCellDown, _: &mut Window, cx: &mut Context<Self>) {
         self.move_selection(1, 0, cx);
+    }
+
+    fn edit_selected_cell(&mut self, _: &EditSelectedCell, _: &mut Window, cx: &mut Context<Self>) {
+        if matches!(self.selected, Some(GridSelection::Cell { .. })) {
+            cx.emit(ResultsEvent::EditSelectedCellRequested);
+        }
     }
 
     fn previous_result_tab(
@@ -2919,6 +2929,7 @@ impl gpui::Render for ResultsView {
             )
             .on_action(cx.listener(Self::copy_selected_cell))
             .on_action(cx.listener(Self::copy_selected_with_headers))
+            .on_action(cx.listener(Self::edit_selected_cell))
             .on_action(cx.listener(Self::move_cell_left))
             .on_action(cx.listener(Self::move_cell_right))
             .on_action(cx.listener(Self::move_cell_up))
@@ -3064,6 +3075,12 @@ mod tests {
                 cx,
             );
             view.select_cell(0, 0, cx);
+            view.select_cell_from_pointer(0, 0, false, 1, cx);
+            view.select_cell_from_pointer(0, 0, false, 1, cx);
+            assert_eq!(
+                view.selected,
+                Some(GridSelection::Cell { row: 0, column: 0 })
+            );
             view.select_cell_from_pointer(0, 0, false, 2, cx);
             assert_eq!(
                 view.selected,
@@ -3734,8 +3751,8 @@ mod tests {
         );
         assert_eq!(
             view.read_with(&cx, |view, _| view.selected),
-            None,
-            "pressing the selected cell again must clear the selection"
+            Some(GridSelection::Cell { row: 0, column: 0 }),
+            "pressing the selected cell again must keep it available for editing"
         );
         view.update(&mut cx, |view, cx| {
             view.select_tab(ResultTab::Messages, cx);
@@ -3746,7 +3763,6 @@ mod tests {
             assert_eq!(view.active_tab(), ResultTab::Messages);
             view.focus_data(cx);
             assert_eq!(view.active_tab(), ResultTab::Data);
-            view.select_cell(0, 0, cx);
             assert_eq!(view.selected_text().as_deref(), Some("neo"));
             view.row_scroll_handle
                 .scroll_to_item(1, ScrollStrategy::Top);
