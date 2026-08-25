@@ -2205,10 +2205,10 @@ impl EntityInputHandler for QueryEditor {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.read_only {
+        if self.vim_text(new_text, cx) {
             return;
         }
-        if self.vim_text(new_text, cx) {
+        if self.read_only {
             return;
         }
         let range = range_utf16

@@ -1672,7 +1672,7 @@ impl Pane {
                 ItemKind::Problems => EditorLanguage::PlainText,
                 ItemKind::Query | ItemKind::Schema | ItemKind::Welcome => EditorLanguage::Sql,
             };
-            let keymap = if vim_mode_default {
+            let keymap = if item.kind == ItemKind::Problems || vim_mode_default {
                 EditorKeymap::Vim
             } else {
                 EditorKeymap::Standard
@@ -8751,6 +8751,7 @@ impl WorkspaceShell {
         let editor = cx.new(|cx| {
             QueryEditor::new(QueryDocument::with_random_peer(&text), cx)
                 .with_language(EditorLanguage::PlainText)
+                .with_keymap(EditorKeymap::Vim)
                 .read_only()
         });
         if let Some(pane) = self.panes.get(self.active_pane) {
@@ -9147,9 +9148,22 @@ impl WorkspaceShell {
             return;
         };
         for pane in &self.panes {
-            let editors = pane.read(cx).editors.values().cloned().collect::<Vec<_>>();
-            for editor in editors {
-                editor.update(cx, |editor, cx| editor.set_keymap(keymap, cx));
+            let editors = {
+                let pane = pane.read(cx);
+                pane.editors
+                    .iter()
+                    .map(|(item_id, editor)| {
+                        let problems = pane
+                            .items
+                            .iter()
+                            .any(|item| item.id == *item_id && item.kind == ItemKind::Problems);
+                        (editor.clone(), problems)
+                    })
+                    .collect::<Vec<_>>()
+            };
+            for (editor, problems) in editors {
+                let editor_keymap = if problems { EditorKeymap::Vim } else { keymap };
+                editor.update(cx, |editor, cx| editor.set_keymap(editor_keymap, cx));
             }
         }
     }
@@ -24821,6 +24835,29 @@ mod tests {
                 "[ERROR] query.sql\nbad column"
             );
         });
+
+        let problems_editor = workspace.read_with(&cx, |shell, cx| {
+            let pane = shell.panes[shell.active_pane].read(cx);
+            let item = pane.active_item().unwrap();
+            assert_eq!(item.kind, ItemKind::Problems);
+            pane.editor(item.id).unwrap()
+        });
+        cx.write_to_clipboard(gpui::ClipboardItem::new_string("sentinel".into()));
+        problems_editor.update_in(&mut cx, |editor, window, cx| {
+            assert_eq!(editor.keymap(), EditorKeymap::Vim);
+            editor.replace_text_in_range(None, "gg", window, cx);
+            editor.replace_text_in_range(None, "v", window, cx);
+            assert_eq!(editor.vim_mode(), VimMode::Visual);
+            editor.replace_text_in_range(None, "$y", window, cx);
+            assert_eq!(editor.document().text(), "[ERROR] query.sql\nbad column");
+        });
+        assert_eq!(
+            cx.read_from_clipboard()
+                .and_then(|item| item.text())
+                .as_deref(),
+            Some("[ERROR] query.sql\n"),
+            "Problems visual yank should use the system clipboard"
+        );
 
         cx.simulate_keystrokes("space");
         assert_eq!(
