@@ -10648,22 +10648,6 @@ impl WorkspaceShell {
         cx.notify();
     }
 
-    fn open_selected_json_view(
-        &mut self,
-        item_id: u64,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let pane = self
-            .panes
-            .iter()
-            .find(|pane| pane.read(cx).contains_item(item_id))
-            .cloned();
-        if let Some(pane) = pane {
-            self.open_result_cell_editor(&pane, item_id, window, cx);
-        }
-    }
-
     fn submit_result_cell_edit(
         &mut self,
         pane: &Entity<Pane>,
@@ -14095,17 +14079,6 @@ impl WorkspaceShell {
                 )
                 .then_some(item_id)
             });
-        let inspector_json_item = (dock.id == DockId::Inspector)
-            .then(|| self.focused_database_item(cx))
-            .flatten()
-            .and_then(|(item_id, source)| {
-                (source.object_kind == sift_protocol::ObjectKind::Table
-                    && self
-                        .focused_pane_results(cx)
-                        .and_then(|results| results.read(cx).selected_cell_edit())
-                        .is_some_and(|cell| matches!(cell.original, sift_protocol::Value::Json(_))))
-                .then_some(item_id)
-            });
         let keyboard_focused = matches!(
             (dock.id, self.focused_surface),
             (DockId::Left, WorkspaceSurface::Connections)
@@ -14150,13 +14123,6 @@ impl WorkspaceShell {
                     .items_center()
                     .gap_2()
                     .child(SectionLabel::new(title.to_uppercase()))
-                    .children(inspector_json_item.map(|item_id| {
-                        Button::new("inspector-json-preview", "JSON Preview")
-                            .tone(ButtonTone::Ghost)
-                            .on_click(cx.listener(move |shell, _, window, cx| {
-                                shell.open_selected_json_view(item_id, window, cx)
-                            }))
-                    }))
                     .children(inspector_target.map(|target| {
                         div()
                             .debug_selector(|| "inspector-target-title".into())
