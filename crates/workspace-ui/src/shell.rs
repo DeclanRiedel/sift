@@ -9588,6 +9588,18 @@ impl WorkspaceShell {
         cx.notify();
     }
 
+    /// Restore the user's selected pane surface after temporary UI takes
+    /// focus. Results stay active until Focus Editor is requested explicitly.
+    fn restore_active_surface(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.focused_surface == WorkspaceSurface::Results
+            && self.focused_pane_results(cx).is_some()
+        {
+            self.focus_results(window, cx);
+        } else {
+            self.focus_active_pane(window, cx);
+        }
+    }
+
     fn focus_tab_delta(&mut self, delta: isize, window: &mut Window, cx: &mut Context<Self>) {
         let Some(pane) = self.panes.get(self.active_pane) else {
             return;
@@ -9603,7 +9615,7 @@ impl WorkspaceShell {
             true
         });
         if changed {
-            self.focus_active_pane(window, cx);
+            self.restore_active_surface(window, cx);
             self.persist(cx);
             cx.notify();
         }
@@ -9796,7 +9808,7 @@ impl WorkspaceShell {
                 self.submit_json_result_cell_edit(*item_id, text, *preview, window, cx);
             }
             PaneEvent::CancelResultCellEditRequested { item_id } => {
-                self.cancel_result_cell_edit(emitter, *item_id, cx);
+                self.cancel_result_cell_edit(emitter, *item_id, window, cx);
             }
             PaneEvent::ResultSelectionChanged => cx.notify(),
             PaneEvent::OpenResultRowJsonRequested { item_id } => {
@@ -10244,7 +10256,7 @@ impl WorkspaceShell {
 
     fn focus_next_pane(&mut self, _: &FocusNextPane, window: &mut Window, cx: &mut Context<Self>) {
         self.active_pane = (self.active_pane + 1) % self.panes.len();
-        self.focus_active_pane(window, cx);
+        self.restore_active_surface(window, cx);
         cx.notify();
     }
 
@@ -10273,7 +10285,7 @@ impl WorkspaceShell {
             return;
         };
         self.active_pane = index;
-        self.focus_active_pane(window, cx);
+        self.restore_active_surface(window, cx);
         cx.notify();
     }
 
@@ -10798,6 +10810,7 @@ impl WorkspaceShell {
             cx.notify();
         });
         results.update(cx, |results, cx| results.set_large_view(true, cx));
+        self.focused_surface = WorkspaceSurface::Results;
         self.modal = Some(Modal::DataResults(item_id));
         results.focus_handle(cx).focus(window, cx);
         cx.notify();
@@ -10821,6 +10834,7 @@ impl WorkspaceShell {
         let Some(results) = pane.read(cx).results.get(&item_id).cloned() else {
             return;
         };
+        self.focused_surface = WorkspaceSurface::Results;
         let Some(selected) = results.read(cx).selected_cell_edit() else {
             self.show_toast("Select one result cell to edit".into(), cx);
             return;
@@ -10894,7 +10908,7 @@ impl WorkspaceShell {
         pane: &Entity<Pane>,
         item_id: u64,
         text: &str,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let text = text.to_owned();
@@ -10915,6 +10929,7 @@ impl WorkspaceShell {
                 results.update(cx, |results, cx| results.finish_inline_cell_edit(cx));
             }
             self.result_cell_edit_target = None;
+            self.focus_results(window, cx);
             cx.notify();
             return;
         }
@@ -10922,6 +10937,7 @@ impl WorkspaceShell {
             results.update(cx, |results, cx| results.finish_inline_cell_edit(cx));
         }
         self.result_cell_edit_target = None;
+        self.focus_results(window, cx);
         self.show_toast(
             format!("{} table change(s) staged", self.staged_result_edits.len()),
             cx,
@@ -10933,6 +10949,7 @@ impl WorkspaceShell {
         &mut self,
         pane: &Entity<Pane>,
         item_id: u64,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         if self
@@ -10946,6 +10963,7 @@ impl WorkspaceShell {
         if let Some(results) = pane.read(cx).results.get(&item_id).cloned() {
             results.update(cx, |results, cx| results.finish_inline_cell_edit(cx));
         }
+        self.focus_results(window, cx);
         cx.notify();
     }
 
@@ -11041,6 +11059,7 @@ impl WorkspaceShell {
             self.open_staged_result_edits(item_id, window, cx);
         } else {
             self.result_cell_edit_target = None;
+            self.focus_results(window, cx);
             self.apply_result_cell_edit(cx);
         }
         cx.notify();
@@ -11168,7 +11187,7 @@ impl WorkspaceShell {
             self.sync_staged_result_cells(item_id, cx);
         }
         self.modal = None;
-        self.focus_active_pane(window, cx);
+        self.restore_active_surface(window, cx);
         self.show_toast("Discarded staged table changes".into(), cx);
         cx.notify();
     }
@@ -11992,20 +12011,17 @@ impl WorkspaceShell {
             self.result_edit_error = None;
         }
         self.modal = None;
-        // Return focus to the workspace so keybindings keep routing.
-        self.focus_active_pane(window, cx);
+        // Return focus to the surface the user chose before opening temporary UI.
+        self.restore_active_surface(window, cx);
         cx.notify();
     }
 
     /// Run a command palette entry by its stable id: dismiss the palette, then
     /// dispatch the matching workspace action. Ids come from `command_specs`.
     fn run_command(&mut self, id: CommandId, window: &mut Window, cx: &mut Context<Self>) {
-        let command_surface = self.command_palette_origin;
-        self.dismiss_modal(&DismissModal, window, cx);
-        if id == CommandId::SaveItem {
-            // `:w` moves focus into the command palette. Restore its origin so
-            // save can distinguish a JSON editor from the Data result grid.
-            self.focused_surface = command_surface;
+        if self.modal == Some(Modal::CommandPalette) {
+            self.focused_surface = self.command_palette_origin;
+            self.dismiss_modal(&DismissModal, window, cx);
         }
         match id {
             CommandId::ConnectServer => {
@@ -20973,7 +20989,8 @@ mod tests {
             assert_eq!(shell.panes[0].read(cx).expanded_result_item, None);
         });
         assert!(cx.debug_bounds("result-row-0").is_some());
-        assert!(cx.update(|window, cx| workspace.read(cx).active_editor_focused(window, cx)));
+        assert!(cx.update(|window, cx| workspace.read(cx).active_results_focused(window, cx)));
+        assert!(!cx.update(|window, cx| workspace.read(cx).active_editor_focused(window, cx)));
     }
 
     #[gpui::test]
@@ -22440,6 +22457,36 @@ mod tests {
         cx.update(|window, cx| focus.dispatch_action(&DismissModal, window, cx));
         let focused = cx.update(|window, cx| workspace.read(cx).active_editor_focused(window, cx));
         assert!(focused);
+    }
+
+    #[gpui::test]
+    fn results_focus_survives_temporary_ui_until_focus_editor_command(cx: &mut TestAppContext) {
+        let mut state = PresentationState::default();
+        state.workspace.panes[0].items.push(ItemPresentation {
+            id: 2,
+            kind: ItemKind::Query,
+            title: "two.sql".into(),
+            dirty: false,
+            source: None,
+            last_result: None,
+        });
+        let window = shell_with_state(state, cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+
+        workspace.update_in(&mut cx, |shell, window, cx| {
+            shell.run_command(CommandId::FocusResults, window, cx);
+            shell.run_command(CommandId::NextTab, window, cx);
+            shell.open_command_palette(&OpenCommandPalette, window, cx);
+            shell.dismiss_modal(&DismissModal, window, cx);
+        });
+        assert!(cx.update(|window, cx| workspace.read(cx).active_results_focused(window, cx)));
+        assert!(!cx.update(|window, cx| workspace.read(cx).active_editor_focused(window, cx)));
+
+        workspace.update_in(&mut cx, |shell, window, cx| {
+            shell.run_command(CommandId::FocusEditor, window, cx)
+        });
+        assert!(cx.update(|window, cx| workspace.read(cx).active_editor_focused(window, cx)));
     }
 
     #[gpui::test]
@@ -25229,6 +25276,8 @@ mod tests {
             receiver.try_recv().is_err(),
             "Enter should only stage the edit"
         );
+        assert!(cx.update(|window, cx| workspace.read(cx).active_results_focused(window, cx)));
+        assert!(!cx.update(|window, cx| workspace.read(cx).active_editor_focused(window, cx)));
         let pane = workspace.read_with(&cx, |shell, _| shell.panes[shell.active_pane].clone());
         workspace.update_in(&mut cx, |shell, window, cx| {
             shell.open_result_cell_editor(&pane, item_id, window, cx)
