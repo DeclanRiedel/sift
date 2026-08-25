@@ -3146,7 +3146,7 @@ impl gpui::Render for Pane {
                                             .children(json_selected.then(|| {
                                                 Button::new(
                                                     ("save-json-result-edit", item_id as usize),
-                                                    "Stage change",
+                                                    "Save changes",
                                                 )
                                                 .tone(ButtonTone::Accent)
                                                 .key_binding(":w")
@@ -10392,7 +10392,7 @@ impl WorkspaceShell {
                 self.focus_results(window, cx);
                 return;
             }
-            self.open_staged_result_edits(item_id, window, cx);
+            self.apply_result_cell_edit(cx);
             return;
         }
         let active_configuration = self.panes.get(self.active_pane).and_then(|pane| {
@@ -10879,6 +10879,7 @@ impl WorkspaceShell {
             }
             return;
         }
+        self.sync_staged_result_cells(item_id, cx);
         if self.staged_result_edits.is_empty() {
             if let Some(results) = pane.read(cx).results.get(&item_id).cloned() {
                 results.update(cx, |results, cx| results.finish_inline_cell_edit(cx));
@@ -10887,7 +10888,6 @@ impl WorkspaceShell {
             cx.notify();
             return;
         }
-        self.sync_staged_result_cells(item_id, cx);
         if let Some(results) = pane.read(cx).results.get(&item_id).cloned() {
             results.update(cx, |results, cx| results.finish_inline_cell_edit(cx));
         }
@@ -10996,33 +10996,22 @@ impl WorkspaceShell {
             }
             return;
         }
+        self.sync_staged_result_cells(item_id, cx);
         if self.staged_result_edits.is_empty() {
+            self.result_cell_edit_target = None;
+            for pane in &self.panes {
+                if let Some(results) = pane.read(cx).results.get(&item_id).cloned() {
+                    results.update(cx, |results, cx| results.finish_inline_cell_edit(cx));
+                }
+            }
             self.show_toast("No changes to save".into(), cx);
             return;
         }
-        self.sync_staged_result_cells(item_id, cx);
         if preview {
             self.open_staged_result_edits(item_id, window, cx);
         } else {
-            for pane in &self.panes {
-                let owns_item = pane.read(cx).contains_item(item_id);
-                if !owns_item {
-                    continue;
-                }
-                pane.update(cx, |pane, cx| {
-                    pane.show_database_item_view(item_id, DatabaseItemView::Query, None, cx);
-                    pane.mark_clean(item_id, cx);
-                    if let Some(results) = pane.results.get(&item_id) {
-                        results.update(cx, |results, cx| results.finish_inline_cell_edit(cx));
-                    }
-                });
-                break;
-            }
             self.result_cell_edit_target = None;
-            self.show_toast(
-                format!("{} table change(s) staged", self.staged_result_edits.len()),
-                cx,
-            );
+            self.apply_result_cell_edit(cx);
         }
         cx.notify();
     }
@@ -16331,7 +16320,7 @@ impl WorkspaceShell {
                                             .child(
                                                 Button::new(
                                                     "stage-json-result-edit",
-                                                    "Stage change",
+                                                    "Save changes",
                                                 )
                                                 .tone(ButtonTone::Accent)
                                                 .key_binding(":w")
@@ -25015,16 +25004,16 @@ mod tests {
             shell.executor_sender = Some(sender);
             shell.focused_surface = WorkspaceSurface::Results;
             shell.save_active_item(&SaveActiveItem, window, cx);
-            assert_eq!(shell.modal, Some(Modal::EditResultCell));
+            assert_eq!(shell.modal, None);
             assert!(matches!(
                 receiver.try_recv(),
-                Ok(ExecutorCommand::PreviewResultEdits { item_id: 1, .. })
+                Ok(ExecutorCommand::ApplyResultEdits { item_id: 1, .. })
             ));
-            shell.dismiss_modal(&DismissModal, window, cx);
+            shell.result_edit_pending = false;
             assert_eq!(
                 shell.staged_result_edits.len(),
                 3,
-                "Data :w review must keep every staged cell"
+                "Data :w must apply every staged cell without previewing"
             );
             shell.revert_staged_result_edit(1, cx);
             assert_eq!(shell.staged_result_edits.len(), 2);
@@ -25141,6 +25130,32 @@ mod tests {
             receiver.try_recv().is_err(),
             "Enter should only stage the edit"
         );
+        let pane = workspace.read_with(&cx, |shell, _| shell.panes[shell.active_pane].clone());
+        workspace.update_in(&mut cx, |shell, window, cx| {
+            shell.open_result_cell_editor(&pane, item_id, window, cx)
+        });
+        results.update(&mut cx, |results, cx| {
+            results.set_inline_cell_edit_text("open", cx)
+        });
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        workspace.read_with(&cx, |shell, cx| {
+            assert!(shell.staged_result_edits.is_empty());
+            assert_eq!(results.read(cx).staged_cell_count(), 0);
+        });
+
+        workspace.update_in(&mut cx, |shell, window, cx| {
+            shell.open_result_cell_editor(&pane, item_id, window, cx)
+        });
+        results.update(&mut cx, |results, cx| {
+            results.set_inline_cell_edit_text("closed", cx)
+        });
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        workspace.read_with(&cx, |shell, cx| {
+            assert_eq!(shell.staged_result_edits.len(), 1);
+            assert_eq!(results.read(cx).staged_cell_count(), 1);
+        });
         let review = cx
             .debug_bounds("review-staged-result-edits")
             .expect("staged edit review button");
@@ -25328,13 +25343,12 @@ mod tests {
             shell.save_active_item(&SaveActiveItem, window, cx);
         });
 
-        assert!(
-            receiver.try_recv().is_err(),
-            "staging JSON must not apply it immediately"
-        );
+        let ExecutorCommand::ApplyResultEdits { edit_set, .. } = receiver.try_recv().unwrap()
+        else {
+            panic!("JSON :w should apply without previewing")
+        };
         workspace.read_with(&cx, |shell, _| {
             assert_eq!(shell.staged_result_edits.len(), 1);
-            let edit_set = shell.staged_result_edit_set().unwrap();
             let sift_protocol::RowEdit::Update { expected, .. } = &edit_set.edits[0] else {
                 panic!("JSON cell edit should be an update")
             };
