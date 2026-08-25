@@ -314,7 +314,7 @@ fn params_to_pg(params: Vec<Value>) -> Result<Vec<Box<dyn ToSql + Sync + Send>>,
             Value::Int64(v) => Box::new(v),
             Value::Float32(v) => Box::new(v),
             Value::Float64(v) => Box::new(v),
-            Value::Decimal(v) => Box::new(v),
+            Value::Decimal(v) => Box::new(PgNativeText(v)),
             Value::Text(v) => Box::new(v),
             Value::Blob(v) => Box::new(v),
             Value::Date(v) => Box::new(v),
@@ -557,5 +557,20 @@ mod tests {
         ));
         assert_eq!(&bytes[..], b"10.20.0.1");
         assert!(matches!(params[0].encode_format(&Type::INET), Format::Text));
+    }
+
+    #[test]
+    fn postgres_decimal_parameter_uses_exact_numeric_text() {
+        let params = params_to_pg(vec![Value::Decimal("1234567890.0123456789".into())]).unwrap();
+        let mut bytes = BytesMut::new();
+        assert!(matches!(
+            params[0].to_sql_checked(&Type::NUMERIC, &mut bytes),
+            Ok(IsNull::No)
+        ));
+        assert_eq!(&bytes[..], b"1234567890.0123456789");
+        assert!(matches!(
+            params[0].encode_format(&Type::NUMERIC),
+            Format::Text
+        ));
     }
 }
