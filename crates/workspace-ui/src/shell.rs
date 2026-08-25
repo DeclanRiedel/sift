@@ -2489,7 +2489,37 @@ fn pane_drop_preview_colors(theme: &Theme) -> (gpui::Hsla, gpui::Hsla) {
     (tint, border)
 }
 
-impl Pane {}
+impl Pane {
+    fn handle_pending_close_key(
+        &mut self,
+        event: &gpui::KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(item_id) = self.pending_close_item else {
+            return;
+        };
+        if event.keystroke.modifiers.modified() {
+            return;
+        }
+        match event.keystroke.key.as_str() {
+            "escape" | "k" => {
+                self.pending_close_item = None;
+                self.active_focus_handle(cx).focus(window, cx);
+                cx.notify();
+            }
+            "d" => cx.emit(PaneEvent::DiscardItemRequested { item_id }),
+            "s" if self
+                .active_item()
+                .is_some_and(|item| item.kind == ItemKind::Configuration) =>
+            {
+                cx.emit(PaneEvent::SaveItemRequested { item_id });
+            }
+            _ => return,
+        }
+        cx.stop_propagation();
+    }
+}
 
 impl gpui::Render for Pane {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -2522,6 +2552,7 @@ impl gpui::Render for Pane {
             .relative()
             .key_context("SiftPane")
             .track_focus(&self.focus_handle)
+            .on_key_down(cx.listener(Self::handle_pending_close_key))
             // Clicking anywhere in the pane makes it the active pane. The
             // workspace owns the pane list, so we ask rather than reach across.
             .on_mouse_down(
@@ -2798,6 +2829,7 @@ impl gpui::Render for Pane {
                             .truncate()
                             .child(format!("Discard changes to {}?", item.title)),
                     )
+                    .child(KeyBinding::new("Esc / k"))
                     .child(
                         Button::new(("keep-editing", item_id as usize), "Keep editing")
                             .tone(ButtonTone::Ghost)
@@ -2808,12 +2840,20 @@ impl gpui::Render for Pane {
                             })),
                     )
                     .children(is_configuration.then(|| {
-                        Button::new(("save-dirty-item", item_id as usize), "Save")
-                            .tone(ButtonTone::Accent)
-                            .on_click(cx.listener(move |_, _, _, cx| {
-                                cx.emit(PaneEvent::SaveItemRequested { item_id });
-                            }))
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_1()
+                            .child(KeyBinding::new("s"))
+                            .child(
+                                Button::new(("save-dirty-item", item_id as usize), "Save")
+                                    .tone(ButtonTone::Accent)
+                                    .on_click(cx.listener(move |_, _, _, cx| {
+                                        cx.emit(PaneEvent::SaveItemRequested { item_id });
+                                    })),
+                            )
                     }))
+                    .child(KeyBinding::new("d"))
                     .child(
                         Button::new(("discard-dirty-item", item_id as usize), "Discard")
                             .tone(ButtonTone::DangerGhost)
@@ -20262,6 +20302,37 @@ mod tests {
             0
         );
         assert!(workspace.read_with(&cx, |workspace, _| workspace.modal().is_none()));
+    }
+
+    #[gpui::test]
+    fn dirty_close_prompt_accepts_keyboard_choices(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        workspace.update(&mut cx, |workspace, cx| {
+            workspace.mark_active_item_dirty(true, cx)
+        });
+        let focus = workspace.read_with(&cx, |shell, cx| shell.focus_handle(cx));
+
+        cx.update(|window, cx| focus.dispatch_action(&CloseActiveItem, window, cx));
+        cx.simulate_keystrokes("k");
+        assert_eq!(
+            workspace.read_with(&cx, |workspace, cx| workspace.panes[0]
+                .read(cx)
+                .pending_close_item),
+            None
+        );
+        assert_eq!(
+            workspace.read_with(&cx, |workspace, cx| workspace.active_item_count(cx)),
+            1
+        );
+
+        cx.update(|window, cx| focus.dispatch_action(&CloseActiveItem, window, cx));
+        cx.simulate_keystrokes("d");
+        assert_eq!(
+            workspace.read_with(&cx, |workspace, cx| workspace.active_item_count(cx)),
+            0
+        );
     }
 
     #[gpui::test]
