@@ -1169,6 +1169,35 @@ async fn run_query_executor(
                     return;
                 }
             }
+            ExecutorCommand::ExportResult {
+                item_id,
+                destination,
+                request,
+            } => {
+                let result = match context.as_ref() {
+                    Some(opened) => match opened
+                        .client
+                        .export_query(opened.session, opened.connection, request)
+                        .await
+                    {
+                        Ok(bytes) => tokio::fs::write(&destination, bytes)
+                            .await
+                            .map_err(|error| format!("writing export failed: {error}")),
+                        Err(error) => Err(format!("exporting query failed: {error}")),
+                    },
+                    None => Err("Connect before exporting results".into()),
+                };
+                if events
+                    .send(ExecutorEvent::ResultExported {
+                        item_id,
+                        destination,
+                        result,
+                    })
+                    .is_err()
+                {
+                    return;
+                }
+            }
             ExecutorCommand::CapturePlan {
                 item_id,
                 sql,

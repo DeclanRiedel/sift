@@ -535,6 +535,9 @@ pub enum ResultsEvent {
     LoadNextWindowRequested,
     /// Present this live Data grid in the workspace's near-fullscreen modal.
     OpenDataModalRequested,
+    ExportRequested {
+        format: sift_protocol::ExportFormat,
+    },
     EditSelectedCellRequested,
     PasteSelectedCellRequested {
         text: String,
@@ -2289,6 +2292,24 @@ impl ResultsView {
                                         ),
                                     )
                             }))
+                            .child(
+                                Button::new("export-result-csv", "CSV")
+                                    .tone(ButtonTone::Ghost)
+                                    .on_click(cx.listener(|_, _, _, cx| {
+                                        cx.emit(ResultsEvent::ExportRequested {
+                                            format: sift_protocol::ExportFormat::Csv,
+                                        })
+                                    })),
+                            )
+                            .child(
+                                Button::new("export-result-json", "JSON")
+                                    .tone(ButtonTone::Ghost)
+                                    .on_click(cx.listener(|_, _, _, cx| {
+                                        cx.emit(ResultsEvent::ExportRequested {
+                                            format: sift_protocol::ExportFormat::JsonArray,
+                                        })
+                                    })),
+                            )
                             .child(
                                 Button::new("copy-result-with-headers", "Copy + headers")
                                     .tone(ButtonTone::Neutral)

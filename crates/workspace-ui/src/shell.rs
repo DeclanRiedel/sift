@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::ops::Range;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use gpui::{
@@ -1036,6 +1037,11 @@ pub enum PaneEvent {
     OpenDataResultsRequested {
         item_id: u64,
     },
+    ExportResultRequested {
+        item_id: u64,
+        sql: String,
+        format: sift_protocol::ExportFormat,
+    },
     EditResultCellRequested {
         item_id: u64,
     },
@@ -1364,6 +1370,11 @@ pub enum ExecutorCommand {
         item_id: u64,
         edit_set: sift_protocol::EditSet,
     },
+    ExportResult {
+        item_id: u64,
+        destination: PathBuf,
+        request: sift_protocol::ExportRequest,
+    },
     CapturePlan {
         item_id: u64,
         sql: String,
@@ -1518,6 +1529,11 @@ pub enum ExecutorEvent {
     ResultEditsApplied {
         item_id: u64,
         result: Result<sift_protocol::ApplyEditsResult, ResultEditApplyFailure>,
+    },
+    ResultExported {
+        item_id: u64,
+        destination: PathBuf,
+        result: Result<(), String>,
     },
     TransactionStateRefreshed(Result<Option<sift_protocol::TransactionState>, String>),
     PlanCaptured {
@@ -1787,6 +1803,11 @@ impl Pane {
             ResultsEvent::OpenDataModalRequested => {
                 cx.emit(PaneEvent::OpenDataResultsRequested { item_id })
             }
+            ResultsEvent::ExportRequested { format } => cx.emit(PaneEvent::ExportResultRequested {
+                item_id,
+                sql: self.targeted_query_sql(item_id, cx),
+                format: *format,
+            }),
             ResultsEvent::EditSelectedCellRequested => {
                 cx.emit(PaneEvent::EditResultCellRequested { item_id })
             }
@@ -5153,6 +5174,27 @@ impl WorkspaceShell {
                             }
                         }
                         self.show_error_toast(failure.message, cx);
+                    }
+                }
+                cx.notify();
+            }
+            ExecutorEvent::ResultExported {
+                item_id,
+                destination,
+                result,
+            } => {
+                match result {
+                    Ok(()) => {
+                        self.show_toast(format!("Exported result to {}", destination.display()), cx)
+                    }
+                    Err(message) => {
+                        self.record_runtime_error(
+                            Some(item_id),
+                            "Result export",
+                            message.clone(),
+                            cx,
+                        );
+                        self.show_error_toast(message, cx);
                     }
                 }
                 cx.notify();
@@ -9805,6 +9847,11 @@ impl WorkspaceShell {
                 self.active_pane = index;
                 self.open_data_results_modal(emitter, *item_id, window, cx);
             }
+            PaneEvent::ExportResultRequested {
+                item_id,
+                sql,
+                format,
+            } => self.prompt_result_export(*item_id, sql.clone(), *format, cx),
             PaneEvent::EditResultCellRequested { item_id } => {
                 self.active_pane = index;
                 self.open_result_cell_editor(emitter, *item_id, window, cx);
@@ -10839,6 +10886,105 @@ impl WorkspaceShell {
         self.modal = Some(Modal::DataResults(item_id));
         results.focus_handle(cx).focus(window, cx);
         cx.notify();
+    }
+
+    fn prompt_result_export(
+        &mut self,
+        item_id: u64,
+        sql: String,
+        format: sift_protocol::ExportFormat,
+        cx: &mut Context<Self>,
+    ) {
+        let params = match self.remembered_query_params(&sql) {
+            Ok(params) => params,
+            Err(message) => {
+                self.show_error_toast(message, cx);
+                return;
+            }
+        };
+        let request = sift_protocol::ExportRequest {
+            sql,
+            params,
+            format,
+            header: true,
+            null_display: None,
+        };
+        let title = self
+            .panes
+            .iter()
+            .find_map(|pane| {
+                pane.read(cx)
+                    .items
+                    .iter()
+                    .find(|item| item.id == item_id)
+                    .map(|item| item.title.clone())
+            })
+            .unwrap_or_else(|| "query-result".into());
+        let prompt = cx.prompt_for_paths(PathPromptOptions {
+            files: false,
+            directories: true,
+            multiple: false,
+            prompt: Some("Choose result export folder".into()),
+        });
+        cx.spawn(async move |shell, cx| {
+            let result = prompt.await;
+            let _ = shell.update(cx, |shell, cx| match result {
+                Ok(Ok(Some(paths))) => {
+                    if let Some(directory) = paths.into_iter().next() {
+                        shell.queue_result_export(item_id, directory, title, request, cx);
+                    }
+                }
+                Ok(Err(error)) => {
+                    shell.show_error_toast(format!("opening export folder: {error}"), cx)
+                }
+                Ok(Ok(None)) | Err(_) => {}
+            });
+        })
+        .detach();
+    }
+
+    fn queue_result_export(
+        &mut self,
+        item_id: u64,
+        directory: PathBuf,
+        title: String,
+        request: sift_protocol::ExportRequest,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(sender) = &self.executor_sender else {
+            self.show_error_toast("Connect before exporting results".into(), cx);
+            return;
+        };
+        let extension = match request.format {
+            sift_protocol::ExportFormat::Csv => "csv",
+            sift_protocol::ExportFormat::Tsv => "tsv",
+            sift_protocol::ExportFormat::JsonLines => "jsonl",
+            sift_protocol::ExportFormat::JsonArray => "json",
+            sift_protocol::ExportFormat::Html => "html",
+            sift_protocol::ExportFormat::Markdown => "md",
+            sift_protocol::ExportFormat::Xlsx => "xlsx",
+        };
+        let stem = title
+            .chars()
+            .map(|character| {
+                if character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.') {
+                    character
+                } else {
+                    '_'
+                }
+            })
+            .collect::<String>();
+        let destination = directory.join(format!("{stem}.{extension}"));
+        if sender
+            .send(ExecutorCommand::ExportResult {
+                item_id,
+                destination,
+                request,
+            })
+            .is_ok()
+        {
+            self.show_toast("Exporting query result…".into(), cx);
+        }
     }
 
     fn open_result_cell_editor(
@@ -22541,6 +22687,45 @@ mod tests {
             shell.run_command(CommandId::FocusEditor, window, cx)
         });
         assert!(cx.update(|window, cx| workspace.read(cx).active_editor_focused(window, cx)));
+    }
+
+    #[gpui::test]
+    fn result_export_queues_typed_request_and_safe_filename(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        workspace.update(&mut cx, |shell, cx| {
+            shell.executor_sender = Some(sender);
+            shell.queue_result_export(
+                1,
+                PathBuf::from("/tmp/sift-export-test"),
+                "audit/events".into(),
+                sift_protocol::ExportRequest {
+                    sql: "select * from audit.events".into(),
+                    params: Vec::new(),
+                    format: sift_protocol::ExportFormat::Csv,
+                    header: true,
+                    null_display: None,
+                },
+                cx,
+            );
+        });
+        let ExecutorCommand::ExportResult {
+            destination,
+            request,
+            ..
+        } = receiver.try_recv().unwrap()
+        else {
+            panic!("result export command")
+        };
+        assert_eq!(
+            destination,
+            PathBuf::from("/tmp/sift-export-test/audit_events.csv")
+        );
+        assert_eq!(request.sql, "select * from audit.events");
+        assert_eq!(request.format, sift_protocol::ExportFormat::Csv);
+        assert!(request.header);
     }
 
     #[gpui::test]
