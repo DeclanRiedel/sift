@@ -965,6 +965,13 @@ pub enum PaneEvent {
     EditResultCellRequested {
         item_id: u64,
     },
+    SubmitResultCellEditRequested {
+        item_id: u64,
+        text: String,
+    },
+    CancelResultCellEditRequested {
+        item_id: u64,
+    },
     CapturePlanRequested {
         item_id: u64,
         sql: String,
@@ -1686,6 +1693,15 @@ impl Pane {
             }
             ResultsEvent::EditSelectedCellRequested => {
                 cx.emit(PaneEvent::EditResultCellRequested { item_id })
+            }
+            ResultsEvent::SubmitCellEdit { text } => {
+                cx.emit(PaneEvent::SubmitResultCellEditRequested {
+                    item_id,
+                    text: text.clone(),
+                })
+            }
+            ResultsEvent::CancelCellEdit => {
+                cx.emit(PaneEvent::CancelResultCellEditRequested { item_id })
             }
             ResultsEvent::ExplainRequested { analyze } => {
                 let sql = self.targeted_query_sql(item_id, cx);
@@ -9393,6 +9409,12 @@ impl WorkspaceShell {
                 self.active_pane = index;
                 self.open_result_cell_editor(emitter, *item_id, window, cx);
             }
+            PaneEvent::SubmitResultCellEditRequested { item_id, text } => {
+                self.submit_result_cell_edit(emitter, *item_id, text, window, cx);
+            }
+            PaneEvent::CancelResultCellEditRequested { item_id } => {
+                self.cancel_result_cell_edit(emitter, *item_id, cx);
+            }
             PaneEvent::CapturePlanRequested { item_id, sql } => {
                 let params = match self.remembered_query_params(sql) {
                     Ok(params) => params,
@@ -10349,12 +10371,10 @@ impl WorkspaceShell {
             self.show_error_toast("Only base-table results can be edited".into(), cx);
             return;
         }
-        let Some(selected) = pane
-            .read(cx)
-            .results
-            .get(&item_id)
-            .and_then(|results| results.read(cx).selected_cell_edit())
-        else {
+        let Some(results) = pane.read(cx).results.get(&item_id).cloned() else {
+            return;
+        };
+        let Some(selected) = results.read(cx).selected_cell_edit() else {
             self.show_toast("Select one result cell to edit".into(), cx);
             return;
         };
@@ -10379,8 +10399,6 @@ impl WorkspaceShell {
             .map(|edit| &edit.value)
             .unwrap_or(&selected.original);
         let text = render_value(staged_value).text;
-        self.result_cell_edit_input
-            .update(cx, |input, cx| input.set_text(text, cx));
         self.result_cell_edit_target = Some(ResultCellEditTarget {
             item_id,
             column: selected.column,
@@ -10390,10 +10408,61 @@ impl WorkspaceShell {
         });
         self.result_edit_pending = false;
         self.result_edit_error = None;
-        self.modal = Some(Modal::EditResultCell);
+        let focus = results.update(cx, |results, cx| results.begin_selected_cell_edit(text, cx));
+        let Some(focus) = focus else {
+            self.result_cell_edit_target = None;
+            return;
+        };
+        focus.focus(window, cx);
+        cx.notify();
+    }
+
+    fn submit_result_cell_edit(
+        &mut self,
+        pane: &Entity<Pane>,
+        item_id: u64,
+        text: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let text = text.to_owned();
         self.result_cell_edit_input
-            .focus_handle(cx)
-            .focus(window, cx);
+            .update(cx, |input, cx| input.set_text(text, cx));
+        if !self.stage_current_result_edit(cx) {
+            if let Some(results) = pane.read(cx).results.get(&item_id).cloned() {
+                results.update(cx, |results, cx| results.set_inline_cell_edit_error(cx));
+            }
+            if let Some(message) = self.result_edit_error.clone() {
+                self.show_error_toast(message, cx);
+            }
+            return;
+        }
+        if let Some(results) = pane.read(cx).results.get(&item_id).cloned() {
+            results.update(cx, |results, cx| results.finish_inline_cell_edit(cx));
+        }
+        self.result_cell_edit_target = None;
+        self.modal = Some(Modal::EditResultCell);
+        self.focus_handle.focus(window, cx);
+        cx.notify();
+    }
+
+    fn cancel_result_cell_edit(
+        &mut self,
+        pane: &Entity<Pane>,
+        item_id: u64,
+        cx: &mut Context<Self>,
+    ) {
+        if self
+            .result_cell_edit_target
+            .as_ref()
+            .is_some_and(|target| target.item_id == item_id)
+        {
+            self.result_cell_edit_target = None;
+            self.result_edit_error = None;
+        }
+        if let Some(results) = pane.read(cx).results.get(&item_id).cloned() {
+            results.update(cx, |results, cx| results.finish_inline_cell_edit(cx));
+        }
         cx.notify();
     }
 
@@ -10467,16 +10536,6 @@ impl WorkspaceShell {
         self.result_edit_error = None;
         cx.notify();
         true
-    }
-
-    fn stage_result_cell_edit_and_close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.stage_current_result_edit(cx) {
-            return;
-        }
-        self.result_cell_edit_target = None;
-        self.modal = None;
-        self.focus_active_pane(window, cx);
-        cx.notify();
     }
 
     fn staged_result_edit_set(&self) -> Option<sift_protocol::EditSet> {
@@ -15126,7 +15185,7 @@ impl WorkspaceShell {
                                         .truncate()
                                         .font_weight(gpui::FontWeight::SEMIBOLD)
                                         .child(target.map_or_else(
-                                            || "Edit result cell".into(),
+                                            || "Review result edits".into(),
                                             |edit| format!("Edit {}.{}", edit.source.object, edit.column),
                                         )),
                                 )
@@ -15151,19 +15210,6 @@ impl WorkspaceShell {
                                 .flex_col()
                                 .gap_3()
                                 .overflow_y_scroll()
-                                .child(
-                                    div()
-                                        .flex()
-                                        .flex_col()
-                                        .gap_1()
-                                        .child(
-                                            div()
-                                                .text_xs()
-                                                .text_color(colors.muted_text)
-                                                .child("New value"),
-                                        )
-                                        .child(self.result_cell_edit_input.clone()),
-                                )
                                 .children(target.map(|edit| {
                                     div()
                                         .text_xs()
@@ -15316,14 +15362,6 @@ impl WorkspaceShell {
                                         .tone(ButtonTone::Neutral)
                                         .on_click(cx.listener(|shell, _, window, cx| {
                                             shell.dismiss_modal(&DismissModal, window, cx)
-                                        })),
-                                )
-                                .child(
-                                    Button::new("stage-result-cell-edit", "Stage and close")
-                                        .tone(ButtonTone::Neutral)
-                                        .disabled(pending)
-                                        .on_click(cx.listener(|shell, _, window, cx| {
-                                            shell.stage_result_cell_edit_and_close(window, cx)
                                         })),
                                 )
                                 .child(

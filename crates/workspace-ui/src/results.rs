@@ -8,8 +8,9 @@ use std::ops::Range;
 
 use gpui::{
     actions, canvas, div, prelude::*, px, uniform_list, App, ClipboardItem, Context, CursorStyle,
-    Div, DragMoveEvent, FocusHandle, Focusable, IntoElement, MouseButton, Pixels, ScrollStrategy,
-    ShapedLine, SharedString, Stateful, TextAlign, TextRun, UniformListScrollHandle, Window,
+    Div, DragMoveEvent, Entity, FocusHandle, Focusable, IntoElement, MouseButton, Pixels,
+    ScrollStrategy, ShapedLine, SharedString, Stateful, TextAlign, TextRun,
+    UniformListScrollHandle, Window,
 };
 use sift_api_types::QueryHistory;
 use sift_protocol::{
@@ -18,7 +19,7 @@ use sift_protocol::{
 };
 use sift_ui::{
     icon, ActiveTheme, Badge, Button, ButtonTone, Clickable, Disableable, ErrorBanner, IconButton,
-    IconName, ThemeColors,
+    IconName, TextInput, ThemeColors,
 };
 
 use crate::presentation::ResultReference;
@@ -479,6 +480,10 @@ pub enum ResultsEvent {
     /// Present this live Data grid in the workspace's near-fullscreen modal.
     OpenDataModalRequested,
     EditSelectedCellRequested,
+    SubmitCellEdit {
+        text: String,
+    },
+    CancelCellEdit,
     /// Explain the editor's targeted statement. Analyze is explicit because it
     /// executes the statement to collect runtime counters.
     ExplainRequested {
@@ -509,6 +514,13 @@ enum ExplainState {
     Pending { analyze: bool },
     Ready(Box<ExplainResponse>),
     Failed(String),
+}
+
+struct InlineCellEdit {
+    row: usize,
+    column: usize,
+    input: Entity<TextInput>,
+    error: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -576,6 +588,7 @@ pub struct ResultsView {
     included_columns: Vec<bool>,
     tab: ResultTab,
     selected: Option<GridSelection>,
+    inline_cell_edit: Option<InlineCellEdit>,
     messages: Vec<ResultMessage>,
     selected_message: Option<usize>,
     row_scroll_handle: UniformListScrollHandle,
@@ -608,6 +621,7 @@ impl ResultsView {
             included_columns: Vec::new(),
             tab: ResultTab::Data,
             selected: None,
+            inline_cell_edit: None,
             messages: Vec::new(),
             selected_message: None,
             row_scroll_handle: UniformListScrollHandle::new(),
@@ -679,6 +693,59 @@ impl ResultsView {
             original: selected,
             original_row,
         })
+    }
+
+    pub(crate) fn begin_selected_cell_edit(
+        &mut self,
+        text: String,
+        cx: &mut Context<Self>,
+    ) -> Option<FocusHandle> {
+        let GridSelection::Cell { row, column } = self.selected? else {
+            return None;
+        };
+        let input = cx.new(|cx| {
+            TextInput::new(text, "New cell value", cx).aria_label("Edit selected result cell")
+        });
+        let focus = input.focus_handle(cx);
+        self.inline_cell_edit = Some(InlineCellEdit {
+            row,
+            column,
+            input,
+            error: false,
+        });
+        cx.notify();
+        Some(focus)
+    }
+
+    pub(crate) fn set_inline_cell_edit_error(&mut self, cx: &mut Context<Self>) {
+        if let Some(edit) = self.inline_cell_edit.as_mut() {
+            edit.error = true;
+            cx.notify();
+        }
+    }
+
+    pub(crate) fn finish_inline_cell_edit(&mut self, cx: &mut Context<Self>) {
+        if self.inline_cell_edit.take().is_some() {
+            cx.notify();
+        }
+    }
+
+    fn submit_inline_cell_edit(&mut self, cx: &mut Context<Self>) {
+        let Some(edit) = self.inline_cell_edit.as_ref() else {
+            return;
+        };
+        cx.emit(ResultsEvent::SubmitCellEdit {
+            text: edit.input.read(cx).text().to_string(),
+        });
+    }
+
+    fn cancel_inline_cell_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.inline_cell_edit.take().is_none() {
+            return;
+        }
+        self.focus_handle.focus(window, cx);
+        cx.emit(ResultsEvent::CancelCellEdit);
+        cx.notify();
     }
 
     pub(crate) fn extent(&self) -> f32 {
@@ -756,6 +823,7 @@ impl ResultsView {
         self.window_start = 0;
         self.window_held = false;
         self.selected = None;
+        self.inline_cell_edit = None;
         cx.notify();
     }
 
@@ -2077,12 +2145,19 @@ impl ResultsView {
                                     }
                                     None => (None, colors.muted_text, false),
                                 };
-                                div()
+                                let inline_edit = view
+                                    .inline_cell_edit
+                                    .as_ref()
+                                    .filter(|edit| {
+                                        edit.row == row_index && edit.column == source_column
+                                    })
+                                    .map(|edit| (edit.input.clone(), edit.error));
+                                let is_inline_edit = inline_edit.is_some();
+                                let cell = div()
                                     .id(("cell", row_index * column_count + display_column))
                                     .flex_none()
                                     .w(px(row_widths[display_column]))
                                     .h(px(ROW_HEIGHT))
-                                    .px_2()
                                     .flex()
                                     .items_center()
                                     .overflow_hidden()
@@ -2090,27 +2165,54 @@ impl ResultsView {
                                     .border_color(colors.subtle_border)
                                     .text_color(color)
                                     .when(is_selected, |el| el.bg(colors.selected_surface))
-                                    .on_mouse_down(
-                                        MouseButton::Left,
-                                        cx.listener(
-                                            move |view,
-                                                  event: &gpui::MouseDownEvent,
-                                                  window,
-                                                  cx| {
-                                                view.focus_handle.focus(window, cx);
-                                                if event.modifiers.shift {
-                                                    view.extend_cell_selection(
-                                                        row_index,
-                                                        source_column,
-                                                        cx,
-                                                    )
-                                                } else {
-                                                    view.select_cell(row_index, source_column, cx)
+                                    .when(!is_inline_edit, |cell| {
+                                        cell.on_mouse_down(
+                                            MouseButton::Left,
+                                            cx.listener(
+                                                move |view,
+                                                      event: &gpui::MouseDownEvent,
+                                                      window,
+                                                      cx| {
+                                                    view.focus_handle.focus(window, cx);
+                                                    if event.modifiers.shift {
+                                                        view.extend_cell_selection(
+                                                            row_index,
+                                                            source_column,
+                                                            cx,
+                                                        )
+                                                    } else {
+                                                        view.select_cell(
+                                                            row_index,
+                                                            source_column,
+                                                            cx,
+                                                        )
+                                                    }
+                                                },
+                                            ),
+                                        )
+                                    });
+                                if let Some((input, error)) = inline_edit {
+                                    cell.border_1()
+                                        .border_color(if error {
+                                            colors.danger
+                                        } else {
+                                            colors.accent
+                                        })
+                                        .on_key_down(cx.listener(
+                                            |view, event: &gpui::KeyDownEvent, window, cx| {
+                                                match event.keystroke.key.as_str() {
+                                                    "enter" => view.submit_inline_cell_edit(cx),
+                                                    "escape" => {
+                                                        view.cancel_inline_cell_edit(window, cx)
+                                                    }
+                                                    _ => return,
                                                 }
+                                                cx.stop_propagation();
                                             },
-                                        ),
-                                    )
-                                    .children(shaped.map(|line| {
+                                        ))
+                                        .child(input)
+                                } else {
+                                    cell.px_2().children(shaped.map(|line| {
                                         canvas(
                                             |_, _, _| (),
                                             move |bounds, _, window, cx| {
@@ -2131,6 +2233,7 @@ impl ResultsView {
                                         )
                                         .size_full()
                                     }))
+                                }
                             })
                             .collect::<Vec<_>>();
                         let row_number = view.window_start + row_index + 1;
@@ -2968,6 +3071,29 @@ mod tests {
             assert_eq!(view.history.rows[1].sql_text, "select 2");
             assert_eq!(view.history.next_cursor, None);
             assert!(!view.history.loading);
+        });
+    }
+
+    #[gpui::test]
+    fn selected_cell_edit_uses_inline_input_state(cx: &mut TestAppContext) {
+        let view = cx.update(|cx| cx.new(ResultsView::new));
+        view.update(cx, |view, cx| {
+            view.set_state(
+                ResultState::from_execute(execute_response(
+                    vec![Row::new(vec![Value::Int64(7)])],
+                    false,
+                )),
+                cx,
+            );
+            view.select_cell(0, 0, cx);
+            assert!(view.begin_selected_cell_edit("7".into(), cx).is_some());
+            let edit = view.inline_cell_edit.as_ref().expect("inline editor");
+            assert_eq!((edit.row, edit.column), (0, 0));
+            assert_eq!(edit.input.read(cx).text(), "7");
+            view.set_inline_cell_edit_error(cx);
+            assert!(view.inline_cell_edit.as_ref().unwrap().error);
+            view.finish_inline_cell_edit(cx);
+            assert!(view.inline_cell_edit.is_none());
         });
     }
 
