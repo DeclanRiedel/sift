@@ -10524,6 +10524,10 @@ impl WorkspaceShell {
             let modal = has_context("SiftModal");
 
             if workspace && results && !modal && !text_input && key == ":" {
+                // Result focus can move without a Pane focus event. Capture the
+                // actual keystroke context so `:w` does not fall back to the
+                // editor after the command palette temporarily takes focus.
+                self.focused_surface = WorkspaceSurface::Results;
                 self.open_command_palette(&OpenCommandPalette, window, cx);
                 cx.stop_propagation();
                 return;
@@ -21882,14 +21886,14 @@ mod tests {
         let workspace = window.root(&mut cx).unwrap();
 
         workspace.update_in(&mut cx, |workspace, window, cx| {
-            workspace.focus_results(window, cx)
+            let results = workspace.focused_pane_results(cx).unwrap();
+            results.focus_handle(cx).focus(window, cx);
+            workspace.focused_surface = WorkspaceSurface::Editor;
         });
-        assert!(workspace.read_with(&cx, |workspace, _| {
-            workspace.focused_surface == WorkspaceSurface::Results
-        }));
         cx.simulate_keystrokes(": w");
 
         workspace.read_with(&cx, |workspace, cx| {
+            assert_eq!(workspace.focused_surface, WorkspaceSurface::Results);
             assert_eq!(workspace.modal(), Some(&Modal::CommandPalette));
             assert_eq!(
                 workspace
