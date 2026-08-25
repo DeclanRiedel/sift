@@ -523,6 +523,7 @@ struct InlineCellEdit {
     column: usize,
     input: Entity<TextInput>,
     error: bool,
+    pending: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -590,6 +591,7 @@ pub struct ResultsView {
     included_columns: Vec<bool>,
     tab: ResultTab,
     selected: Option<GridSelection>,
+    editing_cell: Option<(usize, usize)>,
     inline_cell_edit: Option<InlineCellEdit>,
     messages: Vec<ResultMessage>,
     selected_message: Option<usize>,
@@ -623,6 +625,7 @@ impl ResultsView {
             included_columns: Vec::new(),
             tab: ResultTab::Data,
             selected: None,
+            editing_cell: None,
             inline_cell_edit: None,
             messages: Vec::new(),
             selected_message: None,
@@ -673,6 +676,13 @@ impl ResultsView {
         }
     }
 
+    #[cfg(test)]
+    pub(crate) fn inline_cell_edit_status(&self, cx: &App) -> Option<(String, bool)> {
+        self.inline_cell_edit
+            .as_ref()
+            .map(|edit| (edit.input.read(cx).text().to_string(), edit.pending))
+    }
+
     pub(crate) fn placement(&self) -> ResultPlacement {
         self.placement
     }
@@ -714,20 +724,52 @@ impl ResultsView {
             column,
             input,
             error: false,
+            pending: false,
         });
+        self.editing_cell = Some((row, column));
         cx.notify();
         Some(focus)
+    }
+
+    pub(crate) fn mark_selected_cell_editing(&mut self, cx: &mut Context<Self>) -> bool {
+        let Some(GridSelection::Cell { row, column }) = self.selected else {
+            return false;
+        };
+        self.editing_cell = Some((row, column));
+        cx.notify();
+        true
+    }
+
+    pub(crate) fn set_inline_cell_edit_pending(&mut self, pending: bool, cx: &mut Context<Self>) {
+        if let Some(edit) = self.inline_cell_edit.as_mut() {
+            if edit.pending != pending {
+                edit.pending = pending;
+                cx.notify();
+            }
+        }
+    }
+
+    pub(crate) fn set_inline_cell_edit_text(&mut self, text: &str, cx: &mut Context<Self>) {
+        if let Some(edit) = self.inline_cell_edit.as_ref() {
+            if edit.input.read(cx).text() != text {
+                edit.input
+                    .update(cx, |input, cx| input.set_text(text.to_owned(), cx));
+            }
+        }
     }
 
     pub(crate) fn set_inline_cell_edit_error(&mut self, cx: &mut Context<Self>) {
         if let Some(edit) = self.inline_cell_edit.as_mut() {
             edit.error = true;
+            edit.pending = false;
             cx.notify();
         }
     }
 
     pub(crate) fn finish_inline_cell_edit(&mut self, cx: &mut Context<Self>) {
-        if self.inline_cell_edit.take().is_some() {
+        let had_inline_edit = self.inline_cell_edit.take().is_some();
+        let had_editing_cell = self.editing_cell.take().is_some();
+        if had_inline_edit || had_editing_cell {
             cx.notify();
         }
     }
@@ -736,6 +778,9 @@ impl ResultsView {
         let Some(edit) = self.inline_cell_edit.as_ref() else {
             return;
         };
+        if edit.pending {
+            return;
+        }
         cx.emit(ResultsEvent::SubmitCellEdit {
             text: edit.input.read(cx).text().to_string(),
         });
@@ -745,6 +790,7 @@ impl ResultsView {
         if self.inline_cell_edit.take().is_none() {
             return;
         }
+        self.editing_cell = None;
         self.focus_handle.focus(window, cx);
         cx.emit(ResultsEvent::CancelCellEdit);
         cx.notify();
@@ -1389,6 +1435,7 @@ impl ResultsView {
             Some(GridSelection::All) | None => (0, visible_columns[0]),
         };
         let previous_row = row;
+        let previous_column = column;
         let row = row
             .saturating_add_signed(row_delta)
             .min(data.rows.len() - 1);
@@ -1406,6 +1453,56 @@ impl ResultsView {
         if row != previous_row && self.row_needs_reveal(row) {
             self.row_scroll_handle
                 .scroll_to_item(row, ScrollStrategy::Nearest);
+        }
+        if column != previous_column {
+            self.reveal_column(column, cx);
+        }
+    }
+
+    fn reveal_column(&mut self, source_column: usize, cx: &mut Context<Self>) {
+        let visible_columns = self.visible_column_indices();
+        let Some(display_column) = visible_columns
+            .iter()
+            .position(|column| *column == source_column)
+        else {
+            return;
+        };
+        let viewport_width = self.grid_scroll_handle.bounds().size.width;
+        if viewport_width <= px(0.) {
+            return;
+        }
+        let column_left = px(ROW_NUMBER_WIDTH
+            + visible_columns
+                .iter()
+                .take(display_column)
+                .map(|column| {
+                    self.column_widths
+                        .get(*column)
+                        .copied()
+                        .unwrap_or(DEFAULT_COLUMN_WIDTH)
+                })
+                .sum::<f32>());
+        let column_right = column_left
+            + px(self
+                .column_widths
+                .get(source_column)
+                .copied()
+                .unwrap_or(DEFAULT_COLUMN_WIDTH));
+        let current = self.grid_scroll_handle.offset();
+        let visible_left = -current.x;
+        let visible_right = visible_left + viewport_width;
+        let target_left = if column_left < visible_left {
+            column_left
+        } else if column_right > visible_right {
+            column_right - viewport_width
+        } else {
+            return;
+        };
+        let max = self.grid_scroll_handle.max_offset();
+        let next = gpui::point((-target_left).clamp(-max.x, px(0.)), current.y);
+        if next != current {
+            self.grid_scroll_handle.set_offset(next);
+            cx.notify();
         }
     }
 
@@ -2126,6 +2223,8 @@ impl ResultsView {
                                     Some(GridSelection::All) => true,
                                     None => false,
                                 };
+                                let is_editing =
+                                    view.editing_cell == Some((row_index, source_column));
                                 let rendered = view
                                     .rendered_rows
                                     .get_mut(row_index)
@@ -2162,6 +2261,9 @@ impl ResultsView {
                                     .border_color(colors.subtle_border)
                                     .text_color(color)
                                     .when(is_selected, |el| el.bg(colors.selected_surface))
+                                    .when(is_editing && !is_inline_edit, |el| {
+                                        el.border_1().border_color(colors.accent)
+                                    })
                                     .when(!is_inline_edit, |cell| {
                                         cell.on_mouse_down(
                                             MouseButton::Left,
@@ -3093,10 +3195,15 @@ mod tests {
             let edit = view.inline_cell_edit.as_ref().expect("inline editor");
             assert_eq!((edit.row, edit.column), (0, 0));
             assert_eq!(edit.input.read(cx).text(), "7");
+            assert_eq!(view.editing_cell, Some((0, 0)));
+            view.set_inline_cell_edit_pending(true, cx);
+            assert!(view.inline_cell_edit.as_ref().unwrap().pending);
             view.set_inline_cell_edit_error(cx);
             assert!(view.inline_cell_edit.as_ref().unwrap().error);
+            assert!(!view.inline_cell_edit.as_ref().unwrap().pending);
             view.finish_inline_cell_edit(cx);
             assert!(view.inline_cell_edit.is_none());
+            assert_eq!(view.editing_cell, None);
         });
     }
 
@@ -4011,6 +4118,22 @@ mod tests {
             initially_shaped < 100 * 8,
             "offscreen rows must remain unshaped"
         );
+
+        view.update(&mut cx, |view, cx| {
+            view.select_cell(0, 0, cx);
+            for _ in 0..7 {
+                view.move_selection(0, 1, cx);
+            }
+        });
+        cx.run_until_parked();
+        view.read_with(&cx, |view, _| {
+            assert!(
+                view.grid_scroll_handle.offset().x < px(0.),
+                "moving the selected cell sideways should reveal its column"
+            );
+            view.grid_scroll_handle
+                .set_offset(gpui::point(px(0.), px(0.)));
+        });
 
         view.update(&mut cx, |view, cx| view.select_cell(0, 1, cx));
         cx.run_until_parked();

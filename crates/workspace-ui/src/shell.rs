@@ -4989,6 +4989,11 @@ impl WorkspaceShell {
                         self.pending_edit_set = None;
                         self.result_edit_plan = None;
                         for pane in &self.panes {
+                            if let Some(results) = pane.read(cx).results.get(&item_id).cloned() {
+                                results.update(cx, |results, cx| {
+                                    results.finish_inline_cell_edit(cx);
+                                });
+                            }
                             pane.update(cx, |pane, cx| {
                                 if pane.contains_item(item_id) {
                                     if pane.database_item_views.get(&item_id)
@@ -5016,6 +5021,13 @@ impl WorkspaceShell {
                                 .insert(conflict.edit_index, failure.message.clone());
                         }
                         self.result_edit_error = Some(failure.message.clone());
+                        for pane in &self.panes {
+                            if let Some(results) = pane.read(cx).results.get(&item_id).cloned() {
+                                results.update(cx, |results, cx| {
+                                    results.set_inline_cell_edit_error(cx);
+                                });
+                            }
+                        }
                         self.show_error_toast(failure.message, cx);
                     }
                 }
@@ -10613,6 +10625,9 @@ impl WorkspaceShell {
                 }
                 _ => render_value(&staged_value).text,
             };
+            results.update(cx, |results, cx| {
+                results.mark_selected_cell_editing(cx);
+            });
             let focus = pane.update(cx, |pane, cx| {
                 pane.show_database_item_view(item_id, DatabaseItemView::Json, Some(text), cx);
                 pane.editor(item_id).map(|editor| editor.focus_handle(cx))
@@ -10654,12 +10669,12 @@ impl WorkspaceShell {
         pane: &Entity<Pane>,
         item_id: u64,
         text: &str,
-        window: &mut Window,
+        _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let text = text.to_owned();
         self.result_cell_edit_input
-            .update(cx, |input, cx| input.set_text(text, cx));
+            .update(cx, |input, cx| input.set_text(&text, cx));
         if !self.stage_current_result_edit(cx) {
             if let Some(results) = pane.read(cx).results.get(&item_id).cloned() {
                 results.update(cx, |results, cx| results.set_inline_cell_edit_error(cx));
@@ -10669,12 +10684,29 @@ impl WorkspaceShell {
             }
             return;
         }
-        if let Some(results) = pane.read(cx).results.get(&item_id).cloned() {
-            results.update(cx, |results, cx| results.finish_inline_cell_edit(cx));
+        if self.staged_result_edits.is_empty() {
+            if let Some(results) = pane.read(cx).results.get(&item_id).cloned() {
+                results.update(cx, |results, cx| results.finish_inline_cell_edit(cx));
+            }
+            self.result_cell_edit_target = None;
+            cx.notify();
+            return;
         }
-        self.result_cell_edit_target = None;
-        self.modal = Some(Modal::EditResultCell);
-        self.focus_handle.focus(window, cx);
+        if let Some(results) = pane.read(cx).results.get(&item_id).cloned() {
+            results.update(cx, |results, cx| {
+                results.set_inline_cell_edit_text(&text, cx);
+                results.set_inline_cell_edit_pending(true, cx);
+            });
+        }
+        self.apply_result_cell_edit(cx);
+        if !self.result_edit_pending {
+            if let Some(results) = pane.read(cx).results.get(&item_id).cloned() {
+                results.update(cx, |results, cx| results.set_inline_cell_edit_error(cx));
+                if let Some(message) = self.result_edit_error.clone() {
+                    self.show_error_toast(message, cx);
+                }
+            }
+        }
         cx.notify();
     }
 
@@ -24224,6 +24256,76 @@ mod tests {
             shell.revert_staged_result_edit(1, cx);
             assert_eq!(shell.staged_result_edits.len(), 2);
         });
+    }
+
+    #[gpui::test]
+    fn submitting_an_inline_result_edit_applies_without_opening_review(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+
+        workspace.update_in(&mut cx, |shell, window, cx| {
+            shell.open_table_preview(
+                DatabaseObjectTarget {
+                    connection: ConnectionNavEntry {
+                        id: 2,
+                        tenant_id: 1,
+                        name: "demo/postgres".into(),
+                        provider_id: sift_protocol::Engine::Postgres.provider_id(),
+                    },
+                    catalog: "sifttest".into(),
+                    schema: "audit".into(),
+                    object: "events".into(),
+                    object_kind: sift_protocol::ObjectKind::Table,
+                },
+                window,
+                cx,
+            );
+            let pane = shell.panes[shell.active_pane].clone();
+            let item_id = pane.read(cx).active_item().unwrap().id;
+            let results = pane.read(cx).results.get(&item_id).unwrap().clone();
+            results.update(cx, |results, cx| {
+                results.set_state(
+                    ResultState::Ready(crate::results::ResultData {
+                        columns: vec![crate::results::ResultColumn {
+                            name: "action".into(),
+                            type_label: "text".into(),
+                            nullable: false,
+                        }],
+                        rows: vec![sift_protocol::Row::new(vec![sift_protocol::Value::Text(
+                            "open".into(),
+                        )])],
+                        ..Default::default()
+                    }),
+                    cx,
+                );
+                results.select_cell(0, 0, cx);
+            });
+            shell.open_result_cell_editor(&pane, item_id, window, cx);
+            shell.executor_sender = Some(sender);
+            shell.submit_result_cell_edit(&pane, item_id, "closed", window, cx);
+
+            assert!(shell.result_edit_pending);
+            assert!(!matches!(shell.modal, Some(Modal::EditResultCell)));
+            assert_eq!(
+                results.read(cx).inline_cell_edit_status(cx),
+                Some(("closed".into(), true)),
+                "the submitted value stays visible while the save is pending"
+            );
+        });
+
+        let ExecutorCommand::ApplyResultEdits { edit_set, .. } = receiver.try_recv().unwrap()
+        else {
+            panic!("Enter should apply the inline edit directly")
+        };
+        let sift_protocol::RowEdit::Update { changes, .. } = &edit_set.edits[0] else {
+            panic!("inline cell edit should be an update")
+        };
+        assert_eq!(
+            changes[0].value,
+            sift_protocol::Value::Text("closed".into())
+        );
     }
 
     #[gpui::test]
