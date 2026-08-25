@@ -10,7 +10,7 @@ use modalkit::{
         buffer::{CursorGroupId, EditBuffer},
         context::Resolve,
         cursor::Cursor,
-        store::SharedStore,
+        store::{RegisterCell, RegisterPutFlags, SharedStore},
     },
     env::vim::{
         keybindings::{default_vim_keys, VimMachine},
@@ -18,7 +18,7 @@ use modalkit::{
     },
     key::TerminalKey,
     keybindings::BindingMachine,
-    prelude::{EditTarget, MoveDir1D, MoveType, ViewportContext},
+    prelude::{EditTarget, MoveDir1D, MoveType, Register, TargetShape, ViewportContext},
 };
 
 use super::VimMode;
@@ -30,6 +30,9 @@ pub(super) struct VimSnapshot {
     pub mode: VimMode,
     pub entered: String,
     pub open_command_palette: bool,
+    /// New unnamed-register text produced by this command. The GPUI editor
+    /// publishes it to the platform clipboard after applying the snapshot.
+    pub clipboard: Option<String>,
 }
 
 /// A complete Vim keybinding machine plus ModalKit's editing buffer. Sift
@@ -83,8 +86,28 @@ impl VimEngine {
             .set_leader(self.cursor_group, cursor_from_byte(text, cursor));
     }
 
+    /// Make platform clipboard text the unnamed Vim register. A trailing
+    /// newline is the portable representation of a linewise yank.
+    pub fn set_clipboard(&mut self, text: &str) {
+        let shape = if text.ends_with('\n') {
+            TargetShape::LineWise
+        } else {
+            TargetShape::CharWise
+        };
+        let mut store = self
+            .store
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _ = store.registers.put(
+            &Register::Unnamed,
+            RegisterCell::from((shape, text)),
+            RegisterPutFlags::NONE,
+        );
+    }
+
     pub fn input_text(&mut self, text: &str) -> VimSnapshot {
         let mut text_changed = false;
+        let mut clipboard_changed = false;
         let mut open_command_palette = false;
         for character in text.chars() {
             if character == ':' && self.bindings.mode() == ModalVimMode::Normal {
@@ -92,23 +115,27 @@ impl VimEngine {
                 open_command_palette = true;
                 break;
             }
-            text_changed |=
+            let (changed, register_changed) =
                 self.input_key_event(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE));
+            text_changed |= changed;
+            clipboard_changed |= register_changed;
         }
-        self.snapshot(text_changed, open_command_palette)
+        self.snapshot(text_changed, open_command_palette, clipboard_changed)
     }
 
     pub fn input_key(&mut self, code: KeyCode) -> VimSnapshot {
         if code == KeyCode::Char(':') && self.bindings.mode() == ModalVimMode::Normal {
             self.entered.clear();
-            return self.snapshot(false, true);
+            return self.snapshot(false, true, false);
         }
-        let text_changed = self.input_key_event(KeyEvent::new(code, KeyModifiers::NONE));
-        self.snapshot(text_changed, false)
+        let (text_changed, clipboard_changed) =
+            self.input_key_event(KeyEvent::new(code, KeyModifiers::NONE));
+        self.snapshot(text_changed, false, clipboard_changed)
     }
 
-    fn input_key_event(&mut self, event: KeyEvent) -> bool {
+    fn input_key_event(&mut self, event: KeyEvent) -> (bool, bool) {
         let mut text_changed = false;
+        let register_before = self.unnamed_register();
         let mode_before = self.bindings.mode();
         if mode_before == ModalVimMode::Insert && event.code != KeyCode::Esc {
             self.empty_insert_origin = None;
@@ -165,7 +192,8 @@ impl VimEngine {
                 self.buffer.set_leader(self.cursor_group, origin);
             }
         }
-        text_changed
+        drop(store);
+        (text_changed, self.unnamed_register() != register_before)
     }
 
     /// ModalKit 0.0.25 maps these Vim keys but leaves paragraph movement as a
@@ -197,7 +225,24 @@ impl VimEngine {
         true
     }
 
-    fn snapshot(&mut self, text_changed: bool, open_command_palette: bool) -> VimSnapshot {
+    fn unnamed_register(&self) -> String {
+        let store = self
+            .store
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        store
+            .registers
+            .get(&Register::Unnamed)
+            .map(|cell| cell.value.to_string())
+            .unwrap_or_default()
+    }
+
+    fn snapshot(
+        &mut self,
+        text_changed: bool,
+        open_command_palette: bool,
+        clipboard_changed: bool,
+    ) -> VimSnapshot {
         let text = text_changed.then(|| {
             let mut text = self.buffer.get_text();
             // Remove only the sentinel newline introduced in `new`.
@@ -225,6 +270,7 @@ impl VimEngine {
             mode,
             entered: self.entered.clone(),
             open_command_palette,
+            clipboard: clipboard_changed.then(|| self.unnamed_register()),
         }
     }
 }
@@ -376,6 +422,26 @@ mod tests {
             second.input_text("p").text.as_deref(),
             Some("alpha\none\nbeta")
         );
+    }
+
+    #[test]
+    fn unnamed_register_round_trips_through_platform_clipboard_text() {
+        let mut vim = VimEngine::new("one\ntwo", 0);
+        let yank = vim.input_text("yy");
+        assert_eq!(yank.clipboard.as_deref(), Some("one\n"));
+
+        vim.set_clipboard("external");
+        let paste = vim.input_text("p");
+        assert_eq!(paste.text.as_deref(), Some("oexternalne\ntwo"));
+        assert_eq!(paste.clipboard, None);
+    }
+
+    #[test]
+    fn platform_clipboard_trailing_newline_pastes_linewise() {
+        let mut vim = VimEngine::new("one\ntwo", 0);
+        vim.set_clipboard("external\n");
+        let paste = vim.input_text("p");
+        assert_eq!(paste.text.as_deref(), Some("one\nexternal\ntwo"));
     }
 
     #[test]

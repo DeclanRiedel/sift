@@ -1478,6 +1478,7 @@ impl QueryEditor {
 
     fn apply_vim_snapshot(&mut self, snapshot: VimSnapshot, cx: &mut Context<Self>) {
         let open_command_palette = snapshot.open_command_palette;
+        let clipboard = snapshot.clipboard;
         let vim_state_changed =
             self.vim_mode != snapshot.mode || self.vim_entered != snapshot.entered;
         self.vim_entered = snapshot.entered;
@@ -1539,6 +1540,9 @@ impl QueryEditor {
         if open_command_palette {
             cx.emit(EditorEvent::OpenCommandPalette);
         }
+        if let Some(text) = clipboard {
+            cx.write_to_clipboard(ClipboardItem::new_string(text));
+        }
         if document_changed {
             self.edited(cx);
         } else {
@@ -1551,9 +1555,13 @@ impl QueryEditor {
         code: modalkit::crossterm::event::KeyCode,
         cx: &mut Context<Self>,
     ) -> bool {
+        let clipboard = cx.read_from_clipboard().and_then(|item| item.text());
         let Some(vim) = self.vim.as_mut() else {
             return false;
         };
+        if let Some(text) = clipboard.as_deref() {
+            vim.set_clipboard(text);
+        }
         let rows = (f32::from(self.scroll_handle.bounds().size.height)
             / f32::from(EDITOR_LINE_HEIGHT)) as usize;
         vim.set_viewport_rows(rows);
@@ -1563,9 +1571,13 @@ impl QueryEditor {
     }
 
     fn vim_text(&mut self, text: &str, cx: &mut Context<Self>) -> bool {
+        let clipboard = cx.read_from_clipboard().and_then(|item| item.text());
         let Some(vim) = self.vim.as_mut() else {
             return false;
         };
+        if let Some(text) = clipboard.as_deref() {
+            vim.set_clipboard(text);
+        }
         let snapshot = vim.input_text(text);
         self.apply_vim_snapshot(snapshot, cx);
         true
