@@ -1050,6 +1050,9 @@ pub enum PaneEvent {
         item_id: u64,
     },
     ResultSelectionChanged,
+    OpenResultRowJsonRequested {
+        item_id: u64,
+    },
     CapturePlanRequested {
         item_id: u64,
         sql: String,
@@ -1785,6 +1788,10 @@ impl Pane {
                 cx.emit(PaneEvent::CancelResultCellEditRequested { item_id })
             }
             ResultsEvent::SelectionChanged => cx.emit(PaneEvent::ResultSelectionChanged),
+            ResultsEvent::RowJsonViewerChanged => cx.emit(PaneEvent::ResultSelectionChanged),
+            ResultsEvent::OpenSelectedRowJsonRequested => {
+                cx.emit(PaneEvent::OpenResultRowJsonRequested { item_id })
+            }
             ResultsEvent::ExplainRequested { analyze } => {
                 let sql = self.targeted_query_sql(item_id, cx);
                 cx.emit(PaneEvent::ExplainRequested {
@@ -9462,6 +9469,30 @@ impl WorkspaceShell {
         cx.notify();
     }
 
+    fn show_result_row_json(&mut self, item_id: u64, window: &mut Window, cx: &mut Context<Self>) {
+        let selected_row = self.panes.iter().find_map(|pane| {
+            pane.read(cx)
+                .results
+                .get(&item_id)
+                .map(|results| results.read(cx).selected_row_json().is_some())
+        });
+        if selected_row != Some(true) {
+            self.show_toast("Select a result row to inspect it as JSON".into(), cx);
+            return;
+        }
+        self.result_inspector_views
+            .insert(item_id, ResultInspectorView::RowJson);
+        self.focus_inspector(window, cx);
+    }
+
+    fn show_active_result_row_json(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some((item_id, _)) = self.focused_pane_results_item(cx) else {
+            self.show_toast("Active tab has no result surface".into(), cx);
+            return;
+        };
+        self.show_result_row_json(item_id, window, cx);
+    }
+
     fn focus_results(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(results) = self.focused_pane_results(cx) else {
             self.show_toast("Active tab has no result surface".into(), cx);
@@ -9680,6 +9711,9 @@ impl WorkspaceShell {
                 self.cancel_result_cell_edit(emitter, *item_id, cx);
             }
             PaneEvent::ResultSelectionChanged => cx.notify(),
+            PaneEvent::OpenResultRowJsonRequested { item_id } => {
+                self.show_result_row_json(*item_id, window, cx)
+            }
             PaneEvent::CapturePlanRequested { item_id, sql } => {
                 let params = match self.remembered_query_params(sql) {
                     Ok(params) => params,
@@ -11814,6 +11848,7 @@ impl WorkspaceShell {
             CommandId::FocusConnections => self.focus_connections(window, cx),
             CommandId::FocusEditor => self.focus_active_pane(window, cx),
             CommandId::FocusInspector => self.focus_inspector(window, cx),
+            CommandId::ShowResultRowJson => self.show_active_result_row_json(window, cx),
             CommandId::FocusResults => self.focus_results(window, cx),
             CommandId::FocusProblems => self.show_global_problems(window, cx),
             CommandId::PreviousTab => self.focus_tab_delta(-1, window, cx),
@@ -21034,10 +21069,22 @@ mod tests {
         });
         cx.run_until_parked();
 
-        let json_tab = cx
-            .debug_bounds("inspector-row-json-view")
-            .expect("row JSON inspector tab");
-        cx.simulate_click(json_tab.center(), Modifiers::default());
+        let row = cx
+            .debug_bounds("result-row-0")
+            .expect("selected result row");
+        cx.simulate_mouse_down(
+            point(
+                row.left() + px(crate::results::ROW_NUMBER_WIDTH + 12.0),
+                row.top() + px(crate::results::ROW_HEIGHT / 2.0),
+            ),
+            MouseButton::Right,
+            Modifiers::default(),
+        );
+        cx.run_until_parked();
+        let see_row = cx
+            .debug_bounds("result-cell-see-row-json")
+            .expect("result cell context action");
+        cx.simulate_click(see_row.center(), Modifiers::default());
         cx.run_until_parked();
 
         assert!(cx.debug_bounds("inspector-result-row-json").is_some());
@@ -21058,6 +21105,21 @@ mod tests {
             let (_, results) = shell.focused_pane_results_item(cx).unwrap();
             assert!(results.read(cx).row_json_folded());
             assert!(results.read(cx).row_json_wrapped());
+        });
+
+        workspace.update_in(&mut cx, |shell, window, cx| {
+            let (item_id, _) = shell.focused_pane_results_item(cx).unwrap();
+            shell
+                .result_inspector_views
+                .insert(item_id, ResultInspectorView::Fields);
+            shell.run_command(CommandId::ShowResultRowJson, window, cx);
+        });
+        workspace.read_with(&cx, |shell, cx| {
+            let (item_id, _) = shell.focused_pane_results_item(cx).unwrap();
+            assert_eq!(
+                shell.result_inspector_views.get(&item_id),
+                Some(&ResultInspectorView::RowJson)
+            );
         });
     }
 
@@ -24791,6 +24853,19 @@ mod tests {
                 );
                 results.select_cell(0, 1, cx);
             });
+            shell.show_result_row_json(item_id, window, cx);
+            assert_eq!(
+                shell.result_inspector_views.get(&item_id),
+                Some(&ResultInspectorView::RowJson)
+            );
+            assert_eq!(
+                results.read(cx).selected_row_json().unwrap().value,
+                serde_json::json!({
+                    "id": 1,
+                    "payload": {"event": "open"},
+                    "tags": "{demo}"
+                })
+            );
             shell.open_result_cell_editor(&pane, item_id, window, cx);
             assert_eq!(
                 pane.read(cx).database_item_views.get(&item_id),

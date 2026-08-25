@@ -7,10 +7,10 @@
 use std::ops::Range;
 
 use gpui::{
-    actions, canvas, div, prelude::*, px, uniform_list, App, ClipboardItem, Context, CursorStyle,
-    Div, DragMoveEvent, Entity, FocusHandle, Focusable, IntoElement, MouseButton, Pixels,
-    ScrollStrategy, ShapedLine, SharedString, Stateful, TextAlign, TextRun,
-    UniformListScrollHandle, Window,
+    actions, anchored, canvas, deferred, div, prelude::*, px, uniform_list, App, ClipboardItem,
+    Context, CursorStyle, Div, DragMoveEvent, Entity, FocusHandle, Focusable, IntoElement,
+    MouseButton, Pixels, Point, ScrollStrategy, ShapedLine, SharedString, Stateful, Subscription,
+    TextAlign, TextRun, UniformListScrollHandle, Window,
 };
 use sift_api_types::QueryHistory;
 use sift_protocol::{
@@ -19,7 +19,7 @@ use sift_protocol::{
 };
 use sift_ui::{
     icon, ActiveTheme, Badge, Button, ButtonTone, Clickable, Disableable, ErrorBanner, IconButton,
-    IconName, TextInput, ThemeColors,
+    IconName, TextInput, TextInputEvent, ThemeColors,
 };
 
 use crate::presentation::ResultReference;
@@ -528,6 +528,8 @@ pub enum ResultsEvent {
     },
     CancelCellEdit,
     SelectionChanged,
+    RowJsonViewerChanged,
+    OpenSelectedRowJsonRequested,
     /// Explain the editor's targeted statement. Analyze is explicit because it
     /// executes the statement to collect runtime counters.
     ExplainRequested {
@@ -636,8 +638,10 @@ pub struct ResultsView {
     editing_cell: Option<(usize, usize)>,
     inline_cell_edit: Option<InlineCellEdit>,
     row_json_filter_input: Entity<TextInput>,
+    _row_json_filter_subscription: Subscription,
     row_json_folded: bool,
     row_json_wrapped: bool,
+    context_menu_position: Option<Point<Pixels>>,
     messages: Vec<ResultMessage>,
     selected_message: Option<usize>,
     row_scroll_handle: UniformListScrollHandle,
@@ -663,6 +667,10 @@ impl ResultsView {
         let row_json_filter_input = cx.new(|cx| {
             TextInput::new("", "Filter keys or /regex/", cx).aria_label("Filter selected row JSON")
         });
+        let row_json_filter_subscription = cx
+            .subscribe(&row_json_filter_input, |_, _, _: &TextInputEvent, cx| {
+                cx.emit(ResultsEvent::RowJsonViewerChanged)
+            });
         Self {
             focus_handle: cx.focus_handle(),
             state: ResultState::Idle,
@@ -676,8 +684,10 @@ impl ResultsView {
             editing_cell: None,
             inline_cell_edit: None,
             row_json_filter_input,
+            _row_json_filter_subscription: row_json_filter_subscription,
             row_json_folded: false,
             row_json_wrapped: false,
+            context_menu_position: None,
             messages: Vec::new(),
             selected_message: None,
             row_scroll_handle: UniformListScrollHandle::new(),
@@ -1617,6 +1627,20 @@ impl ResultsView {
         }
     }
 
+    fn open_cell_context_menu(
+        &mut self,
+        row: usize,
+        column: usize,
+        position: Point<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.focus_handle.focus(window, cx);
+        self.set_selection(GridSelection::Cell { row, column }, cx);
+        self.context_menu_position = Some(position);
+        cx.notify();
+    }
+
     fn row_needs_reveal(&self, row: usize) -> bool {
         let state = self.row_scroll_handle.0.borrow();
         let viewport_height = state.base_handle.bounds().size.height;
@@ -2355,6 +2379,24 @@ impl ResultsView {
                                     .when(is_editing && !is_inline_edit, |el| {
                                         el.border_1().border_color(colors.accent)
                                     })
+                                    .on_mouse_down(
+                                        MouseButton::Right,
+                                        cx.listener(
+                                            move |view,
+                                                  event: &gpui::MouseDownEvent,
+                                                  window,
+                                                  cx| {
+                                                view.open_cell_context_menu(
+                                                    row_index,
+                                                    source_column,
+                                                    event.position,
+                                                    window,
+                                                    cx,
+                                                );
+                                                cx.stop_propagation();
+                                            },
+                                        ),
+                                    )
                                     .when(!is_inline_edit, |cell| {
                                         cell.on_mouse_down(
                                             MouseButton::Left,
@@ -3108,6 +3150,7 @@ impl Focusable for ResultsView {
 impl gpui::Render for ResultsView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = cx.theme().colors;
+        let context_menu_position = self.context_menu_position;
         let body = match self.tab {
             ResultTab::Data => self.render_grid(cx),
             ResultTab::Messages => self.render_messages(cx).into_any_element(),
@@ -3121,7 +3164,11 @@ impl gpui::Render for ResultsView {
             .track_focus(&self.focus_handle)
             .on_mouse_down(
                 MouseButton::Left,
-                cx.listener(|view, _, window, cx| view.focus_handle.focus(window, cx)),
+                cx.listener(|view, _, window, cx| {
+                    view.context_menu_position = None;
+                    view.focus_handle.focus(window, cx);
+                    cx.notify();
+                }),
             )
             .on_action(cx.listener(Self::copy_selected_cell))
             .on_action(cx.listener(Self::copy_selected_with_headers))
@@ -3171,6 +3218,44 @@ impl gpui::Render for ResultsView {
                             .flatten(),
                     ),
             )
+            .children(context_menu_position.map(|position| {
+                deferred(
+                    anchored()
+                        .position(position)
+                        .snap_to_window_with_margin(px(8.))
+                        .child(
+                            div()
+                                .debug_selector(|| "result-cell-context-menu".into())
+                                .w(px(190.))
+                                .p_1()
+                                .rounded_sm()
+                                .border_1()
+                                .border_color(colors.strong_border)
+                                .bg(colors.elevated_surface)
+                                .shadow_lg()
+                                .occlude()
+                                .child(
+                                    div()
+                                        .id("result-cell-see-row-json")
+                                        .debug_selector(|| "result-cell-see-row-json".into())
+                                        .role(gpui::Role::MenuItem)
+                                        .h(px(28.))
+                                        .px_2()
+                                        .flex()
+                                        .items_center()
+                                        .rounded_sm()
+                                        .hover(|item| item.bg(colors.hovered_surface))
+                                        .on_click(cx.listener(|view, _, _, cx| {
+                                            view.context_menu_position = None;
+                                            cx.emit(ResultsEvent::OpenSelectedRowJsonRequested);
+                                            cx.notify();
+                                        }))
+                                        .child("See row as JSON"),
+                                ),
+                        ),
+                )
+                .with_priority(1)
+            }))
     }
 }
 

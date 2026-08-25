@@ -12,7 +12,8 @@ pub use components::{
     Tooltip,
 };
 pub use text_input::{
-    Backspace, Backtab, Copy, Cut, Delete, End, Home, Left, Paste, Right, SelectAll, Tab, TextInput,
+    Backspace, Backtab, Copy, Cut, Delete, End, Home, Left, Paste, Right, SelectAll, Tab,
+    TextInput, TextInputEvent,
 };
 pub use theme::{
     init_theme, set_theme, ActiveTheme, GlobalTheme, Theme, ThemeColors, ThemeMetrics,

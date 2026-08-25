@@ -34,6 +34,13 @@ pub struct TextInput {
     last_bounds: Option<Bounds<Pixels>>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TextInputEvent {
+    Changed,
+}
+
+impl gpui::EventEmitter<TextInputEvent> for TextInput {}
+
 impl TextInput {
     pub fn new(
         content: impl Into<SharedString>,
@@ -91,6 +98,7 @@ impl TextInput {
         self.selected_range = cursor..cursor;
         self.selection_reversed = false;
         self.marked_range = None;
+        cx.emit(TextInputEvent::Changed);
         cx.notify();
     }
 
@@ -306,6 +314,7 @@ impl EntityInputHandler for TextInput {
         self.selected_range = cursor..cursor;
         self.selection_reversed = false;
         self.marked_range = None;
+        cx.emit(TextInputEvent::Changed);
         cx.notify();
     }
 
@@ -338,6 +347,7 @@ impl EntityInputHandler for TextInput {
                 cursor..cursor
             });
         self.selection_reversed = false;
+        cx.emit(TextInputEvent::Changed);
         cx.notify();
     }
 
