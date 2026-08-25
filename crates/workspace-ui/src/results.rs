@@ -101,6 +101,48 @@ pub(crate) struct SelectedCellEdit {
     pub original_row: Vec<(String, Value)>,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct SelectedRowJson {
+    pub row_index: usize,
+    pub value: serde_json::Value,
+}
+
+fn value_for_row_json(value: &Value) -> serde_json::Value {
+    match value {
+        Value::Null | Value::TypedNull { .. } => serde_json::Value::Null,
+        Value::Bool(value) => (*value).into(),
+        Value::Int16(value) => (*value).into(),
+        Value::Int32(value) => (*value).into(),
+        Value::Int64(value) => (*value).into(),
+        Value::Float32(value) => serde_json::Number::from_f64(f64::from(*value))
+            .map_or_else(|| value.to_string().into(), serde_json::Value::Number),
+        Value::Float64(value) => serde_json::Number::from_f64(*value)
+            .map_or_else(|| value.to_string().into(), serde_json::Value::Number),
+        // Keep arbitrary precision exact rather than silently rounding it to
+        // the JSON implementation's floating-point representation.
+        Value::Decimal(value) => value.clone().into(),
+        Value::Text(value) => {
+            let trimmed = value.trim();
+            let looks_structured = (trimmed.starts_with('{') && trimmed.ends_with('}'))
+                || (trimmed.starts_with('[') && trimmed.ends_with(']'));
+            if looks_structured {
+                serde_json::from_str(trimmed).unwrap_or_else(|_| value.clone().into())
+            } else {
+                value.clone().into()
+            }
+        }
+        Value::Blob(value) => format!("<{} bytes>", value.len()).into(),
+        Value::Date(value) => value.to_string().into(),
+        Value::Time(value) => value.to_string().into(),
+        Value::Timestamp(value) => value.to_string().into(),
+        Value::TimestampTz(value) => value.to_rfc3339().into(),
+        Value::Interval(value) => format!("{} ms", value.num_milliseconds()).into(),
+        Value::Uuid(value) => value.to_string().into(),
+        Value::Json(value) => value.clone(),
+        Value::Native { display_text, .. } => display_text.clone().into(),
+    }
+}
+
 #[derive(Debug, Clone)]
 struct ColumnDrag {
     index: usize,
@@ -705,6 +747,24 @@ impl ResultsView {
             original: selected,
             original_row,
         })
+    }
+
+    pub fn selected_row_json(&self) -> Option<SelectedRowJson> {
+        let row_index = match self.selected? {
+            GridSelection::Cell { row, .. } | GridSelection::Row(row) => row,
+            GridSelection::Range { focus_row, .. } => focus_row,
+            GridSelection::Column(_) | GridSelection::All => 0,
+        };
+        let data = self.state.ready()?;
+        let row = data.rows.get(row_index)?;
+        let value = data
+            .columns
+            .iter()
+            .zip(&row.values)
+            .map(|(column, value)| (column.name.clone(), value_for_row_json(value)))
+            .collect::<serde_json::Map<_, _>>()
+            .into();
+        Some(SelectedRowJson { row_index, value })
     }
 
     pub(crate) fn begin_selected_cell_edit(
@@ -3204,6 +3264,51 @@ mod tests {
             view.finish_inline_cell_edit(cx);
             assert!(view.inline_cell_edit.is_none());
             assert_eq!(view.editing_cell, None);
+        });
+    }
+
+    #[gpui::test]
+    fn selected_row_json_preserves_types_and_expands_structured_text(cx: &mut TestAppContext) {
+        let view = cx.update(|cx| cx.new(ResultsView::new));
+        view.update(cx, |view, cx| {
+            view.set_state(
+                ResultState::from_execute(ExecuteResponse {
+                    cursor_id: sift_protocol::CursorId(1),
+                    columns: vec![
+                        column("id", PrimitiveType::Int64, Nullability::NotNullable),
+                        column("active", PrimitiveType::Bool, Nullability::NotNullable),
+                        column("payload", PrimitiveType::Text, Nullability::NotNullable),
+                        column("missing", PrimitiveType::Text, Nullability::Nullable),
+                    ],
+                    schema_digest: "d".into(),
+                    rows: vec![Row::new(vec![
+                        Value::Int64(7),
+                        Value::Bool(true),
+                        Value::Text(r#"{"event":"open","tags":["demo"]}"#.into()),
+                        Value::Null,
+                    ])],
+                    affected_rows: None,
+                    warnings: Vec::new(),
+                    has_more: false,
+                }),
+                cx,
+            );
+            view.select_cell(0, 2, cx);
+        });
+
+        view.read_with(cx, |view, _| {
+            assert_eq!(
+                view.selected_row_json(),
+                Some(SelectedRowJson {
+                    row_index: 0,
+                    value: serde_json::json!({
+                        "id": 7,
+                        "active": true,
+                        "payload": {"event": "open", "tags": ["demo"]},
+                        "missing": null,
+                    }),
+                })
+            );
         });
     }
 
