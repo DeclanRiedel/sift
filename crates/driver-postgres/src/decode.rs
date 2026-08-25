@@ -53,12 +53,263 @@ fn decode_value(ty: &Type, raw: &[u8]) -> Result<Value, Box<dyn std::error::Erro
         }
         Type::NUMERIC => Value::Decimal(decode_numeric(raw)?),
         Type::INTERVAL => decode_interval(raw)?,
+        Type::XML => native_value(ty, decode_utf8(raw)?),
+        Type::JSONPATH => {
+            let (&version, text) = raw.split_first().ok_or("invalid jsonpath payload")?;
+            if version != 1 {
+                return Err(format!("unsupported jsonpath version {version}").into());
+            }
+            native_value(ty, decode_utf8(text)?)
+        }
+        Type::INET | Type::CIDR => native_value(ty, decode_network(raw)?),
+        Type::MACADDR | Type::MACADDR8 => native_value(ty, decode_mac(raw)?),
+        Type::MONEY => native_value(ty, decode_money(raw)?),
+        Type::TIMETZ => native_value(ty, decode_timetz(raw)?),
+        _ if matches!(ty.kind(), Kind::Array(_)) => decode_array(ty, raw)?,
+        _ if matches!(ty.kind(), Kind::Range(_)) => decode_range(ty, raw)?,
         _ => Value::Native {
             provider_id: Engine::Postgres.provider_id(),
             type_name: ty.name().to_string(),
             display_text: format!("<undecoded {}>", ty.name()),
         },
     })
+}
+
+fn native_value(ty: &Type, display_text: String) -> Value {
+    Value::Native {
+        provider_id: Engine::Postgres.provider_id(),
+        type_name: ty.name().to_string(),
+        display_text,
+    }
+}
+
+fn decode_utf8(raw: &[u8]) -> Result<String, Box<dyn std::error::Error + Sync + Send>> {
+    Ok(std::str::from_utf8(raw)?.to_owned())
+}
+
+fn decode_mac(raw: &[u8]) -> Result<String, Box<dyn std::error::Error + Sync + Send>> {
+    if !matches!(raw.len(), 6 | 8) {
+        return Err("invalid macaddr payload".into());
+    }
+    Ok(raw
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<Vec<_>>()
+        .join(":"))
+}
+
+fn decode_money(raw: &[u8]) -> Result<String, Box<dyn std::error::Error + Sync + Send>> {
+    let units = i64::from_be_bytes(raw.try_into().map_err(|_| "invalid money payload")?);
+    Ok(format!("{units} minor units"))
+}
+
+fn decode_network(raw: &[u8]) -> Result<String, Box<dyn std::error::Error + Sync + Send>> {
+    if raw.len() < 4 {
+        return Err("invalid network payload".into());
+    }
+    let family = raw[0];
+    let bits = raw[1];
+    let is_cidr = raw[2] != 0;
+    let length = usize::from(raw[3]);
+    if raw.len() != 4 + length {
+        return Err("network payload length mismatch".into());
+    }
+    let (address, full_bits) = match (family, length) {
+        (2, 4) => (
+            std::net::IpAddr::V4(std::net::Ipv4Addr::new(raw[4], raw[5], raw[6], raw[7])),
+            32,
+        ),
+        (3, 16) => {
+            let octets: [u8; 16] = raw[4..].try_into()?;
+            (std::net::IpAddr::V6(std::net::Ipv6Addr::from(octets)), 128)
+        }
+        _ => return Err("unsupported network address family".into()),
+    };
+    if bits > full_bits {
+        return Err("invalid network prefix length".into());
+    }
+    if is_cidr || bits != full_bits {
+        Ok(format!("{address}/{bits}"))
+    } else {
+        Ok(address.to_string())
+    }
+}
+
+fn decode_timetz(raw: &[u8]) -> Result<String, Box<dyn std::error::Error + Sync + Send>> {
+    if raw.len() != 12 {
+        return Err("invalid timetz payload".into());
+    }
+    let micros = i64::from_be_bytes(raw[..8].try_into()?);
+    let seconds_west = i32::from_be_bytes(raw[8..].try_into()?);
+    let seconds = u32::try_from(micros.div_euclid(1_000_000))?;
+    let nanos = u32::try_from(micros.rem_euclid(1_000_000))? * 1_000;
+    let time = chrono::NaiveTime::from_num_seconds_from_midnight_opt(seconds, nanos)
+        .ok_or("timetz time outside one day")?;
+    let offset =
+        chrono::FixedOffset::east_opt(seconds_west.checked_neg().ok_or("invalid timetz offset")?)
+            .ok_or("invalid timetz offset")?;
+    Ok(format!("{}{}", time.format("%H:%M:%S%.f"), offset))
+}
+
+fn decode_array(ty: &Type, raw: &[u8]) -> Result<Value, Box<dyn std::error::Error + Sync + Send>> {
+    let Kind::Array(member) = ty.kind() else {
+        return Err("array type metadata missing element type".into());
+    };
+    let mut cursor = BinaryCursor::new(raw);
+    let dimensions = usize::try_from(cursor.i32()?).map_err(|_| "negative array dimensions")?;
+    let _has_null = cursor.i32()?;
+    let _element_oid = cursor.u32()?;
+    if dimensions > 8 {
+        return Err("array has too many dimensions".into());
+    }
+    let mut lengths = Vec::with_capacity(dimensions);
+    let mut total = 1usize;
+    for _ in 0..dimensions {
+        let length = usize::try_from(cursor.i32()?).map_err(|_| "negative array length")?;
+        let _lower_bound = cursor.i32()?;
+        total = total.checked_mul(length).ok_or("array size overflow")?;
+        if total > 1_000_000 {
+            return Err("array is too large to decode".into());
+        }
+        lengths.push(length);
+    }
+    let mut values = Vec::with_capacity(total);
+    for _ in 0..total {
+        let length = cursor.i32()?;
+        if length == -1 {
+            values.push("NULL".to_string());
+        } else {
+            let bytes =
+                cursor.bytes(usize::try_from(length).map_err(|_| "invalid array value length")?)?;
+            values.push(value_text(&decode_value(member, bytes)?));
+        }
+    }
+    cursor.finish()?;
+    let mut index = 0;
+    let display = format_array_dimension(&values, &lengths, 0, &mut index);
+    Ok(native_value(ty, display))
+}
+
+fn format_array_dimension(
+    values: &[String],
+    lengths: &[usize],
+    depth: usize,
+    index: &mut usize,
+) -> String {
+    if depth == lengths.len() {
+        let value = values.get(*index).cloned().unwrap_or_default();
+        *index += 1;
+        return value;
+    }
+    let parts = (0..lengths[depth])
+        .map(|_| format_array_dimension(values, lengths, depth + 1, index))
+        .collect::<Vec<_>>();
+    format!("{{{}}}", parts.join(","))
+}
+
+fn decode_range(ty: &Type, raw: &[u8]) -> Result<Value, Box<dyn std::error::Error + Sync + Send>> {
+    let Kind::Range(member) = ty.kind() else {
+        return Err("range type metadata missing element type".into());
+    };
+    let mut cursor = BinaryCursor::new(raw);
+    let flags = cursor.u8()?;
+    if flags & 0x01 != 0 {
+        cursor.finish()?;
+        return Ok(native_value(ty, "empty".into()));
+    }
+    let lower = if flags & 0x08 != 0 {
+        None
+    } else {
+        Some(decode_range_bound(member, &mut cursor)?)
+    };
+    let upper = if flags & 0x10 != 0 {
+        None
+    } else {
+        Some(decode_range_bound(member, &mut cursor)?)
+    };
+    cursor.finish()?;
+    let open = if flags & 0x02 != 0 { '[' } else { '(' };
+    let close = if flags & 0x04 != 0 { ']' } else { ')' };
+    Ok(native_value(
+        ty,
+        format!(
+            "{open}{},{upper}{close}",
+            lower.unwrap_or_default(),
+            upper = upper.unwrap_or_default()
+        ),
+    ))
+}
+
+fn decode_range_bound(
+    member: &Type,
+    cursor: &mut BinaryCursor<'_>,
+) -> Result<String, Box<dyn std::error::Error + Sync + Send>> {
+    let length = usize::try_from(cursor.i32()?).map_err(|_| "invalid range bound length")?;
+    Ok(value_text(&decode_value(member, cursor.bytes(length)?)?))
+}
+
+fn value_text(value: &Value) -> String {
+    match value {
+        Value::Null | Value::TypedNull { .. } => "NULL".into(),
+        Value::Bool(value) => value.to_string(),
+        Value::Int16(value) => value.to_string(),
+        Value::Int32(value) => value.to_string(),
+        Value::Int64(value) => value.to_string(),
+        Value::Float32(value) => value.to_string(),
+        Value::Float64(value) => value.to_string(),
+        Value::Decimal(value) | Value::Text(value) => value.clone(),
+        Value::Blob(value) => format!("<{} bytes>", value.len()),
+        Value::Date(value) => value.to_string(),
+        Value::Time(value) => value.to_string(),
+        Value::Timestamp(value) => value.to_string(),
+        Value::TimestampTz(value) => value.to_rfc3339(),
+        Value::Interval(value) => format!("{} ms", value.num_milliseconds()),
+        Value::Uuid(value) => value.to_string(),
+        Value::Json(value) => value.to_string(),
+        Value::Native { display_text, .. } => display_text.clone(),
+    }
+}
+
+struct BinaryCursor<'a> {
+    raw: &'a [u8],
+    offset: usize,
+}
+
+impl<'a> BinaryCursor<'a> {
+    fn new(raw: &'a [u8]) -> Self {
+        Self { raw, offset: 0 }
+    }
+    fn bytes(
+        &mut self,
+        length: usize,
+    ) -> Result<&'a [u8], Box<dyn std::error::Error + Sync + Send>> {
+        let end = self
+            .offset
+            .checked_add(length)
+            .ok_or("binary payload overflow")?;
+        let bytes = self
+            .raw
+            .get(self.offset..end)
+            .ok_or("truncated binary payload")?;
+        self.offset = end;
+        Ok(bytes)
+    }
+    fn u8(&mut self) -> Result<u8, Box<dyn std::error::Error + Sync + Send>> {
+        Ok(self.bytes(1)?[0])
+    }
+    fn i32(&mut self) -> Result<i32, Box<dyn std::error::Error + Sync + Send>> {
+        Ok(i32::from_be_bytes(self.bytes(4)?.try_into()?))
+    }
+    fn u32(&mut self) -> Result<u32, Box<dyn std::error::Error + Sync + Send>> {
+        Ok(u32::from_be_bytes(self.bytes(4)?.try_into()?))
+    }
+    fn finish(self) -> Result<(), Box<dyn std::error::Error + Sync + Send>> {
+        if self.offset == self.raw.len() {
+            Ok(())
+        } else {
+            Err("trailing binary payload bytes".into())
+        }
+    }
 }
 
 fn decode_numeric(raw: &[u8]) -> Result<String, Box<dyn std::error::Error + Sync + Send>> {
@@ -386,6 +637,71 @@ mod tests {
         assert_eq!(
             decode_interval(&raw).unwrap(),
             Value::Interval(chrono::Duration::days(2) + chrono::Duration::seconds(1))
+        );
+    }
+
+    fn native_text(value: Value) -> String {
+        match value {
+            Value::Native { display_text, .. } => display_text,
+            other => panic!("expected native value, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn decodes_network_mac_money_and_timetz_payloads() {
+        assert_eq!(
+            native_text(decode_value(&Type::CIDR, &[2, 24, 1, 4, 192, 168, 1, 0]).unwrap()),
+            "192.168.1.0/24"
+        );
+        assert_eq!(
+            native_text(
+                decode_value(&Type::MACADDR, &[0x00, 0x1a, 0x2b, 0x3c, 0x4d, 0x5e]).unwrap()
+            ),
+            "00:1a:2b:3c:4d:5e"
+        );
+        assert_eq!(
+            native_text(decode_value(&Type::MONEY, &1234_i64.to_be_bytes()).unwrap()),
+            "1234 minor units"
+        );
+        let mut timetz = Vec::new();
+        timetz.extend_from_slice(&(45_296_123_456_i64).to_be_bytes());
+        timetz.extend_from_slice(&(-7_200_i32).to_be_bytes());
+        assert_eq!(
+            native_text(decode_value(&Type::TIMETZ, &timetz).unwrap()),
+            "12:34:56.123456+02:00"
+        );
+    }
+
+    #[test]
+    fn decodes_jsonpath_array_and_range_payloads() {
+        assert_eq!(
+            native_text(decode_value(&Type::JSONPATH, b"\x01$.account.id").unwrap()),
+            "$.account.id"
+        );
+
+        let mut array = Vec::new();
+        array.extend_from_slice(&1_i32.to_be_bytes());
+        array.extend_from_slice(&0_i32.to_be_bytes());
+        array.extend_from_slice(&23_u32.to_be_bytes());
+        array.extend_from_slice(&2_i32.to_be_bytes());
+        array.extend_from_slice(&1_i32.to_be_bytes());
+        for value in [7_i32, 9_i32] {
+            array.extend_from_slice(&4_i32.to_be_bytes());
+            array.extend_from_slice(&value.to_be_bytes());
+        }
+        assert_eq!(
+            native_text(decode_value(&Type::INT4_ARRAY, &array).unwrap()),
+            "{7,9}"
+        );
+
+        let mut range = vec![0x02];
+        range.extend_from_slice(&4_i32.to_be_bytes());
+        range.extend_from_slice(&1_i32.to_be_bytes());
+        range.extend_from_slice(&4_i32.to_be_bytes());
+        range.extend_from_slice(&5_i32.to_be_bytes());
+        assert_eq!(
+            native_text(decode_value(&Type::INT4_RANGE, &range).unwrap()),
+            "[1,5)"
         );
     }
 }

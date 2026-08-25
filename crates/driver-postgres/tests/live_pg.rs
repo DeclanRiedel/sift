@@ -44,7 +44,13 @@ fn unique_schema() -> String {
         .name()
         .unwrap_or("anon")
         .replace("::", "_");
-    let prefix = &caller[..caller.floor_char_boundary(40)];
+    let prefix_end = caller
+        .char_indices()
+        .map(|(index, character)| index + character.len_utf8())
+        .take_while(|end| *end <= 40)
+        .last()
+        .unwrap_or(0);
+    let prefix = &caller[..prefix_end];
     let run = uuid::Uuid::new_v4().simple().to_string();
     format!("live_pg_{prefix}_{n}_{}", &run[..8])
 }
@@ -186,6 +192,56 @@ async fn execute_select_decodes_types() {
         matches!(&rows[0][3], Value::Interval(v) if *v == chrono::Duration::days(2) + chrono::Duration::seconds(1))
     );
 
+    driver.close(conn).await.unwrap();
+}
+
+#[tokio::test]
+async fn execute_select_decodes_extended_native_types() {
+    let driver = PgDriver::new();
+    let conn = driver.open(&spec()).await.unwrap();
+    let stream = driver
+        .execute(
+            conn.clone(),
+            sift_protocol::ExecuteRequest::new(
+                "SELECT '192.168.1.0/24'::cidr, '10.0.0.1'::inet, \
+                 '08:00:2b:01:02:03'::macaddr, 12.34::money, \
+                 '<root />'::xml, '$.account.id'::jsonpath, \
+                 '12:34:56.123456+02'::timetz, ARRAY[7, 9]::int4[], \
+                 int4range(1, 5, '[)')",
+            ),
+        )
+        .await
+        .expect("execute extended native types");
+    let pages = drain(stream).await;
+    let row = pages
+        .iter()
+        .find_map(|page| match page {
+            Page::Rows { rows } => rows.first(),
+            _ => None,
+        })
+        .expect("one native-type row");
+    let displays = row
+        .values
+        .iter()
+        .map(|value| match value {
+            Value::Native { display_text, .. } => display_text.as_str(),
+            other => panic!("expected native value, got {other:?}"),
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        displays,
+        vec![
+            "192.168.1.0/24",
+            "10.0.0.1",
+            "08:00:2b:01:02:03",
+            "1234 minor units",
+            "<root />",
+            "$.\"account\".\"id\"",
+            "12:34:56.123456+02:00",
+            "{7,9}",
+            "[1,5)",
+        ]
+    );
     driver.close(conn).await.unwrap();
 }
 
