@@ -3690,6 +3690,7 @@ pub struct WorkspaceShell {
     ide_input: Option<Vec<String>>,
     pane_input: bool,
     focused_surface: WorkspaceSurface,
+    command_palette_origin: WorkspaceSurface,
     result_inspector_views: HashMap<u64, ResultInspectorView>,
     connection_nav_selected: usize,
     connection_nav_g_pending: bool,
@@ -4140,6 +4141,7 @@ impl WorkspaceShell {
             ide_input: None,
             pane_input: false,
             focused_surface: WorkspaceSurface::Editor,
+            command_palette_origin: WorkspaceSurface::Editor,
             result_inspector_views: HashMap::new(),
             connection_nav_selected: 0,
             connection_nav_g_pending: false,
@@ -10406,6 +10408,7 @@ impl WorkspaceShell {
                 self.focus_results(window, cx);
                 return;
             }
+            self.focus_results(window, cx);
             self.apply_result_cell_edit(cx);
             return;
         }
@@ -10489,6 +10492,7 @@ impl WorkspaceShell {
         cx: &mut Context<Self>,
     ) {
         self.ide_input = None;
+        self.command_palette_origin = self.focused_surface;
         self.modal = Some(Modal::CommandPalette);
         self.palette_selected = 0;
         self.query_input
@@ -11988,7 +11992,7 @@ impl WorkspaceShell {
     /// Run a command palette entry by its stable id: dismiss the palette, then
     /// dispatch the matching workspace action. Ids come from `command_specs`.
     fn run_command(&mut self, id: CommandId, window: &mut Window, cx: &mut Context<Self>) {
-        let command_surface = self.focused_surface;
+        let command_surface = self.command_palette_origin;
         self.dismiss_modal(&DismissModal, window, cx);
         if id == CommandId::SaveItem {
             // `:w` moves focus into the command palette. Restore its origin so
@@ -21901,8 +21905,37 @@ mod tests {
         let window = shell(cx);
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         let workspace = window.root(&mut cx).unwrap();
+        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
 
         workspace.update_in(&mut cx, |workspace, window, cx| {
+            let item_id = workspace.panes[workspace.active_pane]
+                .read(cx)
+                .active_item()
+                .unwrap()
+                .id;
+            workspace.executor_sender = Some(sender);
+            workspace.staged_result_edits = vec![StagedResultEdit {
+                item_id,
+                column: "action".into(),
+                original: sift_protocol::Value::Text("open".into()),
+                value: sift_protocol::Value::Text("closed".into()),
+                original_row: vec![
+                    ("id".into(), sift_protocol::Value::Int64(1)),
+                    ("action".into(), sift_protocol::Value::Text("open".into())),
+                ],
+                source: DatabaseObjectSource {
+                    instance_id: "local".into(),
+                    tenant_id: 1,
+                    profile_id: 2,
+                    profile_name: "demo/postgres".into(),
+                    provider_id: sift_protocol::Engine::Postgres.provider_id(),
+                    catalog: Some("sifttest".into()),
+                    schema: "audit".into(),
+                    object: "events".into(),
+                    object_kind: sift_protocol::ObjectKind::Table,
+                    last_refreshed_at_ms: None,
+                },
+            }];
             let results = workspace.focused_pane_results(cx).unwrap();
             results.focus_handle(cx).focus(window, cx);
             workspace.focused_surface = WorkspaceSurface::Editor;
@@ -21921,6 +21954,17 @@ mod tests {
                 vec![CommandId::SaveItem]
             );
         });
+        workspace.update_in(&mut cx, |workspace, window, cx| {
+            workspace.palette_confirm(&PaletteConfirm, window, cx)
+        });
+        assert!(matches!(
+            receiver.try_recv(),
+            Ok(ExecutorCommand::ApplyResultEdits { .. })
+        ));
+        assert!(workspace.read_with(&cx, |workspace, _| {
+            workspace.focused_surface == WorkspaceSurface::Results && workspace.result_edit_pending
+        }));
+        assert!(cx.update(|window, cx| { workspace.read(cx).active_results_focused(window, cx) }));
     }
 
     #[gpui::test]
