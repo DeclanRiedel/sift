@@ -115,6 +115,7 @@ struct GlobalProblem {
     title: String,
     severity: ProblemSeverity,
     message: String,
+    transient: bool,
 }
 
 fn quote_identifier(identifier: &str) -> String {
@@ -5024,6 +5025,7 @@ impl WorkspaceShell {
                     Err(message) => {
                         self.transaction_error = Some(message.clone());
                         self.status.transaction = "TX: Failed".into();
+                        self.record_runtime_error(None, "Transaction", message.clone(), cx);
                         self.show_error_toast(message, cx);
                     }
                 }
@@ -5045,7 +5047,10 @@ impl WorkspaceShell {
                         self.result_edit_conflicts.clear();
                         self.result_edit_error = None;
                     }
-                    Err(message) => self.result_edit_error = Some(message),
+                    Err(message) => {
+                        self.result_edit_error = Some(message.clone());
+                        self.record_runtime_error(Some(item_id), "Edit preview", message, cx);
+                    }
                 }
                 cx.notify();
             }
@@ -5107,6 +5112,12 @@ impl WorkspaceShell {
                                 .insert(conflict.edit_index, failure.message.clone());
                         }
                         self.result_edit_error = Some(failure.message.clone());
+                        self.record_runtime_error(
+                            Some(item_id),
+                            "Edit apply",
+                            failure.message.clone(),
+                            cx,
+                        );
                         for pane in &self.panes {
                             if let Some(results) = pane.read(cx).results.get(&item_id).cloned() {
                                 results.update(cx, |results, cx| {
@@ -8588,7 +8599,7 @@ impl WorkspaceShell {
         cx: &mut Context<Self>,
     ) {
         self.global_problems
-            .retain(|problem| problem.item_id != item_id);
+            .retain(|problem| problem.item_id != item_id || !problem.transient);
         let title = self.query_item_title(item_id, cx);
         let mut push = |severity, message: String| {
             self.global_problems.push(GlobalProblem {
@@ -8596,6 +8607,7 @@ impl WorkspaceShell {
                 title: title.clone(),
                 severity,
                 message,
+                transient: true,
             });
         };
         match state {
@@ -8622,7 +8634,35 @@ impl WorkspaceShell {
 
     fn clear_global_problems_for(&mut self, item_id: u64, cx: &mut Context<Self>) {
         self.global_problems
-            .retain(|problem| problem.item_id != item_id);
+            .retain(|problem| problem.item_id != item_id || !problem.transient);
+        self.sync_global_problems_editor(cx);
+    }
+
+    fn record_runtime_error(
+        &mut self,
+        item_id: Option<u64>,
+        operation: &str,
+        message: String,
+        cx: &mut Context<Self>,
+    ) {
+        let item_id = item_id.unwrap_or(0);
+        let title = if item_id == 0 {
+            operation.to_owned()
+        } else {
+            format!("{operation} · {}", self.query_item_title(item_id, cx))
+        };
+        self.global_problems.push(GlobalProblem {
+            item_id,
+            title,
+            severity: ProblemSeverity::Error,
+            message,
+            transient: false,
+        });
+        const MAX_RUNTIME_PROBLEMS: usize = 200;
+        if self.global_problems.len() > MAX_RUNTIME_PROBLEMS {
+            let overflow = self.global_problems.len() - MAX_RUNTIME_PROBLEMS;
+            self.global_problems.drain(..overflow);
+        }
         self.sync_global_problems_editor(cx);
     }
 
@@ -24612,6 +24652,34 @@ mod tests {
             assert_eq!(
                 pane.editor(item.id).unwrap().read(cx).document().text(),
                 "No problems."
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn runtime_errors_remain_in_problems_after_query_refresh(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+
+        workspace.update(&mut cx, |shell, cx| {
+            shell.record_runtime_error(
+                Some(1),
+                "Edit apply",
+                "driver internal error: error serializing parameter 0".into(),
+                cx,
+            );
+            shell.route_result(
+                1,
+                ResultState::Ready(crate::results::ResultData::default()),
+                cx,
+            );
+            assert_eq!(shell.global_problems.len(), 1);
+            assert!(!shell.global_problems[0].transient);
+            assert_eq!(
+                shell.global_problems_text(),
+                "[ERROR] Edit apply · query.sql\n\
+                 driver internal error: error serializing parameter 0"
             );
         });
     }
