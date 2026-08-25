@@ -768,6 +768,63 @@ impl ResultsView {
         })
     }
 
+    pub(crate) fn apply_saved_cell_value(
+        &mut self,
+        original_row: &[(String, Value)],
+        column: &str,
+        value: Value,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let data = match &mut self.state {
+            ResultState::Streaming(data) | ResultState::Ready(data) => data,
+            _ => return false,
+        };
+        let Some(column_index) = data
+            .columns
+            .iter()
+            .position(|candidate| candidate.name == column)
+        else {
+            return false;
+        };
+        let expected_columns = original_row
+            .iter()
+            .map(|(name, expected)| {
+                data.columns
+                    .iter()
+                    .position(|column| column.name == *name)
+                    .map(|index| (index, expected))
+            })
+            .collect::<Option<Vec<_>>>();
+        let Some(expected_columns) = expected_columns else {
+            return false;
+        };
+        let Some(row_index) = data.rows.iter().position(|row| {
+            expected_columns
+                .iter()
+                .all(|(index, expected)| row.values.get(*index) == Some(*expected))
+        }) else {
+            return false;
+        };
+        data.rows[row_index].values[column_index] = value.clone();
+
+        let rendered = render_value(&value);
+        if let Some(cell) = self
+            .rendered_rows
+            .get_mut(row_index)
+            .and_then(|row| row.get_mut(column_index))
+        {
+            let text: SharedString = rendered.text.into();
+            *cell = CachedCellRender {
+                paint_text: single_line_text(&text),
+                text,
+                class: rendered.class,
+                shaped: None,
+            };
+        }
+        cx.notify();
+        true
+    }
+
     pub fn selected_row_json(&self) -> Option<SelectedRowJson> {
         let row_index = match self.selected? {
             GridSelection::Cell { row, .. } | GridSelection::Row(row) => row,

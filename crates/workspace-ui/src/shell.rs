@@ -5061,15 +5061,23 @@ impl WorkspaceShell {
                             .iter()
                             .map(|outcome| outcome.affected_rows)
                             .sum::<u64>();
+                        let applied_edits = std::mem::take(&mut self.staged_result_edits);
                         self.modal = None;
                         self.result_cell_edit_target = None;
-                        self.staged_result_edits.clear();
                         self.result_edit_conflicts.clear();
                         self.pending_edit_set = None;
                         self.result_edit_plan = None;
                         for pane in &self.panes {
                             if let Some(results) = pane.read(cx).results.get(&item_id).cloned() {
                                 results.update(cx, |results, cx| {
+                                    for edit in &applied_edits {
+                                        results.apply_saved_cell_value(
+                                            &edit.original_row,
+                                            &edit.column,
+                                            edit.value.clone(),
+                                            cx,
+                                        );
+                                    }
                                     results.finish_inline_cell_edit(cx);
                                 });
                             }
@@ -24726,7 +24734,7 @@ mod tests {
         let workspace = window.root(&mut cx).unwrap();
         let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
 
-        workspace.update_in(&mut cx, |shell, window, cx| {
+        let (item_id, results) = workspace.update_in(&mut cx, |shell, window, cx| {
             shell.open_table_preview(
                 DatabaseObjectTarget {
                     connection: ConnectionNavEntry {
@@ -24774,6 +24782,7 @@ mod tests {
                 Some(("closed".into(), true)),
                 "the submitted value stays visible while the save is pending"
             );
+            (item_id, results)
         });
 
         let ExecutorCommand::ApplyResultEdits { edit_set, .. } = receiver.try_recv().unwrap()
@@ -24786,6 +24795,30 @@ mod tests {
         assert_eq!(
             changes[0].value,
             sift_protocol::Value::Text("closed".into())
+        );
+        workspace.update(&mut cx, |shell, cx| {
+            shell.on_executor_event(
+                ExecutorEvent::ResultEditsApplied {
+                    item_id,
+                    result: Ok(sift_protocol::ApplyEditsResult {
+                        applied: vec![sift_protocol::EditOutcome {
+                            edit_index: 0,
+                            kind: sift_protocol::EditStatementKind::Update,
+                            affected_rows: 1,
+                            returned: Vec::new(),
+                        }],
+                        committed: true,
+                    }),
+                },
+                cx,
+            );
+        });
+        assert_eq!(
+            results.read_with(&cx, |results, _| {
+                results.selected_cell_edit().map(|edit| edit.original)
+            }),
+            Some(sift_protocol::Value::Text("closed".into())),
+            "a successful Enter save must replace the cached value immediately"
         );
     }
 
