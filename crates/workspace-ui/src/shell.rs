@@ -1039,6 +1039,13 @@ pub enum PaneEvent {
     EditResultCellRequested {
         item_id: u64,
     },
+    PasteResultCellRequested {
+        item_id: u64,
+        text: String,
+    },
+    RevertResultCellRequested {
+        item_id: u64,
+    },
     ReviewStagedResultEditsRequested {
         item_id: u64,
     },
@@ -1782,6 +1789,15 @@ impl Pane {
             }
             ResultsEvent::EditSelectedCellRequested => {
                 cx.emit(PaneEvent::EditResultCellRequested { item_id })
+            }
+            ResultsEvent::PasteSelectedCellRequested { text } => {
+                cx.emit(PaneEvent::PasteResultCellRequested {
+                    item_id,
+                    text: text.clone(),
+                })
+            }
+            ResultsEvent::RevertSelectedCellRequested => {
+                cx.emit(PaneEvent::RevertResultCellRequested { item_id })
             }
             ResultsEvent::ReviewStagedEditsRequested => {
                 cx.emit(PaneEvent::ReviewStagedResultEditsRequested { item_id })
@@ -9793,6 +9809,15 @@ impl WorkspaceShell {
                 self.active_pane = index;
                 self.open_result_cell_editor(emitter, *item_id, window, cx);
             }
+            PaneEvent::PasteResultCellRequested { item_id, text } => {
+                self.active_pane = index;
+                self.open_result_cell_editor(emitter, *item_id, window, cx);
+                self.submit_result_cell_edit(emitter, *item_id, text, window, cx);
+            }
+            PaneEvent::RevertResultCellRequested { item_id } => {
+                self.active_pane = index;
+                self.revert_selected_result_cell(emitter, *item_id, window, cx);
+            }
             PaneEvent::ReviewStagedResultEditsRequested { item_id } => {
                 self.active_pane = index;
                 self.open_staged_result_edits(*item_id, window, cx);
@@ -10965,6 +10990,35 @@ impl WorkspaceShell {
         }
         self.focus_results(window, cx);
         cx.notify();
+    }
+
+    fn revert_selected_result_cell(
+        &mut self,
+        pane: &Entity<Pane>,
+        item_id: u64,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let selected = pane
+            .read(cx)
+            .results
+            .get(&item_id)
+            .and_then(|results| results.read(cx).selected_cell_edit());
+        let Some(selected) = selected else {
+            return;
+        };
+        let Some(index) = self.staged_result_edits.iter().position(|edit| {
+            edit.item_id == item_id
+                && edit.column == selected.column
+                && edit.original_row == selected.original_row
+        }) else {
+            self.show_toast("Selected cell has no staged change".into(), cx);
+            self.focus_results(window, cx);
+            return;
+        };
+        self.revert_staged_result_edit(index, cx);
+        self.focus_results(window, cx);
+        self.show_toast("Reverted staged cell change".into(), cx);
     }
 
     fn parse_result_cell_value(

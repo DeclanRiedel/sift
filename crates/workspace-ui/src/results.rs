@@ -500,6 +500,10 @@ actions!(
         CopySelectedCell,
         CopySelectedWithHeaders,
         EditSelectedCell,
+        ToggleVisualSelection,
+        ExitVisualSelection,
+        PasteSelectedCell,
+        RevertSelectedCell,
         MoveCellLeft,
         MoveCellRight,
         MoveCellUp,
@@ -532,6 +536,10 @@ pub enum ResultsEvent {
     /// Present this live Data grid in the workspace's near-fullscreen modal.
     OpenDataModalRequested,
     EditSelectedCellRequested,
+    PasteSelectedCellRequested {
+        text: String,
+    },
+    RevertSelectedCellRequested,
     ReviewStagedEditsRequested,
     SubmitCellEdit {
         text: String,
@@ -646,6 +654,7 @@ pub struct ResultsView {
     included_columns: Vec<bool>,
     tab: ResultTab,
     selected: Option<GridSelection>,
+    visual_selection: bool,
     editing_cell: Option<(usize, usize)>,
     inline_cell_edit: Option<InlineCellEdit>,
     staged_cells: HashMap<(usize, usize), Value>,
@@ -699,6 +708,7 @@ impl ResultsView {
             included_columns: Vec::new(),
             tab: ResultTab::Data,
             selected: None,
+            visual_selection: false,
             editing_cell: None,
             inline_cell_edit: None,
             staged_cells: HashMap::new(),
@@ -1744,7 +1754,27 @@ impl ResultsView {
             .saturating_add_signed(column_delta)
             .min(visible_columns.len() - 1);
         let column = visible_columns[display_column];
-        self.set_selection(GridSelection::Cell { row, column }, cx);
+        if self.visual_selection {
+            let (anchor_row, anchor_column) = match self.selected {
+                Some(GridSelection::Range {
+                    anchor_row,
+                    anchor_column,
+                    ..
+                }) => (anchor_row, anchor_column),
+                _ => (previous_row, previous_column),
+            };
+            self.set_selection(
+                GridSelection::Range {
+                    anchor_row,
+                    anchor_column,
+                    focus_row: row,
+                    focus_column: column,
+                },
+                cx,
+            );
+        } else {
+            self.set_selection(GridSelection::Cell { row, column }, cx);
+        }
         // Most repeated arrow events stay inside the viewport. Do not make the
         // uniform list resolve a deferred scroll request and relayout its rows
         // until selection actually crosses a visible edge.
@@ -1881,6 +1911,83 @@ impl ResultsView {
         }
     }
 
+    fn toggle_visual_selection(
+        &mut self,
+        _: &ToggleVisualSelection,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.visual_selection = !self.visual_selection;
+        if self.visual_selection {
+            if self.selected.is_none() {
+                self.move_selection(0, 0, cx);
+            }
+        } else if let Some(GridSelection::Range {
+            focus_row,
+            focus_column,
+            ..
+        }) = self.selected
+        {
+            self.set_selection(
+                GridSelection::Cell {
+                    row: focus_row,
+                    column: focus_column,
+                },
+                cx,
+            );
+        }
+        cx.notify();
+    }
+
+    fn exit_visual_selection(
+        &mut self,
+        _: &ExitVisualSelection,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.visual_selection = false;
+        if let Some(GridSelection::Range {
+            focus_row,
+            focus_column,
+            ..
+        }) = self.selected
+        {
+            self.set_selection(
+                GridSelection::Cell {
+                    row: focus_row,
+                    column: focus_column,
+                },
+                cx,
+            );
+        }
+        cx.notify();
+    }
+
+    fn paste_selected_cell(
+        &mut self,
+        _: &PasteSelectedCell,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !matches!(self.selected, Some(GridSelection::Cell { .. })) {
+            return;
+        }
+        if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
+            cx.emit(ResultsEvent::PasteSelectedCellRequested { text });
+        }
+    }
+
+    fn revert_selected_cell(
+        &mut self,
+        _: &RevertSelectedCell,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if matches!(self.selected, Some(GridSelection::Cell { .. })) {
+            cx.emit(ResultsEvent::RevertSelectedCellRequested);
+        }
+    }
+
     fn previous_result_tab(
         &mut self,
         _: &PreviousResultTab,
@@ -1897,6 +2004,8 @@ impl ResultsView {
     fn copy_selected_cell(&mut self, _: &CopySelectedCell, _: &mut Window, cx: &mut Context<Self>) {
         if let Some(text) = self.selected_text() {
             cx.write_to_clipboard(ClipboardItem::new_string(text));
+            self.visual_selection = false;
+            cx.notify();
         }
     }
 
@@ -3418,6 +3527,10 @@ impl gpui::Render for ResultsView {
             .on_action(cx.listener(Self::copy_selected_cell))
             .on_action(cx.listener(Self::copy_selected_with_headers))
             .on_action(cx.listener(Self::edit_selected_cell))
+            .on_action(cx.listener(Self::toggle_visual_selection))
+            .on_action(cx.listener(Self::exit_visual_selection))
+            .on_action(cx.listener(Self::paste_selected_cell))
+            .on_action(cx.listener(Self::revert_selected_cell))
             .on_action(cx.listener(Self::move_cell_left))
             .on_action(cx.listener(Self::move_cell_right))
             .on_action(cx.listener(Self::move_cell_up))
@@ -4531,6 +4644,29 @@ mod tests {
             view.set_extent(360.0, cx);
             view.toggle_placement(cx);
             assert_eq!(view.extent(), 300.0);
+        });
+        view.update_in(&mut cx, |view, window, cx| {
+            view.set_selection(GridSelection::Cell { row: 0, column: 0 }, cx);
+            view.toggle_visual_selection(&ToggleVisualSelection, window, cx);
+            view.move_selection(0, 1, cx);
+            view.move_selection(1, 0, cx);
+            assert_eq!(
+                view.selected,
+                Some(GridSelection::Range {
+                    anchor_row: 0,
+                    anchor_column: 0,
+                    focus_row: 1,
+                    focus_column: 1,
+                })
+            );
+            view.copy_selected_cell(&CopySelectedCell, window, cx);
+            assert!(!view.visual_selection);
+            assert_eq!(
+                cx.read_from_clipboard()
+                    .and_then(|item| item.text())
+                    .as_deref(),
+                Some("neo\t1\ntrinity\t2")
+            );
         });
     }
 
