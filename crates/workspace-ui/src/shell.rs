@@ -24895,6 +24895,15 @@ mod tests {
                 .inline_cell_edit_focus(cx)
                 .is_some_and(|focus| focus.is_focused(window))
         }));
+        cx.update(|window, cx| results.focus_handle(cx).focus(window, cx));
+        cx.simulate_click(cell, Modifiers::default());
+        cx.run_until_parked();
+        assert!(cx.update(|window, cx| {
+            results
+                .read(cx)
+                .inline_cell_edit_focus(cx)
+                .is_some_and(|focus| focus.is_focused(window))
+        }));
         results.update(&mut cx, |results, cx| {
             results.set_inline_cell_edit_text("closed", cx)
         });

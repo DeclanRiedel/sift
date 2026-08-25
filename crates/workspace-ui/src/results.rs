@@ -1725,7 +1725,11 @@ impl ResultsView {
     ) -> bool {
         if click_count >= 2 {
             self.set_selection(GridSelection::Cell { row, column }, cx);
-            if self.editing_cell != Some((row, column)) {
+            let inline_editor_open = self
+                .inline_cell_edit
+                .as_ref()
+                .is_some_and(|edit| edit.row == row && edit.column == column);
+            if !inline_editor_open {
                 cx.emit(ResultsEvent::EditSelectedCellRequested);
                 return true;
             }
@@ -2531,12 +2535,20 @@ impl ResultsView {
                                         )
                                     });
                                 if let Some((input, error)) = inline_edit {
+                                    let input_focus = input.focus_handle(cx);
                                     cell.border_1()
                                         .border_color(if error {
                                             colors.danger
                                         } else {
                                             colors.accent
                                         })
+                                        .on_mouse_down(
+                                            MouseButton::Left,
+                                            cx.listener(move |_, _, window, cx| {
+                                                input_focus.focus(window, cx);
+                                                cx.stop_propagation();
+                                            }),
+                                        )
                                         .on_key_down(cx.listener(
                                             |view, event: &gpui::KeyDownEvent, window, cx| {
                                                 match event.keystroke.key.as_str() {
@@ -3502,6 +3514,11 @@ mod tests {
             view.finish_inline_cell_edit(cx);
             assert!(view.inline_cell_edit.is_none());
             assert_eq!(view.editing_cell, None);
+            view.editing_cell = Some((0, 0));
+            assert!(
+                view.select_cell_from_pointer(0, 0, false, 2, cx),
+                "a stale editing outline must not block reopening the inline editor"
+            );
         });
     }
 
