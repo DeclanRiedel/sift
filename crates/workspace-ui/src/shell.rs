@@ -5099,7 +5099,6 @@ impl WorkspaceShell {
                             });
                         }
                         self.show_toast(format!("Applied edit to {affected} row(s)"), cx);
-                        self.refresh_database_item(item_id, cx);
                     }
                     Err(failure) => {
                         self.result_edit_conflicts.clear();
@@ -24880,6 +24879,10 @@ mod tests {
             }),
             Some(sift_protocol::Value::Text("closed".into())),
             "a successful Enter save must replace the cached value immediately"
+        );
+        assert!(
+            receiver.try_recv().is_err(),
+            "saving a cell must not re-run an unordered table preview and move the row"
         );
     }
 
