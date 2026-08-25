@@ -1404,6 +1404,24 @@ impl ResultsView {
         }
     }
 
+    fn select_cell_from_pointer(
+        &mut self,
+        row: usize,
+        column: usize,
+        shift: bool,
+        click_count: usize,
+        cx: &mut Context<Self>,
+    ) {
+        if click_count >= 2 {
+            self.set_selection(GridSelection::Cell { row, column }, cx);
+            cx.emit(ResultsEvent::EditSelectedCellRequested);
+        } else if shift {
+            self.extend_cell_selection(row, column, cx);
+        } else {
+            self.select_cell(row, column, cx);
+        }
+    }
+
     fn row_needs_reveal(&self, row: usize) -> bool {
         let state = self.row_scroll_handle.0.borrow();
         let viewport_height = state.base_handle.bounds().size.height;
@@ -1722,23 +1740,6 @@ impl ResultsView {
                                     )
                             }))
                             .child(
-                                IconButton::new(
-                                    "edit-result-cell",
-                                    IconName::Edit,
-                                    "Edit selected cell",
-                                )
-                                .square(px(24.))
-                                .icon_size(13.)
-                                .disabled(!matches!(
-                                    self.selected,
-                                    Some(GridSelection::Cell { .. })
-                                ))
-                                .tooltip("Edit selected cell")
-                                .on_click(cx.listener(
-                                    |_, _, _, cx| cx.emit(ResultsEvent::EditSelectedCellRequested),
-                                )),
-                            )
-                            .child(
                                 Button::new("copy-result-with-headers", "Copy + headers")
                                     .tone(ButtonTone::Neutral)
                                     .disabled(self.selected.is_none())
@@ -1839,23 +1840,6 @@ impl ResultsView {
                                     |_, _, _, cx| cx.emit(ResultsEvent::OpenDataModalRequested),
                                 ))
                             }))
-                            .child(
-                                IconButton::new(
-                                    "edit-result-cell-vertical",
-                                    IconName::Edit,
-                                    "Edit selected cell",
-                                )
-                                .icon_size(13.)
-                                .text("Edit")
-                                .disabled(!matches!(
-                                    self.selected,
-                                    Some(GridSelection::Cell { .. })
-                                ))
-                                .tooltip("Edit selected cell")
-                                .on_click(cx.listener(
-                                    |_, _, _, cx| cx.emit(ResultsEvent::EditSelectedCellRequested),
-                                )),
-                            )
                             .child(
                                 IconButton::new(
                                     "copy-result-cell-vertical",
@@ -2174,19 +2158,13 @@ impl ResultsView {
                                                       window,
                                                       cx| {
                                                     view.focus_handle.focus(window, cx);
-                                                    if event.modifiers.shift {
-                                                        view.extend_cell_selection(
-                                                            row_index,
-                                                            source_column,
-                                                            cx,
-                                                        )
-                                                    } else {
-                                                        view.select_cell(
-                                                            row_index,
-                                                            source_column,
-                                                            cx,
-                                                        )
-                                                    }
+                                                    view.select_cell_from_pointer(
+                                                        row_index,
+                                                        source_column,
+                                                        event.modifiers.shift,
+                                                        event.click_count,
+                                                        cx,
+                                                    );
                                                 },
                                             ),
                                         )
@@ -3086,6 +3064,11 @@ mod tests {
                 cx,
             );
             view.select_cell(0, 0, cx);
+            view.select_cell_from_pointer(0, 0, false, 2, cx);
+            assert_eq!(
+                view.selected,
+                Some(GridSelection::Cell { row: 0, column: 0 })
+            );
             assert!(view.begin_selected_cell_edit("7".into(), cx).is_some());
             let edit = view.inline_cell_edit.as_ref().expect("inline editor");
             assert_eq!((edit.row, edit.column), (0, 0));
