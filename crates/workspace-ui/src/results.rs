@@ -635,6 +635,9 @@ pub struct ResultsView {
     selected: Option<GridSelection>,
     editing_cell: Option<(usize, usize)>,
     inline_cell_edit: Option<InlineCellEdit>,
+    row_json_filter_input: Entity<TextInput>,
+    row_json_folded: bool,
+    row_json_wrapped: bool,
     messages: Vec<ResultMessage>,
     selected_message: Option<usize>,
     row_scroll_handle: UniformListScrollHandle,
@@ -657,6 +660,9 @@ pub struct ResultsView {
 
 impl ResultsView {
     pub fn new(cx: &mut Context<Self>) -> Self {
+        let row_json_filter_input = cx.new(|cx| {
+            TextInput::new("", "Filter keys or /regex/", cx).aria_label("Filter selected row JSON")
+        });
         Self {
             focus_handle: cx.focus_handle(),
             state: ResultState::Idle,
@@ -669,6 +675,9 @@ impl ResultsView {
             selected: None,
             editing_cell: None,
             inline_cell_edit: None,
+            row_json_filter_input,
+            row_json_folded: false,
+            row_json_wrapped: false,
             messages: Vec::new(),
             selected_message: None,
             row_scroll_handle: UniformListScrollHandle::new(),
@@ -765,6 +774,28 @@ impl ResultsView {
             .collect::<serde_json::Map<_, _>>()
             .into();
         Some(SelectedRowJson { row_index, value })
+    }
+
+    pub(crate) fn row_json_filter_input(&self) -> Entity<TextInput> {
+        self.row_json_filter_input.clone()
+    }
+
+    pub(crate) fn row_json_folded(&self) -> bool {
+        self.row_json_folded
+    }
+
+    pub(crate) fn row_json_wrapped(&self) -> bool {
+        self.row_json_wrapped
+    }
+
+    pub(crate) fn toggle_row_json_folded(&mut self, cx: &mut Context<Self>) {
+        self.row_json_folded = !self.row_json_folded;
+        cx.notify();
+    }
+
+    pub(crate) fn toggle_row_json_wrapped(&mut self, cx: &mut Context<Self>) {
+        self.row_json_wrapped = !self.row_json_wrapped;
+        cx.notify();
     }
 
     pub(crate) fn begin_selected_cell_edit(

@@ -9,6 +9,7 @@ use gpui::{
     ScrollStrategy, SharedString, Subscription, Task, UniformListScrollHandle, Window,
     WindowBounds, WindowControlArea,
 };
+use regex::{Regex, RegexBuilder};
 use sift_api_types::RoomId;
 use sift_ui::{
     database_logo, icon, ActiveTheme, Badge, Button, ButtonTone, Clickable, Disableable,
@@ -464,6 +465,68 @@ enum ResultInspectorView {
     #[default]
     Fields,
     RowJson,
+}
+
+enum RowJsonFilter {
+    Text(String),
+    Regex(Regex),
+}
+
+impl RowJsonFilter {
+    fn parse(query: &str) -> Result<Option<Self>, String> {
+        let query = query.trim();
+        if query.is_empty() {
+            return Ok(None);
+        }
+        if query.len() >= 2 && query.starts_with('/') && query.ends_with('/') {
+            return RegexBuilder::new(&query[1..query.len() - 1])
+                .case_insensitive(true)
+                .build()
+                .map(Self::Regex)
+                .map(Some)
+                .map_err(|error| format!("Invalid regular expression: {error}"));
+        }
+        Ok(Some(Self::Text(query.to_lowercase())))
+    }
+
+    fn matches(&self, candidate: &str) -> bool {
+        match self {
+            Self::Text(query) => {
+                let candidate = candidate.to_lowercase();
+                let mut characters = candidate.chars();
+                query
+                    .chars()
+                    .all(|needle| characters.by_ref().any(|candidate| candidate == needle))
+            }
+            Self::Regex(regex) => regex.is_match(candidate),
+        }
+    }
+}
+
+fn filter_row_json(value: &serde_json::Value, filter: &RowJsonFilter) -> Option<serde_json::Value> {
+    match value {
+        serde_json::Value::Object(object) => {
+            let filtered = object
+                .iter()
+                .filter_map(|(key, value)| {
+                    if filter.matches(key) {
+                        Some((key.clone(), value.clone()))
+                    } else {
+                        filter_row_json(value, filter).map(|value| (key.clone(), value))
+                    }
+                })
+                .collect::<serde_json::Map<_, _>>();
+            (!filtered.is_empty()).then(|| filtered.into())
+        }
+        serde_json::Value::Array(values) => {
+            let filtered = values
+                .iter()
+                .filter_map(|value| filter_row_json(value, filter))
+                .collect::<Vec<_>>();
+            (!filtered.is_empty()).then(|| filtered.into())
+        }
+        value => filter.matches(&value.to_string()).then(|| value.clone()),
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -12904,11 +12967,42 @@ impl WorkspaceShell {
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         let colors = cx.theme().colors;
-        let selected = results.read(cx).selected_row_json();
+        let (selected, filter_input, folded, wrapped) = {
+            let results = results.read(cx);
+            (
+                results.selected_row_json(),
+                results.row_json_filter_input(),
+                results.row_json_folded(),
+                results.row_json_wrapped(),
+            )
+        };
         let row_number = selected.as_ref().map(|row| row.row_index.saturating_add(1));
-        let pretty = selected
-            .and_then(|row| serde_json::to_string_pretty(&row.value).ok())
+        let filter_text = filter_input.read(cx).text().to_owned();
+        let (visible_value, filter_error) = match RowJsonFilter::parse(&filter_text) {
+            Ok(Some(filter)) => (
+                selected
+                    .as_ref()
+                    .and_then(|row| filter_row_json(&row.value, &filter)),
+                None,
+            ),
+            Ok(None) => (selected.as_ref().map(|row| row.value.clone()), None),
+            Err(error) => (None, Some(error)),
+        };
+        let text = visible_value
+            .as_ref()
+            .and_then(|value| {
+                if folded {
+                    serde_json::to_string(value).ok()
+                } else {
+                    serde_json::to_string_pretty(value).ok()
+                }
+            })
             .unwrap_or_default();
+        let copy_text = text.clone();
+        let has_filter_error = filter_error.is_some();
+        let clear_input = filter_input.clone();
+        let fold_results = results.clone();
+        let wrap_results = results.clone();
 
         div()
             .debug_selector(|| "inspector-result-row-json".into())
@@ -12935,11 +13029,88 @@ impl WorkspaceShell {
             )
             .child(
                 div()
+                    .h(px(34.))
+                    .px_2()
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .border_b_1()
+                    .border_color(colors.subtle_border)
+                    .child(div().flex_1().min_w_0().child(filter_input))
+                    .children((!filter_text.is_empty()).then(|| {
+                        IconButton::new(
+                            "inspector-row-json-clear-filter",
+                            IconName::Close,
+                            "Clear JSON filter",
+                        )
+                        .square(px(24.))
+                        .icon_size(12.)
+                        .on_click(cx.listener(move |_, _, _, cx| {
+                            clear_input.update(cx, |input, cx| input.set_text("", cx));
+                            cx.notify();
+                        }))
+                    }))
+                    .child(
+                        div()
+                            .debug_selector(|| "inspector-row-json-fold".into())
+                            .child(
+                                Button::new(
+                                    "inspector-row-json-fold-button",
+                                    if folded { "Expand" } else { "Collapse" },
+                                )
+                                .tone(ButtonTone::Ghost)
+                                .on_click(cx.listener(
+                                    move |_, _, _, cx| {
+                                        fold_results.update(cx, |results, cx| {
+                                            results.toggle_row_json_folded(cx)
+                                        });
+                                    },
+                                )),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .debug_selector(|| "inspector-row-json-wrap".into())
+                            .child(
+                                Button::new("inspector-row-json-wrap-button", "Wrap")
+                                    .tone(if wrapped {
+                                        ButtonTone::Accent
+                                    } else {
+                                        ButtonTone::Ghost
+                                    })
+                                    .on_click(cx.listener(move |_, _, _, cx| {
+                                        wrap_results.update(cx, |results, cx| {
+                                            results.toggle_row_json_wrapped(cx)
+                                        });
+                                    })),
+                            ),
+                    )
+                    .child(
+                        IconButton::new(
+                            "inspector-row-json-copy",
+                            IconName::Copy,
+                            "Copy visible JSON",
+                        )
+                        .square(px(24.))
+                        .icon_size(12.)
+                        .disabled(copy_text.is_empty())
+                        .on_click(cx.listener(move |_, _, _, cx| {
+                            cx.write_to_clipboard(gpui::ClipboardItem::new_string(
+                                copy_text.clone(),
+                            ));
+                        })),
+                    )
+                    .on_key_down(cx.listener(|_, _, _, cx| cx.notify())),
+            )
+            .children(filter_error.map(|error| div().mx_2().mt_2().child(ErrorBanner::new(error))))
+            .child(
+                div()
                     .id("inspector-result-row-json-scroll")
                     .flex_1()
                     .min_h_0()
                     .overflow_scroll()
-                    .when(pretty.is_empty(), |viewer| {
+                    .when(selected.is_none(), |viewer| {
                         viewer.child(
                             div()
                                 .p_3()
@@ -12947,15 +13118,27 @@ impl WorkspaceShell {
                                 .child("Select a result row to inspect it as JSON"),
                         )
                     })
-                    .when(!pretty.is_empty(), |viewer| {
+                    .when(
+                        selected.is_some() && text.is_empty() && !has_filter_error,
+                        |viewer| {
+                            viewer.child(
+                                div()
+                                    .p_3()
+                                    .text_color(colors.muted_text)
+                                    .child("No JSON keys or values match this filter"),
+                            )
+                        },
+                    )
+                    .when(!text.is_empty(), |viewer| {
                         viewer.child(div().p_3().font_family("monospace").text_xs().children(
-                            pretty.lines().enumerate().map(|(line, text)| {
+                            text.lines().enumerate().map(|(line, text)| {
                                 div()
                                     .id(("inspector-result-json-line", line))
-                                    .h(px(20.))
+                                    .min_h(px(20.))
                                     .flex()
                                     .items_center()
-                                    .whitespace_nowrap()
+                                    .when(wrapped, |line| line.whitespace_normal())
+                                    .when(!wrapped, |line| line.whitespace_nowrap())
                                     .child(text.to_owned())
                             }),
                         ))
@@ -20865,6 +21048,37 @@ mod tests {
                 Some(&ResultInspectorView::RowJson)
             );
         });
+
+        let fold = cx.debug_bounds("inspector-row-json-fold").unwrap();
+        cx.simulate_click(fold.center(), Modifiers::default());
+        let wrap = cx.debug_bounds("inspector-row-json-wrap").unwrap();
+        cx.simulate_click(wrap.center(), Modifiers::default());
+        cx.run_until_parked();
+        workspace.read_with(&cx, |shell, cx| {
+            let (_, results) = shell.focused_pane_results_item(cx).unwrap();
+            assert!(results.read(cx).row_json_folded());
+            assert!(results.read(cx).row_json_wrapped());
+        });
+    }
+
+    #[test]
+    fn row_json_filter_supports_fuzzy_text_regex_and_nested_values() {
+        let row = serde_json::json!({
+            "id": 7,
+            "payload": {"event": "open", "count": 2},
+            "owner": "demo"
+        });
+        let fuzzy = RowJsonFilter::parse("pyld").unwrap().unwrap();
+        assert_eq!(
+            filter_row_json(&row, &fuzzy),
+            Some(serde_json::json!({"payload": {"event": "open", "count": 2}}))
+        );
+        let regex = RowJsonFilter::parse("/^ev.*$/").unwrap().unwrap();
+        assert_eq!(
+            filter_row_json(&row, &regex),
+            Some(serde_json::json!({"payload": {"event": "open"}}))
+        );
+        assert!(RowJsonFilter::parse("/[unterminated/").is_err());
     }
 
     #[gpui::test]
