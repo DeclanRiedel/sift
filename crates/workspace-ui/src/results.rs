@@ -638,6 +638,7 @@ pub struct ResultsView {
     selected: Option<GridSelection>,
     editing_cell: Option<(usize, usize)>,
     inline_cell_edit: Option<InlineCellEdit>,
+    restore_grid_focus: bool,
     row_json_filter_input: Entity<TextInput>,
     _row_json_filter_subscription: Subscription,
     row_json_folded: bool,
@@ -688,6 +689,7 @@ impl ResultsView {
             selected: None,
             editing_cell: None,
             inline_cell_edit: None,
+            restore_grid_focus: false,
             row_json_filter_input,
             _row_json_filter_subscription: row_json_filter_subscription,
             row_json_folded: false,
@@ -946,6 +948,7 @@ impl ResultsView {
         let had_inline_edit = self.inline_cell_edit.take().is_some();
         let had_editing_cell = self.editing_cell.take().is_some();
         if had_inline_edit || had_editing_cell {
+            self.restore_grid_focus = true;
             cx.notify();
         }
     }
@@ -3228,7 +3231,11 @@ impl Focusable for ResultsView {
 }
 
 impl gpui::Render for ResultsView {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if std::mem::take(&mut self.restore_grid_focus) {
+            let focus = self.focus_handle.clone();
+            window.defer(cx, move |window, cx| focus.focus(window, cx));
+        }
         let colors = cx.theme().colors;
         let context_menu_position = self.context_menu_position;
         let body = match self.tab {

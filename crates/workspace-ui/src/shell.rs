@@ -24873,6 +24873,8 @@ mod tests {
                 cx,
             );
         });
+        cx.run_until_parked();
+        assert!(cx.update(|window, cx| results.focus_handle(cx).is_focused(window)));
         assert_eq!(
             results.read_with(&cx, |results, _| {
                 results.selected_cell_edit().map(|edit| edit.original)
