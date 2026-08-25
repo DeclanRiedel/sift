@@ -53,6 +53,10 @@ pub enum SemanticRequestKind {
     Usages {
         position: u32,
     },
+    Rename {
+        position: u32,
+        new_name: String,
+    },
 }
 
 impl SemanticRequestKind {
@@ -75,6 +79,10 @@ pub enum SemanticOutcome {
         candidates: Vec<CompletionCandidate>,
     },
     Edits {
+        edits: Vec<TextEdit>,
+        warnings: Vec<String>,
+    },
+    RenamePreview {
         edits: Vec<TextEdit>,
         warnings: Vec<String>,
     },

@@ -2611,6 +2611,31 @@ async fn semantic_outcome(
                 }
             }
         }
+        SemanticRequestKind::Rename { position, new_name } => {
+            let catalog =
+                current_catalog_revision(client, session, connection, catalog_revision).await;
+            match client
+                .prepare_semantic_refactor(
+                    session,
+                    connection,
+                    document,
+                    sift_protocol::PrepareSqlRefactorRequest {
+                        revision,
+                        catalog_revision: catalog,
+                        refactor: sift_protocol::SqlRefactor::RenameSymbol { position, new_name },
+                    },
+                )
+                .await
+            {
+                Ok(edit) => match workspace_edit_outcome(edit, document) {
+                    SemanticOutcome::Edits { edits, warnings } => {
+                        SemanticOutcome::RenamePreview { edits, warnings }
+                    }
+                    outcome => outcome,
+                },
+                Err(error) => SemanticOutcome::Failed(format!("preparing rename failed: {error}")),
+            }
+        }
     }
 }
 

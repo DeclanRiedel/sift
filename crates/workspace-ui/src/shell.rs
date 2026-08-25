@@ -810,6 +810,7 @@ pub enum Modal {
     DatabaseConnection,
     ConfirmDeleteConnection(ConnectionNavEntry),
     ConfirmTerminateProcess(i64),
+    SemanticRename,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1156,6 +1157,15 @@ struct PendingDatabaseExplain {
     sql: String,
     analyze: bool,
     source: DatabaseObjectSource,
+}
+
+struct PendingSemanticRename {
+    item_id: u64,
+    revision: u64,
+    position: u32,
+    edits: Option<Vec<sift_protocol::TextEdit>>,
+    warnings: Vec<String>,
+    pending: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -3745,6 +3755,7 @@ pub struct WorkspaceShell {
     inspector_focus_handle: FocusHandle,
     connections_scroll_handle: ScrollHandle,
     query_input: Entity<TextInput>,
+    semantic_rename_input: Entity<TextInput>,
     saved_query_name_input: Entity<TextInput>,
     result_cell_edit_input: Entity<TextInput>,
     /// Legacy modal slot retained while result-edit review shares the modal
@@ -3844,6 +3855,7 @@ pub struct WorkspaceShell {
     /// generation is allowed to dispatch, so a burst of keystrokes costs one
     /// server round trip instead of one per character.
     semantic_analyze_generation: HashMap<u64, u64>,
+    pending_semantic_rename: Option<PendingSemanticRename>,
     next_execution_id: u64,
     running_explains: HashMap<u64, u64>,
     next_explain_id: u64,
@@ -4053,6 +4065,7 @@ impl WorkspaceShell {
             })
             .collect();
         let query_input = cx.new(|cx| TextInput::new("", "Search commands…", cx));
+        let semantic_rename_input = cx.new(|cx| TextInput::new("", "New symbol name", cx));
         let saved_query_name_input = cx.new(|cx| TextInput::new("", "Saved query name…", cx));
         let result_cell_edit_input = cx.new(|cx| TextInput::new("", "New value…", cx));
         let schema_search_input = cx.new(|cx| {
@@ -4204,6 +4217,7 @@ impl WorkspaceShell {
             inspector_focus_handle: cx.focus_handle(),
             connections_scroll_handle: ScrollHandle::new(),
             query_input,
+            semantic_rename_input,
             saved_query_name_input,
             result_cell_edit_input,
             result_json_edit_editor: None,
@@ -4295,6 +4309,7 @@ impl WorkspaceShell {
             pending_connection_change: None,
             held_result_pages: HashMap::new(),
             semantic_analyze_generation: HashMap::new(),
+            pending_semantic_rename: None,
             next_execution_id: 1,
             running_explains: HashMap::new(),
             next_explain_id: 1,
@@ -4396,6 +4411,7 @@ impl WorkspaceShell {
             CommandId::FormatSql => sift_protocol::OperationKind::FormatSql,
             CommandId::ApplySqlQuickFix => sift_protocol::OperationKind::SqlQuickFix,
             CommandId::FindSqlUsages => sift_protocol::OperationKind::FindSqlUsages,
+            CommandId::RenameSqlSymbol => sift_protocol::OperationKind::PrepareSqlRefactor,
             CommandId::SearchSchema => sift_protocol::OperationKind::SearchSchema,
             CommandId::SearchData => sift_protocol::OperationKind::SearchData,
             _ => return spec,
@@ -5591,7 +5607,30 @@ impl WorkspaceShell {
                 item_id,
                 text_revision,
                 outcome,
-            } => self.route_semantic_outcome(item_id, text_revision, *outcome, cx),
+            } => match *outcome {
+                SemanticOutcome::RenamePreview { edits, warnings } => {
+                    if let Some(rename) = self.pending_semantic_rename.as_mut().filter(|rename| {
+                        rename.item_id == item_id && rename.revision == text_revision
+                    }) {
+                        rename.pending = false;
+                        rename.edits = Some(edits);
+                        rename.warnings = warnings;
+                        cx.notify();
+                    }
+                }
+                SemanticOutcome::Failed(message)
+                    if self.pending_semantic_rename.as_ref().is_some_and(|rename| {
+                        rename.item_id == item_id && rename.revision == text_revision
+                    }) =>
+                {
+                    if let Some(rename) = self.pending_semantic_rename.as_mut() {
+                        rename.pending = false;
+                        rename.warnings = vec![message.clone()];
+                    }
+                    self.show_error_toast(message, cx);
+                }
+                outcome => self.route_semantic_outcome(item_id, text_revision, outcome, cx),
+            },
             ExecutorEvent::TableDefinitionLoaded { item_id, graph } => {
                 let source = match self.table_definitions.remove(&item_id) {
                     Some(TableDefinitionState::Loading { source })
@@ -12707,6 +12746,9 @@ impl WorkspaceShell {
             self.result_cell_edit_target = None;
             self.result_edit_error = None;
         }
+        if self.modal == Some(Modal::SemanticRename) {
+            self.pending_semantic_rename = None;
+        }
         self.modal = None;
         // Return focus to the surface the user chose before opening temporary UI.
         self.restore_active_surface(window, cx);
@@ -12757,6 +12799,7 @@ impl WorkspaceShell {
             CommandId::FindSqlUsages => {
                 self.dispatch_active_editor_action(&crate::editor::FindUsages, window, cx)
             }
+            CommandId::RenameSqlSymbol => self.open_semantic_rename(window, cx),
             CommandId::SearchSchema => self.open_schema_search(window, cx),
             CommandId::SearchData => self.open_data_search(window, cx),
             CommandId::BeginTransaction => self.begin_transaction(cx),
@@ -12822,6 +12865,85 @@ impl WorkspaceShell {
                 .active_focus_handle(cx)
                 .dispatch_action(action, window, cx);
         }
+    }
+
+    fn open_semantic_rename(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some((item_id, editor)) = self.panes.get(self.active_pane).and_then(|pane| {
+            let pane = pane.read(cx);
+            let item_id = pane.active_item()?.id;
+            Some((item_id, pane.editor(item_id)?))
+        }) else {
+            return;
+        };
+        let editor = editor.read(cx);
+        if !editor.semantic_enabled() {
+            return;
+        }
+        let position = u32::try_from(editor.cursor_offset()).unwrap_or(u32::MAX);
+        self.pending_semantic_rename = Some(PendingSemanticRename {
+            item_id,
+            revision: editor.text_revision(),
+            position,
+            edits: None,
+            warnings: Vec::new(),
+            pending: false,
+        });
+        self.semantic_rename_input
+            .update(cx, |input, cx| input.set_text("", cx));
+        self.modal = Some(Modal::SemanticRename);
+        self.semantic_rename_input
+            .focus_handle(cx)
+            .focus(window, cx);
+        cx.notify();
+    }
+
+    fn preview_semantic_rename(&mut self, cx: &mut Context<Self>) {
+        let new_name = self.semantic_rename_input.read(cx).text().trim().to_owned();
+        if new_name.is_empty() {
+            return;
+        }
+        let Some(rename) = self.pending_semantic_rename.as_ref() else {
+            return;
+        };
+        let (item_id, revision, position) = (rename.item_id, rename.revision, rename.position);
+        let Some(editor) = self.editor_for_item(item_id, cx) else {
+            return;
+        };
+        if editor.read(cx).text_revision() != revision {
+            return;
+        }
+        let command = ExecutorCommand::Semantic {
+            item_id,
+            text_revision: revision,
+            text: editor.read(cx).document().text().to_owned(),
+            request: SemanticRequestKind::Rename { position, new_name },
+        };
+        let pending = self
+            .executor_sender
+            .as_ref()
+            .is_some_and(|sender| sender.send(command).is_ok());
+        if let Some(rename) = self.pending_semantic_rename.as_mut() {
+            rename.pending = pending;
+            rename.edits = None;
+        }
+        cx.notify();
+    }
+
+    fn apply_semantic_rename(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(rename) = self.pending_semantic_rename.take() else {
+            return;
+        };
+        let Some(edits) = rename.edits else {
+            return;
+        };
+        if let Some(editor) = self.editor_for_item(rename.item_id, cx) {
+            editor.update(cx, |editor, cx| {
+                editor.apply_prepared_semantic_edits(rename.revision, edits, rename.warnings, cx);
+            });
+        }
+        self.modal = None;
+        self.focus_active_pane(window, cx);
+        cx.notify();
     }
 
     fn toggle_left_dock(
@@ -19677,6 +19799,22 @@ impl WorkspaceShell {
                             .child(Button::new("confirm-terminate-process", "Terminate").tone(ButtonTone::DangerMuted).on_click(cx.listener(move |shell, _, _, cx| shell.confirm_terminate_process(process_id, cx)))))
                         .into_any_element()
                 }
+                Modal::SemanticRename => {
+                    let (pending, edit_count, warnings) = self.pending_semantic_rename.as_ref().map_or((false, None, Vec::new()), |rename| (rename.pending, rename.edits.as_ref().map(Vec::len), rename.warnings.clone()));
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_3()
+                        .child(div().font_weight(gpui::FontWeight::SEMIBOLD).child("Rename SQL symbol"))
+                        .child(self.semantic_rename_input.clone())
+                        .children(edit_count.map(|count| div().rounded_sm().bg(colors.active_surface).p_2().child(format!("Preview: {count} reference(s) in this query will change."))))
+                        .children(warnings.into_iter().map(|warning| div().text_xs().text_color(colors.warning).child(warning)))
+                        .child(div().flex().justify_end().gap_2()
+                            .child(Button::new("cancel-semantic-rename", "Cancel").tone(ButtonTone::Neutral).on_click(cx.listener(|shell, _, window, cx| shell.dismiss_modal(&DismissModal, window, cx))))
+                            .child(Button::new("preview-semantic-rename", if pending { "Preparing…" } else { "Preview" }).tone(ButtonTone::Neutral).disabled(pending).on_click(cx.listener(|shell, _, _, cx| shell.preview_semantic_rename(cx))))
+                            .child(Button::new("apply-semantic-rename", "Apply rename").tone(ButtonTone::Accent).disabled(edit_count.is_none() || pending).on_click(cx.listener(|shell, _, window, cx| shell.apply_semantic_rename(window, cx)))))
+                        .into_any_element()
+                }
             };
             let toolbar_height = cx.theme().metrics.toolbar_height;
             // Scrim-clicking dismisses transient surfaces. Long-form dialogs
@@ -19698,6 +19836,7 @@ impl WorkspaceShell {
                     | Modal::ConfirmTransactionDisconnect
                     | Modal::ConfirmDeleteConnection(_)
                     | Modal::ConfirmTerminateProcess(_)
+                    | Modal::SemanticRename
             );
             div()
                 .id("modal-layer")
@@ -25240,6 +25379,60 @@ mod tests {
             commands.try_recv(),
             Ok(ExecutorCommand::TerminateDatabaseProcess { process_id: 42 })
         ));
+    }
+
+    #[gpui::test]
+    fn semantic_rename_previews_before_applying(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        workspace.update_in(&mut cx, |shell, window, cx| {
+            let editor = shell.editor_for_item(1, cx).unwrap();
+            editor.update(cx, |editor, cx| {
+                editor.replace_text_from_owner("select old_name from audit.events old_name", cx)
+            });
+            let revision = editor.read(cx).text_revision();
+            shell.pending_semantic_rename = Some(PendingSemanticRename {
+                item_id: 1,
+                revision,
+                position: 7,
+                edits: None,
+                warnings: Vec::new(),
+                pending: true,
+            });
+            shell.modal = Some(Modal::SemanticRename);
+            shell.on_executor_event(
+                ExecutorEvent::Semantic {
+                    item_id: 1,
+                    text_revision: revision,
+                    outcome: Box::new(SemanticOutcome::RenamePreview {
+                        edits: vec![sift_protocol::TextEdit {
+                            range: sift_protocol::TextRange { start: 7, end: 15 },
+                            new_text: "new_name".into(),
+                        }],
+                        warnings: Vec::new(),
+                    }),
+                },
+                cx,
+            );
+            assert_eq!(
+                editor.read(cx).document().text(),
+                "select old_name from audit.events old_name"
+            );
+            assert_eq!(
+                shell
+                    .pending_semantic_rename
+                    .as_ref()
+                    .and_then(|rename| rename.edits.as_ref())
+                    .map(Vec::len),
+                Some(1)
+            );
+            shell.apply_semantic_rename(window, cx);
+            assert_eq!(
+                editor.read(cx).document().text(),
+                "select new_name from audit.events old_name"
+            );
+        });
     }
 
     #[gpui::test]

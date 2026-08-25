@@ -243,6 +243,10 @@ impl QueryDocument {
         )
     }
 
+    pub fn cursor_offset(&self) -> usize {
+        self.cursor()
+    }
+
     /// Apply a text splice against the replica and refresh the cached text. Only
     /// touches CRDT state; selection and history are the caller's concern.
     fn splice(&mut self, start: usize, end: usize, new_text: &str) {
@@ -1036,6 +1040,10 @@ impl QueryEditor {
         self.document.cursor_position()
     }
 
+    pub fn cursor_offset(&self) -> usize {
+        self.document.cursor()
+    }
+
     /// Monotonic identity of the current buffer contents. Every semantic
     /// request is tagged with it and every answer is checked against it, so a
     /// slow server reply can never be applied to text the user has since
@@ -1106,6 +1114,7 @@ impl QueryEditor {
             SemanticOutcome::Edits { edits, warnings } => {
                 self.apply_semantic_edits(revision, edits, warnings, cx)
             }
+            SemanticOutcome::RenamePreview { .. } => false,
             SemanticOutcome::Failed(message) => {
                 self.semantic.set_notice(Some(message));
                 true
@@ -1151,6 +1160,16 @@ impl QueryEditor {
         self.semantic.set_notice(warnings.first().cloned());
         self.edited(cx);
         true
+    }
+
+    pub fn apply_prepared_semantic_edits(
+        &mut self,
+        revision: u64,
+        edits: Vec<sift_protocol::TextEdit>,
+        warnings: Vec<String>,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        self.apply_semantic_edits(revision, edits, warnings, cx)
     }
 
     fn complete(&mut self, _: &Complete, _: &mut Window, cx: &mut Context<Self>) {
