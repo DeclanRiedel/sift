@@ -13665,40 +13665,30 @@ impl WorkspaceShell {
                 }
                 _ => None,
             });
-        let status_color = match &self.connection_status {
+        let label_color = match &self.connection_status {
             ConnectionStatus::Connected { .. } if failure.is_some() => colors.warning,
-            ConnectionStatus::Connected { .. } => colors.success,
-            ConnectionStatus::Connecting { .. } => colors.warning,
             ConnectionStatus::Failed { .. } => colors.danger,
-            ConnectionStatus::Disconnected => colors.muted_text,
+            _ => colors.muted_text,
         };
 
         div()
             .id("connections-health-footer")
             .debug_selector(|| "connections-health-footer".into())
-            .h(px(32.))
+            .h(cx.theme().metrics.row_height)
             .flex_none()
             .flex()
             .items_center()
-            .gap_1()
-            .px_2()
+            .gap(px(2.))
+            .px_3()
             .border_t_1()
             .border_color(colors.subtle_border)
-            .bg(colors.toolbar)
-            .child(
-                div()
-                    .size(px(6.))
-                    .flex_none()
-                    .rounded_full()
-                    .bg(status_color),
-            )
             .child(
                 div()
                     .flex_1()
                     .min_w_0()
                     .truncate()
                     .text_xs()
-                    .text_color(colors.muted_text)
+                    .text_color(label_color)
                     .child(label),
             )
             .children(reconnect_detail.map(|detail| {
