@@ -809,6 +809,7 @@ pub enum Modal {
     Account,
     DatabaseConnection,
     ConfirmDeleteConnection(ConnectionNavEntry),
+    ConfirmTerminateProcess(i64),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1341,6 +1342,10 @@ pub enum ExecutorCommand {
         tenant_id: i64,
         profile_id: i64,
     },
+    LoadDatabaseProcesses,
+    TerminateDatabaseProcess {
+        process_id: i64,
+    },
     LoadTableDefinition {
         item_id: u64,
         source: DatabaseObjectSource,
@@ -1495,6 +1500,11 @@ pub enum ExecutorEvent {
         profile_id: i64,
     },
     ProfileDeletionFailed(String),
+    DatabaseProcessesLoaded(Result<Vec<sift_protocol::DatabaseProcess>, String>),
+    DatabaseProcessTerminated {
+        process_id: i64,
+        result: Result<bool, String>,
+    },
     TableDefinitionLoaded {
         item_id: u64,
         graph: Box<sift_protocol::CatalogGraph>,
@@ -3816,6 +3826,9 @@ pub struct WorkspaceShell {
     executor_sender: Option<tokio::sync::mpsc::UnboundedSender<ExecutorCommand>>,
     room_document_sender: Option<tokio::sync::mpsc::UnboundedSender<RoomDocumentCommand>>,
     running_queries: HashMap<u64, u64>,
+    database_processes: Vec<sift_protocol::DatabaseProcess>,
+    database_processes_loading: bool,
+    database_processes_error: Option<String>,
     transaction: Option<sift_protocol::TransactionInfo>,
     transaction_pending: bool,
     transaction_aborted: bool,
@@ -4270,6 +4283,9 @@ impl WorkspaceShell {
             executor_sender: None,
             room_document_sender: None,
             running_queries: HashMap::new(),
+            database_processes: Vec::new(),
+            database_processes_loading: false,
+            database_processes_error: None,
             transaction: None,
             transaction_pending: false,
             transaction_aborted: false,
@@ -5904,6 +5920,34 @@ impl WorkspaceShell {
             }
             ExecutorEvent::ProfileDeletionFailed(message) => {
                 self.show_error_toast(message, cx);
+            }
+            ExecutorEvent::DatabaseProcessesLoaded(result) => {
+                self.database_processes_loading = false;
+                match result {
+                    Ok(processes) => {
+                        self.database_processes = processes;
+                        self.database_processes_error = None;
+                    }
+                    Err(message) => self.database_processes_error = Some(message),
+                }
+                cx.notify();
+            }
+            ExecutorEvent::DatabaseProcessTerminated { process_id, result } => {
+                match result {
+                    Ok(true) => {
+                        self.database_processes
+                            .retain(|process| process.process_id != process_id);
+                        self.show_success_toast(format!("Terminated process {process_id}"), cx);
+                    }
+                    Ok(false) => self
+                        .show_error_toast(format!("Process {process_id} was not terminated"), cx),
+                    Err(message) => {
+                        self.record_runtime_error(None, "Activity monitor", message.clone(), cx);
+                        self.show_error_toast(message, cx);
+                    }
+                }
+                self.modal = None;
+                cx.notify();
             }
         }
     }
@@ -9394,7 +9438,38 @@ impl WorkspaceShell {
             self.active_bottom_tool = tool;
             self.bottom_dock.presentation.open = true;
         }
+        if tool == BottomTool::Monitor && self.bottom_dock.presentation.open {
+            self.load_database_processes(cx);
+        }
         self.persist(cx);
+        cx.notify();
+    }
+
+    fn load_database_processes(&mut self, cx: &mut Context<Self>) {
+        if self.database_processes_loading {
+            return;
+        }
+        let Some(sender) = &self.executor_sender else {
+            self.database_processes_error = Some("Database executor is unavailable".into());
+            return;
+        };
+        self.database_processes_loading =
+            sender.send(ExecutorCommand::LoadDatabaseProcesses).is_ok();
+        if self.database_processes_loading {
+            self.database_processes_error = None;
+        }
+        cx.notify();
+    }
+
+    fn request_terminate_process(&mut self, process_id: i64, cx: &mut Context<Self>) {
+        self.modal = Some(Modal::ConfirmTerminateProcess(process_id));
+        cx.notify();
+    }
+
+    fn confirm_terminate_process(&mut self, process_id: i64, cx: &mut Context<Self>) {
+        if let Some(sender) = &self.executor_sender {
+            let _ = sender.send(ExecutorCommand::TerminateDatabaseProcess { process_id });
+        }
         cx.notify();
     }
 
@@ -19589,6 +19664,19 @@ impl WorkspaceShell {
                         )
                         .into_any_element()
                 }
+                Modal::ConfirmTerminateProcess(process_id) => {
+                    let process_id = *process_id;
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_4()
+                        .child(div().font_weight(gpui::FontWeight::SEMIBOLD).child(format!("Terminate database process {process_id}?")))
+                        .child(div().text_sm().text_color(colors.muted_text).whitespace_normal().child("This asks the database server to terminate the selected process. Any open work in that process may be rolled back."))
+                        .child(div().flex().justify_end().gap_2()
+                            .child(Button::new("cancel-terminate-process", "Cancel").tone(ButtonTone::Neutral).on_click(cx.listener(|shell, _, window, cx| shell.dismiss_modal(&DismissModal, window, cx))))
+                            .child(Button::new("confirm-terminate-process", "Terminate").tone(ButtonTone::DangerMuted).on_click(cx.listener(move |shell, _, _, cx| shell.confirm_terminate_process(process_id, cx)))))
+                        .into_any_element()
+                }
             };
             let toolbar_height = cx.theme().metrics.toolbar_height;
             // Scrim-clicking dismisses transient surfaces. Long-form dialogs
@@ -19609,6 +19697,7 @@ impl WorkspaceShell {
                     | Modal::DatabaseConnection
                     | Modal::ConfirmTransactionDisconnect
                     | Modal::ConfirmDeleteConnection(_)
+                    | Modal::ConfirmTerminateProcess(_)
             );
             div()
                 .id("modal-layer")
@@ -25125,6 +25214,32 @@ mod tests {
             assert!(!snapshot.workspace.bottom_dock.open);
             assert!(!snapshot.workspace.right_dock.open);
         });
+    }
+
+    #[gpui::test]
+    fn monitor_loads_activity_and_requires_termination_confirmation(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        let (sender, mut commands) = tokio::sync::mpsc::unbounded_channel();
+        workspace.update(&mut cx, |shell, cx| {
+            shell.executor_sender = Some(sender);
+            shell.select_bottom_tool(BottomTool::Monitor, cx);
+        });
+        assert!(matches!(
+            commands.try_recv(),
+            Ok(ExecutorCommand::LoadDatabaseProcesses)
+        ));
+        workspace.update(&mut cx, |shell, cx| {
+            shell.database_processes_loading = false;
+            shell.request_terminate_process(42, cx);
+            assert_eq!(shell.modal, Some(Modal::ConfirmTerminateProcess(42)));
+            shell.confirm_terminate_process(42, cx);
+        });
+        assert!(matches!(
+            commands.try_recv(),
+            Ok(ExecutorCommand::TerminateDatabaseProcess { process_id: 42 })
+        ));
     }
 
     #[gpui::test]

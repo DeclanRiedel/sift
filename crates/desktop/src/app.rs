@@ -1038,6 +1038,39 @@ async fn run_query_executor(
                     return;
                 }
             }
+            ExecutorCommand::LoadDatabaseProcesses => {
+                let result = match context.as_ref() {
+                    Some(opened) => opened
+                        .client
+                        .list_processes(opened.session, opened.metadata_connection)
+                        .await
+                        .map_err(|error| format!("loading database activity failed: {error}")),
+                    None => Err("Connect before loading database activity".into()),
+                };
+                if events
+                    .send(ExecutorEvent::DatabaseProcessesLoaded(result))
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            ExecutorCommand::TerminateDatabaseProcess { process_id } => {
+                let result = match context.as_ref() {
+                    Some(opened) => opened
+                        .client
+                        .kill_process(opened.session, opened.metadata_connection, process_id)
+                        .await
+                        .map(|response| response.terminated)
+                        .map_err(|error| format!("terminating database process failed: {error}")),
+                    None => Err("Connect before terminating database activity".into()),
+                };
+                if events
+                    .send(ExecutorEvent::DatabaseProcessTerminated { process_id, result })
+                    .is_err()
+                {
+                    return;
+                }
+            }
             ExecutorCommand::LoadTableDefinition { item_id, source } => {
                 let event = match context.as_ref() {
                     Some(opened) if opened.profile_id == source.profile_id => {
