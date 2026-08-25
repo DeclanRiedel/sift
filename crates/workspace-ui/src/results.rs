@@ -1614,10 +1614,13 @@ impl ResultsView {
         shift: bool,
         click_count: usize,
         cx: &mut Context<Self>,
-    ) {
+    ) -> bool {
         if click_count >= 2 {
             self.set_selection(GridSelection::Cell { row, column }, cx);
-            cx.emit(ResultsEvent::EditSelectedCellRequested);
+            if self.editing_cell != Some((row, column)) {
+                cx.emit(ResultsEvent::EditSelectedCellRequested);
+                return true;
+            }
         } else if shift {
             self.extend_cell_selection(row, column, cx);
         } else {
@@ -1625,6 +1628,7 @@ impl ResultsView {
             // made a subsequent double-click lose its edit target.
             self.set_selection(GridSelection::Cell { row, column }, cx);
         }
+        false
     }
 
     fn open_cell_context_menu(
@@ -3362,7 +3366,7 @@ mod tests {
                 view.selected,
                 Some(GridSelection::Cell { row: 0, column: 0 })
             );
-            view.select_cell_from_pointer(0, 0, false, 2, cx);
+            assert!(view.select_cell_from_pointer(0, 0, false, 2, cx));
             assert_eq!(
                 view.selected,
                 Some(GridSelection::Cell { row: 0, column: 0 })
@@ -3372,6 +3376,11 @@ mod tests {
             assert_eq!((edit.row, edit.column), (0, 0));
             assert_eq!(edit.input.read(cx).text(), "7");
             assert_eq!(view.editing_cell, Some((0, 0)));
+            assert!(!view.select_cell_from_pointer(0, 0, false, 2, cx));
+            assert_eq!(
+                view.selected,
+                Some(GridSelection::Cell { row: 0, column: 0 })
+            );
             view.set_inline_cell_edit_pending(true, cx);
             assert!(view.inline_cell_edit.as_ref().unwrap().pending);
             view.set_inline_cell_edit_error(cx);
