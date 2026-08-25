@@ -240,6 +240,7 @@ pub struct ResultData {
     pub columns: Vec<ResultColumn>,
     pub rows: Vec<Row>,
     pub affected_rows: Option<u64>,
+    pub duration_ms: Option<u64>,
     pub warnings: Vec<DriverWarning>,
     pub has_more: bool,
     /// Set when a multi-result batch was truncated to its first result set.
@@ -287,6 +288,7 @@ impl ResultState {
                 .collect(),
             rows: response.rows,
             affected_rows: response.affected_rows,
+            duration_ms: None,
             warnings: response.warnings,
             has_more: response.has_more,
             truncated_extra_results: false,
@@ -377,10 +379,16 @@ impl ResultState {
             ResultState::Pending => "Running…".into(),
             ResultState::Streaming(data) => format!("{}+ row(s) · Running…", data.rows.len()),
             ResultState::Ready(data) => match (data.rows.len(), data.affected_rows) {
-                (0, Some(affected)) => format!("{affected} row(s) affected"),
+                (0, Some(affected)) => match data.duration_ms {
+                    Some(duration) => format!("{affected} row(s) affected · {duration} ms"),
+                    None => format!("{affected} row(s) affected"),
+                },
                 (rows, _) => {
                     let more = if data.has_more { "+" } else { "" };
-                    format!("{rows}{more} row(s)")
+                    match data.duration_ms {
+                        Some(duration) => format!("{rows}{more} row(s) · {duration} ms"),
+                        None => format!("{rows}{more} row(s)"),
+                    }
                 }
             },
             ResultState::Unavailable(reason) => reason.clone(),
@@ -639,6 +647,7 @@ pub struct ResultsView {
     editing_cell: Option<(usize, usize)>,
     inline_cell_edit: Option<InlineCellEdit>,
     restore_grid_focus: bool,
+    query_started_at: Option<std::time::Instant>,
     row_json_filter_input: Entity<TextInput>,
     _row_json_filter_subscription: Subscription,
     row_json_folded: bool,
@@ -690,6 +699,7 @@ impl ResultsView {
             editing_cell: None,
             inline_cell_edit: None,
             restore_grid_focus: false,
+            query_started_at: None,
             row_json_filter_input,
             _row_json_filter_subscription: row_json_filter_subscription,
             row_json_folded: false,
@@ -1000,7 +1010,24 @@ impl ResultsView {
     }
 
     /// Adopt a new outcome, resetting selection and opening failures as text.
-    pub fn set_state(&mut self, state: ResultState, cx: &mut Context<Self>) {
+    pub fn set_state(&mut self, mut state: ResultState, cx: &mut Context<Self>) {
+        match &mut state {
+            ResultState::Pending => self.query_started_at = Some(std::time::Instant::now()),
+            ResultState::Streaming(_) => {
+                self.query_started_at
+                    .get_or_insert_with(std::time::Instant::now);
+            }
+            ResultState::Ready(data) => {
+                if data.duration_ms.is_none() {
+                    data.duration_ms = self.query_started_at.take().map(|started| {
+                        u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)
+                    });
+                } else {
+                    self.query_started_at = None;
+                }
+            }
+            _ => self.query_started_at = None,
+        }
         self.rendered_columns = match &state {
             ResultState::Streaming(data) | ResultState::Ready(data) => data
                 .columns
@@ -1230,6 +1257,9 @@ impl ResultsView {
                     _ => unreachable!("stream initialized above"),
                 };
                 data.affected_rows = affected_rows;
+                data.duration_ms = self.query_started_at.take().map(|started| {
+                    u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)
+                });
                 data.warnings = warnings;
                 self.state = ResultState::Ready(data);
                 self.messages = Self::messages_for_state(&self.state);
@@ -3732,6 +3762,60 @@ mod tests {
         assert!(data.columns[1].nullable);
         assert_eq!(data.rows.len(), 1);
         assert_eq!(state.status_label(), "1 row(s)");
+    }
+
+    #[test]
+    fn completed_result_status_includes_query_duration() {
+        let state = ResultState::Ready(ResultData {
+            rows: vec![Row::new(vec![Value::Int64(1)])],
+            duration_ms: Some(12),
+            ..Default::default()
+        });
+        assert_eq!(state.status_label(), "1 row(s) · 12 ms");
+
+        let state = ResultState::Ready(ResultData {
+            affected_rows: Some(3),
+            duration_ms: Some(7),
+            ..Default::default()
+        });
+        assert_eq!(state.status_label(), "3 row(s) affected · 7 ms");
+    }
+
+    #[gpui::test]
+    fn streamed_result_records_elapsed_query_time(cx: &mut TestAppContext) {
+        let view = cx.new(ResultsView::new);
+        view.update(cx, |view, cx| {
+            view.set_pending(cx);
+            view.query_started_at = Some(
+                std::time::Instant::now()
+                    .checked_sub(std::time::Duration::from_millis(12))
+                    .unwrap(),
+            );
+            view.begin_stream(cx);
+            assert_eq!(
+                view.apply_stream_page(
+                    Page::Rows {
+                        rows: vec![Row::new(vec![Value::Int64(1)])],
+                    },
+                    cx,
+                ),
+                StreamProgress::Consumed
+            );
+            assert_eq!(
+                view.apply_stream_page(
+                    Page::Done {
+                        affected_rows: None,
+                        warnings: Vec::new(),
+                    },
+                    cx,
+                ),
+                StreamProgress::Terminal
+            );
+            let ResultState::Ready(data) = view.state() else {
+                panic!("terminal page should complete the result")
+            };
+            assert!(data.duration_ms.is_some_and(|duration| duration >= 12));
+        });
     }
 
     #[test]
