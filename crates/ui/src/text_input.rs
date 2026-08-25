@@ -13,7 +13,10 @@ use crate::ActiveTheme;
 
 actions!(
     sift_text_input,
-    [Backspace, Delete, Left, Right, Home, End, Copy, Cut, Paste, SelectAll, Tab, Backtab]
+    [
+        Backspace, Delete, Left, Right, Home, End, Copy, Cut, Paste, SelectAll, Tab, Backtab,
+        Submit
+    ]
 );
 
 /// Minimal single-line GPUI text input used to prove the Phase M input
@@ -37,6 +40,7 @@ pub struct TextInput {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TextInputEvent {
     Changed,
+    Submitted,
 }
 
 impl gpui::EventEmitter<TextInputEvent> for TextInput {}
@@ -216,6 +220,10 @@ impl TextInput {
         } else {
             window.focus_prev(cx);
         }
+    }
+
+    fn submit(&mut self, _: &Submit, _: &mut Window, cx: &mut Context<Self>) {
+        cx.emit(TextInputEvent::Submitted);
     }
 
     fn offset_from_utf16(&self, offset: usize) -> usize {
@@ -414,6 +422,7 @@ impl gpui::Render for TextInput {
             .on_action(cx.listener(Self::select_all))
             .on_action(cx.listener(Self::tab))
             .on_action(cx.listener(Self::backtab))
+            .on_action(cx.listener(Self::submit))
             .w_full()
             .min_w_0()
             .h(px(26.))

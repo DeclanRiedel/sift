@@ -566,6 +566,7 @@ struct InlineCellEdit {
     row: usize,
     column: usize,
     input: Entity<TextInput>,
+    _subscription: Subscription,
     error: bool,
     pending: bool,
 }
@@ -667,10 +668,14 @@ impl ResultsView {
         let row_json_filter_input = cx.new(|cx| {
             TextInput::new("", "Filter keys or /regex/", cx).aria_label("Filter selected row JSON")
         });
-        let row_json_filter_subscription = cx
-            .subscribe(&row_json_filter_input, |_, _, _: &TextInputEvent, cx| {
-                cx.emit(ResultsEvent::RowJsonViewerChanged)
-            });
+        let row_json_filter_subscription = cx.subscribe(
+            &row_json_filter_input,
+            |_, _, event: &TextInputEvent, cx| {
+                if *event == TextInputEvent::Changed {
+                    cx.emit(ResultsEvent::RowJsonViewerChanged);
+                }
+            },
+        );
         Self {
             focus_handle: cx.focus_handle(),
             state: ResultState::Idle,
@@ -742,6 +747,13 @@ impl ResultsView {
         self.inline_cell_edit
             .as_ref()
             .map(|edit| (edit.input.read(cx).text().to_string(), edit.pending))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn inline_cell_edit_focus(&self, cx: &App) -> Option<FocusHandle> {
+        self.inline_cell_edit
+            .as_ref()
+            .map(|edit| edit.input.focus_handle(cx))
     }
 
     pub(crate) fn placement(&self) -> ResultPlacement {
@@ -877,10 +889,16 @@ impl ResultsView {
             TextInput::new(text, "New cell value", cx).aria_label("Edit selected result cell")
         });
         let focus = input.focus_handle(cx);
+        let subscription = cx.subscribe(&input, |view, _, event: &TextInputEvent, cx| {
+            if *event == TextInputEvent::Submitted {
+                view.submit_inline_cell_edit(cx);
+            }
+        });
         self.inline_cell_edit = Some(InlineCellEdit {
             row,
             column,
             input,
+            _subscription: subscription,
             error: false,
             pending: false,
         });
@@ -2474,6 +2492,7 @@ impl ResultsView {
                                                         event.click_count,
                                                         cx,
                                                     );
+                                                    cx.stop_propagation();
                                                 },
                                             ),
                                         )

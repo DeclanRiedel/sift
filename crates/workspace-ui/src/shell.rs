@@ -19703,6 +19703,11 @@ mod tests {
 
     fn shell(cx: &mut TestAppContext) -> gpui::WindowHandle<WorkspaceShell> {
         cx.update(|cx| {
+            cx.bind_keys([gpui::KeyBinding::new(
+                "enter",
+                sift_ui::Submit,
+                Some("SiftTextInput"),
+            )]);
             cx.open_window(Default::default(), |window, cx| {
                 cx.new(|cx| {
                     WorkspaceShell::new(
@@ -24794,14 +24799,40 @@ mod tests {
                 );
                 results.select_cell(0, 0, cx);
             });
-            shell.open_result_cell_editor(&pane, item_id, window, cx);
             shell.executor_sender = Some(sender);
             (item_id, results)
         });
+        cx.run_until_parked();
+        let row = cx.debug_bounds("result-row-0").expect("result row");
+        let cell = point(
+            row.left() + px(crate::results::ROW_NUMBER_WIDTH + 12.0),
+            row.top() + px(crate::results::ROW_HEIGHT / 2.0),
+        );
+        cx.simulate_event(gpui::MouseDownEvent {
+            position: cell,
+            modifiers: Modifiers::default(),
+            button: MouseButton::Left,
+            click_count: 2,
+            first_mouse: false,
+        });
+        cx.simulate_mouse_up(cell, MouseButton::Left, Modifiers::default());
+        cx.run_until_parked();
+        assert_eq!(
+            results.read_with(&cx, |results, cx| results.inline_cell_edit_status(cx)),
+            Some(("open".into(), false)),
+            "double-click should mount and focus the inline editor"
+        );
+        assert!(cx.update(|window, cx| {
+            results
+                .read(cx)
+                .inline_cell_edit_focus(cx)
+                .is_some_and(|focus| focus.is_focused(window))
+        }));
         results.update(&mut cx, |results, cx| {
             results.set_inline_cell_edit_text("closed", cx)
         });
         cx.run_until_parked();
+        while receiver.try_recv().is_ok() {}
         cx.simulate_keystrokes("enter");
         cx.run_until_parked();
 

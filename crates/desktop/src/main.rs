@@ -7,7 +7,7 @@ mod platform;
 use gpui::{prelude::*, px, Bounds, Menu, MenuItem, WindowBounds, WindowOptions};
 use gpui_platform::application;
 use sift_ui::{
-    Backspace, Backtab, Copy, Cut, Delete, End, Home, Left, Paste, Right, SelectAll, Tab,
+    Backspace, Backtab, Copy, Cut, Delete, End, Home, Left, Paste, Right, SelectAll, Submit, Tab,
 };
 
 use crate::app::{display_rects, SiftApp, SiftWindow};
@@ -26,6 +26,7 @@ fn editor_key_bindings() -> Vec<gpui::KeyBinding> {
     let ctx = Some("SiftEditor");
     let insert_ctx = Some("SiftEditor && vim_mode == insert");
     let standard_ctx = Some("SiftEditor && keymap_profile != vim");
+    let results_ctx = Some("SiftResults && !SiftTextInput");
     let primary = primary_modifier();
     vec![
         gpui::KeyBinding::new("backspace", ed::Backspace, insert_ctx),
@@ -69,27 +70,23 @@ fn editor_key_bindings() -> Vec<gpui::KeyBinding> {
             standard_ctx,
         ),
         gpui::KeyBinding::new("alt-enter", ed::ApplyQuickFix, standard_ctx),
-        gpui::KeyBinding::new(
-            &format!("{primary}-c"),
-            res::CopySelectedCell,
-            Some("SiftResults"),
-        ),
+        gpui::KeyBinding::new(&format!("{primary}-c"), res::CopySelectedCell, results_ctx),
         gpui::KeyBinding::new(
             &format!("{primary}-shift-c"),
             res::CopySelectedWithHeaders,
-            Some("SiftResults"),
+            results_ctx,
         ),
-        gpui::KeyBinding::new("left", res::MoveCellLeft, Some("SiftResults")),
-        gpui::KeyBinding::new("right", res::MoveCellRight, Some("SiftResults")),
-        gpui::KeyBinding::new("up", res::MoveCellUp, Some("SiftResults")),
-        gpui::KeyBinding::new("down", res::MoveCellDown, Some("SiftResults")),
-        gpui::KeyBinding::new("h", res::MoveCellLeft, Some("SiftResults")),
-        gpui::KeyBinding::new("l", res::MoveCellRight, Some("SiftResults")),
-        gpui::KeyBinding::new("k", res::MoveCellUp, Some("SiftResults")),
-        gpui::KeyBinding::new("j", res::MoveCellDown, Some("SiftResults")),
-        gpui::KeyBinding::new("enter", res::EditSelectedCell, Some("SiftResults")),
-        gpui::KeyBinding::new("shift-h", res::PreviousResultTab, Some("SiftResults")),
-        gpui::KeyBinding::new("shift-l", res::NextResultTab, Some("SiftResults")),
+        gpui::KeyBinding::new("left", res::MoveCellLeft, results_ctx),
+        gpui::KeyBinding::new("right", res::MoveCellRight, results_ctx),
+        gpui::KeyBinding::new("up", res::MoveCellUp, results_ctx),
+        gpui::KeyBinding::new("down", res::MoveCellDown, results_ctx),
+        gpui::KeyBinding::new("h", res::MoveCellLeft, results_ctx),
+        gpui::KeyBinding::new("l", res::MoveCellRight, results_ctx),
+        gpui::KeyBinding::new("k", res::MoveCellUp, results_ctx),
+        gpui::KeyBinding::new("j", res::MoveCellDown, results_ctx),
+        gpui::KeyBinding::new("enter", res::EditSelectedCell, results_ctx),
+        gpui::KeyBinding::new("shift-h", res::PreviousResultTab, results_ctx),
+        gpui::KeyBinding::new("shift-l", res::NextResultTab, results_ctx),
     ]
 }
 
@@ -163,6 +160,7 @@ fn main() {
                 gpui::KeyBinding::new("ctrl-a", SelectAll, text),
                 gpui::KeyBinding::new("tab", Tab, text),
                 gpui::KeyBinding::new("shift-tab", Backtab, text),
+                gpui::KeyBinding::new("enter", Submit, text),
             ]);
             cx.bind_keys(editor_key_bindings());
 
