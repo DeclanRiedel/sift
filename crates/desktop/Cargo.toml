@@ -6,6 +6,7 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+futures = { workspace = true }
 gpui = { workspace = true }
 gpui_platform = { workspace = true }
 keyring = { workspace = true }

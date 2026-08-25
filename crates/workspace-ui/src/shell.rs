@@ -1042,6 +1042,9 @@ pub enum PaneEvent {
         sql: String,
         format: sift_protocol::ExportFormat,
     },
+    CancelResultExportRequested {
+        item_id: u64,
+    },
     EditResultCellRequested {
         item_id: u64,
     },
@@ -1375,6 +1378,9 @@ pub enum ExecutorCommand {
         destination: PathBuf,
         request: sift_protocol::ExportRequest,
     },
+    CancelResultExport {
+        item_id: u64,
+    },
     CapturePlan {
         item_id: u64,
         sql: String,
@@ -1534,6 +1540,10 @@ pub enum ExecutorEvent {
         item_id: u64,
         destination: PathBuf,
         result: Result<(), String>,
+    },
+    ResultExportProgress {
+        item_id: u64,
+        bytes: u64,
     },
     TransactionStateRefreshed(Result<Option<sift_protocol::TransactionState>, String>),
     PlanCaptured {
@@ -1808,6 +1818,9 @@ impl Pane {
                 sql: self.targeted_query_sql(item_id, cx),
                 format: *format,
             }),
+            ResultsEvent::CancelExportRequested => {
+                cx.emit(PaneEvent::CancelResultExportRequested { item_id })
+            }
             ResultsEvent::EditSelectedCellRequested => {
                 cx.emit(PaneEvent::EditResultCellRequested { item_id })
             }
@@ -3602,6 +3615,36 @@ fn parameter_binding_key(sql: &str) -> String {
     format!("{:x}", Sha256::digest(normalized.as_bytes()))
 }
 
+fn export_extension(format: sift_protocol::ExportFormat) -> &'static str {
+    match format {
+        sift_protocol::ExportFormat::Csv => "csv",
+        sift_protocol::ExportFormat::Tsv => "tsv",
+        sift_protocol::ExportFormat::JsonLines => "jsonl",
+        sift_protocol::ExportFormat::JsonArray => "json",
+        sift_protocol::ExportFormat::Html => "html",
+        sift_protocol::ExportFormat::Markdown => "md",
+        sift_protocol::ExportFormat::Xlsx => "xlsx",
+    }
+}
+
+fn safe_export_stem(title: &str) -> String {
+    let stem = title
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.') {
+                character
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+    if stem.trim_matches(['.', '_']).is_empty() {
+        "query-result".into()
+    } else {
+        stem
+    }
+}
+
 fn parse_parameter_value(text: &str) -> Result<sift_protocol::Value, String> {
     let trimmed = text.trim();
     if trimmed.eq_ignore_ascii_case("null") {
@@ -5183,6 +5226,7 @@ impl WorkspaceShell {
                 destination,
                 result,
             } => {
+                self.set_result_export_progress(item_id, None, cx);
                 match result {
                     Ok(()) => {
                         self.show_toast(format!("Exported result to {}", destination.display()), cx)
@@ -5530,6 +5574,9 @@ impl WorkspaceShell {
                     };
                     cx.notify();
                 }
+            }
+            ExecutorEvent::ResultExportProgress { item_id, bytes } => {
+                self.set_result_export_progress(item_id, Some(bytes), cx);
             }
             ExecutorEvent::SchemaSearchFailed {
                 generation,
@@ -9852,6 +9899,12 @@ impl WorkspaceShell {
                 sql,
                 format,
             } => self.prompt_result_export(*item_id, sql.clone(), *format, cx),
+            PaneEvent::CancelResultExportRequested { item_id } => {
+                if let Some(sender) = &self.executor_sender {
+                    let _ = sender.send(ExecutorCommand::CancelResultExport { item_id: *item_id });
+                    self.show_toast("Cancelling export…".into(), cx);
+                }
+            }
             PaneEvent::EditResultCellRequested { item_id } => {
                 self.active_pane = index;
                 self.open_result_cell_editor(emitter, *item_id, window, cx);
@@ -10920,19 +10973,13 @@ impl WorkspaceShell {
                     .map(|item| item.title.clone())
             })
             .unwrap_or_else(|| "query-result".into());
-        let prompt = cx.prompt_for_paths(PathPromptOptions {
-            files: false,
-            directories: true,
-            multiple: false,
-            prompt: Some("Choose result export folder".into()),
-        });
+        let suggested_name = format!("{}.{}", safe_export_stem(&title), export_extension(format));
+        let prompt = cx.prompt_for_new_path(std::path::Path::new("."), Some(&suggested_name));
         cx.spawn(async move |shell, cx| {
             let result = prompt.await;
             let _ = shell.update(cx, |shell, cx| match result {
-                Ok(Ok(Some(paths))) => {
-                    if let Some(directory) = paths.into_iter().next() {
-                        shell.queue_result_export(item_id, directory, title, request, cx);
-                    }
+                Ok(Ok(Some(destination))) => {
+                    shell.queue_result_export_to_path(item_id, destination, request, cx)
                 }
                 Ok(Err(error)) => {
                     shell.show_error_toast(format!("opening export folder: {error}"), cx)
@@ -10943,6 +10990,7 @@ impl WorkspaceShell {
         .detach();
     }
 
+    #[cfg(test)]
     fn queue_result_export(
         &mut self,
         item_id: u64,
@@ -10951,30 +10999,23 @@ impl WorkspaceShell {
         request: sift_protocol::ExportRequest,
         cx: &mut Context<Self>,
     ) {
+        let extension = export_extension(request.format);
+        let stem = safe_export_stem(&title);
+        let destination = directory.join(format!("{stem}.{extension}"));
+        self.queue_result_export_to_path(item_id, destination, request, cx);
+    }
+
+    fn queue_result_export_to_path(
+        &mut self,
+        item_id: u64,
+        destination: PathBuf,
+        request: sift_protocol::ExportRequest,
+        cx: &mut Context<Self>,
+    ) {
         let Some(sender) = &self.executor_sender else {
             self.show_error_toast("Connect before exporting results".into(), cx);
             return;
         };
-        let extension = match request.format {
-            sift_protocol::ExportFormat::Csv => "csv",
-            sift_protocol::ExportFormat::Tsv => "tsv",
-            sift_protocol::ExportFormat::JsonLines => "jsonl",
-            sift_protocol::ExportFormat::JsonArray => "json",
-            sift_protocol::ExportFormat::Html => "html",
-            sift_protocol::ExportFormat::Markdown => "md",
-            sift_protocol::ExportFormat::Xlsx => "xlsx",
-        };
-        let stem = title
-            .chars()
-            .map(|character| {
-                if character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.') {
-                    character
-                } else {
-                    '_'
-                }
-            })
-            .collect::<String>();
-        let destination = directory.join(format!("{stem}.{extension}"));
         if sender
             .send(ExecutorCommand::ExportResult {
                 item_id,
@@ -10983,7 +11024,21 @@ impl WorkspaceShell {
             })
             .is_ok()
         {
+            self.set_result_export_progress(item_id, Some(0), cx);
             self.show_toast("Exporting query result…".into(), cx);
+        }
+    }
+
+    fn set_result_export_progress(
+        &mut self,
+        item_id: u64,
+        bytes: Option<u64>,
+        cx: &mut Context<Self>,
+    ) {
+        for pane in &self.panes {
+            if let Some(results) = pane.read(cx).results.get(&item_id).cloned() {
+                results.update(cx, |results, cx| results.set_export_progress(bytes, cx));
+            }
         }
     }
 

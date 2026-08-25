@@ -1,5 +1,7 @@
+use futures::StreamExt as _;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use tokio::io::AsyncWriteExt as _;
 
 const HISTORY_LOAD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 const ESTIMATED_PLAN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
@@ -525,6 +527,7 @@ async fn run_query_executor(
     health_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut active_queries: HashMap<u64, (u64, tokio::sync::mpsc::UnboundedSender<QueryControl>)> =
         HashMap::new();
+    let mut active_exports: HashMap<u64, tokio::sync::oneshot::Sender<()>> = HashMap::new();
     loop {
         let command = tokio::select! {
             command = commands.recv() => command,
@@ -541,6 +544,7 @@ async fn run_query_executor(
                     return;
                 }
                 cancel_active_queries(&mut active_queries);
+                active_exports.clear();
                 if let Some(previous) = context.take() {
                     let _ = previous.client.close_session(previous.session).await;
                 }
@@ -560,6 +564,7 @@ async fn run_query_executor(
                 name,
             } => {
                 cancel_active_queries(&mut active_queries);
+                active_exports.clear();
                 if let Some(previous) = context.take() {
                     let _ = previous.client.close_session(previous.session).await;
                 }
@@ -1174,29 +1179,42 @@ async fn run_query_executor(
                 destination,
                 request,
             } => {
-                let result = match context.as_ref() {
-                    Some(opened) => match opened
-                        .client
-                        .export_query(opened.session, opened.connection, request)
-                        .await
-                    {
-                        Ok(bytes) => tokio::fs::write(&destination, bytes)
-                            .await
-                            .map_err(|error| format!("writing export failed: {error}")),
-                        Err(error) => Err(format!("exporting query failed: {error}")),
-                    },
-                    None => Err("Connect before exporting results".into()),
+                let Some(opened) = context.as_ref() else {
+                    let _ = events.send(ExecutorEvent::ResultExported {
+                        item_id,
+                        destination,
+                        result: Err("Connect before exporting results".into()),
+                    });
+                    continue;
                 };
-                if events
-                    .send(ExecutorEvent::ResultExported {
+                active_exports.remove(&item_id);
+                let (cancel, cancelled) = tokio::sync::oneshot::channel();
+                active_exports.insert(item_id, cancel);
+                let client = opened.client.clone();
+                let session = opened.session;
+                let connection = opened.connection;
+                let events = events.clone();
+                std::mem::drop(tokio::spawn(async move {
+                    let result = stream_result_export(
+                        client,
+                        session,
+                        connection,
+                        request,
+                        &destination,
+                        cancelled,
+                        &events,
+                        item_id,
+                    )
+                    .await;
+                    let _ = events.send(ExecutorEvent::ResultExported {
                         item_id,
                         destination,
                         result,
-                    })
-                    .is_err()
-                {
-                    return;
-                }
+                    });
+                }));
+            }
+            ExecutorCommand::CancelResultExport { item_id } => {
+                active_exports.remove(&item_id);
             }
             ExecutorCommand::CapturePlan {
                 item_id,
@@ -1422,6 +1440,65 @@ fn cancel_active_queries(
     for (_, (_, control)) in active_queries.drain() {
         let _ = control.send(QueryControl::Cancel);
     }
+}
+
+async fn stream_result_export(
+    client: Client,
+    session: SessionId,
+    connection: ConnectionId,
+    request: sift_protocol::ExportRequest,
+    destination: &std::path::Path,
+    mut cancelled: tokio::sync::oneshot::Receiver<()>,
+    events: &tokio::sync::mpsc::UnboundedSender<ExecutorEvent>,
+    item_id: u64,
+) -> Result<(), String> {
+    let mut output = tokio::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(destination)
+        .await
+        .map_err(|error| {
+            format!("creating export (existing files are not overwritten): {error}")
+        })?;
+    let mut stream = match client
+        .stream_export_query(session, connection, request)
+        .await
+    {
+        Ok(stream) => stream,
+        Err(error) => {
+            let _ = tokio::fs::remove_file(destination).await;
+            return Err(format!("exporting query failed: {error}"));
+        }
+    };
+    let mut bytes = 0_u64;
+    loop {
+        let chunk = tokio::select! {
+            _ = &mut cancelled => {
+                let _ = tokio::fs::remove_file(destination).await;
+                return Err("Export cancelled".into());
+            }
+            chunk = stream.next() => chunk,
+        };
+        let Some(chunk) = chunk else { break };
+        let chunk = match chunk {
+            Ok(chunk) => chunk,
+            Err(error) => {
+                let _ = tokio::fs::remove_file(destination).await;
+                return Err(format!("streaming export failed: {error}"));
+            }
+        };
+        if let Err(error) = output.write_all(&chunk).await {
+            let _ = tokio::fs::remove_file(destination).await;
+            return Err(format!("writing export failed: {error}"));
+        }
+        bytes = bytes.saturating_add(u64::try_from(chunk.len()).unwrap_or(u64::MAX));
+        let _ = events.send(ExecutorEvent::ResultExportProgress { item_id, bytes });
+    }
+    if let Err(error) = output.flush().await {
+        let _ = tokio::fs::remove_file(destination).await;
+        return Err(format!("finishing export failed: {error}"));
+    }
+    Ok(())
 }
 
 async fn delete_connection_profile(

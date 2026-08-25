@@ -7347,6 +7347,7 @@ dependencies = [
 name = "sift-desktop"
 version = "0.1.0"
 dependencies = [
+ "futures",
  "gpui",
  "gpui_platform",
  "keyring",

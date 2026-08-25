@@ -538,6 +538,7 @@ pub enum ResultsEvent {
     ExportRequested {
         format: sift_protocol::ExportFormat,
     },
+    CancelExportRequested,
     EditSelectedCellRequested,
     PasteSelectedCellRequested {
         text: String,
@@ -661,6 +662,8 @@ pub struct ResultsView {
     editing_cell: Option<(usize, usize)>,
     inline_cell_edit: Option<InlineCellEdit>,
     staged_cells: HashMap<(usize, usize), Value>,
+    /// Bytes written by an active streamed export. `None` means idle.
+    export_bytes: Option<u64>,
     restore_grid_focus: bool,
     query_started_at: Option<std::time::Instant>,
     row_json_filter_input: Entity<TextInput>,
@@ -715,6 +718,7 @@ impl ResultsView {
             editing_cell: None,
             inline_cell_edit: None,
             staged_cells: HashMap::new(),
+            export_bytes: None,
             restore_grid_focus: false,
             query_started_at: None,
             row_json_filter_input,
@@ -738,6 +742,11 @@ impl ResultsView {
             large_view: false,
             history: HistoryState::default(),
         }
+    }
+
+    pub fn set_export_progress(&mut self, bytes: Option<u64>, cx: &mut Context<Self>) {
+        self.export_bytes = bytes;
+        cx.notify();
     }
 
     pub fn state(&self) -> &ResultState {
@@ -2292,24 +2301,83 @@ impl ResultsView {
                                         ),
                                     )
                             }))
-                            .child(
+                            .children(self.export_bytes.map(|bytes| {
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_1()
+                                    .child(format!("Exporting {bytes} B"))
+                                    .child(
+                                        Button::new("cancel-result-export", "Cancel")
+                                            .tone(ButtonTone::Neutral)
+                                            .on_click(cx.listener(|_, _, _, cx| {
+                                                cx.emit(ResultsEvent::CancelExportRequested)
+                                            })),
+                                    )
+                            }))
+                            .children(self.export_bytes.is_none().then(|| {
                                 Button::new("export-result-csv", "CSV")
                                     .tone(ButtonTone::Ghost)
                                     .on_click(cx.listener(|_, _, _, cx| {
                                         cx.emit(ResultsEvent::ExportRequested {
                                             format: sift_protocol::ExportFormat::Csv,
                                         })
-                                    })),
-                            )
-                            .child(
+                                    }))
+                            }))
+                            .children(self.export_bytes.is_none().then(|| {
+                                Button::new("export-result-tsv", "TSV")
+                                    .tone(ButtonTone::Ghost)
+                                    .on_click(cx.listener(|_, _, _, cx| {
+                                        cx.emit(ResultsEvent::ExportRequested {
+                                            format: sift_protocol::ExportFormat::Tsv,
+                                        })
+                                    }))
+                            }))
+                            .children(self.export_bytes.is_none().then(|| {
+                                Button::new("export-result-jsonl", "JSONL")
+                                    .tone(ButtonTone::Ghost)
+                                    .on_click(cx.listener(|_, _, _, cx| {
+                                        cx.emit(ResultsEvent::ExportRequested {
+                                            format: sift_protocol::ExportFormat::JsonLines,
+                                        })
+                                    }))
+                            }))
+                            .children(self.export_bytes.is_none().then(|| {
                                 Button::new("export-result-json", "JSON")
                                     .tone(ButtonTone::Ghost)
                                     .on_click(cx.listener(|_, _, _, cx| {
                                         cx.emit(ResultsEvent::ExportRequested {
                                             format: sift_protocol::ExportFormat::JsonArray,
                                         })
-                                    })),
-                            )
+                                    }))
+                            }))
+                            .children(self.export_bytes.is_none().then(|| {
+                                Button::new("export-result-xlsx", "XLSX")
+                                    .tone(ButtonTone::Ghost)
+                                    .on_click(cx.listener(|_, _, _, cx| {
+                                        cx.emit(ResultsEvent::ExportRequested {
+                                            format: sift_protocol::ExportFormat::Xlsx,
+                                        })
+                                    }))
+                            }))
+                            .children(self.export_bytes.is_none().then(|| {
+                                Button::new("export-result-html", "HTML")
+                                    .tone(ButtonTone::Ghost)
+                                    .on_click(cx.listener(|_, _, _, cx| {
+                                        cx.emit(ResultsEvent::ExportRequested {
+                                            format: sift_protocol::ExportFormat::Html,
+                                        })
+                                    }))
+                            }))
+                            .children(self.export_bytes.is_none().then(|| {
+                                Button::new("export-result-markdown", "MD")
+                                    .tone(ButtonTone::Ghost)
+                                    .on_click(cx.listener(|_, _, _, cx| {
+                                        cx.emit(ResultsEvent::ExportRequested {
+                                            format: sift_protocol::ExportFormat::Markdown,
+                                        })
+                                    }))
+                            }))
                             .child(
                                 Button::new("copy-result-with-headers", "Copy + headers")
                                     .tone(ButtonTone::Neutral)
