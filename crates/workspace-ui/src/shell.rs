@@ -22,7 +22,8 @@ use crate::editor::{
     SemanticOutcome, SemanticRequestKind, VimMode, EDITOR_GUTTER_WIDTH,
 };
 use crate::results::{
-    render_value, ResultPlacement, ResultState, ResultsEvent, ResultsView, StreamProgress,
+    render_value, ResultPlacement, ResultState, ResultTab, ResultsEvent, ResultsView,
+    StreamProgress,
 };
 use crate::settings::{EditorMode, KeyboardProfile, KeymapSettings, SettingsStore, UserSettings};
 
@@ -3148,7 +3149,7 @@ impl gpui::Render for Pane {
                                                     "Stage change",
                                                 )
                                                 .tone(ButtonTone::Accent)
-                                                .key_binding("Mod Enter")
+                                                .key_binding(":w")
                                                 .on_click(cx.listener(move |_, _, _, cx| {
                                                     cx.emit(
                                                         PaneEvent::SubmitJsonResultEditRequested {
@@ -10371,6 +10372,29 @@ impl WorkspaceShell {
             self.submit_json_result_cell_edit(item_id, &text, false, window, cx);
             return;
         }
+        let active_data_item = (self.focused_surface == WorkspaceSurface::Results)
+            .then(|| {
+                let pane = self.panes.get(self.active_pane)?.read(cx);
+                let item_id = pane.active_item()?.id;
+                pane.results
+                    .get(&item_id)
+                    .is_some_and(|results| results.read(cx).active_tab() == ResultTab::Data)
+                    .then_some(item_id)
+            })
+            .flatten();
+        if let Some(item_id) = active_data_item {
+            if !self
+                .staged_result_edits
+                .iter()
+                .any(|edit| edit.item_id == item_id)
+            {
+                self.show_toast("No table changes are staged".into(), cx);
+                self.focus_results(window, cx);
+                return;
+            }
+            self.open_staged_result_edits(item_id, window, cx);
+            return;
+        }
         let active_configuration = self.panes.get(self.active_pane).and_then(|pane| {
             let pane = pane.read(cx);
             pane.active_item()
@@ -10453,6 +10477,8 @@ impl WorkspaceShell {
         self.ide_input = None;
         self.modal = Some(Modal::CommandPalette);
         self.palette_selected = 0;
+        self.query_input
+            .update(cx, |input, cx| input.set_text("", cx));
         self.palette_scroll_handle
             .scroll_to_item(0, ScrollStrategy::Top);
         self.query_input.focus_handle(cx).focus(window, cx);
@@ -10493,8 +10519,15 @@ impl WorkspaceShell {
             });
             let workspace = has_context("SiftWorkspace");
             let editor = has_context("SiftEditor");
+            let results = has_context("SiftResults");
             let text_input = has_context("SiftTextInput");
             let modal = has_context("SiftModal");
+
+            if workspace && results && !modal && !text_input && key == ":" {
+                self.open_command_palette(&OpenCommandPalette, window, cx);
+                cx.stop_propagation();
+                return;
+            }
 
             if self.pane_input {
                 cx.stop_propagation();
@@ -11742,6 +11775,13 @@ impl WorkspaceShell {
     /// Commands matching the palette search text (case-insensitive substring).
     fn filtered_commands(&self, cx: &App) -> Vec<CommandSpec> {
         let query = self.query_input.read(cx).text().trim().to_lowercase();
+        if query == "w" {
+            return self
+                .command_specs(cx)
+                .into_iter()
+                .filter(|command| command.id == CommandId::SaveItem)
+                .collect();
+        }
         let compact_query = query
             .chars()
             .filter(|character| !character.is_whitespace())
@@ -11938,7 +11978,13 @@ impl WorkspaceShell {
     /// Run a command palette entry by its stable id: dismiss the palette, then
     /// dispatch the matching workspace action. Ids come from `command_specs`.
     fn run_command(&mut self, id: CommandId, window: &mut Window, cx: &mut Context<Self>) {
+        let command_surface = self.focused_surface;
         self.dismiss_modal(&DismissModal, window, cx);
+        if id == CommandId::SaveItem {
+            // `:w` moves focus into the command palette. Restore its origin so
+            // save can distinguish a JSON editor from the Data result grid.
+            self.focused_surface = command_surface;
+        }
         match id {
             CommandId::ConnectServer => {
                 self.open_server_connection(&OpenServerConnection, window, cx)
@@ -16288,7 +16334,7 @@ impl WorkspaceShell {
                                                     "Stage change",
                                                 )
                                                 .tone(ButtonTone::Accent)
-                                                .key_binding("Mod Enter")
+                                                .key_binding(":w")
                                                 .on_click(cx.listener(
                                                     |shell, _, window, cx| {
                                                         shell.stage_json_result_edit(
@@ -21826,6 +21872,45 @@ mod tests {
             assert_eq!(editor.vim_mode(), VimMode::Normal);
             assert_eq!(editor.document().text(), "");
         });
+        cx.simulate_keystrokes("w");
+        workspace.read_with(&cx, |workspace, cx| {
+            assert_eq!(
+                workspace
+                    .filtered_commands(cx)
+                    .iter()
+                    .map(|command| command.id)
+                    .collect::<Vec<_>>(),
+                vec![CommandId::SaveItem],
+                "the Vim :w spelling must resolve exactly to contextual save"
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn vim_colon_opens_contextual_write_from_data_grid(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+
+        workspace.update_in(&mut cx, |workspace, window, cx| {
+            workspace.focus_results(window, cx)
+        });
+        assert!(workspace.read_with(&cx, |workspace, _| {
+            workspace.focused_surface == WorkspaceSurface::Results
+        }));
+        cx.simulate_keystrokes(": w");
+
+        workspace.read_with(&cx, |workspace, cx| {
+            assert_eq!(workspace.modal(), Some(&Modal::CommandPalette));
+            assert_eq!(
+                workspace
+                    .filtered_commands(cx)
+                    .iter()
+                    .map(|command| command.id)
+                    .collect::<Vec<_>>(),
+                vec![CommandId::SaveItem]
+            );
+        });
     }
 
     #[gpui::test]
@@ -24857,6 +24942,7 @@ mod tests {
         let window = shell(cx);
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         let workspace = window.root(&mut cx).unwrap();
+        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
         let source = DatabaseObjectSource {
             instance_id: "local".into(),
             tenant_id: 1,
@@ -24926,6 +25012,20 @@ mod tests {
             assert!(expected.iter().all(|cell| cell.column != "tags"));
             assert_eq!(staged_result_row_index(&shell.staged_result_edits, 1), 0);
             assert_eq!(staged_result_row_index(&shell.staged_result_edits, 2), 1);
+            shell.executor_sender = Some(sender);
+            shell.focused_surface = WorkspaceSurface::Results;
+            shell.save_active_item(&SaveActiveItem, window, cx);
+            assert_eq!(shell.modal, Some(Modal::EditResultCell));
+            assert!(matches!(
+                receiver.try_recv(),
+                Ok(ExecutorCommand::PreviewResultEdits { item_id: 1, .. })
+            ));
+            shell.dismiss_modal(&DismissModal, window, cx);
+            assert_eq!(
+                shell.staged_result_edits.len(),
+                3,
+                "Data :w review must keep every staged cell"
+            );
             shell.revert_staged_result_edit(1, cx);
             assert_eq!(shell.staged_result_edits.len(), 2);
             shell.modal = Some(Modal::EditResultCell);
@@ -25219,13 +25319,13 @@ mod tests {
             );
 
             shell.executor_sender = Some(sender);
-            shell.submit_json_result_cell_edit(
-                item_id,
-                "{\n  \"event\": \"close\"\n}",
-                false,
-                window,
-                cx,
-            );
+            pane.read(cx)
+                .editor(item_id)
+                .unwrap()
+                .update(cx, |editor, cx| {
+                    editor.replace_text_from_owner("{\n  \"event\": \"close\"\n}", cx)
+                });
+            shell.save_active_item(&SaveActiveItem, window, cx);
         });
 
         assert!(
