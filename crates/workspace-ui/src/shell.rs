@@ -664,6 +664,7 @@ struct TabTransfer {
     database_item_view: Option<DatabaseItemView>,
     database_query_text: Option<String>,
     database_ddl_text: Option<String>,
+    database_json_text: Option<String>,
 }
 
 fn optional_u32_field(
@@ -970,9 +971,15 @@ pub enum PaneEvent {
         item_id: u64,
         text: String,
     },
+    SubmitJsonResultEditRequested {
+        item_id: u64,
+        text: String,
+        preview: bool,
+    },
     CancelResultCellEditRequested {
         item_id: u64,
     },
+    ResultSelectionChanged,
     CapturePlanRequested {
         item_id: u64,
         sql: String,
@@ -1015,6 +1022,7 @@ enum DatabaseItemState {
 enum DatabaseItemView {
     Query,
     Ddl,
+    Json,
 }
 
 #[derive(Debug, Clone)]
@@ -1518,6 +1526,7 @@ pub struct Pane {
     database_item_views: HashMap<u64, DatabaseItemView>,
     database_query_texts: HashMap<u64, String>,
     database_ddl_texts: HashMap<u64, String>,
+    database_json_texts: HashMap<u64, String>,
     /// Transient wrapper sizes while dragging. Keeping these on the pane avoids
     /// invalidating and repainting the result grid for every pointer event.
     live_result_extents: HashMap<u64, f32>,
@@ -1655,6 +1664,7 @@ impl Pane {
             database_item_views,
             database_query_texts: HashMap::new(),
             database_ddl_texts: HashMap::new(),
+            database_json_texts: HashMap::new(),
             live_result_extents: HashMap::new(),
             result_resize_frame_pending: false,
             tab_drop_target: None,
@@ -1704,6 +1714,7 @@ impl Pane {
             ResultsEvent::CancelCellEdit => {
                 cx.emit(PaneEvent::CancelResultCellEditRequested { item_id })
             }
+            ResultsEvent::SelectionChanged => cx.emit(PaneEvent::ResultSelectionChanged),
             ResultsEvent::ExplainRequested { analyze } => {
                 let sql = self.targeted_query_sql(item_id, cx);
                 cx.emit(PaneEvent::ExplainRequested {
@@ -1960,7 +1971,7 @@ impl Pane {
         &mut self,
         item_id: u64,
         view: DatabaseItemView,
-        generated_ddl: Option<String>,
+        generated_text: Option<String>,
         cx: &mut Context<Self>,
     ) -> bool {
         if self.database_source(item_id).is_none() {
@@ -1982,18 +1993,40 @@ impl Pane {
             DatabaseItemView::Ddl => {
                 self.database_ddl_texts.insert(item_id, current_text);
             }
+            DatabaseItemView::Json => {
+                self.database_json_texts.insert(item_id, current_text);
+            }
         }
-        if let Some(ddl) = generated_ddl {
-            self.database_ddl_texts.insert(item_id, ddl);
+        if let Some(text) = generated_text {
+            match view {
+                DatabaseItemView::Query => {
+                    self.database_query_texts.insert(item_id, text);
+                }
+                DatabaseItemView::Ddl => {
+                    self.database_ddl_texts.insert(item_id, text);
+                }
+                DatabaseItemView::Json => {
+                    self.database_json_texts.insert(item_id, text);
+                }
+            }
         }
         let replacement = match view {
             DatabaseItemView::Query => self.database_query_texts.get(&item_id),
             DatabaseItemView::Ddl => self.database_ddl_texts.get(&item_id),
+            DatabaseItemView::Json => self.database_json_texts.get(&item_id),
         }
         .cloned()
         .unwrap_or_default();
         editor.update(cx, |editor, cx| {
-            editor.replace_text_from_owner(&replacement, cx)
+            editor.set_language(
+                if view == DatabaseItemView::Json {
+                    EditorLanguage::Json
+                } else {
+                    EditorLanguage::Sql
+                },
+                cx,
+            );
+            editor.replace_text_from_owner(&replacement, cx);
         });
         self.database_item_views.insert(item_id, view);
         cx.notify();
@@ -2079,6 +2112,7 @@ impl Pane {
         self.database_item_views.remove(&item_id);
         self.database_query_texts.remove(&item_id);
         self.database_ddl_texts.remove(&item_id);
+        self.database_json_texts.remove(&item_id);
         if self.pending_close_item == Some(item_id) {
             self.pending_close_item = None;
         }
@@ -2413,6 +2447,7 @@ impl Pane {
         let database_item_view = self.database_item_views.remove(&item_id);
         let database_query_text = self.database_query_texts.remove(&item_id);
         let database_ddl_text = self.database_ddl_texts.remove(&item_id);
+        let database_json_text = self.database_json_texts.remove(&item_id);
         self.forget_item(item_id);
         self.active_item = self.active_item.min(self.items.len().saturating_sub(1));
         Some(TabTransfer {
@@ -2423,6 +2458,7 @@ impl Pane {
             database_item_view,
             database_query_text,
             database_ddl_text,
+            database_json_text,
         })
     }
 
@@ -2451,6 +2487,9 @@ impl Pane {
         }
         if let Some(text) = transfer.database_ddl_text {
             self.database_ddl_texts.insert(item_id, text);
+        }
+        if let Some(text) = transfer.database_json_text {
+            self.database_json_texts.insert(item_id, text);
         }
         if let Some(results) = transfer.results {
             self.attach_results(item_id, results, cx);
@@ -2922,10 +2961,15 @@ impl gpui::Render for Pane {
                                     .copied()
                                     .unwrap_or(DatabaseItemView::Query);
                                 let database_view_switch =
-                                    self.database_ddl_texts.contains_key(&item.id).then(|| {
-                                        let query_selected =
-                                            database_view == DatabaseItemView::Query;
+                                    (self.database_ddl_texts.contains_key(&item.id)
+                                        || self.database_json_texts.contains_key(&item.id))
+                                    .then(|| {
                                         let item_id = item.id;
+                                        let json_available =
+                                            self.database_json_texts.contains_key(&item_id);
+                                        let json_selected = database_view == DatabaseItemView::Json;
+                                        let preview_editor = editor.clone();
+                                        let save_editor = editor.clone();
                                         div()
                                             .h(px(28.))
                                             .flex_none()
@@ -2941,7 +2985,7 @@ impl gpui::Render for Pane {
                                                     ("database-query-view", item_id as usize),
                                                     "Query",
                                                 )
-                                                .tone(if query_selected {
+                                                .tone(if database_view == DatabaseItemView::Query {
                                                     ButtonTone::Neutral
                                                 } else {
                                                     ButtonTone::Ghost
@@ -2960,10 +3004,10 @@ impl gpui::Render for Pane {
                                                     ("database-ddl-view", item_id as usize),
                                                     "DDL",
                                                 )
-                                                .tone(if query_selected {
-                                                    ButtonTone::Ghost
-                                                } else {
+                                                .tone(if database_view == DatabaseItemView::Ddl {
                                                     ButtonTone::Neutral
+                                                } else {
+                                                    ButtonTone::Ghost
                                                 })
                                                 .on_click(cx.listener(move |pane, _, _, cx| {
                                                     pane.show_database_item_view(
@@ -2974,6 +3018,67 @@ impl gpui::Render for Pane {
                                                     );
                                                 })),
                                             )
+                                            .children(json_available.then(|| {
+                                                Button::new(
+                                                    ("database-json-view", item_id as usize),
+                                                    "JSON",
+                                                )
+                                                .tone(if json_selected {
+                                                    ButtonTone::Neutral
+                                                } else {
+                                                    ButtonTone::Ghost
+                                                })
+                                                .on_click(cx.listener(move |pane, _, _, cx| {
+                                                    pane.show_database_item_view(
+                                                        item_id,
+                                                        DatabaseItemView::Json,
+                                                        None,
+                                                        cx,
+                                                    );
+                                                }))
+                                            }))
+                                            .child(div().flex_1())
+                                            .children(json_selected.then(|| {
+                                                Button::new(
+                                                    ("preview-json-result-edit", item_id as usize),
+                                                    "Preview changes",
+                                                )
+                                                .tone(ButtonTone::Ghost)
+                                                .on_click(cx.listener(move |_, _, _, cx| {
+                                                    cx.emit(
+                                                        PaneEvent::SubmitJsonResultEditRequested {
+                                                            item_id,
+                                                            text: preview_editor
+                                                                .read(cx)
+                                                                .document()
+                                                                .text()
+                                                                .to_owned(),
+                                                            preview: true,
+                                                        },
+                                                    );
+                                                }))
+                                            }))
+                                            .children(json_selected.then(|| {
+                                                Button::new(
+                                                    ("save-json-result-edit", item_id as usize),
+                                                    "Save changes",
+                                                )
+                                                .tone(ButtonTone::Accent)
+                                                .key_binding("Mod Enter")
+                                                .on_click(cx.listener(move |_, _, _, cx| {
+                                                    cx.emit(
+                                                        PaneEvent::SubmitJsonResultEditRequested {
+                                                            item_id,
+                                                            text: save_editor
+                                                                .read(cx)
+                                                                .document()
+                                                                .text()
+                                                                .to_owned(),
+                                                            preview: false,
+                                                        },
+                                                    );
+                                                }))
+                                            }))
                                     });
                                 let placement = result.read(cx).placement();
                                 let extent = self
@@ -3072,7 +3177,11 @@ impl gpui::Render for Pane {
                                             .into_any_element(),
                                     }
                                 };
-                                body.children(database_view_switch).child(split)
+                                body.when(database_view == DatabaseItemView::Json, |body| {
+                                    body.key_context("SiftJsonResultEditor")
+                                })
+                                .children(database_view_switch)
+                                .child(split)
                             }
                             _ => body.child(
                                 div()
@@ -3437,6 +3546,8 @@ pub struct WorkspaceShell {
     query_input: Entity<TextInput>,
     saved_query_name_input: Entity<TextInput>,
     result_cell_edit_input: Entity<TextInput>,
+    /// Legacy modal slot retained while result-edit review shares the modal
+    /// renderer. JSON edits now live in the database item's JSON view.
     result_json_edit_editor: Option<Entity<QueryEditor>>,
     schema_search_input: Entity<TextInput>,
     data_search_input: Entity<TextInput>,
@@ -4877,6 +4988,24 @@ impl WorkspaceShell {
                         self.result_edit_conflicts.clear();
                         self.pending_edit_set = None;
                         self.result_edit_plan = None;
+                        for pane in &self.panes {
+                            pane.update(cx, |pane, cx| {
+                                if pane.contains_item(item_id) {
+                                    if pane.database_item_views.get(&item_id)
+                                        == Some(&DatabaseItemView::Json)
+                                    {
+                                        pane.show_database_item_view(
+                                            item_id,
+                                            DatabaseItemView::Query,
+                                            None,
+                                            cx,
+                                        );
+                                        pane.database_json_texts.remove(&item_id);
+                                    }
+                                    pane.mark_clean(item_id, cx);
+                                }
+                            });
+                        }
                         self.show_toast(format!("Applied edit to {affected} row(s)"), cx);
                         self.refresh_database_item(item_id, cx);
                     }
@@ -4886,7 +5015,8 @@ impl WorkspaceShell {
                             self.result_edit_conflicts
                                 .insert(conflict.edit_index, failure.message.clone());
                         }
-                        self.result_edit_error = Some(failure.message);
+                        self.result_edit_error = Some(failure.message.clone());
+                        self.show_error_toast(failure.message, cx);
                     }
                 }
                 cx.notify();
@@ -9455,9 +9585,17 @@ impl WorkspaceShell {
             PaneEvent::SubmitResultCellEditRequested { item_id, text } => {
                 self.submit_result_cell_edit(emitter, *item_id, text, window, cx);
             }
+            PaneEvent::SubmitJsonResultEditRequested {
+                item_id,
+                text,
+                preview,
+            } => {
+                self.submit_json_result_cell_edit(*item_id, text, *preview, window, cx);
+            }
             PaneEvent::CancelResultCellEditRequested { item_id } => {
                 self.cancel_result_cell_edit(emitter, *item_id, cx);
             }
+            PaneEvent::ResultSelectionChanged => cx.notify(),
             PaneEvent::CapturePlanRequested { item_id, sql } => {
                 let params = match self.remembered_query_params(sql) {
                     Ok(params) => params,
@@ -10030,6 +10168,20 @@ impl WorkspaceShell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let active_json = self.panes.get(self.active_pane).and_then(|pane| {
+            let pane = pane.read(cx);
+            let item_id = pane.active_item()?.id;
+            (pane.database_item_views.get(&item_id) == Some(&DatabaseItemView::Json))
+                .then(|| {
+                    pane.editor(item_id)
+                        .map(|editor| (item_id, editor.read(cx).document().text().to_owned()))
+                })
+                .flatten()
+        });
+        if let Some((item_id, text)) = active_json {
+            self.submit_json_result_cell_edit(item_id, &text, false, window, cx);
+            return;
+        }
         let active_configuration = self.panes.get(self.active_pane).and_then(|pane| {
             let pane = pane.read(cx);
             pane.active_item()
@@ -10461,15 +10613,13 @@ impl WorkspaceShell {
                 }
                 _ => render_value(&staged_value).text,
             };
-            let editor = cx.new(|cx| {
-                QueryEditor::new(QueryDocument::with_random_peer(&text), cx)
-                    .with_language(EditorLanguage::Json)
-                    .with_keymap(EditorKeymap::Vim)
+            let focus = pane.update(cx, |pane, cx| {
+                pane.show_database_item_view(item_id, DatabaseItemView::Json, Some(text), cx);
+                pane.editor(item_id).map(|editor| editor.focus_handle(cx))
             });
-            let focus = editor.focus_handle(cx);
-            self.result_json_edit_editor = Some(editor);
-            self.modal = Some(Modal::EditResultCell);
-            focus.focus(window, cx);
+            if let Some(focus) = focus {
+                focus.focus(window, cx);
+            }
             cx.notify();
             return;
         }
@@ -10481,6 +10631,22 @@ impl WorkspaceShell {
         };
         focus.focus(window, cx);
         cx.notify();
+    }
+
+    fn open_selected_json_view(
+        &mut self,
+        item_id: u64,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let pane = self
+            .panes
+            .iter()
+            .find(|pane| pane.read(cx).contains_item(item_id))
+            .cloned();
+        if let Some(pane) = pane {
+            self.open_result_cell_editor(&pane, item_id, window, cx);
+        }
     }
 
     fn submit_result_cell_edit(
@@ -10507,7 +10673,6 @@ impl WorkspaceShell {
             results.update(cx, |results, cx| results.finish_inline_cell_edit(cx));
         }
         self.result_cell_edit_target = None;
-        self.result_json_edit_editor = None;
         self.modal = Some(Modal::EditResultCell);
         self.focus_handle.focus(window, cx);
         cx.notify();
@@ -10580,17 +10745,38 @@ impl WorkspaceShell {
         self.stage_current_result_edit(cx)
     }
 
-    fn submit_json_result_cell_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(editor) = self.result_json_edit_editor.as_ref() else {
-            return;
-        };
-        let text = editor.read(cx).document().text().to_owned();
-        if !self.stage_result_cell_text(&text, cx) {
+    fn submit_json_result_cell_edit(
+        &mut self,
+        item_id: u64,
+        text: &str,
+        preview: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self
+            .result_cell_edit_target
+            .as_ref()
+            .is_none_or(|target| target.item_id != item_id)
+        {
             return;
         }
-        self.result_cell_edit_target = None;
-        self.result_json_edit_editor = None;
-        self.focus_handle.focus(window, cx);
+        if !self.stage_result_cell_text(text, cx) {
+            if let Some(message) = self.result_edit_error.clone() {
+                self.show_error_toast(message, cx);
+            }
+            return;
+        }
+        if self.staged_result_edits.is_empty() {
+            self.show_toast("No changes to save".into(), cx);
+            return;
+        }
+        if preview {
+            self.modal = Some(Modal::EditResultCell);
+            self.focus_handle.focus(window, cx);
+            self.preview_result_cell_edit(cx);
+        } else {
+            self.apply_result_cell_edit(cx);
+        }
         cx.notify();
     }
 
@@ -10600,8 +10786,18 @@ impl WorkspaceShell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.modal == Some(Modal::EditResultCell) && self.result_json_edit_editor.is_some() {
-            self.submit_json_result_cell_edit(window, cx);
+        let active = self.panes.get(self.active_pane).and_then(|pane| {
+            let pane = pane.read(cx);
+            let item_id = pane.active_item()?.id;
+            (pane.database_item_views.get(&item_id) == Some(&DatabaseItemView::Json))
+                .then(|| {
+                    pane.editor(item_id)
+                        .map(|editor| (item_id, editor.read(cx).document().text().to_owned()))
+                })
+                .flatten()
+        });
+        if let Some((item_id, text)) = active {
+            self.submit_json_result_cell_edit(item_id, &text, false, window, cx);
         }
     }
 
@@ -10677,17 +10873,31 @@ impl WorkspaceShell {
             edits: rows
                 .into_iter()
                 .map(|row| {
+                    let changed_columns = row
+                        .changes
+                        .iter()
+                        .map(|change| change.column.as_str())
+                        .collect::<HashSet<_>>();
                     let original = row
                         .original
                         .into_iter()
                         .map(|(column, value)| sift_protocol::CellEdit { column, value })
                         .collect::<Vec<_>>();
+                    // The key carries the complete row because the server
+                    // resolves the actual identity columns. Conflict checks
+                    // only need edited values; binding unrelated provider-
+                    // native cells can be impossible (arrays/enums, etc.).
+                    let expected = original
+                        .iter()
+                        .filter(|cell| changed_columns.contains(cell.column.as_str()))
+                        .cloned()
+                        .collect();
                     sift_protocol::RowEdit::Update {
                         key: sift_protocol::RowKey {
                             columns: original.clone(),
                         },
                         changes: row.changes,
-                        expected: original,
+                        expected,
                     }
                 })
                 .collect(),
@@ -10725,20 +10935,25 @@ impl WorkspaceShell {
     }
 
     fn apply_result_cell_edit(&mut self, cx: &mut Context<Self>) {
-        let (Some(staged), Some(edit_set), Some(sender)) = (
-            self.staged_result_edits.first(),
-            self.pending_edit_set.clone(),
-            self.executor_sender.as_ref(),
-        ) else {
+        let Some(item_id) = self.staged_result_edits.first().map(|edit| edit.item_id) else {
+            return;
+        };
+        let Some(edit_set) = self
+            .pending_edit_set
+            .clone()
+            .or_else(|| self.staged_result_edit_set())
+        else {
+            return;
+        };
+        let Some(sender) = self.executor_sender.as_ref() else {
+            self.result_edit_error = Some("The database executor is unavailable".into());
+            cx.notify();
             return;
         };
         self.result_edit_pending = true;
         self.result_edit_error = None;
         if sender
-            .send(ExecutorCommand::ApplyResultEdits {
-                item_id: staged.item_id,
-                edit_set,
-            })
+            .send(ExecutorCommand::ApplyResultEdits { item_id, edit_set })
             .is_err()
         {
             self.result_edit_pending = false;
@@ -11374,15 +11589,11 @@ impl WorkspaceShell {
                     self.open_schema_search_target(target, window, cx);
                 }
             }
-            Some(Modal::EditResultCell) if self.result_json_edit_editor.is_none() => {
+            Some(Modal::EditResultCell) => {
                 if self.result_edit_pending {
                     return;
                 }
-                if self.result_edit_plan.is_some() && self.pending_edit_set.is_some() {
-                    self.apply_result_cell_edit(cx);
-                } else {
-                    self.preview_result_cell_edit(cx);
-                }
+                self.apply_result_cell_edit(cx);
             }
             _ => {}
         }
@@ -11433,15 +11644,20 @@ impl WorkspaceShell {
             self.pending_connection_change = None;
         }
         if self.modal == Some(Modal::EditResultCell) {
-            self.result_cell_edit_target = None;
-            if self.result_json_edit_editor.is_none() {
+            let json_edit_active = self.result_cell_edit_target.as_ref().is_some_and(|target| {
+                self.panes.iter().any(|pane| {
+                    let pane = pane.read(cx);
+                    pane.database_item_views.get(&target.item_id) == Some(&DatabaseItemView::Json)
+                })
+            });
+            if !json_edit_active {
+                self.result_cell_edit_target = None;
                 self.staged_result_edits.clear();
                 self.result_edit_conflicts.clear();
                 self.pending_edit_set = None;
                 self.result_edit_plan = None;
-                self.result_edit_pending = false;
             }
-            self.result_json_edit_editor = None;
+            self.result_edit_pending = false;
             self.result_edit_error = None;
         }
         self.modal = None;
@@ -13847,6 +14063,17 @@ impl WorkspaceShell {
                 )
                 .then_some(item_id)
             });
+        let inspector_json_item = (dock.id == DockId::Inspector)
+            .then(|| self.focused_database_item(cx))
+            .flatten()
+            .and_then(|(item_id, source)| {
+                (source.object_kind == sift_protocol::ObjectKind::Table
+                    && self
+                        .focused_pane_results(cx)
+                        .and_then(|results| results.read(cx).selected_cell_edit())
+                        .is_some_and(|cell| matches!(cell.original, sift_protocol::Value::Json(_))))
+                .then_some(item_id)
+            });
         let keyboard_focused = matches!(
             (dock.id, self.focused_surface),
             (DockId::Left, WorkspaceSurface::Connections)
@@ -13891,6 +14118,13 @@ impl WorkspaceShell {
                     .items_center()
                     .gap_2()
                     .child(SectionLabel::new(title.to_uppercase()))
+                    .children(inspector_json_item.map(|item_id| {
+                        Button::new("inspector-json-preview", "JSON Preview")
+                            .tone(ButtonTone::Ghost)
+                            .on_click(cx.listener(move |shell, _, window, cx| {
+                                shell.open_selected_json_view(item_id, window, cx)
+                            }))
+                    }))
                     .children(inspector_target.map(|target| {
                         div()
                             .debug_selector(|| "inspector-target-title".into())
@@ -15521,8 +15755,10 @@ impl WorkspaceShell {
                                                 .key_binding("Mod Enter")
                                                 .on_click(cx.listener(
                                                     |shell, _, window, cx| {
-                                                        shell.submit_json_result_cell_edit(
-                                                            window, cx,
+                                                        shell.stage_json_result_edit(
+                                                            &StageJsonResultEdit,
+                                                            window,
+                                                            cx,
                                                         )
                                                     },
                                                 )),
@@ -15535,8 +15771,16 @@ impl WorkspaceShell {
                     let staged_edits = self.staged_result_edits.clone();
                     let pending = self.result_edit_pending;
                     let plan = self.result_edit_plan.as_ref();
-                    let can_apply = plan.is_some() && self.pending_edit_set.is_some() && !pending;
+                    let can_apply = !staged_edits.is_empty() && !pending;
                     div()
+                        .on_key_down(cx.listener(
+                            |shell, event: &gpui::KeyDownEvent, window, cx| {
+                                if event.keystroke.key == "escape" {
+                                    shell.dismiss_modal(&DismissModal, window, cx);
+                                    cx.stop_propagation();
+                                }
+                            },
+                        ))
                         .flex()
                         .flex_col()
                         .max_h(px(640.))
@@ -15557,7 +15801,7 @@ impl WorkspaceShell {
                                         .truncate()
                                         .font_weight(gpui::FontWeight::SEMIBOLD)
                                         .child(target.map_or_else(
-                                            || "Review result edits".into(),
+                                            || "Review edits".into(),
                                             |edit| format!("Edit {}.{}", edit.source.object, edit.column),
                                         )),
                                 )
@@ -15638,10 +15882,10 @@ impl WorkspaceShell {
                                                             .child(
                                                                 div()
                                                                     .min_w_0()
-                                                                    .truncate()
+                                                                    .whitespace_normal()
                                                                     .text_sm()
                                                                     .child(format!(
-                                                                        "Row {} · {}: {} → {}",
+                                                                        "Row {} · {}\nBefore: {}\nAfter: {}",
                                                                         row_index + 1,
                                                                         edit.column,
                                                                         render_value(&edit.original).text,
@@ -15730,7 +15974,7 @@ impl WorkspaceShell {
                                 .border_t_1()
                                 .border_color(colors.subtle_border)
                                 .child(
-                                    Button::new("cancel-result-cell-edit", "Discard all")
+                                    Button::new("cancel-result-cell-edit", "Discard changes")
                                         .tone(ButtonTone::Neutral)
                                         .key_binding("Esc")
                                         .on_click(cx.listener(|shell, _, window, cx| {
@@ -15740,7 +15984,6 @@ impl WorkspaceShell {
                                 .child(
                                     Button::new("preview-result-cell-edit", "Preview changes")
                                         .tone(ButtonTone::Neutral)
-                                        .when(!can_apply, |button| button.key_binding("Enter"))
                                         .loading(pending && plan.is_none())
                                         .disabled(pending)
                                         .on_click(cx.listener(|shell, _, _, cx| {
@@ -15750,7 +15993,7 @@ impl WorkspaceShell {
                                 .child(
                                     Button::new("apply-result-cell-edit", "Save changes")
                                         .tone(ButtonTone::Accent)
-                                        .when(can_apply, |button| button.key_binding("Enter"))
+                                        .key_binding("Enter")
                                         .loading(pending && plan.is_some())
                                         .disabled(!can_apply)
                                         .on_click(cx.listener(|shell, _, _, cx| {
@@ -23924,6 +24167,14 @@ mod tests {
         let first_row = vec![
             ("id".into(), sift_protocol::Value::Int64(1)),
             ("action".into(), sift_protocol::Value::Text("open".into())),
+            (
+                "tags".into(),
+                sift_protocol::Value::Native {
+                    provider_id: sift_protocol::Engine::Postgres.provider_id(),
+                    type_name: "text[]".into(),
+                    display_text: "{demo}".into(),
+                },
+            ),
         ];
         let second_row = vec![
             ("id".into(), sift_protocol::Value::Int64(2)),
@@ -23959,15 +24210,120 @@ mod tests {
             ];
             let edit_set = shell.staged_result_edit_set().unwrap();
             assert_eq!(edit_set.edits.len(), 2);
-            let sift_protocol::RowEdit::Update { changes, .. } = &edit_set.edits[0] else {
+            let sift_protocol::RowEdit::Update {
+                changes, expected, ..
+            } = &edit_set.edits[0]
+            else {
                 panic!("staged changes produce updates")
             };
             assert_eq!(changes.len(), 2);
+            assert_eq!(expected.len(), 2);
+            assert!(expected.iter().all(|cell| cell.column != "tags"));
             assert_eq!(staged_result_row_index(&shell.staged_result_edits, 1), 0);
             assert_eq!(staged_result_row_index(&shell.staged_result_edits, 2), 1);
             shell.revert_staged_result_edit(1, cx);
             assert_eq!(shell.staged_result_edits.len(), 2);
         });
+    }
+
+    #[gpui::test]
+    fn json_result_edit_uses_table_view_and_skips_unedited_native_conflicts(
+        cx: &mut TestAppContext,
+    ) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+
+        workspace.update_in(&mut cx, |shell, window, cx| {
+            shell.open_table_preview(
+                DatabaseObjectTarget {
+                    connection: ConnectionNavEntry {
+                        id: 2,
+                        tenant_id: 1,
+                        name: "demo/postgres".into(),
+                        provider_id: sift_protocol::Engine::Postgres.provider_id(),
+                    },
+                    catalog: "sifttest".into(),
+                    schema: "audit".into(),
+                    object: "events".into(),
+                    object_kind: sift_protocol::ObjectKind::Table,
+                },
+                window,
+                cx,
+            );
+            let pane = shell.panes[shell.active_pane].clone();
+            let item_id = pane.read(cx).active_item().unwrap().id;
+            let results = pane.read(cx).results.get(&item_id).unwrap().clone();
+            results.update(cx, |results, cx| {
+                results.set_state(
+                    ResultState::Ready(crate::results::ResultData {
+                        columns: vec![
+                            crate::results::ResultColumn {
+                                name: "id".into(),
+                                type_label: "int64".into(),
+                                nullable: false,
+                            },
+                            crate::results::ResultColumn {
+                                name: "payload".into(),
+                                type_label: "jsonb".into(),
+                                nullable: false,
+                            },
+                            crate::results::ResultColumn {
+                                name: "tags".into(),
+                                type_label: "text[]".into(),
+                                nullable: true,
+                            },
+                        ],
+                        rows: vec![sift_protocol::Row::new(vec![
+                            sift_protocol::Value::Int64(1),
+                            sift_protocol::Value::Json(serde_json::json!({"event": "open"})),
+                            sift_protocol::Value::Native {
+                                provider_id: sift_protocol::Engine::Postgres.provider_id(),
+                                type_name: "text[]".into(),
+                                display_text: "{demo}".into(),
+                            },
+                        ])],
+                        ..Default::default()
+                    }),
+                    cx,
+                );
+                results.select_cell(0, 1, cx);
+            });
+            shell.open_result_cell_editor(&pane, item_id, window, cx);
+            assert_eq!(
+                pane.read(cx).database_item_views.get(&item_id),
+                Some(&DatabaseItemView::Json)
+            );
+            assert_eq!(
+                pane.read(cx)
+                    .editor(item_id)
+                    .unwrap()
+                    .read(cx)
+                    .document()
+                    .text(),
+                "{\n  \"event\": \"open\"\n}"
+            );
+
+            shell.executor_sender = Some(sender);
+            shell.submit_json_result_cell_edit(
+                item_id,
+                "{\n  \"event\": \"close\"\n}",
+                false,
+                window,
+                cx,
+            );
+        });
+
+        let ExecutorCommand::ApplyResultEdits { edit_set, .. } = receiver.try_recv().unwrap()
+        else {
+            panic!("saving JSON should apply without requiring preview")
+        };
+        let sift_protocol::RowEdit::Update { expected, .. } = &edit_set.edits[0] else {
+            panic!("JSON cell edit should be an update")
+        };
+        assert_eq!(expected.len(), 1);
+        assert_eq!(expected[0].column, "payload");
     }
 
     #[test]

@@ -485,6 +485,7 @@ pub enum ResultsEvent {
         text: String,
     },
     CancelCellEdit,
+    SelectionChanged,
     /// Explain the editor's targeted statement. Analyze is explicit because it
     /// executes the statement to collect runtime counters.
     ExplainRequested {
@@ -1186,7 +1187,7 @@ impl ResultsView {
     }
 
     #[cfg(test)]
-    fn select_cell(&mut self, row: usize, column: usize, cx: &mut Context<Self>) {
+    pub(crate) fn select_cell(&mut self, row: usize, column: usize, cx: &mut Context<Self>) {
         self.toggle_selection(GridSelection::Cell { row, column }, cx);
     }
 
@@ -1228,12 +1229,14 @@ impl ResultsView {
 
     fn toggle_selection(&mut self, selection: GridSelection, cx: &mut Context<Self>) {
         self.selected = (self.selected != Some(selection)).then_some(selection);
+        cx.emit(ResultsEvent::SelectionChanged);
         cx.notify();
     }
 
     fn set_selection(&mut self, selection: GridSelection, cx: &mut Context<Self>) {
         if self.selected != Some(selection) {
             self.selected = Some(selection);
+            cx.emit(ResultsEvent::SelectionChanged);
             cx.notify();
         }
     }

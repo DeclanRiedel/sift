@@ -953,6 +953,20 @@ impl QueryEditor {
         self.keymap
     }
 
+    pub fn set_language(&mut self, language: EditorLanguage, cx: &mut Context<Self>) {
+        if self.language == language {
+            return;
+        }
+        self.language = language;
+        self.semantic.invalidate();
+        if self.language == EditorLanguage::Json {
+            self.refresh_local_diagnostics();
+        } else {
+            self.request_semantic(SemanticRequestKind::Analyze, cx);
+        }
+        cx.notify();
+    }
+
     pub fn vim_mode(&self) -> VimMode {
         self.vim_mode
     }
