@@ -17844,7 +17844,10 @@ impl WorkspaceShell {
                 .justify_center()
                 .child(
                     div()
-                        .max_w(px(900.))
+                        .id("key-language-hint-content")
+                        .debug_selector(|| "key-language-hint-content".into())
+                        .w_full()
+                        .overflow_x_scroll()
                         .px_2()
                         .py_1()
                         .flex()
@@ -20346,6 +20349,26 @@ mod tests {
             editor.read_with(&cx, |editor, _| editor.document().text().to_owned()),
             original
         );
+    }
+
+    #[gpui::test]
+    fn leader_preview_uses_available_workspace_width(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        workspace.update(&mut cx, |shell, cx| {
+            shell.ide_input = Some(Vec::new());
+            cx.notify();
+        });
+        cx.run_until_parked();
+
+        let outer = cx
+            .debug_bounds("key-language-hint")
+            .expect("leader preview");
+        let content = cx
+            .debug_bounds("key-language-hint-content")
+            .expect("leader preview content");
+        assert_eq!(content.size.width, outer.size.width);
     }
 
     #[gpui::test]
