@@ -9911,8 +9911,7 @@ impl WorkspaceShell {
             }
             PaneEvent::PasteResultCellRequested { item_id, text } => {
                 self.active_pane = index;
-                self.open_result_cell_editor(emitter, *item_id, window, cx);
-                self.submit_result_cell_edit(emitter, *item_id, text, window, cx);
+                self.paste_result_cell_range(emitter, *item_id, text, window, cx);
             }
             PaneEvent::RevertResultCellRequested { item_id } => {
                 self.active_pane = index;
@@ -11169,6 +11168,95 @@ impl WorkspaceShell {
             cx,
         );
         cx.notify();
+    }
+
+    fn paste_result_cell_range(
+        &mut self,
+        pane: &Entity<Pane>,
+        item_id: u64,
+        text: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(source) = pane.read(cx).database_source(item_id) else {
+            self.show_error_toast("Only database table results can be edited".into(), cx);
+            return;
+        };
+        if source.object_kind != sift_protocol::ObjectKind::Table {
+            self.show_error_toast("Only base-table results can be edited".into(), cx);
+            return;
+        }
+        if self
+            .staged_result_edits
+            .first()
+            .is_some_and(|edit| edit.item_id != item_id)
+        {
+            self.show_error_toast(
+                "Apply or discard the staged changes for the other result first".into(),
+                cx,
+            );
+            return;
+        }
+        let pasted = pane
+            .read(cx)
+            .results
+            .get(&item_id)
+            .ok_or_else(|| "Result is unavailable".to_owned())
+            .and_then(|results| results.read(cx).pasted_cell_edits(text));
+        let pasted = match pasted {
+            Ok(pasted) => pasted,
+            Err(message) => {
+                self.show_error_toast(message, cx);
+                return;
+            }
+        };
+        let parsed = pasted
+            .into_iter()
+            .map(|edit| {
+                Self::parse_result_cell_value(&edit.selected.original, &edit.text)
+                    .map(|value| (edit.selected, value))
+            })
+            .collect::<Result<Vec<_>, _>>();
+        let parsed = match parsed {
+            Ok(parsed) => parsed,
+            Err(message) => {
+                self.show_error_toast(format!("Nothing was pasted: {message}"), cx);
+                return;
+            }
+        };
+
+        // Work on a copy so every conversion and coordinate succeeds before
+        // any staged state changes.
+        let mut staged = self.staged_result_edits.clone();
+        for (selected, value) in parsed {
+            if let Some(index) = staged.iter().position(|edit| {
+                edit.item_id == item_id
+                    && edit.column == selected.column
+                    && edit.original_row == selected.original_row
+            }) {
+                staged.remove(index);
+            }
+            if value != selected.original {
+                staged.push(StagedResultEdit {
+                    item_id,
+                    column: selected.column,
+                    original: selected.original,
+                    value,
+                    original_row: selected.original_row,
+                    source: source.clone(),
+                });
+            }
+        }
+        self.staged_result_edits = staged;
+        self.pending_edit_set = None;
+        self.result_edit_plan = None;
+        self.result_edit_conflicts.clear();
+        self.sync_staged_result_cells(item_id, cx);
+        self.focus_results(window, cx);
+        self.show_toast(
+            format!("{} table change(s) staged", self.staged_result_edits.len()),
+            cx,
+        );
     }
 
     fn cancel_result_cell_edit(

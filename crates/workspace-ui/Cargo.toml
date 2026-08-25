@@ -6,6 +6,7 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+csv = { workspace = true }
 gpui = { workspace = true }
 modalkit = { workspace = true }
 regex = { workspace = true }

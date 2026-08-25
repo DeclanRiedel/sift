@@ -102,6 +102,11 @@ pub(crate) struct SelectedCellEdit {
     pub original_row: Vec<(String, Value)>,
 }
 
+pub(crate) struct PastedCellEdit {
+    pub selected: SelectedCellEdit,
+    pub text: String,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct SelectedRowJson {
     pub row_index: usize,
@@ -821,6 +826,68 @@ impl ResultsView {
             original: selected,
             original_row,
         })
+    }
+
+    pub(crate) fn pasted_cell_edits(&self, text: &str) -> Result<Vec<PastedCellEdit>, String> {
+        let GridSelection::Cell { row, column } =
+            self.selected.ok_or("Select a destination cell")?
+        else {
+            return Err("Select one destination cell before pasting".into());
+        };
+        let data = self.state.ready().ok_or("Run the query before pasting")?;
+        let delimiter = if text.contains('\t') { b'\t' } else { b',' };
+        let mut reader = csv::ReaderBuilder::new()
+            .has_headers(false)
+            .delimiter(delimiter)
+            .flexible(true)
+            .from_reader(text.as_bytes());
+        let records = reader
+            .records()
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| format!("Invalid pasted table data: {error}"))?;
+        if records.is_empty() {
+            return Err("Clipboard has no cells to paste".into());
+        }
+        let mut edits = Vec::new();
+        for (row_offset, record) in records.into_iter().enumerate() {
+            let target_row = row.saturating_add(row_offset);
+            let source_row = data
+                .rows
+                .get(target_row)
+                .ok_or_else(|| format!("Paste exceeds the result at row {}", target_row + 1))?;
+            let original_row = data
+                .columns
+                .iter()
+                .zip(source_row.values.iter())
+                .map(|(column, value)| (column.name.clone(), value.clone()))
+                .collect::<Vec<_>>();
+            for (column_offset, field) in record.iter().enumerate() {
+                let target_column = column.saturating_add(column_offset);
+                let metadata = data.columns.get(target_column).ok_or_else(|| {
+                    format!("Paste exceeds the result at column {}", target_column + 1)
+                })?;
+                let original = source_row
+                    .values
+                    .get(target_column)
+                    .cloned()
+                    .ok_or_else(|| {
+                        format!(
+                            "Result row {} is missing column {}",
+                            target_row + 1,
+                            target_column + 1
+                        )
+                    })?;
+                edits.push(PastedCellEdit {
+                    selected: SelectedCellEdit {
+                        column: metadata.name.clone(),
+                        original,
+                        original_row: original_row.clone(),
+                    },
+                    text: field.to_owned(),
+                });
+            }
+        }
+        Ok(edits)
     }
 
     pub(crate) fn apply_saved_cell_values<'a>(
@@ -3912,6 +3979,43 @@ mod tests {
             );
             assert_eq!(view.rendered_rows[0][0].text, "2");
             assert_eq!(view.rendered_rows[0][1].text, "closed");
+        });
+    }
+
+    #[gpui::test]
+    fn tabular_paste_maps_from_the_focused_cell_without_mutating(cx: &mut TestAppContext) {
+        let view = cx.update(|cx| cx.new(ResultsView::new));
+        view.update(cx, |view, cx| {
+            view.set_state(
+                ResultState::Ready(ResultData {
+                    columns: vec![
+                        ResultColumn {
+                            name: "id".into(),
+                            type_label: "bigint".into(),
+                            nullable: false,
+                        },
+                        ResultColumn {
+                            name: "action".into(),
+                            type_label: "text".into(),
+                            nullable: false,
+                        },
+                    ],
+                    rows: vec![
+                        Row::new(vec![Value::Int64(1), Value::Text("open".into())]),
+                        Row::new(vec![Value::Int64(2), Value::Text("close".into())]),
+                    ],
+                    ..Default::default()
+                }),
+                cx,
+            );
+            view.select_cell(0, 0, cx);
+            let edits = view.pasted_cell_edits("10\tkept\n11\tdropped").unwrap();
+            assert_eq!(edits.len(), 4);
+            assert_eq!(edits[0].selected.column, "id");
+            assert_eq!(edits[1].selected.column, "action");
+            assert_eq!(edits[2].selected.original, Value::Int64(2));
+            assert_eq!(edits[3].text, "dropped");
+            assert!(view.staged_cells.is_empty());
         });
     }
 
