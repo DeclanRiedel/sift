@@ -20858,6 +20858,23 @@ mod tests {
         }
     }
 
+    #[test]
+    fn app_bar_advertises_vim_command_bindings() {
+        let run = app_bar::menu_items(AppBarMenu::Run);
+        let execute = run
+            .iter()
+            .find(|item| item.command == Some(CommandId::ExecuteStatement))
+            .expect("run menu exposes statement execution");
+        assert_eq!(execute.shortcut, "<leader> x s");
+
+        let edit = app_bar::menu_items(AppBarMenu::Edit);
+        let copy = edit
+            .iter()
+            .find(|item| item.command == Some(CommandId::Copy))
+            .expect("edit menu exposes copy");
+        assert_eq!(copy.shortcut, "");
+    }
+
     #[gpui::test]
     fn dismissing_the_palette_restores_editor_focus(cx: &mut TestAppContext) {
         let window = shell(cx);
