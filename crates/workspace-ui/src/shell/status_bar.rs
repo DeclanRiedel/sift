@@ -294,6 +294,37 @@ pub(super) fn render_status_bar(
                         .gap_1()
                         .child(shell.status.transaction.clone())
                         .child(
+                            Button::new("footer-create-savepoint", "Savepoint")
+                                .tone(ButtonTone::Neutral)
+                                .disabled(shell.transaction_pending || shell.transaction_aborted)
+                                .on_click(
+                                    cx.listener(|shell, _, _, cx| shell.create_savepoint(cx)),
+                                ),
+                        )
+                        .children(shell.savepoints.last().cloned().map(|name| {
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_1()
+                                .child(format!("{} · {}", shell.savepoints.len(), name))
+                                .child(
+                                    Button::new("footer-rollback-savepoint", "Undo to")
+                                        .tone(ButtonTone::Neutral)
+                                        .disabled(shell.transaction_pending)
+                                        .on_click(cx.listener(|shell, _, _, cx| {
+                                            shell.rollback_last_savepoint(cx)
+                                        })),
+                                )
+                                .child(
+                                    Button::new("footer-release-savepoint", "Release")
+                                        .tone(ButtonTone::Ghost)
+                                        .disabled(shell.transaction_pending)
+                                        .on_click(cx.listener(|shell, _, _, cx| {
+                                            shell.release_last_savepoint(cx)
+                                        })),
+                                )
+                        }))
+                        .child(
                             Button::new("footer-commit-transaction", "Commit")
                                 .debug_selector("footer-commit-transaction")
                                 .tone(ButtonTone::Accent)

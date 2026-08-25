@@ -1292,6 +1292,15 @@ pub enum ExecutorCommand {
     BeginTransaction,
     CommitTransaction,
     RollbackTransaction,
+    CreateSavepoint {
+        name: String,
+    },
+    RollbackToSavepoint {
+        name: String,
+    },
+    ReleaseSavepoint {
+        name: String,
+    },
     RefreshSchema,
     Execute {
         item_id: u64,
@@ -1435,6 +1444,11 @@ pub enum ExecutorEvent {
     Connection(ConnectionStatus),
     ConnectionHealth(ConnectionHealthReport),
     TransactionChanged(Result<Option<sift_protocol::TransactionInfo>, String>),
+    SavepointChanged {
+        action: &'static str,
+        name: String,
+        result: Result<(), String>,
+    },
     CapabilitiesLoaded {
         profile_id: i64,
         capabilities: Result<Vec<sift_protocol::OperationCapability>, String>,
@@ -3806,6 +3820,8 @@ pub struct WorkspaceShell {
     transaction_pending: bool,
     transaction_aborted: bool,
     transaction_error: Option<String>,
+    savepoints: Vec<String>,
+    next_savepoint: u64,
     pending_connection_change: Option<PendingConnectionChange>,
     /// Pages withheld because their tab's retained window is full. Holding the
     /// acknowledgement holds the whole server stream, which is the backpressure
@@ -4258,6 +4274,8 @@ impl WorkspaceShell {
             transaction_pending: false,
             transaction_aborted: false,
             transaction_error: None,
+            savepoints: Vec::new(),
+            next_savepoint: 1,
             pending_connection_change: None,
             held_result_pages: HashMap::new(),
             semantic_analyze_generation: HashMap::new(),
@@ -5120,6 +5138,10 @@ impl WorkspaceShell {
                 match result {
                     Ok(transaction) => {
                         self.transaction = transaction;
+                        if self.transaction.is_none() {
+                            self.savepoints.clear();
+                            self.next_savepoint = 1;
+                        }
                         self.transaction_aborted = false;
                         self.transaction_error = None;
                         self.status.transaction = self.transaction.as_ref().map_or_else(
@@ -5131,6 +5153,29 @@ impl WorkspaceShell {
                         self.transaction_error = Some(message.clone());
                         self.status.transaction = "TX: Failed".into();
                         self.record_runtime_error(None, "Transaction", message.clone(), cx);
+                        self.show_error_toast(message, cx);
+                    }
+                }
+                cx.notify();
+            }
+            ExecutorEvent::SavepointChanged {
+                action,
+                name,
+                result,
+            } => {
+                self.transaction_pending = false;
+                match result {
+                    Ok(()) => {
+                        if action == "created" {
+                            self.savepoints.push(name.clone());
+                        } else if action == "released" {
+                            self.savepoints.retain(|candidate| candidate != &name);
+                        }
+                        self.show_success_toast(format!("Savepoint {name} {action}"), cx);
+                    }
+                    Err(message) => {
+                        self.transaction_error = Some(message.clone());
+                        self.record_runtime_error(None, "Savepoint", message.clone(), cx);
                         self.show_error_toast(message, cx);
                     }
                 }
@@ -9407,6 +9452,38 @@ impl WorkspaceShell {
                 "TX: Rolling back…".into()
             };
         }
+        cx.notify();
+    }
+
+    fn create_savepoint(&mut self, cx: &mut Context<Self>) {
+        if self.transaction.is_none() || self.transaction_pending {
+            return;
+        }
+        let name = format!("sift_{}", self.next_savepoint);
+        self.next_savepoint = self.next_savepoint.saturating_add(1);
+        self.send_savepoint_command(ExecutorCommand::CreateSavepoint { name }, cx);
+    }
+
+    fn rollback_last_savepoint(&mut self, cx: &mut Context<Self>) {
+        if let Some(name) = self.savepoints.last().cloned() {
+            self.send_savepoint_command(ExecutorCommand::RollbackToSavepoint { name }, cx);
+        }
+    }
+
+    fn release_last_savepoint(&mut self, cx: &mut Context<Self>) {
+        if let Some(name) = self.savepoints.last().cloned() {
+            self.send_savepoint_command(ExecutorCommand::ReleaseSavepoint { name }, cx);
+        }
+    }
+
+    fn send_savepoint_command(&mut self, command: ExecutorCommand, cx: &mut Context<Self>) {
+        if self.transaction_pending {
+            return;
+        }
+        self.transaction_pending = self
+            .executor_sender
+            .as_ref()
+            .is_some_and(|sender| sender.send(command).is_ok());
         cx.notify();
     }
 
@@ -25230,6 +25307,45 @@ mod tests {
             receiver.try_recv(),
             Ok(ExecutorCommand::RollbackTransaction)
         ));
+    }
+
+    #[gpui::test]
+    fn savepoint_controls_keep_transaction_history(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        let (sender, mut commands) = tokio::sync::mpsc::unbounded_channel();
+        workspace.update(&mut cx, |shell, cx| {
+            shell.executor_sender = Some(sender);
+            shell.transaction = Some(sift_protocol::TransactionInfo {
+                tx_id: sift_protocol::TxId(9),
+                connection: sift_protocol::ConnectionId(1),
+                mode: sift_protocol::TxMode::default(),
+                opened_at: "2026-08-25T00:00:00Z".parse().unwrap(),
+            });
+            shell.create_savepoint(cx);
+        });
+        assert!(
+            matches!(commands.try_recv(), Ok(ExecutorCommand::CreateSavepoint { ref name }) if name == "sift_1")
+        );
+        workspace.update(&mut cx, |shell, cx| {
+            shell.on_executor_event(
+                ExecutorEvent::SavepointChanged {
+                    action: "created",
+                    name: "sift_1".into(),
+                    result: Ok(()),
+                },
+                cx,
+            );
+            shell.rollback_last_savepoint(cx);
+        });
+        assert!(
+            matches!(commands.try_recv(), Ok(ExecutorCommand::RollbackToSavepoint { ref name }) if name == "sift_1")
+        );
+        assert_eq!(
+            workspace.read_with(&cx, |shell, _| shell.savepoints.clone()),
+            vec!["sift_1"]
+        );
     }
 
     #[gpui::test]

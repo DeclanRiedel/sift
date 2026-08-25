@@ -700,6 +700,68 @@ async fn run_query_executor(
                     return;
                 }
             }
+            ExecutorCommand::CreateSavepoint { ref name }
+            | ExecutorCommand::RollbackToSavepoint { ref name }
+            | ExecutorCommand::ReleaseSavepoint { ref name } => {
+                let action = match &command {
+                    ExecutorCommand::CreateSavepoint { .. } => "created",
+                    ExecutorCommand::RollbackToSavepoint { .. } => "rolled back",
+                    ExecutorCommand::ReleaseSavepoint { .. } => "released",
+                    _ => unreachable!(),
+                };
+                let result = match context
+                    .as_ref()
+                    .and_then(|opened| opened.transaction.as_ref().map(|tx| (opened, tx)))
+                {
+                    Some((opened, transaction)) => match action {
+                        "created" => {
+                            opened
+                                .client
+                                .create_savepoint(
+                                    opened.session,
+                                    transaction.connection,
+                                    transaction.tx_id,
+                                    name.clone(),
+                                )
+                                .await
+                        }
+                        "rolled back" => {
+                            opened
+                                .client
+                                .rollback_to_savepoint(
+                                    opened.session,
+                                    transaction.connection,
+                                    transaction.tx_id,
+                                    name.clone(),
+                                )
+                                .await
+                        }
+                        _ => {
+                            opened
+                                .client
+                                .release_savepoint(
+                                    opened.session,
+                                    transaction.connection,
+                                    transaction.tx_id,
+                                    name.clone(),
+                                )
+                                .await
+                        }
+                    }
+                    .map_err(|error| format!("savepoint operation failed: {error}")),
+                    None => Err("No transaction is open".into()),
+                };
+                if events
+                    .send(ExecutorEvent::SavepointChanged {
+                        action,
+                        name: name.clone(),
+                        result,
+                    })
+                    .is_err()
+                {
+                    return;
+                }
+            }
             ExecutorCommand::RefreshSchema => {
                 let Some(opened) = context.as_ref() else {
                     continue;
