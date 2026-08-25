@@ -801,48 +801,56 @@ impl ResultsView {
         })
     }
 
-    pub(crate) fn apply_saved_cell_value(
+    pub(crate) fn apply_saved_cell_values<'a>(
         &mut self,
-        original_row: &[(String, Value)],
-        column: &str,
-        value: Value,
+        edits: impl IntoIterator<Item = (&'a [(String, Value)], &'a str, &'a Value)>,
         cx: &mut Context<Self>,
-    ) -> bool {
+    ) -> usize {
+        // Resolve every coordinate against the unchanged result snapshot first.
+        // Mutating one cell can otherwise make later edits on the same row fail
+        // their original-row lookup and leave stale staged highlights behind.
+        let resolved = {
+            let Some(data) = self.state.ready() else {
+                return 0;
+            };
+            edits
+                .into_iter()
+                .filter_map(|(original_row, column, value)| {
+                    let column_index = data
+                        .columns
+                        .iter()
+                        .position(|candidate| candidate.name == column)?;
+                    let expected_columns = original_row
+                        .iter()
+                        .map(|(name, expected)| {
+                            data.columns
+                                .iter()
+                                .position(|column| column.name == *name)
+                                .map(|index| (index, expected))
+                        })
+                        .collect::<Option<Vec<_>>>()?;
+                    let row_index = data.rows.iter().position(|row| {
+                        expected_columns
+                            .iter()
+                            .all(|(index, expected)| row.values.get(*index) == Some(*expected))
+                    })?;
+                    Some((row_index, column_index, value.clone()))
+                })
+                .collect::<Vec<_>>()
+        };
         let data = match &mut self.state {
             ResultState::Streaming(data) | ResultState::Ready(data) => data,
-            _ => return false,
+            _ => return 0,
         };
-        let Some(column_index) = data
-            .columns
-            .iter()
-            .position(|candidate| candidate.name == column)
-        else {
-            return false;
-        };
-        let expected_columns = original_row
-            .iter()
-            .map(|(name, expected)| {
-                data.columns
-                    .iter()
-                    .position(|column| column.name == *name)
-                    .map(|index| (index, expected))
-            })
-            .collect::<Option<Vec<_>>>();
-        let Some(expected_columns) = expected_columns else {
-            return false;
-        };
-        let Some(row_index) = data.rows.iter().position(|row| {
-            expected_columns
-                .iter()
-                .all(|(index, expected)| row.values.get(*index) == Some(*expected))
-        }) else {
-            return false;
-        };
-        data.rows[row_index].values[column_index] = value.clone();
-        self.staged_cells.remove(&(row_index, column_index));
-        self.replace_rendered_cell(row_index, column_index, &value);
+        for (row, column, value) in &resolved {
+            data.rows[*row].values[*column] = value.clone();
+        }
+        for (row, column, value) in &resolved {
+            self.staged_cells.remove(&(*row, *column));
+            self.replace_rendered_cell(*row, *column, value);
+        }
         cx.notify();
-        true
+        resolved.len()
     }
 
     pub(crate) fn stage_cell_value(
@@ -3640,6 +3648,68 @@ mod tests {
                 view.select_cell_from_pointer(0, 0, false, 2, cx),
                 "a stale editing outline must not block reopening the inline editor"
             );
+        });
+    }
+
+    #[gpui::test]
+    fn applying_multiple_staged_cells_resolves_row_before_mutation(cx: &mut TestAppContext) {
+        let view = cx.update(|cx| cx.new(ResultsView::new));
+        view.update(cx, |view, cx| {
+            view.set_state(
+                ResultState::Ready(ResultData {
+                    columns: vec![
+                        ResultColumn {
+                            name: "id".into(),
+                            type_label: "bigint".into(),
+                            nullable: false,
+                        },
+                        ResultColumn {
+                            name: "action".into(),
+                            type_label: "text".into(),
+                            nullable: false,
+                        },
+                    ],
+                    rows: vec![Row::new(vec![Value::Int64(1), Value::Text("open".into())])],
+                    ..Default::default()
+                }),
+                cx,
+            );
+            let original_row = vec![
+                ("id".into(), Value::Int64(1)),
+                ("action".into(), Value::Text("open".into())),
+            ];
+            assert!(view.stage_cell_value(&original_row, "id", Value::Int64(2), cx));
+            assert!(view.stage_cell_value(
+                &original_row,
+                "action",
+                Value::Text("closed".into()),
+                cx,
+            ));
+
+            let saved = [
+                (original_row.clone(), "id".to_owned(), Value::Int64(2)),
+                (
+                    original_row,
+                    "action".to_owned(),
+                    Value::Text("closed".into()),
+                ),
+            ];
+            assert_eq!(
+                view.apply_saved_cell_values(
+                    saved
+                        .iter()
+                        .map(|(row, column, value)| { (row.as_slice(), column.as_str(), value) }),
+                    cx,
+                ),
+                2
+            );
+            assert!(view.staged_cells.is_empty());
+            assert_eq!(
+                view.state.ready().unwrap().rows[0].values,
+                vec![Value::Int64(2), Value::Text("closed".into())]
+            );
+            assert_eq!(view.rendered_rows[0][0].text, "2");
+            assert_eq!(view.rendered_rows[0][1].text, "closed");
         });
     }
 

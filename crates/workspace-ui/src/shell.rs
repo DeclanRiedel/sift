@@ -5081,14 +5081,16 @@ impl WorkspaceShell {
                         for pane in &self.panes {
                             if let Some(results) = pane.read(cx).results.get(&item_id).cloned() {
                                 results.update(cx, |results, cx| {
-                                    for edit in &applied_edits {
-                                        results.apply_saved_cell_value(
-                                            &edit.original_row,
-                                            &edit.column,
-                                            edit.value.clone(),
-                                            cx,
-                                        );
-                                    }
+                                    results.apply_saved_cell_values(
+                                        applied_edits.iter().map(|edit| {
+                                            (
+                                                edit.original_row.as_slice(),
+                                                edit.column.as_str(),
+                                                &edit.value,
+                                            )
+                                        }),
+                                        cx,
+                                    );
                                     results.finish_inline_cell_edit(cx);
                                 });
                             }
