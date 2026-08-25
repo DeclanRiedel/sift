@@ -10520,6 +10520,14 @@ impl WorkspaceShell {
         cx: &mut Context<Self>,
     ) {
         let key = event.keystroke.unparse();
+        if self.modal == Some(Modal::CommandPalette)
+            && key == "enter"
+            && !event.keystroke.modifiers.modified()
+        {
+            self.palette_confirm(&PaletteConfirm, window, cx);
+            cx.stop_propagation();
+            return;
+        }
         if self.ide_input.is_none() {
             if !self.keyboard_profile().vim_enabled() {
                 return;
@@ -21954,9 +21962,7 @@ mod tests {
                 vec![CommandId::SaveItem]
             );
         });
-        workspace.update_in(&mut cx, |workspace, window, cx| {
-            workspace.palette_confirm(&PaletteConfirm, window, cx)
-        });
+        cx.simulate_keystrokes("enter");
         assert!(matches!(
             receiver.try_recv(),
             Ok(ExecutorCommand::ApplyResultEdits { .. })
