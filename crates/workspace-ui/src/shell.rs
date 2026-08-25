@@ -11242,6 +11242,9 @@ impl WorkspaceShell {
     }
 
     fn apply_result_cell_edit(&mut self, cx: &mut Context<Self>) {
+        if self.result_edit_pending {
+            return;
+        }
         let Some(item_id) = self.staged_result_edits.first().map(|edit| edit.item_id) else {
             return;
         };
@@ -25013,6 +25016,11 @@ mod tests {
                 receiver.try_recv(),
                 Ok(ExecutorCommand::ApplyResultEdits { item_id: 1, .. })
             ));
+            shell.save_active_item(&SaveActiveItem, window, cx);
+            assert!(
+                receiver.try_recv().is_err(),
+                "a pending :w must not submit the stale edit set twice"
+            );
             shell.result_edit_pending = false;
             assert_eq!(
                 shell.staged_result_edits.len(),
