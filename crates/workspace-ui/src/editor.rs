@@ -52,13 +52,23 @@ const COMPLETION_MENU_WIDTH: Pixels = px(340.);
 const COMPLETION_ROW_HEIGHT: Pixels = px(22.);
 const COMPLETION_VISIBLE_ROWS: usize = 9;
 
+#[cfg(test)]
 fn line_starts(text: &str) -> Vec<usize> {
+    line_indices(text).0
+}
+
+fn line_indices(text: &str) -> (Vec<usize>, Vec<usize>) {
     let mut starts = vec![0];
-    starts.extend(
-        text.match_indices('\n')
-            .map(|(offset, _)| offset.saturating_add(1)),
-    );
-    starts
+    let mut char_starts = vec![0];
+    let mut chars = 0;
+    for (offset, character) in text.char_indices() {
+        chars += 1;
+        if character == '\n' {
+            starts.push(offset + 1);
+            char_starts.push(chars);
+        }
+    }
+    (starts, char_starts)
 }
 
 /// Pixel bounds of the part of `range` that falls on the line starting at
@@ -123,6 +133,8 @@ struct DocumentChange {
 pub struct QueryDocument {
     replica: TextReplica,
     text: String,
+    line_starts: Arc<Vec<usize>>,
+    line_char_starts: Vec<usize>,
     selection: Range<usize>,
     reversed: bool,
     /// Sticky column for vertical movement, so up/down over short lines keeps
@@ -143,9 +155,12 @@ impl QueryDocument {
         }
         let text = replica.text();
         let end = text.len();
+        let (line_starts, line_char_starts) = line_indices(&text);
         Self {
             replica,
             text,
+            line_starts: Arc::new(line_starts),
+            line_char_starts,
             selection: end..end,
             reversed: false,
             goal_column: None,
@@ -165,9 +180,12 @@ impl QueryDocument {
         let replica = TextReplica::from_snapshot(random_peer_id(), snapshot)?;
         let text = replica.text();
         let end = text.len();
+        let (line_starts, line_char_starts) = line_indices(&text);
         Ok(Self {
             replica,
             text,
+            line_starts: Arc::new(line_starts),
+            line_char_starts,
             selection: end..end,
             reversed: false,
             goal_column: None,
@@ -180,6 +198,20 @@ impl QueryDocument {
 
     pub fn text(&self) -> &str {
         &self.text
+    }
+
+    fn line_starts(&self) -> Arc<Vec<usize>> {
+        self.line_starts.clone()
+    }
+
+    fn line_count(&self) -> usize {
+        self.line_starts.len()
+    }
+
+    fn line_of_offset(&self, offset: usize) -> usize {
+        self.line_starts
+            .partition_point(|start| *start <= offset.min(self.text.len()))
+            .saturating_sub(1)
     }
 
     /// Replace the materialized buffer after a room replica sync. The room
@@ -235,12 +267,10 @@ impl QueryDocument {
 
     /// One-based line and Unicode-scalar column for status-bar presentation.
     pub fn cursor_position(&self) -> (usize, usize) {
-        let before = &self.text[..self.cursor()];
-        let line_start = before.rfind('\n').map_or(0, |index| index + 1);
-        (
-            before.matches('\n').count() + 1,
-            before[line_start..].chars().count() + 1,
-        )
+        let cursor = self.cursor();
+        let line = self.line_of_offset(cursor);
+        let line_start = self.line_starts[line];
+        (line + 1, self.text[line_start..cursor].chars().count() + 1)
     }
 
     pub fn cursor_offset(&self) -> usize {
@@ -251,8 +281,12 @@ impl QueryDocument {
     /// touches CRDT state; selection and history are the caller's concern.
     fn splice(&mut self, start: usize, end: usize, new_text: &str) {
         let since = self.replica.version_vector();
-        let char_start = self.text[..start].chars().count();
+        let line = self.line_of_offset(start);
+        let line_start = self.line_starts[line];
+        let char_start = self.line_char_starts[line] + self.text[line_start..start].chars().count();
         let removed_chars = self.text[start..end].chars().count();
+        let inserted_chars = new_text.chars().count();
+        let structural = self.text[start..end].contains('\n') || new_text.contains('\n');
         if removed_chars > 0 {
             self.replica
                 .delete(char_start, removed_chars)
@@ -263,7 +297,24 @@ impl QueryDocument {
                 .insert(char_start, new_text)
                 .expect("insert within bounds");
         }
-        self.text = self.replica.text();
+        self.text.replace_range(start..end, new_text);
+        if structural {
+            let (line_starts, line_char_starts) = line_indices(&self.text);
+            self.line_starts = Arc::new(line_starts);
+            self.line_char_starts = line_char_starts;
+        } else {
+            let byte_delta = new_text.len() as isize - (end - start) as isize;
+            let char_delta = inserted_chars as isize - removed_chars as isize;
+            for line_start in Arc::make_mut(&mut self.line_starts)
+                .iter_mut()
+                .skip(line + 1)
+            {
+                *line_start = line_start.saturating_add_signed(byte_delta);
+            }
+            for char_start in self.line_char_starts.iter_mut().skip(line + 1) {
+                *char_start = char_start.saturating_add_signed(char_delta);
+            }
+        }
         self.pending_room_update = self
             .replica
             .updates_since_if_any(&since)
@@ -282,10 +333,7 @@ impl QueryDocument {
         let end = range.end.clamp(start, self.text.len());
         let removed = self.text[start..end].to_string();
         self.last_change = Some(DocumentChange {
-            line: self.text[..start]
-                .bytes()
-                .filter(|byte| *byte == b'\n')
-                .count(),
+            line: self.line_of_offset(start),
             structural: removed.contains('\n') || new_text.contains('\n'),
         });
         let edit = Edit {
@@ -344,10 +392,7 @@ impl QueryDocument {
         let start = edit.at;
         let end = start + edit.inserted.len();
         self.last_change = Some(DocumentChange {
-            line: self.text[..start]
-                .bytes()
-                .filter(|byte| *byte == b'\n')
-                .count(),
+            line: self.line_of_offset(start),
             structural: edit.inserted.contains('\n') || edit.removed.contains('\n'),
         });
         self.splice(start, end, &edit.removed);
@@ -365,10 +410,7 @@ impl QueryDocument {
         let start = edit.at;
         let end = start + edit.removed.len();
         self.last_change = Some(DocumentChange {
-            line: self.text[..start]
-                .bytes()
-                .filter(|byte| *byte == b'\n')
-                .count(),
+            line: self.line_of_offset(start),
             structural: edit.inserted.contains('\n') || edit.removed.contains('\n'),
         });
         self.splice(start, end, &edit.inserted);
@@ -824,8 +866,6 @@ impl CursorBlink {
 
 #[derive(Default)]
 struct LineLayoutCache {
-    revision: u64,
-    line_starts: Arc<Vec<usize>>,
     lines: HashMap<usize, ShapedLine>,
 }
 
@@ -1489,10 +1529,7 @@ impl QueryEditor {
         if viewport.size.height <= px(0.) {
             return;
         }
-        let line = self.document.text()[..self.document.cursor()]
-            .bytes()
-            .filter(|byte| *byte == b'\n')
-            .count();
+        let line = self.document.line_of_offset(self.document.cursor());
         let caret_top = EDITOR_VERTICAL_INSET + EDITOR_LINE_HEIGHT * line as f32;
         let caret_bottom = caret_top + EDITOR_LINE_HEIGHT;
         let mut offset = self.scroll_handle.offset();
@@ -1503,7 +1540,7 @@ impl QueryEditor {
         } else if caret_bottom > visible_bottom - EDITOR_VERTICAL_INSET {
             offset.y = -(caret_bottom + EDITOR_VERTICAL_INSET - viewport.size.height);
         }
-        let line_count = self.document.text().split('\n').count().max(1);
+        let line_count = self.document.line_count();
         let content_height = EDITOR_VERTICAL_INSET * 2. + EDITOR_LINE_HEIGHT * line_count as f32;
         let max_scroll = (content_height - viewport.size.height).max(px(0.));
         offset.y = offset.y.min(px(0.)).max(-max_scroll);
@@ -1921,7 +1958,7 @@ impl QueryEditor {
             return None;
         }
         let line = (f32::from(content_y) / f32::from(EDITOR_LINE_HEIGHT)) as usize;
-        let starts = line_starts(self.document.text());
+        let starts = self.document.line_starts();
         let start = *starts.get(line)?;
         let end = starts
             .get(line + 1)
@@ -2514,7 +2551,7 @@ impl Element for QueryEditorElement {
         window: &mut Window,
         cx: &mut App,
     ) -> (LayoutId, Self::RequestLayoutState) {
-        let line_count = self.editor.read(cx).document.text().split('\n').count();
+        let line_count = self.editor.read(cx).document.line_count();
         let mut style = Style::default();
         style.size.width = gpui::relative(1.).into();
         style.size.height =
@@ -2552,14 +2589,7 @@ impl Element for QueryEditorElement {
 
         let mut lines = Vec::new();
         let mut line_numbers = Vec::new();
-        let line_starts = {
-            let mut cache = editor.line_cache.borrow_mut();
-            if cache.revision != editor.revision || cache.line_starts.is_empty() {
-                cache.revision = editor.revision;
-                cache.line_starts = Arc::new(line_starts(text));
-            }
-            cache.line_starts.clone()
-        };
+        let line_starts = editor.document.line_starts();
         let mut selections = Vec::new();
         let mut find_quads = Vec::new();
         let mut usage_quads = Vec::new();
@@ -4261,6 +4291,24 @@ mod tests {
         assert_eq!(document.text(), "select 1");
         assert_eq!(document.replica.text(), "select 1");
         assert_eq!(document.selection(), 8..8);
+    }
+
+    #[test]
+    fn incremental_line_index_tracks_unicode_and_structural_edits() {
+        let mut document = doc("αβ\nxyz\nlast");
+        assert_eq!(&*document.line_starts(), &[0, 5, 9]);
+        assert_eq!(document.line_char_starts, vec![0, 3, 7]);
+
+        document.replace_range(0..0, "!");
+        assert_eq!(document.text(), "!αβ\nxyz\nlast");
+        assert_eq!(&*document.line_starts(), &[0, 6, 10]);
+        assert_eq!(document.line_char_starts, vec![0, 4, 8]);
+
+        document.replace_range(6..9, "x\ny");
+        assert_eq!(document.text(), "!αβ\nx\ny\nlast");
+        assert_eq!(&*document.line_starts(), &[0, 6, 8, 10]);
+        assert_eq!(document.line_char_starts, vec![0, 4, 6, 8]);
+        assert_eq!(document.replica.text(), document.text());
     }
 
     #[test]
