@@ -161,6 +161,7 @@ pub enum IconName {
     Minimize,
     Outline,
     Play,
+    Refresh,
     Search,
     Sequence,
     Server,
@@ -175,7 +176,7 @@ pub enum IconName {
 }
 
 impl IconName {
-    pub const ALL: [Self; 34] = [
+    pub const ALL: [Self; 35] = [
         Self::Activity,
         Self::Add,
         Self::Automations,
@@ -199,6 +200,7 @@ impl IconName {
         Self::Minimize,
         Self::Outline,
         Self::Play,
+        Self::Refresh,
         Self::Search,
         Self::Sequence,
         Self::Server,
@@ -237,6 +239,7 @@ impl IconName {
             Self::Minimize => "icons/minimize.svg",
             Self::Outline => "icons/outline.svg",
             Self::Play => "icons/play.svg",
+            Self::Refresh => "icons/refresh.svg",
             Self::Search => "icons/search.svg",
             Self::Sequence => "icons/sequence.svg",
             Self::Server => "icons/server.svg",

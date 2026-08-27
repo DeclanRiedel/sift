@@ -31,6 +31,7 @@ must be used when Qlementine has no appropriate semantic icon.
 | `minimize.svg` | `action/windows-minimize.svg` |
 | `outline.svg` | `misc/items-tree.svg` |
 | `play.svg` | `media/play.svg` |
+| `refresh.svg` | `action/refresh.svg` |
 | `search.svg` | `navigation/search.svg` |
 | `server.svg` | `hardware/server.svg` |
 | `terminal.svg` | `software/command-line.svg` |

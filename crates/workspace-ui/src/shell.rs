@@ -16240,6 +16240,10 @@ impl WorkspaceShell {
         div()
             .id("connections-health-footer")
             .debug_selector(|| "connections-health-footer".into())
+            .absolute()
+            .right_0()
+            .bottom_0()
+            .left_0()
             .h(cx.theme().metrics.row_height)
             .flex_none()
             .flex()
@@ -16361,6 +16365,10 @@ impl WorkspaceShell {
             .flex_col()
             .overflow_hidden()
             .py_1()
+            .when(
+                dock.id == DockId::Left && self.active_left_panel == LeftPanel::Connections,
+                |dock| dock.pb_0(),
+            )
             .border_color(if keyboard_focused {
                 colors.accent
             } else {
@@ -16420,6 +16428,7 @@ impl WorkspaceShell {
                     div()
                         .mx_2()
                         .h(cx.theme().metrics.row_height)
+                        .flex_none()
                         .flex()
                         .items_center()
                         .justify_between()
@@ -16455,11 +16464,21 @@ impl WorkspaceShell {
                                             ),
                                     )
                                     .child(
-                                        Button::new("refresh-connection-schema", "Refresh")
-                                            .tone(ButtonTone::Ghost)
-                                            .on_click(cx.listener(|shell, _, _, cx| {
-                                                shell.refresh_connection_schema(cx)
-                                            })),
+                                        div()
+                                            .debug_selector(|| "refresh-connection-schema".into())
+                                            .child(
+                                                IconButton::new(
+                                                    "refresh-connection-schema",
+                                                    IconName::Refresh,
+                                                    "Refresh database schema",
+                                                )
+                                                .square(px(26.))
+                                                .icon_size(13.)
+                                                .tooltip("Refresh database schema")
+                                                .on_click(cx.listener(|shell, _, _, cx| {
+                                                    shell.refresh_connection_schema(cx)
+                                                })),
+                                            ),
                                     )
                             },
                         ),
@@ -26466,7 +26485,18 @@ mod tests {
         });
         while receiver.try_recv().is_ok() {}
         cx.run_until_parked();
-        assert!(cx.debug_bounds("connections-health-footer").is_some());
+        let footer = cx
+            .debug_bounds("connections-health-footer")
+            .expect("connections health footer");
+        let left_dock = cx.debug_bounds("left-dock").expect("left dock");
+        assert_eq!(footer.bottom(), left_dock.bottom());
+        let search = cx
+            .debug_bounds("open-schema-search")
+            .expect("schema search button");
+        let refresh = cx
+            .debug_bounds("refresh-connection-schema")
+            .expect("schema refresh button");
+        assert_eq!(search.size, refresh.size);
         assert!(cx.debug_bounds("connections-reconnect").is_some());
         assert!(cx.debug_bounds("connections-check-connection").is_some());
         assert!(cx.debug_bounds("connections-disconnect").is_some());
