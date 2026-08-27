@@ -25,6 +25,8 @@ pub enum CommandId {
     SearchSchema,
     SearchData,
     ImportCsv,
+    CaptureCatalogSnapshot,
+    CompareCatalogSnapshot,
     ExportCsv,
     ExportTsv,
     ExportJsonLines,
@@ -86,6 +88,8 @@ impl CommandId {
             Self::SearchSchema => "database.search-schema",
             Self::SearchData => "database.search-data",
             Self::ImportCsv => "database.import-csv",
+            Self::CaptureCatalogSnapshot => "database.capture-catalog-snapshot",
+            Self::CompareCatalogSnapshot => "database.compare-catalog-snapshot",
             Self::ExportCsv => "query.export-csv",
             Self::ExportTsv => "query.export-tsv",
             Self::ExportJsonLines => "query.export-json-lines",
@@ -482,6 +486,22 @@ const DEFINITIONS: &[CommandDefinition] = &[
         "Import CSV as New Table…",
         "",
         "<leader> d i",
+        true,
+        AvailabilityRule::ConnectedDatabase,
+    ),
+    command(
+        CommandId::CaptureCatalogSnapshot,
+        "Capture Schema Baseline",
+        "",
+        "<leader> m b",
+        true,
+        AvailabilityRule::ConnectedDatabase,
+    ),
+    command(
+        CommandId::CompareCatalogSnapshot,
+        "Compare Schema to Baseline…",
+        "",
+        "<leader> m c",
         true,
         AvailabilityRule::ConnectedDatabase,
     ),
@@ -928,6 +948,22 @@ mod tests {
         .enabled());
         assert!(CommandRegistry::spec(
             CommandId::SearchSchema,
+            CommandContext {
+                database_connected: true,
+                ..empty
+            }
+        )
+        .enabled());
+        assert!(CommandRegistry::spec(
+            CommandId::CaptureCatalogSnapshot,
+            CommandContext {
+                database_connected: true,
+                ..empty
+            }
+        )
+        .enabled());
+        assert!(CommandRegistry::spec(
+            CommandId::CompareCatalogSnapshot,
             CommandContext {
                 database_connected: true,
                 ..empty

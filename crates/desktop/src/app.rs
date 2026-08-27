@@ -1150,6 +1150,134 @@ async fn run_query_executor(
                     return;
                 }
             }
+            ExecutorCommand::CaptureCatalogSnapshot => {
+                let result = match context.as_ref() {
+                    Some(opened) => async {
+                        let graph = opened
+                            .client
+                            .catalog_graph(
+                                opened.session,
+                                opened.metadata_connection,
+                                sift_protocol::CatalogGraphRequest::default(),
+                            )
+                            .await?;
+                        opened
+                            .client
+                            .create_catalog_snapshot(
+                                opened.session,
+                                opened.metadata_connection,
+                                sift_protocol::CreateCatalogSnapshotRequest {
+                                    expected_catalog_revision: graph.revision,
+                                    options: Default::default(),
+                                    description: Some("Desktop schema baseline".into()),
+                                    accept_partial: false,
+                                },
+                            )
+                            .await
+                    }
+                    .await
+                    .map_err(|error| format!("capturing schema baseline failed: {error}")),
+                    None => Err("Connect before capturing a schema baseline".into()),
+                };
+                if events
+                    .send(ExecutorEvent::CatalogSnapshotCaptured(result))
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            ExecutorCommand::PrepareCatalogMigration => {
+                let result = match context.as_ref() {
+                    Some(opened) => async {
+                        let live = opened
+                            .client
+                            .catalog_graph(
+                                opened.session,
+                                opened.metadata_connection,
+                                sift_protocol::CatalogGraphRequest::default(),
+                            )
+                            .await?;
+                        let snapshots = opened
+                            .client
+                            .catalog_snapshots(sift_api_types::TenantId(opened.tenant_id), 100)
+                            .await?;
+                        let baseline = snapshots
+                            .into_iter()
+                            .find(|snapshot| {
+                                snapshot.connection_profile_id == Some(opened.profile_id)
+                            })
+                            .ok_or_else(|| {
+                                sift_client_sdk::Error::Protocol(
+                                    "Capture a schema baseline for this connection first".into(),
+                                )
+                            })?;
+                        let diff_request = sift_protocol::SchemaDiffRequest {
+                            from: sift_protocol::CatalogSourceRef::Snapshot {
+                                snapshot_id: baseline.id,
+                            },
+                            to: sift_protocol::CatalogSourceRef::Live {
+                                expected_revision: live.revision,
+                                options: Default::default(),
+                            },
+                            accepted_renames: Vec::new(),
+                            max_changes: Some(2_000),
+                        };
+                        let diff = opened
+                            .client
+                            .compare_catalog_schemas(
+                                opened.session,
+                                opened.metadata_connection,
+                                diff_request.clone(),
+                            )
+                            .await?;
+                        let plan = opened
+                            .client
+                            .preview_migration(
+                                opened.session,
+                                opened.metadata_connection,
+                                sift_protocol::PreviewMigrationRequest {
+                                    diff: diff_request,
+                                    expected_diff_digest: diff.digest.clone(),
+                                    selected_changes: diff
+                                        .changes
+                                        .iter()
+                                        .map(|change| change.id.clone())
+                                        .collect(),
+                                    expected_live_revision: live.revision,
+                                    options: Default::default(),
+                                },
+                            )
+                            .await?;
+                        Ok::<_, sift_client_sdk::Error>((Box::new(diff), Box::new(plan)))
+                    }
+                    .await
+                    .map_err(|error| format!("preparing schema migration failed: {error}")),
+                    None => Err("Connect before comparing schemas".into()),
+                };
+                if events
+                    .send(ExecutorEvent::CatalogMigrationPrepared(result))
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            ExecutorCommand::ApplyCatalogMigration { request } => {
+                let result = match context.as_ref() {
+                    Some(opened) => opened
+                        .client
+                        .apply_migration(opened.session, opened.metadata_connection, request)
+                        .await
+                        .map(Box::new)
+                        .map_err(|error| format!("applying schema migration failed: {error}")),
+                    None => Err("Connect before applying a schema migration".into()),
+                };
+                if events
+                    .send(ExecutorEvent::CatalogMigrationApplied(result))
+                    .is_err()
+                {
+                    return;
+                }
+            }
             ExecutorCommand::LoadHistory { item_id, cursor } => {
                 let append = cursor.is_some();
                 let connected_client = context.as_ref().map(|opened| opened.client.clone());

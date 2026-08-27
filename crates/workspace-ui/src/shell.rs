@@ -892,6 +892,7 @@ pub enum Modal {
     ConfirmDeleteConnection(ConnectionNavEntry),
     ConfirmTerminateProcess(i64),
     SemanticRename,
+    CatalogMigration,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1506,6 +1507,11 @@ pub enum ExecutorCommand {
     ImportCsv {
         request: sift_protocol::CsvImportRequest,
     },
+    CaptureCatalogSnapshot,
+    PrepareCatalogMigration,
+    ApplyCatalogMigration {
+        request: sift_protocol::ApplyMigrationRequest,
+    },
     LoadHistory {
         item_id: u64,
         cursor: Option<String>,
@@ -1678,6 +1684,17 @@ pub enum ExecutorEvent {
         message: String,
     },
     CsvImported(Result<sift_protocol::CsvImportResponse, String>),
+    CatalogSnapshotCaptured(Result<sift_protocol::CatalogSnapshot, String>),
+    CatalogMigrationPrepared(
+        Result<
+            (
+                Box<sift_protocol::SchemaDiff>,
+                Box<sift_protocol::MigrationPlan>,
+            ),
+            String,
+        >,
+    ),
+    CatalogMigrationApplied(Result<Box<sift_protocol::MigrationRun>, String>),
     HistoryLoaded {
         item_id: u64,
         append: bool,
@@ -4048,6 +4065,10 @@ pub struct WorkspaceShell {
     pending_database_execution: Option<PendingDatabaseExecution>,
     pending_production_execution: Option<PendingProductionExecution>,
     pending_database_explain: Option<PendingDatabaseExplain>,
+    catalog_diff: Option<Box<sift_protocol::SchemaDiff>>,
+    catalog_migration_plan: Option<Box<sift_protocol::MigrationPlan>>,
+    catalog_migration_pending: bool,
+    catalog_migration_error: Option<String>,
     instance_sender: Option<tokio::sync::mpsc::UnboundedSender<InstanceCommand>>,
     saved_servers: Vec<SavedServerProfile>,
     instance_roots: Vec<SavedInstanceRoot>,
@@ -4505,6 +4526,10 @@ impl WorkspaceShell {
             pending_database_execution: None,
             pending_production_execution: None,
             pending_database_explain: None,
+            catalog_diff: None,
+            catalog_migration_plan: None,
+            catalog_migration_pending: false,
+            catalog_migration_error: None,
             instance_sender: None,
             saved_servers: Vec::new(),
             instance_roots: Vec::new(),
@@ -5937,6 +5962,38 @@ impl WorkspaceShell {
                     self.show_error_toast(message, cx);
                 }
             },
+            ExecutorEvent::CatalogSnapshotCaptured(result) => match result {
+                Ok(snapshot) => {
+                    self.show_toast(format!("Captured schema baseline {}", snapshot.id), cx)
+                }
+                Err(message) => self.show_error_toast(message, cx),
+            },
+            ExecutorEvent::CatalogMigrationPrepared(result) => {
+                self.catalog_migration_pending = false;
+                match result {
+                    Ok((diff, plan)) => {
+                        self.catalog_diff = Some(diff);
+                        self.catalog_migration_plan = Some(plan);
+                        self.catalog_migration_error = None;
+                    }
+                    Err(message) => self.catalog_migration_error = Some(message),
+                }
+                cx.notify();
+            }
+            ExecutorEvent::CatalogMigrationApplied(result) => {
+                self.catalog_migration_pending = false;
+                match result {
+                    Ok(run) => {
+                        self.modal = None;
+                        self.show_toast(format!("Migration {} completed", run.id), cx);
+                        if let Some(sender) = &self.executor_sender {
+                            let _ = sender.send(ExecutorCommand::RefreshSchema);
+                        }
+                    }
+                    Err(message) => self.catalog_migration_error = Some(message),
+                }
+                cx.notify();
+            }
             ExecutorEvent::HistoryLoaded {
                 item_id,
                 append,
@@ -12195,6 +12252,53 @@ impl WorkspaceShell {
         cx.notify();
     }
 
+    fn capture_catalog_snapshot(&mut self, cx: &mut Context<Self>) {
+        let Some(sender) = &self.executor_sender else {
+            return;
+        };
+        if sender.send(ExecutorCommand::CaptureCatalogSnapshot).is_ok() {
+            self.show_toast("Capturing schema baseline…".into(), cx);
+        }
+    }
+
+    fn prepare_catalog_migration(&mut self, cx: &mut Context<Self>) {
+        let Some(sender) = &self.executor_sender else {
+            return;
+        };
+        if sender
+            .send(ExecutorCommand::PrepareCatalogMigration)
+            .is_ok()
+        {
+            self.catalog_diff = None;
+            self.catalog_migration_plan = None;
+            self.catalog_migration_error = None;
+            self.catalog_migration_pending = true;
+            self.modal = Some(Modal::CatalogMigration);
+            cx.notify();
+        }
+    }
+
+    fn apply_catalog_migration(&mut self, cx: &mut Context<Self>) {
+        let Some(plan) = self.catalog_migration_plan.as_ref() else {
+            return;
+        };
+        let Some(sender) = &self.executor_sender else {
+            return;
+        };
+        let request = sift_protocol::ApplyMigrationRequest {
+            plan_id: plan.id,
+            plan_digest: plan.digest.clone(),
+            acknowledgements: plan.required_acknowledgements.clone(),
+        };
+        if sender
+            .send(ExecutorCommand::ApplyCatalogMigration { request })
+            .is_ok()
+        {
+            self.catalog_migration_pending = true;
+            cx.notify();
+        }
+    }
+
     fn open_data_results_modal(
         &mut self,
         pane: &Entity<Pane>,
@@ -13718,6 +13822,12 @@ impl WorkspaceShell {
         if self.modal == Some(Modal::SemanticRename) {
             self.pending_semantic_rename = None;
         }
+        if self.modal == Some(Modal::CatalogMigration) {
+            self.catalog_diff = None;
+            self.catalog_migration_plan = None;
+            self.catalog_migration_error = None;
+            self.catalog_migration_pending = false;
+        }
         self.modal = None;
         // Return focus to the surface the user chose before opening temporary UI.
         self.restore_active_surface(window, cx);
@@ -13772,6 +13882,8 @@ impl WorkspaceShell {
             CommandId::SearchSchema => self.open_schema_search(window, cx),
             CommandId::SearchData => self.open_data_search(window, cx),
             CommandId::ImportCsv => self.prompt_csv_import(cx),
+            CommandId::CaptureCatalogSnapshot => self.capture_catalog_snapshot(cx),
+            CommandId::CompareCatalogSnapshot => self.prepare_catalog_migration(cx),
             CommandId::ExportCsv => self.export_active_result(sift_protocol::ExportFormat::Csv, cx),
             CommandId::ExportTsv => self.export_active_result(sift_protocol::ExportFormat::Tsv, cx),
             CommandId::ExportJsonLines => {
@@ -20124,6 +20236,50 @@ impl WorkspaceShell {
                             .child(Button::new("confirm-terminate-process", "Terminate").tone(ButtonTone::DangerMuted).on_click(cx.listener(move |shell, _, _, cx| shell.confirm_terminate_process(process_id, cx)))))
                         .into_any_element()
                 }
+                Modal::CatalogMigration => {
+                    let change_count = self.catalog_diff.as_ref().map_or(0, |diff| diff.changes.len());
+                    let statement_count = self.catalog_migration_plan.as_ref().map_or(0, |plan| {
+                        plan.groups.iter().map(|group| group.statements.len()).sum()
+                    });
+                    let statements = self
+                        .catalog_migration_plan
+                        .iter()
+                        .flat_map(|plan| &plan.groups)
+                        .flat_map(|group| &group.statements)
+                        .take(20)
+                        .map(|statement| {
+                            div()
+                                .flex()
+                                .flex_col()
+                                .gap_1()
+                                .p_2()
+                                .border_b_1()
+                                .border_color(colors.subtle_border)
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(colors.warning)
+                                        .child(format!("{:?}", statement.risk)),
+                                )
+                                .child(div().text_sm().whitespace_normal().child(statement.sql.clone()))
+                        })
+                        .collect::<Vec<_>>();
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_3()
+                        .w(px(720.))
+                        .max_h(px(640.))
+                        .child(div().font_weight(gpui::FontWeight::SEMIBOLD).child("Schema baseline migration"))
+                        .child(div().text_sm().text_color(colors.muted_text).child(format!("{change_count} change(s) · {statement_count} statement(s)")))
+                        .children(self.catalog_migration_error.clone().map(ErrorBanner::new))
+                        .child(div().id("catalog-migration-statements").flex_1().min_h_0().overflow_y_scroll().children(statements))
+                        .children((statement_count > 20).then(|| div().text_xs().text_color(colors.muted_text).child(format!("{} more statement(s) not shown", statement_count - 20))))
+                        .child(div().flex().justify_end().gap_2()
+                            .child(Button::new("cancel-catalog-migration", "Cancel").tone(ButtonTone::Neutral).on_click(cx.listener(|shell, _, window, cx| shell.dismiss_modal(&DismissModal, window, cx))))
+                            .child(Button::new("apply-catalog-migration", if self.catalog_migration_pending { "Working…" } else { "Apply migration" }).tone(ButtonTone::DangerMuted).disabled(self.catalog_migration_pending || self.catalog_migration_plan.is_none()).on_click(cx.listener(|shell, _, _, cx| shell.apply_catalog_migration(cx)))))
+                        .into_any_element()
+                }
                 Modal::SemanticRename => {
                     let (pending, edit_count, warnings) = self.pending_semantic_rename.as_ref().map_or((false, None, Vec::new()), |rename| (rename.pending, rename.edits.as_ref().map(Vec::len), rename.warnings.clone()));
                     div()
@@ -20163,6 +20319,7 @@ impl WorkspaceShell {
                     | Modal::ConfirmDeleteConnection(_)
                     | Modal::ConfirmTerminateProcess(_)
                     | Modal::SemanticRename
+                    | Modal::CatalogMigration
             );
             div()
                 .id("modal-layer")
@@ -22684,6 +22841,23 @@ mod tests {
                 Some(&ResultInspectorView::RowJson)
             );
         });
+    }
+
+    #[gpui::test]
+    fn catalog_migration_workflow_is_executor_owned(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let workspace = window.root(cx).unwrap();
+        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        workspace.update(cx, |shell, cx| {
+            shell.executor_sender = Some(sender);
+            shell.prepare_catalog_migration(cx);
+            assert_eq!(shell.modal, Some(Modal::CatalogMigration));
+            assert!(shell.catalog_migration_pending);
+        });
+        assert!(matches!(
+            receiver.try_recv(),
+            Ok(ExecutorCommand::PrepareCatalogMigration)
+        ));
     }
 
     #[test]
