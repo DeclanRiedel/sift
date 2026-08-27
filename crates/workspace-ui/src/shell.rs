@@ -7325,11 +7325,11 @@ impl WorkspaceShell {
             };
         };
 
-        let selected = self.focused_surface == WorkspaceSurface::Connections
-            && self.connection_nav_selected == nav_index;
+        let selected = self.connection_nav_selected == nav_index;
         let base = |depth| {
             div()
-                .mx_2()
+                .debug_selector(move || format!("connection-nav-row-{nav_index}"))
+                .w_full()
                 .h(row_height)
                 .pl(tree_indent(depth))
                 .pr_2()
@@ -7337,9 +7337,13 @@ impl WorkspaceShell {
                 .items_center()
                 .gap(px(6.))
                 .rounded_sm()
-                .when(selected, |row| {
-                    row.bg(colors.accent_muted).text_color(colors.text)
+                .border_1()
+                .border_color(if selected {
+                    colors.accent
+                } else {
+                    gpui::transparent_black()
                 })
+                .when(selected, |row| row.text_color(colors.text))
         };
 
         match item.action {
@@ -7462,7 +7466,6 @@ impl WorkspaceShell {
                 let entry_for_delete = connection.clone();
                 let mut element = base(1)
                     .id(("conn", connection_id as usize))
-                    .when(connected, |row| row.bg(colors.active_surface))
                     .hover(|row| row.bg(colors.hovered_surface))
                     .child(leading)
                     .child(logo)
@@ -7483,11 +7486,18 @@ impl WorkspaceShell {
                         )
                     });
                 if connected {
-                    element = element.child(
-                        Button::new(("disconnect", connection_id as usize), "Disconnect")
-                            .tone(ButtonTone::DangerGhost)
-                            .on_click(cx.listener(|shell, _, _, cx| shell.disconnect(cx))),
-                    );
+                    element = element
+                        .on_click(cx.listener(move |shell, _, _, cx| {
+                            shell.set_connection_selection(nav_index, cx)
+                        }))
+                        .child(
+                            Button::new(("disconnect", connection_id as usize), "Disconnect")
+                                .tone(ButtonTone::DangerGhost)
+                                .on_click(cx.listener(move |shell, _, _, cx| {
+                                    shell.set_connection_selection(nav_index, cx);
+                                    shell.disconnect(cx)
+                                })),
+                        );
                 } else {
                     element = element.on_click(cx.listener(move |shell, _, _, cx| {
                         shell.set_connection_selection(nav_index, cx);
@@ -7510,6 +7520,7 @@ impl WorkspaceShell {
                             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                             .on_click(cx.listener(move |shell, _, _, cx| {
                                 cx.stop_propagation();
+                                shell.set_connection_selection(nav_index, cx);
                                 shell.request_edit_connection(&entry_for_edit, cx)
                             }))
                             .child(icon(IconName::Edit, colors.muted_text, 11.)),
@@ -7529,6 +7540,7 @@ impl WorkspaceShell {
                             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                             .on_click(cx.listener(move |shell, _, _, cx| {
                                 cx.stop_propagation();
+                                shell.set_connection_selection(nav_index, cx);
                                 shell.request_delete_connection(&entry_for_delete, cx)
                             }))
                             .child(icon(IconName::Close, colors.danger, 11.)),
@@ -7681,12 +7693,17 @@ impl WorkspaceShell {
                     } else {
                         colors.muted_text
                     })
+                    .hover(|row| row.bg(colors.hovered_surface))
                     .when(can_preview, |row| {
-                        row.hover(|row| row.bg(colors.hovered_surface))
-                            .on_click(cx.listener(move |shell, _, window, cx| {
-                                shell.set_connection_selection(nav_index, cx);
-                                shell.open_table_preview(target.clone(), window, cx)
-                            }))
+                        row.on_click(cx.listener(move |shell, _, window, cx| {
+                            shell.set_connection_selection(nav_index, cx);
+                            shell.open_table_preview(target.clone(), window, cx)
+                        }))
+                    })
+                    .when(!can_preview, |row| {
+                        row.on_click(cx.listener(move |shell, _, _, cx| {
+                            shell.set_connection_selection(nav_index, cx)
+                        }))
                     })
                     .child(tree_spacer_slot())
                     .child(
@@ -7739,6 +7756,7 @@ impl WorkspaceShell {
                             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                             .on_click(cx.listener(move |shell, _, _, cx| {
                                 cx.stop_propagation();
+                                shell.set_connection_selection(nav_index, cx);
                                 shell.create_room_document(room_id, cx)
                             }))
                             .child(icon(IconName::Add, colors.muted_text, 11.)),
@@ -21137,9 +21155,28 @@ mod tests {
             assert_eq!(shell.connection_nav_selected, 0);
         });
 
+        workspace.update(&mut cx, |shell, cx| {
+            shell.connection_status = ConnectionStatus::Connected {
+                profile_id: 7,
+                name: "Demo".into(),
+            };
+            shell.toggle_tenant(1, cx);
+        });
+        cx.run_until_parked();
+        let connection_row = cx
+            .debug_bounds("connection-nav-row-1")
+            .expect("visible connection row");
+        assert!(connection_row.size.width > px(200.));
+        cx.simulate_click(connection_row.center(), Modifiers::default());
+        workspace.read_with(&cx, |shell, _| {
+            assert_eq!(shell.connection_nav_selected, 1);
+            assert_eq!(shell.focused_surface, WorkspaceSurface::Connections);
+        });
+
         cx.simulate_keystrokes("l j");
         workspace.read_with(&cx, |shell, _| {
             assert!(shell.expanded_tenants.contains(&1));
+            assert!(shell.expanded_connections.contains(&7));
             assert_eq!(shell.connection_nav_selected, 1);
         });
         cx.simulate_keystrokes("k shift-g g g");
