@@ -582,6 +582,7 @@ actions!(
         MoveLastResultRow,
         MoveFirstResultColumn,
         MoveLastResultColumn,
+        DeleteSelectedValues,
         YankSelectedWithHeaders,
         PreviousResultTab,
         NextResultTab
@@ -935,10 +936,31 @@ impl ResultsView {
     }
 
     pub(crate) fn pasted_cell_edits(&self, text: &str) -> Result<Vec<PastedCellEdit>, String> {
-        let GridSelection::Cell { row, column } =
-            self.selected.ok_or("Select a destination cell")?
-        else {
-            return Err("Select one destination cell before pasting".into());
+        let visible_columns = self.visible_column_indices();
+        let (row, column) = match self.selected.ok_or("Select a destination cell")? {
+            GridSelection::Cell { row, column } => (row, column),
+            GridSelection::Range {
+                anchor_row,
+                anchor_column,
+                focus_row,
+                focus_column,
+            } => {
+                let (rows, columns) =
+                    self.range_coordinates(anchor_row, anchor_column, focus_row, focus_column);
+                (
+                    *rows.first().ok_or("Selection has no rows")?,
+                    *columns.first().ok_or("Selection has no columns")?,
+                )
+            }
+            GridSelection::Row(row) => (row, *visible_columns.first().ok_or("No visible columns")?),
+            GridSelection::Column(column) => (
+                *self.display_rows.first().ok_or("No displayed rows")?,
+                column,
+            ),
+            GridSelection::All => (
+                *self.display_rows.first().ok_or("No displayed rows")?,
+                *visible_columns.first().ok_or("No visible columns")?,
+            ),
         };
         let data = self.state.ready().ok_or("Run the query before pasting")?;
         let delimiter = if text.contains('\t') { b'\t' } else { b',' };
@@ -959,6 +981,10 @@ impl ResultsView {
             .iter()
             .position(|source| *source == row)
             .ok_or("Selected row is not displayed")?;
+        let start_display_column = visible_columns
+            .iter()
+            .position(|source| *source == column)
+            .ok_or("Selected column is not displayed")?;
         let mut edits = Vec::new();
         for (row_offset, record) in records.into_iter().enumerate() {
             let display_row = start_display_row.saturating_add(row_offset);
@@ -979,7 +1005,13 @@ impl ResultsView {
                 .map(|(column, value)| (column.name.clone(), value.clone()))
                 .collect::<Vec<_>>();
             for (column_offset, field) in record.iter().enumerate() {
-                let target_column = column.saturating_add(column_offset);
+                let display_column = start_display_column.saturating_add(column_offset);
+                let target_column = *visible_columns.get(display_column).ok_or_else(|| {
+                    format!(
+                        "Paste exceeds the displayed result at column {}",
+                        display_column + 1
+                    )
+                })?;
                 let metadata = data.columns.get(target_column).ok_or_else(|| {
                     format!("Paste exceeds the result at column {}", target_column + 1)
                 })?;
@@ -2403,12 +2435,48 @@ impl ResultsView {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !matches!(self.selected, Some(GridSelection::Cell { .. })) {
+        if self.selected.is_none() {
             return;
         }
         if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
             cx.emit(ResultsEvent::PasteSelectedCellRequested { text });
         }
+    }
+
+    fn delete_selected_values(
+        &mut self,
+        _: &DeleteSelectedValues,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(selection) = self.selected else {
+            return;
+        };
+        let visible_columns = self.visible_column_indices();
+        let (rows, columns) = match selection {
+            GridSelection::Cell { row, column } => (vec![row], vec![column]),
+            GridSelection::Range {
+                anchor_row,
+                anchor_column,
+                focus_row,
+                focus_column,
+            } => self.range_coordinates(anchor_row, anchor_column, focus_row, focus_column),
+            GridSelection::Row(row) => (vec![row], visible_columns),
+            GridSelection::Column(column) => (self.display_rows.to_vec(), vec![column]),
+            GridSelection::All => (self.display_rows.to_vec(), visible_columns),
+        };
+        if rows.is_empty() || columns.is_empty() {
+            return;
+        }
+        let row = std::iter::repeat_n("NULL", columns.len())
+            .collect::<Vec<_>>()
+            .join("\t");
+        let text = std::iter::repeat_n(row, rows.len())
+            .collect::<Vec<_>>()
+            .join("\n");
+        cx.emit(ResultsEvent::PasteSelectedCellRequested { text });
+        self.visual_selection = false;
+        cx.notify();
     }
 
     fn revert_selected_cell(
@@ -4086,6 +4154,7 @@ impl gpui::Render for ResultsView {
             .on_action(cx.listener(Self::toggle_visual_selection))
             .on_action(cx.listener(Self::exit_visual_selection))
             .on_action(cx.listener(Self::paste_selected_cell))
+            .on_action(cx.listener(Self::delete_selected_values))
             .on_action(cx.listener(Self::revert_selected_cell))
             .on_action(cx.listener(Self::move_cell_left))
             .on_action(cx.listener(Self::move_cell_right))
@@ -5354,6 +5423,9 @@ mod tests {
                 view.selected_text_with_headers().as_deref(),
                 Some("name\trank\nneo\t1\ntrinity\t2")
             );
+            let visual_edits = view.pasted_cell_edits("NULL\tNULL\nNULL\tNULL").unwrap();
+            assert_eq!(visual_edits.len(), 4);
+            assert!(visual_edits.iter().all(|edit| edit.text == "NULL"));
             assert_eq!(view.placement(), ResultPlacement::Bottom);
             view.set_extent(300.0, cx);
             assert_eq!(view.extent(), 300.0);
