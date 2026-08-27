@@ -892,6 +892,7 @@ pub enum Modal {
     ConfirmDeleteConnection(ConnectionNavEntry),
     ConfirmTerminateProcess(i64),
     SemanticRename,
+    CatalogDiagram,
     CatalogMigration,
 }
 
@@ -1490,6 +1491,7 @@ pub enum ExecutorCommand {
         profile_id: i64,
     },
     LoadDatabaseProcesses,
+    LoadCatalogDiagram,
     TerminateDatabaseProcess {
         process_id: i64,
     },
@@ -1656,6 +1658,7 @@ pub enum ExecutorEvent {
     },
     ProfileDeletionFailed(String),
     DatabaseProcessesLoaded(Result<Vec<sift_protocol::DatabaseProcess>, String>),
+    CatalogDiagramLoaded(Result<Box<sift_protocol::CatalogDiagram>, String>),
     DatabaseProcessTerminated {
         process_id: i64,
         result: Result<bool, String>,
@@ -4068,6 +4071,9 @@ pub struct WorkspaceShell {
     pending_database_execution: Option<PendingDatabaseExecution>,
     pending_production_execution: Option<PendingProductionExecution>,
     pending_database_explain: Option<PendingDatabaseExplain>,
+    catalog_diagram: Option<Box<sift_protocol::CatalogDiagram>>,
+    catalog_diagram_loading: bool,
+    catalog_diagram_error: Option<String>,
     catalog_diff: Option<Box<sift_protocol::SchemaDiff>>,
     catalog_migration_plan: Option<Box<sift_protocol::MigrationPlan>>,
     catalog_migration_pending: bool,
@@ -4531,6 +4537,9 @@ impl WorkspaceShell {
             pending_database_execution: None,
             pending_production_execution: None,
             pending_database_explain: None,
+            catalog_diagram: None,
+            catalog_diagram_loading: false,
+            catalog_diagram_error: None,
             catalog_diff: None,
             catalog_migration_plan: None,
             catalog_migration_pending: false,
@@ -4614,6 +4623,7 @@ impl WorkspaceShell {
             CommandId::SearchSchema => sift_protocol::OperationKind::SearchSchema,
             CommandId::SearchData => sift_protocol::OperationKind::SearchData,
             CommandId::ImportCsv => sift_protocol::OperationKind::ImportCsv,
+            CommandId::OpenCatalogDiagram => sift_protocol::OperationKind::ProjectCatalogDiagram,
             CommandId::CaptureCatalogSnapshot => {
                 sift_protocol::OperationKind::CreateCatalogSnapshot
             }
@@ -6279,6 +6289,20 @@ impl WorkspaceShell {
                         self.database_processes_error = None;
                     }
                     Err(message) => self.database_processes_error = Some(message),
+                }
+                cx.notify();
+            }
+            ExecutorEvent::CatalogDiagramLoaded(result) => {
+                self.catalog_diagram_loading = false;
+                match result {
+                    Ok(diagram) => {
+                        self.catalog_diagram = Some(diagram);
+                        self.catalog_diagram_error = None;
+                    }
+                    Err(message) => {
+                        self.catalog_diagram = None;
+                        self.catalog_diagram_error = Some(message);
+                    }
                 }
                 cx.notify();
             }
@@ -12469,6 +12493,26 @@ impl WorkspaceShell {
         }
     }
 
+    fn open_catalog_diagram(&mut self, cx: &mut Context<Self>) {
+        if !self.require_operation(
+            sift_protocol::OperationKind::ProjectCatalogDiagram,
+            "Open catalog diagram",
+            cx,
+        ) {
+            return;
+        }
+        let Some(sender) = &self.executor_sender else {
+            self.show_error_toast("Connect before opening the catalog diagram".into(), cx);
+            return;
+        };
+        if sender.send(ExecutorCommand::LoadCatalogDiagram).is_ok() {
+            self.catalog_diagram_loading = true;
+            self.catalog_diagram_error = None;
+            self.modal = Some(Modal::CatalogDiagram);
+            cx.notify();
+        }
+    }
+
     fn prepare_catalog_migration(&mut self, cx: &mut Context<Self>) {
         let Some(sender) = &self.executor_sender else {
             return;
@@ -14132,6 +14176,7 @@ impl WorkspaceShell {
             CommandId::SearchSchema => self.open_schema_search(window, cx),
             CommandId::SearchData => self.open_data_search(window, cx),
             CommandId::ImportCsv => self.prompt_csv_import(cx),
+            CommandId::OpenCatalogDiagram => self.open_catalog_diagram(cx),
             CommandId::CaptureCatalogSnapshot => self.capture_catalog_snapshot(cx),
             CommandId::CompareCatalogSnapshot => self.prepare_catalog_migration(cx),
             CommandId::ExportCsv => self.export_active_result(sift_protocol::ExportFormat::Csv, cx),
@@ -17168,6 +17213,7 @@ impl WorkspaceShell {
             let query_parameters = matches!(modal, Modal::QueryParameters);
             let result_cell_edit = matches!(modal, Modal::EditResultCell);
             let plan_captures = matches!(modal, Modal::PlanCaptures);
+            let catalog_diagram = matches!(modal, Modal::CatalogDiagram);
             let instance_setup = matches!(modal, Modal::InstanceSetup);
             let card_width = if data_results {
                 0.0
@@ -17180,6 +17226,8 @@ impl WorkspaceShell {
                 || plan_captures
             {
                 720.0
+            } else if catalog_diagram {
+                1040.0
             } else if data_search {
                 900.0
             } else if server_picker || account {
@@ -20572,6 +20620,95 @@ impl WorkspaceShell {
                             .child(Button::new("confirm-terminate-process", "Terminate").tone(ButtonTone::DangerMuted).on_click(cx.listener(move |shell, _, _, cx| shell.confirm_terminate_process(process_id, cx)))))
                         .into_any_element()
                 }
+                Modal::CatalogDiagram => {
+                    let (summary, cards) = self.catalog_diagram.as_ref().map_or_else(
+                        || ("Catalog diagram".to_owned(), Vec::new()),
+                        |diagram| {
+                            let names = diagram
+                                .nodes
+                                .iter()
+                                .map(|node| (node.id.clone(), node.qualified_name.clone()))
+                                .collect::<HashMap<_, _>>();
+                            let cards = diagram
+                                .nodes
+                                .iter()
+                                .filter(|node| matches!(node.kind,
+                                    sift_protocol::CatalogNodeKind::Table
+                                        | sift_protocol::CatalogNodeKind::View
+                                        | sift_protocol::CatalogNodeKind::MaterializedView
+                                        | sift_protocol::CatalogNodeKind::ForeignTable
+                                        | sift_protocol::CatalogNodeKind::PartitionedTable))
+                                .take(100)
+                                .enumerate()
+                                .map(|(index, node)| {
+                                    let relations = diagram.edges.iter().filter(|edge| edge.from == node.id).map(|edge| {
+                                        let target = edge.to.as_ref().and_then(|id| names.get(id)).cloned().or_else(|| edge.referenced_path.clone()).unwrap_or_else(|| "unresolved target".into());
+                                        format!("{:?} → {target}", edge.kind)
+                                    }).collect::<Vec<_>>();
+                                    div()
+                                        .debug_selector(move || format!("catalog-diagram-card-{index}"))
+                                        .w(px(300.))
+                                        .min_h(px(84.))
+                                        .p_3()
+                                        .rounded_sm()
+                                        .border_1()
+                                        .border_color(colors.subtle_border)
+                                        .bg(colors.elevated_surface)
+                                        .child(div().font_weight(gpui::FontWeight::SEMIBOLD).truncate().child(node.qualified_name.clone()))
+                                        .child(div().text_xs().text_color(colors.muted_text).child(format!("{:?}", node.kind)))
+                                        .children(relations.into_iter().take(6).map(|relation| div().mt_1().truncate().text_xs().child(relation)))
+                                })
+                                .collect::<Vec<_>>();
+                            (
+                                format!(
+                                    "{} nodes · {} relationships{}",
+                                    diagram.nodes.len(),
+                                    diagram.edges.len(),
+                                    if diagram.partial { " · partial" } else { "" }
+                                ),
+                                cards,
+                            )
+                        },
+                    );
+                    div()
+                        .debug_selector(|| "catalog-diagram-modal".into())
+                        .w(px(980.))
+                        .max_h(px(720.))
+                        .flex()
+                        .flex_col()
+                        .gap_3()
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .justify_between()
+                                .child(div().font_weight(gpui::FontWeight::SEMIBOLD).child("Catalog diagram"))
+                                .child(div().text_xs().text_color(colors.muted_text).child(summary)),
+                        )
+                        .children(self.catalog_diagram_error.clone().map(ErrorBanner::new))
+                        .when(self.catalog_diagram_loading, |diagram| diagram.child(div().p_4().text_center().text_color(colors.muted_text).child("Loading catalog relationships…")))
+                        .child(
+                            div()
+                                .id("catalog-diagram-cards")
+                                .flex_1()
+                                .min_h_0()
+                                .overflow_y_scroll()
+                                .flex()
+                                .flex_wrap()
+                                .content_start()
+                                .gap_3()
+                                .children(cards),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .justify_end()
+                                .gap_2()
+                                .child(Button::new("refresh-catalog-diagram", "Refresh").debug_selector("refresh-catalog-diagram").tone(ButtonTone::Neutral).loading(self.catalog_diagram_loading).on_click(cx.listener(|shell, _, _, cx| shell.open_catalog_diagram(cx))))
+                                .child(Button::new("compare-catalog-diagram", "Compare to baseline…").debug_selector("compare-catalog-diagram").tone(ButtonTone::Accent).disabled(self.catalog_diagram_loading).on_click(cx.listener(|shell, _, _, cx| shell.prepare_catalog_migration(cx))))
+                        )
+                        .into_any_element()
+                }
                 Modal::CatalogMigration => {
                     let change_count = self.catalog_diff.as_ref().map_or(0, |diff| diff.changes.len());
                     let statement_count = self.catalog_migration_plan.as_ref().map_or(0, |plan| {
@@ -20673,6 +20810,7 @@ impl WorkspaceShell {
                     | Modal::ConfirmDeleteConnection(_)
                     | Modal::ConfirmTerminateProcess(_)
                     | Modal::SemanticRename
+                    | Modal::CatalogDiagram
                     | Modal::CatalogMigration
             );
             div()
@@ -23295,6 +23433,53 @@ mod tests {
             receiver.try_recv(),
             Ok(ExecutorCommand::PrepareCatalogMigration)
         ));
+    }
+
+    #[gpui::test]
+    fn catalog_diagram_loads_relationship_cards_and_links_comparison(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        workspace.update_in(&mut cx, |shell, window, cx| {
+            shell.executor_sender = Some(sender);
+            shell.connection_status = ConnectionStatus::Connected {
+                profile_id: 2,
+                name: "Demo".into(),
+            };
+            shell.run_command(CommandId::OpenCatalogDiagram, window, cx);
+        });
+        assert!(matches!(
+            receiver.try_recv(),
+            Ok(ExecutorCommand::LoadCatalogDiagram)
+        ));
+        let graph = table_graph();
+        workspace.update(&mut cx, |shell, cx| {
+            shell.on_executor_event(
+                ExecutorEvent::CatalogDiagramLoaded(Ok(Box::new(sift_protocol::CatalogDiagram {
+                    catalog_revision: graph.revision,
+                    catalog_digest: graph.content_digest,
+                    nodes: graph.data.nodes,
+                    edges: vec![sift_protocol::CatalogEdge {
+                        from: sift_protocol::CatalogObjectId("table".into()),
+                        to: Some(sift_protocol::CatalogObjectId("schema".into())),
+                        kind: sift_protocol::CatalogEdgeKind::DependsOn,
+                        certainty: sift_protocol::CatalogEdgeCertainty::CatalogProven,
+                        referenced_path: None,
+                        column_pairs: Vec::new(),
+                    }],
+                    omitted_nodes: 0,
+                    omitted_edges: 0,
+                    inaccessible_boundaries: 0,
+                    partial: false,
+                }))),
+                cx,
+            );
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("catalog-diagram-modal").is_some());
+        assert!(cx.debug_bounds("catalog-diagram-card-0").is_some());
+        assert!(cx.debug_bounds("compare-catalog-diagram").is_some());
     }
 
     #[test]

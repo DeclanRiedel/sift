@@ -1054,6 +1054,47 @@ async fn run_query_executor(
                     return;
                 }
             }
+            ExecutorCommand::LoadCatalogDiagram => {
+                let result = match context.as_ref() {
+                    Some(opened) => match opened
+                        .client
+                        .catalog_graph(
+                            opened.session,
+                            opened.metadata_connection,
+                            sift_protocol::CatalogGraphRequest::default(),
+                        )
+                        .await
+                    {
+                        Ok(graph) => opened
+                            .client
+                            .catalog_diagram(
+                                opened.session,
+                                opened.metadata_connection,
+                                sift_protocol::CatalogDiagramRequest {
+                                    expected_revision: graph.revision,
+                                    schemas: Vec::new(),
+                                    object_ids: Vec::new(),
+                                    edge_kinds: Vec::new(),
+                                    neighborhood_depth: 1,
+                                    include_columns: true,
+                                    include_routines: false,
+                                    max_nodes: Some(200),
+                                },
+                            )
+                            .await
+                            .map(Box::new)
+                            .map_err(|error| format!("loading catalog diagram failed: {error}")),
+                        Err(error) => Err(format!("loading catalog graph failed: {error}")),
+                    },
+                    None => Err("Connect before loading the catalog diagram".into()),
+                };
+                if events
+                    .send(ExecutorEvent::CatalogDiagramLoaded(result))
+                    .is_err()
+                {
+                    return;
+                }
+            }
             ExecutorCommand::TerminateDatabaseProcess { process_id } => {
                 let result = match context.as_ref() {
                     Some(opened) => opened

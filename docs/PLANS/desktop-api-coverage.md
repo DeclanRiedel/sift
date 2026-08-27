@@ -163,7 +163,8 @@ surfaces, then admin/platform. Within P0, the connection experience comes first.
 - [ ] `compare_catalog_schemas`, `start_comparison`, `comparison`, `comparison_page`, `cancel_comparison`, `prepare_comparison_patch` — schema comparison (M5)
 - [ ] `create_catalog_snapshot`, `catalog_snapshots`, `catalog_snapshot`, `delete_catalog_snapshot` — snapshot manager (M5)
 - [ ] `preview_migration`, `apply_migration`, `migration_run`, `durable_migration_run`, `cancel_migration` — migration plan/apply + safety findings (M5)
-- [ ] `catalog_diagram`, `preview_catalog_diagram_mutation` — ER diagram surface (M5)
+- [x] `catalog_diagram`, `preview_catalog_diagram_mutation` — bounded relationship
+      diagram with table-designer mutation previews and baseline-comparison handoff (M5)
 
 ### Plan captures
 
