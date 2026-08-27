@@ -23,5 +23,11 @@ toml = { workspace = true }
 toml_edit = { workspace = true }
 
 [dev-dependencies]
-gpui = { workspace = true, features = ["test-support"] }
+criterion = { workspace = true }
+gpui = { workspace = true, features = ["bench", "test-support"] }
+gpui_platform = { workspace = true, features = ["test-support"] }
 tempfile = { workspace = true }
+
+[[bench]]
+name = "frame_budget"
+harness = false
