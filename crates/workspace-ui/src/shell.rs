@@ -4186,6 +4186,8 @@ pub struct WorkspaceShell {
     account_error: Option<String>,
     connection_status: ConnectionStatus,
     connection_health: Option<ConnectionHealthReport>,
+    connection_health_history: Vec<ConnectionHealthReport>,
+    connection_health_expanded: bool,
     connection_last_success_ms: Option<u64>,
     reconnect_attempt: u32,
     reconnect_available_at_ms: u64,
@@ -4655,6 +4657,8 @@ impl WorkspaceShell {
             account_error: None,
             connection_status: ConnectionStatus::Disconnected,
             connection_health: None,
+            connection_health_history: Vec::new(),
+            connection_health_expanded: false,
             connection_last_success_ms: None,
             reconnect_attempt: 0,
             reconnect_available_at_ms: 0,
@@ -5433,6 +5437,8 @@ impl WorkspaceShell {
         match event {
             ExecutorEvent::Connection(status) => {
                 self.connection_health = None;
+                self.connection_health_history.clear();
+                self.connection_health_expanded = false;
                 self.connection_last_success_ms = None;
                 if let ConnectionStatus::Connected { profile_id, .. } = &status {
                     self.expanded_connections.insert(*profile_id);
@@ -5527,6 +5533,13 @@ impl WorkspaceShell {
                     self.reconnect_available_at_ms = report
                         .checked_at_ms
                         .saturating_add(delay_seconds.saturating_mul(1_000));
+                }
+                self.connection_health_history.push(report.clone());
+                const MAX_CONNECTION_HEALTH_HISTORY: usize = 20;
+                if self.connection_health_history.len() > MAX_CONNECTION_HEALTH_HISTORY {
+                    let overflow =
+                        self.connection_health_history.len() - MAX_CONNECTION_HEALTH_HISTORY;
+                    self.connection_health_history.drain(..overflow);
                 }
                 self.connection_health = Some(report);
                 cx.notify();
@@ -7559,6 +7572,16 @@ impl WorkspaceShell {
         if let Some(sender) = &self.executor_sender {
             let _ = sender.send(ExecutorCommand::CheckConnectionHealth);
         }
+    }
+
+    fn toggle_connection_health_details(&mut self, cx: &mut Context<Self>) {
+        self.connection_health_expanded = !self.connection_health_expanded;
+        cx.notify();
+    }
+
+    fn close_connection_health_details(&mut self, cx: &mut Context<Self>) {
+        self.connection_health_expanded = false;
+        cx.notify();
     }
 
     fn toggle_catalog_schema(&mut self, profile_id: i64, catalog: String, cx: &mut Context<Self>) {
@@ -16878,6 +16901,97 @@ impl WorkspaceShell {
             ConnectionStatus::Failed { .. } => colors.danger,
             _ => colors.muted_text,
         };
+        let health_details =
+            self.connection_health_expanded.then(|| {
+                let rows = self
+                    .connection_health_history
+                    .iter()
+                    .rev()
+                    .take(8)
+                    .map(|report| {
+                        let status = match &report.failure {
+                            None => "Healthy".to_owned(),
+                            Some(ConnectionHealthFailure::Server(message)) => {
+                                format!("Server · {message}")
+                            }
+                            Some(ConnectionHealthFailure::Database(message)) => {
+                                format!("Database · {message}")
+                            }
+                        };
+                        let seconds = (report.checked_at_ms / 1_000) % 86_400;
+                        div()
+                            .h(px(26.))
+                            .flex_none()
+                            .px_3()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .border_t_1()
+                            .border_color(colors.subtle_border)
+                            .text_xs()
+                            .child(div().w(px(64.)).font_family("monospace").child(format!(
+                                "{:02}:{:02}:{:02}Z",
+                                seconds / 3_600,
+                                (seconds % 3_600) / 60,
+                                seconds % 60
+                            )))
+                            .child(div().flex_1().min_w_0().truncate().child(status))
+                            .child(format!("{} ms", report.latency_ms))
+                    });
+                let backoff = self
+                    .reconnect_available_at_ms
+                    .saturating_sub(epoch_millis())
+                    / 1_000;
+                div()
+                    .id("connection-health-details")
+                    .debug_selector(|| "connection-health-details".into())
+                    .absolute()
+                    .left_0()
+                    .right_0()
+                    .bottom(cx.theme().metrics.row_height)
+                    .max_h(px(250.))
+                    .bg(colors.elevated_surface)
+                    .border_1()
+                    .border_color(colors.subtle_border)
+                    .shadow_lg()
+                    .child(
+                        div()
+                            .h(px(32.))
+                            .px_3()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .child(SectionLabel::new("CONNECTION HEALTH"))
+                            .child(div().flex_1())
+                            .children((self.reconnect_attempt > 0).then(|| {
+                                div().text_xs().text_color(colors.warning).child(format!(
+                                    "retry {} · {}s backoff",
+                                    self.reconnect_attempt, backoff
+                                ))
+                            }))
+                            .child(
+                                Button::new("health-check-now", "Check now")
+                                    .debug_selector("health-check-now")
+                                    .tone(ButtonTone::Ghost)
+                                    .disabled(!self.running_queries.is_empty())
+                                    .on_click(cx.listener(|shell, _, _, cx| {
+                                        shell.check_connection_health(cx)
+                                    })),
+                            )
+                            .child(
+                                Button::new("close-health-details", "Close")
+                                    .debug_selector("close-health-details")
+                                    .tone(ButtonTone::Ghost)
+                                    .on_click(cx.listener(|shell, _, _, cx| {
+                                        shell.close_connection_health_details(cx)
+                                    })),
+                            ),
+                    )
+                    .when(self.connection_health_history.is_empty(), |panel| {
+                        panel.child(div().px_3().pb_3().text_xs().child("No checks recorded."))
+                    })
+                    .children(rows)
+            });
 
         div()
             .id("connections-health-footer")
@@ -16894,13 +17008,20 @@ impl WorkspaceShell {
             .px_3()
             .border_t_1()
             .border_color(colors.subtle_border)
+            .children(health_details)
             .child(
                 div()
+                    .id("connection-health-summary")
+                    .debug_selector(|| "connection-health-summary".into())
                     .flex_1()
                     .min_w_0()
                     .truncate()
                     .text_xs()
                     .text_color(label_color)
+                    .cursor_pointer()
+                    .on_click(
+                        cx.listener(|shell, _, _, cx| shell.toggle_connection_health_details(cx)),
+                    )
                     .child(label),
             )
             .children(reconnect_detail.map(|detail| {
@@ -27437,6 +27558,7 @@ mod tests {
                 cx,
             );
             assert_eq!(shell.connection_last_success_ms, Some(1_000));
+            assert_eq!(shell.connection_health_history.len(), 2);
         });
         while receiver.try_recv().is_ok() {}
         cx.run_until_parked();
@@ -27457,6 +27579,11 @@ mod tests {
         assert!(cx.debug_bounds("connections-disconnect").is_some());
         assert!(cx.debug_bounds("footer-check-connection").is_none());
         assert!(cx.debug_bounds("footer-disconnect-database").is_none());
+        let summary = cx.debug_bounds("connection-health-summary").unwrap();
+        cx.simulate_click(summary.center(), Modifiers::default());
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("connection-health-details").is_some());
+        assert!(cx.debug_bounds("health-check-now").is_some());
         assert!(matches!(
             workspace.read_with(&cx, |shell, _| shell
                 .connection_health
