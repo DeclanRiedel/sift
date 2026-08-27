@@ -162,15 +162,15 @@ pub fn render_plan(
             )),
         }
     }
-    let rollback_groups = (!rollback_statements.is_empty())
-        .then(|| {
-            vec![MigrationGroup {
-                ordinal: 1,
-                transactional: options.prefer_transactional,
-                statements: rollback_statements,
-            }]
-        })
-        .unwrap_or_default();
+    let rollback_groups = if rollback_statements.is_empty() {
+        Vec::new()
+    } else {
+        vec![MigrationGroup {
+            ordinal: 1,
+            transactional: options.prefer_transactional,
+            statements: rollback_statements,
+        }]
+    };
     let id = MigrationPlanId(uuid::Uuid::new_v4());
     let run_id = sift_protocol::MigrationRunId(uuid::Uuid::new_v4());
     let expires_at = chrono::Utc::now() + chrono::Duration::minutes(10);
