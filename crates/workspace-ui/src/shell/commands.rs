@@ -24,6 +24,11 @@ pub enum CommandId {
     RenameSqlSymbol,
     SearchSchema,
     SearchData,
+    ExportCsv,
+    ExportTsv,
+    ExportJsonLines,
+    ExportJson,
+    ExportXlsx,
     BeginTransaction,
     CommitTransaction,
     RollbackTransaction,
@@ -76,6 +81,11 @@ impl CommandId {
             Self::RenameSqlSymbol => "query.rename-symbol",
             Self::SearchSchema => "database.search-schema",
             Self::SearchData => "database.search-data",
+            Self::ExportCsv => "query.export-csv",
+            Self::ExportTsv => "query.export-tsv",
+            Self::ExportJsonLines => "query.export-json-lines",
+            Self::ExportJson => "query.export-json",
+            Self::ExportXlsx => "query.export-xlsx",
             Self::BeginTransaction => "database.begin-transaction",
             Self::CommitTransaction => "database.commit-transaction",
             Self::RollbackTransaction => "database.rollback-transaction",
@@ -118,6 +128,7 @@ enum AvailabilityRule {
     EditableInstance,
     RunningQuery,
     ConnectedDatabase,
+    ActiveResult,
     NoActiveTransaction,
     ActiveTransaction,
     CommittableTransaction,
@@ -143,6 +154,7 @@ pub struct CommandContext {
     pub active_query_running: bool,
     pub any_query_running: bool,
     pub database_connected: bool,
+    pub has_active_result: bool,
     pub transaction_active: bool,
     pub transaction_pending: bool,
     pub transaction_aborted: bool,
@@ -204,6 +216,9 @@ impl CommandRegistry {
                 AvailabilityRule::ConnectedDatabase if !context.database_connected => {
                     Some("No database connected".into())
                 }
+                AvailabilityRule::ActiveResult if !context.has_active_result => {
+                    Some("Active tab has no result surface".into())
+                }
                 AvailabilityRule::NoActiveTransaction if !context.database_connected => {
                     Some("No database connected".into())
                 }
@@ -234,6 +249,7 @@ impl CommandRegistry {
                 | AvailabilityRule::EditableInstance
                 | AvailabilityRule::RunningQuery
                 | AvailabilityRule::ConnectedDatabase
+                | AvailabilityRule::ActiveResult
                 | AvailabilityRule::NoActiveTransaction
                 | AvailabilityRule::ActiveTransaction
                 | AvailabilityRule::CommittableTransaction => None,
@@ -349,7 +365,7 @@ const DEFINITIONS: &[CommandDefinition] = &[
         CommandId::UndoQuery,
         "Undo Query Edit",
         "Ctrl+Z",
-        "u",
+        "<leader> u",
         true,
         AvailabilityRule::ActiveItem,
     ),
@@ -448,6 +464,46 @@ const DEFINITIONS: &[CommandDefinition] = &[
         "<leader> f r",
         true,
         AvailabilityRule::ConnectedDatabase,
+    ),
+    command(
+        CommandId::ExportCsv,
+        "Export CSV…",
+        "",
+        "",
+        true,
+        AvailabilityRule::ActiveResult,
+    ),
+    command(
+        CommandId::ExportTsv,
+        "Export TSV…",
+        "",
+        "",
+        true,
+        AvailabilityRule::ActiveResult,
+    ),
+    command(
+        CommandId::ExportJsonLines,
+        "Export JSON Lines…",
+        "",
+        "",
+        true,
+        AvailabilityRule::ActiveResult,
+    ),
+    command(
+        CommandId::ExportJson,
+        "Export JSON…",
+        "",
+        "",
+        true,
+        AvailabilityRule::ActiveResult,
+    ),
+    command(
+        CommandId::ExportXlsx,
+        "Export XLSX…",
+        "",
+        "",
+        true,
+        AvailabilityRule::ActiveResult,
     ),
     command(
         CommandId::BeginTransaction,
@@ -767,6 +823,7 @@ mod tests {
             active_query_running: false,
             any_query_running: false,
             database_connected: false,
+            has_active_result: false,
             transaction_active: false,
             transaction_pending: false,
             transaction_aborted: false,
@@ -810,6 +867,12 @@ mod tests {
                 .as_deref(),
             Some("No database connected")
         );
+        assert_eq!(
+            CommandRegistry::spec(CommandId::ExportCsv, empty)
+                .disabled_reason
+                .as_deref(),
+            Some("Active tab has no result surface")
+        );
         assert!(CommandRegistry::spec(
             CommandId::CancelExecution,
             CommandContext {
@@ -822,6 +885,14 @@ mod tests {
             CommandId::SearchSchema,
             CommandContext {
                 database_connected: true,
+                ..empty
+            }
+        )
+        .enabled());
+        assert!(CommandRegistry::spec(
+            CommandId::ExportJson,
+            CommandContext {
+                has_active_result: true,
                 ..empty
             }
         )
@@ -853,6 +924,10 @@ mod tests {
         assert_eq!(
             CommandRegistry::resolve_language(&["l".into()]),
             CommandLanguageMatch::Command(CommandId::NextTab)
+        );
+        assert_eq!(
+            CommandRegistry::resolve_language(&["u".into()]),
+            CommandLanguageMatch::Command(CommandId::UndoQuery)
         );
 
         let bindings = BTreeMap::from([(

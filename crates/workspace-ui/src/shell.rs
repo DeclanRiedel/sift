@@ -4414,6 +4414,11 @@ impl WorkspaceShell {
             CommandId::RenameSqlSymbol => sift_protocol::OperationKind::PrepareSqlRefactor,
             CommandId::SearchSchema => sift_protocol::OperationKind::SearchSchema,
             CommandId::SearchData => sift_protocol::OperationKind::SearchData,
+            CommandId::ExportCsv
+            | CommandId::ExportTsv
+            | CommandId::ExportJsonLines
+            | CommandId::ExportJson
+            | CommandId::ExportXlsx => sift_protocol::OperationKind::ExportQuery,
             _ => return spec,
         };
         if let Some(capability) = self.operation_capabilities.get(&operation) {
@@ -4436,6 +4441,7 @@ impl WorkspaceShell {
             .is_some_and(|pane| pane.read(cx).active_item().is_some());
         CommandContext {
             has_active_item: has_item,
+            has_active_result: self.focused_pane_results_item(cx).is_some(),
             pane_count: self.panes.len(),
             has_editable_instance: self
                 .lifecycle
@@ -11333,6 +11339,24 @@ impl WorkspaceShell {
         cx.notify();
     }
 
+    fn export_active_result(
+        &mut self,
+        format: sift_protocol::ExportFormat,
+        cx: &mut Context<Self>,
+    ) {
+        let Some((item_id, sql)) = self.panes.get(self.active_pane).and_then(|pane| {
+            let pane = pane.read(cx);
+            let item_id = pane.active_item()?.id;
+            pane.results
+                .contains_key(&item_id)
+                .then(|| (item_id, pane.targeted_query_sql(item_id, cx)))
+        }) else {
+            self.show_toast("Active tab has no result surface".into(), cx);
+            return;
+        };
+        self.prompt_result_export(item_id, sql, format, cx);
+    }
+
     fn prompt_result_export(
         &mut self,
         item_id: u64,
@@ -12774,7 +12798,7 @@ impl WorkspaceShell {
             }
             CommandId::CancelExecution => self.cancel_execution(&CancelExecution, window, cx),
             CommandId::UndoQuery => {
-                self.dispatch_active_editor_action(&crate::editor::Undo, window, cx)
+                self.dispatch_active_editor_action(&crate::editor::VimUndo, window, cx)
             }
             CommandId::RedoQuery => {
                 self.dispatch_active_editor_action(&crate::editor::Redo, window, cx)
@@ -12802,6 +12826,17 @@ impl WorkspaceShell {
             CommandId::RenameSqlSymbol => self.open_semantic_rename(window, cx),
             CommandId::SearchSchema => self.open_schema_search(window, cx),
             CommandId::SearchData => self.open_data_search(window, cx),
+            CommandId::ExportCsv => self.export_active_result(sift_protocol::ExportFormat::Csv, cx),
+            CommandId::ExportTsv => self.export_active_result(sift_protocol::ExportFormat::Tsv, cx),
+            CommandId::ExportJsonLines => {
+                self.export_active_result(sift_protocol::ExportFormat::JsonLines, cx)
+            }
+            CommandId::ExportJson => {
+                self.export_active_result(sift_protocol::ExportFormat::JsonArray, cx)
+            }
+            CommandId::ExportXlsx => {
+                self.export_active_result(sift_protocol::ExportFormat::Xlsx, cx)
+            }
             CommandId::BeginTransaction => self.begin_transaction(cx),
             CommandId::CommitTransaction => self.finish_transaction(true, cx),
             CommandId::RollbackTransaction => self.finish_transaction(false, cx),
@@ -20811,11 +20846,10 @@ mod tests {
 
     fn shell(cx: &mut TestAppContext) -> gpui::WindowHandle<WorkspaceShell> {
         cx.update(|cx| {
-            cx.bind_keys([gpui::KeyBinding::new(
-                "enter",
-                sift_ui::Submit,
-                Some("SiftTextInput"),
-            )]);
+            cx.bind_keys([
+                gpui::KeyBinding::new("enter", sift_ui::Submit, Some("SiftTextInput")),
+                gpui::KeyBinding::new("escape", crate::editor::ExitInsertMode, Some("SiftEditor")),
+            ]);
             cx.open_window(Default::default(), |window, cx| {
                 cx.new(|cx| {
                     WorkspaceShell::new(
@@ -22655,6 +22689,66 @@ mod tests {
         assert_eq!(
             editor.read_with(&cx, |editor, _| editor.document().text().to_owned()),
             original
+        );
+    }
+
+    #[gpui::test]
+    fn vim_editor_keeps_local_motions_and_leader_undo(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        let editor = workspace.read_with(&cx, |workspace, cx| {
+            let pane = workspace.panes[workspace.active_pane].read(cx);
+            let item_id = pane.active_item().expect("active query item").id;
+            pane.editor(item_id).expect("active query editor")
+        });
+        editor.update_in(&mut cx, |editor, window, cx| {
+            editor.replace_text_from_owner("abc\ndef", cx);
+            if editor.keymap() != EditorKeymap::Vim {
+                editor.toggle_keymap(cx);
+            }
+            editor.focus_handle(cx).focus(window, cx);
+        });
+
+        cx.simulate_keystrokes("g g");
+        assert_eq!(
+            editor.read_with(&cx, |editor, _| editor.document().cursor()),
+            0
+        );
+        cx.simulate_keystrokes("l");
+        assert_eq!(
+            editor.read_with(&cx, |editor, _| editor.document().cursor()),
+            1
+        );
+        cx.simulate_keystrokes("j");
+        assert_eq!(
+            editor.read_with(&cx, |editor, _| editor.document().cursor()),
+            5
+        );
+        cx.simulate_keystrokes("h");
+        assert_eq!(
+            editor.read_with(&cx, |editor, _| editor.document().cursor()),
+            4
+        );
+        cx.simulate_keystrokes("k");
+        assert_eq!(
+            editor.read_with(&cx, |editor, _| editor.document().cursor()),
+            0
+        );
+
+        cx.simulate_keystrokes("i x escape");
+        assert_eq!(
+            editor.read_with(&cx, |editor, _| editor.document().text().to_owned()),
+            "xabc\ndef"
+        );
+        cx.simulate_keystrokes("space u");
+        assert_eq!(
+            editor.read_with(&cx, |editor, _| editor.document().text().to_owned()),
+            "abc\ndef"
+        );
+        assert_eq!(
+            workspace.read_with(&cx, |shell, _| shell.ide_key_buffer()),
+            ""
         );
     }
 

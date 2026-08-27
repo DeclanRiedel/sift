@@ -2382,69 +2382,6 @@ impl ResultsView {
                                             })),
                                     )
                             }))
-                            .children(self.export_bytes.is_none().then(|| {
-                                Button::new("export-result-csv", "CSV")
-                                    .tone(ButtonTone::Ghost)
-                                    .on_click(cx.listener(|_, _, _, cx| {
-                                        cx.emit(ResultsEvent::ExportRequested {
-                                            format: sift_protocol::ExportFormat::Csv,
-                                        })
-                                    }))
-                            }))
-                            .children(self.export_bytes.is_none().then(|| {
-                                Button::new("export-result-tsv", "TSV")
-                                    .tone(ButtonTone::Ghost)
-                                    .on_click(cx.listener(|_, _, _, cx| {
-                                        cx.emit(ResultsEvent::ExportRequested {
-                                            format: sift_protocol::ExportFormat::Tsv,
-                                        })
-                                    }))
-                            }))
-                            .children(self.export_bytes.is_none().then(|| {
-                                Button::new("export-result-jsonl", "JSONL")
-                                    .tone(ButtonTone::Ghost)
-                                    .on_click(cx.listener(|_, _, _, cx| {
-                                        cx.emit(ResultsEvent::ExportRequested {
-                                            format: sift_protocol::ExportFormat::JsonLines,
-                                        })
-                                    }))
-                            }))
-                            .children(self.export_bytes.is_none().then(|| {
-                                Button::new("export-result-json", "JSON")
-                                    .tone(ButtonTone::Ghost)
-                                    .on_click(cx.listener(|_, _, _, cx| {
-                                        cx.emit(ResultsEvent::ExportRequested {
-                                            format: sift_protocol::ExportFormat::JsonArray,
-                                        })
-                                    }))
-                            }))
-                            .children(self.export_bytes.is_none().then(|| {
-                                Button::new("export-result-xlsx", "XLSX")
-                                    .tone(ButtonTone::Ghost)
-                                    .on_click(cx.listener(|_, _, _, cx| {
-                                        cx.emit(ResultsEvent::ExportRequested {
-                                            format: sift_protocol::ExportFormat::Xlsx,
-                                        })
-                                    }))
-                            }))
-                            .children(self.export_bytes.is_none().then(|| {
-                                Button::new("export-result-html", "HTML")
-                                    .tone(ButtonTone::Ghost)
-                                    .on_click(cx.listener(|_, _, _, cx| {
-                                        cx.emit(ResultsEvent::ExportRequested {
-                                            format: sift_protocol::ExportFormat::Html,
-                                        })
-                                    }))
-                            }))
-                            .children(self.export_bytes.is_none().then(|| {
-                                Button::new("export-result-markdown", "MD")
-                                    .tone(ButtonTone::Ghost)
-                                    .on_click(cx.listener(|_, _, _, cx| {
-                                        cx.emit(ResultsEvent::ExportRequested {
-                                            format: sift_protocol::ExportFormat::Markdown,
-                                        })
-                                    }))
-                            }))
                             .child(
                                 Button::new("copy-result-with-headers", "Copy + headers")
                                     .tone(ButtonTone::Neutral)

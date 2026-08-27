@@ -743,6 +743,7 @@ actions!(
         Cut,
         Paste,
         Undo,
+        VimUndo,
         Redo,
         ExitInsertMode,
         Complete,
@@ -1788,6 +1789,16 @@ impl QueryEditor {
         }
     }
 
+    fn vim_undo(&mut self, _: &VimUndo, _: &mut Window, cx: &mut Context<Self>) {
+        if self.read_only {
+            return;
+        }
+        if !self.vim_key(modalkit::crossterm::event::KeyCode::Char('u'), cx) && self.document.undo()
+        {
+            self.edited(cx);
+        }
+    }
+
     fn redo(&mut self, _: &Redo, _: &mut Window, cx: &mut Context<Self>) {
         if self.read_only {
             return;
@@ -2382,6 +2393,7 @@ impl gpui::Render for QueryEditor {
             .on_action(cx.listener(Self::cut))
             .on_action(cx.listener(Self::paste))
             .on_action(cx.listener(Self::undo))
+            .on_action(cx.listener(Self::vim_undo))
             .on_action(cx.listener(Self::redo))
             .on_action(cx.listener(Self::exit_insert_mode))
             .on_action(cx.listener(Self::execute_statement))
