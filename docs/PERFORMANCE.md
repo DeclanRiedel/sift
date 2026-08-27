@@ -49,6 +49,23 @@ editor and result-projection branches a reproducible before measurement. The
 quick run includes Criterion warm-up/calibration frames; use the full command
 for graduation evidence.
 
+### Incremental-path baseline
+
+Quick Criterion run on 2026-08-27 after the incremental editor indexes and
+background result-cell preparation were merged:
+
+| Benchmark | Draw p95 | Change from initial | 120 Hz result |
+| --- | --- | --- | --- |
+| Vim typing | 5.45 ms | 55% lower | passes |
+| First result page | 159.78 ms | 85% lower | still misses |
+| Retained-grid navigation | 75.37 ms | 71% lower | still misses |
+
+The first-result benchmark now constructs `PreparedResultPage` values before
+entering GPUI, matching the production executor boundary. Formatting time is
+therefore excluded from the UI-thread measurement. M3 performance is not yet
+graduated: typing meets its draw budget, while grid construction and navigation
+still require a custom paint/layout path or equivalent measured reduction.
+
 ## Interactive large-schema fixture
 
 The schema tree also needs a real compositor because the important path includes

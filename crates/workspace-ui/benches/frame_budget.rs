@@ -1,8 +1,9 @@
 use gpui::{Action as _, BenchAppContext, Keystroke, VisualContext as _};
-use sift_protocol::{Row, Value};
+use sift_protocol::{ColumnMetadata, Page, PrimitiveType, Row, TypeRef, Value};
 use sift_workspace_ui::editor::{EditorKeymap, QueryDocument, QueryEditor};
 use sift_workspace_ui::results::{
-    MoveCellDown, MoveCellUp, ResultColumn, ResultData, ResultState, ResultsView,
+    MoveCellDown, MoveCellUp, PreparedResultPage, ResultColumn, ResultData, ResultState,
+    ResultsView,
 };
 
 const LARGE_SQL_LINES: usize = 8_000;
@@ -67,15 +68,30 @@ fn vim_typing_large_document(cx: &mut BenchAppContext) {
 
 #[gpui::bench(fps = 120)]
 fn first_result_page(cx: &mut BenchAppContext) {
-    let page = ResultState::Ready(result_data(FIRST_PAGE_ROWS));
+    // Match production: the executor prepares display strings before the page
+    // reaches GPUI. This benchmark measures the UI-thread append and first
+    // paint, not work deliberately moved to the background executor.
+    let data = result_data(FIRST_PAGE_ROWS);
+    let columns = PreparedResultPage::new(Page::NextResult {
+        columns: (0..RESULT_COLUMNS)
+            .map(|column| {
+                ColumnMetadata::new(
+                    format!("column_{column}"),
+                    TypeRef::Primitive(PrimitiveType::Text),
+                )
+            })
+            .collect(),
+    });
+    let rows = PreparedResultPage::new(Page::Rows { rows: data.rows });
     let mut window = cx.add_empty_window();
     let results = window
         .replace_root_view(|_, cx| ResultsView::new(cx))
         .unwrap();
 
     cx.bench_renderer(results, move |results, _, cx| {
-        results.set_pending(cx);
-        results.set_state(page.clone(), cx);
+        results.begin_stream(cx);
+        results.apply_stream_page(columns.clone(), cx);
+        results.apply_stream_page(rows.clone(), cx);
     });
 }
 
