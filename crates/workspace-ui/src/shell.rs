@@ -4,11 +4,11 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use gpui::{
-    actions, deferred, div, img, prelude::*, px, uniform_list, App, Bounds, Context, CursorStyle,
-    DefiniteLength, Div, Entity, EventEmitter, FocusHandle, Focusable, Hsla, IntoElement,
-    KeystrokeEvent, MouseButton, PathPromptOptions, Pixels, ResizeEdge, Role, ScrollHandle,
-    ScrollStrategy, SharedString, Subscription, Task, UniformListScrollHandle, Window,
-    WindowBounds, WindowControlArea,
+    actions, deferred, div, img, prelude::*, px, uniform_list, AnyElement, App, Bounds, Context,
+    CursorStyle, DefiniteLength, Div, Entity, EventEmitter, FocusHandle, Focusable, Hsla,
+    IntoElement, KeystrokeEvent, MouseButton, PathPromptOptions, Pixels, ResizeEdge, Role,
+    ScrollHandle, ScrollStrategy, SharedString, Subscription, Task, UniformListScrollHandle,
+    Window, WindowBounds, WindowControlArea,
 };
 use regex::{Regex, RegexBuilder};
 use sift_api_types::RoomId;
@@ -801,7 +801,8 @@ actions!(
         CancelExecution,
         ToggleLeftDock,
         ToggleRightDock,
-        ToggleBottomDock
+        ToggleBottomDock,
+        ToggleFrameMetrics
     ]
 );
 
@@ -3803,6 +3804,7 @@ pub struct WorkspaceShell {
     schema_search_selected: usize,
     schema_search_scroll_handle: UniformListScrollHandle,
     dark_theme: bool,
+    show_frame_metrics: bool,
     settings: UserSettings,
     settings_store: Option<Arc<SettingsStore>>,
     settings_item: Option<u64>,
@@ -4263,6 +4265,7 @@ impl WorkspaceShell {
             schema_search_selected: 0,
             schema_search_scroll_handle: UniformListScrollHandle::new(),
             dark_theme: state.dark_theme,
+            show_frame_metrics: false,
             next_toast_id: 1,
             settings,
             settings_store,
@@ -13677,6 +13680,65 @@ impl WorkspaceShell {
         cx.notify();
     }
 
+    fn toggle_frame_metrics(
+        &mut self,
+        _: &ToggleFrameMetrics,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.show_frame_metrics = !self.show_frame_metrics;
+        cx.notify();
+    }
+
+    fn render_frame_metrics(window: &Window, cx: &App) -> AnyElement {
+        let snapshot = window.frame_duration_snapshot();
+        let draws = snapshot.draw_duration_histogram;
+        let intervals = snapshot.present_interval_histogram;
+        let milliseconds = |nanoseconds: u64| nanoseconds as f64 / 1_000_000.0;
+        let over_120hz = draws
+            .len()
+            .saturating_sub(draws.count_between(0, 8_300_000));
+        let over_60hz = draws
+            .len()
+            .saturating_sub(draws.count_between(0, 16_700_000));
+        let colors = cx.theme().colors;
+        div()
+            .id("frame-metrics-overlay")
+            .absolute()
+            .right_3()
+            .bottom(px(38.))
+            .flex()
+            .flex_col()
+            .gap_1()
+            .px_3()
+            .py_2()
+            .rounded(cx.theme().metrics.radius)
+            .border_1()
+            .border_color(colors.border)
+            .bg(colors.elevated_surface)
+            .shadow_lg()
+            .text_xs()
+            .text_color(colors.muted_text)
+            .child(format!(
+                "Draw  p50 {:.2}  p95 {:.2}  p99 {:.2} ms",
+                milliseconds(draws.value_at_quantile(0.50)),
+                milliseconds(draws.value_at_quantile(0.95)),
+                milliseconds(draws.value_at_quantile(0.99)),
+            ))
+            .child(format!(
+                "Present  p95 {:.2}  p99 {:.2} ms",
+                milliseconds(intervals.value_at_quantile(0.95)),
+                milliseconds(intervals.value_at_quantile(0.99)),
+            ))
+            .child(format!(
+                "Frames  {} draws  >8.3ms {}  >16.7ms {}",
+                draws.len(),
+                over_120hz,
+                over_60hz,
+            ))
+            .into_any_element()
+    }
+
     fn toggle_app_bar_menu(&mut self, menu: AppBarMenu, cx: &mut Context<Self>) {
         self.close_app_bar_modal(cx);
         self.app_bar_menu = (self.app_bar_menu != Some(menu)).then_some(menu);
@@ -20217,6 +20279,9 @@ impl WorkspaceShell {
 impl gpui::Render for WorkspaceShell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = cx.theme().colors;
+        let frame_metrics = self
+            .show_frame_metrics
+            .then(|| Self::render_frame_metrics(window, cx));
         let keymap_context = match self.keyboard_profile() {
             KeyboardProfile::Vim => "SiftWorkspace keymap_profile=vim",
             KeyboardProfile::Hybrid => "SiftWorkspace keymap_profile=hybrid",
@@ -20365,6 +20430,7 @@ impl gpui::Render for WorkspaceShell {
             .on_action(cx.listener(Self::toggle_left_dock))
             .on_action(cx.listener(Self::toggle_right_dock))
             .on_action(cx.listener(Self::toggle_bottom_dock))
+            .on_action(cx.listener(Self::toggle_frame_metrics))
             .on_drag_move::<TabDrag>(cx.listener(Self::track_tab_drag))
             .on_drop::<TabDrag>(cx.listener(Self::finish_workspace_tab_drag))
             .relative()
@@ -20474,6 +20540,7 @@ impl gpui::Render for WorkspaceShell {
                     }))
             }))
             .children(self.render_key_language_hint(cx))
+            .children(frame_metrics)
             .children(self.render_modal(cx))
             .children(
                 edge_resize_enabled(window.is_maximized(), window.is_fullscreen())

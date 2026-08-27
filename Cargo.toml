@@ -123,7 +123,7 @@ modalkit = "0.0.25"
 
 # Phase M pins GPUI exactly because the framework remains pre-1.0. Upgrades are
 # deliberate compatibility commits, never an unconstrained crates.io update.
-gpui = { version = "0.2.2", git = "https://github.com/zed-industries/zed.git", rev = "d71f1461045c098dc6ca6b1b5adcf1b8949722e8", default-features = false, features = ["wayland", "x11"] }
+gpui = { version = "0.2.2", git = "https://github.com/zed-industries/zed.git", rev = "d71f1461045c098dc6ca6b1b5adcf1b8949722e8", default-features = false, features = ["frame-duration-histogram", "wayland", "x11"] }
 gpui_platform = { version = "0.1.0", git = "https://github.com/zed-industries/zed.git", rev = "d71f1461045c098dc6ca6b1b5adcf1b8949722e8", default-features = false, features = ["font-kit", "wayland", "x11"] }
 
 [profile.dev]

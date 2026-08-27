@@ -4,7 +4,7 @@ use gpui::KeyBinding;
 use sift_workspace_ui::{
     CloseActiveItem, CloseActivePane, DismissModal, OpenCommandPalette, PaletteConfirm,
     PaletteDown, PaletteUp, SaveActiveItem, SplitPane, StageJsonResultEdit, ToggleBottomDock,
-    ToggleLeftDock, ToggleRightDock,
+    ToggleFrameMetrics, ToggleLeftDock, ToggleRightDock,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -139,6 +139,7 @@ pub fn shell_key_bindings() -> Vec<KeyBinding> {
             standard_context,
         ),
         KeyBinding::new(&format!("{primary}-j"), ToggleBottomDock, standard_context),
+        KeyBinding::new("ctrl-alt-shift-p", ToggleFrameMetrics, context),
     ];
 
     bindings.extend([
@@ -170,6 +171,6 @@ mod tests {
 
     #[test]
     fn keymap_has_stable_action_coverage() {
-        assert_eq!(shell_key_bindings().len(), 16);
+        assert_eq!(shell_key_bindings().len(), 17);
     }
 }

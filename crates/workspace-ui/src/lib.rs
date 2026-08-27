@@ -35,5 +35,6 @@ pub use shell::{
     Modal, OpenCommandPalette, OpenSchemaSearch, OpenServerConnection, PaletteConfirm, PaletteDown,
     PaletteUp, Pane, PaneEvent, ResultEditApplyFailure, RoomDocumentCommand, RoomDocumentEvent,
     SaveActiveItem, SavedInstanceRoot, SavedServerProfile, SplitPane, StageJsonResultEdit,
-    StatusBar, Toast, ToastTone, ToggleBottomDock, ToggleLeftDock, ToggleRightDock, WorkspaceShell,
+    StatusBar, Toast, ToastTone, ToggleBottomDock, ToggleFrameMetrics, ToggleLeftDock,
+    ToggleRightDock, WorkspaceShell,
 };
