@@ -869,6 +869,14 @@ struct LineLayoutCache {
     lines: HashMap<usize, ShapedLine>,
 }
 
+#[derive(Default)]
+struct FindMatchCache {
+    revision: u64,
+    query: String,
+    case_sensitive: bool,
+    matches: Arc<Vec<Range<usize>>>,
+}
+
 /// Multi-line GPUI editor over a [`QueryDocument`]. Character and IME input flow
 /// through the platform via [`EntityInputHandler`]; editing commands arrive as
 /// typed actions the workspace keymap binds under the `SiftEditor` context.
@@ -899,6 +907,7 @@ pub struct QueryEditor {
     find_query: Entity<TextInput>,
     replace_query: Entity<TextInput>,
     find_case_sensitive: bool,
+    find_cache: RefCell<FindMatchCache>,
 }
 
 impl QueryEditor {
@@ -938,6 +947,7 @@ impl QueryEditor {
             find_query,
             replace_query,
             find_case_sensitive: false,
+            find_cache: RefCell::new(FindMatchCache::default()),
         }
     }
 
@@ -1386,17 +1396,28 @@ impl QueryEditor {
         }
         let replacement = self.replace_query.read(cx).text().to_owned();
         let mut updated = self.document.text().to_owned();
-        for range in matches.into_iter().rev() {
-            updated.replace_range(range, &replacement);
+        for range in matches.iter().rev() {
+            updated.replace_range(range.clone(), &replacement);
         }
         let length = self.document.text().len();
         self.document.replace_range(0..length, &updated);
         self.edited(cx);
     }
 
-    fn current_find_matches(&self, cx: &App) -> Vec<Range<usize>> {
-        self.document
-            .find_matches(self.find_query.read(cx).text(), self.find_case_sensitive)
+    fn current_find_matches(&self, cx: &App) -> Arc<Vec<Range<usize>>> {
+        let query = self.find_query.read(cx).text();
+        let mut cache = self.find_cache.borrow_mut();
+        if cache.revision != self.revision
+            || cache.query != query
+            || cache.case_sensitive != self.find_case_sensitive
+        {
+            cache.revision = self.revision;
+            cache.query.clear();
+            cache.query.push_str(query);
+            cache.case_sensitive = self.find_case_sensitive;
+            cache.matches = Arc::new(self.document.find_matches(query, self.find_case_sensitive));
+        }
+        cache.matches.clone()
     }
 
     fn toggle_find_case(&mut self, cx: &mut Context<Self>) {
@@ -2580,7 +2601,7 @@ impl Element for QueryEditorElement {
         let find_matches = if editor.find_open {
             editor.current_find_matches(cx)
         } else {
-            Vec::new()
+            Arc::new(Vec::new())
         };
         let viewport = editor.scroll_handle.bounds();
         let style = window.text_style();
@@ -2678,11 +2699,9 @@ impl Element for QueryEditorElement {
 
             if let Some(diagnostic) = editor
                 .semantic
-                .diagnostics()
+                .diagnostic_indexes_on_line(line_index)
                 .iter()
-                .filter(|diagnostic| {
-                    diagnostic.range.start <= line_end && diagnostic.range.end >= offset
-                })
+                .map(|index| &editor.semantic.diagnostics()[*index])
                 .min_by_key(|diagnostic| match diagnostic.severity {
                     sift_protocol::DiagnosticSeverity::Error => 0,
                     sift_protocol::DiagnosticSeverity::Warning => 1,
@@ -2716,7 +2735,7 @@ impl Element for QueryEditorElement {
 
             // Selection rectangle for the portion of this line inside the range.
             if editor.find_open {
-                for range in &find_matches {
+                for range in find_matches.iter() {
                     if let Some(bounds) = span_bounds(
                         range,
                         offset,
@@ -2754,7 +2773,8 @@ impl Element for QueryEditorElement {
 
             // Usage highlights sit behind the glyphs; diagnostics underline
             // them. Both are clipped to this line's span of the range.
-            for (range, _) in editor.semantic.usages() {
+            for index in editor.semantic.usage_indexes_on_line(line_index) {
+                let (range, _) = &editor.semantic.usages()[*index];
                 if let Some(bounds) = span_bounds(
                     range,
                     offset,
@@ -2767,7 +2787,8 @@ impl Element for QueryEditorElement {
                     usage_quads.push(fill(bounds, theme.colors.accent_muted));
                 }
             }
-            for diagnostic in editor.semantic.diagnostics() {
+            for index in editor.semantic.diagnostic_indexes_on_line(line_index) {
+                let diagnostic = &editor.semantic.diagnostics()[*index];
                 let color = match diagnostic.severity {
                     sift_protocol::DiagnosticSeverity::Error => theme.colors.danger,
                     sift_protocol::DiagnosticSeverity::Warning => theme.colors.warning,

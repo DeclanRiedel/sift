@@ -155,6 +155,7 @@ impl CompletionMenu {
 #[derive(Debug, Default)]
 pub struct SemanticState {
     diagnostics: Vec<EditorDiagnostic>,
+    diagnostics_by_line: Vec<Vec<usize>>,
     /// Text revision the current diagnostics describe. `None` means the buffer
     /// has never been analysed.
     diagnostics_revision: Option<u64>,
@@ -164,6 +165,7 @@ pub struct SemanticState {
     /// menu from flickering open on a stale answer.
     pending_completion: Option<u64>,
     usages: Vec<(Range<usize>, SqlUsageKind)>,
+    usages_by_line: Vec<Vec<usize>>,
     usages_revision: Option<u64>,
     /// Last non-fatal semantic message (format warnings, partial usages,
     /// service failures). Surfaced in the editor status strip.
@@ -185,6 +187,16 @@ impl SemanticState {
 
     pub fn usages(&self) -> &[(Range<usize>, SqlUsageKind)] {
         &self.usages
+    }
+
+    pub fn diagnostic_indexes_on_line(&self, line: usize) -> &[usize] {
+        self.diagnostics_by_line
+            .get(line)
+            .map_or(&[], Vec::as_slice)
+    }
+
+    pub fn usage_indexes_on_line(&self, line: usize) -> &[usize] {
+        self.usages_by_line.get(line).map_or(&[], Vec::as_slice)
     }
 
     pub fn notice(&self) -> Option<&str> {
@@ -220,6 +232,7 @@ impl SemanticState {
         self.completion = None;
         self.pending_completion = None;
         self.usages.clear();
+        self.usages_by_line.clear();
         self.usages_revision = None;
     }
 
@@ -268,6 +281,10 @@ impl SemanticState {
                 diagnostic.range.end,
             )
         });
+        self.diagnostics_by_line = span_line_index(
+            text,
+            self.diagnostics.iter().map(|diagnostic| &diagnostic.range),
+        );
         self.diagnostics_revision = Some(revision);
         self.diagnostics_incomplete = incomplete;
         true
@@ -313,6 +330,9 @@ impl SemanticState {
             .into_iter()
             .map(|usage| (clamp_range(text, usage.range), usage.kind))
             .collect();
+        self.usages
+            .sort_by_key(|(range, _)| (range.start, range.end));
+        self.usages_by_line = span_line_index(text, self.usages.iter().map(|(range, _)| range));
         self.usages_revision = Some(revision);
         self.notice = (!is_complete).then(|| {
             format!(
@@ -332,6 +352,27 @@ impl SemanticState {
         self.diagnostics_revision
             .is_some_and(|revision| revision != current_revision)
     }
+}
+
+fn span_line_index<'a>(
+    text: &str,
+    ranges: impl Iterator<Item = &'a Range<usize>>,
+) -> Vec<Vec<usize>> {
+    let mut line_starts = vec![0];
+    line_starts.extend(text.match_indices('\n').map(|(offset, _)| offset + 1));
+    let mut index = vec![Vec::new(); line_starts.len()];
+    for (span_index, range) in ranges.enumerate() {
+        let start = line_starts
+            .partition_point(|line_start| *line_start <= range.start.min(text.len()))
+            .saturating_sub(1);
+        let end = line_starts
+            .partition_point(|line_start| *line_start <= range.end.min(text.len()))
+            .saturating_sub(1);
+        for line in index.iter_mut().take(end + 1).skip(start) {
+            line.push(span_index);
+        }
+    }
+    index
 }
 
 const fn severity_rank(severity: DiagnosticSeverity) -> u8 {
@@ -527,5 +568,12 @@ mod tests {
         );
         assert!(state.diagnostic_at(6).is_some());
         assert!(state.diagnostic_at(5).is_none());
+    }
+
+    #[test]
+    fn span_index_projects_only_overlapping_lines() {
+        let ranges = [0..3, 2..8, 9..9];
+        let index = span_line_index("one\ntwo\nthree", ranges.iter());
+        assert_eq!(index, vec![vec![0, 1], vec![1], vec![1, 2]]);
     }
 }
