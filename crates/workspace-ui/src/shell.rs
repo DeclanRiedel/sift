@@ -881,6 +881,7 @@ pub enum Modal {
     EditResultCell,
     PlanCaptures,
     ConfirmTransactionDisconnect,
+    ConfirmProductionExecution,
     ServerPicker,
     ServerConnection,
     InstanceSetup,
@@ -891,6 +892,54 @@ pub enum Modal {
     ConfirmDeleteConnection(ConnectionNavEntry),
     ConfirmTerminateProcess(i64),
     SemanticRename,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ConnectionEnvironment {
+    Production,
+    Staging,
+    Development,
+}
+
+impl ConnectionEnvironment {
+    fn from_name(name: &str) -> Self {
+        let name = name.to_ascii_lowercase();
+        if name.contains("prod") || name.contains("live") {
+            Self::Production
+        } else if name.contains("stag") || name.contains("uat") || name.contains("test") {
+            Self::Staging
+        } else {
+            Self::Development
+        }
+    }
+
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Production => "PROD",
+            Self::Staging => "STAGE",
+            Self::Development => "DEV",
+        }
+    }
+}
+
+fn sql_may_mutate(sql: &str) -> bool {
+    sql.split(|character: char| !character.is_ascii_alphanumeric() && character != '_')
+        .any(|token| {
+            matches!(
+                token.to_ascii_uppercase().as_str(),
+                "INSERT"
+                    | "UPDATE"
+                    | "DELETE"
+                    | "MERGE"
+                    | "CREATE"
+                    | "ALTER"
+                    | "DROP"
+                    | "TRUNCATE"
+                    | "GRANT"
+                    | "REVOKE"
+                    | "CALL"
+            )
+        })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1207,6 +1256,12 @@ struct PendingDatabaseExecution {
     sql: String,
     params: Vec<sift_protocol::Value>,
     source: DatabaseObjectSource,
+}
+
+struct PendingProductionExecution {
+    item_id: u64,
+    sql: String,
+    params: Vec<sift_protocol::Value>,
 }
 
 struct PendingParameterRun {
@@ -3991,6 +4046,7 @@ pub struct WorkspaceShell {
     remembered_parameter_bindings: HashMap<String, Vec<String>>,
     parameter_binding_error: Option<String>,
     pending_database_execution: Option<PendingDatabaseExecution>,
+    pending_production_execution: Option<PendingProductionExecution>,
     pending_database_explain: Option<PendingDatabaseExplain>,
     instance_sender: Option<tokio::sync::mpsc::UnboundedSender<InstanceCommand>>,
     saved_servers: Vec<SavedServerProfile>,
@@ -4447,6 +4503,7 @@ impl WorkspaceShell {
             remembered_parameter_bindings,
             parameter_binding_error: None,
             pending_database_execution: None,
+            pending_production_execution: None,
             pending_database_explain: None,
             instance_sender: None,
             saved_servers: Vec::new(),
@@ -6450,6 +6507,40 @@ impl WorkspaceShell {
         params: Vec<sift_protocol::Value>,
         cx: &mut Context<Self>,
     ) {
+        let production = match &self.connection_status {
+            ConnectionStatus::Connected { name, .. } => {
+                ConnectionEnvironment::from_name(name) == ConnectionEnvironment::Production
+            }
+            _ => false,
+        };
+        if production && sql_may_mutate(&sql) {
+            self.pending_production_execution = Some(PendingProductionExecution {
+                item_id,
+                sql,
+                params,
+            });
+            self.modal = Some(Modal::ConfirmProductionExecution);
+            cx.notify();
+            return;
+        }
+        self.send_execution_now(item_id, sql, params, cx);
+    }
+
+    fn confirm_production_execution(&mut self, cx: &mut Context<Self>) {
+        let Some(pending) = self.pending_production_execution.take() else {
+            return;
+        };
+        self.modal = None;
+        self.send_execution_now(pending.item_id, pending.sql, pending.params, cx);
+    }
+
+    fn send_execution_now(
+        &mut self,
+        item_id: u64,
+        sql: String,
+        params: Vec<sift_protocol::Value>,
+        cx: &mut Context<Self>,
+    ) {
         if self
             .staged_result_edits
             .iter()
@@ -7580,6 +7671,12 @@ impl WorkspaceShell {
                 let entry_for_connect = connection.clone();
                 let entry_for_context_menu = connection.clone();
                 let menu_open = self.connection_row_menu == Some(connection_id);
+                let environment = ConnectionEnvironment::from_name(&connection.name);
+                let environment_color = match environment {
+                    ConnectionEnvironment::Production => colors.danger,
+                    ConnectionEnvironment::Staging => colors.warning,
+                    ConnectionEnvironment::Development => colors.muted_text,
+                };
                 let mut element = base(1)
                     .id(("conn", connection_id as usize))
                     .hover(|row| row.bg(colors.hovered_surface))
@@ -7600,6 +7697,17 @@ impl WorkspaceShell {
                             .min_w_0()
                             .truncate()
                             .child(connection.name.clone()),
+                    )
+                    .child(
+                        div()
+                            .flex_none()
+                            .px_1()
+                            .rounded_sm()
+                            .border_1()
+                            .border_color(environment_color)
+                            .text_xs()
+                            .text_color(environment_color)
+                            .child(environment.label()),
                     )
                     .when_some(status_label, |row, label| {
                         row.child(
@@ -13599,6 +13707,9 @@ impl WorkspaceShell {
         }
         if self.modal == Some(Modal::ConfirmTransactionDisconnect) {
             self.pending_connection_change = None;
+        }
+        if self.modal == Some(Modal::ConfirmProductionExecution) {
+            self.pending_production_execution = None;
         }
         if self.modal == Some(Modal::EditResultCell) {
             self.result_cell_edit_target = None;
@@ -19905,6 +20016,50 @@ impl WorkspaceShell {
                         )
                         .into_any_element()
                 }
+                Modal::ConfirmProductionExecution => div()
+                    .flex()
+                    .flex_col()
+                    .gap_4()
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .child(icon(IconName::Warning, colors.danger, 16.))
+                            .child("Confirm production write"),
+                    )
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(colors.muted_text)
+                            .whitespace_normal()
+                            .child("This statement may modify production data. Review the active connection and SQL before continuing."),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .justify_end()
+                            .gap_2()
+                            .child(
+                                Button::new("cancel-production-execution", "Cancel")
+                                    .tone(ButtonTone::Neutral)
+                                    .wide(true)
+                                    .on_click(cx.listener(|shell, _, window, cx| {
+                                        shell.dismiss_modal(&DismissModal, window, cx)
+                                    })),
+                            )
+                            .child(
+                                Button::new("confirm-production-execution", "Run on PROD")
+                                    .tone(ButtonTone::DangerMuted)
+                                    .wide(true)
+                                    .on_click(cx.listener(|shell, _, _, cx| {
+                                        shell.confirm_production_execution(cx)
+                                    })),
+                            ),
+                    )
+                    .into_any_element(),
                 Modal::ConfirmDeleteConnection(entry) => {
                     let entry = entry.clone();
                     let entry_for_delete = entry.clone();
@@ -20004,6 +20159,7 @@ impl WorkspaceShell {
                     | Modal::PlanCaptures
                     | Modal::DatabaseConnection
                     | Modal::ConfirmTransactionDisconnect
+                    | Modal::ConfirmProductionExecution
                     | Modal::ConfirmDeleteConnection(_)
                     | Modal::ConfirmTerminateProcess(_)
                     | Modal::SemanticRename
@@ -22537,6 +22693,49 @@ mod tests {
             "sales_report"
         );
         assert_eq!(csv_table_name(std::path::Path::new("2026.csv")), "csv_2026");
+    }
+
+    #[test]
+    fn connection_environment_and_mutation_guard_are_conservative() {
+        assert_eq!(
+            ConnectionEnvironment::from_name("Payments PROD"),
+            ConnectionEnvironment::Production
+        );
+        assert_eq!(
+            ConnectionEnvironment::from_name("warehouse-uat"),
+            ConnectionEnvironment::Staging
+        );
+        assert_eq!(
+            ConnectionEnvironment::from_name("local postgres"),
+            ConnectionEnvironment::Development
+        );
+        assert!(!sql_may_mutate("select * from users"));
+        assert!(sql_may_mutate(
+            "with changed as (delete from users returning *) select * from changed"
+        ));
+        assert!(sql_may_mutate("select 1; drop table users"));
+    }
+
+    #[gpui::test]
+    fn production_mutations_require_explicit_confirmation(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let workspace = window.root(cx).unwrap();
+        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        workspace.update(cx, |shell, cx| {
+            shell.executor_sender = Some(sender);
+            shell.connection_status = ConnectionStatus::Connected {
+                profile_id: 7,
+                name: "payments-prod".into(),
+            };
+            shell.send_execution(9, "delete from invoices".into(), Vec::new(), cx);
+            assert_eq!(shell.modal, Some(Modal::ConfirmProductionExecution));
+        });
+        assert!(receiver.try_recv().is_err());
+        workspace.update(cx, |shell, cx| shell.confirm_production_execution(cx));
+        assert!(matches!(
+            receiver.try_recv(),
+            Ok(ExecutorCommand::Execute { item_id: 9, .. })
+        ));
     }
 
     #[test]
