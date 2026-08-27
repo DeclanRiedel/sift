@@ -4000,6 +4000,8 @@ pub struct WorkspaceShell {
     focused_surface: WorkspaceSurface,
     command_palette_origin: WorkspaceSurface,
     result_inspector_views: HashMap<u64, ResultInspectorView>,
+    inspector_field_selected: usize,
+    inspector_g_pending: bool,
     connection_nav_selected: usize,
     connection_nav_g_pending: bool,
     connection_row_menu: Option<i64>,
@@ -4468,6 +4470,8 @@ impl WorkspaceShell {
             focused_surface: WorkspaceSurface::Editor,
             command_palette_origin: WorkspaceSurface::Editor,
             result_inspector_views: HashMap::new(),
+            inspector_field_selected: 0,
+            inspector_g_pending: false,
             connection_nav_selected: 0,
             connection_nav_g_pending: false,
             connection_row_menu: None,
@@ -11001,6 +11005,55 @@ impl WorkspaceShell {
         cx.notify();
     }
 
+    fn select_result_inspector_view(
+        &mut self,
+        view: ResultInspectorView,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some((item_id, _)) = self.focused_pane_results_item(cx) else {
+            return false;
+        };
+        self.result_inspector_views.insert(item_id, view);
+        self.inspector_g_pending = false;
+        cx.notify();
+        true
+    }
+
+    fn move_inspector_field_selection(&mut self, delta: isize, cx: &mut Context<Self>) -> bool {
+        let Some((_, results)) = self.focused_pane_results_item(cx) else {
+            return false;
+        };
+        let field_count = results.read(cx).inspector_fields().len();
+        if field_count == 0 {
+            return false;
+        }
+        self.inspector_field_selected = self
+            .inspector_field_selected
+            .saturating_add_signed(delta)
+            .min(field_count - 1);
+        self.inspector_g_pending = false;
+        cx.notify();
+        true
+    }
+
+    fn toggle_selected_inspector_field(&mut self, cx: &mut Context<Self>) -> bool {
+        let Some((_, results)) = self.focused_pane_results_item(cx) else {
+            return false;
+        };
+        let Some(field) = results
+            .read(cx)
+            .inspector_fields()
+            .get(self.inspector_field_selected)
+            .cloned()
+        else {
+            return false;
+        };
+        results.update(cx, |results, cx| {
+            results.set_column_included(field.source_column, !field.included, cx)
+        });
+        true
+    }
+
     fn show_result_row_json(&mut self, item_id: u64, window: &mut Window, cx: &mut Context<Self>) {
         let selected_row = self.panes.iter().find_map(|pane| {
             pane.read(cx)
@@ -12145,12 +12198,52 @@ impl WorkspaceShell {
                     return;
                 }
             }
-            if workspace && !modal && !text_input && has_context("SiftInspector") && key == "escape"
-            {
-                self.focus_active_pane(window, cx);
-                cx.stop_propagation();
-                cx.notify();
-                return;
+            if workspace && !modal && !text_input && has_context("SiftInspector") {
+                let fields_selected = self
+                    .focused_pane_results_item(cx)
+                    .map(|(item_id, _)| {
+                        self.result_inspector_views
+                            .get(&item_id)
+                            .copied()
+                            .unwrap_or_default()
+                            == ResultInspectorView::Fields
+                    })
+                    .unwrap_or(false);
+                let handled = match key.as_str() {
+                    "h" => self.select_result_inspector_view(ResultInspectorView::Fields, cx),
+                    "l" => self.select_result_inspector_view(ResultInspectorView::RowJson, cx),
+                    "j" if fields_selected => self.move_inspector_field_selection(1, cx),
+                    "k" if fields_selected => self.move_inspector_field_selection(-1, cx),
+                    "g" if fields_selected && self.inspector_g_pending => {
+                        self.inspector_field_selected = 0;
+                        self.inspector_g_pending = false;
+                        cx.notify();
+                        true
+                    }
+                    "g" if fields_selected => {
+                        self.inspector_g_pending = true;
+                        cx.notify();
+                        true
+                    }
+                    "shift-g" if fields_selected => {
+                        self.move_inspector_field_selection(isize::MAX, cx)
+                    }
+                    "enter" if fields_selected => self.toggle_selected_inspector_field(cx),
+                    "escape" => {
+                        self.inspector_g_pending = false;
+                        self.focus_active_pane(window, cx);
+                        cx.notify();
+                        true
+                    }
+                    _ => {
+                        self.inspector_g_pending = false;
+                        false
+                    }
+                };
+                if handled {
+                    cx.stop_propagation();
+                    return;
+                }
             }
             let starts_ide_command = workspace
                 && !modal
@@ -14799,7 +14892,7 @@ impl WorkspaceShell {
                     .flex_1()
                     .min_h_0()
                     .overflow_y_scroll()
-                    .children(fields.into_iter().map(|field| {
+                    .children(fields.into_iter().enumerate().map(|(index, field)| {
                         let include_results = results.clone();
                         let exclude_results = results.clone();
                         let source_column = field.source_column;
@@ -14807,6 +14900,7 @@ impl WorkspaceShell {
                         let exclude_label = format!("Exclude field {}", field.name);
                         div()
                             .id(("inspector-result-field", source_column))
+                            .debug_selector(move || format!("inspector-result-field-{index}"))
                             .px_3()
                             .h(px(30.))
                             .flex_none()
@@ -14815,6 +14909,11 @@ impl WorkspaceShell {
                             .gap_2()
                             .border_b_1()
                             .border_color(colors.subtle_border)
+                            .when(
+                                self.focused_surface == WorkspaceSurface::Inspector
+                                    && index == self.inspector_field_selected,
+                                |row| row.bg(colors.selected_surface).border_color(colors.accent),
+                            )
                             .child(
                                 div()
                                     .min_w_0()
@@ -22936,6 +23035,58 @@ mod tests {
                 shell.result_inspector_views.get(&item_id),
                 Some(&ResultInspectorView::RowJson)
             );
+        });
+    }
+
+    #[gpui::test]
+    fn inspector_vim_navigation_switches_views_and_fields(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        workspace.update_in(&mut cx, |shell, window, cx| {
+            let results = shell.focused_pane_results(cx).unwrap();
+            results.update(cx, |results, cx| {
+                results.set_state(
+                    ResultState::Ready(crate::results::ResultData {
+                        columns: vec![
+                            crate::results::ResultColumn {
+                                name: "id".into(),
+                                type_label: "bigint".into(),
+                                nullable: false,
+                            },
+                            crate::results::ResultColumn {
+                                name: "payload".into(),
+                                type_label: "text".into(),
+                                nullable: true,
+                            },
+                        ],
+                        rows: vec![sift_protocol::Row::new(vec![
+                            sift_protocol::Value::Int64(1),
+                            sift_protocol::Value::Text("open".into()),
+                        ])],
+                        ..Default::default()
+                    }),
+                    cx,
+                );
+                results.select_cell(0, 0, cx);
+            });
+            shell.focus_inspector(window, cx);
+        });
+        cx.run_until_parked();
+
+        cx.simulate_keystrokes("l");
+        workspace.read_with(&cx, |shell, cx| {
+            let (item_id, _) = shell.focused_pane_results_item(cx).unwrap();
+            assert_eq!(
+                shell.result_inspector_views.get(&item_id),
+                Some(&ResultInspectorView::RowJson)
+            );
+        });
+        cx.simulate_keystrokes("h j enter");
+        workspace.read_with(&cx, |shell, cx| {
+            assert_eq!(shell.inspector_field_selected, 1);
+            let (_, results) = shell.focused_pane_results_item(cx).unwrap();
+            assert!(!results.read(cx).inspector_fields()[1].included);
         });
     }
 

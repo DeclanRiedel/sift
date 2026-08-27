@@ -83,8 +83,10 @@ prefixes display a compact which-key strip generated from the same vocabulary.
       expose the same movement through `<leader> w h/j/k/l`.
 - [x] Add `<leader> g c/e/i/r/p` surface focus and Connections NORMAL mode with
       `h/j/k/l`, `gg/G`, `/`, `Enter`, `r`, and `Escape`.
-- [ ] Give Inspector, result tabs, and Problems complete NORMAL selection state
-      and their remaining local motions/operators.
+- [x] Give Inspector, result tabs, and Problems complete NORMAL selection state
+      and their remaining local motions/operators. Inspector uses `h/l` views,
+      `j/k`, `gg/G`, and Enter for field projection; result tabs use `H/L`; the
+      read-only Problems item retains full Vim navigation and visual yank.
 - [ ] Add grid visual selection and system-clipboard `yc`, `yy`, `yh`, and `p`.
 - [ ] Add editable-result `i`, `dd`, `o`, undo/redo, Preview, Apply, Revert.
 - [ ] Add generated keyboard-equivalence tests proving every visible action has
