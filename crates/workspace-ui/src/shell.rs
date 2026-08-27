@@ -899,6 +899,7 @@ pub enum Modal {
     SemanticRename,
     CatalogDiagram,
     CatalogMigration,
+    CsvImport,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1416,6 +1417,24 @@ struct TableDesignerState {
     plan: Option<Box<sift_protocol::MigrationPlan>>,
     pending: bool,
     error: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct CsvPreviewColumn {
+    source: String,
+    target: String,
+    inferred_type: sift_protocol::InferredCsvType,
+    nullable: bool,
+}
+
+#[derive(Debug, Clone)]
+struct CsvImportPreviewState {
+    table: String,
+    data: Vec<u8>,
+    columns: Vec<CsvPreviewColumn>,
+    rows: Vec<Vec<String>>,
+    row_count: usize,
+    conflict_policy: sift_protocol::CsvConflictPolicy,
 }
 
 #[derive(Debug, Clone)]
@@ -3978,6 +3997,116 @@ fn csv_table_name(path: &std::path::Path) -> String {
     table
 }
 
+fn infer_csv_value(value: &str) -> sift_protocol::InferredCsvType {
+    if value.eq_ignore_ascii_case("true") || value.eq_ignore_ascii_case("false") {
+        sift_protocol::InferredCsvType::Boolean
+    } else if value.parse::<i64>().is_ok() {
+        sift_protocol::InferredCsvType::Int64
+    } else if value.parse::<f64>().is_ok() {
+        sift_protocol::InferredCsvType::Decimal
+    } else if value.len() == 10
+        && value.as_bytes().get(4) == Some(&b'-')
+        && value.as_bytes().get(7) == Some(&b'-')
+        && value
+            .bytes()
+            .enumerate()
+            .all(|(index, byte)| matches!(index, 4 | 7) || byte.is_ascii_digit())
+    {
+        sift_protocol::InferredCsvType::Date
+    } else if value.len() >= 20
+        && value.as_bytes().get(4) == Some(&b'-')
+        && value.as_bytes().get(7) == Some(&b'-')
+        && value
+            .as_bytes()
+            .get(10)
+            .is_some_and(|byte| matches!(byte, b'T' | b' '))
+        && (value.ends_with('Z') || value.contains('+'))
+    {
+        sift_protocol::InferredCsvType::TimestampTz
+    } else {
+        sift_protocol::InferredCsvType::Text
+    }
+}
+
+fn preview_csv(table: String, data: Vec<u8>) -> Result<CsvImportPreviewState, String> {
+    let mut reader = csv::ReaderBuilder::new()
+        .has_headers(true)
+        .from_reader(data.as_slice());
+    let headers = reader
+        .headers()
+        .map_err(|error| format!("reading CSV header failed: {error}"))?
+        .iter()
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    if headers.is_empty() {
+        return Err("CSV file has no columns".into());
+    }
+    let mut samples = vec![Vec::<String>::new(); headers.len()];
+    let mut nullables = vec![false; headers.len()];
+    let mut rows = Vec::new();
+    let mut row_count = 0usize;
+    for record in reader.records() {
+        let record = record.map_err(|error| format!("reading CSV row failed: {error}"))?;
+        if record.len() != headers.len() {
+            return Err(format!(
+                "CSV row {} has {} fields; expected {}",
+                row_count + 2,
+                record.len(),
+                headers.len()
+            ));
+        }
+        let values = record.iter().map(str::to_owned).collect::<Vec<_>>();
+        if row_count < 200 {
+            for (column, value) in values.iter().enumerate() {
+                if value.is_empty() || value == "NULL" {
+                    nullables[column] = true;
+                } else {
+                    samples[column].push(value.clone());
+                }
+            }
+        }
+        if rows.len() < 20 {
+            rows.push(values);
+        }
+        row_count += 1;
+    }
+    let columns = headers
+        .into_iter()
+        .enumerate()
+        .map(|(index, source)| {
+            let mut types = samples[index]
+                .iter()
+                .map(|value| infer_csv_value(value))
+                .collect::<Vec<_>>();
+            types.sort_by_key(|kind| format!("{kind:?}"));
+            types.dedup();
+            let inferred_type = match types.as_slice() {
+                [] => sift_protocol::InferredCsvType::Text,
+                [only] => *only,
+                [sift_protocol::InferredCsvType::Decimal, sift_protocol::InferredCsvType::Int64]
+                | [sift_protocol::InferredCsvType::Int64, sift_protocol::InferredCsvType::Decimal] => {
+                    sift_protocol::InferredCsvType::Decimal
+                }
+                _ => sift_protocol::InferredCsvType::Text,
+            };
+            CsvPreviewColumn {
+                target: source.clone(),
+                source,
+                inferred_type,
+                nullable: nullables[index],
+            }
+        })
+        .collect();
+    Ok(CsvImportPreviewState {
+        table,
+        data,
+        columns,
+        rows,
+        row_count,
+        conflict_policy: sift_protocol::CsvConflictPolicy::Abort,
+    })
+}
+
 fn parse_parameter_value(text: &str) -> Result<sift_protocol::Value, String> {
     let trimmed = text.trim();
     if trimmed.eq_ignore_ascii_case("null") {
@@ -4185,6 +4314,7 @@ pub struct WorkspaceShell {
     catalog_migration_pending: bool,
     catalog_migration_error: Option<String>,
     last_catalog_drift_digest: Option<String>,
+    csv_import_preview: Option<CsvImportPreviewState>,
     instance_sender: Option<tokio::sync::mpsc::UnboundedSender<InstanceCommand>>,
     saved_servers: Vec<SavedServerProfile>,
     instance_roots: Vec<SavedInstanceRoot>,
@@ -4657,6 +4787,7 @@ impl WorkspaceShell {
             catalog_migration_pending: false,
             catalog_migration_error: None,
             last_catalog_drift_digest: None,
+            csv_import_preview: None,
             instance_sender: None,
             saved_servers: Vec::new(),
             instance_roots: Vec::new(),
@@ -13112,10 +13243,10 @@ impl WorkspaceShell {
         if !self.require_operation(sift_protocol::OperationKind::ImportCsv, "Import CSV", cx) {
             return;
         }
-        let Some(sender) = self.executor_sender.clone() else {
+        if self.executor_sender.is_none() {
             self.show_error_toast("Connect before importing CSV data".into(), cx);
             return;
-        };
+        }
         let prompt = cx.prompt_for_paths(PathPromptOptions {
             files: true,
             directories: false,
@@ -13136,20 +13267,14 @@ impl WorkspaceShell {
                 .spawn(async move { std::fs::read(read_path) })
                 .await;
             let _ = shell.update(cx, |shell, cx| match data {
-                Ok(data) if data.len() <= 64 * 1024 * 1024 => {
-                    let request = sift_protocol::CsvImportRequest {
-                        table: table.clone(),
-                        data,
-                        header: true,
-                        delimiter: ',',
-                        null_value: Some("NULL".into()),
-                        create_table: true,
-                        conflict_policy: sift_protocol::CsvConflictPolicy::Abort,
-                    };
-                    if sender.send(ExecutorCommand::ImportCsv { request }).is_ok() {
-                        shell.show_toast(format!("Importing CSV into {table}…"), cx);
+                Ok(data) if data.len() <= 64 * 1024 * 1024 => match preview_csv(table, data) {
+                    Ok(preview) => {
+                        shell.csv_import_preview = Some(preview);
+                        shell.modal = Some(Modal::CsvImport);
+                        cx.notify();
                     }
-                }
+                    Err(message) => shell.show_error_toast(message, cx),
+                },
                 Ok(_) => {
                     shell.show_error_toast("CSV import exceeds the 64 MiB payload limit".into(), cx)
                 }
@@ -13158,6 +13283,41 @@ impl WorkspaceShell {
             });
         })
         .detach();
+    }
+
+    fn toggle_csv_conflict_policy(&mut self, cx: &mut Context<Self>) {
+        let Some(preview) = self.csv_import_preview.as_mut() else {
+            return;
+        };
+        preview.conflict_policy = match preview.conflict_policy {
+            sift_protocol::CsvConflictPolicy::Abort => sift_protocol::CsvConflictPolicy::Skip,
+            sift_protocol::CsvConflictPolicy::Skip => sift_protocol::CsvConflictPolicy::Abort,
+        };
+        cx.notify();
+    }
+
+    fn confirm_csv_import(&mut self, cx: &mut Context<Self>) {
+        let Some(preview) = self.csv_import_preview.take() else {
+            return;
+        };
+        let Some(sender) = &self.executor_sender else {
+            self.show_error_toast("Connect before importing CSV data".into(), cx);
+            return;
+        };
+        let table = preview.table.clone();
+        let request = sift_protocol::CsvImportRequest {
+            table: preview.table,
+            data: preview.data,
+            header: true,
+            delimiter: ',',
+            null_value: Some("NULL".into()),
+            create_table: true,
+            conflict_policy: preview.conflict_policy,
+        };
+        if sender.send(ExecutorCommand::ImportCsv { request }).is_ok() {
+            self.modal = None;
+            self.show_toast(format!("Importing CSV into {table}…"), cx);
+        }
     }
 
     #[cfg(test)]
@@ -14567,6 +14727,9 @@ impl WorkspaceShell {
             self.catalog_migration_plan = None;
             self.catalog_migration_error = None;
             self.catalog_migration_pending = false;
+        }
+        if self.modal == Some(Modal::CsvImport) {
+            self.csv_import_preview = None;
         }
         self.modal = None;
         // Return focus to the surface the user chose before opening temporary UI.
@@ -17960,6 +18123,7 @@ impl WorkspaceShell {
             let result_cell_edit = matches!(modal, Modal::EditResultCell);
             let plan_captures = matches!(modal, Modal::PlanCaptures);
             let catalog_diagram = matches!(modal, Modal::CatalogDiagram);
+            let csv_import = matches!(modal, Modal::CsvImport);
             let instance_setup = matches!(modal, Modal::InstanceSetup);
             let card_width = if data_results {
                 0.0
@@ -17974,7 +18138,7 @@ impl WorkspaceShell {
                 720.0
             } else if catalog_diagram {
                 1040.0
-            } else if data_search {
+            } else if data_search || csv_import {
                 900.0
             } else if server_picker || account {
                 360.0
@@ -21501,6 +21665,118 @@ impl WorkspaceShell {
                             .child(Button::new("apply-catalog-migration", if self.catalog_migration_pending { "Working…" } else { "Apply migration" }).tone(ButtonTone::DangerMuted).disabled(self.catalog_migration_pending || self.catalog_migration_plan.is_none()).on_click(cx.listener(|shell, _, _, cx| shell.apply_catalog_migration(cx)))))
                         .into_any_element()
                 }
+                Modal::CsvImport => {
+                    let preview = self.csv_import_preview.as_ref();
+                    let mappings = preview
+                        .into_iter()
+                        .flat_map(|preview| &preview.columns)
+                        .enumerate()
+                        .map(|(index, column)| {
+                            div()
+                                .debug_selector(move || format!("csv-import-column-{index}"))
+                                .grid()
+                                .grid_cols(4)
+                                .gap_2()
+                                .px_2()
+                                .py_1()
+                                .border_b_1()
+                                .border_color(colors.subtle_border)
+                                .text_xs()
+                                .child(column.source.clone())
+                                .child(format!("→ {}", column.target))
+                                .child(format!("{:?}", column.inferred_type))
+                                .child(if column.nullable { "nullable" } else { "required" })
+                        })
+                        .collect::<Vec<_>>();
+                    let rows = preview
+                        .into_iter()
+                        .flat_map(|preview| &preview.rows)
+                        .enumerate()
+                        .map(|(index, row)| {
+                            div()
+                                .debug_selector(move || format!("csv-import-preview-row-{index}"))
+                                .px_2()
+                                .py_1()
+                                .border_b_1()
+                                .border_color(colors.subtle_border)
+                                .font_family("monospace")
+                                .text_xs()
+                                .truncate()
+                                .child(row.join("  |  "))
+                        })
+                        .collect::<Vec<_>>();
+                    let (table, row_count, conflict_policy) = preview.map_or_else(
+                        || ("CSV import".to_owned(), 0, sift_protocol::CsvConflictPolicy::Abort),
+                        |preview| {
+                            (
+                                preview.table.clone(),
+                                preview.row_count,
+                                preview.conflict_policy,
+                            )
+                        },
+                    );
+                    div()
+                        .debug_selector(|| "csv-import-preview".into())
+                        .w(px(860.))
+                        .max_h(px(700.))
+                        .flex()
+                        .flex_col()
+                        .gap_3()
+                        .child(div().font_weight(gpui::FontWeight::SEMIBOLD).child(format!("Import CSV into {table}")))
+                        .child(div().text_sm().text_color(colors.muted_text).child(format!("{row_count} data row(s) · inferred from first 200 rows · preview limited to 20")))
+                        .child(div().text_xs().font_weight(gpui::FontWeight::SEMIBOLD).child("COLUMN MAPPING"))
+                        .child(div().id("csv-import-mappings").max_h(px(180.)).overflow_y_scroll().border_1().border_color(colors.subtle_border).children(mappings))
+                        .child(div().text_xs().font_weight(gpui::FontWeight::SEMIBOLD).child("DATA PREVIEW"))
+                        .child(div().id("csv-import-preview-rows").flex_1().min_h_0().overflow_y_scroll().border_1().border_color(colors.subtle_border).children(rows))
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .justify_between()
+                                .child(
+                                    Button::new(
+                                        "csv-import-conflict-policy",
+                                        format!("Duplicates: {:?}", conflict_policy),
+                                    )
+                                    .debug_selector("csv-import-conflict-policy")
+                                    .tone(ButtonTone::Ghost)
+                                    .on_click(cx.listener(|shell, _, _, cx| {
+                                        shell.toggle_csv_conflict_policy(cx)
+                                    })),
+                                )
+                                .child(
+                                    div()
+                                        .flex()
+                                        .gap_2()
+                                        .child(
+                                            Button::new("cancel-csv-import", "Cancel")
+                                                .tone(ButtonTone::Neutral)
+                                                .on_click(cx.listener(
+                                                    |shell, _, window, cx| {
+                                                        shell.dismiss_modal(
+                                                            &DismissModal,
+                                                            window,
+                                                            cx,
+                                                        )
+                                                    },
+                                                )),
+                                        )
+                                        .child(
+                                            Button::new(
+                                                "confirm-csv-import",
+                                                "Create table and import",
+                                            )
+                                            .debug_selector("confirm-csv-import")
+                                            .tone(ButtonTone::Accent)
+                                            .disabled(preview.is_none())
+                                            .on_click(cx.listener(|shell, _, _, cx| {
+                                                shell.confirm_csv_import(cx)
+                                            })),
+                                        ),
+                                ),
+                        )
+                        .into_any_element()
+                }
                 Modal::SemanticRename => {
                     let (pending, edit_count, warnings) = self.pending_semantic_rename.as_ref().map_or((false, None, Vec::new()), |rename| (rename.pending, rename.edits.as_ref().map(Vec::len), rename.warnings.clone()));
                     let preview_rows = self.semantic_rename_preview_rows(cx);
@@ -21560,6 +21836,7 @@ impl WorkspaceShell {
                     | Modal::SemanticRename
                     | Modal::CatalogDiagram
                     | Modal::CatalogMigration
+                    | Modal::CsvImport
             );
             div()
                 .id("modal-layer")
@@ -24255,6 +24532,66 @@ mod tests {
             "sales_report"
         );
         assert_eq!(csv_table_name(std::path::Path::new("2026.csv")), "csv_2026");
+    }
+
+    #[test]
+    fn csv_preview_infers_columns_and_bounds_rendered_rows() {
+        let mut csv = String::from("id,active,amount,created_at,note\n");
+        for index in 0..25 {
+            csv.push_str(&format!(
+                "{index},true,12.5,2026-08-27T10:00:00Z,{}\n",
+                if index == 3 { "NULL" } else { "ok" }
+            ));
+        }
+        let preview = preview_csv("events".into(), csv.into_bytes()).unwrap();
+        assert_eq!(preview.row_count, 25);
+        assert_eq!(preview.rows.len(), 20);
+        assert_eq!(
+            preview.columns[0].inferred_type,
+            sift_protocol::InferredCsvType::Int64
+        );
+        assert_eq!(
+            preview.columns[1].inferred_type,
+            sift_protocol::InferredCsvType::Boolean
+        );
+        assert_eq!(
+            preview.columns[2].inferred_type,
+            sift_protocol::InferredCsvType::Decimal
+        );
+        assert!(preview.columns[4].nullable);
+    }
+
+    #[gpui::test]
+    fn csv_import_requires_preview_confirmation(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        workspace.update(&mut cx, |shell, cx| {
+            shell.executor_sender = Some(sender);
+            shell.csv_import_preview =
+                Some(preview_csv("events".into(), b"id,name\n1,Alice\n".to_vec()).unwrap());
+            shell.modal = Some(Modal::CsvImport);
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("csv-import-preview").is_some());
+        let policy = cx.debug_bounds("csv-import-conflict-policy").unwrap();
+        cx.simulate_click(policy.center(), Modifiers::default());
+        workspace.read_with(&cx, |shell, _| {
+            assert_eq!(
+                shell.csv_import_preview.as_ref().unwrap().conflict_policy,
+                sift_protocol::CsvConflictPolicy::Skip
+            );
+        });
+        let confirm = cx.debug_bounds("confirm-csv-import").unwrap();
+        cx.simulate_click(confirm.center(), Modifiers::default());
+        assert!(matches!(
+            receiver.try_recv(),
+            Ok(ExecutorCommand::ImportCsv { request })
+                if request.table == "events"
+                    && request.conflict_policy == sift_protocol::CsvConflictPolicy::Skip
+        ));
     }
 
     #[test]
