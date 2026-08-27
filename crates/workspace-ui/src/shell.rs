@@ -4054,6 +4054,7 @@ pub struct WorkspaceShell {
     database_processes: Vec<sift_protocol::DatabaseProcess>,
     database_processes_loading: bool,
     database_processes_error: Option<String>,
+    selected_database_process: Option<i64>,
     transaction: Option<sift_protocol::TransactionInfo>,
     transaction_pending: bool,
     transaction_aborted: bool,
@@ -4528,6 +4529,7 @@ impl WorkspaceShell {
             database_processes: Vec::new(),
             database_processes_loading: false,
             database_processes_error: None,
+            selected_database_process: None,
             transaction: None,
             transaction_pending: false,
             transaction_aborted: false,
@@ -6314,6 +6316,13 @@ impl WorkspaceShell {
                 self.database_processes_loading = false;
                 match result {
                     Ok(processes) => {
+                        if self.selected_database_process.is_some_and(|selected| {
+                            !processes
+                                .iter()
+                                .any(|process| process.process_id == selected)
+                        }) {
+                            self.selected_database_process = None;
+                        }
                         self.database_processes = processes;
                         self.database_processes_error = None;
                     }
@@ -6340,6 +6349,9 @@ impl WorkspaceShell {
                     Ok(true) => {
                         self.database_processes
                             .retain(|process| process.process_id != process_id);
+                        if self.selected_database_process == Some(process_id) {
+                            self.selected_database_process = None;
+                        }
                         self.show_success_toast(format!("Terminated process {process_id}"), cx);
                     }
                     Ok(false) => self
@@ -10666,6 +10678,27 @@ impl WorkspaceShell {
         }
         self.modal = Some(Modal::ConfirmTerminateProcess(process_id));
         cx.notify();
+    }
+
+    fn select_database_process(&mut self, process_id: i64, cx: &mut Context<Self>) {
+        self.selected_database_process = Some(process_id);
+        cx.notify();
+    }
+
+    fn close_database_process_details(&mut self, cx: &mut Context<Self>) {
+        self.selected_database_process = None;
+        cx.notify();
+    }
+
+    fn copy_database_process_statement(&self, process_id: i64, cx: &mut Context<Self>) {
+        if let Some(statement) = self
+            .database_processes
+            .iter()
+            .find(|process| process.process_id == process_id)
+            .and_then(|process| process.statement.clone())
+        {
+            cx.write_to_clipboard(gpui::ClipboardItem::new_string(statement));
+        }
     }
 
     fn confirm_terminate_process(&mut self, process_id: i64, cx: &mut Context<Self>) {
@@ -26883,9 +26916,6 @@ mod tests {
                 }])),
                 cx,
             );
-            shell.request_terminate_process(42, cx);
-            assert_eq!(shell.modal, Some(Modal::ConfirmTerminateProcess(42)));
-            shell.confirm_terminate_process(42, cx);
         });
         cx.run_until_parked();
         assert!(cx.debug_bounds("database-process-42").is_some());
@@ -26893,6 +26923,26 @@ mod tests {
             .debug_bounds("database-process-statement-header")
             .is_some());
         assert!(cx.debug_bounds("database-process-statement-42").is_some());
+        let statement = cx
+            .debug_bounds("database-process-statement-42")
+            .expect("statement should be clickable");
+        cx.simulate_click(statement.center(), Modifiers::default());
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("database-process-details-42").is_some());
+        let copy = cx
+            .debug_bounds("copy-process-statement-42")
+            .expect("copy action should be visible");
+        cx.simulate_click(copy.center(), Modifiers::default());
+        cx.run_until_parked();
+        assert_eq!(
+            cx.read_from_clipboard().and_then(|item| item.text()),
+            Some("select * from events".into())
+        );
+        workspace.update(&mut cx, |shell, cx| {
+            shell.request_terminate_process(42, cx);
+            assert_eq!(shell.modal, Some(Modal::ConfirmTerminateProcess(42)));
+            shell.confirm_terminate_process(42, cx);
+        });
         assert!(matches!(
             commands.try_recv(),
             Ok(ExecutorCommand::TerminateDatabaseProcess { process_id: 42 })

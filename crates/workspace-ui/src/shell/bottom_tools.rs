@@ -137,14 +137,24 @@ pub(super) fn render_bottom_panel(
                     })
                     .children(savepoints)
             });
-            let processes = Arc::new(shell.database_processes.clone());
+            let processes = Arc::new(database_process_rows(&shell.database_processes));
             let process_count = processes.len();
+            let process_details = shell.selected_database_process.and_then(|process_id| {
+                shell
+                    .database_processes
+                    .iter()
+                    .find(|process| process.process_id == process_id)
+                    .cloned()
+            });
             div()
                 .flex()
                 .flex_1()
                 .min_h_0()
                 .flex_col()
                 .children(transaction)
+                .children(
+                    process_details.map(|process| render_database_process_details(process, cx)),
+                )
                 .child(
                     div()
                         .flex_none()
@@ -237,11 +247,71 @@ pub(super) fn render_bottom_panel(
         .into_any_element()
 }
 
-fn render_database_process_row(
+#[derive(Clone)]
+struct DatabaseProcessRow {
     process: sift_protocol::DatabaseProcess,
+    block_depth: usize,
+    cycle: bool,
+}
+
+fn database_process_rows(processes: &[sift_protocol::DatabaseProcess]) -> Vec<DatabaseProcessRow> {
+    fn depth(
+        process_id: i64,
+        blockers: &HashMap<i64, Vec<i64>>,
+        visiting: &mut HashSet<i64>,
+        memo: &mut HashMap<i64, (usize, bool)>,
+    ) -> (usize, bool) {
+        if let Some(result) = memo.get(&process_id) {
+            return *result;
+        }
+        if !visiting.insert(process_id) {
+            return (0, true);
+        }
+        let mut result = (0, false);
+        for blocker in blockers.get(&process_id).into_iter().flatten() {
+            let (blocker_depth, cycle) = if blockers.contains_key(blocker) {
+                depth(*blocker, blockers, visiting, memo)
+            } else {
+                (0, false)
+            };
+            result.0 = result.0.max(blocker_depth.saturating_add(1));
+            result.1 |= cycle;
+        }
+        visiting.remove(&process_id);
+        memo.insert(process_id, result);
+        result
+    }
+
+    let blockers = processes
+        .iter()
+        .map(|process| (process.process_id, process.blocked_by.clone()))
+        .collect::<HashMap<_, _>>();
+    let mut memo = HashMap::new();
+    processes
+        .iter()
+        .cloned()
+        .map(|process| {
+            let (block_depth, cycle) = depth(
+                process.process_id,
+                &blockers,
+                &mut HashSet::new(),
+                &mut memo,
+            );
+            DatabaseProcessRow {
+                process,
+                block_depth,
+                cycle,
+            }
+        })
+        .collect()
+}
+
+fn render_database_process_row(
+    row: DatabaseProcessRow,
     cx: &mut Context<WorkspaceShell>,
 ) -> gpui::AnyElement {
     let colors = cx.theme().colors;
+    let process = row.process;
     let process_id = process.process_id;
     let user_database = match (process.user, process.database) {
         (Some(user), Some(database)) => format!("{user} @ {database}"),
@@ -265,6 +335,10 @@ fn render_database_process_row(
                 .join(", "),
         );
     }
+    if row.cycle {
+        state.push_str(" · blocking cycle");
+    }
+    let statement = process.statement.unwrap_or_else(|| "Idle".into());
 
     div()
         .id(("database-process", process_id as usize))
@@ -277,18 +351,35 @@ fn render_database_process_row(
         .gap_3()
         .border_b_1()
         .border_color(colors.subtle_border)
-        .child(div().w(px(72.)).child(process_id.to_string()))
+        .when(row.block_depth > 0, |row| row.bg(colors.warning_muted))
+        .child(
+            div()
+                .w(px(72.))
+                .pl(px((row.block_depth.min(4) * 8) as f32))
+                .child(if row.block_depth > 0 {
+                    format!("↳ {process_id}")
+                } else {
+                    process_id.to_string()
+                }),
+        )
         .child(div().w(px(180.)).truncate().child(user_database))
         .child(div().w(px(220.)).truncate().child(state))
         .child(
             div()
+                .id(("database-process-statement", process_id as usize))
                 .debug_selector(move || format!("database-process-statement-{process_id}"))
                 .flex_1()
                 .min_w_0()
                 .truncate()
                 .text_right()
                 .font_family("monospace")
-                .child(process.statement.unwrap_or_else(|| "Idle".into())),
+                .cursor_pointer()
+                .on_click(
+                    cx.listener(move |shell, _, _, cx| {
+                        shell.select_database_process(process_id, cx)
+                    }),
+                )
+                .child(statement),
         )
         .child(
             Button::new(("terminate-process", process_id as usize), "Terminate")
@@ -298,4 +389,122 @@ fn render_database_process_row(
                 })),
         )
         .into_any_element()
+}
+
+fn render_database_process_details(
+    process: sift_protocol::DatabaseProcess,
+    cx: &mut Context<WorkspaceShell>,
+) -> gpui::AnyElement {
+    let colors = cx.theme().colors;
+    let process_id = process.process_id;
+    let started = process
+        .started_at
+        .map(|started| started.to_rfc3339())
+        .unwrap_or_else(|| "Unknown".into());
+    let elapsed = process.started_at.map(|started| {
+        let elapsed_ms = epoch_millis().saturating_sub(started.timestamp_millis().max(0) as u64);
+        format!("{}.{:01}s", elapsed_ms / 1_000, (elapsed_ms % 1_000) / 100)
+    });
+    let blockers = if process.blocked_by.is_empty() {
+        "None".into()
+    } else {
+        process
+            .blocked_by
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let statement = process.statement.unwrap_or_else(|| "Idle".into());
+    let metadata = format!(
+        "{:?} · {} @ {} · {} · wait: {} · blocked by: {} · started: {}{}",
+        process.engine,
+        process.user.unwrap_or_else(|| "unknown user".into()),
+        process
+            .database
+            .unwrap_or_else(|| "unknown database".into()),
+        process.state.unwrap_or_else(|| "unknown state".into()),
+        process.wait.unwrap_or_else(|| "none".into()),
+        blockers,
+        started,
+        elapsed.map_or_else(String::new, |elapsed| format!(" · elapsed: {elapsed}")),
+    );
+
+    div()
+        .debug_selector(move || format!("database-process-details-{process_id}"))
+        .flex_none()
+        .border_b_1()
+        .border_color(colors.subtle_border)
+        .bg(colors.elevated_surface)
+        .p_3()
+        .flex()
+        .flex_col()
+        .gap_2()
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap_2()
+                .child(SectionLabel::new(format!("PROCESS {process_id}")))
+                .child(div().flex_1().truncate().text_xs().child(metadata))
+                .child(
+                    Button::new(("copy-process-statement", process_id as usize), "Copy")
+                        .debug_selector(format!("copy-process-statement-{process_id}"))
+                        .tone(ButtonTone::Ghost)
+                        .on_click(cx.listener(move |shell, _, _, cx| {
+                            shell.copy_database_process_statement(process_id, cx)
+                        })),
+                )
+                .child(
+                    Button::new("close-process-details", "Close")
+                        .tone(ButtonTone::Ghost)
+                        .on_click(
+                            cx.listener(|shell, _, _, cx| shell.close_database_process_details(cx)),
+                        ),
+                ),
+        )
+        .child(
+            div()
+                .id(("database-process-sql", process_id as usize))
+                .max_h(px(96.))
+                .overflow_y_scroll()
+                .font_family("monospace")
+                .text_color(colors.text)
+                .whitespace_normal()
+                .child(statement),
+        )
+        .into_any_element()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn process(process_id: i64, blocked_by: Vec<i64>) -> sift_protocol::DatabaseProcess {
+        sift_protocol::DatabaseProcess {
+            engine: sift_protocol::Engine::Postgres,
+            process_id,
+            user: None,
+            database: None,
+            state: None,
+            statement: None,
+            started_at: None,
+            wait: None,
+            blocked_by,
+        }
+    }
+
+    #[test]
+    fn blocking_chains_compute_depth_and_detect_cycles() {
+        let rows =
+            database_process_rows(&[process(1, vec![]), process(2, vec![1]), process(3, vec![2])]);
+        assert_eq!(
+            rows.iter().map(|row| row.block_depth).collect::<Vec<_>>(),
+            vec![0, 1, 2]
+        );
+        assert!(rows.iter().all(|row| !row.cycle));
+
+        let cycle = database_process_rows(&[process(4, vec![5]), process(5, vec![4])]);
+        assert!(cycle.iter().all(|row| row.cycle));
+    }
 }
