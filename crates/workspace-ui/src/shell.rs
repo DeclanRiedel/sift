@@ -26889,6 +26889,10 @@ mod tests {
         });
         cx.run_until_parked();
         assert!(cx.debug_bounds("database-process-42").is_some());
+        assert!(cx
+            .debug_bounds("database-process-statement-header")
+            .is_some());
+        assert!(cx.debug_bounds("database-process-statement-42").is_some());
         assert!(matches!(
             commands.try_recv(),
             Ok(ExecutorCommand::TerminateDatabaseProcess { process_id: 42 })

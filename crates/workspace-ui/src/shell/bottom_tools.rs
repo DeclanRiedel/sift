@@ -158,7 +158,13 @@ pub(super) fn render_bottom_panel(
                         .child(div().w(px(72.)).child("PROCESS"))
                         .child(div().w(px(180.)).child("USER / DATABASE"))
                         .child(div().w(px(220.)).child("STATE / WAIT"))
-                        .child(div().flex_1().child("STATEMENT"))
+                        .child(
+                            div()
+                                .debug_selector(|| "database-process-statement-header".into())
+                                .flex_1()
+                                .text_right()
+                                .child("STATEMENT"),
+                        )
                         .child(
                             Button::new(
                                 "refresh-database-processes",
@@ -276,9 +282,11 @@ fn render_database_process_row(
         .child(div().w(px(220.)).truncate().child(state))
         .child(
             div()
+                .debug_selector(move || format!("database-process-statement-{process_id}"))
                 .flex_1()
                 .min_w_0()
                 .truncate()
+                .text_right()
                 .font_family("monospace")
                 .child(process.statement.unwrap_or_else(|| "Idle".into())),
         )
