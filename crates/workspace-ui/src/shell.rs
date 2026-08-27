@@ -3162,7 +3162,7 @@ impl gpui::Render for Pane {
                                                                         .items_center()
                                                                         .gap_1()
                                                                         .child(icon(
-                                                                            IconName::Activity,
+                                                                            IconName::Info,
                                                                             colors.accent,
                                                                             13.,
                                                                         ))
@@ -15093,7 +15093,7 @@ impl WorkspaceShell {
                             .child(
                                 IconButton::new(
                                     "toolbar-notifications",
-                                    IconName::Activity,
+                                    IconName::Info,
                                     "Open notifications",
                                 )
                                 .square(px(26.))
@@ -16796,7 +16796,7 @@ impl WorkspaceShell {
                         .child(
                             IconButton::new(
                                 "connections-check-connection",
-                                IconName::Activity,
+                                IconName::Check,
                                 "Check connection",
                             )
                             .square(px(24.))
