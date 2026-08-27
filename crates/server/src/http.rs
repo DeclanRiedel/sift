@@ -9046,7 +9046,7 @@ fn validate_transfer_format(
 ) -> ApiResult<()> {
     if matches!(
         format_id,
-        "csv" | "tsv" | "jsonl" | "json_array" | "html" | "markdown" | "xlsx"
+        "csv" | "tsv" | "jsonl" | "json_array" | "html" | "markdown" | "xlsx" | "sql"
     ) || state
         .sessions
         .formatter_registry()

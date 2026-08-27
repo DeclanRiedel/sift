@@ -218,6 +218,7 @@ fn bundled_format(id: &str) -> Option<ExportFormat> {
         "html" => Some(ExportFormat::Html),
         "markdown" => Some(ExportFormat::Markdown),
         "xlsx" => Some(ExportFormat::Xlsx),
+        "sql" => Some(ExportFormat::SqlInsert),
         _ => None,
     }
 }

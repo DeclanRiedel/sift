@@ -115,6 +115,8 @@ pub enum ExportFormat {
     Markdown,
     /// Office Open XML workbook with one worksheet.
     Xlsx,
+    /// Portable SQL INSERT statements targeting a quoted `result` table.
+    SqlInsert,
 }
 
 /// Body of `POST /v1/sessions/:id/connections/:conn_id/export`. The

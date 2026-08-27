@@ -38,6 +38,7 @@ pub fn content_type(format: ExportFormat) -> &'static str {
         ExportFormat::Html => "text/html; charset=utf-8",
         ExportFormat::Markdown => "text/markdown; charset=utf-8",
         ExportFormat::Xlsx => "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        ExportFormat::SqlInsert => "application/sql; charset=utf-8",
     }
 }
 
@@ -222,6 +223,24 @@ fn encode_row(
             buf.put_u8(b'\n');
             buf.split().freeze()
         }
+        ExportFormat::SqlInsert => {
+            buf.extend_from_slice(b"INSERT INTO \"result\" (");
+            for (index, column) in columns.iter().enumerate() {
+                if index > 0 {
+                    buf.extend_from_slice(b", ");
+                }
+                write_sql_identifier(buf, &column.name);
+            }
+            buf.extend_from_slice(b") VALUES (");
+            for (index, value) in row.values.iter().enumerate() {
+                if index > 0 {
+                    buf.extend_from_slice(b", ");
+                }
+                write_sql_value(buf, value);
+            }
+            buf.extend_from_slice(b");\n");
+            buf.split().freeze()
+        }
         ExportFormat::Xlsx => unreachable!("XLSX rows are buffered into the workbook"),
     }
 }
@@ -241,7 +260,58 @@ fn write_delimited_value(buf: &mut BytesMut, v: &Value, format: ExportFormat, nu
         | ExportFormat::JsonArray
         | ExportFormat::Html
         | ExportFormat::Markdown
-        | ExportFormat::Xlsx => {}
+        | ExportFormat::Xlsx
+        | ExportFormat::SqlInsert => {}
+    }
+}
+
+fn write_sql_identifier(buf: &mut BytesMut, value: &str) {
+    buf.put_u8(b'"');
+    for byte in value.bytes() {
+        if byte == b'"' {
+            buf.put_u8(b'"');
+        }
+        buf.put_u8(byte);
+    }
+    buf.put_u8(b'"');
+}
+
+fn write_sql_string(buf: &mut BytesMut, value: &str) {
+    buf.put_u8(b'\'');
+    for byte in value.bytes() {
+        if byte == b'\'' {
+            buf.put_u8(b'\'');
+        }
+        buf.put_u8(byte);
+    }
+    buf.put_u8(b'\'');
+}
+
+fn write_sql_value(buf: &mut BytesMut, value: &Value) {
+    match value {
+        Value::Null | Value::TypedNull { .. } => buf.extend_from_slice(b"NULL"),
+        Value::Bool(true) => buf.extend_from_slice(b"TRUE"),
+        Value::Bool(false) => buf.extend_from_slice(b"FALSE"),
+        Value::Int16(value) => write!(buf, "{value}").expect("write to BytesMut"),
+        Value::Int32(value) => write!(buf, "{value}").expect("write to BytesMut"),
+        Value::Int64(value) => write!(buf, "{value}").expect("write to BytesMut"),
+        Value::Float32(value) => write!(buf, "{value}").expect("write to BytesMut"),
+        Value::Float64(value) => write!(buf, "{value}").expect("write to BytesMut"),
+        Value::Decimal(value) => buf.extend_from_slice(value.as_bytes()),
+        Value::Blob(value) => {
+            buf.extend_from_slice(b"X'");
+            write_hex(buf, value);
+            buf.put_u8(b'\'');
+        }
+        Value::Text(value) => write_sql_string(buf, value),
+        Value::Date(value) => write_sql_string(buf, &value.to_string()),
+        Value::Time(value) => write_sql_string(buf, &value.to_string()),
+        Value::Timestamp(value) => write_sql_string(buf, &value.to_string()),
+        Value::TimestampTz(value) => write_sql_string(buf, &value.to_rfc3339()),
+        Value::Interval(value) => write_sql_string(buf, &format!("{value:?}")),
+        Value::Uuid(value) => write_sql_string(buf, &value.to_string()),
+        Value::Json(value) => write_sql_string(buf, &value.to_string()),
+        Value::Native { display_text, .. } => write_sql_string(buf, display_text),
     }
 }
 
@@ -432,6 +502,7 @@ fn rich_header(columns: &[ColumnMetadata], format: ExportFormat) -> Bytes {
                 names.iter().map(|_| "---").collect::<Vec<_>>().join(" | ")
             ))
         }
+        ExportFormat::SqlInsert => Bytes::new(),
         _ => Bytes::new(),
     }
 }
@@ -577,5 +648,20 @@ mod tests {
         assert!(sheet.contains("t=\"inlineStr\""));
         assert!(!sheet.contains("<f>"));
         assert!(sheet.contains("&lt;x&gt;|=SUM(1,1)"));
+    }
+
+    #[tokio::test]
+    async fn sql_insert_export_quotes_identifiers_and_literals() {
+        let sql = String::from_utf8(encoded(ExportFormat::SqlInsert).await).unwrap();
+        assert_eq!(
+            sql,
+            "INSERT INTO \"result\" (\"col_0\") VALUES ('<x>|=SUM(1,1)');\n"
+        );
+
+        let mut buffer = BytesMut::new();
+        write_sql_identifier(&mut buffer, "odd\"name");
+        buffer.put_u8(b' ');
+        write_sql_value(&mut buffer, &Value::Text("O'Brien".into()));
+        assert_eq!(&buffer[..], b"\"odd\"\"name\" 'O''Brien'");
     }
 }

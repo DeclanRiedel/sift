@@ -208,7 +208,7 @@ impl MetadataStore {
 fn validate_recipe(input: &NewTransferRecipe) -> Result<()> {
     let bundled = matches!(
         input.format_id.as_str(),
-        "csv" | "tsv" | "jsonl" | "json_array" | "html" | "markdown" | "xlsx"
+        "csv" | "tsv" | "jsonl" | "json_array" | "html" | "markdown" | "xlsx" | "sql"
     );
     let extension = input.format_id.len() <= 255
         && input

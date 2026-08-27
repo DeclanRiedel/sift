@@ -3919,6 +3919,7 @@ fn export_extension(format: sift_protocol::ExportFormat) -> &'static str {
         sift_protocol::ExportFormat::Html => "html",
         sift_protocol::ExportFormat::Markdown => "md",
         sift_protocol::ExportFormat::Xlsx => "xlsx",
+        sift_protocol::ExportFormat::SqlInsert => "sql",
     }
 }
 
@@ -4733,7 +4734,8 @@ impl WorkspaceShell {
             | CommandId::ExportJson
             | CommandId::ExportHtml
             | CommandId::ExportMarkdown
-            | CommandId::ExportXlsx => sift_protocol::OperationKind::ExportQuery,
+            | CommandId::ExportXlsx
+            | CommandId::ExportSql => sift_protocol::OperationKind::ExportQuery,
             CommandId::BeginTransaction => sift_protocol::OperationKind::BeginTransaction,
             CommandId::CommitTransaction => sift_protocol::OperationKind::CommitTransaction,
             CommandId::RollbackTransaction => sift_protocol::OperationKind::RollbackTransaction,
@@ -14509,6 +14511,9 @@ impl WorkspaceShell {
             }
             CommandId::ExportXlsx => {
                 self.export_active_result(sift_protocol::ExportFormat::Xlsx, cx)
+            }
+            CommandId::ExportSql => {
+                self.export_active_result(sift_protocol::ExportFormat::SqlInsert, cx)
             }
             CommandId::BeginTransaction => self.begin_transaction(cx),
             CommandId::CommitTransaction => self.finish_transaction(true, cx),
