@@ -4,6 +4,7 @@
 //! is GPUI-free so cell formatting and state transitions are unit-testable. The
 //! grid virtualizes rows so paint cost tracks the viewport, not cardinality.
 
+use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::ops::Range;
 use std::sync::Arc;
@@ -21,7 +22,7 @@ use sift_protocol::{
 };
 use sift_ui::{
     icon, ActiveTheme, Badge, Button, ButtonTone, Clickable, Disableable, ErrorBanner, IconButton,
-    IconName, TextInput, TextInputEvent, ThemeColors,
+    IconName, TextInput, TextInputEvent, ThemeColors, Toggleable,
 };
 
 use crate::presentation::ResultReference;
@@ -261,6 +262,12 @@ enum GridSelection {
 enum SortDirection {
     Ascending,
     Descending,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GridTransformTab {
+    Filter,
+    Sort,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -742,6 +749,11 @@ pub struct ResultsView {
     /// source-indexed when loaded-row transforms reorder the grid.
     display_rows: Arc<Vec<usize>>,
     sort: Option<(usize, SortDirection)>,
+    column_filters: Vec<String>,
+    grid_transform_column: Option<usize>,
+    grid_transform_tab: GridTransformTab,
+    column_filter_input: Entity<TextInput>,
+    _column_filter_subscription: Subscription,
     grid_filter_input: Entity<TextInput>,
     _grid_filter_subscription: Subscription,
     grid_search_input: Entity<TextInput>,
@@ -810,6 +822,18 @@ impl ResultsView {
                     view.rebuild_display_rows(cx);
                 }
             });
+        let column_filter_input = cx.new(|cx| {
+            TextInput::new("", "Filter this column", cx)
+                .aria_label("Filter the selected result column")
+        });
+        let column_filter_subscription = cx.subscribe(
+            &column_filter_input,
+            |view, _, event: &TextInputEvent, cx| {
+                if *event == TextInputEvent::Changed {
+                    view.update_active_column_filter(cx);
+                }
+            },
+        );
         let grid_search_input = cx.new(|cx| {
             TextInput::new("", "Find in rows", cx).aria_label("Find in loaded result rows")
         });
@@ -826,6 +850,11 @@ impl ResultsView {
             rendered_rows: Vec::new(),
             display_rows: Arc::new(Vec::new()),
             sort: None,
+            column_filters: Vec::new(),
+            grid_transform_column: None,
+            grid_transform_tab: GridTransformTab::Filter,
+            column_filter_input,
+            _column_filter_subscription: column_filter_subscription,
             grid_filter_input,
             _grid_filter_subscription: grid_filter_subscription,
             grid_search_input,
@@ -1417,6 +1446,10 @@ impl ResultsView {
         };
         self.display_rows = Arc::new((0..self.rendered_rows.len()).collect());
         self.sort = None;
+        self.column_filters = vec![String::new(); self.rendered_columns.len()];
+        self.grid_transform_column = None;
+        self.column_filter_input
+            .update(cx, |input, cx| input.set_text("", cx));
         self.column_widths = vec![DEFAULT_COLUMN_WIDTH; self.rendered_columns.len()];
         self.column_order = (0..self.rendered_columns.len()).collect();
         self.included_columns = vec![true; self.rendered_columns.len()];
@@ -1565,11 +1598,19 @@ impl ResultsView {
                     self.column_widths = vec![DEFAULT_COLUMN_WIDTH; self.rendered_columns.len()];
                     self.column_order = (0..self.rendered_columns.len()).collect();
                     self.included_columns = vec![true; self.rendered_columns.len()];
+                    self.column_filters = vec![String::new(); self.rendered_columns.len()];
+                    self.grid_transform_column = None;
                 }
                 cx.notify();
                 StreamProgress::Consumed
             }
             Page::Rows { rows } => {
+                let transforms_active = self.sort.is_some()
+                    || !self.grid_filter_input.read(cx).text().trim().is_empty()
+                    || self
+                        .column_filters
+                        .iter()
+                        .any(|filter| !filter.trim().is_empty());
                 let ResultState::Streaming(data) = &mut self.state else {
                     unreachable!("stream initialized above")
                 };
@@ -1592,7 +1633,11 @@ impl ResultsView {
                         .push(rendered.into_iter().map(Into::into).collect());
                     data.rows.push(row);
                 }
-                cx.notify();
+                if transforms_active {
+                    self.rebuild_display_rows(cx);
+                } else {
+                    cx.notify();
+                }
                 StreamProgress::Consumed
             }
             Page::Error { error } => {
@@ -1901,25 +1946,57 @@ impl ResultsView {
             .position(|candidate| *candidate == source_row)
     }
 
+    fn compare_cells(
+        left: Option<&CachedCellRender>,
+        right: Option<&CachedCellRender>,
+    ) -> Ordering {
+        match (left, right) {
+            (Some(left), Some(right))
+                if left.class == CellClass::Number && right.class == CellClass::Number =>
+            {
+                match (left.text.parse::<f64>(), right.text.parse::<f64>()) {
+                    (Ok(left), Ok(right)) => left.partial_cmp(&right).unwrap_or(Ordering::Equal),
+                    _ => left.text.cmp(&right.text),
+                }
+            }
+            (Some(left), Some(right)) => left.text.cmp(&right.text),
+            (None, Some(_)) => Ordering::Less,
+            (Some(_), None) => Ordering::Greater,
+            (None, None) => Ordering::Equal,
+        }
+    }
+
     fn rebuild_display_rows(&mut self, cx: &mut Context<Self>) {
         let filter = self.grid_filter_input.read(cx).text().trim().to_lowercase();
+        let column_filters = self
+            .column_filters
+            .iter()
+            .enumerate()
+            .filter_map(|(column, filter)| {
+                let filter = filter.trim().to_lowercase();
+                (!filter.is_empty()).then_some((column, filter))
+            })
+            .collect::<Vec<_>>();
         let mut rows = (0..self.rendered_rows.len())
             .filter(|row| {
-                filter.is_empty()
-                    || self.rendered_rows[*row]
+                let cells = &self.rendered_rows[*row];
+                (filter.is_empty()
+                    || cells
                         .iter()
-                        .any(|cell| cell.text.to_lowercase().contains(&filter))
+                        .any(|cell| cell.text.to_lowercase().contains(&filter)))
+                    && column_filters.iter().all(|(column, filter)| {
+                        cells
+                            .get(*column)
+                            .is_some_and(|cell| cell.text.to_lowercase().contains(filter))
+                    })
             })
             .collect::<Vec<_>>();
         if let Some((column, direction)) = self.sort {
             rows.sort_by(|left_row, right_row| {
-                let left = self.rendered_rows[*left_row]
-                    .get(column)
-                    .map(|cell| &cell.text);
-                let right = self.rendered_rows[*right_row]
-                    .get(column)
-                    .map(|cell| &cell.text);
-                let ordering = left.cmp(&right).then_with(|| left_row.cmp(right_row));
+                let left = self.rendered_rows[*left_row].get(column);
+                let right = self.rendered_rows[*right_row].get(column);
+                let ordering =
+                    Self::compare_cells(left, right).then_with(|| left_row.cmp(right_row));
                 match direction {
                     SortDirection::Ascending => ordering,
                     SortDirection::Descending => ordering.reverse(),
@@ -1934,15 +2011,73 @@ impl ResultsView {
         cx.notify();
     }
 
-    fn cycle_sort(&mut self, column: usize, cx: &mut Context<Self>) {
-        self.sort = match self.sort {
-            Some((current, SortDirection::Ascending)) if current == column => {
-                Some((column, SortDirection::Descending))
-            }
-            Some((current, SortDirection::Descending)) if current == column => None,
-            _ => Some((column, SortDirection::Ascending)),
+    fn update_active_column_filter(&mut self, cx: &mut Context<Self>) {
+        let Some(column) = self.grid_transform_column else {
+            return;
         };
+        let Some(filter) = self.column_filters.get_mut(column) else {
+            return;
+        };
+        *filter = self.column_filter_input.read(cx).text().to_string();
         self.rebuild_display_rows(cx);
+    }
+
+    fn open_grid_transform(
+        &mut self,
+        column: usize,
+        tab: GridTransformTab,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if column >= self.rendered_columns.len() {
+            return;
+        }
+        self.grid_transform_column = None;
+        self.grid_transform_tab = tab;
+        let filter = self.column_filters.get(column).cloned().unwrap_or_default();
+        if self.column_filter_input.read(cx).text() != filter {
+            self.column_filter_input
+                .update(cx, |input, cx| input.set_text(filter, cx));
+        }
+        self.grid_transform_column = Some(column);
+        if tab == GridTransformTab::Filter {
+            self.column_filter_input.focus_handle(cx).focus(window, cx);
+        }
+        cx.notify();
+    }
+
+    fn close_grid_transform(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.grid_transform_column = None;
+        self.focus_handle.focus(window, cx);
+        cx.notify();
+    }
+
+    fn select_grid_transform_tab(
+        &mut self,
+        tab: GridTransformTab,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.grid_transform_tab = tab;
+        if tab == GridTransformTab::Filter {
+            self.column_filter_input.focus_handle(cx).focus(window, cx);
+        }
+        cx.notify();
+    }
+
+    fn set_sort(
+        &mut self,
+        column: usize,
+        direction: Option<SortDirection>,
+        cx: &mut Context<Self>,
+    ) {
+        self.sort = direction.map(|direction| (column, direction));
+        self.rebuild_display_rows(cx);
+    }
+
+    fn clear_active_column_filter(&mut self, cx: &mut Context<Self>) {
+        self.column_filter_input
+            .update(cx, |input, cx| input.set_text("", cx));
     }
 
     fn select_next_search_match(&mut self, cx: &mut Context<Self>) -> bool {
@@ -2039,6 +2174,15 @@ impl ResultsView {
     fn set_grid_filter(&mut self, filter: &str, cx: &mut Context<Self>) {
         self.grid_filter_input
             .update(cx, |input, cx| input.set_text(filter, cx));
+        self.rebuild_display_rows(cx);
+    }
+
+    #[cfg(test)]
+    fn set_column_filter(&mut self, column: usize, filter: &str, cx: &mut Context<Self>) {
+        let Some(current) = self.column_filters.get_mut(column) else {
+            return;
+        };
+        *current = filter.to_owned();
         self.rebuild_display_rows(cx);
     }
 
@@ -3085,6 +3229,184 @@ impl ResultsView {
             )
     }
 
+    fn render_grid_transform_editor(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+        let column_index = self.grid_transform_column?;
+        let column = self.rendered_columns.get(column_index)?;
+        let colors = cx.theme().colors;
+        let active_filter = self
+            .column_filters
+            .get(column_index)
+            .is_some_and(|filter| !filter.trim().is_empty());
+        let tab = |label: &'static str, target: GridTransformTab| {
+            let selected = self.grid_transform_tab == target;
+            let tab_index: usize = match target {
+                GridTransformTab::Filter => 0,
+                GridTransformTab::Sort => 1,
+            };
+            div()
+                .id(("grid-transform-tab", tab_index))
+                .debug_selector(move || format!("grid-transform-tab-{}", label.to_lowercase()))
+                .role(gpui::Role::Tab)
+                .aria_label(format!("{label} result column"))
+                .h(px(27.))
+                .px_2()
+                .flex()
+                .items_center()
+                .rounded_t_sm()
+                .border_1()
+                .border_color(if selected {
+                    colors.accent
+                } else {
+                    colors.subtle_border
+                })
+                .bg(if selected {
+                    colors.active_surface
+                } else {
+                    colors.toolbar
+                })
+                .text_color(if selected {
+                    colors.text
+                } else {
+                    colors.muted_text
+                })
+                .on_click(cx.listener(move |view, _, window, cx| {
+                    cx.stop_propagation();
+                    view.select_grid_transform_tab(target, window, cx);
+                }))
+                .child(label)
+        };
+        let editor = match self.grid_transform_tab {
+            GridTransformTab::Filter => div()
+                .flex()
+                .flex_1()
+                .min_w_0()
+                .items_center()
+                .gap_2()
+                .child(
+                    div()
+                        .w(px(280.))
+                        .h(px(26.))
+                        .child(self.column_filter_input.clone()),
+                )
+                .child(
+                    Button::new("clear-active-column-filter", "Clear")
+                        .debug_selector("clear-active-column-filter")
+                        .tone(ButtonTone::Ghost)
+                        .disabled(!active_filter)
+                        .on_click(cx.listener(|view, _, _, cx| {
+                            cx.stop_propagation();
+                            view.clear_active_column_filter(cx);
+                        })),
+                )
+                .child(div().text_xs().text_color(colors.muted_text).child(format!(
+                    "{} of {} loaded rows",
+                    self.display_rows.len(),
+                    self.rendered_rows.len()
+                )))
+                .into_any_element(),
+            GridTransformTab::Sort => {
+                let current = self.sort.filter(|(column, _)| *column == column_index);
+                div()
+                    .flex()
+                    .flex_1()
+                    .min_w_0()
+                    .items_center()
+                    .gap_1()
+                    .child(
+                        Button::new("sort-active-column-ascending", "Ascending")
+                            .debug_selector("sort-active-column-ascending")
+                            .tone(
+                                if current == Some((column_index, SortDirection::Ascending)) {
+                                    ButtonTone::Accent
+                                } else {
+                                    ButtonTone::Neutral
+                                },
+                            )
+                            .on_click(cx.listener(move |view, _, _, cx| {
+                                cx.stop_propagation();
+                                view.set_sort(column_index, Some(SortDirection::Ascending), cx);
+                            })),
+                    )
+                    .child(
+                        Button::new("sort-active-column-descending", "Descending")
+                            .debug_selector("sort-active-column-descending")
+                            .tone(
+                                if current == Some((column_index, SortDirection::Descending)) {
+                                    ButtonTone::Accent
+                                } else {
+                                    ButtonTone::Neutral
+                                },
+                            )
+                            .on_click(cx.listener(move |view, _, _, cx| {
+                                cx.stop_propagation();
+                                view.set_sort(column_index, Some(SortDirection::Descending), cx);
+                            })),
+                    )
+                    .child(
+                        Button::new("clear-active-column-sort", "Clear")
+                            .debug_selector("clear-active-column-sort")
+                            .tone(ButtonTone::Ghost)
+                            .disabled(current.is_none())
+                            .on_click(cx.listener(move |view, _, _, cx| {
+                                cx.stop_propagation();
+                                view.set_sort(column_index, None, cx);
+                            })),
+                    )
+                    .into_any_element()
+            }
+        };
+        Some(
+            div()
+                .id("result-grid-transform-editor")
+                .debug_selector(|| "result-grid-transform-editor".into())
+                .h(px(38.))
+                .flex_none()
+                .flex()
+                .items_center()
+                .gap_2()
+                .px_2()
+                .border_b_1()
+                .border_color(colors.subtle_border)
+                .bg(colors.elevated_surface)
+                .child(
+                    div()
+                        .max_w(px(180.))
+                        .truncate()
+                        .text_sm()
+                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                        .child(column.name.clone()),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .items_end()
+                        .gap_1()
+                        .child(tab("Filter", GridTransformTab::Filter))
+                        .child(tab("Sort", GridTransformTab::Sort)),
+                )
+                .child(editor)
+                .child(
+                    div()
+                        .debug_selector(|| "close-result-grid-transform-editor".into())
+                        .child(
+                            IconButton::new(
+                                "close-result-grid-transform-editor",
+                                IconName::Close,
+                                "Close sort and filter editor",
+                            )
+                            .square(px(24.))
+                            .on_click(cx.listener(
+                                |view, _, window, cx| {
+                                    cx.stop_propagation();
+                                    view.close_grid_transform(window, cx);
+                                },
+                            )),
+                        ),
+                )
+                .into_any_element(),
+        )
+    }
+
     fn render_grid(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let colors = cx.theme().colors;
         let Some(_) = self.state.ready() else {
@@ -3252,31 +3574,95 @@ impl ResultsView {
                                 view.focus_handle.focus(window, cx);
                                 view.select_column(source_column, cx);
                             }))
-                            .on_mouse_down(
-                                MouseButton::Right,
-                                cx.listener(move |view, _, _, cx| {
-                                    cx.stop_propagation();
-                                    view.cycle_sort(source_column, cx);
-                                }),
-                            )
                             .child(
                                 div()
+                                    .w_full()
+                                    .flex()
+                                    .items_center()
+                                    .gap_1()
                                     .text_sm()
                                     .font_weight(gpui::FontWeight::SEMIBOLD)
-                                    .truncate()
-                                    .child(match self.sort {
-                                        Some((sorted, SortDirection::Ascending))
-                                            if sorted == source_column =>
-                                        {
-                                            format!("{} ↑", column.name)
-                                        }
-                                        Some((sorted, SortDirection::Descending))
-                                            if sorted == source_column =>
-                                        {
-                                            format!("{} ↓", column.name)
-                                        }
-                                        _ => column.name.to_string(),
-                                    }),
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .min_w_0()
+                                            .truncate()
+                                            .child(column.name.clone()),
+                                    )
+                                    .children(self.sort.and_then(|(sorted, direction)| {
+                                        (sorted == source_column).then(|| {
+                                            div().text_xs().text_color(colors.accent).child(
+                                                match direction {
+                                                    SortDirection::Ascending => "↑",
+                                                    SortDirection::Descending => "↓",
+                                                },
+                                            )
+                                        })
+                                    }))
+                                    .child(
+                                        div()
+                                            .debug_selector(move || {
+                                                format!("filter-result-column-{display_column}")
+                                            })
+                                            .child(
+                                                IconButton::new(
+                                                    ("filter-result-column", display_column),
+                                                    IconName::Search,
+                                                    format!("Filter {}", column.name),
+                                                )
+                                                .square(px(20.))
+                                                .icon_size(11.)
+                                                .toggle_state(
+                                                    self.column_filters
+                                                        .get(source_column)
+                                                        .is_some_and(|filter| {
+                                                            !filter.trim().is_empty()
+                                                        }),
+                                                )
+                                                .tooltip(format!("Filter {}", column.name))
+                                                .on_click(cx.listener(
+                                                    move |view, _, window, cx| {
+                                                        cx.stop_propagation();
+                                                        view.open_grid_transform(
+                                                            source_column,
+                                                            GridTransformTab::Filter,
+                                                            window,
+                                                            cx,
+                                                        );
+                                                    },
+                                                )),
+                                            ),
+                                    )
+                                    .child(
+                                        div()
+                                            .debug_selector(move || {
+                                                format!("sort-result-column-{display_column}")
+                                            })
+                                            .child(
+                                                IconButton::new(
+                                                    ("sort-result-column", display_column),
+                                                    IconName::ChevronDown,
+                                                    format!("Sort {}", column.name),
+                                                )
+                                                .square(px(20.))
+                                                .icon_size(11.)
+                                                .toggle_state(self.sort.is_some_and(
+                                                    |(column, _)| column == source_column,
+                                                ))
+                                                .tooltip(format!("Sort {}", column.name))
+                                                .on_click(cx.listener(
+                                                    move |view, _, window, cx| {
+                                                        cx.stop_propagation();
+                                                        view.open_grid_transform(
+                                                            source_column,
+                                                            GridTransformTab::Sort,
+                                                            window,
+                                                            cx,
+                                                        );
+                                                    },
+                                                )),
+                                            ),
+                                    ),
                             )
                             .child(
                                 div()
@@ -3610,6 +3996,7 @@ impl ResultsView {
             .min_h_0()
             .flex()
             .flex_col()
+            .children(self.render_grid_transform_editor(cx))
             .child(header)
             .child(
                 div()
@@ -4816,11 +5203,46 @@ mod tests {
             );
             view.set_grid_filter("al", cx);
             assert_eq!(&*view.display_rows, &[1, 2]);
-            view.cycle_sort(0, cx);
+            view.set_sort(0, Some(SortDirection::Ascending), cx);
             assert_eq!(&*view.display_rows, &[1, 2]);
-            view.cycle_sort(0, cx);
+            view.set_sort(0, Some(SortDirection::Descending), cx);
             assert_eq!(&*view.display_rows, &[2, 1]);
             assert_eq!(view.rendered_rows[0][0].text, "zebra");
+        });
+    }
+
+    #[gpui::test]
+    fn column_filters_compose_and_keep_source_rows_stable(cx: &mut TestAppContext) {
+        let view = cx.update(|cx| cx.new(ResultsView::new));
+        view.update(cx, |view, cx| {
+            view.set_state(
+                ResultState::from_execute(ExecuteResponse {
+                    cursor_id: sift_protocol::CursorId(1),
+                    columns: vec![
+                        column("name", PrimitiveType::Text, Nullability::NotNullable),
+                        column("team", PrimitiveType::Text, Nullability::NotNullable),
+                    ],
+                    schema_digest: "d".into(),
+                    rows: [("Alice", "North"), ("Alicia", "South"), ("Bob", "North")]
+                        .into_iter()
+                        .map(|(name, team)| {
+                            Row::new(vec![Value::Text(name.into()), Value::Text(team.into())])
+                        })
+                        .collect(),
+                    affected_rows: None,
+                    warnings: Vec::new(),
+                    has_more: false,
+                }),
+                cx,
+            );
+
+            view.set_column_filter(0, "ali", cx);
+            assert_eq!(&*view.display_rows, &[0, 1]);
+            view.set_column_filter(1, "north", cx);
+            assert_eq!(&*view.display_rows, &[0]);
+            view.set_column_filter(0, "", cx);
+            assert_eq!(&*view.display_rows, &[0, 2]);
+            assert_eq!(view.rendered_rows[1][0].text, "Alicia");
         });
     }
 
@@ -5589,6 +6011,75 @@ mod tests {
                 "v G extends to the last displayed row"
             );
         });
+    }
+
+    #[gpui::test]
+    fn header_controls_open_the_filter_and_sort_editor_above_the_grid(cx: &mut TestAppContext) {
+        let window = cx
+            .update(|cx| {
+                cx.open_window(Default::default(), |_window, cx| {
+                    let view = cx.new(ResultsView::new);
+                    cx.new(|_| ResultsHost(view))
+                })
+            })
+            .unwrap();
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let host = window.root(&mut cx).unwrap();
+        let view = host.read_with(&cx, |host, _| host.0.clone());
+        view.update(&mut cx, |view, cx| {
+            view.set_state(
+                ResultState::from_execute(ExecuteResponse {
+                    cursor_id: sift_protocol::CursorId(1),
+                    columns: vec![column(
+                        "name",
+                        PrimitiveType::Text,
+                        Nullability::NotNullable,
+                    )],
+                    schema_digest: "d".into(),
+                    rows: ["alpha", "zebra"]
+                        .into_iter()
+                        .map(|value| Row::new(vec![Value::Text(value.into())]))
+                        .collect(),
+                    affected_rows: None,
+                    warnings: Vec::new(),
+                    has_more: false,
+                }),
+                cx,
+            );
+        });
+        cx.run_until_parked();
+
+        let filter = cx
+            .debug_bounds("filter-result-column-0")
+            .expect("header filter control");
+        cx.simulate_click(filter.center(), Modifiers::default());
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("result-grid-transform-editor").is_some());
+        assert!(view.read_with(&cx, |view, _| {
+            view.grid_transform_column == Some(0)
+                && view.grid_transform_tab == GridTransformTab::Filter
+        }));
+
+        let sort_tab = cx
+            .debug_bounds("grid-transform-tab-sort")
+            .expect("sort editor tab");
+        cx.simulate_click(sort_tab.center(), Modifiers::default());
+        cx.run_until_parked();
+        let descending = cx
+            .debug_bounds("sort-active-column-descending")
+            .expect("descending sort action");
+        cx.simulate_click(descending.center(), Modifiers::default());
+        cx.run_until_parked();
+        assert!(view.read_with(&cx, |view, _| {
+            view.sort == Some((0, SortDirection::Descending)) && *view.display_rows == [1, 0]
+        }));
+
+        let close = cx
+            .debug_bounds("close-result-grid-transform-editor")
+            .expect("close editor action");
+        cx.simulate_click(close.center(), Modifiers::default());
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("result-grid-transform-editor").is_none());
     }
 
     #[gpui::test]
