@@ -2050,7 +2050,7 @@ async fn run_streamed_query_inner(
                 item_id,
                 execution_id,
                 cursor_id,
-                page,
+                page: sift_workspace_ui::results::PreparedResultPage::new(page),
                 acknowledge,
             })
             .is_err()
@@ -2133,7 +2133,7 @@ async fn resume_spilled_query(
                     item_id,
                     execution_id,
                     cursor_id,
-                    page,
+                    page: sift_workspace_ui::results::PreparedResultPage::new(page),
                     acknowledge,
                 })
                 .is_err()
@@ -2170,12 +2170,14 @@ async fn resume_spilled_query(
                     item_id,
                     execution_id,
                     cursor_id,
-                    page: sift_protocol::Page::Done {
-                        affected_rows: None,
-                        warnings: vec![sift_protocol::DriverWarning::new(
-                            "Cursor resumed after eviction; only retained spill pages are available.",
-                        )],
-                    },
+                    page: sift_workspace_ui::results::PreparedResultPage::new(
+                        sift_protocol::Page::Done {
+                            affected_rows: None,
+                            warnings: vec![sift_protocol::DriverWarning::new(
+                                "Cursor resumed after eviction; only retained spill pages are available.",
+                            )],
+                        },
+                    ),
                     acknowledge,
                 });
             }

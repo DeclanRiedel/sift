@@ -74,6 +74,64 @@ struct CachedCellRender {
 }
 
 #[derive(Debug, Clone)]
+pub struct PreparedCellRender {
+    text: SharedString,
+    paint_text: SharedString,
+    class: CellClass,
+}
+
+impl From<PreparedCellRender> for CachedCellRender {
+    fn from(cell: PreparedCellRender) -> Self {
+        Self {
+            text: cell.text,
+            paint_text: cell.paint_text,
+            class: cell.class,
+            shaped: None,
+        }
+    }
+}
+
+/// A protocol page plus display strings prepared away from GPUI's UI thread.
+#[derive(Debug, Clone)]
+pub struct PreparedResultPage {
+    page: Page,
+    rows: Option<Vec<Vec<PreparedCellRender>>>,
+}
+
+impl PreparedResultPage {
+    pub fn new(page: Page) -> Self {
+        let rows = match &page {
+            Page::Rows { rows } => Some(
+                rows.iter()
+                    .map(|row| {
+                        row.values
+                            .iter()
+                            .map(|value| {
+                                let rendered = render_value(value);
+                                let text: SharedString = rendered.text.into();
+                                PreparedCellRender {
+                                    paint_text: single_line_text(&text),
+                                    text,
+                                    class: rendered.class,
+                                }
+                            })
+                            .collect()
+                    })
+                    .collect(),
+            ),
+            _ => None,
+        };
+        Self { page, rows }
+    }
+}
+
+impl From<Page> for PreparedResultPage {
+    fn from(page: Page) -> Self {
+        Self::new(page)
+    }
+}
+
+#[derive(Debug, Clone)]
 struct CachedShapedCell {
     line: ShapedLine,
     run: TextRun,
@@ -1355,11 +1413,19 @@ impl ResultsView {
     /// row remainder across the pause, and the retained bound is a memory
     /// budget rather than an exact window size, so a window may end slightly
     /// short of [`MAX_RETAINED_ROWS`] instead.
-    pub fn apply_stream_page(&mut self, page: Page, cx: &mut Context<Self>) -> StreamProgress {
+    pub fn apply_stream_page(
+        &mut self,
+        prepared: impl Into<PreparedResultPage>,
+        cx: &mut Context<Self>,
+    ) -> StreamProgress {
         if !matches!(self.state, ResultState::Streaming(_)) {
             self.begin_stream(cx);
         }
 
+        let PreparedResultPage {
+            page,
+            rows: prepared_rows,
+        } = prepared.into();
         match page {
             Page::NextResult { columns } => {
                 let ResultState::Streaming(data) = &mut self.state else {
@@ -1399,22 +1465,12 @@ impl ResultsView {
                     cx.notify();
                     return StreamProgress::WindowFull;
                 }
-                for row in rows {
-                    self.rendered_rows.push(
-                        row.values
-                            .iter()
-                            .map(|value| {
-                                let rendered = render_value(value);
-                                let text: SharedString = rendered.text.into();
-                                CachedCellRender {
-                                    paint_text: single_line_text(&text),
-                                    text,
-                                    class: rendered.class,
-                                    shaped: None,
-                                }
-                            })
-                            .collect(),
-                    );
+                let prepared_rows = prepared_rows
+                    .expect("row pages are prepared before they enter the results surface");
+                debug_assert_eq!(rows.len(), prepared_rows.len());
+                for (row, rendered) in rows.into_iter().zip(prepared_rows) {
+                    self.rendered_rows
+                        .push(rendered.into_iter().map(Into::into).collect());
                     data.rows.push(row);
                 }
                 cx.notify();

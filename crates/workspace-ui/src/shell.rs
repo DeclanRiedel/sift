@@ -1504,7 +1504,7 @@ pub enum ExecutorEvent {
         item_id: u64,
         execution_id: u64,
         cursor_id: sift_protocol::CursorId,
-        page: sift_protocol::Page,
+        page: crate::results::PreparedResultPage,
         acknowledge: tokio::sync::oneshot::Sender<()>,
     },
     ExplainFinished {
@@ -2036,7 +2036,7 @@ impl Pane {
     fn apply_result_page(
         &mut self,
         item_id: u64,
-        page: sift_protocol::Page,
+        page: crate::results::PreparedResultPage,
         cx: &mut Context<Self>,
     ) -> Option<(StreamProgress, ResultState)> {
         let result = self.results.get(&item_id)?;
@@ -3507,7 +3507,7 @@ impl gpui::Render for Pane {
 struct HeldResultPage {
     execution_id: u64,
     cursor_id: sift_protocol::CursorId,
-    page: sift_protocol::Page,
+    page: crate::results::PreparedResultPage,
     acknowledge: tokio::sync::oneshot::Sender<()>,
 }
 
@@ -24402,7 +24402,7 @@ mod tests {
                         item_id: 1,
                         execution_id: 1,
                         cursor_id,
-                        page,
+                        page: page.into(),
                         acknowledge,
                     },
                     cx,
@@ -24482,7 +24482,7 @@ mod tests {
                 HeldResultPage {
                     execution_id: 1,
                     cursor_id: sift_protocol::CursorId(9),
-                    page: sift_protocol::Page::Rows { rows: Vec::new() },
+                    page: sift_protocol::Page::Rows { rows: Vec::new() }.into(),
                     acknowledge,
                 },
             );
