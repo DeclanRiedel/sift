@@ -4,11 +4,11 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use gpui::{
-    actions, deferred, div, img, prelude::*, px, uniform_list, AnyElement, App, Bounds, Context,
-    CursorStyle, DefiniteLength, Div, Entity, EventEmitter, FocusHandle, Focusable, Hsla,
-    IntoElement, KeystrokeEvent, MouseButton, PathPromptOptions, Pixels, ResizeEdge, Role,
-    ScrollHandle, ScrollStrategy, SharedString, Subscription, Task, UniformListScrollHandle,
-    Window, WindowBounds, WindowControlArea,
+    actions, anchored, deferred, div, img, prelude::*, px, uniform_list, Anchor, AnyElement, App,
+    Bounds, Context, CursorStyle, DefiniteLength, Div, Entity, EventEmitter, FocusHandle,
+    Focusable, Hsla, IntoElement, KeystrokeEvent, MouseButton, PathPromptOptions, Pixels,
+    ResizeEdge, Role, ScrollHandle, ScrollStrategy, SharedString, Subscription, Task,
+    UniformListScrollHandle, Window, WindowBounds, WindowControlArea,
 };
 use regex::{Regex, RegexBuilder};
 use sift_api_types::RoomId;
@@ -652,6 +652,71 @@ fn tree_chevron_slot(open: bool, color: Hsla) -> Div {
 
 fn tree_spacer_slot() -> Div {
     div().flex_none().w(px(14.))
+}
+
+fn shell_connection_row_menu(
+    entry: ConnectionNavEntry,
+    colors: sift_ui::ThemeColors,
+    cx: &mut Context<WorkspaceShell>,
+) -> impl IntoElement {
+    let edit_entry = entry.clone();
+    let delete_entry = entry;
+    div()
+        .id("connection-row-menu")
+        .debug_selector(|| "connection-row-menu".into())
+        .w(px(180.))
+        .p_1()
+        .rounded_sm()
+        .border_1()
+        .border_color(colors.strong_border)
+        .bg(colors.elevated_surface)
+        .shadow_lg()
+        .occlude()
+        .role(Role::Menu)
+        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+        .on_mouse_down_out(cx.listener(|shell, _, _, cx| {
+            shell.connection_row_menu = None;
+            cx.notify();
+        }))
+        .child(
+            div()
+                .id("connection-row-edit")
+                .debug_selector(|| "connection-row-edit".into())
+                .role(Role::MenuItem)
+                .h(px(28.))
+                .px_2()
+                .flex()
+                .items_center()
+                .gap_2()
+                .rounded_sm()
+                .hover(|item| item.bg(colors.hovered_surface))
+                .on_click(cx.listener(move |shell, _, _, cx| {
+                    shell.connection_row_menu = None;
+                    shell.request_edit_connection(&edit_entry, cx);
+                }))
+                .child(icon(IconName::Edit, colors.muted_text, 11.))
+                .child("Edit connection"),
+        )
+        .child(
+            div()
+                .id("connection-row-remove")
+                .debug_selector(|| "connection-row-remove".into())
+                .role(Role::MenuItem)
+                .h(px(28.))
+                .px_2()
+                .flex()
+                .items_center()
+                .gap_2()
+                .rounded_sm()
+                .text_color(colors.danger)
+                .hover(|item| item.bg(colors.danger_muted))
+                .on_click(cx.listener(move |shell, _, _, cx| {
+                    shell.connection_row_menu = None;
+                    shell.request_delete_connection(&delete_entry, cx);
+                }))
+                .child(icon(IconName::Close, colors.danger, 11.))
+                .child("Remove connection"),
+        )
 }
 
 /// Full-colour vendor artwork for a connection's engine, when we carry it.
@@ -3837,6 +3902,7 @@ pub struct WorkspaceShell {
     result_inspector_views: HashMap<u64, ResultInspectorView>,
     connection_nav_selected: usize,
     connection_nav_g_pending: bool,
+    connection_row_menu: Option<i64>,
     app_bar_expanded: bool,
     app_bar_menu: Option<AppBarMenu>,
     toasts: Vec<Toast>,
@@ -4299,6 +4365,7 @@ impl WorkspaceShell {
             result_inspector_views: HashMap::new(),
             connection_nav_selected: 0,
             connection_nav_g_pending: false,
+            connection_row_menu: None,
             app_bar_expanded: false,
             app_bar_menu: None,
             toasts: Vec::new(),
@@ -7465,11 +7532,20 @@ impl WorkspaceShell {
                     None => icon(IconName::Database, connection_color, 12.),
                 };
                 let entry_for_connect = connection.clone();
-                let entry_for_edit = connection.clone();
-                let entry_for_delete = connection.clone();
+                let entry_for_context_menu = connection.clone();
+                let menu_open = self.connection_row_menu == Some(connection_id);
                 let mut element = base(1)
                     .id(("conn", connection_id as usize))
                     .hover(|row| row.bg(colors.hovered_surface))
+                    .on_mouse_down(
+                        MouseButton::Right,
+                        cx.listener(move |shell, _, _, cx| {
+                            cx.stop_propagation();
+                            shell.set_connection_selection(nav_index, cx);
+                            shell.connection_row_menu = Some(connection_id);
+                            cx.notify();
+                        }),
+                    )
                     .child(leading)
                     .child(logo)
                     .child(
@@ -7489,18 +7565,9 @@ impl WorkspaceShell {
                         )
                     });
                 if connected {
-                    element = element
-                        .on_click(cx.listener(move |shell, _, _, cx| {
-                            shell.set_connection_selection(nav_index, cx)
-                        }))
-                        .child(
-                            Button::new(("disconnect", connection_id as usize), "Disconnect")
-                                .tone(ButtonTone::DangerGhost)
-                                .on_click(cx.listener(move |shell, _, _, cx| {
-                                    shell.set_connection_selection(nav_index, cx);
-                                    shell.disconnect(cx)
-                                })),
-                        );
+                    element = element.on_click(cx.listener(move |shell, _, _, cx| {
+                        shell.set_connection_selection(nav_index, cx)
+                    }));
                 } else {
                     element = element.on_click(cx.listener(move |shell, _, _, cx| {
                         shell.set_connection_selection(nav_index, cx);
@@ -7508,46 +7575,50 @@ impl WorkspaceShell {
                     }));
                 }
                 element
-                    .child(
-                        div()
-                            .id(("edit-connection", connection_id as usize))
-                            .flex_none()
-                            .role(Role::Button)
-                            .aria_label(format!("Edit connection {}", connection.name))
-                            .p_1()
-                            .rounded_sm()
-                            .text_color(colors.muted_text)
-                            .hover(|button| {
-                                button.bg(colors.hovered_surface).text_color(colors.text)
-                            })
-                            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                            .on_click(cx.listener(move |shell, _, _, cx| {
-                                cx.stop_propagation();
-                                shell.set_connection_selection(nav_index, cx);
-                                shell.request_edit_connection(&entry_for_edit, cx)
-                            }))
-                            .child(icon(IconName::Edit, colors.muted_text, 11.)),
-                    )
-                    .child(
-                        div()
-                            .id(("delete-connection", connection_id as usize))
-                            .flex_none()
-                            .role(Role::Button)
-                            .aria_label(format!("Delete connection {}", connection.name))
-                            .p_1()
-                            .rounded_sm()
-                            .text_color(colors.muted_text)
-                            .hover(|button| {
-                                button.bg(colors.danger_muted).text_color(colors.danger)
-                            })
-                            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                            .on_click(cx.listener(move |shell, _, _, cx| {
-                                cx.stop_propagation();
-                                shell.set_connection_selection(nav_index, cx);
-                                shell.request_delete_connection(&entry_for_delete, cx)
-                            }))
-                            .child(icon(IconName::Close, colors.danger, 11.)),
-                    )
+                    .when(selected, |row| {
+                        row.child(
+                            div()
+                                .debug_selector(move || {
+                                    format!("connection-row-actions-{connection_id}")
+                                })
+                                .relative()
+                                .flex_none()
+                                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                                .child(
+                                    IconButton::new(
+                                        ("connection-actions", connection_id as usize),
+                                        IconName::Menu,
+                                        format!("Connection actions for {}", connection.name),
+                                    )
+                                    .square(px(24.))
+                                    .icon_size(11.)
+                                    .tooltip("Connection actions")
+                                    .on_click(cx.listener(
+                                        move |shell, _, _, cx| {
+                                            cx.stop_propagation();
+                                            shell.set_connection_selection(nav_index, cx);
+                                            shell.connection_row_menu =
+                                                if menu_open { None } else { Some(connection_id) };
+                                            cx.notify();
+                                        },
+                                    )),
+                                )
+                                .when(menu_open, |trigger| {
+                                    trigger.child(
+                                        div().absolute().bottom_0().right_0().size_0().child(
+                                            deferred(anchored().anchor(Anchor::TopRight).child(
+                                                shell_connection_row_menu(
+                                                    entry_for_context_menu.clone(),
+                                                    colors,
+                                                    cx,
+                                                ),
+                                            ))
+                                            .with_priority(2),
+                                        ),
+                                    )
+                                }),
+                        )
+                    })
                     .into_any_element()
             }
             ConnectionTreeAction::Catalog {
@@ -7826,10 +7897,14 @@ impl WorkspaceShell {
             .saturating_add_signed(delta)
             .min(count - 1);
         self.connection_nav_g_pending = false;
+        self.connection_row_menu = None;
         cx.notify();
     }
 
     fn set_connection_selection(&mut self, index: usize, cx: &mut Context<Self>) {
+        if self.connection_nav_selected != index {
+            self.connection_row_menu = None;
+        }
         self.connection_nav_selected = index;
         self.connection_nav_g_pending = false;
         self.focused_surface = WorkspaceSurface::Connections;
@@ -21270,6 +21345,73 @@ mod tests {
             workspace.read_with(&cx, |shell, _| shell.focused_surface),
             WorkspaceSurface::Editor
         );
+    }
+
+    #[gpui::test]
+    fn connection_rows_move_management_into_one_context_menu(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        workspace.update(&mut cx, |shell, cx| {
+            shell.executor_sender = Some(sender);
+            shell.lifecycle.tenants = vec![crate::TenantNavEntry {
+                id: sift_api_types::TenantId(1),
+                name: "Personal".into(),
+                rooms: Vec::new(),
+                connections: vec![ConnectionNavEntry {
+                    id: 7,
+                    tenant_id: 1,
+                    name: "Demo".into(),
+                    provider_id: sift_protocol::ProviderId::new("sift/postgres").unwrap(),
+                }],
+            }];
+            shell.connection_status = ConnectionStatus::Connected {
+                profile_id: 7,
+                name: "Demo".into(),
+            };
+            shell.toggle_tenant(1, cx);
+        });
+        cx.run_until_parked();
+
+        let row = cx
+            .debug_bounds("connection-nav-row-1")
+            .expect("connection row");
+        cx.simulate_mouse_down(row.center(), MouseButton::Right, Modifiers::default());
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("connection-row-menu").is_some());
+        assert!(cx.debug_bounds("connection-row-edit").is_some());
+        assert!(cx.debug_bounds("connection-row-remove").is_some());
+        assert!(cx.debug_bounds("connection-row-actions-7").is_some());
+        assert!(cx.debug_bounds("connections-disconnect").is_some());
+
+        let edit = cx.debug_bounds("connection-row-edit").unwrap();
+        cx.simulate_click(edit.center(), Modifiers::default());
+        cx.run_until_parked();
+        workspace.read_with(&cx, |shell, _| {
+            assert_eq!(shell.modal, Some(Modal::DatabaseConnection));
+            assert!(shell.connection_row_menu.is_none());
+        });
+        assert!(matches!(
+            receiver.try_recv(),
+            Ok(ExecutorCommand::LoadConnectionProfile { profile_id: 7, .. })
+        ));
+
+        workspace.update(&mut cx, |shell, cx| {
+            shell.modal = None;
+            cx.notify();
+        });
+        cx.run_until_parked();
+        let actions = cx.debug_bounds("connection-row-actions-7").unwrap();
+        cx.simulate_click(actions.center(), Modifiers::default());
+        cx.run_until_parked();
+        let remove = cx.debug_bounds("connection-row-remove").unwrap();
+        cx.simulate_click(remove.center(), Modifiers::default());
+        cx.run_until_parked();
+        assert!(matches!(
+            workspace.read_with(&cx, |shell, _| shell.modal.clone()),
+            Some(Modal::ConfirmDeleteConnection(entry)) if entry.id == 7
+        ));
     }
 
     #[gpui::test]
