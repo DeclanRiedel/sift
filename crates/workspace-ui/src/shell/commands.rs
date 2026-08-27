@@ -28,6 +28,8 @@ pub enum CommandId {
     ExportTsv,
     ExportJsonLines,
     ExportJson,
+    ExportHtml,
+    ExportMarkdown,
     ExportXlsx,
     BeginTransaction,
     CommitTransaction,
@@ -85,6 +87,8 @@ impl CommandId {
             Self::ExportTsv => "query.export-tsv",
             Self::ExportJsonLines => "query.export-json-lines",
             Self::ExportJson => "query.export-json",
+            Self::ExportHtml => "query.export-html",
+            Self::ExportMarkdown => "query.export-markdown",
             Self::ExportXlsx => "query.export-xlsx",
             Self::BeginTransaction => "database.begin-transaction",
             Self::CommitTransaction => "database.commit-transaction",
@@ -155,6 +159,7 @@ pub struct CommandContext {
     pub any_query_running: bool,
     pub database_connected: bool,
     pub has_active_result: bool,
+    pub active_result_exporting: bool,
     pub transaction_active: bool,
     pub transaction_pending: bool,
     pub transaction_aborted: bool,
@@ -218,6 +223,9 @@ impl CommandRegistry {
                 }
                 AvailabilityRule::ActiveResult if !context.has_active_result => {
                     Some("Active tab has no result surface".into())
+                }
+                AvailabilityRule::ActiveResult if context.active_result_exporting => {
+                    Some("Result export already in progress".into())
                 }
                 AvailabilityRule::NoActiveTransaction if !context.database_connected => {
                     Some("No database connected".into())
@@ -492,6 +500,22 @@ const DEFINITIONS: &[CommandDefinition] = &[
     command(
         CommandId::ExportJson,
         "Export JSON…",
+        "",
+        "",
+        true,
+        AvailabilityRule::ActiveResult,
+    ),
+    command(
+        CommandId::ExportHtml,
+        "Export HTML…",
+        "",
+        "",
+        true,
+        AvailabilityRule::ActiveResult,
+    ),
+    command(
+        CommandId::ExportMarkdown,
+        "Export Markdown…",
         "",
         "",
         true,
@@ -824,6 +848,7 @@ mod tests {
             any_query_running: false,
             database_connected: false,
             has_active_result: false,
+            active_result_exporting: false,
             transaction_active: false,
             transaction_pending: false,
             transaction_aborted: false,
@@ -897,6 +922,35 @@ mod tests {
             }
         )
         .enabled());
+        assert!(CommandRegistry::spec(
+            CommandId::ExportHtml,
+            CommandContext {
+                has_active_result: true,
+                ..empty
+            }
+        )
+        .enabled());
+        assert!(CommandRegistry::spec(
+            CommandId::ExportMarkdown,
+            CommandContext {
+                has_active_result: true,
+                ..empty
+            }
+        )
+        .enabled());
+        assert_eq!(
+            CommandRegistry::spec(
+                CommandId::ExportXlsx,
+                CommandContext {
+                    has_active_result: true,
+                    active_result_exporting: true,
+                    ..empty
+                }
+            )
+            .disabled_reason
+            .as_deref(),
+            Some("Result export already in progress")
+        );
     }
 
     #[test]

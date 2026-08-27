@@ -754,6 +754,10 @@ impl ResultsView {
         cx.notify();
     }
 
+    pub(crate) fn export_in_progress(&self) -> bool {
+        self.export_bytes.is_some()
+    }
+
     pub fn state(&self) -> &ResultState {
         &self.state
     }

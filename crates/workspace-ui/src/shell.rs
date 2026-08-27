@@ -4432,6 +4432,8 @@ impl WorkspaceShell {
             | CommandId::ExportTsv
             | CommandId::ExportJsonLines
             | CommandId::ExportJson
+            | CommandId::ExportHtml
+            | CommandId::ExportMarkdown
             | CommandId::ExportXlsx => sift_protocol::OperationKind::ExportQuery,
             _ => return spec,
         };
@@ -4453,9 +4455,12 @@ impl WorkspaceShell {
             .panes
             .get(self.active_pane)
             .is_some_and(|pane| pane.read(cx).active_item().is_some());
+        let active_result = self.focused_pane_results_item(cx);
         CommandContext {
             has_active_item: has_item,
-            has_active_result: self.focused_pane_results_item(cx).is_some(),
+            has_active_result: active_result.is_some(),
+            active_result_exporting: active_result
+                .is_some_and(|(_, results)| results.read(cx).export_in_progress()),
             pane_count: self.panes.len(),
             has_editable_instance: self
                 .lifecycle
@@ -11964,16 +11969,21 @@ impl WorkspaceShell {
         format: sift_protocol::ExportFormat,
         cx: &mut Context<Self>,
     ) {
-        let Some((item_id, sql)) = self.panes.get(self.active_pane).and_then(|pane| {
+        let Some((item_id, results, sql)) = self.panes.get(self.active_pane).and_then(|pane| {
             let pane = pane.read(cx);
             let item_id = pane.active_item()?.id;
             pane.results
-                .contains_key(&item_id)
-                .then(|| (item_id, pane.targeted_query_sql(item_id, cx)))
+                .get(&item_id)
+                .cloned()
+                .map(|results| (item_id, results, pane.targeted_query_sql(item_id, cx)))
         }) else {
             self.show_toast("Active tab has no result surface".into(), cx);
             return;
         };
+        if results.read(cx).export_in_progress() {
+            self.show_toast("Result export already in progress".into(), cx);
+            return;
+        }
         self.prompt_result_export(item_id, sql, format, cx);
     }
 
@@ -13453,6 +13463,12 @@ impl WorkspaceShell {
             }
             CommandId::ExportJson => {
                 self.export_active_result(sift_protocol::ExportFormat::JsonArray, cx)
+            }
+            CommandId::ExportHtml => {
+                self.export_active_result(sift_protocol::ExportFormat::Html, cx)
+            }
+            CommandId::ExportMarkdown => {
+                self.export_active_result(sift_protocol::ExportFormat::Markdown, cx)
             }
             CommandId::ExportXlsx => {
                 self.export_active_result(sift_protocol::ExportFormat::Xlsx, cx)
