@@ -1546,6 +1546,16 @@ pub enum ExecutorCommand {
         path: sift_protocol::WorkspacePath,
         staged: bool,
     },
+    LoadAutomations {
+        workspace_id: i64,
+    },
+    StartAutomation {
+        configuration_id: i64,
+        expected_revision: u64,
+    },
+    CancelAutomation {
+        run_id: i64,
+    },
     LoadCatalogDiagram,
     TerminateDatabaseProcess {
         process_id: i64,
@@ -1739,6 +1749,11 @@ pub enum ExecutorEvent {
         workspace_id: i64,
         result: Result<Option<sift_protocol::VcsStatus>, String>,
     },
+    AutomationsLoaded {
+        workspace_id: i64,
+        result: Result<Vec<sift_protocol::RunConfiguration>, String>,
+    },
+    AutomationRunUpdated(Result<sift_protocol::Run, String>),
     CatalogDiagramLoaded(Result<Box<sift_protocol::CatalogDiagram>, String>),
     DatabaseProcessTerminated {
         process_id: i64,
@@ -4306,6 +4321,10 @@ pub struct WorkspaceShell {
     repository_status: Option<sift_protocol::VcsStatus>,
     repository_status_loading: bool,
     repository_status_error: Option<String>,
+    automation_configurations: Vec<sift_protocol::RunConfiguration>,
+    automation_runs: HashMap<sift_protocol::RunConfigurationId, sift_protocol::Run>,
+    automations_loading: bool,
+    automations_error: Option<String>,
     _lifecycle_task: Option<Task<()>>,
     _presence_task: Option<Task<()>>,
     _room_document_task: Option<Task<()>>,
@@ -4798,6 +4817,10 @@ impl WorkspaceShell {
             repository_status: None,
             repository_status_loading: false,
             repository_status_error: None,
+            automation_configurations: Vec::new(),
+            automation_runs: HashMap::new(),
+            automations_loading: false,
+            automations_error: None,
             _lifecycle_task: None,
             _presence_task: None,
             _room_document_task: None,
@@ -6651,6 +6674,34 @@ impl WorkspaceShell {
                         self.repository_status_error = None;
                     }
                     Err(message) => self.repository_status_error = Some(message),
+                }
+                cx.notify();
+            }
+            ExecutorEvent::AutomationsLoaded {
+                workspace_id,
+                result,
+            } => {
+                if self.selected_workspace_id != Some(workspace_id) {
+                    return;
+                }
+                self.automations_loading = false;
+                match result {
+                    Ok(configurations) => {
+                        self.automation_configurations = configurations;
+                        self.automations_error = None;
+                    }
+                    Err(message) => self.automations_error = Some(message),
+                }
+                cx.notify();
+            }
+            ExecutorEvent::AutomationRunUpdated(result) => {
+                self.automations_loading = false;
+                match result {
+                    Ok(run) => {
+                        self.automation_runs.insert(run.configuration_id, run);
+                        self.automations_error = None;
+                    }
+                    Err(message) => self.automations_error = Some(message),
                 }
                 cx.notify();
             }
@@ -11208,6 +11259,9 @@ impl WorkspaceShell {
         if tool == BottomTool::Monitor && self.bottom_dock.presentation.open {
             self.load_database_processes(cx);
         }
+        if tool == BottomTool::Automations && self.bottom_dock.presentation.open {
+            self.request_automations(cx);
+        }
         self.persist(cx);
         cx.notify();
     }
@@ -11225,6 +11279,49 @@ impl WorkspaceShell {
         if self.database_processes_loading {
             self.database_processes_error = None;
         }
+        cx.notify();
+    }
+
+    fn request_automations(&mut self, cx: &mut Context<Self>) {
+        let Some(workspace_id) = self.selected_workspace_id else {
+            self.automations_error = Some("Select a workspace to inspect automations".into());
+            cx.notify();
+            return;
+        };
+        let Some(sender) = &self.executor_sender else {
+            self.automations_error = Some("Automation manager is unavailable".into());
+            cx.notify();
+            return;
+        };
+        self.automations_loading = sender
+            .send(ExecutorCommand::LoadAutomations { workspace_id })
+            .is_ok();
+        if self.automations_loading {
+            self.automations_error = None;
+        }
+        cx.notify();
+    }
+
+    fn start_automation(&mut self, configuration_id: i64, revision: u64, cx: &mut Context<Self>) {
+        let Some(sender) = &self.executor_sender else {
+            return;
+        };
+        self.automations_loading = sender
+            .send(ExecutorCommand::StartAutomation {
+                configuration_id,
+                expected_revision: revision,
+            })
+            .is_ok();
+        cx.notify();
+    }
+
+    fn cancel_automation(&mut self, run_id: i64, cx: &mut Context<Self>) {
+        let Some(sender) = &self.executor_sender else {
+            return;
+        };
+        self.automations_loading = sender
+            .send(ExecutorCommand::CancelAutomation { run_id })
+            .is_ok();
         cx.notify();
     }
 
@@ -28509,6 +28606,23 @@ mod tests {
             assert!(!snapshot.workspace.bottom_dock.open);
             assert!(!snapshot.workspace.right_dock.open);
         });
+    }
+
+    #[gpui::test]
+    fn automations_tool_loads_selected_workspace_configurations(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        workspace.update(&mut cx, |shell, cx| {
+            shell.executor_sender = Some(sender);
+            shell.selected_workspace_id = Some(42);
+            shell.select_bottom_tool(BottomTool::Automations, cx);
+        });
+        assert!(matches!(
+            receiver.try_recv(),
+            Ok(ExecutorCommand::LoadAutomations { workspace_id: 42 })
+        ));
     }
 
     #[gpui::test]

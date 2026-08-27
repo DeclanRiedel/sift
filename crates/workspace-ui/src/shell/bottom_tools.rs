@@ -16,19 +16,7 @@ pub(super) fn render_bottom_panel(
                 .to_owned(),
         ),
         BottomTool::Monitor => None,
-        BottomTool::Automations => Some(shell.selected_workspace().map_or_else(
-            || "Select a workspace to inspect runs, schedules, and transfer recipes.".into(),
-            |workspace| {
-                if workspace.scheduling_enabled {
-                    format!(
-                        "Automations enabled for {}. Run and schedule rendering arrives with desktop automation integration.",
-                        workspace.name
-                    )
-                } else {
-                    format!("Scheduling is disabled for {}.", workspace.name)
-                }
-            },
-        )),
+        BottomTool::Automations => None,
     };
     div()
         .debug_selector(|| "bottom-dock".into())
@@ -229,6 +217,137 @@ pub(super) fn render_bottom_panel(
                                 .child("No database activity reported."),
                         )
                     },
+                )
+                .into_any_element()
+        } else if shell.active_bottom_tool == BottomTool::Automations {
+            let rows =
+                shell
+                    .automation_configurations
+                    .iter()
+                    .enumerate()
+                    .map(|(index, configuration)| {
+                        let configuration_id = configuration.id.0;
+                        let revision = configuration.revision;
+                        let run = shell.automation_runs.get(&configuration.id);
+                        let running = run.is_some_and(|run| {
+                            matches!(
+                                run.state,
+                                sift_protocol::RunState::Queued
+                                    | sift_protocol::RunState::Admitted
+                                    | sift_protocol::RunState::Preparing
+                                    | sift_protocol::RunState::Running
+                            )
+                        });
+                        let run_id = run.map(|run| run.id.0);
+                        let requires_variables = configuration
+                            .variables
+                            .iter()
+                            .any(|variable| variable.required);
+                        div()
+                            .id(("automation-configuration", index))
+                            .h(px(38.))
+                            .px_3()
+                            .flex()
+                            .items_center()
+                            .gap_3()
+                            .border_b_1()
+                            .border_color(colors.subtle_border)
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .truncate()
+                                    .text_color(colors.text)
+                                    .child(configuration.name.clone()),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .child(format!("{} step(s)", configuration.scripts.len())),
+                            )
+                            .children(run.map(|run| {
+                                div()
+                                    .text_xs()
+                                    .text_color(
+                                        if matches!(run.state, sift_protocol::RunState::Failed) {
+                                            colors.danger
+                                        } else {
+                                            colors.muted_text
+                                        },
+                                    )
+                                    .child(format!("{:?}", run.state))
+                            }))
+                            .when_some(run_id.filter(|_| running), |row, run_id| {
+                                row.child(
+                                    Button::new(("cancel-automation", index), "Cancel")
+                                        .tone(ButtonTone::DangerGhost)
+                                        .disabled(shell.automations_loading)
+                                        .on_click(cx.listener(move |shell, _, _, cx| {
+                                            shell.cancel_automation(run_id, cx)
+                                        })),
+                                )
+                            })
+                            .when(!running, |row| {
+                                row.child(
+                                    Button::new(("start-automation", index), "Run")
+                                        .tone(ButtonTone::Accent)
+                                        .disabled(shell.automations_loading || requires_variables)
+                                        .on_click(cx.listener(move |shell, _, _, cx| {
+                                            shell.start_automation(configuration_id, revision, cx)
+                                        })),
+                                )
+                            })
+                    });
+            div()
+                .flex()
+                .flex_1()
+                .min_h_0()
+                .flex_col()
+                .child(
+                    div()
+                        .h(px(30.))
+                        .px_3()
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .child(format!(
+                            "{} configuration(s)",
+                            shell.automation_configurations.len()
+                        ))
+                        .child(
+                            Button::new("refresh-automations", "Refresh")
+                                .tone(ButtonTone::Ghost)
+                                .disabled(shell.automations_loading)
+                                .on_click(
+                                    cx.listener(|shell, _, _, cx| shell.request_automations(cx)),
+                                ),
+                        ),
+                )
+                .children(
+                    shell.automations_error.as_ref().map(|message| {
+                        div().mx_3().mb_2().child(ErrorBanner::new(message.clone()))
+                    }),
+                )
+                .when(
+                    shell.automation_configurations.is_empty()
+                        && shell.automations_error.is_none()
+                        && !shell.automations_loading,
+                    |panel| {
+                        panel.child(
+                            div()
+                                .p_4()
+                                .text_center()
+                                .child("No run configurations in this workspace."),
+                        )
+                    },
+                )
+                .child(
+                    div()
+                        .id("automation-configuration-list")
+                        .flex_1()
+                        .min_h_0()
+                        .overflow_y_scroll()
+                        .children(rows),
                 )
                 .into_any_element()
         } else {

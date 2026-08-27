@@ -15,8 +15,8 @@ fn system_epoch_millis() -> u64 {
 
 use gpui::{prelude::*, App, Context, Entity, IntoElement, Window};
 use sift_api_types::{
-    ConnectionProfileId, CredentialMode, RoomId, TenantId, UpsertConnectionProfileRequest,
-    VcsPathsRequest,
+    ConnectionProfileId, CredentialMode, RoomId, StartRunRequest, TenantId,
+    UpsertConnectionProfileRequest, VcsPathsRequest,
 };
 use sift_client_sdk::{
     Client, Error as ClientError, Ingest, OpenConnectionFromProfileRequest, RoomReplica,
@@ -1212,6 +1212,67 @@ async fn run_query_executor(
                         workspace_id,
                         result,
                     })
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            ExecutorCommand::LoadAutomations { workspace_id } => {
+                let server = targets.borrow().clone();
+                let result = match server.client().await {
+                    Ok(client) => client
+                        .run_configurations(sift_protocol::WorkspaceId(workspace_id))
+                        .await
+                        .map_err(|error| format!("loading automations failed: {error}")),
+                    Err(error) => Err(error),
+                };
+                if events
+                    .send(ExecutorEvent::AutomationsLoaded {
+                        workspace_id,
+                        result,
+                    })
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            ExecutorCommand::StartAutomation {
+                configuration_id,
+                expected_revision,
+            } => {
+                let server = targets.borrow().clone();
+                let result = match server.client().await {
+                    Ok(client) => client
+                        .start_run(
+                            sift_protocol::RunConfigurationId(configuration_id),
+                            StartRunRequest {
+                                expected_configuration_revision: expected_revision,
+                                variables: Default::default(),
+                                timeout_secs: None,
+                            },
+                        )
+                        .await
+                        .map_err(|error| format!("starting automation failed: {error}")),
+                    Err(error) => Err(error),
+                };
+                if events
+                    .send(ExecutorEvent::AutomationRunUpdated(result))
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            ExecutorCommand::CancelAutomation { run_id } => {
+                let server = targets.borrow().clone();
+                let result = match server.client().await {
+                    Ok(client) => client
+                        .cancel_run(sift_protocol::RunId(run_id))
+                        .await
+                        .map_err(|error| format!("cancelling automation failed: {error}")),
+                    Err(error) => Err(error),
+                };
+                if events
+                    .send(ExecutorEvent::AutomationRunUpdated(result))
                     .is_err()
                 {
                     return;
