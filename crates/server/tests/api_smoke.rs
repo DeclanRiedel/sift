@@ -1301,11 +1301,14 @@ async fn client_sdk_consumes_postgres_notifications() {
         .await
         .unwrap();
 
-    let notifications = client
-        .listen_notifications(session.id, conn.id, vec!["events".into()], 1)
+    let mut notifications = client
+        .subscribe_notifications(session.id, conn.id, vec!["events".into()])
         .await
         .unwrap();
-    assert_eq!(notifications, vec![("events".into(), "created".into())]);
+    assert_eq!(
+        notifications.next().await.unwrap(),
+        ("events".into(), "created".into())
+    );
 
     server.abort();
 }

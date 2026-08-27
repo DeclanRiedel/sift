@@ -496,6 +496,31 @@ struct QueryContext {
     semantic: tokio::sync::mpsc::UnboundedSender<SemanticControl>,
 }
 
+fn spawn_notification_stream(
+    context: &QueryContext,
+    events: tokio::sync::mpsc::UnboundedSender<ExecutorEvent>,
+) -> tokio::task::JoinHandle<()> {
+    let client = context.client.clone();
+    let session = context.session;
+    let connection = context.metadata_connection;
+    tokio::spawn(async move {
+        let Ok(mut stream) = client
+            .subscribe_notifications(session, connection, vec!["sift".into(), "events".into()])
+            .await
+        else {
+            return;
+        };
+        while let Ok((channel, payload)) = stream.next().await {
+            if events
+                .send(ExecutorEvent::ServerNotification { channel, payload })
+                .is_err()
+            {
+                return;
+            }
+        }
+    })
+}
+
 async fn check_connection_health(context: &QueryContext) -> ConnectionHealthReport {
     let started = std::time::Instant::now();
     let failure = match context.client.health().await {
@@ -528,6 +553,7 @@ async fn run_query_executor(
     let mut active_queries: HashMap<u64, (u64, tokio::sync::mpsc::UnboundedSender<QueryControl>)> =
         HashMap::new();
     let mut active_exports: HashMap<u64, tokio::sync::oneshot::Sender<()>> = HashMap::new();
+    let mut notification_task: Option<tokio::task::JoinHandle<()>> = None;
     loop {
         let command = tokio::select! {
             command = commands.recv() => command,
@@ -545,6 +571,9 @@ async fn run_query_executor(
                 }
                 cancel_active_queries(&mut active_queries);
                 active_exports.clear();
+                if let Some(task) = notification_task.take() {
+                    task.abort();
+                }
                 if let Some(previous) = context.take() {
                     let _ = previous.client.close_session(previous.session).await;
                 }
@@ -565,6 +594,9 @@ async fn run_query_executor(
             } => {
                 cancel_active_queries(&mut active_queries);
                 active_exports.clear();
+                if let Some(task) = notification_task.take() {
+                    task.abort();
+                }
                 if let Some(previous) = context.take() {
                     let _ = previous.client.close_session(previous.session).await;
                 }
@@ -584,6 +616,8 @@ async fn run_query_executor(
                             return;
                         }
                         let schema_event = load_schema(&opened).await;
+                        notification_task =
+                            Some(spawn_notification_stream(&opened, events.clone()));
                         context = Some(opened);
                         if events.send(schema_event).is_err() {
                             return;
@@ -604,6 +638,9 @@ async fn run_query_executor(
             }
             ExecutorCommand::Disconnect => {
                 cancel_active_queries(&mut active_queries);
+                if let Some(task) = notification_task.take() {
+                    task.abort();
+                }
                 if let Some(opened) = context.take() {
                     let _ = opened.client.close_session(opened.session).await;
                 }
@@ -915,6 +952,9 @@ async fn run_query_executor(
                 tags,
             } => {
                 if let Some(previous) = context.take() {
+                    if let Some(task) = notification_task.take() {
+                        task.abort();
+                    }
                     let _ = previous.client.close_session(previous.session).await;
                 }
                 let server = targets.borrow().clone();
@@ -944,6 +984,8 @@ async fn run_query_executor(
                                     ));
                                     let _ = events.send(load_capabilities(&opened).await);
                                     let schema_event = load_schema(&opened).await;
+                                    notification_task =
+                                        Some(spawn_notification_stream(&opened, events.clone()));
                                     context = Some(opened);
                                     let _ = events.send(schema_event);
                                     None
@@ -1030,6 +1072,9 @@ async fn run_query_executor(
                     .is_some_and(|opened| opened.profile_id == profile_id)
                 {
                     if let Some(opened) = context.take() {
+                        if let Some(task) = notification_task.take() {
+                            task.abort();
+                        }
                         let _ = opened.client.close_session(opened.session).await;
                     }
                 }

@@ -1699,6 +1699,10 @@ pub enum ExecutorEvent {
     ProfileCreationFailed(String),
     ProfileLoaded(Result<Box<sift_api_types::ConnectionProfile>, String>),
     ProfileTested(Result<(), String>),
+    ServerNotification {
+        channel: String,
+        payload: String,
+    },
     ProfileDeleted {
         tenant_id: i64,
         profile_id: i64,
@@ -6555,6 +6559,9 @@ impl WorkspaceShell {
                     }
                 }
                 cx.notify();
+            }
+            ExecutorEvent::ServerNotification { channel, payload } => {
+                self.show_toast(format!("[{channel}] {payload}"), cx);
             }
             ExecutorEvent::SavedQueriesLoaded { tenant_id, result } => {
                 if self.saved_queries_tenant != Some(tenant_id) {

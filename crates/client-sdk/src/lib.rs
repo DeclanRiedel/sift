@@ -427,6 +427,28 @@ pub struct SessionWebSocket {
     socket: TransportWebSocket,
 }
 
+/// A live PostgreSQL LISTEN stream carried over a dedicated session socket.
+pub struct NotificationStream {
+    socket: SessionWebSocket,
+    request_id: String,
+}
+
+impl NotificationStream {
+    pub async fn next(&mut self) -> Result<(String, String)> {
+        loop {
+            match self.socket.next().await? {
+                WsServerMessage::Notification {
+                    request_id,
+                    channel,
+                    payload,
+                } if request_id == self.request_id => return Ok((channel, payload)),
+                WsServerMessage::Error { message, .. } => return Err(Error::Protocol(message)),
+                _ => {}
+            }
+        }
+    }
+}
+
 /// One server-backed query cursor carried over a session WebSocket.
 ///
 /// Pages are delivered one at a time. Callers must acknowledge each
@@ -3674,6 +3696,26 @@ impl Client {
             }
         }
         Ok(notifications)
+    }
+
+    /// Subscribe without buffering notifications. Dropping the returned
+    /// stream closes its dedicated socket and releases the server listener.
+    pub async fn subscribe_notifications(
+        &self,
+        session: SessionId,
+        connection: ConnectionId,
+        channels: Vec<String>,
+    ) -> Result<NotificationStream> {
+        let mut socket = self.connect_session_websocket(session).await?;
+        let request_id = format!("sdk-listen-{}", uuid::Uuid::new_v4());
+        socket
+            .send(WsClientMessage::Listen {
+                request_id: request_id.clone(),
+                connection,
+                channels,
+            })
+            .await?;
+        Ok(NotificationStream { socket, request_id })
     }
 
     pub fn ws_url(&self, session: SessionId) -> String {
