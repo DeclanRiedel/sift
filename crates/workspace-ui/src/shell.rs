@@ -471,6 +471,7 @@ fn is_read_only_feed(kind: ItemKind) -> bool {
 enum ResultInspectorView {
     #[default]
     Fields,
+    Value,
     RowJson,
 }
 
@@ -11425,6 +11426,29 @@ impl WorkspaceShell {
         true
     }
 
+    fn move_result_inspector_view(&mut self, delta: isize, cx: &mut Context<Self>) -> bool {
+        let Some((item_id, _)) = self.focused_pane_results_item(cx) else {
+            return false;
+        };
+        let views = [
+            ResultInspectorView::Fields,
+            ResultInspectorView::Value,
+            ResultInspectorView::RowJson,
+        ];
+        let current = self
+            .result_inspector_views
+            .get(&item_id)
+            .copied()
+            .unwrap_or_default();
+        let index = views
+            .iter()
+            .position(|view| *view == current)
+            .unwrap_or_default()
+            .saturating_add_signed(delta)
+            .min(views.len() - 1);
+        self.select_result_inspector_view(views[index], cx)
+    }
+
     fn move_inspector_field_selection(&mut self, delta: isize, cx: &mut Context<Self>) -> bool {
         let Some((_, results)) = self.focused_pane_results_item(cx) else {
             return false;
@@ -12627,8 +12651,8 @@ impl WorkspaceShell {
                     })
                     .unwrap_or(false);
                 let handled = match key.as_str() {
-                    "h" => self.select_result_inspector_view(ResultInspectorView::Fields, cx),
-                    "l" => self.select_result_inspector_view(ResultInspectorView::RowJson, cx),
+                    "h" => self.move_result_inspector_view(-1, cx),
+                    "l" => self.move_result_inspector_view(1, cx),
                     "j" if fields_selected => self.move_inspector_field_selection(1, cx),
                     "k" if fields_selected => self.move_inspector_field_selection(-1, cx),
                     "g" if fields_selected && self.inspector_g_pending => {
@@ -15706,6 +15730,153 @@ impl WorkspaceShell {
             .into_any_element()
     }
 
+    fn render_result_value_inspector(
+        &self,
+        results: Entity<ResultsView>,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let colors = cx.theme().colors;
+        let selected = results.read(cx).selected_value();
+        let (text, format_label) = selected.as_ref().map_or_else(
+            || (String::new(), None),
+            |selected| match &selected.value {
+                sift_protocol::Value::Json(value) => (
+                    serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string()),
+                    Some("JSON".to_owned()),
+                ),
+                sift_protocol::Value::Text(value) => (value.clone(), Some("TEXT".to_owned())),
+                sift_protocol::Value::Blob(bytes) => {
+                    let image = if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+                        Some("PNG IMAGE")
+                    } else if bytes.starts_with(&[0xff, 0xd8, 0xff]) {
+                        Some("JPEG IMAGE")
+                    } else if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
+                        Some("GIF IMAGE")
+                    } else if bytes.starts_with(b"RIFF")
+                        && bytes.get(8..12).is_some_and(|kind| kind == b"WEBP")
+                    {
+                        Some("WEBP IMAGE")
+                    } else {
+                        None
+                    };
+                    let visible = bytes.len().min(4_096);
+                    let mut dump = String::new();
+                    for (offset, chunk) in bytes[..visible].chunks(16).enumerate() {
+                        let hex = chunk
+                            .iter()
+                            .map(|byte| format!("{byte:02x}"))
+                            .collect::<Vec<_>>()
+                            .join(" ");
+                        let ascii = chunk
+                            .iter()
+                            .map(|byte| {
+                                if byte.is_ascii_graphic() || *byte == b' ' {
+                                    char::from(*byte)
+                                } else {
+                                    '.'
+                                }
+                            })
+                            .collect::<String>();
+                        dump.push_str(&format!("{:08x}  {hex:<47}  |{ascii}|\n", offset * 16));
+                    }
+                    if visible < bytes.len() {
+                        dump.push_str(&format!("\n… {} bytes omitted", bytes.len() - visible));
+                    }
+                    (
+                        format!("{} bytes\n\n{dump}", bytes.len()),
+                        Some(image.unwrap_or("BINARY").to_owned()),
+                    )
+                }
+                sift_protocol::Value::Native { display_text, .. } => {
+                    (display_text.clone(), Some("NATIVE".to_owned()))
+                }
+                value => (
+                    render_value(value).text,
+                    Some(value.type_category().to_uppercase()),
+                ),
+            },
+        );
+        let copy_text = text.clone();
+        let metadata = selected.as_ref().map(|selected| {
+            format!(
+                "Row {} · {} · {}",
+                selected.row_index.saturating_add(1),
+                selected.column_name,
+                selected.type_label
+            )
+        });
+
+        div()
+            .debug_selector(|| "inspector-result-value".into())
+            .flex_1()
+            .min_h_0()
+            .flex()
+            .flex_col()
+            .child(
+                div()
+                    .h(px(32.))
+                    .px_3()
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .border_b_1()
+                    .border_color(colors.subtle_border)
+                    .children(format_label.map(|label| Badge::new(label).tone(Tone::Neutral)))
+                    .children(metadata.map(|metadata| {
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .text_xs()
+                            .text_color(colors.muted_text)
+                            .child(metadata)
+                    }))
+                    .child(div().flex_1())
+                    .child(
+                        IconButton::new(
+                            "inspector-value-copy",
+                            IconName::Copy,
+                            "Copy selected value",
+                        )
+                        .square(px(24.))
+                        .icon_size(12.)
+                        .disabled(copy_text.is_empty())
+                        .on_click(cx.listener(move |_, _, _, cx| {
+                            cx.write_to_clipboard(gpui::ClipboardItem::new_string(
+                                copy_text.clone(),
+                            ));
+                        })),
+                    ),
+            )
+            .child(
+                div()
+                    .id("inspector-result-value-scroll")
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_scroll()
+                    .when(selected.is_none(), |viewer| {
+                        viewer.child(
+                            div()
+                                .p_3()
+                                .text_color(colors.muted_text)
+                                .child("Select a result value to inspect it"),
+                        )
+                    })
+                    .when(selected.is_some(), |viewer| {
+                        viewer.child(
+                            div()
+                                .p_3()
+                                .font_family("monospace")
+                                .text_xs()
+                                .whitespace_normal()
+                                .child(text),
+                        )
+                    }),
+            )
+            .into_any_element()
+    }
+
     fn render_result_inspector(
         &self,
         item_id: u64,
@@ -15719,6 +15890,7 @@ impl WorkspaceShell {
             .copied()
             .unwrap_or_default();
         let fields_pane = self.panes[self.active_pane].clone();
+        let value_pane = fields_pane.clone();
         let json_pane = fields_pane.clone();
         div()
             .flex()
@@ -15734,6 +15906,34 @@ impl WorkspaceShell {
                     .px_3()
                     .border_b_1()
                     .border_color(colors.subtle_border)
+                    .child(
+                        div()
+                            .id("inspector-value-view")
+                            .debug_selector(|| "inspector-value-view".into())
+                            .role(Role::Tab)
+                            .aria_label("Show selected value")
+                            .h_full()
+                            .flex()
+                            .items_center()
+                            .text_xs()
+                            .text_color(if selected == ResultInspectorView::Value {
+                                colors.text
+                            } else {
+                                colors.muted_text
+                            })
+                            .when(selected == ResultInspectorView::Value, |tab| {
+                                tab.border_b_1().border_color(colors.accent)
+                            })
+                            .on_click(cx.listener(move |shell, _, _, cx| {
+                                if value_pane.read(cx).contains_item(item_id) {
+                                    shell
+                                        .result_inspector_views
+                                        .insert(item_id, ResultInspectorView::Value);
+                                    cx.notify();
+                                }
+                            }))
+                            .child("Value"),
+                    )
                     .child(
                         div()
                             .id("inspector-fields-view")
@@ -15793,6 +15993,7 @@ impl WorkspaceShell {
             )
             .child(match selected {
                 ResultInspectorView::Fields => self.render_result_fields_inspector(results, cx),
+                ResultInspectorView::Value => self.render_result_value_inspector(results, cx),
                 ResultInspectorView::RowJson => self.render_result_row_json_inspector(results, cx),
             })
             .into_any_element()
@@ -23817,10 +24018,19 @@ mod tests {
             let (item_id, _) = shell.focused_pane_results_item(cx).unwrap();
             assert_eq!(
                 shell.result_inspector_views.get(&item_id),
+                Some(&ResultInspectorView::Value)
+            );
+        });
+        assert!(cx.debug_bounds("inspector-result-value").is_some());
+        cx.simulate_keystrokes("l");
+        workspace.read_with(&cx, |shell, cx| {
+            let (item_id, _) = shell.focused_pane_results_item(cx).unwrap();
+            assert_eq!(
+                shell.result_inspector_views.get(&item_id),
                 Some(&ResultInspectorView::RowJson)
             );
         });
-        cx.simulate_keystrokes("h j enter");
+        cx.simulate_keystrokes("h h j enter");
         workspace.read_with(&cx, |shell, cx| {
             assert_eq!(shell.inspector_field_selected, 1);
             let (_, results) = shell.focused_pane_results_item(cx).unwrap();

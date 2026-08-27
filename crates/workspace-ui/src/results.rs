@@ -177,6 +177,15 @@ pub struct SelectedRowJson {
     pub value: serde_json::Value,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct SelectedValue {
+    pub row_index: usize,
+    pub column_index: usize,
+    pub column_name: String,
+    pub type_label: String,
+    pub value: Value,
+}
+
 fn value_for_row_json(value: &Value) -> serde_json::Value {
     match value {
         Value::Null | Value::TypedNull { .. } => serde_json::Value::Null,
@@ -1249,6 +1258,31 @@ impl ResultsView {
             .collect::<serde_json::Map<_, _>>()
             .into();
         Some(SelectedRowJson { row_index, value })
+    }
+
+    pub fn selected_value(&self) -> Option<SelectedValue> {
+        let visible_columns = self.visible_column_indices();
+        let (row_index, column_index) = match self.selected? {
+            GridSelection::Cell { row, column } => (row, column),
+            GridSelection::Range {
+                focus_row,
+                focus_column,
+                ..
+            } => (focus_row, focus_column),
+            GridSelection::Row(row) => (row, *visible_columns.first()?),
+            GridSelection::Column(column) => (*self.display_rows.first()?, column),
+            GridSelection::All => (*self.display_rows.first()?, *visible_columns.first()?),
+        };
+        let data = self.state.ready()?;
+        let column = data.columns.get(column_index)?;
+        let value = data.rows.get(row_index)?.values.get(column_index)?.clone();
+        Some(SelectedValue {
+            row_index,
+            column_index,
+            column_name: column.name.clone(),
+            type_label: column.type_label.clone(),
+            value,
+        })
     }
 
     pub(crate) fn row_json_filter_input(&self) -> Entity<TextInput> {
@@ -5033,6 +5067,16 @@ mod tests {
                         "payload": {"event": "open", "tags": ["demo"]},
                         "missing": null,
                     }),
+                })
+            );
+            assert_eq!(
+                view.selected_value(),
+                Some(SelectedValue {
+                    row_index: 0,
+                    column_index: 2,
+                    column_name: "payload".into(),
+                    type_label: "text".into(),
+                    value: Value::Text(r#"{"event":"open","tags":["demo"]}"#.into()),
                 })
             );
         });
