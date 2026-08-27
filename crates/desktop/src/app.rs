@@ -1107,6 +1107,45 @@ async fn run_query_executor(
                     return;
                 }
             }
+            ExecutorCommand::LoadRoomMembers { room_id } => {
+                let server = targets.borrow().clone();
+                let result = match server.client().await {
+                    Ok(client) => client
+                        .room_members(sift_api_types::RoomId(room_id))
+                        .await
+                        .map_err(|error| format!("loading room members failed: {error}")),
+                    Err(error) => Err(error),
+                };
+                if events
+                    .send(ExecutorEvent::RoomMembersLoaded { room_id, result })
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            ExecutorCommand::RemoveRoomMember {
+                room_id,
+                principal_id,
+            } => {
+                let server = targets.borrow().clone();
+                let result = match server.client().await {
+                    Ok(client) => client
+                        .remove_room_member(sift_api_types::RoomId(room_id), principal_id)
+                        .await
+                        .map_err(|error| format!("removing room member failed: {error}")),
+                    Err(error) => Err(error),
+                };
+                if events
+                    .send(ExecutorEvent::RoomMemberRemoved {
+                        room_id,
+                        principal_id,
+                        result,
+                    })
+                    .is_err()
+                {
+                    return;
+                }
+            }
             ExecutorCommand::LoadCatalogDiagram => {
                 let result = match context.as_ref() {
                     Some(opened) => match opened

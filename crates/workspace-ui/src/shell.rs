@@ -1529,6 +1529,13 @@ pub enum ExecutorCommand {
         profile_id: i64,
     },
     LoadDatabaseProcesses,
+    LoadRoomMembers {
+        room_id: i64,
+    },
+    RemoveRoomMember {
+        room_id: i64,
+        principal_id: i64,
+    },
     LoadCatalogDiagram,
     TerminateDatabaseProcess {
         process_id: i64,
@@ -1709,6 +1716,15 @@ pub enum ExecutorEvent {
     },
     ProfileDeletionFailed(String),
     DatabaseProcessesLoaded(Result<Vec<sift_protocol::DatabaseProcess>, String>),
+    RoomMembersLoaded {
+        room_id: i64,
+        result: Result<Vec<sift_api_types::RoomMember>, String>,
+    },
+    RoomMemberRemoved {
+        room_id: i64,
+        principal_id: i64,
+        result: Result<(), String>,
+    },
     CatalogDiagramLoaded(Result<Box<sift_protocol::CatalogDiagram>, String>),
     DatabaseProcessTerminated {
         process_id: i64,
@@ -4270,6 +4286,9 @@ pub struct WorkspaceShell {
     global_problems: Vec<GlobalProblem>,
     lifecycle: LifecycleProjection,
     presence: RoomPresenceProjection,
+    room_members: Vec<sift_api_types::RoomMember>,
+    room_members_loading: bool,
+    room_members_error: Option<String>,
     _lifecycle_task: Option<Task<()>>,
     _presence_task: Option<Task<()>>,
     _room_document_task: Option<Task<()>>,
@@ -4756,6 +4775,9 @@ impl WorkspaceShell {
             global_problems: Vec::new(),
             lifecycle: LifecycleProjection::default(),
             presence: RoomPresenceProjection::default(),
+            room_members: Vec::new(),
+            room_members_loading: false,
+            room_members_error: None,
             _lifecycle_task: None,
             _presence_task: None,
             _room_document_task: None,
@@ -6562,6 +6584,38 @@ impl WorkspaceShell {
             }
             ExecutorEvent::ServerNotification { channel, payload } => {
                 self.show_toast(format!("[{channel}] {payload}"), cx);
+            }
+            ExecutorEvent::RoomMembersLoaded { room_id, result } => {
+                if self.selected_workspace().map(|workspace| workspace.room_id) != Some(room_id) {
+                    return;
+                }
+                self.room_members_loading = false;
+                match result {
+                    Ok(members) => {
+                        self.room_members = members;
+                        self.room_members_error = None;
+                    }
+                    Err(message) => self.room_members_error = Some(message),
+                }
+                cx.notify();
+            }
+            ExecutorEvent::RoomMemberRemoved {
+                room_id,
+                principal_id,
+                result,
+            } => {
+                self.room_members_loading = false;
+                match result {
+                    Ok(()) => {
+                        self.room_members
+                            .retain(|member| member.principal_id.0 != principal_id);
+                        self.show_success_toast(format!("Removed member {principal_id}"), cx);
+                    }
+                    Err(message) => self.room_members_error = Some(message),
+                }
+                if self.selected_workspace().map(|workspace| workspace.room_id) == Some(room_id) {
+                    cx.notify();
+                }
             }
             ExecutorEvent::SavedQueriesLoaded { tenant_id, result } => {
                 if self.saved_queries_tenant != Some(tenant_id) {
@@ -10787,6 +10841,9 @@ impl WorkspaceShell {
         if panel == LeftPanel::SavedQueries && self.left_dock.presentation.open {
             self.request_saved_queries(cx);
         }
+        if panel == LeftPanel::Collaboration && self.left_dock.presentation.open {
+            self.request_room_members(cx);
+        }
         self.fit_side_docks_to_width(self.window_presentation.bounds.width);
         self.persist(cx);
         cx.notify();
@@ -10804,6 +10861,42 @@ impl WorkspaceShell {
             }
         }
         self.lifecycle.tenants.first().map(|tenant| tenant.id.0)
+    }
+
+    fn request_room_members(&mut self, cx: &mut Context<Self>) {
+        let Some(room_id) = self.selected_workspace().map(|workspace| workspace.room_id) else {
+            self.room_members.clear();
+            self.room_members_error = Some("Select a room workspace to manage members".into());
+            cx.notify();
+            return;
+        };
+        let Some(sender) = &self.executor_sender else {
+            self.room_members_error = Some("Room manager is unavailable".into());
+            cx.notify();
+            return;
+        };
+        self.room_members_loading = sender
+            .send(ExecutorCommand::LoadRoomMembers { room_id })
+            .is_ok();
+        if self.room_members_loading {
+            self.room_members_error = None;
+        }
+        cx.notify();
+    }
+
+    fn remove_room_member(&mut self, room_id: i64, principal_id: i64, cx: &mut Context<Self>) {
+        let Some(sender) = &self.executor_sender else {
+            self.room_members_error = Some("Room manager is unavailable".into());
+            cx.notify();
+            return;
+        };
+        self.room_members_loading = sender
+            .send(ExecutorCommand::RemoveRoomMember {
+                room_id,
+                principal_id,
+            })
+            .is_ok();
+        cx.notify();
     }
 
     fn request_saved_queries(&mut self, cx: &mut Context<Self>) {
@@ -17996,7 +18089,7 @@ impl WorkspaceShell {
                 dock.id == DockId::Left
                     && self.active_left_panel == LeftPanel::Collaboration,
                 |dock_view| {
-                    let rows = self.presence.participants.iter().map(|participant| {
+                    let presence_rows = self.presence.participants.iter().map(|participant| {
                         let followed = self.presence.followed_attachment
                             == Some(participant.attachment_id);
                         div()
@@ -18012,16 +18105,77 @@ impl WorkspaceShell {
                             .child(div().size(px(7.)).rounded_full().bg(colors.success))
                             .child(format!("Participant {}", participant.principal_id))
                     });
+                    let room_id = self.selected_workspace().map(|workspace| workspace.room_id);
+                    let member_rows = self.room_members.iter().enumerate().map(|(index, member)| {
+                        let principal_id = member.principal_id.0;
+                        let member_room_id = member.room_id.0;
+                        div()
+                            .id(("room-member", index))
+                            .mx_2()
+                            .h(cx.theme().metrics.row_height)
+                            .px_2()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .border_b_1()
+                            .border_color(colors.subtle_border)
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .truncate()
+                                    .child(format!("Principal {principal_id}")),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(colors.muted_text)
+                                    .child(format!("{:?}", member.role)),
+                            )
+                            .child(
+                                Button::new(("remove-room-member", index), "Remove")
+                                    .tone(ButtonTone::DangerGhost)
+                                    .disabled(self.room_members_loading)
+                                    .on_click(cx.listener(move |shell, _, _, cx| {
+                                        shell.remove_room_member(
+                                            member_room_id,
+                                            principal_id,
+                                            cx,
+                                        )
+                                    })),
+                            )
+                    });
                     dock_view
                         .child(
                             div()
+                                .h(px(32.))
                                 .px_3()
+                                .flex()
+                                .items_center()
+                                .justify_between()
+                                .child(SectionLabel::new("MEMBERS"))
+                                .child(
+                                    Button::new("refresh-room-members", "Refresh")
+                                        .tone(ButtonTone::Ghost)
+                                        .disabled(self.room_members_loading || room_id.is_none())
+                                        .on_click(cx.listener(|shell, _, _, cx| {
+                                            shell.request_room_members(cx)
+                                        })),
+                                ),
+                        )
+                        .children(self.room_members_error.as_ref().map(|message| {
+                            div().mx_2().mb_2().child(ErrorBanner::new(message.clone()))
+                        }))
+                        .children(member_rows)
+                        .child(
+                            div()
+                                .px_3()
+                                .pt_3()
                                 .pb_2()
-                                .text_color(colors.muted_text)
-                                .child(format!(
-                                    "{} participant(s) in this room",
+                                .child(SectionLabel::new(format!(
+                                    "LIVE PRESENCE · {}",
                                     self.presence.participants.len()
-                                )),
+                                ))),
                         )
                         .child(
                             div()
@@ -18029,7 +18183,7 @@ impl WorkspaceShell {
                                 .flex_1()
                                 .min_h_0()
                                 .overflow_y_scroll()
-                                .children(rows),
+                                .children(presence_rows),
                         )
                 },
             )
