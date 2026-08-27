@@ -775,6 +775,7 @@ async fn run_query_executor(
                 execution_id,
                 sql,
                 params,
+                transform,
             } => {
                 let Some(opened) = context.as_ref() else {
                     if events
@@ -812,6 +813,7 @@ async fn run_query_executor(
                             execution_id,
                             sql,
                             params,
+                            transform,
                         },
                         control_receiver,
                         events,
@@ -2099,6 +2101,7 @@ struct QueryRun {
     execution_id: u64,
     sql: String,
     params: Vec<sift_protocol::Value>,
+    transform: Option<sift_protocol::ResultTransform>,
 }
 
 async fn run_streamed_query(
@@ -2139,9 +2142,10 @@ async fn run_streamed_query_inner(
         execution_id,
         sql,
         params,
+        transform,
     } = run;
     let started = tokio::select! {
-        stream = client.start_query_stream_with(
+        stream = client.start_query_stream_transformed(
             session,
             connection,
             sql,
@@ -2151,6 +2155,7 @@ async fn run_streamed_query_inner(
                 connection: transaction.connection,
                 mode: transaction.mode,
             }),
+            transform,
         ) => stream,
         control = controls.recv() => {
             if matches!(control, Some(QueryControl::Cancel)) {

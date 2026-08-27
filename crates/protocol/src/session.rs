@@ -90,6 +90,9 @@ pub struct ExecuteRequestHttp {
     /// Optional metadata connection profile context for query history attribution.
     #[serde(default)]
     pub connection_profile_id: Option<i64>,
+    /// Complete-result filter/sort applied before cursor paging.
+    #[serde(default)]
+    pub transform: Option<crate::ResultTransform>,
 }
 
 /// Server-side export format for
@@ -312,6 +315,8 @@ pub enum WsClientMessage {
         /// transaction.
         #[serde(default)]
         tx: Option<TxHandleRef>,
+        #[serde(default)]
+        transform: Option<crate::ResultTransform>,
     },
     Listen {
         request_id: String,

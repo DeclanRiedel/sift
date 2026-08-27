@@ -1350,6 +1350,7 @@ impl SessionStore {
                 ExecuteRequest {
                     sql: req.sql,
                     params: req.params,
+                    transform: None,
                 },
                 None,
             )
@@ -2277,6 +2278,7 @@ impl SessionStore {
                             tx: tx.clone(),
                             room_id: None,
                             connection_profile_id: Some(profile.0),
+                            transform: None,
                         },
                         sift_protocol::OperationKind::ApplyMigration,
                     )
@@ -2741,10 +2743,15 @@ impl SessionStore {
         )?;
         let resource_guards = self.reserve_query_resources(&entry)?;
         let retained_context = self.retained_byte_context(&entry);
-        let exec = ExecuteRequest {
+        let mut exec = ExecuteRequest {
             sql: req.sql,
             params: req.params,
+            transform: req.transform,
         };
+        if let Some(transform) = exec.transform.take() {
+            exec.sql = crate::result_transform::apply(entry.driver.engine(), &exec.sql, &transform)
+                .map_err(ApiError::BadRequest)?;
+        }
         let driver = entry.driver.clone();
         let handle = entry.handle.clone();
         let dur = self.request_timeout();
@@ -2888,7 +2895,7 @@ impl SessionStore {
         &self,
         session_id: SessionId,
         conn_id: ConnectionId,
-        req: ExecuteRequest,
+        mut req: ExecuteRequest,
         tx: Option<&TxHandleRef>,
         operation: sift_protocol::OperationKind,
     ) -> ApiResult<ResultSetStream> {
@@ -2900,6 +2907,11 @@ impl SessionStore {
             Some(&req.sql),
             &[],
         )?;
+        if let Some(transform) = req.transform.take() {
+            let engine = entry.driver.engine();
+            req.sql = crate::result_transform::apply(engine, &req.sql, &transform)
+                .map_err(ApiError::BadRequest)?;
+        }
         let resource_guards = self.reserve_query_resources(&entry)?;
         let retained_context = self.retained_byte_context(&entry);
         let driver = entry.driver.clone();
@@ -2974,6 +2986,7 @@ impl SessionStore {
         let exec = ExecuteRequest {
             sql: req.sql,
             params: req.params,
+            transform: None,
         };
         let dur = self.request_timeout();
         let fut = self.execute_stream_as(
@@ -3936,6 +3949,7 @@ impl SessionStore {
                 tx: Some(tx_ref.clone()),
                 room_id: None,
                 connection_profile_id: None,
+                transform: None,
             };
             match self
                 .execute_http_as(session_id, exec, sift_protocol::OperationKind::ApplyEdits)
@@ -4049,6 +4063,7 @@ impl SessionStore {
                     tx: None,
                     room_id: None,
                     connection_profile_id: None,
+                    transform: None,
                 },
                 sift_protocol::OperationKind::SearchSchema,
             )
@@ -4131,6 +4146,7 @@ impl SessionStore {
                         tx: None,
                         room_id: None,
                         connection_profile_id: None,
+                        transform: None,
                     },
                     sift_protocol::OperationKind::SearchData,
                 )
@@ -4876,6 +4892,7 @@ impl SessionStore {
                             tx: None,
                             room_id: None,
                             connection_profile_id: None,
+                            transform: None,
                         },
                         sift_protocol::OperationKind::StartComparison,
                     )

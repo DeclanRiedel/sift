@@ -1189,6 +1189,11 @@ pub enum PaneEvent {
     CancelResultExportRequested {
         item_id: u64,
     },
+    ApplyResultTransformRequested {
+        item_id: u64,
+        sql: String,
+        transform: sift_protocol::ResultTransform,
+    },
     EditResultCellRequested {
         item_id: u64,
     },
@@ -1466,6 +1471,7 @@ pub enum ExecutorCommand {
         execution_id: u64,
         sql: String,
         params: Vec<sift_protocol::Value>,
+        transform: Option<sift_protocol::ResultTransform>,
     },
     Explain {
         item_id: u64,
@@ -2038,6 +2044,13 @@ impl Pane {
             }),
             ResultsEvent::CancelExportRequested => {
                 cx.emit(PaneEvent::CancelResultExportRequested { item_id })
+            }
+            ResultsEvent::ApplyTransformRequested { transform } => {
+                cx.emit(PaneEvent::ApplyResultTransformRequested {
+                    item_id,
+                    sql: self.targeted_query_sql(item_id, cx),
+                    transform: transform.clone(),
+                })
             }
             ResultsEvent::EditSelectedCellRequested => {
                 cx.emit(PaneEvent::EditResultCellRequested { item_id })
@@ -6921,7 +6934,7 @@ impl WorkspaceShell {
             cx.notify();
             return;
         }
-        self.send_execution_now(item_id, sql, params, cx);
+        self.send_execution_now(item_id, sql, params, None, cx);
     }
 
     fn confirm_production_execution(&mut self, cx: &mut Context<Self>) {
@@ -6929,7 +6942,7 @@ impl WorkspaceShell {
             return;
         };
         self.modal = None;
-        self.send_execution_now(pending.item_id, pending.sql, pending.params, cx);
+        self.send_execution_now(pending.item_id, pending.sql, pending.params, None, cx);
     }
 
     fn send_execution_now(
@@ -6937,6 +6950,7 @@ impl WorkspaceShell {
         item_id: u64,
         sql: String,
         params: Vec<sift_protocol::Value>,
+        transform: Option<sift_protocol::ResultTransform>,
         cx: &mut Context<Self>,
     ) {
         if self
@@ -6966,6 +6980,7 @@ impl WorkspaceShell {
                 execution_id,
                 sql,
                 params,
+                transform,
             })
             .is_ok()
         {
@@ -6983,6 +6998,23 @@ impl WorkspaceShell {
             }
             cx.notify();
         }
+    }
+
+    fn apply_server_result_transform(
+        &mut self,
+        item_id: u64,
+        sql: &str,
+        transform: sift_protocol::ResultTransform,
+        cx: &mut Context<Self>,
+    ) {
+        let params = match self.remembered_query_params(sql) {
+            Ok(params) => params,
+            Err(error) => {
+                self.show_error_toast(error, cx);
+                return;
+            }
+        };
+        self.send_execution_now(item_id, sql.to_owned(), params, Some(transform), cx);
     }
 
     fn explain_database_item(
@@ -11771,6 +11803,11 @@ impl WorkspaceShell {
                     self.show_toast("Cancelling export…".into(), cx);
                 }
             }
+            PaneEvent::ApplyResultTransformRequested {
+                item_id,
+                sql,
+                transform,
+            } => self.apply_server_result_transform(*item_id, sql, transform.clone(), cx),
             PaneEvent::EditResultCellRequested { item_id } => {
                 self.active_pane = index;
                 self.open_result_cell_editor(emitter, *item_id, window, cx);
@@ -25418,6 +25455,38 @@ mod tests {
             shell.run_command(CommandId::FocusEditor, window, cx)
         });
         assert!(cx.update(|window, cx| workspace.read(cx).active_editor_focused(window, cx)));
+    }
+
+    #[gpui::test]
+    fn full_result_transform_is_dispatched_to_the_executor(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let workspace = window.root(cx).unwrap();
+        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        workspace.update(cx, |shell, cx| {
+            shell.executor_sender = Some(sender);
+            shell.apply_server_result_transform(
+                1,
+                "select * from events",
+                sift_protocol::ResultTransform {
+                    filters: vec![sift_protocol::ResultFilter {
+                        column: "status".into(),
+                        contains: "open".into(),
+                    }],
+                    sort: Some(sift_protocol::ResultSort {
+                        column: "created_at".into(),
+                        direction: sift_protocol::ResultSortDirection::Descending,
+                    }),
+                },
+                cx,
+            );
+        });
+        assert!(matches!(
+            receiver.try_recv(),
+            Ok(ExecutorCommand::Execute {
+                transform: Some(sift_protocol::ResultTransform { filters, sort: Some(sort) }),
+                ..
+            }) if filters[0].column == "status" && sort.column == "created_at"
+        ));
     }
 
     #[gpui::test]

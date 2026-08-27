@@ -59,6 +59,7 @@ async fn failed_statement_marks_transaction_and_blocks_commit() {
                 tx: Some(tx),
                 room_id: None,
                 connection_profile_id: None,
+                transform: None,
             },
         )
         .await

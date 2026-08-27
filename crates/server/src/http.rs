@@ -13711,6 +13711,7 @@ async fn handle_ws(
                         sql,
                         params,
                         tx,
+                        transform,
                     } => {
                         if let Err(retry_after_secs) = ws_rate_admit(
                             &state,
@@ -13730,7 +13731,11 @@ async fn handle_ws(
                             .execute_stream(
                                 session_id,
                                 connection,
-                                ExecuteRequest { sql, params },
+                                ExecuteRequest {
+                                    sql,
+                                    params,
+                                    transform,
+                                },
                                 tx.as_ref(),
                             )
                             .await

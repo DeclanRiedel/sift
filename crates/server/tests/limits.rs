@@ -76,6 +76,7 @@ fn req(conn: sift_protocol::ConnectionId) -> ExecuteRequestHttp {
         tx: None,
         room_id: None,
         connection_profile_id: None,
+        transform: None,
     }
 }
 

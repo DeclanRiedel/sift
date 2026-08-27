@@ -343,6 +343,7 @@ async fn fetch_scalar_text(
             ExecuteRequest {
                 sql,
                 params: Vec::new(),
+                transform: None,
             },
         )
         .await?;

@@ -1966,6 +1966,7 @@ impl Client {
                 tx: None,
                 room_id: None,
                 connection_profile_id: None,
+                transform: None,
             },
         )
         .await
@@ -1987,6 +1988,7 @@ impl Client {
                 tx: None,
                 room_id: None,
                 connection_profile_id: None,
+                transform: None,
             },
         )
         .await
@@ -2011,6 +2013,7 @@ impl Client {
                 }),
                 room_id: None,
                 connection_profile_id: None,
+                transform: None,
             },
         )
         .await
@@ -3536,6 +3539,19 @@ impl Client {
         params: Vec<Value>,
         tx: Option<TxHandleRef>,
     ) -> Result<QueryStream> {
+        self.start_query_stream_transformed(session, connection, sql, params, tx, None)
+            .await
+    }
+
+    pub async fn start_query_stream_transformed(
+        &self,
+        session: SessionId,
+        connection: ConnectionId,
+        sql: impl Into<String>,
+        params: Vec<Value>,
+        tx: Option<TxHandleRef>,
+        transform: Option<sift_protocol::ResultTransform>,
+    ) -> Result<QueryStream> {
         let mut socket = self.connect_session_websocket(session).await?;
         let request_id = "sdk-stream-query".to_string();
         socket
@@ -3545,6 +3561,7 @@ impl Client {
                 sql: sql.into(),
                 params,
                 tx,
+                transform,
             })
             .await?;
 

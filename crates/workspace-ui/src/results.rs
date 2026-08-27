@@ -638,6 +638,9 @@ pub enum ResultsEvent {
         format: sift_protocol::ExportFormat,
     },
     CancelExportRequested,
+    ApplyTransformRequested {
+        transform: sift_protocol::ResultTransform,
+    },
     EditSelectedCellRequested,
     PasteSelectedCellRequested {
         text: String,
@@ -3277,6 +3280,33 @@ impl ResultsView {
             .column_filters
             .get(column_index)
             .is_some_and(|filter| !filter.trim().is_empty());
+        let server_transform = sift_protocol::ResultTransform {
+            filters: self
+                .column_filters
+                .iter()
+                .enumerate()
+                .filter_map(|(index, filter)| {
+                    if filter.trim().is_empty() {
+                        return None;
+                    }
+                    Some(sift_protocol::ResultFilter {
+                        column: self.rendered_columns.get(index)?.name.to_string(),
+                        contains: filter.trim().to_owned(),
+                    })
+                })
+                .collect(),
+            sort: self.sort.and_then(|(index, direction)| {
+                Some(sift_protocol::ResultSort {
+                    column: self.rendered_columns.get(index)?.name.to_string(),
+                    direction: match direction {
+                        SortDirection::Ascending => sift_protocol::ResultSortDirection::Ascending,
+                        SortDirection::Descending => sift_protocol::ResultSortDirection::Descending,
+                    },
+                })
+            }),
+        };
+        let can_apply_server =
+            !server_transform.filters.is_empty() || server_transform.sort.is_some();
         let tab = |label: &'static str, target: GridTransformTab| {
             let selected = self.grid_transform_tab == target;
             let tab_index: usize = match target {
@@ -3425,6 +3455,18 @@ impl ResultsView {
                         .child(tab("Sort", GridTransformTab::Sort)),
                 )
                 .child(editor)
+                .child(
+                    Button::new("apply-full-result-transform", "Apply to all rows")
+                        .debug_selector("apply-full-result-transform")
+                        .tone(ButtonTone::Accent)
+                        .disabled(!can_apply_server)
+                        .on_click(cx.listener(move |_, _, _, cx| {
+                            cx.stop_propagation();
+                            cx.emit(ResultsEvent::ApplyTransformRequested {
+                                transform: server_transform.clone(),
+                            });
+                        })),
+                )
                 .child(
                     div()
                         .debug_selector(|| "close-result-grid-transform-editor".into())
@@ -6142,6 +6184,7 @@ mod tests {
         assert!(view.read_with(&cx, |view, _| {
             view.sort == Some((0, SortDirection::Descending)) && *view.display_rows == [1, 0]
         }));
+        assert!(cx.debug_bounds("apply-full-result-transform").is_some());
 
         let close = cx
             .debug_bounds("close-result-grid-transform-editor")

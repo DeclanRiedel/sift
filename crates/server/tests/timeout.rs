@@ -46,6 +46,7 @@ fn execute_req(connection: sift_protocol::ConnectionId, sql: &str) -> ExecuteReq
         tx: None,
         room_id: None,
         connection_profile_id: None,
+        transform: None,
     }
 }
 

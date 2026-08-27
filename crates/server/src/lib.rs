@@ -39,6 +39,7 @@ pub mod rate_limit;
 pub mod registry;
 pub mod remote_agent;
 pub mod resources;
+mod result_transform;
 pub mod room_results;
 pub mod room_runtime;
 pub mod room_service;

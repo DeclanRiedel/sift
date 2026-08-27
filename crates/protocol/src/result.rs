@@ -17,6 +17,37 @@ impl CursorId {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ResultSortDirection {
+    Ascending,
+    Descending,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ResultFilter {
+    pub column: String,
+    pub contains: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ResultSort {
+    pub column: String,
+    pub direction: ResultSortDirection,
+}
+
+/// Server-side transforms applied to the complete query result before paging.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ResultTransform {
+    #[serde(default)]
+    pub filters: Vec<ResultFilter>,
+    #[serde(default)]
+    pub sort: Option<ResultSort>,
+}
+
 impl std::fmt::Display for CursorId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.0)
@@ -77,6 +108,8 @@ pub struct ExecuteRequest {
     pub sql: String,
     #[serde(default)]
     pub params: Vec<Value>,
+    #[serde(default)]
+    pub transform: Option<ResultTransform>,
 }
 
 impl ExecuteRequest {
@@ -84,6 +117,7 @@ impl ExecuteRequest {
         Self {
             sql: sql.into(),
             params: Vec::new(),
+            transform: None,
         }
     }
 }

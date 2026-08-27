@@ -61,7 +61,7 @@ pub(crate) async fn execute_query(
     );
 
     let inner = Arc::clone(&driver.inner);
-    let ExecuteRequest { sql, params } = req;
+    let ExecuteRequest { sql, params, .. } = req;
 
     let task = tokio::spawn(run_query(QueryJob {
         inner,

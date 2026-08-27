@@ -581,6 +581,7 @@ async fn mssql_poll_task(
         let req = ExecuteRequest {
             sql: "SELECT CONVERT(varchar(30), MAX(modify_date), 121) FROM sys.objects".into(),
             params: Vec::new(),
+            transform: None,
         };
         let value = match read_first_scalar(&*driver, handle.clone(), req).await {
             Ok(v) => {
