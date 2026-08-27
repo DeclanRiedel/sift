@@ -539,6 +539,20 @@ struct ConnectionTreeItem {
 }
 
 #[derive(Debug, Clone)]
+enum ConnectionDockRow {
+    Navigation {
+        nav_index: usize,
+        item: ConnectionTreeItem,
+    },
+    Section(&'static str),
+    SchemaStatus {
+        depth: usize,
+        message: String,
+        failed: bool,
+    },
+}
+
+#[derive(Debug, Clone)]
 enum ConnectionTreeAction {
     Tenant(i64),
     Connection(ConnectionNavEntry),
@@ -3753,7 +3767,7 @@ pub struct WorkspaceShell {
     focus_handle: FocusHandle,
     connections_focus_handle: FocusHandle,
     inspector_focus_handle: FocusHandle,
-    connections_scroll_handle: ScrollHandle,
+    connections_scroll_handle: UniformListScrollHandle,
     query_input: Entity<TextInput>,
     semantic_rename_input: Entity<TextInput>,
     saved_query_name_input: Entity<TextInput>,
@@ -4215,7 +4229,7 @@ impl WorkspaceShell {
             focus_handle: cx.focus_handle(),
             connections_focus_handle: cx.focus_handle(),
             inspector_focus_handle: cx.focus_handle(),
-            connections_scroll_handle: ScrollHandle::new(),
+            connections_scroll_handle: UniformListScrollHandle::new(),
             query_input,
             semantic_rename_input,
             saved_query_name_input,
@@ -7089,14 +7103,14 @@ impl WorkspaceShell {
                             continue;
                         }
                         for group in ObjectGroupKind::CANONICAL {
-                            let objects = schema
+                            let object_count = schema
                                 .objects
                                 .iter()
                                 .filter(|object| {
                                     ObjectGroupKind::from_object_kind(object.kind) == group
                                 })
-                                .collect::<Vec<_>>();
-                            if objects.is_empty() {
+                                .count();
+                            if object_count == 0 {
                                 continue;
                             }
                             items.push(ConnectionTreeItem {
@@ -7116,7 +7130,9 @@ impl WorkspaceShell {
                             )) {
                                 continue;
                             }
-                            for object in objects {
+                            for object in schema.objects.iter().filter(|object| {
+                                ObjectGroupKind::from_object_kind(object.kind) == group
+                            }) {
                                 items.push(ConnectionTreeItem {
                                     depth: 5,
                                     action: ConnectionTreeAction::Object(DatabaseObjectTarget {
@@ -7162,6 +7178,610 @@ impl WorkspaceShell {
             }
         }
         items
+    }
+
+    fn connection_dock_rows(&self) -> Vec<ConnectionDockRow> {
+        let items = self.visible_connection_items();
+        let mut rows = Vec::with_capacity(items.len() + self.lifecycle.tenants.len() * 2);
+        let mut current_tenant = None;
+        let mut workspace_section_rendered = false;
+
+        for (nav_index, item) in items.into_iter().enumerate() {
+            match &item.action {
+                ConnectionTreeAction::Tenant(tenant_id) => {
+                    let tenant_id = *tenant_id;
+                    current_tenant = Some(tenant_id);
+                    workspace_section_rendered = false;
+                    rows.push(ConnectionDockRow::Navigation { nav_index, item });
+                    if self.expanded_tenants.contains(&tenant_id)
+                        && self
+                            .lifecycle
+                            .tenants
+                            .iter()
+                            .find(|tenant| tenant.id.0 == tenant_id)
+                            .is_some_and(|tenant| !tenant.connections.is_empty())
+                    {
+                        rows.push(ConnectionDockRow::Section("DATABASES"));
+                    }
+                }
+                ConnectionTreeAction::Connection(connection) => {
+                    let connected = matches!(
+                        self.connection_status,
+                        ConnectionStatus::Connected { profile_id, .. }
+                            if profile_id == connection.id
+                    );
+                    let expanded = self.expanded_connections.contains(&connection.id);
+                    let profile_id = connection.id;
+                    rows.push(ConnectionDockRow::Navigation { nav_index, item });
+                    if connected && expanded {
+                        match &self.connection_schema {
+                            ConnectionSchemaState::Loading {
+                                profile_id: loading,
+                            } if *loading == profile_id => {
+                                rows.push(ConnectionDockRow::SchemaStatus {
+                                    depth: 2,
+                                    message: "Loading schema…".into(),
+                                    failed: false,
+                                });
+                            }
+                            ConnectionSchemaState::Failed {
+                                profile_id: failed,
+                                message,
+                            } if *failed == profile_id => {
+                                rows.push(ConnectionDockRow::SchemaStatus {
+                                    depth: 2,
+                                    message: format!("Schema unavailable: {message}"),
+                                    failed: true,
+                                });
+                            }
+                            ConnectionSchemaState::Ready {
+                                profile_id: ready,
+                                snapshot,
+                            } if *ready == profile_id && snapshot.trees.is_empty() => {
+                                rows.push(ConnectionDockRow::SchemaStatus {
+                                    depth: 2,
+                                    message: "No schema objects found".into(),
+                                    failed: false,
+                                });
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                ConnectionTreeAction::Room(_) => {
+                    if !workspace_section_rendered {
+                        let show_section = current_tenant
+                            .and_then(|tenant_id| {
+                                self.lifecycle
+                                    .tenants
+                                    .iter()
+                                    .find(|tenant| tenant.id.0 == tenant_id)
+                            })
+                            .is_some_and(|tenant| {
+                                tenant.rooms.iter().any(|room| !room.workspaces.is_empty())
+                            });
+                        if show_section {
+                            rows.push(ConnectionDockRow::Section("WORKSPACES"));
+                        }
+                        workspace_section_rendered = true;
+                    }
+                    rows.push(ConnectionDockRow::Navigation { nav_index, item });
+                }
+                _ => rows.push(ConnectionDockRow::Navigation { nav_index, item }),
+            }
+        }
+        rows
+    }
+
+    fn render_connection_dock_row(
+        &self,
+        row_index: usize,
+        row: ConnectionDockRow,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let colors = cx.theme().colors;
+        let row_height = cx.theme().metrics.row_height;
+        let ConnectionDockRow::Navigation { nav_index, item } = row else {
+            return match row {
+                ConnectionDockRow::Section(label) => div()
+                    .id(("connection-section", row_index))
+                    .mx_2()
+                    .h(row_height)
+                    .pl(tree_indent(1))
+                    .flex()
+                    .items_center()
+                    .text_xs()
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .text_color(colors.disabled_text)
+                    .child(label)
+                    .into_any_element(),
+                ConnectionDockRow::SchemaStatus {
+                    depth,
+                    message,
+                    failed,
+                } => div()
+                    .id(("connection-schema-status", row_index))
+                    .mx_2()
+                    .h(row_height)
+                    .pl(tree_indent(depth))
+                    .pr_2()
+                    .flex()
+                    .items_center()
+                    .truncate()
+                    .text_xs()
+                    .text_color(if failed {
+                        colors.danger
+                    } else {
+                        colors.muted_text
+                    })
+                    .child(message)
+                    .into_any_element(),
+                ConnectionDockRow::Navigation { .. } => unreachable!(),
+            };
+        };
+
+        let selected = self.focused_surface == WorkspaceSurface::Connections
+            && self.connection_nav_selected == nav_index;
+        let base = |depth| {
+            div()
+                .mx_2()
+                .h(row_height)
+                .pl(tree_indent(depth))
+                .pr_2()
+                .flex()
+                .items_center()
+                .gap(px(6.))
+                .rounded_sm()
+                .when(selected, |row| {
+                    row.bg(colors.accent_muted).text_color(colors.text)
+                })
+        };
+
+        match item.action {
+            ConnectionTreeAction::Tenant(tenant_id) => {
+                let name = self
+                    .lifecycle
+                    .tenants
+                    .iter()
+                    .find(|tenant| tenant.id.0 == tenant_id)
+                    .map(|tenant| tenant.name.clone())
+                    .unwrap_or_default();
+                let open = self.expanded_tenants.contains(&tenant_id);
+                base(0)
+                    .id(("connection-tenant", tenant_id as usize))
+                    .text_color(colors.muted_text)
+                    .hover(|row| row.bg(colors.hovered_surface).text_color(colors.text))
+                    .on_click(cx.listener(move |shell, _, _, cx| {
+                        shell.set_connection_selection(nav_index, cx);
+                        shell.toggle_tenant(tenant_id, cx)
+                    }))
+                    .child(tree_chevron_slot(open, colors.muted_text))
+                    .child(
+                        div()
+                            .min_w_0()
+                            .truncate()
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .child(name),
+                    )
+                    .into_any_element()
+            }
+            ConnectionTreeAction::Connection(connection) => {
+                let connection_id = connection.id;
+                let connected = matches!(
+                    self.connection_status,
+                    ConnectionStatus::Connected { profile_id, .. } if profile_id == connection_id
+                );
+                let (connection_color, status_color, status_label) = match &self.connection_status {
+                    ConnectionStatus::Connected { profile_id, .. }
+                        if *profile_id == connection_id =>
+                    {
+                        (
+                            colors.success,
+                            Some(colors.success),
+                            provider_display_name(&connection.provider_id),
+                        )
+                    }
+                    ConnectionStatus::Connecting { profile_id } if *profile_id == connection_id => {
+                        (colors.warning, Some(colors.warning), Some("Connecting…"))
+                    }
+                    ConnectionStatus::Failed { profile_id, .. } if *profile_id == connection_id => {
+                        (colors.danger, Some(colors.danger), Some("Failed"))
+                    }
+                    _ => (
+                        colors.muted_text,
+                        None,
+                        provider_display_name(&connection.provider_id),
+                    ),
+                };
+                let open = self.expanded_connections.contains(&connection_id);
+                let leading = if connected {
+                    div()
+                        .id(("toggle-connection", connection_id as usize))
+                        .role(Role::Button)
+                        .flex_none()
+                        .w(px(14.))
+                        .h_full()
+                        .flex()
+                        .items_center()
+                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                        .on_click(cx.listener(move |shell, _, _, cx| {
+                            cx.stop_propagation();
+                            shell.set_connection_selection(nav_index, cx);
+                            shell.toggle_connection(connection_id, cx)
+                        }))
+                        .child(icon(
+                            if open {
+                                IconName::ChevronDown
+                            } else {
+                                IconName::ChevronRight
+                            },
+                            colors.muted_text,
+                            11.,
+                        ))
+                        .into_any_element()
+                } else {
+                    tree_spacer_slot().into_any_element()
+                };
+                let logo = match provider_logo_asset(&connection.provider_id) {
+                    Some(asset) => div()
+                        .relative()
+                        .flex_none()
+                        .when(!connected, |logo| logo.opacity(0.6))
+                        .child(
+                            img(database_logo(asset))
+                                .size(px(14.))
+                                .object_fit(gpui::ObjectFit::Contain),
+                        )
+                        .when_some(status_color, |logo, dot| {
+                            logo.child(
+                                div()
+                                    .absolute()
+                                    .bottom_0()
+                                    .right_0()
+                                    .size(px(6.))
+                                    .rounded_full()
+                                    .bg(dot)
+                                    .border_1()
+                                    .border_color(if connected {
+                                        colors.active_surface
+                                    } else {
+                                        colors.panel
+                                    }),
+                            )
+                        })
+                        .into_any_element(),
+                    None => icon(IconName::Database, connection_color, 12.),
+                };
+                let entry_for_connect = connection.clone();
+                let entry_for_edit = connection.clone();
+                let entry_for_delete = connection.clone();
+                let mut element = base(1)
+                    .id(("conn", connection_id as usize))
+                    .when(connected, |row| row.bg(colors.active_surface))
+                    .hover(|row| row.bg(colors.hovered_surface))
+                    .child(leading)
+                    .child(logo)
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .child(connection.name.clone()),
+                    )
+                    .when_some(status_label, |row, label| {
+                        row.child(
+                            div()
+                                .flex_none()
+                                .text_xs()
+                                .text_color(status_color.unwrap_or(colors.disabled_text))
+                                .child(label),
+                        )
+                    });
+                if connected {
+                    element = element.child(
+                        Button::new(("disconnect", connection_id as usize), "Disconnect")
+                            .tone(ButtonTone::DangerGhost)
+                            .on_click(cx.listener(|shell, _, _, cx| shell.disconnect(cx))),
+                    );
+                } else {
+                    element = element.on_click(cx.listener(move |shell, _, _, cx| {
+                        shell.set_connection_selection(nav_index, cx);
+                        shell.connect(&entry_for_connect, cx)
+                    }));
+                }
+                element
+                    .child(
+                        div()
+                            .id(("edit-connection", connection_id as usize))
+                            .flex_none()
+                            .role(Role::Button)
+                            .aria_label(format!("Edit connection {}", connection.name))
+                            .p_1()
+                            .rounded_sm()
+                            .text_color(colors.muted_text)
+                            .hover(|button| {
+                                button.bg(colors.hovered_surface).text_color(colors.text)
+                            })
+                            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                            .on_click(cx.listener(move |shell, _, _, cx| {
+                                cx.stop_propagation();
+                                shell.request_edit_connection(&entry_for_edit, cx)
+                            }))
+                            .child(icon(IconName::Edit, colors.muted_text, 11.)),
+                    )
+                    .child(
+                        div()
+                            .id(("delete-connection", connection_id as usize))
+                            .flex_none()
+                            .role(Role::Button)
+                            .aria_label(format!("Delete connection {}", connection.name))
+                            .p_1()
+                            .rounded_sm()
+                            .text_color(colors.muted_text)
+                            .hover(|button| {
+                                button.bg(colors.danger_muted).text_color(colors.danger)
+                            })
+                            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                            .on_click(cx.listener(move |shell, _, _, cx| {
+                                cx.stop_propagation();
+                                shell.request_delete_connection(&entry_for_delete, cx)
+                            }))
+                            .child(icon(IconName::Close, colors.danger, 11.)),
+                    )
+                    .into_any_element()
+            }
+            ConnectionTreeAction::Catalog {
+                profile_id,
+                catalog,
+            } => {
+                let open = self
+                    .expanded_catalogs
+                    .contains(&(profile_id, catalog.clone()));
+                let toggle_catalog = catalog.clone();
+                base(2)
+                    .id(("schema-catalog-row", row_index))
+                    .text_color(colors.muted_text)
+                    .hover(|row| row.bg(colors.hovered_surface).text_color(colors.text))
+                    .on_click(cx.listener(move |shell, _, _, cx| {
+                        shell.set_connection_selection(nav_index, cx);
+                        shell.toggle_catalog_schema(profile_id, toggle_catalog.clone(), cx)
+                    }))
+                    .child(tree_chevron_slot(open, colors.muted_text))
+                    .child(icon(IconName::Database, colors.muted_text, 12.))
+                    .child(div().min_w_0().truncate().child(catalog))
+                    .into_any_element()
+            }
+            ConnectionTreeAction::Schema {
+                profile_id,
+                catalog,
+                schema,
+            } => {
+                let open =
+                    self.expanded_schemas
+                        .contains(&(profile_id, catalog.clone(), schema.clone()));
+                let object_count = match &self.connection_schema {
+                    ConnectionSchemaState::Ready {
+                        profile_id: ready,
+                        snapshot,
+                    } if *ready == profile_id => snapshot
+                        .trees
+                        .iter()
+                        .find(|tree| tree.name == catalog)
+                        .and_then(|tree| tree.schemas.iter().find(|entry| entry.name == schema))
+                        .map_or(0, |entry| entry.objects.len()),
+                    _ => 0,
+                };
+                let toggle_catalog = catalog.clone();
+                let toggle_schema = schema.clone();
+                base(3)
+                    .id(("schema-namespace-row", row_index))
+                    .text_color(colors.muted_text)
+                    .hover(|row| row.bg(colors.hovered_surface).text_color(colors.text))
+                    .on_click(cx.listener(move |shell, _, _, cx| {
+                        shell.set_connection_selection(nav_index, cx);
+                        shell.toggle_database_schema(
+                            profile_id,
+                            toggle_catalog.clone(),
+                            toggle_schema.clone(),
+                            cx,
+                        )
+                    }))
+                    .child(tree_chevron_slot(open, colors.muted_text))
+                    .child(icon(IconName::Folder, colors.muted_text, 12.))
+                    .child(div().min_w_0().truncate().child(schema))
+                    .child(
+                        div()
+                            .ml_auto()
+                            .text_xs()
+                            .text_color(colors.disabled_text)
+                            .child(object_count.to_string()),
+                    )
+                    .into_any_element()
+            }
+            ConnectionTreeAction::Group {
+                profile_id,
+                catalog,
+                schema,
+                group,
+            } => {
+                let open = self.expanded_object_groups.contains(&(
+                    profile_id,
+                    catalog.clone(),
+                    schema.clone(),
+                    group,
+                ));
+                let object_count = match &self.connection_schema {
+                    ConnectionSchemaState::Ready {
+                        profile_id: ready,
+                        snapshot,
+                    } if *ready == profile_id => snapshot
+                        .trees
+                        .iter()
+                        .find(|tree| tree.name == catalog)
+                        .and_then(|tree| tree.schemas.iter().find(|entry| entry.name == schema))
+                        .map_or(0, |entry| {
+                            entry
+                                .objects
+                                .iter()
+                                .filter(|object| {
+                                    ObjectGroupKind::from_object_kind(object.kind) == group
+                                })
+                                .count()
+                        }),
+                    _ => 0,
+                };
+                let toggle_catalog = catalog.clone();
+                let toggle_schema = schema.clone();
+                base(4)
+                    .id(("schema-group-row", row_index))
+                    .text_color(colors.muted_text)
+                    .hover(|row| row.bg(colors.hovered_surface).text_color(colors.text))
+                    .on_click(cx.listener(move |shell, _, _, cx| {
+                        shell.set_connection_selection(nav_index, cx);
+                        shell.toggle_object_group(
+                            profile_id,
+                            toggle_catalog.clone(),
+                            toggle_schema.clone(),
+                            group,
+                            cx,
+                        )
+                    }))
+                    .child(tree_chevron_slot(open, colors.muted_text))
+                    .child(icon(group.icon(), colors.muted_text, 12.))
+                    .child(group.label())
+                    .child(
+                        div()
+                            .ml_auto()
+                            .text_xs()
+                            .text_color(colors.disabled_text)
+                            .child(object_count.to_string()),
+                    )
+                    .into_any_element()
+            }
+            ConnectionTreeAction::Object(target) => {
+                let can_preview = matches!(
+                    target.object_kind,
+                    sift_protocol::ObjectKind::Table
+                        | sift_protocol::ObjectKind::View
+                        | sift_protocol::ObjectKind::MaterializedView
+                        | sift_protocol::ObjectKind::ForeignTable
+                        | sift_protocol::ObjectKind::PartitionedTable
+                );
+                let icon_name = schema_object_kind_icon(target.object_kind);
+                let object_name = target.object.clone();
+                base(5)
+                    .id(("schema-object-row", row_index))
+                    .text_color(if can_preview {
+                        colors.text
+                    } else {
+                        colors.muted_text
+                    })
+                    .when(can_preview, |row| {
+                        row.hover(|row| row.bg(colors.hovered_surface))
+                            .on_click(cx.listener(move |shell, _, window, cx| {
+                                shell.set_connection_selection(nav_index, cx);
+                                shell.open_table_preview(target.clone(), window, cx)
+                            }))
+                    })
+                    .child(tree_spacer_slot())
+                    .child(
+                        div()
+                            .min_w_0()
+                            .flex_1()
+                            .flex()
+                            .items_center()
+                            .gap(px(6.))
+                            .truncate()
+                            .child(icon(icon_name, colors.muted_text, 12.))
+                            .child(div().min_w_0().truncate().child(object_name)),
+                    )
+                    .into_any_element()
+            }
+            ConnectionTreeAction::Room(room_id) => {
+                let room = self
+                    .lifecycle
+                    .tenants
+                    .iter()
+                    .flat_map(|tenant| &tenant.rooms)
+                    .find(|room| room.id.0 == room_id)
+                    .cloned();
+                let room_name = room
+                    .as_ref()
+                    .map(|room| room.name.clone())
+                    .unwrap_or_default();
+                let create_label = format!("Create query in {room_name}");
+                let open = self.expanded_rooms.contains(&room_id);
+                base(1)
+                    .id(("connection-room", room_id as usize))
+                    .text_color(colors.muted_text)
+                    .hover(|row| row.bg(colors.hovered_surface).text_color(colors.text))
+                    .on_click(cx.listener(move |shell, _, _, cx| {
+                        shell.set_connection_selection(nav_index, cx);
+                        shell.toggle_room(room_id, cx)
+                    }))
+                    .child(tree_chevron_slot(open, colors.muted_text))
+                    .child(icon(IconName::Users, colors.muted_text, 12.))
+                    .child(div().min_w_0().truncate().child(room_name))
+                    .child(
+                        div()
+                            .id(("create-room-document", room_id as usize))
+                            .ml_auto()
+                            .p_1()
+                            .rounded_sm()
+                            .role(Role::Button)
+                            .aria_label(create_label)
+                            .hover(|button| button.bg(colors.active_surface))
+                            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                            .on_click(cx.listener(move |shell, _, _, cx| {
+                                cx.stop_propagation();
+                                shell.create_room_document(room_id, cx)
+                            }))
+                            .child(icon(IconName::Add, colors.muted_text, 11.)),
+                    )
+                    .into_any_element()
+            }
+            ConnectionTreeAction::Workspace(workspace) => {
+                let features = match (workspace.git_enabled, workspace.scheduling_enabled) {
+                    (true, true) => " · Git · Runs",
+                    (true, false) => " · Git",
+                    (false, true) => " · Runs",
+                    (false, false) => "",
+                };
+                let is_open = self.selected_workspace_id == Some(workspace.id);
+                let workspace_id = workspace.id;
+                let label = format!("{}{features}", workspace.name);
+                base(2)
+                    .id(("workspace", workspace_id as usize))
+                    .when(is_open, |row| {
+                        row.bg(colors.active_surface).text_color(colors.text)
+                    })
+                    .hover(|row| row.bg(colors.hovered_surface))
+                    .on_click(cx.listener(move |shell, _, _, cx| {
+                        shell.set_connection_selection(nav_index, cx);
+                        shell.open_workspace(&workspace, cx)
+                    }))
+                    .child(tree_spacer_slot())
+                    .child(icon(IconName::Workspace, colors.muted_text, 12.))
+                    .child(div().min_w_0().truncate().child(label))
+                    .into_any_element()
+            }
+            ConnectionTreeAction::Document(document) => {
+                let document_id = document.id.0;
+                let title = document.title.clone();
+                base(2)
+                    .id(("room-document", document_id as usize))
+                    .text_color(colors.text)
+                    .hover(|row| row.bg(colors.hovered_surface))
+                    .on_click(cx.listener(move |shell, _, window, cx| {
+                        shell.set_connection_selection(nav_index, cx);
+                        shell.open_room_document(&document, window, cx)
+                    }))
+                    .child(tree_spacer_slot())
+                    .child(icon(IconName::Edit, colors.muted_text, 12.))
+                    .child(div().min_w_0().truncate().child(title))
+                    .into_any_element()
+            }
+        }
     }
 
     fn normalize_connection_selection(&mut self) {
@@ -13549,351 +14169,6 @@ impl WorkspaceShell {
             )
     }
 
-    fn connection_schema_rows(
-        &self,
-        connection: &ConnectionNavEntry,
-        colors: sift_ui::ThemeColors,
-        nav_index: &mut usize,
-        render_offset: usize,
-        cx: &mut Context<Self>,
-    ) -> Vec<gpui::AnyElement> {
-        let profile_id = connection.id;
-        match &self.connection_schema {
-            ConnectionSchemaState::Loading {
-                profile_id: loading,
-            } if *loading == profile_id => vec![div()
-                .mx_2()
-                .pl(tree_indent(2))
-                .h(cx.theme().metrics.row_height)
-                .flex()
-                .items_center()
-                .text_xs()
-                .text_color(colors.muted_text)
-                .child("Loading schema…")
-                .into_any_element()],
-            ConnectionSchemaState::Failed {
-                profile_id: failed,
-                message,
-            } if *failed == profile_id => vec![div()
-                .mx_2()
-                .pl(tree_indent(2))
-                .pr_2()
-                .py_1()
-                .flex()
-                .flex_col()
-                .gap_1()
-                .text_xs()
-                .text_color(colors.danger)
-                .child("Schema unavailable")
-                .child(
-                    div()
-                        .truncate()
-                        .text_color(colors.muted_text)
-                        .child(message.clone()),
-                )
-                .into_any_element()],
-            ConnectionSchemaState::Ready {
-                profile_id: ready,
-                snapshot,
-            } if *ready == profile_id => {
-                let mut rows = Vec::new();
-                for (catalog_index, catalog) in snapshot.trees.iter().enumerate() {
-                    let catalog_nav_index = *nav_index;
-                    *nav_index += 1;
-                    if self.focused_surface == WorkspaceSurface::Connections
-                        && self.connection_nav_selected == catalog_nav_index
-                    {
-                        self.connections_scroll_handle
-                            .scroll_to_item(render_offset + rows.len());
-                    }
-                    let catalog_key = (profile_id, catalog.name.clone());
-                    let catalog_open = self.expanded_catalogs.contains(&catalog_key);
-                    let catalog_name = catalog.name.clone();
-                    rows.push(
-                        div()
-                            .id(("schema-catalog", catalog_index + profile_id as usize * 1000))
-                            .mx_2()
-                            .h(cx.theme().metrics.row_height)
-                            .pl(tree_indent(2))
-                            .pr_2()
-                            .flex()
-                            .items_center()
-                            .gap(px(6.))
-                            .rounded_sm()
-                            .when(
-                                self.focused_surface == WorkspaceSurface::Connections
-                                    && self.connection_nav_selected == catalog_nav_index,
-                                |row| row.bg(colors.accent_muted).text_color(colors.text),
-                            )
-                            .text_color(colors.muted_text)
-                            .hover(|row| row.bg(colors.hovered_surface).text_color(colors.text))
-                            .on_click(cx.listener(move |shell, _, _, cx| {
-                                shell.set_connection_selection(catalog_nav_index, cx);
-                                shell.toggle_catalog_schema(profile_id, catalog_name.clone(), cx)
-                            }))
-                            .child(tree_chevron_slot(catalog_open, colors.muted_text))
-                            .child(icon(IconName::Database, colors.muted_text, 12.))
-                            .child(div().min_w_0().truncate().child(catalog.name.clone()))
-                            .into_any_element(),
-                    );
-                    if !catalog_open {
-                        continue;
-                    }
-                    for (schema_index, schema) in catalog.schemas.iter().enumerate() {
-                        let schema_nav_index = *nav_index;
-                        *nav_index += 1;
-                        if self.focused_surface == WorkspaceSurface::Connections
-                            && self.connection_nav_selected == schema_nav_index
-                        {
-                            self.connections_scroll_handle
-                                .scroll_to_item(render_offset + rows.len());
-                        }
-                        let schema_key = (profile_id, catalog.name.clone(), schema.name.clone());
-                        let schema_open = self.expanded_schemas.contains(&schema_key);
-                        let catalog_name = catalog.name.clone();
-                        let schema_name = schema.name.clone();
-                        rows.push(
-                            div()
-                                .id((
-                                    "schema-namespace",
-                                    schema_index
-                                        + catalog_index * 100
-                                        + profile_id as usize * 100_000,
-                                ))
-                                .mx_2()
-                                .h(cx.theme().metrics.row_height)
-                                .pl(tree_indent(3))
-                                .pr_2()
-                                .flex()
-                                .items_center()
-                                .gap(px(6.))
-                                .rounded_sm()
-                                .when(
-                                    self.focused_surface == WorkspaceSurface::Connections
-                                        && self.connection_nav_selected == schema_nav_index,
-                                    |row| row.bg(colors.accent_muted).text_color(colors.text),
-                                )
-                                .text_color(colors.muted_text)
-                                .hover(|row| row.bg(colors.hovered_surface).text_color(colors.text))
-                                .on_click(cx.listener(move |shell, _, _, cx| {
-                                    shell.set_connection_selection(schema_nav_index, cx);
-                                    shell.toggle_database_schema(
-                                        profile_id,
-                                        catalog_name.clone(),
-                                        schema_name.clone(),
-                                        cx,
-                                    )
-                                }))
-                                .child(tree_chevron_slot(schema_open, colors.muted_text))
-                                .child(icon(IconName::Folder, colors.muted_text, 12.))
-                                .child(div().min_w_0().truncate().child(schema.name.clone()))
-                                .child(
-                                    div()
-                                        .ml_auto()
-                                        .text_xs()
-                                        .text_color(colors.disabled_text)
-                                        .child(schema.objects.len().to_string()),
-                                )
-                                .into_any_element(),
-                        );
-                        if !schema_open {
-                            continue;
-                        }
-                        for (group_index, group) in
-                            ObjectGroupKind::CANONICAL.into_iter().enumerate()
-                        {
-                            let objects: Vec<_> = schema
-                                .objects
-                                .iter()
-                                .filter(|object| {
-                                    ObjectGroupKind::from_object_kind(object.kind) == group
-                                })
-                                .collect();
-                            if objects.is_empty() {
-                                continue;
-                            }
-                            let group_key =
-                                (profile_id, catalog.name.clone(), schema.name.clone(), group);
-                            let group_nav_index = *nav_index;
-                            *nav_index += 1;
-                            if self.focused_surface == WorkspaceSurface::Connections
-                                && self.connection_nav_selected == group_nav_index
-                            {
-                                self.connections_scroll_handle
-                                    .scroll_to_item(render_offset + rows.len());
-                            }
-                            let group_open = self.expanded_object_groups.contains(&group_key);
-                            let catalog_name = catalog.name.clone();
-                            let schema_name = schema.name.clone();
-                            rows.push(
-                                div()
-                                    .id((
-                                        "schema-group",
-                                        group_index
-                                            + schema_index * 10
-                                            + catalog_index * 100
-                                            + profile_id as usize * 100_000,
-                                    ))
-                                    .mx_2()
-                                    .h(cx.theme().metrics.row_height)
-                                    .pl(tree_indent(4))
-                                    .pr_2()
-                                    .flex()
-                                    .items_center()
-                                    .gap(px(6.))
-                                    .rounded_sm()
-                                    .when(
-                                        self.focused_surface == WorkspaceSurface::Connections
-                                            && self.connection_nav_selected == group_nav_index,
-                                        |row| row.bg(colors.accent_muted).text_color(colors.text),
-                                    )
-                                    .text_color(colors.muted_text)
-                                    .hover(|row| {
-                                        row.bg(colors.hovered_surface).text_color(colors.text)
-                                    })
-                                    .on_click(cx.listener(move |shell, _, _, cx| {
-                                        shell.set_connection_selection(group_nav_index, cx);
-                                        shell.toggle_object_group(
-                                            profile_id,
-                                            catalog_name.clone(),
-                                            schema_name.clone(),
-                                            group,
-                                            cx,
-                                        )
-                                    }))
-                                    .child(tree_chevron_slot(group_open, colors.muted_text))
-                                    .child(icon(group.icon(), colors.muted_text, 12.))
-                                    .child(group.label())
-                                    .child(
-                                        div()
-                                            .ml_auto()
-                                            .text_xs()
-                                            .text_color(colors.disabled_text)
-                                            .child(objects.len().to_string()),
-                                    )
-                                    .into_any_element(),
-                            );
-                            if !group_open {
-                                continue;
-                            }
-                            for (object_index, object) in objects.iter().enumerate() {
-                                let object_nav_index = *nav_index;
-                                *nav_index += 1;
-                                if self.focused_surface == WorkspaceSurface::Connections
-                                    && self.connection_nav_selected == object_nav_index
-                                {
-                                    self.connections_scroll_handle
-                                        .scroll_to_item(render_offset + rows.len());
-                                }
-                                let can_preview = matches!(
-                                    object.kind,
-                                    sift_protocol::ObjectKind::Table
-                                        | sift_protocol::ObjectKind::View
-                                        | sift_protocol::ObjectKind::MaterializedView
-                                        | sift_protocol::ObjectKind::ForeignTable
-                                        | sift_protocol::ObjectKind::PartitionedTable
-                                );
-                                let connection_for_preview = connection.clone();
-                                let catalog_name = catalog.name.clone();
-                                let schema_name = schema.name.clone();
-                                let object_name = object.name.clone();
-                                let object_kind = object.kind;
-                                let row = div()
-                                    .id((
-                                        "schema-object",
-                                        object_index
-                                            + group_index * 100_000
-                                            + schema_index * 10_000_000
-                                            + catalog_index * 100_000_000
-                                            + profile_id as usize * 1_000_000_000,
-                                    ))
-                                    .mx_2()
-                                    .h(cx.theme().metrics.row_height)
-                                    .pl(tree_indent(5))
-                                    .pr_2()
-                                    .flex()
-                                    .items_center()
-                                    .gap(px(6.))
-                                    .rounded_sm()
-                                    .when(
-                                        self.focused_surface == WorkspaceSurface::Connections
-                                            && self.connection_nav_selected == object_nav_index,
-                                        |row| row.bg(colors.accent_muted),
-                                    )
-                                    .text_color(if can_preview {
-                                        colors.text
-                                    } else {
-                                        colors.muted_text
-                                    })
-                                    .when(can_preview, |row| {
-                                        row.hover(|row| row.bg(colors.hovered_surface)).on_click(
-                                            cx.listener(move |shell, _, window, cx| {
-                                                shell
-                                                    .set_connection_selection(object_nav_index, cx);
-                                                shell.open_table_preview(
-                                                    DatabaseObjectTarget {
-                                                        connection: connection_for_preview.clone(),
-                                                        catalog: catalog_name.clone(),
-                                                        schema: schema_name.clone(),
-                                                        object: object_name.clone(),
-                                                        object_kind,
-                                                    },
-                                                    window,
-                                                    cx,
-                                                )
-                                            }),
-                                        )
-                                    })
-                                    .child(tree_spacer_slot())
-                                    .child(
-                                        div()
-                                            .min_w_0()
-                                            .flex_1()
-                                            .flex()
-                                            .items_center()
-                                            .gap(px(6.))
-                                            .truncate()
-                                            .child(icon(
-                                                schema_object_kind_icon(object.kind),
-                                                if can_preview {
-                                                    colors.muted_text
-                                                } else {
-                                                    colors.disabled_text
-                                                },
-                                                12.,
-                                            ))
-                                            .child(
-                                                div()
-                                                    .min_w_0()
-                                                    .truncate()
-                                                    .child(object.name.clone()),
-                                            ),
-                                    );
-                                rows.push(row.into_any_element());
-                            }
-                        }
-                    }
-                }
-                if rows.is_empty() {
-                    rows.push(
-                        div()
-                            .mx_2()
-                            .pl(tree_indent(2))
-                            .h(cx.theme().metrics.row_height)
-                            .flex()
-                            .items_center()
-                            .text_xs()
-                            .text_color(colors.muted_text)
-                            .child("No schema objects found")
-                            .into_any_element(),
-                    );
-                }
-                rows
-            }
-            _ => Vec::new(),
-        }
-    }
-
     fn render_result_fields_inspector(
         &self,
         results: Entity<ResultsView>,
@@ -15690,456 +15965,36 @@ impl WorkspaceShell {
             .when(
                 dock.id == DockId::Left && self.active_left_panel == LeftPanel::Connections,
                 |dock_view| {
-                let selected = self.selected_workspace_id;
-                let mut rows: Vec<gpui::AnyElement> = Vec::new();
-                let mut nav_index = 0usize;
-                for tenant in &self.lifecycle.tenants {
-                    let tenant_id = tenant.id.0;
-                    let tenant_open = self.expanded_tenants.contains(&tenant_id);
-                    let tenant_nav_index = nav_index;
-                    nav_index += 1;
-                    if self.focused_surface == WorkspaceSurface::Connections
-                        && self.connection_nav_selected == tenant_nav_index
-                    {
-                        self.connections_scroll_handle.scroll_to_item(rows.len());
-                    }
-                    rows.push(
-                        div()
-                            .id(("connection-tenant", tenant_id as usize))
-                            .mt_2()
-                            .mx_2()
-                            .h(cx.theme().metrics.row_height)
-                            .pl(tree_indent(0))
-                            .pr_2()
-                            .flex()
-                            .items_center()
-                            .gap(px(6.))
-                            .rounded_sm()
-                            .when(
-                                self.focused_surface == WorkspaceSurface::Connections
-                                    && self.connection_nav_selected == tenant_nav_index,
-                                |row| row.bg(colors.accent_muted).text_color(colors.text),
+                    let rows = self.connection_dock_rows();
+                    if self.focused_surface == WorkspaceSurface::Connections {
+                        if let Some(index) = rows.iter().position(|row| {
+                            matches!(
+                                row,
+                                ConnectionDockRow::Navigation { nav_index, .. }
+                                    if *nav_index == self.connection_nav_selected
                             )
-                            .text_color(colors.muted_text)
-                            .hover(|row| row.bg(colors.hovered_surface).text_color(colors.text))
-                            .on_click(cx.listener(move |shell, _, _, cx| {
-                                shell.set_connection_selection(tenant_nav_index, cx);
-                                shell.toggle_tenant(tenant_id, cx)
-                            }))
-                            .child(tree_chevron_slot(tenant_open, colors.muted_text))
-                            .child(
-                                div()
-                                    .min_w_0()
-                                    .truncate()
-                                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                                    .child(tenant.name.clone()),
-                            )
-                            .into_any_element(),
-                    );
-                    if !tenant_open {
-                        continue;
-                    }
-                    if !tenant.connections.is_empty() {
-                        rows.push(
-                            div()
-                                .mx_2()
-                                .h(px(20.))
-                                .pl(tree_indent(1))
-                                .flex()
-                                .items_end()
-                                .text_xs()
-                                .font_weight(gpui::FontWeight::SEMIBOLD)
-                                .text_color(colors.disabled_text)
-                                .child("DATABASES")
-                                .into_any_element(),
-                        );
-                    }
-                    for conn in &tenant.connections {
-                        let connection_nav_index = nav_index;
-                        nav_index += 1;
-                        if self.focused_surface == WorkspaceSurface::Connections
-                            && self.connection_nav_selected == connection_nav_index
-                        {
-                            self.connections_scroll_handle.scroll_to_item(rows.len());
-                        }
-                        let connection_id = conn.id;
-                        let entry_for_delete = conn.clone();
-                        let entry_for_edit = conn.clone();
-                        let (connection_color, connected) = match &self.connection_status {
-                            ConnectionStatus::Connected { profile_id, .. }
-                                if *profile_id == conn.id =>
-                            {
-                                (colors.success, true)
-                            }
-                            ConnectionStatus::Connecting { profile_id }
-                                if *profile_id == conn.id =>
-                            {
-                                (colors.warning, false)
-                            }
-                            ConnectionStatus::Failed { profile_id, .. }
-                                if *profile_id == conn.id =>
-                            {
-                                (colors.danger, false)
-                            }
-                            _ => (colors.muted_text, false),
-                        };
-                        let (status_color, status_label) = match &self.connection_status {
-                            ConnectionStatus::Connected { profile_id, .. }
-                                if *profile_id == conn.id =>
-                            {
-                                (Some(colors.success), provider_display_name(&conn.provider_id))
-                            }
-                            ConnectionStatus::Connecting { profile_id }
-                                if *profile_id == conn.id =>
-                            {
-                                (Some(colors.warning), Some("Connecting…"))
-                            }
-                            ConnectionStatus::Failed { profile_id, .. }
-                                if *profile_id == conn.id =>
-                            {
-                                (Some(colors.danger), Some("Failed"))
-                            }
-                            _ => (None, provider_display_name(&conn.provider_id)),
-                        };
-                        let connection_open = self.expanded_connections.contains(&connection_id);
-                        let leading = if connected {
-                            div()
-                                .id(("toggle-connection", connection_id as usize))
-                                .role(Role::Button)
-                                .flex_none()
-                                .w(px(14.))
-                                .h_full()
-                                .flex()
-                                .items_center()
-                                .on_mouse_down(MouseButton::Left, |_, _, cx| {
-                                    cx.stop_propagation()
-                                })
-                                .on_click(cx.listener(move |shell, _, _, cx| {
-                                    cx.stop_propagation();
-                                    shell.set_connection_selection(connection_nav_index, cx);
-                                    shell.toggle_connection(connection_id, cx)
-                                }))
-                                .child(icon(
-                                    if connection_open {
-                                        IconName::ChevronDown
-                                    } else {
-                                        IconName::ChevronRight
-                                    },
-                                    colors.muted_text,
-                                    11.,
-                                ))
-                                .into_any_element()
-                        } else {
-                            tree_spacer_slot().into_any_element()
-                        };
-                        let logo = match provider_logo_asset(&conn.provider_id) {
-                            Some(asset) => {
-                                let dot_border = if connected {
-                                    colors.active_surface
-                                } else {
-                                    colors.panel
-                                };
-                                div()
-                                    .relative()
-                                    .flex_none()
-                                    .when(!connected, |logo| logo.opacity(0.6))
-                                    .child(
-                                        img(database_logo(asset))
-                                            .size(px(14.))
-                                            .object_fit(gpui::ObjectFit::Contain),
-                                    )
-                                    .when_some(status_color, |logo, dot| {
-                                        logo.child(
-                                            div()
-                                                .absolute()
-                                                .bottom_0()
-                                                .right_0()
-                                                .size(px(6.))
-                                                .rounded_full()
-                                                .bg(dot)
-                                                .border_1()
-                                                .border_color(dot_border),
-                                        )
-                                    })
-                                    .into_any_element()
-                            }
-                            None => icon(IconName::Database, connection_color, 12.),
-                        };
-                        let mut row = div()
-                            .id(("conn", conn.id as usize))
-                            .flex()
-                            .items_center()
-                            .gap(px(6.))
-                            .mx_2()
-                            .h(cx.theme().metrics.row_height)
-                            .pl(tree_indent(1))
-                            .pr_2()
-                            .rounded_sm()
-                            .when(
-                                self.focused_surface == WorkspaceSurface::Connections
-                                    && self.connection_nav_selected == connection_nav_index,
-                                |row| row.bg(colors.accent_muted).text_color(colors.text),
-                            )
-                            .when(connected, |row| row.bg(colors.active_surface))
-                            .hover(|row| row.bg(colors.hovered_surface))
-                            .child(leading)
-                            .child(logo)
-                            .child(div().flex_1().min_w_0().truncate().child(conn.name.clone()))
-                            .when_some(status_label, |row, label| {
-                                row.child(
-                                    div()
-                                        .flex_none()
-                                        .text_xs()
-                                        .text_color(status_color.unwrap_or(colors.disabled_text))
-                                        .child(label),
-                                )
-                            });
-                        if connected {
-                            row = row.child(
-                                Button::new(("disconnect", conn.id as usize), "Disconnect")
-                                    .tone(ButtonTone::DangerGhost)
-                                    .on_click(
-                                        cx.listener(|shell, _, _, cx| shell.disconnect(cx)),
-                                    ),
-                            );
-                        } else {
-                            let entry = conn.clone();
-                            row = row.on_click(cx.listener(move |shell, _, _, cx| {
-                                shell.set_connection_selection(connection_nav_index, cx);
-                                shell.connect(&entry, cx)
-                            }));
-                        }
-                        row = row.child(
-                            div()
-                                .id(("edit-connection", conn.id as usize))
-                                .flex_none()
-                                .role(Role::Button)
-                                .aria_label(format!("Edit connection {}", conn.name))
-                                .p_1()
-                                .rounded_sm()
-                                .text_color(colors.muted_text)
-                                .hover(|button| button.bg(colors.hovered_surface).text_color(colors.text))
-                                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                                .on_click(cx.listener(move |shell, _, _, cx| {
-                                    cx.stop_propagation();
-                                    shell.request_edit_connection(&entry_for_edit, cx)
-                                }))
-                                .child(icon(IconName::Edit, colors.muted_text, 11.)),
-                        );
-                        row = row.child(
-                            div()
-                                .id(("delete-connection", conn.id as usize))
-                                .flex_none()
-                                .role(Role::Button)
-                                .aria_label(format!("Delete connection {}", conn.name))
-                                .p_1()
-                                .rounded_sm()
-                                .text_color(colors.muted_text)
-                                .hover(|button| {
-                                    button
-                                        .bg(colors.danger_muted)
-                                        .text_color(colors.danger)
-                                })
-                                .on_mouse_down(MouseButton::Left, |_, _, cx| {
-                                    cx.stop_propagation()
-                                })
-                                .on_click(cx.listener(move |shell, _, _, cx| {
-                                    cx.stop_propagation();
-                                    shell.request_delete_connection(&entry_for_delete, cx)
-                                }))
-                                .child(icon(IconName::Close, colors.danger, 11.)),
-                        );
-                        rows.push(row.into_any_element());
-                        if connected && connection_open {
-                            let render_offset = rows.len();
-                            rows.extend(self.connection_schema_rows(
-                                conn,
-                                colors,
-                                &mut nav_index,
-                                render_offset,
-                                cx,
-                            ));
+                        }) {
+                            self.connections_scroll_handle
+                                .scroll_to_item(index, ScrollStrategy::Nearest);
                         }
                     }
-                    if tenant
-                        .rooms
-                        .iter()
-                        .any(|room| !room.workspaces.is_empty())
-                    {
-                        rows.push(
-                            div()
-                                .mx_2()
-                                .h(px(20.))
-                                .pl(tree_indent(1))
-                                .flex()
-                                .items_end()
-                                .text_xs()
-                                .font_weight(gpui::FontWeight::SEMIBOLD)
-                                .text_color(colors.disabled_text)
-                                .child("WORKSPACES")
-                                .into_any_element(),
-                        );
-                    }
-                    for room in &tenant.rooms {
-                        let room_id = room.id.0;
-                        let room_open = self.expanded_rooms.contains(&room_id);
-                        let room_nav_index = nav_index;
-                        nav_index += 1;
-                        if self.focused_surface == WorkspaceSurface::Connections
-                            && self.connection_nav_selected == room_nav_index
-                        {
-                            self.connections_scroll_handle.scroll_to_item(rows.len());
-                        }
-                        rows.push(
-                            div()
-                                .id(("connection-room", room_id as usize))
-                                .mx_2()
-                                .h(cx.theme().metrics.row_height)
-                                .pl(tree_indent(1))
-                                .pr_2()
-                                .flex()
-                                .items_center()
-                                .gap(px(6.))
-                                .rounded_sm()
-                                .when(
-                                    self.focused_surface == WorkspaceSurface::Connections
-                                        && self.connection_nav_selected == room_nav_index,
-                                    |row| row.bg(colors.accent_muted).text_color(colors.text),
-                                )
-                                .text_color(colors.muted_text)
-                                .hover(|row| {
-                                    row.bg(colors.hovered_surface).text_color(colors.text)
-                                })
-                                .on_click(cx.listener(move |shell, _, _, cx| {
-                                    shell.set_connection_selection(room_nav_index, cx);
-                                    shell.toggle_room(room_id, cx)
-                                }))
-                                .child(tree_chevron_slot(room_open, colors.muted_text))
-                                .child(icon(IconName::Users, colors.muted_text, 12.))
-                                .child(div().min_w_0().truncate().child(room.name.clone()))
-                                .child(
-                                    div()
-                                        .id(("create-room-document", room_id as usize))
-                                        .ml_auto()
-                                        .p_1()
-                                        .rounded_sm()
-                                        .role(Role::Button)
-                                        .aria_label(format!("Create query in {}", room.name))
-                                        .hover(|button| button.bg(colors.active_surface))
-                                        .on_mouse_down(MouseButton::Left, |_, _, cx| {
-                                            cx.stop_propagation()
+                    let row_count = rows.len();
+                    dock_view
+                        .child(
+                            uniform_list(
+                                "connections-scroll",
+                                row_count,
+                                cx.processor(move |shell, range: Range<usize>, _, cx| {
+                                    range
+                                        .filter_map(|index| {
+                                            rows.get(index).cloned().map(|row| (index, row))
                                         })
-                                        .on_click(cx.listener(move |shell, _, _, cx| {
-                                            cx.stop_propagation();
-                                            shell.create_room_document(room_id, cx)
-                                        }))
-                                        .child(icon(IconName::Add, colors.muted_text, 11.)),
-                                )
-                                .into_any_element(),
-                        );
-                        if !room_open {
-                            continue;
-                        }
-                        for workspace in &room.workspaces {
-                            let workspace_nav_index = nav_index;
-                            nav_index += 1;
-                            if self.focused_surface == WorkspaceSurface::Connections
-                                && self.connection_nav_selected == workspace_nav_index
-                            {
-                                self.connections_scroll_handle.scroll_to_item(rows.len());
-                            }
-                            let features =
-                                match (workspace.git_enabled, workspace.scheduling_enabled) {
-                                    (true, true) => " · Git · Runs",
-                                    (true, false) => " · Git",
-                                    (false, true) => " · Runs",
-                                    (false, false) => "",
-                                };
-                            let is_open = selected == Some(workspace.id);
-                            let entry = workspace.clone();
-                            rows.push(
-                                div()
-                                    .id(("workspace", workspace.id as usize))
-                                    .mx_2()
-                                    .h(cx.theme().metrics.row_height)
-                                    .pl(tree_indent(2))
-                                    .pr_2()
-                                    .flex()
-                                    .items_center()
-                                    .gap(px(6.))
-                                    .rounded_sm()
-                                    .when(
-                                        self.focused_surface == WorkspaceSurface::Connections
-                                            && self.connection_nav_selected == workspace_nav_index,
-                                        |row| row.bg(colors.accent_muted).text_color(colors.text),
-                                    )
-                                    .when(is_open, |row| {
-                                        row.bg(colors.active_surface).text_color(colors.text)
-                                    })
-                                    .hover(|row| row.bg(colors.hovered_surface))
-                                    .on_click(cx.listener(move |shell, _, _, cx| {
-                                        shell.set_connection_selection(workspace_nav_index, cx);
-                                        shell.open_workspace(&entry, cx)
-                                    }))
-                                    .child(tree_spacer_slot())
-                                    .child(icon(IconName::Workspace, colors.muted_text, 12.))
-                                    .child(
-                                        div()
-                                            .min_w_0()
-                                            .truncate()
-                                            .child(format!("{}{features}", workspace.name)),
-                                    )
-                                    .into_any_element(),
-                            );
-                        }
-                        for document in &room.documents {
-                            let document_nav_index = nav_index;
-                            nav_index += 1;
-                            if self.focused_surface == WorkspaceSurface::Connections
-                                && self.connection_nav_selected == document_nav_index
-                            {
-                                self.connections_scroll_handle.scroll_to_item(rows.len());
-                            }
-                            let entry = document.clone();
-                            rows.push(
-                                div()
-                                    .id(("room-document", document.id.0 as usize))
-                                    .mx_2()
-                                    .h(cx.theme().metrics.row_height)
-                                    .pl(tree_indent(2))
-                                    .pr_2()
-                                    .flex()
-                                    .items_center()
-                                    .gap(px(6.))
-                                    .rounded_sm()
-                                    .when(
-                                        self.focused_surface == WorkspaceSurface::Connections
-                                            && self.connection_nav_selected == document_nav_index,
-                                        |row| row.bg(colors.accent_muted),
-                                    )
-                                    .text_color(colors.text)
-                                    .hover(|row| row.bg(colors.hovered_surface))
-                                    .on_click(cx.listener(move |shell, _, window, cx| {
-                                        shell.set_connection_selection(document_nav_index, cx);
-                                        shell.open_room_document(&entry, window, cx)
-                                    }))
-                                    .child(tree_spacer_slot())
-                                    .child(icon(IconName::Edit, colors.muted_text, 12.))
-                                    .child(
-                                        div()
-                                            .min_w_0()
-                                            .truncate()
-                                            .child(document.title.clone()),
-                                    )
-                                    .into_any_element(),
-                            );
-                        }
-                    }
-                }
-                dock_view
-                    .child(
-                        div()
-                            .id("connections-scroll")
+                                        .map(|(index, row)| {
+                                            shell.render_connection_dock_row(index, row, cx)
+                                        })
+                                        .collect()
+                                }),
+                            )
                             .on_mouse_down(
                                 MouseButton::Left,
                                 cx.listener(|shell, _, window, cx| {
@@ -16149,11 +16004,10 @@ impl WorkspaceShell {
                             )
                             .flex_1()
                             .min_h_0()
-                            .overflow_y_scroll()
-                            .track_scroll(&self.connections_scroll_handle)
-                            .children(rows),
-                    )
-                    .child(self.render_connections_footer(cx))
+                            .w_full()
+                            .track_scroll(&self.connections_scroll_handle),
+                        )
+                        .child(self.render_connections_footer(cx))
                 },
             )
             .when(
