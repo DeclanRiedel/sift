@@ -137,47 +137,8 @@ pub(super) fn render_bottom_panel(
                     })
                     .children(savepoints)
             });
-            let rows = shell.database_processes.iter().map(|process| {
-                let process_id = process.process_id;
-                div()
-                    .id(("database-process", process_id as usize))
-                    .flex_none()
-                    .min_h(px(30.))
-                    .px_3()
-                    .flex()
-                    .items_center()
-                    .gap_3()
-                    .border_b_1()
-                    .border_color(colors.subtle_border)
-                    .child(div().w(px(72.)).child(process_id.to_string()))
-                    .child(
-                        div()
-                            .w(px(120.))
-                            .truncate()
-                            .child(process.user.clone().unwrap_or_else(|| "—".into())),
-                    )
-                    .child(
-                        div()
-                            .w(px(100.))
-                            .truncate()
-                            .child(process.state.clone().unwrap_or_else(|| "—".into())),
-                    )
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .truncate()
-                            .font_family("monospace")
-                            .child(process.statement.clone().unwrap_or_else(|| "Idle".into())),
-                    )
-                    .child(
-                        Button::new(("terminate-process", process_id as usize), "Terminate")
-                            .tone(ButtonTone::DangerGhost)
-                            .on_click(cx.listener(move |shell, _, _, cx| {
-                                shell.request_terminate_process(process_id, cx)
-                            })),
-                    )
-            });
+            let processes = Arc::new(shell.database_processes.clone());
+            let process_count = processes.len();
             div()
                 .flex()
                 .flex_1()
@@ -195,8 +156,8 @@ pub(super) fn render_bottom_panel(
                         .text_xs()
                         .text_color(colors.disabled_text)
                         .child(div().w(px(72.)).child("PROCESS"))
-                        .child(div().w(px(120.)).child("USER"))
-                        .child(div().w(px(100.)).child("STATE"))
+                        .child(div().w(px(180.)).child("USER / DATABASE"))
+                        .child(div().w(px(220.)).child("STATE / WAIT"))
                         .child(div().flex_1().child("STATEMENT"))
                         .child(
                             Button::new(
@@ -215,12 +176,19 @@ pub(super) fn render_bottom_panel(
                         ),
                 )
                 .child(
-                    div()
-                        .id("database-process-list")
-                        .flex_1()
-                        .min_h_0()
-                        .overflow_y_scroll()
-                        .children(rows),
+                    div().id("database-process-list").flex_1().min_h_0().child(
+                        uniform_list(
+                            "database-process-rows",
+                            process_count,
+                            cx.processor(move |_, range: Range<usize>, _, cx| {
+                                range
+                                    .filter_map(|index| processes.get(index).cloned())
+                                    .map(|process| render_database_process_row(process, cx))
+                                    .collect()
+                            }),
+                        )
+                        .size_full(),
+                    ),
                 )
                 .children(
                     shell
@@ -260,5 +228,66 @@ pub(super) fn render_bottom_panel(
                 )
                 .into_any_element()
         })
+        .into_any_element()
+}
+
+fn render_database_process_row(
+    process: sift_protocol::DatabaseProcess,
+    cx: &mut Context<WorkspaceShell>,
+) -> gpui::AnyElement {
+    let colors = cx.theme().colors;
+    let process_id = process.process_id;
+    let user_database = match (process.user, process.database) {
+        (Some(user), Some(database)) => format!("{user} @ {database}"),
+        (Some(user), None) => user,
+        (None, Some(database)) => database,
+        (None, None) => "—".into(),
+    };
+    let mut state = process.state.unwrap_or_else(|| "—".into());
+    if let Some(wait) = process.wait {
+        state.push_str(" · ");
+        state.push_str(&wait);
+    }
+    if !process.blocked_by.is_empty() {
+        state.push_str(" · blocked by ");
+        state.push_str(
+            &process
+                .blocked_by
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(", "),
+        );
+    }
+
+    div()
+        .id(("database-process", process_id as usize))
+        .debug_selector(move || format!("database-process-{process_id}"))
+        .flex_none()
+        .min_h(px(30.))
+        .px_3()
+        .flex()
+        .items_center()
+        .gap_3()
+        .border_b_1()
+        .border_color(colors.subtle_border)
+        .child(div().w(px(72.)).child(process_id.to_string()))
+        .child(div().w(px(180.)).truncate().child(user_database))
+        .child(div().w(px(220.)).truncate().child(state))
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .truncate()
+                .font_family("monospace")
+                .child(process.statement.unwrap_or_else(|| "Idle".into())),
+        )
+        .child(
+            Button::new(("terminate-process", process_id as usize), "Terminate")
+                .tone(ButtonTone::DangerGhost)
+                .on_click(cx.listener(move |shell, _, _, cx| {
+                    shell.request_terminate_process(process_id, cx)
+                })),
+        )
         .into_any_element()
 }

@@ -26105,11 +26105,26 @@ mod tests {
             Ok(ExecutorCommand::LoadDatabaseProcesses)
         ));
         workspace.update(&mut cx, |shell, cx| {
-            shell.database_processes_loading = false;
+            shell.on_executor_event(
+                ExecutorEvent::DatabaseProcessesLoaded(Ok(vec![sift_protocol::DatabaseProcess {
+                    engine: sift_protocol::Engine::Postgres,
+                    process_id: 42,
+                    user: Some("analyst".into()),
+                    database: Some("warehouse".into()),
+                    state: Some("active".into()),
+                    statement: Some("select * from events".into()),
+                    started_at: None,
+                    wait: Some("Lock".into()),
+                    blocked_by: vec![7],
+                }])),
+                cx,
+            );
             shell.request_terminate_process(42, cx);
             assert_eq!(shell.modal, Some(Modal::ConfirmTerminateProcess(42)));
             shell.confirm_terminate_process(42, cx);
         });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("database-process-42").is_some());
         assert!(matches!(
             commands.try_recv(),
             Ok(ExecutorCommand::TerminateDatabaseProcess { process_id: 42 })
