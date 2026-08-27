@@ -36,6 +36,7 @@ impl ItemRegistry {
             ItemKind::Query => &QUERY,
             ItemKind::Configuration => &CONFIGURATION,
             ItemKind::Problems => &PROBLEMS,
+            ItemKind::Notifications => &NOTIFICATIONS,
             ItemKind::Schema => &SCHEMA,
             ItemKind::Welcome => &WELCOME,
         }
@@ -67,6 +68,13 @@ const PROBLEMS: ItemDefinition = ItemDefinition {
     empty_message: "Problems feed is unavailable",
 };
 
+const NOTIFICATIONS: ItemDefinition = ItemDefinition {
+    kind: ItemKind::Notifications,
+    runtime: ItemRuntimeKind::ReadOnlyText,
+    placeholder_prefix: Some("Notifications"),
+    empty_message: "Notifications feed is unavailable",
+};
+
 const SCHEMA: ItemDefinition = ItemDefinition {
     kind: ItemKind::Schema,
     runtime: ItemRuntimeKind::Placeholder,
@@ -81,7 +89,14 @@ const WELCOME: ItemDefinition = ItemDefinition {
     empty_message: "Open a connection or create a query to begin.",
 };
 
-const DEFINITIONS: [ItemDefinition; 5] = [QUERY, CONFIGURATION, PROBLEMS, SCHEMA, WELCOME];
+const DEFINITIONS: [ItemDefinition; 6] = [
+    QUERY,
+    CONFIGURATION,
+    PROBLEMS,
+    NOTIFICATIONS,
+    SCHEMA,
+    WELCOME,
+];
 
 #[cfg(test)]
 mod tests {
@@ -93,11 +108,12 @@ mod tests {
             ItemKind::Query,
             ItemKind::Configuration,
             ItemKind::Problems,
+            ItemKind::Notifications,
             ItemKind::Schema,
             ItemKind::Welcome,
         ] {
             assert_eq!(ItemRegistry::definition(&kind).kind, kind);
         }
-        assert_eq!(ItemRegistry::definitions().len(), 5);
+        assert_eq!(ItemRegistry::definitions().len(), 6);
     }
 }

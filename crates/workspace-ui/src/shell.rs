@@ -463,6 +463,10 @@ enum WorkspaceSurface {
     Problems,
 }
 
+fn is_read_only_feed(kind: ItemKind) -> bool {
+    matches!(kind, ItemKind::Problems | ItemKind::Notifications)
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 enum ResultInspectorView {
     #[default]
@@ -1908,15 +1912,15 @@ impl Pane {
             let language = match item.kind {
                 ItemKind::Configuration if item.title.ends_with(".json") => EditorLanguage::Json,
                 ItemKind::Configuration => EditorLanguage::Toml,
-                ItemKind::Problems => EditorLanguage::PlainText,
+                ItemKind::Problems | ItemKind::Notifications => EditorLanguage::PlainText,
                 ItemKind::Query | ItemKind::Schema | ItemKind::Welcome => EditorLanguage::Sql,
             };
-            let keymap = if item.kind == ItemKind::Problems || vim_mode_default {
+            let keymap = if is_read_only_feed(item.kind) || vim_mode_default {
                 EditorKeymap::Vim
             } else {
                 EditorKeymap::Standard
             };
-            let read_only = item.kind == ItemKind::Problems;
+            let read_only = is_read_only_feed(item.kind);
             let editor = cx.new(|cx| {
                 let editor = QueryEditor::new(document, cx)
                     .with_language(language)
@@ -2202,7 +2206,12 @@ impl Pane {
         let items = self
             .items
             .iter()
-            .filter(|item| !matches!(item.kind, ItemKind::Configuration | ItemKind::Problems))
+            .filter(|item| {
+                !matches!(
+                    item.kind,
+                    ItemKind::Configuration | ItemKind::Problems | ItemKind::Notifications
+                )
+            })
             .cloned()
             .collect::<Vec<_>>();
         let active_id = self.active_item().map(|item| item.id);
@@ -3144,6 +3153,21 @@ impl gpui::Render for Pane {
                                                                         ))
                                                                 },
                                                             )
+                                                            .when(
+                                                                item.kind
+                                                                    == ItemKind::Notifications,
+                                                                |label| {
+                                                                    label
+                                                                        .flex()
+                                                                        .items_center()
+                                                                        .gap_1()
+                                                                        .child(icon(
+                                                                            IconName::Activity,
+                                                                            colors.accent,
+                                                                            13.,
+                                                                        ))
+                                                                },
+                                                            )
                                                             .child(item.title.clone()),
                                                     ),
                                             )
@@ -3286,7 +3310,7 @@ impl gpui::Render for Pane {
                                     .items_center()
                                     .justify_center()
                                     .text_color(colors.muted_text)
-                                    .child("Problems feed is unavailable"),
+                                    .child(ItemRegistry::definition(&item.kind).empty_message),
                             ),
                         }
                     }
@@ -4012,6 +4036,8 @@ pub struct WorkspaceShell {
     app_bar_expanded: bool,
     app_bar_menu: Option<AppBarMenu>,
     toasts: Vec<Toast>,
+    notification_history: Vec<Toast>,
+    unread_notifications: usize,
     next_toast_id: u64,
     status: StatusBar,
     global_problems: Vec<GlobalProblem>,
@@ -4485,6 +4511,8 @@ impl WorkspaceShell {
             app_bar_expanded: false,
             app_bar_menu: None,
             toasts: Vec::new(),
+            notification_history: Vec::new(),
+            unread_notifications: 0,
             status: StatusBar::default(),
             global_problems: Vec::new(),
             lifecycle: LifecycleProjection::default(),
@@ -4985,6 +5013,7 @@ impl WorkspaceShell {
                 .unwrap_or(0)
                 + 1,
         );
+        self.sync_notifications_editor(cx);
         if let Some(pane) = self.panes.get(self.active_pane) {
             pane.read(cx).active_focus_handle(cx).focus(window, cx);
         }
@@ -6342,11 +6371,22 @@ impl WorkspaceShell {
     /// visible at once, and each auto-dismisses independently.
     fn push_toast(&mut self, message: String, tone: ToastTone, cx: &mut Context<Self>) {
         let id = self.next_toast_id;
-        self.next_toast_id += 1;
+        self.next_toast_id = self.next_toast_id.saturating_add(1);
+        let notification = Toast { id, message, tone };
         if self.toasts.len() >= 3 {
             self.toasts.remove(0);
         }
-        self.toasts.push(Toast { id, message, tone });
+        self.toasts.push(notification.clone());
+        self.notification_history.push(notification);
+        const MAX_NOTIFICATION_HISTORY: usize = 200;
+        if self.notification_history.len() > MAX_NOTIFICATION_HISTORY {
+            let overflow = self.notification_history.len() - MAX_NOTIFICATION_HISTORY;
+            self.notification_history.drain(..overflow);
+        }
+        if !self.notifications_tab_active(cx) {
+            self.unread_notifications = self.unread_notifications.saturating_add(1);
+        }
+        self.sync_notifications_editor(cx);
         cx.spawn(async move |shell, cx| {
             cx.background_executor()
                 .timer(std::time::Duration::from_secs(3))
@@ -6357,6 +6397,104 @@ impl WorkspaceShell {
             });
         })
         .detach();
+        cx.notify();
+    }
+
+    fn notifications_tab_active(&self, cx: &App) -> bool {
+        self.panes.get(self.active_pane).is_some_and(|pane| {
+            pane.read(cx)
+                .active_item()
+                .is_some_and(|item| item.kind == ItemKind::Notifications)
+        })
+    }
+
+    fn notifications_text(&self) -> String {
+        if self.notification_history.is_empty() {
+            return "No notifications.".into();
+        }
+        self.notification_history
+            .iter()
+            .rev()
+            .map(|notification| {
+                let tone = match notification.tone {
+                    ToastTone::Info => "INFO",
+                    ToastTone::Success => "SUCCESS",
+                    ToastTone::Error => "ERROR",
+                };
+                format!("[{tone}] {}", notification.message)
+            })
+            .collect::<Vec<_>>()
+            .join("\n\n")
+    }
+
+    fn sync_notifications_editor(&mut self, cx: &mut Context<Self>) {
+        let text = self.notifications_text();
+        for pane in &self.panes {
+            pane.update(cx, |pane, cx| {
+                let Some(item) = pane
+                    .items
+                    .iter()
+                    .find(|item| item.kind == ItemKind::Notifications)
+                else {
+                    return;
+                };
+                if let Some(editor) = pane.editors.get(&item.id) {
+                    editor.update(cx, |editor, cx| editor.replace_text_from_owner(&text, cx));
+                }
+            });
+        }
+    }
+
+    fn show_notifications(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.unread_notifications = 0;
+        self.sync_notifications_editor(cx);
+        if let Some((pane_index, item_index)) =
+            self.panes
+                .iter()
+                .enumerate()
+                .find_map(|(pane_index, pane)| {
+                    pane.read(cx)
+                        .items
+                        .iter()
+                        .position(|item| item.kind == ItemKind::Notifications)
+                        .map(|item_index| (pane_index, item_index))
+                })
+        {
+            self.active_pane = pane_index;
+            self.panes[pane_index].update(cx, |pane, _| pane.activate_item(item_index, true));
+            self.focus_active_pane(window, cx);
+            self.focused_surface = WorkspaceSurface::Problems;
+            cx.notify();
+            return;
+        }
+
+        let item_id = self.next_id;
+        self.next_id = self.next_id.saturating_add(1);
+        let text = self.notifications_text();
+        let editor = cx.new(|cx| {
+            QueryEditor::new(QueryDocument::with_random_peer(&text), cx)
+                .with_language(EditorLanguage::PlainText)
+                .with_keymap(EditorKeymap::Vim)
+                .read_only()
+        });
+        if let Some(pane) = self.panes.get(self.active_pane) {
+            pane.update(cx, |pane, cx| {
+                pane.open_configuration(
+                    ItemPresentation {
+                        id: item_id,
+                        kind: ItemKind::Notifications,
+                        title: "Notifications".into(),
+                        dirty: false,
+                        source: None,
+                        last_result: None,
+                    },
+                    editor,
+                    cx,
+                );
+            });
+        }
+        self.focus_active_pane(window, cx);
+        self.focused_surface = WorkspaceSurface::Problems;
         cx.notify();
     }
 
@@ -10734,16 +10872,20 @@ impl WorkspaceShell {
                 pane.editors
                     .iter()
                     .map(|(item_id, editor)| {
-                        let problems = pane
+                        let read_only_feed = pane
                             .items
                             .iter()
-                            .any(|item| item.id == *item_id && item.kind == ItemKind::Problems);
-                        (editor.clone(), problems)
+                            .any(|item| item.id == *item_id && is_read_only_feed(item.kind));
+                        (editor.clone(), read_only_feed)
                     })
                     .collect::<Vec<_>>()
             };
-            for (editor, problems) in editors {
-                let editor_keymap = if problems { EditorKeymap::Vim } else { keymap };
+            for (editor, read_only_feed) in editors {
+                let editor_keymap = if read_only_feed {
+                    EditorKeymap::Vim
+                } else {
+                    keymap
+                };
                 editor.update(cx, |editor, cx| editor.set_keymap(editor_keymap, cx));
             }
         }
@@ -11307,7 +11449,7 @@ impl WorkspaceShell {
                         WorkspaceSurface::Results
                     } else if pane
                         .active_item()
-                        .is_some_and(|item| item.kind == ItemKind::Problems)
+                        .is_some_and(|item| is_read_only_feed(item.kind))
                     {
                         WorkspaceSurface::Problems
                     } else {
@@ -14944,6 +15086,28 @@ impl WorkspaceShell {
                                 shell.toggle_app_bar_modal(Modal::Account, cx)
                             }))
                             .child(self.render_account_icon(18., cx)),
+                    )
+                    .child(
+                        div()
+                            .debug_selector(|| "toolbar-notifications".into())
+                            .child(
+                                IconButton::new(
+                                    "toolbar-notifications",
+                                    IconName::Activity,
+                                    "Open notifications",
+                                )
+                                .square(px(26.))
+                                .icon_size(14.)
+                                .badge(self.unread_notifications)
+                                .toggle_state(self.notifications_tab_active(cx))
+                                .tooltip("Open notifications")
+                                .on_click(cx.listener(
+                                    |shell, _, window, cx| {
+                                        shell.dismiss_app_bar_overlays(cx);
+                                        shell.show_notifications(window, cx);
+                                    },
+                                )),
+                            ),
                     )
                     .child(
                         div()
@@ -27343,6 +27507,74 @@ mod tests {
 
         assert_eq!(cx.update(|window, cx| window.simulate_next_frame(cx)), 1);
         assert!(!workspace.read_with(&cx, |shell, _| shell.workspace_resize_frame_pending));
+    }
+
+    #[gpui::test]
+    fn app_bar_notifications_open_a_singleton_text_feed(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+
+        workspace.update(&mut cx, |shell, cx| {
+            shell.show_toast("Started export".into(), cx);
+            shell.show_success_toast("Saved query".into(), cx);
+            shell.show_error_toast("Connection lost".into(), cx);
+            assert_eq!(shell.unread_notifications, 3);
+            shell.dismiss_toast(cx);
+            assert!(shell.toasts.is_empty());
+            assert_eq!(shell.notification_history.len(), 3);
+        });
+        cx.run_until_parked();
+
+        let notifications = cx
+            .debug_bounds("toolbar-notifications")
+            .expect("notifications app-bar action");
+        cx.simulate_click(notifications.center(), Modifiers::default());
+        cx.run_until_parked();
+
+        workspace.update(&mut cx, |shell, cx| {
+            assert_eq!(shell.unread_notifications, 0);
+            let pane = shell.panes[shell.active_pane].read(cx);
+            assert_eq!(
+                pane.items
+                    .iter()
+                    .filter(|item| item.kind == ItemKind::Notifications)
+                    .count(),
+                1
+            );
+            let item = pane.active_item().expect("active notifications item");
+            assert_eq!(item.kind, ItemKind::Notifications);
+            assert_eq!(item.title, "Notifications");
+            assert_eq!(
+                pane.editor(item.id).unwrap().read(cx).document().text(),
+                "[ERROR] Connection lost\n\n[SUCCESS] Saved query\n\n[INFO] Started export"
+            );
+        });
+
+        workspace.update(&mut cx, |shell, cx| {
+            shell.show_toast("Still working".into(), cx);
+            assert_eq!(shell.unread_notifications, 0);
+            let pane = shell.panes[shell.active_pane].read(cx);
+            let item = pane.active_item().unwrap();
+            assert_eq!(
+                pane.editor(item.id).unwrap().read(cx).document().text(),
+                "[INFO] Still working\n\n[ERROR] Connection lost\n\n[SUCCESS] Saved query\n\n[INFO] Started export"
+            );
+        });
+
+        let notifications = cx.debug_bounds("toolbar-notifications").unwrap();
+        cx.simulate_click(notifications.center(), Modifiers::default());
+        cx.run_until_parked();
+        workspace.read_with(&cx, |shell, cx| {
+            let pane = shell.panes[shell.active_pane].read(cx);
+            assert_eq!(
+                pane.items
+                    .iter()
+                    .filter(|item| item.kind == ItemKind::Notifications)
+                    .count(),
+                1
+            );
+        });
     }
 
     #[gpui::test]

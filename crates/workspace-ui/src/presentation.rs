@@ -98,6 +98,7 @@ pub enum ItemKind {
     Query,
     Configuration,
     Problems,
+    Notifications,
     Schema,
     Welcome,
 }
