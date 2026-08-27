@@ -830,7 +830,7 @@ impl ResultsView {
             },
         );
         let grid_filter_input = cx.new(|cx| {
-            TextInput::new("", "Filter loaded rows", cx).aria_label("Filter loaded result rows")
+            TextInput::new("", "Filter all columns", cx).aria_label("Filter result rows")
         });
         let grid_filter_subscription =
             cx.subscribe(&grid_filter_input, |view, _, event: &TextInputEvent, cx| {
@@ -850,9 +850,8 @@ impl ResultsView {
                 }
             },
         );
-        let grid_search_input = cx.new(|cx| {
-            TextInput::new("", "Find in rows", cx).aria_label("Find in loaded result rows")
-        });
+        let grid_search_input = cx
+            .new(|cx| TextInput::new("", "Find value", cx).aria_label("Find value in result rows"));
         let grid_search_subscription =
             cx.subscribe(&grid_search_input, |view, _, event: &TextInputEvent, cx| {
                 if *event == TextInputEvent::Submitted {
@@ -2105,6 +2104,27 @@ impl ResultsView {
         cx.notify();
     }
 
+    fn navigate_grid_transform(
+        &mut self,
+        direction: isize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let columns = self.visible_column_indices();
+        let Some(current) = self.grid_transform_column else {
+            return;
+        };
+        let Some(position) = columns.iter().position(|column| *column == current) else {
+            return;
+        };
+        let next = position
+            .saturating_add_signed(direction)
+            .min(columns.len().saturating_sub(1));
+        if let Some(column) = columns.get(next).copied() {
+            self.open_grid_transform(column, self.grid_transform_tab, window, cx);
+        }
+    }
+
     fn set_sort(
         &mut self,
         column: usize,
@@ -2132,8 +2152,7 @@ impl ResultsView {
             .flat_map(|row| columns.iter().map(move |column| (*row, *column)))
             .filter(|(row, column)| {
                 self.rendered_rows[*row][*column]
-                    .text
-                    .to_lowercase()
+                    .filter_text
                     .contains(&query)
             })
             .collect::<Vec<_>>();
@@ -3083,18 +3102,6 @@ impl ResultsView {
                             .flex()
                             .items_center()
                             .gap_1()
-                            .child(
-                                div()
-                                    .w(px(150.))
-                                    .h(px(24.))
-                                    .child(self.grid_filter_input.clone()),
-                            )
-                            .child(
-                                div()
-                                    .w(px(150.))
-                                    .h(px(24.))
-                                    .child(self.grid_search_input.clone()),
-                            )
                             .children(
                                 self.selection_summary()
                                     .map(|summary| div().max_w(px(240.)).truncate().child(summary)),
@@ -3219,12 +3226,6 @@ impl ResultsView {
                             .flex()
                             .flex_col()
                             .gap_1()
-                            .child(
-                                div()
-                                    .w_full()
-                                    .h(px(24.))
-                                    .child(self.grid_search_input.clone()),
-                            )
                             .children(
                                 self.selection_summary()
                                     .map(|summary| div().w_full().truncate().child(summary)),
@@ -3307,6 +3308,18 @@ impl ResultsView {
         };
         let can_apply_server =
             !server_transform.filters.is_empty() || server_transform.sort.is_some();
+        let visible_columns = self.visible_column_indices();
+        let column_position = visible_columns
+            .iter()
+            .position(|visible| *visible == column_index)
+            .unwrap_or(0);
+        let can_navigate_back = column_position > 0;
+        let can_navigate_forward = column_position + 1 < visible_columns.len();
+        let active_filter_count = self
+            .column_filters
+            .iter()
+            .filter(|filter| !filter.trim().is_empty())
+            .count();
         let tab = |label: &'static str, target: GridTransformTab| {
             let selected = self.grid_transform_tab == target;
             let tab_index: usize = match target {
@@ -3429,60 +3442,158 @@ impl ResultsView {
             div()
                 .id("result-grid-transform-editor")
                 .debug_selector(|| "result-grid-transform-editor".into())
-                .h(px(38.))
+                .h(px(70.))
                 .flex_none()
                 .flex()
-                .items_center()
-                .gap_2()
-                .px_2()
+                .flex_col()
                 .border_b_1()
                 .border_color(colors.subtle_border)
                 .bg(colors.elevated_surface)
                 .child(
                     div()
-                        .max_w(px(180.))
-                        .truncate()
-                        .text_sm()
-                        .font_weight(gpui::FontWeight::SEMIBOLD)
-                        .child(column.name.clone()),
-                )
-                .child(
-                    div()
+                        .h(px(32.))
+                        .flex_none()
                         .flex()
-                        .items_end()
-                        .gap_1()
-                        .child(tab("Filter", GridTransformTab::Filter))
-                        .child(tab("Sort", GridTransformTab::Sort)),
-                )
-                .child(editor)
-                .child(
-                    Button::new("apply-full-result-transform", "Apply to all rows")
-                        .debug_selector("apply-full-result-transform")
-                        .tone(ButtonTone::Accent)
-                        .disabled(!can_apply_server)
-                        .on_click(cx.listener(move |_, _, _, cx| {
-                            cx.stop_propagation();
-                            cx.emit(ResultsEvent::ApplyTransformRequested {
-                                transform: server_transform.clone(),
-                            });
-                        })),
+                        .items_center()
+                        .gap_2()
+                        .px_2()
+                        .border_b_1()
+                        .border_color(colors.subtle_border)
+                        .child(
+                            div()
+                                .text_xs()
+                                .font_weight(gpui::FontWeight::SEMIBOLD)
+                                .text_color(colors.muted_text)
+                                .child("FILTER BUILDER"),
+                        )
+                        .child(
+                            div()
+                                .debug_selector(|| "result-filter-builder-row-filter".into())
+                                .w(px(240.))
+                                .h(px(24.))
+                                .child(self.grid_filter_input.clone()),
+                        )
+                        .child(
+                            div()
+                                .debug_selector(|| "result-filter-builder-find".into())
+                                .w(px(200.))
+                                .h(px(24.))
+                                .child(self.grid_search_input.clone()),
+                        )
+                        .child(
+                            Button::new("find-next-result-value", "Next")
+                                .debug_selector("find-next-result-value")
+                                .tone(ButtonTone::Ghost)
+                                .on_click(cx.listener(|view, _, _, cx| {
+                                    cx.stop_propagation();
+                                    view.select_next_search_match(cx);
+                                })),
+                        )
+                        .child(div().flex_1())
+                        .child(div().text_xs().text_color(colors.muted_text).child(format!(
+                            "{active_filter_count} column filter(s) · {} of {} rows",
+                            self.display_rows.len(),
+                            self.rendered_rows.len()
+                        ))),
                 )
                 .child(
                     div()
-                        .debug_selector(|| "close-result-grid-transform-editor".into())
+                        .h(px(37.))
+                        .flex_none()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .px_2()
                         .child(
-                            IconButton::new(
-                                "close-result-grid-transform-editor",
-                                IconName::Close,
-                                "Close sort and filter editor",
-                            )
-                            .square(px(24.))
-                            .on_click(cx.listener(
-                                |view, _, window, cx| {
+                            div()
+                                .debug_selector(|| "previous-result-transform-column".into())
+                                .child(
+                                    IconButton::new(
+                                        "previous-result-transform-column",
+                                        IconName::ChevronLeft,
+                                        "Previous result column",
+                                    )
+                                    .square(px(22.))
+                                    .disabled(!can_navigate_back)
+                                    .on_click(cx.listener(
+                                        |view, _, window, cx| {
+                                            cx.stop_propagation();
+                                            view.navigate_grid_transform(-1, window, cx);
+                                        },
+                                    )),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .w(px(150.))
+                                .min_w_0()
+                                .truncate()
+                                .text_sm()
+                                .font_weight(gpui::FontWeight::SEMIBOLD)
+                                .child(format!(
+                                    "{}  {}/{}",
+                                    column.name,
+                                    column_position + 1,
+                                    visible_columns.len()
+                                )),
+                        )
+                        .child(
+                            div()
+                                .debug_selector(|| "next-result-transform-column".into())
+                                .child(
+                                    IconButton::new(
+                                        "next-result-transform-column",
+                                        IconName::ChevronRight,
+                                        "Next result column",
+                                    )
+                                    .square(px(22.))
+                                    .disabled(!can_navigate_forward)
+                                    .on_click(cx.listener(
+                                        |view, _, window, cx| {
+                                            cx.stop_propagation();
+                                            view.navigate_grid_transform(1, window, cx);
+                                        },
+                                    )),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .items_end()
+                                .gap_1()
+                                .child(tab("Filter", GridTransformTab::Filter))
+                                .child(tab("Sort", GridTransformTab::Sort)),
+                        )
+                        .child(editor)
+                        .child(
+                            Button::new("apply-full-result-transform", "Apply to all rows")
+                                .debug_selector("apply-full-result-transform")
+                                .tone(ButtonTone::Accent)
+                                .disabled(!can_apply_server)
+                                .on_click(cx.listener(move |_, _, _, cx| {
                                     cx.stop_propagation();
-                                    view.close_grid_transform(window, cx);
-                                },
-                            )),
+                                    cx.emit(ResultsEvent::ApplyTransformRequested {
+                                        transform: server_transform.clone(),
+                                    });
+                                })),
+                        )
+                        .child(
+                            div()
+                                .debug_selector(|| "close-result-grid-transform-editor".into())
+                                .child(
+                                    IconButton::new(
+                                        "close-result-grid-transform-editor",
+                                        IconName::Close,
+                                        "Close sort and filter editor",
+                                    )
+                                    .square(px(24.))
+                                    .on_click(cx.listener(
+                                        |view, _, window, cx| {
+                                            cx.stop_propagation();
+                                            view.close_grid_transform(window, cx);
+                                        },
+                                    )),
+                                ),
                         ),
                 )
                 .into_any_element(),
@@ -6141,15 +6252,16 @@ mod tests {
             view.set_state(
                 ResultState::from_execute(ExecuteResponse {
                     cursor_id: sift_protocol::CursorId(1),
-                    columns: vec![column(
-                        "name",
-                        PrimitiveType::Text,
-                        Nullability::NotNullable,
-                    )],
+                    columns: vec![
+                        column("name", PrimitiveType::Text, Nullability::NotNullable),
+                        column("team", PrimitiveType::Text, Nullability::NotNullable),
+                    ],
                     schema_digest: "d".into(),
-                    rows: ["alpha", "zebra"]
+                    rows: [("alpha", "blue"), ("zebra", "amber")]
                         .into_iter()
-                        .map(|value| Row::new(vec![Value::Text(value.into())]))
+                        .map(|(name, team)| {
+                            Row::new(vec![Value::Text(name.into()), Value::Text(team.into())])
+                        })
                         .collect(),
                     affected_rows: None,
                     warnings: Vec::new(),
@@ -6170,6 +6282,29 @@ mod tests {
             view.grid_transform_column == Some(0)
                 && view.grid_transform_tab == GridTransformTab::Filter
         }));
+        assert!(cx
+            .debug_bounds("result-filter-builder-row-filter")
+            .is_some());
+        assert!(cx.debug_bounds("result-filter-builder-find").is_some());
+
+        let next_column = cx
+            .debug_bounds("next-result-transform-column")
+            .expect("next column navigator");
+        cx.simulate_click(next_column.center(), Modifiers::default());
+        cx.run_until_parked();
+        assert_eq!(
+            view.read_with(&cx, |view, _| view.grid_transform_column),
+            Some(1)
+        );
+        let previous_column = cx
+            .debug_bounds("previous-result-transform-column")
+            .expect("previous column navigator");
+        cx.simulate_click(previous_column.center(), Modifiers::default());
+        cx.run_until_parked();
+        assert_eq!(
+            view.read_with(&cx, |view, _| view.grid_transform_column),
+            Some(0)
+        );
 
         let sort_tab = cx
             .debug_bounds("grid-transform-tab-sort")

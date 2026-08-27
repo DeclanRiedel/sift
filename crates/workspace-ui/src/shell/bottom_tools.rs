@@ -172,22 +172,27 @@ pub(super) fn render_bottom_panel(
                             div()
                                 .debug_selector(|| "database-process-statement-header".into())
                                 .flex_1()
+                                .min_w_0()
                                 .text_right()
                                 .child("STATEMENT"),
                         )
                         .child(
-                            Button::new(
-                                "refresh-database-processes",
-                                if shell.database_processes_loading {
-                                    "Loading…"
-                                } else {
-                                    "Refresh"
-                                },
-                            )
-                            .tone(ButtonTone::Ghost)
-                            .disabled(shell.database_processes_loading)
-                            .on_click(
-                                cx.listener(|shell, _, _, cx| shell.load_database_processes(cx)),
+                            div().w(px(84.)).flex().justify_end().child(
+                                Button::new(
+                                    "refresh-database-processes",
+                                    if shell.database_processes_loading {
+                                        "Loading…"
+                                    } else {
+                                        "Refresh"
+                                    },
+                                )
+                                .tone(ButtonTone::Ghost)
+                                .disabled(shell.database_processes_loading)
+                                .on_click(
+                                    cx.listener(|shell, _, _, cx| {
+                                        shell.load_database_processes(cx)
+                                    }),
+                                ),
                             ),
                         ),
                 )
@@ -344,6 +349,7 @@ fn render_database_process_row(
         .id(("database-process", process_id as usize))
         .debug_selector(move || format!("database-process-{process_id}"))
         .flex_none()
+        .w_full()
         .min_h(px(30.))
         .px_3()
         .flex()
@@ -370,6 +376,10 @@ fn render_database_process_row(
                 .debug_selector(move || format!("database-process-statement-{process_id}"))
                 .flex_1()
                 .min_w_0()
+                .h_full()
+                .flex()
+                .items_center()
+                .justify_end()
                 .truncate()
                 .text_right()
                 .font_family("monospace")
@@ -382,11 +392,13 @@ fn render_database_process_row(
                 .child(statement),
         )
         .child(
-            Button::new(("terminate-process", process_id as usize), "Terminate")
-                .tone(ButtonTone::DangerGhost)
-                .on_click(cx.listener(move |shell, _, _, cx| {
-                    shell.request_terminate_process(process_id, cx)
-                })),
+            div().w(px(84.)).flex().justify_end().child(
+                Button::new(("terminate-process", process_id as usize), "Terminate")
+                    .tone(ButtonTone::DangerGhost)
+                    .on_click(cx.listener(move |shell, _, _, cx| {
+                        shell.request_terminate_process(process_id, cx)
+                    })),
+            ),
         )
         .into_any_element()
 }
