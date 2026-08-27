@@ -257,6 +257,12 @@ enum GridSelection {
     All,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SortDirection {
+    Ascending,
+    Descending,
+}
+
 #[derive(Debug, Clone, Copy)]
 struct ColumnResizeDrag {
     column: usize,
@@ -723,6 +729,9 @@ pub struct ResultsView {
     /// Display-order projection into source rows. Selection and edits remain
     /// source-indexed when loaded-row transforms reorder the grid.
     display_rows: Arc<Vec<usize>>,
+    sort: Option<(usize, SortDirection)>,
+    grid_filter_input: Entity<TextInput>,
+    _grid_filter_subscription: Subscription,
     column_widths: Vec<f32>,
     /// Stable source-column indices in current display order. Visibility is a
     /// separate projection so excluded fields can return in the same position.
@@ -776,12 +785,24 @@ impl ResultsView {
                 }
             },
         );
+        let grid_filter_input = cx.new(|cx| {
+            TextInput::new("", "Filter loaded rows", cx).aria_label("Filter loaded result rows")
+        });
+        let grid_filter_subscription =
+            cx.subscribe(&grid_filter_input, |view, _, event: &TextInputEvent, cx| {
+                if *event == TextInputEvent::Changed {
+                    view.rebuild_display_rows(cx);
+                }
+            });
         Self {
             focus_handle: cx.focus_handle(),
             state: ResultState::Idle,
             rendered_columns: Vec::new(),
             rendered_rows: Vec::new(),
             display_rows: Arc::new(Vec::new()),
+            sort: None,
+            grid_filter_input,
+            _grid_filter_subscription: grid_filter_subscription,
             column_widths: Vec::new(),
             column_order: Vec::new(),
             included_columns: Vec::new(),
@@ -1323,6 +1344,7 @@ impl ResultsView {
             _ => Vec::new(),
         };
         self.display_rows = Arc::new((0..self.rendered_rows.len()).collect());
+        self.sort = None;
         self.column_widths = vec![DEFAULT_COLUMN_WIDTH; self.rendered_columns.len()];
         self.column_order = (0..self.rendered_columns.len()).collect();
         self.included_columns = vec![true; self.rendered_columns.len()];
@@ -1340,7 +1362,7 @@ impl ResultsView {
         self.selected = None;
         self.inline_cell_edit = None;
         self.staged_cells.clear();
-        cx.notify();
+        self.rebuild_display_rows(cx);
     }
 
     fn is_error_state(state: &ResultState) -> bool {
@@ -1805,6 +1827,50 @@ impl ResultsView {
             .position(|candidate| *candidate == source_row)
     }
 
+    fn rebuild_display_rows(&mut self, cx: &mut Context<Self>) {
+        let filter = self.grid_filter_input.read(cx).text().trim().to_lowercase();
+        let mut rows = (0..self.rendered_rows.len())
+            .filter(|row| {
+                filter.is_empty()
+                    || self.rendered_rows[*row]
+                        .iter()
+                        .any(|cell| cell.text.to_lowercase().contains(&filter))
+            })
+            .collect::<Vec<_>>();
+        if let Some((column, direction)) = self.sort {
+            rows.sort_by(|left_row, right_row| {
+                let left = self.rendered_rows[*left_row]
+                    .get(column)
+                    .map(|cell| &cell.text);
+                let right = self.rendered_rows[*right_row]
+                    .get(column)
+                    .map(|cell| &cell.text);
+                let ordering = left.cmp(&right).then_with(|| left_row.cmp(right_row));
+                match direction {
+                    SortDirection::Ascending => ordering,
+                    SortDirection::Descending => ordering.reverse(),
+                }
+            });
+        }
+        self.display_rows = Arc::new(rows);
+        self.selected = None;
+        self.row_scroll_handle
+            .scroll_to_item(0, ScrollStrategy::Top);
+        cx.emit(ResultsEvent::SelectionChanged);
+        cx.notify();
+    }
+
+    fn cycle_sort(&mut self, column: usize, cx: &mut Context<Self>) {
+        self.sort = match self.sort {
+            Some((current, SortDirection::Ascending)) if current == column => {
+                Some((column, SortDirection::Descending))
+            }
+            Some((current, SortDirection::Descending)) if current == column => None,
+            _ => Some((column, SortDirection::Ascending)),
+        };
+        self.rebuild_display_rows(cx);
+    }
+
     #[cfg(test)]
     fn set_display_rows(&mut self, rows: Vec<usize>, cx: &mut Context<Self>) {
         debug_assert!(rows.iter().all(|row| *row < self.rendered_rows.len()));
@@ -1813,6 +1879,13 @@ impl ResultsView {
         self.row_scroll_handle
             .scroll_to_item(0, ScrollStrategy::Top);
         cx.notify();
+    }
+
+    #[cfg(test)]
+    fn set_grid_filter(&mut self, filter: &str, cx: &mut Context<Self>) {
+        self.grid_filter_input
+            .update(cx, |input, cx| input.set_text(filter, cx));
+        self.rebuild_display_rows(cx);
     }
 
     pub(crate) fn set_column_included(
@@ -2577,6 +2650,12 @@ impl ResultsView {
                             .flex()
                             .items_center()
                             .gap_1()
+                            .child(
+                                div()
+                                    .w(px(180.))
+                                    .h(px(24.))
+                                    .child(self.grid_filter_input.clone()),
+                            )
                             .children((!self.staged_cells.is_empty()).then(|| {
                                 Button::new(
                                     "review-staged-result-edits",
@@ -2907,12 +2986,31 @@ impl ResultsView {
                                 view.focus_handle.focus(window, cx);
                                 view.select_column(source_column, cx);
                             }))
+                            .on_mouse_down(
+                                MouseButton::Right,
+                                cx.listener(move |view, _, _, cx| {
+                                    cx.stop_propagation();
+                                    view.cycle_sort(source_column, cx);
+                                }),
+                            )
                             .child(
                                 div()
                                     .text_sm()
                                     .font_weight(gpui::FontWeight::SEMIBOLD)
                                     .truncate()
-                                    .child(column.name.clone()),
+                                    .child(match self.sort {
+                                        Some((sorted, SortDirection::Ascending))
+                                            if sorted == source_column =>
+                                        {
+                                            format!("{} ↑", column.name)
+                                        }
+                                        Some((sorted, SortDirection::Descending))
+                                            if sorted == source_column =>
+                                        {
+                                            format!("{} ↓", column.name)
+                                        }
+                                        _ => column.name.to_string(),
+                                    }),
                             )
                             .child(
                                 div()
@@ -4414,6 +4512,39 @@ mod tests {
             assert_eq!(edits.len(), 2);
             assert_eq!(edits[0].selected.original, Value::Text("third".into()));
             assert_eq!(edits[1].selected.original, Value::Text("first".into()));
+        });
+    }
+
+    #[gpui::test]
+    fn loaded_rows_filter_and_sort_without_reordering_source_data(cx: &mut TestAppContext) {
+        let view = cx.update(|cx| cx.new(ResultsView::new));
+        view.update(cx, |view, cx| {
+            view.set_state(
+                ResultState::from_execute(ExecuteResponse {
+                    cursor_id: sift_protocol::CursorId(1),
+                    columns: vec![column(
+                        "name",
+                        PrimitiveType::Text,
+                        Nullability::NotNullable,
+                    )],
+                    schema_digest: "d".into(),
+                    rows: ["zebra", "alpha", "alpine"]
+                        .into_iter()
+                        .map(|value| Row::new(vec![Value::Text(value.into())]))
+                        .collect(),
+                    affected_rows: None,
+                    warnings: Vec::new(),
+                    has_more: false,
+                }),
+                cx,
+            );
+            view.set_grid_filter("al", cx);
+            assert_eq!(&*view.display_rows, &[1, 2]);
+            view.cycle_sort(0, cx);
+            assert_eq!(&*view.display_rows, &[1, 2]);
+            view.cycle_sort(0, cx);
+            assert_eq!(&*view.display_rows, &[2, 1]);
+            assert_eq!(view.rendered_rows[0][0].text, "zebra");
         });
     }
 
