@@ -55,6 +55,88 @@ pub(super) fn render_bottom_panel(
                 )),
         )
         .child(if shell.active_bottom_tool == BottomTool::Monitor {
+            let transaction = shell.transaction.as_ref().map(|transaction| {
+                let savepoints =
+                    shell
+                        .savepoints
+                        .iter()
+                        .rev()
+                        .cloned()
+                        .enumerate()
+                        .map(|(index, name)| {
+                            let selector_name = name.clone();
+                            let rollback_name = name.clone();
+                            let release_name = name.clone();
+                            div()
+                                .debug_selector(move || {
+                                    format!("transaction-savepoint-{selector_name}")
+                                })
+                                .h(px(28.))
+                                .flex_none()
+                                .px_3()
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .child(div().flex_1().font_family("monospace").child(name))
+                                .child(
+                                    Button::new(("rollback-savepoint", index), "Rollback to")
+                                        .debug_selector(format!(
+                                            "rollback-savepoint-{rollback_name}"
+                                        ))
+                                        .tone(ButtonTone::Neutral)
+                                        .disabled(shell.transaction_pending)
+                                        .on_click(cx.listener(move |shell, _, _, cx| {
+                                            shell.rollback_to_savepoint(rollback_name.clone(), cx)
+                                        })),
+                                )
+                                .child(
+                                    Button::new(("release-savepoint", index), "Release")
+                                        .debug_selector(format!("release-savepoint-{release_name}"))
+                                        .tone(ButtonTone::Ghost)
+                                        .disabled(shell.transaction_pending)
+                                        .on_click(cx.listener(move |shell, _, _, cx| {
+                                            shell.release_savepoint(release_name.clone(), cx)
+                                        })),
+                                )
+                        });
+                let mode = format!(
+                    "{:?} · {:?}",
+                    transaction.mode.isolation, transaction.mode.access
+                );
+                div()
+                    .debug_selector(|| "transaction-monitor".into())
+                    .flex_none()
+                    .border_b_1()
+                    .border_color(colors.subtle_border)
+                    .child(
+                        div()
+                            .h(px(30.))
+                            .px_3()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .child(SectionLabel::new(format!(
+                                "TRANSACTION {}",
+                                transaction.tx_id
+                            )))
+                            .child(div().text_xs().child(mode))
+                            .child(div().flex_1())
+                            .child(
+                                Button::new("monitor-create-savepoint", "New savepoint")
+                                    .tone(ButtonTone::Neutral)
+                                    .disabled(
+                                        shell.transaction_pending || shell.transaction_aborted,
+                                    )
+                                    .on_click(
+                                        cx.listener(|shell, _, _, cx| shell.create_savepoint(cx)),
+                                    ),
+                            ),
+                    )
+                    .when(shell.savepoints.is_empty(), |panel| {
+                        panel.child(div().px_3().pb_2().text_xs().child("No savepoints"))
+                    })
+                    .children(savepoints)
+            });
             let rows = shell.database_processes.iter().map(|process| {
                 let process_id = process.process_id;
                 div()
@@ -101,6 +183,7 @@ pub(super) fn render_bottom_panel(
                 .flex_1()
                 .min_h_0()
                 .flex_col()
+                .children(transaction)
                 .child(
                     div()
                         .flex_none()

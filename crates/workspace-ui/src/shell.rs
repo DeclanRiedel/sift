@@ -10518,12 +10518,24 @@ impl WorkspaceShell {
 
     fn rollback_last_savepoint(&mut self, cx: &mut Context<Self>) {
         if let Some(name) = self.savepoints.last().cloned() {
-            self.send_savepoint_command(ExecutorCommand::RollbackToSavepoint { name }, cx);
+            self.rollback_to_savepoint(name, cx);
         }
     }
 
     fn release_last_savepoint(&mut self, cx: &mut Context<Self>) {
         if let Some(name) = self.savepoints.last().cloned() {
+            self.release_savepoint(name, cx);
+        }
+    }
+
+    fn rollback_to_savepoint(&mut self, name: String, cx: &mut Context<Self>) {
+        if self.savepoints.iter().any(|candidate| candidate == &name) {
+            self.send_savepoint_command(ExecutorCommand::RollbackToSavepoint { name }, cx);
+        }
+    }
+
+    fn release_savepoint(&mut self, name: String, cx: &mut Context<Self>) {
+        if self.savepoints.iter().any(|candidate| candidate == &name) {
             self.send_savepoint_command(ExecutorCommand::ReleaseSavepoint { name }, cx);
         }
     }
@@ -26377,6 +26389,15 @@ mod tests {
             workspace.read_with(&cx, |shell, _| shell.savepoints.clone()),
             vec!["sift_1"]
         );
+        workspace.update(&mut cx, |shell, cx| {
+            shell.transaction_pending = false;
+            shell.select_bottom_tool(BottomTool::Monitor, cx);
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("transaction-monitor").is_some());
+        assert!(cx.debug_bounds("transaction-savepoint-sift_1").is_some());
+        assert!(cx.debug_bounds("rollback-savepoint-sift_1").is_some());
+        assert!(cx.debug_bounds("release-savepoint-sift_1").is_some());
     }
 
     #[gpui::test]
