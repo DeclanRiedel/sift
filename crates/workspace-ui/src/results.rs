@@ -572,6 +572,11 @@ actions!(
         MoveCellRight,
         MoveCellUp,
         MoveCellDown,
+        MoveFirstResultRow,
+        MoveLastResultRow,
+        MoveFirstResultColumn,
+        MoveLastResultColumn,
+        YankSelectedWithHeaders,
         PreviousResultTab,
         NextResultTab
     ]
@@ -2080,6 +2085,88 @@ impl ResultsView {
         self.move_selection(1, 0, cx);
     }
 
+    fn move_first_result_row(
+        &mut self,
+        _: &MoveFirstResultRow,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let current = self
+            .selected
+            .and_then(|selection| match selection {
+                GridSelection::Cell { row, .. }
+                | GridSelection::Row(row)
+                | GridSelection::Range { focus_row: row, .. } => self.display_position(row),
+                GridSelection::Column(_) | GridSelection::All => Some(0),
+            })
+            .unwrap_or(0);
+        self.move_selection(-(current as isize), 0, cx);
+    }
+
+    fn move_last_result_row(
+        &mut self,
+        _: &MoveLastResultRow,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let current = self
+            .selected
+            .and_then(|selection| match selection {
+                GridSelection::Cell { row, .. }
+                | GridSelection::Row(row)
+                | GridSelection::Range { focus_row: row, .. } => self.display_position(row),
+                GridSelection::Column(_) | GridSelection::All => Some(0),
+            })
+            .unwrap_or(0);
+        let delta = self.display_rows.len().saturating_sub(current + 1) as isize;
+        self.move_selection(delta, 0, cx);
+    }
+
+    fn move_first_result_column(
+        &mut self,
+        _: &MoveFirstResultColumn,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let columns = self.visible_column_indices();
+        let current = self
+            .selected
+            .and_then(|selection| match selection {
+                GridSelection::Cell { column, .. }
+                | GridSelection::Column(column)
+                | GridSelection::Range {
+                    focus_column: column,
+                    ..
+                } => columns.iter().position(|candidate| *candidate == column),
+                GridSelection::Row(_) | GridSelection::All => Some(0),
+            })
+            .unwrap_or(0);
+        self.move_selection(0, -(current as isize), cx);
+    }
+
+    fn move_last_result_column(
+        &mut self,
+        _: &MoveLastResultColumn,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let columns = self.visible_column_indices();
+        let current = self
+            .selected
+            .and_then(|selection| match selection {
+                GridSelection::Cell { column, .. }
+                | GridSelection::Column(column)
+                | GridSelection::Range {
+                    focus_column: column,
+                    ..
+                } => columns.iter().position(|candidate| *candidate == column),
+                GridSelection::Row(_) | GridSelection::All => Some(0),
+            })
+            .unwrap_or(0);
+        let delta = columns.len().saturating_sub(current + 1) as isize;
+        self.move_selection(0, delta, cx);
+    }
+
     fn edit_selected_cell(&mut self, _: &EditSelectedCell, _: &mut Window, cx: &mut Context<Self>) {
         if matches!(self.selected, Some(GridSelection::Cell { .. })) {
             cx.emit(ResultsEvent::EditSelectedCellRequested);
@@ -2191,6 +2278,33 @@ impl ResultsView {
         cx: &mut Context<Self>,
     ) {
         self.copy_selected_with_headers_to_clipboard(cx);
+    }
+
+    fn yank_selected_with_headers(
+        &mut self,
+        _: &YankSelectedWithHeaders,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.copy_selected_with_headers_to_clipboard(cx) {
+            return;
+        }
+        self.visual_selection = false;
+        if let Some(GridSelection::Range {
+            focus_row,
+            focus_column,
+            ..
+        }) = self.selected
+        {
+            self.set_selection(
+                GridSelection::Cell {
+                    row: focus_row,
+                    column: focus_column,
+                },
+                cx,
+            );
+        }
+        cx.notify();
     }
 
     pub(crate) fn copy_selected_with_headers_to_clipboard(
@@ -3760,6 +3874,11 @@ impl gpui::Render for ResultsView {
             .on_action(cx.listener(Self::move_cell_right))
             .on_action(cx.listener(Self::move_cell_up))
             .on_action(cx.listener(Self::move_cell_down))
+            .on_action(cx.listener(Self::move_first_result_row))
+            .on_action(cx.listener(Self::move_last_result_row))
+            .on_action(cx.listener(Self::move_first_result_column))
+            .on_action(cx.listener(Self::move_last_result_column))
+            .on_action(cx.listener(Self::yank_selected_with_headers))
             .on_action(cx.listener(Self::previous_result_tab))
             .on_action(cx.listener(Self::next_result_tab))
             .flex()
@@ -4974,6 +5093,48 @@ mod tests {
                     .and_then(|item| item.text())
                     .as_deref(),
                 Some("neo\t1\ntrinity\t2")
+            );
+
+            view.set_selection(GridSelection::Cell { row: 1, column: 0 }, cx);
+            view.toggle_visual_selection(&ToggleVisualSelection, window, cx);
+            view.move_first_result_row(&MoveFirstResultRow, window, cx);
+            assert_eq!(
+                view.selected,
+                Some(GridSelection::Range {
+                    anchor_row: 1,
+                    anchor_column: 0,
+                    focus_row: 0,
+                    focus_column: 0,
+                }),
+                "v gg extends to the first displayed row"
+            );
+            view.move_last_result_column(&MoveLastResultColumn, window, cx);
+            view.yank_selected_with_headers(&YankSelectedWithHeaders, window, cx);
+            assert_eq!(
+                cx.read_from_clipboard()
+                    .and_then(|item| item.text())
+                    .as_deref(),
+                Some("name\trank\nneo\t1\ntrinity\t2"),
+                "visual yanks include the highlighted column headers"
+            );
+            assert_eq!(
+                view.selected,
+                Some(GridSelection::Cell { row: 0, column: 1 }),
+                "yank exits visual selection at its focus"
+            );
+
+            view.set_selection(GridSelection::Cell { row: 0, column: 0 }, cx);
+            view.toggle_visual_selection(&ToggleVisualSelection, window, cx);
+            view.move_last_result_row(&MoveLastResultRow, window, cx);
+            assert_eq!(
+                view.selected,
+                Some(GridSelection::Range {
+                    anchor_row: 0,
+                    anchor_column: 0,
+                    focus_row: 1,
+                    focus_column: 0,
+                }),
+                "v G extends to the last displayed row"
             );
         });
     }
