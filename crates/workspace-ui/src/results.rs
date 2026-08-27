@@ -574,6 +574,9 @@ actions!(
         ExitVisualSelection,
         PasteSelectedCell,
         RevertSelectedCell,
+        UndoStagedEdit,
+        RedoStagedEdit,
+        EditCellBelow,
         MoveCellLeft,
         MoveCellRight,
         MoveCellUp,
@@ -641,6 +644,14 @@ pub enum ResultsEvent {
     RerunHistory {
         sql: String,
     },
+}
+
+#[derive(Debug, Clone)]
+struct StagedEditHistory {
+    row: usize,
+    column: usize,
+    before: Option<Value>,
+    after: Value,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -746,6 +757,8 @@ pub struct ResultsView {
     editing_cell: Option<(usize, usize)>,
     inline_cell_edit: Option<InlineCellEdit>,
     staged_cells: HashMap<(usize, usize), Value>,
+    staged_undo: Vec<StagedEditHistory>,
+    staged_redo: Vec<StagedEditHistory>,
     /// Bytes written by an active streamed export. `None` means idle.
     export_bytes: Option<u64>,
     restore_grid_focus: bool,
@@ -826,6 +839,8 @@ impl ResultsView {
             editing_cell: None,
             inline_cell_edit: None,
             staged_cells: HashMap::new(),
+            staged_undo: Vec::new(),
+            staged_redo: Vec::new(),
             export_bytes: None,
             restore_grid_focus: false,
             query_started_at: None,
@@ -1087,6 +1102,8 @@ impl ResultsView {
             self.staged_cells.remove(&(*row, *column));
             self.replace_rendered_cell(*row, *column, value);
         }
+        self.staged_undo.clear();
+        self.staged_redo.clear();
         cx.notify();
         resolved.len()
     }
@@ -1127,8 +1144,16 @@ impl ResultsView {
         }) else {
             return false;
         };
-        self.staged_cells
+        let before = self
+            .staged_cells
             .insert((row_index, column_index), value.clone());
+        self.staged_undo.push(StagedEditHistory {
+            row: row_index,
+            column: column_index,
+            before,
+            after: value.clone(),
+        });
+        self.staged_redo.clear();
         self.replace_rendered_cell(row_index, column_index, &value);
         cx.notify();
         true
@@ -1137,6 +1162,8 @@ impl ResultsView {
     pub(crate) fn clear_staged_cells(&mut self, cx: &mut Context<Self>) {
         let coordinates = self.staged_cells.keys().copied().collect::<Vec<_>>();
         self.staged_cells.clear();
+        self.staged_undo.clear();
+        self.staged_redo.clear();
         let originals = self.state.ready().map(|data| {
             coordinates
                 .iter()
@@ -1407,6 +1434,8 @@ impl ResultsView {
         self.selected = None;
         self.inline_cell_edit = None;
         self.staged_cells.clear();
+        self.staged_undo.clear();
+        self.staged_redo.clear();
         self.rebuild_display_rows(cx);
     }
 
@@ -2487,6 +2516,56 @@ impl ResultsView {
     ) {
         if matches!(self.selected, Some(GridSelection::Cell { .. })) {
             cx.emit(ResultsEvent::RevertSelectedCellRequested);
+        }
+    }
+
+    fn undo_staged_edit(&mut self, _: &UndoStagedEdit, _: &mut Window, cx: &mut Context<Self>) {
+        self.undo_last_staged_edit(cx);
+    }
+
+    fn undo_last_staged_edit(&mut self, cx: &mut Context<Self>) {
+        let Some(change) = self.staged_undo.pop() else {
+            return;
+        };
+        if let Some(value) = change.before.as_ref() {
+            self.staged_cells
+                .insert((change.row, change.column), value.clone());
+            self.replace_rendered_cell(change.row, change.column, value);
+        } else {
+            self.staged_cells.remove(&(change.row, change.column));
+            let original = self.state.ready().and_then(|data| {
+                data.rows
+                    .get(change.row)
+                    .and_then(|row| row.values.get(change.column))
+                    .cloned()
+            });
+            if let Some(original) = original.as_ref() {
+                self.replace_rendered_cell(change.row, change.column, original);
+            }
+        }
+        self.staged_redo.push(change);
+        cx.notify();
+    }
+
+    fn redo_staged_edit(&mut self, _: &RedoStagedEdit, _: &mut Window, cx: &mut Context<Self>) {
+        self.redo_last_staged_edit(cx);
+    }
+
+    fn redo_last_staged_edit(&mut self, cx: &mut Context<Self>) {
+        let Some(change) = self.staged_redo.pop() else {
+            return;
+        };
+        self.staged_cells
+            .insert((change.row, change.column), change.after.clone());
+        self.replace_rendered_cell(change.row, change.column, &change.after);
+        self.staged_undo.push(change);
+        cx.notify();
+    }
+
+    fn edit_cell_below(&mut self, _: &EditCellBelow, _: &mut Window, cx: &mut Context<Self>) {
+        self.move_selection(1, 0, cx);
+        if matches!(self.selected, Some(GridSelection::Cell { .. })) {
+            cx.emit(ResultsEvent::EditSelectedCellRequested);
         }
     }
 
@@ -4156,6 +4235,9 @@ impl gpui::Render for ResultsView {
             .on_action(cx.listener(Self::paste_selected_cell))
             .on_action(cx.listener(Self::delete_selected_values))
             .on_action(cx.listener(Self::revert_selected_cell))
+            .on_action(cx.listener(Self::undo_staged_edit))
+            .on_action(cx.listener(Self::redo_staged_edit))
+            .on_action(cx.listener(Self::edit_cell_below))
             .on_action(cx.listener(Self::move_cell_left))
             .on_action(cx.listener(Self::move_cell_right))
             .on_action(cx.listener(Self::move_cell_up))
@@ -4365,6 +4447,12 @@ mod tests {
             assert_eq!(view.staged_cells.get(&(0, 0)), Some(&Value::Int64(9)));
             assert_eq!(view.rendered_rows[0][0].text, "9");
             assert_eq!(view.selected_cell_edit().unwrap().original, Value::Int64(7));
+            view.undo_last_staged_edit(cx);
+            assert!(view.staged_cells.is_empty());
+            assert_eq!(view.rendered_rows[0][0].text, "7");
+            view.redo_last_staged_edit(cx);
+            assert_eq!(view.staged_cells.get(&(0, 0)), Some(&Value::Int64(9)));
+            assert_eq!(view.rendered_rows[0][0].text, "9");
             view.clear_staged_cells(cx);
             assert!(view.staged_cells.is_empty());
             assert_eq!(view.rendered_rows[0][0].text, "7");

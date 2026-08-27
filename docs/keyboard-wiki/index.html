@@ -153,6 +153,10 @@
             <tr><td><code>v</code></td><td>Start or finish visual cell selection</td></tr>
             <tr><td><code>y</code></td><td>Yank highlighted fields with headers</td></tr>
             <tr><td><code>p</code></td><td>Stage clipboard paste when editable</td></tr>
+            <tr><td><code>i / o</code></td><td>Edit current cell / cell on the next row</td></tr>
+            <tr><td><code>d / x</code></td><td>Stage selected fields as NULL</td></tr>
+            <tr><td><code>u / Ctrl+R</code></td><td>Undo / redo staged edits</td></tr>
+            <tr><td><code>U</code></td><td>Revert the selected staged cell</td></tr>
             <tr><td><code>/ · n · N</code></td><td>Search results</td></tr>
           </tbody>
         </table>
@@ -189,16 +193,18 @@
       </section>
 
       <section id="editing">
-        <h2>Editable results <small>planned next feature</small></h2>
+        <h2>Editable results</h2>
         <table>
           <thead><tr><th>Key</th><th>Action</th></tr></thead>
           <tbody>
             <tr><td><code>i</code></td><td>Edit current cell</td></tr>
-            <tr><td><code>dd / o</code></td><td>Stage row deletion / insertion</td></tr>
+            <tr><td><code>o</code></td><td>Move down and edit the next cell</td></tr>
+            <tr><td><code>d / x</code></td><td>Stage selected fields as NULL</td></tr>
             <tr><td><code>&lt;leader&gt; e p</code></td><td>Preview staged changes</td></tr>
             <tr><td><code>&lt;leader&gt; e a</code></td><td>Apply approved changes</td></tr>
             <tr><td><code>&lt;leader&gt; e r</code></td><td>Revert staged changes</td></tr>
             <tr><td><code>u / Ctrl+R</code></td><td>Undo / redo staged changes</td></tr>
+            <tr><td><code>U</code></td><td>Revert the selected staged cell</td></tr>
           </tbody>
         </table>
         <p>Mutation commands stage or preview changes. They never bypass approval or conflict checks.</p>
