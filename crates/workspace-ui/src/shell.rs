@@ -14042,6 +14042,25 @@ impl WorkspaceShell {
     }
 
     fn apply_semantic_rename(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some((item_id, revision)) = self
+            .pending_semantic_rename
+            .as_ref()
+            .map(|rename| (rename.item_id, rename.revision))
+        else {
+            return;
+        };
+        if self
+            .editor_for_item(item_id, cx)
+            .is_none_or(|editor| editor.read(cx).text_revision() != revision)
+        {
+            if let Some(rename) = self.pending_semantic_rename.as_mut() {
+                rename.edits = None;
+                rename.warnings =
+                    vec!["The query changed after this preview. Preview the rename again.".into()];
+            }
+            cx.notify();
+            return;
+        }
         let Some(rename) = self.pending_semantic_rename.take() else {
             return;
         };
@@ -14056,6 +14075,34 @@ impl WorkspaceShell {
         self.modal = None;
         self.focus_active_pane(window, cx);
         cx.notify();
+    }
+
+    fn semantic_rename_preview_rows(&self, cx: &App) -> Vec<(usize, String, String)> {
+        let Some(rename) = self.pending_semantic_rename.as_ref() else {
+            return Vec::new();
+        };
+        let Some(edits) = rename.edits.as_ref() else {
+            return Vec::new();
+        };
+        let Some(editor) = self.editor_for_item(rename.item_id, cx) else {
+            return Vec::new();
+        };
+        let text = editor.read(cx).document().text().to_owned();
+        edits
+            .iter()
+            .filter_map(|edit| {
+                let start = usize::try_from(edit.range.start).ok()?;
+                let end = usize::try_from(edit.range.end).ok()?;
+                let before = text.get(start..end)?.to_owned();
+                let line = text
+                    .get(..start)?
+                    .bytes()
+                    .filter(|byte| *byte == b'\n')
+                    .count()
+                    + 1;
+                Some((line, before, edit.new_text.clone()))
+            })
+            .collect()
     }
 
     fn toggle_left_dock(
@@ -20313,6 +20360,8 @@ impl WorkspaceShell {
                 }
                 Modal::SemanticRename => {
                     let (pending, edit_count, warnings) = self.pending_semantic_rename.as_ref().map_or((false, None, Vec::new()), |rename| (rename.pending, rename.edits.as_ref().map(Vec::len), rename.warnings.clone()));
+                    let preview_rows = self.semantic_rename_preview_rows(cx);
+                    let can_apply = edit_count.is_some_and(|count| count > 0) && !pending;
                     div()
                         .flex()
                         .flex_col()
@@ -20320,11 +20369,27 @@ impl WorkspaceShell {
                         .child(div().font_weight(gpui::FontWeight::SEMIBOLD).child("Rename SQL symbol"))
                         .child(self.semantic_rename_input.clone())
                         .children(edit_count.map(|count| div().rounded_sm().bg(colors.active_surface).p_2().child(format!("Preview: {count} reference(s) in this query will change."))))
+                        .children(preview_rows.into_iter().take(20).enumerate().map(|(index, (line, before, after))| {
+                            div()
+                                .debug_selector(move || format!("semantic-rename-preview-{index}"))
+                                .grid()
+                                .grid_cols(3)
+                                .gap_2()
+                                .px_2()
+                                .py_1()
+                                .rounded_sm()
+                                .bg(colors.elevated_surface)
+                                .text_xs()
+                                .child(div().text_color(colors.muted_text).child(format!("Line {line}")))
+                                .child(div().font_family("monospace").child(before))
+                                .child(div().font_family("monospace").text_color(colors.success).child(after))
+                        }))
+                        .children((edit_count.unwrap_or_default() > 20).then(|| div().text_xs().text_color(colors.muted_text).child(format!("{} more references", edit_count.unwrap_or_default() - 20))))
                         .children(warnings.into_iter().map(|warning| div().text_xs().text_color(colors.warning).child(warning)))
                         .child(div().flex().justify_end().gap_2()
                             .child(Button::new("cancel-semantic-rename", "Cancel").tone(ButtonTone::Neutral).on_click(cx.listener(|shell, _, window, cx| shell.dismiss_modal(&DismissModal, window, cx))))
                             .child(Button::new("preview-semantic-rename", if pending { "Preparing…" } else { "Preview" }).tone(ButtonTone::Neutral).disabled(pending).on_click(cx.listener(|shell, _, _, cx| shell.preview_semantic_rename(cx))))
-                            .child(Button::new("apply-semantic-rename", "Apply rename").tone(ButtonTone::Accent).disabled(edit_count.is_none() || pending).on_click(cx.listener(|shell, _, window, cx| shell.apply_semantic_rename(window, cx)))))
+                            .child(Button::new("apply-semantic-rename", "Apply rename").tone(ButtonTone::Accent).disabled(!can_apply).on_click(cx.listener(|shell, _, window, cx| shell.apply_semantic_rename(window, cx)))))
                         .into_any_element()
                 }
             };
@@ -26136,7 +26201,7 @@ mod tests {
         let window = shell(cx);
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         let workspace = window.root(&mut cx).unwrap();
-        workspace.update_in(&mut cx, |shell, window, cx| {
+        workspace.update_in(&mut cx, |shell, _window, cx| {
             let editor = shell.editor_for_item(1, cx).unwrap();
             editor.update(cx, |editor, cx| {
                 editor.replace_text_from_owner("select old_name from audit.events old_name", cx)
@@ -26177,9 +26242,18 @@ mod tests {
                     .map(Vec::len),
                 Some(1)
             );
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("semantic-rename-preview-0").is_some());
+        workspace.update_in(&mut cx, |shell, window, cx| {
             shell.apply_semantic_rename(window, cx);
             assert_eq!(
-                editor.read(cx).document().text(),
+                shell
+                    .editor_for_item(1, cx)
+                    .unwrap()
+                    .read(cx)
+                    .document()
+                    .text(),
                 "select new_name from audit.events old_name"
             );
         });
