@@ -4612,6 +4612,11 @@ impl WorkspaceShell {
             CommandId::RenameSqlSymbol => sift_protocol::OperationKind::PrepareSqlRefactor,
             CommandId::SearchSchema => sift_protocol::OperationKind::SearchSchema,
             CommandId::SearchData => sift_protocol::OperationKind::SearchData,
+            CommandId::ImportCsv => sift_protocol::OperationKind::ImportCsv,
+            CommandId::CaptureCatalogSnapshot => {
+                sift_protocol::OperationKind::CreateCatalogSnapshot
+            }
+            CommandId::CompareCatalogSnapshot => sift_protocol::OperationKind::PreviewMigration,
             CommandId::ExportCsv
             | CommandId::ExportTsv
             | CommandId::ExportJsonLines
@@ -4619,6 +4624,9 @@ impl WorkspaceShell {
             | CommandId::ExportHtml
             | CommandId::ExportMarkdown
             | CommandId::ExportXlsx => sift_protocol::OperationKind::ExportQuery,
+            CommandId::BeginTransaction => sift_protocol::OperationKind::BeginTransaction,
+            CommandId::CommitTransaction => sift_protocol::OperationKind::CommitTransaction,
+            CommandId::RollbackTransaction => sift_protocol::OperationKind::RollbackTransaction,
             _ => return spec,
         };
         if let Some(capability) = self.operation_capabilities.get(&operation) {
@@ -4632,6 +4640,49 @@ impl WorkspaceShell {
             }
         }
         spec
+    }
+
+    fn operation_unavailable_reason(
+        &self,
+        operation: sift_protocol::OperationKind,
+    ) -> Option<String> {
+        self.operation_capabilities
+            .get(&operation)
+            .filter(|capability| !capability.available)
+            .map(|capability| {
+                capability
+                    .reason
+                    .clone()
+                    .unwrap_or_else(|| "Operation is unavailable for this connection".into())
+            })
+    }
+
+    fn require_operation(
+        &mut self,
+        operation: sift_protocol::OperationKind,
+        action: &str,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(reason) = self.operation_unavailable_reason(operation) else {
+            return true;
+        };
+        self.show_toast(format!("{action}: {reason}"), cx);
+        false
+    }
+
+    fn connection_is_read_only(&self) -> bool {
+        let mutations = [
+            sift_protocol::OperationKind::ApplyEdits,
+            sift_protocol::OperationKind::ImportCsv,
+            sift_protocol::OperationKind::BeginTransaction,
+            sift_protocol::OperationKind::ApplyMigration,
+            sift_protocol::OperationKind::KillProcess,
+        ];
+        mutations.iter().all(|operation| {
+            self.operation_capabilities
+                .get(operation)
+                .is_some_and(|capability| !capability.available)
+        })
     }
 
     fn command_context(&self, cx: &App) -> CommandContext {
@@ -10443,6 +10494,13 @@ impl WorkspaceShell {
     }
 
     fn request_terminate_process(&mut self, process_id: i64, cx: &mut Context<Self>) {
+        if !self.require_operation(
+            sift_protocol::OperationKind::KillProcess,
+            "Terminate database process",
+            cx,
+        ) {
+            return;
+        }
         self.modal = Some(Modal::ConfirmTerminateProcess(process_id));
         cx.notify();
     }
@@ -10455,6 +10513,13 @@ impl WorkspaceShell {
     }
 
     fn begin_transaction(&mut self, cx: &mut Context<Self>) {
+        if !self.require_operation(
+            sift_protocol::OperationKind::BeginTransaction,
+            "Begin transaction",
+            cx,
+        ) {
+            return;
+        }
         if self.transaction.is_some() || self.transaction_pending {
             return;
         }
@@ -10478,6 +10543,22 @@ impl WorkspaceShell {
     }
 
     fn finish_transaction(&mut self, commit: bool, cx: &mut Context<Self>) {
+        let operation = if commit {
+            sift_protocol::OperationKind::CommitTransaction
+        } else {
+            sift_protocol::OperationKind::RollbackTransaction
+        };
+        if !self.require_operation(
+            operation,
+            if commit {
+                "Commit transaction"
+            } else {
+                "Rollback transaction"
+            },
+            cx,
+        ) {
+            return;
+        }
         if self.transaction.is_none() || self.transaction_pending {
             return;
         }
@@ -10512,6 +10593,13 @@ impl WorkspaceShell {
     }
 
     fn create_savepoint(&mut self, cx: &mut Context<Self>) {
+        if !self.require_operation(
+            sift_protocol::OperationKind::Savepoint,
+            "Create savepoint",
+            cx,
+        ) {
+            return;
+        }
         if self.transaction.is_none() || self.transaction_pending {
             return;
         }
@@ -10533,12 +10621,26 @@ impl WorkspaceShell {
     }
 
     fn rollback_to_savepoint(&mut self, name: String, cx: &mut Context<Self>) {
+        if !self.require_operation(
+            sift_protocol::OperationKind::RollbackToSavepoint,
+            "Rollback to savepoint",
+            cx,
+        ) {
+            return;
+        }
         if self.savepoints.iter().any(|candidate| candidate == &name) {
             self.send_savepoint_command(ExecutorCommand::RollbackToSavepoint { name }, cx);
         }
     }
 
     fn release_savepoint(&mut self, name: String, cx: &mut Context<Self>) {
+        if !self.require_operation(
+            sift_protocol::OperationKind::ReleaseSavepoint,
+            "Release savepoint",
+            cx,
+        ) {
+            return;
+        }
         if self.savepoints.iter().any(|candidate| candidate == &name) {
             self.send_savepoint_command(ExecutorCommand::ReleaseSavepoint { name }, cx);
         }
@@ -12384,6 +12486,13 @@ impl WorkspaceShell {
     }
 
     fn apply_catalog_migration(&mut self, cx: &mut Context<Self>) {
+        if !self.require_operation(
+            sift_protocol::OperationKind::ApplyMigration,
+            "Apply catalog migration",
+            cx,
+        ) {
+            return;
+        }
         let Some(plan) = self.catalog_migration_plan.as_ref() else {
             return;
         };
@@ -12509,6 +12618,9 @@ impl WorkspaceShell {
     }
 
     fn prompt_csv_import(&mut self, cx: &mut Context<Self>) {
+        if !self.require_operation(sift_protocol::OperationKind::ImportCsv, "Import CSV", cx) {
+            return;
+        }
         let Some(sender) = self.executor_sender.clone() else {
             self.show_error_toast("Connect before importing CSV data".into(), cx);
             return;
@@ -12616,6 +12728,13 @@ impl WorkspaceShell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if !self.require_operation(
+            sift_protocol::OperationKind::PreviewEdits,
+            "Edit result data",
+            cx,
+        ) {
+            return;
+        }
         let Some(source) = pane.read(cx).database_source(item_id) else {
             self.show_error_toast("Only database table results can be edited".into(), cx);
             return;
@@ -13198,6 +13317,13 @@ impl WorkspaceShell {
     }
 
     fn apply_result_cell_edit(&mut self, cx: &mut Context<Self>) {
+        if !self.require_operation(
+            sift_protocol::OperationKind::ApplyEdits,
+            "Apply result edits",
+            cx,
+        ) {
+            return;
+        }
         if self.result_edit_pending {
             return;
         }
@@ -16345,7 +16471,7 @@ impl WorkspaceShell {
                 format!("{}m ago", seconds / 60)
             }
         });
-        let label = match (&self.connection_status, failure) {
+        let mut label = match (&self.connection_status, failure) {
             (ConnectionStatus::Connected { .. }, Some(ConnectionHealthFailure::Server(_))) => {
                 format!(
                     "Server unavailable · last good {}",
@@ -16374,6 +16500,11 @@ impl WorkspaceShell {
             (ConnectionStatus::Failed { reason, .. }, _) => format!("Failed · {reason}"),
             (ConnectionStatus::Disconnected, _) => "No active connection".into(),
         };
+        if matches!(self.connection_status, ConnectionStatus::Connected { .. })
+            && self.connection_is_read_only()
+        {
+            label.push_str(" · Read only");
+        }
         let reconnect_detail = failure
             .map(|failure| match failure {
                 ConnectionHealthFailure::Server(message) => {
@@ -21826,6 +21957,37 @@ mod tests {
                     .disabled_reason
                     .as_deref(),
                 Some("operation is not supported by this provider")
+            );
+            let read_only_operations = [
+                sift_protocol::OperationKind::ApplyEdits,
+                sift_protocol::OperationKind::ImportCsv,
+                sift_protocol::OperationKind::BeginTransaction,
+                sift_protocol::OperationKind::ApplyMigration,
+                sift_protocol::OperationKind::KillProcess,
+            ];
+            shell.on_executor_event(
+                ExecutorEvent::CapabilitiesLoaded {
+                    profile_id: 7,
+                    capabilities: Ok(read_only_operations
+                        .into_iter()
+                        .map(|operation| sift_protocol::OperationCapability {
+                            operation,
+                            available: false,
+                            reason: Some("connection policy is read-only".into()),
+                            destructive: false,
+                            provider_id: None,
+                        })
+                        .collect()),
+                },
+                cx,
+            );
+            assert!(shell.connection_is_read_only());
+            assert_eq!(
+                shell
+                    .command_spec(CommandId::ImportCsv, cx)
+                    .disabled_reason
+                    .as_deref(),
+                Some("connection policy is read-only")
             );
         });
     }
