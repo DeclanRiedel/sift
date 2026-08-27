@@ -10727,6 +10727,19 @@ impl WorkspaceShell {
         self.show_result_row_json(item_id, window, cx);
     }
 
+    fn copy_active_result_with_headers(&mut self, cx: &mut Context<Self>) {
+        let Some(results) = self.focused_pane_results(cx) else {
+            self.show_toast("Active tab has no result surface".into(), cx);
+            return;
+        };
+        let copied = results.update(cx, |results, cx| {
+            results.copy_selected_with_headers_to_clipboard(cx)
+        });
+        if !copied {
+            self.show_toast("Highlight result fields before copying".into(), cx);
+        }
+    }
+
     fn focus_results(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(results) = self.focused_pane_results(cx) else {
             self.show_toast("Active tab has no result surface".into(), cx);
@@ -13512,6 +13525,7 @@ impl WorkspaceShell {
             CommandId::FocusEditor => self.focus_active_pane(window, cx),
             CommandId::FocusInspector => self.focus_inspector(window, cx),
             CommandId::ShowResultRowJson => self.show_active_result_row_json(window, cx),
+            CommandId::CopyResultWithHeaders => self.copy_active_result_with_headers(cx),
             CommandId::FocusResults => self.focus_results(window, cx),
             CommandId::FocusProblems => self.show_global_problems(window, cx),
             CommandId::PreviousTab => self.focus_tab_delta(-1, window, cx),
@@ -21855,7 +21869,9 @@ mod tests {
         let body = cx
             .debug_bounds("data-results-modal-body")
             .expect("large Data body");
-        let row = cx.debug_bounds("result-row-0").expect("live grid row");
+        let row = cx
+            .debug_bounds("result-row-fields-0")
+            .expect("live grid fields");
         assert!(body.contains(&row.center()));
         assert!(
             row.right() < body.right(),

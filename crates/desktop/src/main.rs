@@ -71,11 +71,6 @@ fn editor_key_bindings() -> Vec<gpui::KeyBinding> {
         ),
         gpui::KeyBinding::new("alt-enter", ed::ApplyQuickFix, standard_ctx),
         gpui::KeyBinding::new(&format!("{primary}-c"), res::CopySelectedCell, results_ctx),
-        gpui::KeyBinding::new(
-            &format!("{primary}-shift-c"),
-            res::CopySelectedWithHeaders,
-            results_ctx,
-        ),
         gpui::KeyBinding::new("left", res::MoveCellLeft, results_ctx),
         gpui::KeyBinding::new("right", res::MoveCellRight, results_ctx),
         gpui::KeyBinding::new("up", res::MoveCellUp, results_ctx),

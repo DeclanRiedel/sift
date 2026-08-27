@@ -2190,8 +2190,18 @@ impl ResultsView {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.copy_selected_with_headers_to_clipboard(cx);
+    }
+
+    pub(crate) fn copy_selected_with_headers_to_clipboard(
+        &mut self,
+        cx: &mut Context<Self>,
+    ) -> bool {
         if let Some(text) = self.selected_text_with_headers() {
             cx.write_to_clipboard(ClipboardItem::new_string(text));
+            true
+        } else {
+            false
         }
     }
 
@@ -2498,18 +2508,6 @@ impl ResultsView {
                                     )
                             }))
                             .child(
-                                Button::new("copy-result-with-headers", "Copy + headers")
-                                    .tone(ButtonTone::Neutral)
-                                    .disabled(self.selected.is_none())
-                                    .on_click(cx.listener(|view, _, window, cx| {
-                                        view.copy_selected_with_headers(
-                                            &CopySelectedWithHeaders,
-                                            window,
-                                            cx,
-                                        )
-                                    })),
-                            )
-                            .child(
                                 IconButton::new(
                                     "copy-result-cell",
                                     IconName::Copy,
@@ -2623,18 +2621,6 @@ impl ResultsView {
                                         view.copy_selected_cell(&CopySelectedCell, window, cx)
                                     },
                                 )),
-                            )
-                            .child(
-                                Button::new("copy-result-with-headers-vertical", "Copy + headers")
-                                    .tone(ButtonTone::Neutral)
-                                    .disabled(self.selected.is_none())
-                                    .on_click(cx.listener(|view, _, window, cx| {
-                                        view.copy_selected_with_headers(
-                                            &CopySelectedWithHeaders,
-                                            window,
-                                            cx,
-                                        )
-                                    })),
                             )
                     })),
             )
@@ -3069,9 +3055,7 @@ impl ResultsView {
                             .child(row_number.to_string());
                         Some(
                             div()
-                                .debug_selector(move || {
-                                    format!("result-row-container-{display_row}")
-                                })
+                                .debug_selector(move || format!("result-row-{display_row}"))
                                 .flex()
                                 .w_full()
                                 .min_w_0()
@@ -4830,7 +4814,7 @@ mod tests {
             assert!(!cache_miss, "unchanged cell layout should be reused");
         });
         assert!(
-            cx.debug_bounds("result-row-container-0")
+            cx.debug_bounds("result-row-0")
                 .is_some_and(|bounds| bounds.size.height > px(0.)),
             "ready result rows should receive a visible layout"
         );
@@ -4879,7 +4863,7 @@ mod tests {
             px(DEFAULT_COLUMN_WIDTH),
             "resizing one column must not resize its neighbor"
         );
-        let first_row = cx.debug_bounds("result-row-container-0").unwrap();
+        let first_row = cx.debug_bounds("result-row-0").unwrap();
         cx.simulate_mouse_down(
             gpui::point(
                 first_row.left() + px(ROW_NUMBER_WIDTH + 12.),
