@@ -16,6 +16,7 @@ fn system_epoch_millis() -> u64 {
 use gpui::{prelude::*, App, Context, Entity, IntoElement, Window};
 use sift_api_types::{
     ConnectionProfileId, CredentialMode, RoomId, TenantId, UpsertConnectionProfileRequest,
+    VcsPathsRequest,
 };
 use sift_client_sdk::{
     Client, Error as ClientError, Ingest, OpenConnectionFromProfileRequest, RoomReplica,
@@ -1139,6 +1140,76 @@ async fn run_query_executor(
                     .send(ExecutorEvent::RoomMemberRemoved {
                         room_id,
                         principal_id,
+                        result,
+                    })
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            ExecutorCommand::LoadRepositoryStatus { workspace_id } => {
+                let server = targets.borrow().clone();
+                let result = match server.client().await {
+                    Ok(client) => match client
+                        .workspace_repository(sift_protocol::WorkspaceId(workspace_id))
+                        .await
+                    {
+                        Ok(Some(binding)) => client
+                            .repository_status(binding.id)
+                            .await
+                            .map(Some)
+                            .map_err(|error| format!("loading repository status failed: {error}")),
+                        Ok(None) => Ok(None),
+                        Err(error) => Err(format!("loading repository binding failed: {error}")),
+                    },
+                    Err(error) => Err(error),
+                };
+                if events
+                    .send(ExecutorEvent::RepositoryStatusLoaded {
+                        workspace_id,
+                        result,
+                    })
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            ExecutorCommand::SetRepositoryPathStaged {
+                workspace_id,
+                binding_id,
+                expected_revision,
+                path,
+                staged,
+            } => {
+                let server = targets.borrow().clone();
+                let result = match server.client().await {
+                    Ok(client) => {
+                        let binding = sift_protocol::RepositoryBindingId(binding_id);
+                        let request = VcsPathsRequest {
+                            expected_revision,
+                            paths: vec![path],
+                        };
+                        let changed = if staged {
+                            client.stage_repository_paths(binding, request).await
+                        } else {
+                            client.unstage_repository_paths(binding, request).await
+                        };
+                        match changed {
+                            Ok(binding) => client
+                                .repository_status(binding.id)
+                                .await
+                                .map(Some)
+                                .map_err(|error| {
+                                    format!("refreshing repository status failed: {error}")
+                                }),
+                            Err(error) => Err(format!("updating staged paths failed: {error}")),
+                        }
+                    }
+                    Err(error) => Err(error),
+                };
+                if events
+                    .send(ExecutorEvent::RepositoryStatusLoaded {
+                        workspace_id,
                         result,
                     })
                     .is_err()

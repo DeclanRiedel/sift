@@ -1536,6 +1536,16 @@ pub enum ExecutorCommand {
         room_id: i64,
         principal_id: i64,
     },
+    LoadRepositoryStatus {
+        workspace_id: i64,
+    },
+    SetRepositoryPathStaged {
+        workspace_id: i64,
+        binding_id: i64,
+        expected_revision: u64,
+        path: sift_protocol::WorkspacePath,
+        staged: bool,
+    },
     LoadCatalogDiagram,
     TerminateDatabaseProcess {
         process_id: i64,
@@ -1724,6 +1734,10 @@ pub enum ExecutorEvent {
         room_id: i64,
         principal_id: i64,
         result: Result<(), String>,
+    },
+    RepositoryStatusLoaded {
+        workspace_id: i64,
+        result: Result<Option<sift_protocol::VcsStatus>, String>,
     },
     CatalogDiagramLoaded(Result<Box<sift_protocol::CatalogDiagram>, String>),
     DatabaseProcessTerminated {
@@ -4289,6 +4303,9 @@ pub struct WorkspaceShell {
     room_members: Vec<sift_api_types::RoomMember>,
     room_members_loading: bool,
     room_members_error: Option<String>,
+    repository_status: Option<sift_protocol::VcsStatus>,
+    repository_status_loading: bool,
+    repository_status_error: Option<String>,
     _lifecycle_task: Option<Task<()>>,
     _presence_task: Option<Task<()>>,
     _room_document_task: Option<Task<()>>,
@@ -4778,6 +4795,9 @@ impl WorkspaceShell {
             room_members: Vec::new(),
             room_members_loading: false,
             room_members_error: None,
+            repository_status: None,
+            repository_status_loading: false,
+            repository_status_error: None,
             _lifecycle_task: None,
             _presence_task: None,
             _room_document_task: None,
@@ -6616,6 +6636,23 @@ impl WorkspaceShell {
                 if self.selected_workspace().map(|workspace| workspace.room_id) == Some(room_id) {
                     cx.notify();
                 }
+            }
+            ExecutorEvent::RepositoryStatusLoaded {
+                workspace_id,
+                result,
+            } => {
+                if self.selected_workspace_id != Some(workspace_id) {
+                    return;
+                }
+                self.repository_status_loading = false;
+                match result {
+                    Ok(status) => {
+                        self.repository_status = status;
+                        self.repository_status_error = None;
+                    }
+                    Err(message) => self.repository_status_error = Some(message),
+                }
+                cx.notify();
             }
             ExecutorEvent::SavedQueriesLoaded { tenant_id, result } => {
                 if self.saved_queries_tenant != Some(tenant_id) {
@@ -10844,6 +10881,9 @@ impl WorkspaceShell {
         if panel == LeftPanel::Collaboration && self.left_dock.presentation.open {
             self.request_room_members(cx);
         }
+        if panel == LeftPanel::Git && self.left_dock.presentation.open {
+            self.request_repository_status(cx);
+        }
         self.fit_side_docks_to_width(self.window_presentation.bounds.width);
         self.persist(cx);
         cx.notify();
@@ -10894,6 +10934,54 @@ impl WorkspaceShell {
             .send(ExecutorCommand::RemoveRoomMember {
                 room_id,
                 principal_id,
+            })
+            .is_ok();
+        cx.notify();
+    }
+
+    fn request_repository_status(&mut self, cx: &mut Context<Self>) {
+        let Some(workspace_id) = self.selected_workspace_id else {
+            self.repository_status = None;
+            self.repository_status_error = Some("Select a Git-enabled workspace".into());
+            cx.notify();
+            return;
+        };
+        let Some(sender) = &self.executor_sender else {
+            self.repository_status_error = Some("Source control is unavailable".into());
+            cx.notify();
+            return;
+        };
+        self.repository_status_loading = sender
+            .send(ExecutorCommand::LoadRepositoryStatus { workspace_id })
+            .is_ok();
+        if self.repository_status_loading {
+            self.repository_status_error = None;
+        }
+        cx.notify();
+    }
+
+    fn set_repository_path_staged(
+        &mut self,
+        path: sift_protocol::WorkspacePath,
+        staged: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(status) = &self.repository_status else {
+            return;
+        };
+        let Some(workspace_id) = self.selected_workspace_id else {
+            return;
+        };
+        let Some(sender) = &self.executor_sender else {
+            return;
+        };
+        self.repository_status_loading = sender
+            .send(ExecutorCommand::SetRepositoryPathStaged {
+                workspace_id,
+                binding_id: status.binding_id.0,
+                expected_revision: status.binding_revision,
+                path,
+                staged,
             })
             .is_ok();
         cx.notify();
@@ -18063,26 +18151,93 @@ impl WorkspaceShell {
             .when(
                 dock.id == DockId::Left && self.active_left_panel == LeftPanel::Git,
                 |dock_view| {
-                    let content = self.selected_workspace().map_or_else(
-                        || "Select a Git-enabled workspace to inspect changes.".into(),
-                        |workspace| {
-                            if workspace.git_enabled {
-                                format!(
-                                    "Git projection enabled for {}. Change-list rendering arrives with desktop VCS integration.",
-                                    workspace.name
+                    let rows = self.repository_status.as_ref().into_iter().flat_map(|status| {
+                        status.entries.iter().enumerate().map(|(index, entry)| {
+                            let path = entry.path.clone();
+                            let staged = matches!(entry.stage, sift_protocol::VcsStageState::Staged);
+                            div()
+                                .id(("repository-path", index))
+                                .mx_2()
+                                .h(cx.theme().metrics.row_height)
+                                .px_2()
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .border_b_1()
+                                .border_color(colors.subtle_border)
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .truncate()
+                                        .child(entry.path.0.clone()),
                                 )
-                            } else {
-                                format!("Git is disabled for {}.", workspace.name)
-                            }
-                        },
-                    );
-                    dock_view.child(
-                        div()
-                            .p_3()
-                            .whitespace_normal()
-                            .text_color(colors.muted_text)
-                            .child(content),
-                    )
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(colors.muted_text)
+                                        .child(format!("{:?}", entry.state)),
+                                )
+                                .child(
+                                    Button::new(
+                                        ("toggle-repository-path", index),
+                                        if staged { "Unstage" } else { "Stage" },
+                                    )
+                                    .tone(ButtonTone::Ghost)
+                                    .disabled(self.repository_status_loading)
+                                    .on_click(cx.listener(move |shell, _, _, cx| {
+                                        shell.set_repository_path_staged(path.clone(), !staged, cx)
+                                    })),
+                                )
+                        })
+                    });
+                    let summary = self.repository_status.as_ref().map(|status| {
+                        let branch = status.branch.as_deref().unwrap_or("detached");
+                        format!("{branch} · {} change(s)", status.entries.len())
+                    });
+                    dock_view
+                        .child(
+                            div()
+                                .h(px(32.))
+                                .px_3()
+                                .flex()
+                                .items_center()
+                                .justify_between()
+                                .child(summary.unwrap_or_else(|| "SOURCE CONTROL".into()))
+                                .child(
+                                    Button::new("refresh-repository-status", "Refresh")
+                                        .tone(ButtonTone::Ghost)
+                                        .disabled(self.repository_status_loading)
+                                        .on_click(cx.listener(|shell, _, _, cx| {
+                                            shell.request_repository_status(cx)
+                                        })),
+                                ),
+                        )
+                        .children(self.repository_status_error.as_ref().map(|message| {
+                            div().mx_2().mb_2().child(ErrorBanner::new(message.clone()))
+                        }))
+                        .when(
+                            self.repository_status.is_none()
+                                && self.repository_status_error.is_none()
+                                && !self.repository_status_loading,
+                            |panel| {
+                                panel.child(
+                                    div()
+                                        .p_3()
+                                        .whitespace_normal()
+                                        .text_color(colors.muted_text)
+                                        .child("No repository is bound to this workspace."),
+                                )
+                            },
+                        )
+                        .child(
+                            div()
+                                .id("repository-status-list")
+                                .flex_1()
+                                .min_h_0()
+                                .overflow_y_scroll()
+                                .children(rows),
+                        )
                 },
             )
             .when(
