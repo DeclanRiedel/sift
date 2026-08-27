@@ -221,7 +221,7 @@
 
         demoPostgres = pkgs.writeShellApplication {
           name = "sift-demo-postgres";
-          runtimeInputs = with pkgs; [ curl jq nodejs nix postgresql ];
+          runtimeInputs = with pkgs; [ curl git jq nodejs nix postgresql ];
           text = ''
             set -euo pipefail
 
@@ -242,13 +242,29 @@
             backend_log="''${SIFT_BACKEND_LAB_BACKEND_LOG:-/tmp/sift-backend-lab-backend.log}"
             bind="''${SIFT_BIND:-127.0.0.1:3000}"
             base_url="http://$bind"
+            workspace_root="''${SIFT_DEMO_WORKSPACE_ROOT:-/tmp/sift-demo-workspace-$(id -u)}"
+            mkdir -p "$workspace_root/queries"
+            if [ ! -f "$workspace_root/README.md" ]; then
+              printf '%s\n\n%s\n' '# Sift Demo Postgres' 'Git-backed workspace for the seeded lab database.' >"$workspace_root/README.md"
+            fi
+            if [ ! -f "$workspace_root/queries/order-summary.sql" ]; then
+              printf '%s\n' 'SELECT * FROM lab.order_summary ORDER BY placed_at DESC;' >"$workspace_root/queries/order-summary.sql"
+            fi
+            workspace_path_literal="$(jq -Rn --arg value "$workspace_root" '$value')"
+            workspace_roots="[{handle=\"demo-postgres\",path=$workspace_path_literal,read_only=false}]"
 
             pgport="$(sh "$repo/examples/reproducible-instance/scripts/dev-seed-postgres.sh")"
 
             cd "$repo"
             # Real (non-mock) backend: a fresh metadata database must be migrated first.
             nix develop "$repo" --command cargo run -q -p sift-server -- migrate apply
-            nix develop "$repo" --command env SIFT_BIND="$bind" cargo run -p sift-server -- >"$backend_log" 2>&1 &
+            nix develop "$repo" --command env \
+              SIFT_BIND="$bind" \
+              SIFT_WORKSPACES__ENABLED=true \
+              SIFT_WORKSPACES__ROOTS="$workspace_roots" \
+              SIFT_VCS__ENABLED=true \
+              SIFT_VCS__NETWORK_ENABLED=false \
+              cargo run -p sift-server -- >"$backend_log" 2>&1 &
             backend_pid=$!
             cleanup() {
               kill "$backend_pid" >/dev/null 2>&1 || true
@@ -277,6 +293,7 @@
             fi
 
             profile_id="$(sh "$repo/examples/reproducible-instance/scripts/dev-register-demo-connection.sh" "$base_url" "$pgport")"
+            workspace_seed="$(sh "$repo/examples/reproducible-instance/scripts/dev-seed-demo-workspace.sh" "$base_url" "$profile_id")"
 
             cd "$lab"
             if [ ! -d node_modules ]; then
@@ -285,6 +302,7 @@
 
             echo "Postgres: host=127.0.0.1 port=$pgport db=sifttest user=sift password=<empty> ssl=disable"
             echo "Sift connection: Demo Postgres (profile $profile_id)"
+            echo "Sift Git workspace: $workspace_root (repository $(printf '%s' "$workspace_seed" | jq -r .repository_id))"
             echo "Seeded query: SELECT * FROM lab.order_summary ORDER BY placed_at DESC;"
             echo "Large result query: SELECT * FROM lab.large ORDER BY id;"
             echo "Backend log: $backend_log"
@@ -417,14 +435,14 @@
         # real (non-mock) server from that root.
         desktopDemo = pkgs.writeShellApplication {
           name = "sift-desktop-demo";
-          runtimeInputs = with pkgs; [ coreutils gnugrep gnused jq nix openssl postgresql util-linux ];
+          runtimeInputs = with pkgs; [ coreutils curl git gnugrep gnused jq nix openssl postgresql util-linux ];
           text = ''
             set -Eeuo pipefail
 
             phase_name="launcher validation"
             phase() {
               phase_name="$2"
-              echo "[$1/6] $2"
+              echo "[$1/7] $2"
             }
             demo_error() {
               status=$?
@@ -466,6 +484,8 @@
             # desktop inventory entry instead of accumulating throwaway roots.
             manifest_id="''${SIFT_DESKTOP_DEMO_MANIFEST_ID:-d35fd35e-3144-4dc2-98cf-38fb44db851b}"
             instance_state="''${XDG_STATE_HOME:-$HOME/.local/state}/sift/instances/$manifest_id"
+            workspace_root="''${SIFT_DESKTOP_DEMO_WORKSPACE_ROOT:-$instance_root/workspace}"
+            seed_server_pid=""
 
             run_in_dev() {
               if [ -n "''${IN_NIX_SHELL:-}" ]; then
@@ -476,6 +496,10 @@
             }
 
             cleanup() {
+              if [ -n "$seed_server_pid" ]; then
+                kill "$seed_server_pid" >/dev/null 2>&1 || true
+                wait "$seed_server_pid" >/dev/null 2>&1 || true
+              fi
               if [ "''${SIFT_DEMO_KEEP_POSTGRES:-0}" != "1" ]; then
                 pg_ctl -D "$pgdata" -m fast -w stop >/dev/null 2>&1 || true
               fi
@@ -500,6 +524,24 @@
               -e 's/name = "demo-sift"/name = "desktop-demo"/' \
               -e "s|127.0.0.1:5432/postgres|127.0.0.1:$pgport/sifttest|" \
               "$instance_root/sift.toml"
+            mkdir -p "$workspace_root/queries"
+            printf '%s\n\n%s\n' '# Sift Desktop Demo' 'Git-backed workspace for the seeded lab database.' >"$workspace_root/README.md"
+            printf '%s\n' 'SELECT * FROM lab.order_summary ORDER BY placed_at DESC;' >"$workspace_root/queries/order-summary.sql"
+            workspace_path_literal="$(jq -Rn --arg value "$workspace_root" '$value')"
+            cat >>"$instance_root/sift.toml" <<EOF
+
+[server.workspaces]
+enabled = true
+
+[[server.workspaces.roots]]
+handle = "demo-postgres"
+path = $workspace_path_literal
+read_only = false
+
+[server.vcs]
+enabled = true
+network_enabled = false
+EOF
 
             # The demo credential is random and destination-local. It never
             # enters sift.toml, sift.lock, process arguments, or repository state.
@@ -526,7 +568,51 @@
             echo "Desktop: supervising the applied auto-loopback instance"
             echo "The desktop can edit this run's sift.toml through the current-instance API."
 
-            phase 6 "Start the desktop and supervised Sift server"
+            phase 6 "Initialize the Git-backed demo workspace"
+            seed_server_log="''${TMPDIR:-/tmp}/sift-desktop-demo-seed-server-$(id -u).log"
+            run_in_dev cargo run -q --profile release-dev -p sift-server --bin sift-server -- \
+              --instance-root "$instance_root" >"$seed_server_log" 2>&1 &
+            seed_server_pid=$!
+            seed_base_url=""
+            for _ in $(seq 1 200); do
+              if [ -f "$instance_state/daemon.json" ]; then
+                seed_endpoint="$(jq -er .endpoint "$instance_state/daemon.json" 2>/dev/null || true)"
+                if [ -n "$seed_endpoint" ] && curl -fsS "http://$seed_endpoint/v1/health" >/dev/null 2>&1; then
+                  seed_base_url="http://$seed_endpoint"
+                  break
+                fi
+              fi
+              if ! kill -0 "$seed_server_pid" >/dev/null 2>&1; then
+                echo "Demo seed server exited before becoming ready. Log follows:" >&2
+                sed -n '1,200p' "$seed_server_log" >&2
+                exit 1
+              fi
+              sleep 0.1
+            done
+            if [ -z "$seed_base_url" ]; then
+              echo "Demo seed server was not ready before timeout. Log follows:" >&2
+              sed -n '1,200p' "$seed_server_log" >&2
+              exit 1
+            fi
+            seed_protocol="$(curl -fsS -X POST "$seed_base_url/v1/handshake" \
+              -H 'content-type: application/json' \
+              -d '{"client_version":"sift-desktop-demo","client_kind":"automation","protocol":{"minimum":1,"maximum":1}}' \
+              | jq -er .selected_protocol)"
+            demo_tenant_id="$(curl -fsS "$seed_base_url/v1/metadata/tenants" \
+              -H "x-sift-protocol-version: $seed_protocol" \
+              | jq -er 'first(.[] | select(.tenant.name == "demo") | .tenant.id)')"
+            demo_profile_id="$(curl -fsS "$seed_base_url/v1/metadata/connections?tenant=$demo_tenant_id" \
+              -H "x-sift-protocol-version: $seed_protocol" \
+              | jq -er 'first(.[] | select(.name == "demo/postgres") | .id)')"
+            workspace_seed="$(SIFT_DEMO_TENANT_ID="$demo_tenant_id" \
+              sh "$repo/examples/reproducible-instance/scripts/dev-seed-demo-workspace.sh" \
+              "$seed_base_url" "$demo_profile_id")"
+            kill "$seed_server_pid"
+            wait "$seed_server_pid" || true
+            seed_server_pid=""
+            echo "Sift Git workspace: $workspace_root (repository $(printf '%s' "$workspace_seed" | jq -r .repository_id))"
+
+            phase 7 "Start the desktop and supervised Sift server"
             run_in_dev cargo run --profile release-dev -p sift-desktop -- --instance-root "$instance_root" "$@"
           '';
         };

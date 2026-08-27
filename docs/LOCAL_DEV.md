@@ -95,6 +95,15 @@ The seed helper and desktop demo are idempotent. Rerunning reuses the existing
 cluster and the stable desktop-demo identity. Older throwaway desktop-demo
 inventory entries are replaced automatically instead of accumulating.
 
+`sift-demo-postgres` also creates a writable demo workspace at
+`/tmp/sift-demo-workspace-$UID`, binds it to the seeded room, and initializes
+it as a Git repository through Sift. Override the location with
+`SIFT_DEMO_WORKSPACE_ROOT`.
+
+`sift-desktop-demo` does the same inside its reproducible instance root before
+launching the desktop. Override that location with
+`SIFT_DESKTOP_DEMO_WORKSPACE_ROOT`.
+
 Useful overrides:
 
 - `SIFT_DEMO_PG_PORT` — port for the demo cluster.

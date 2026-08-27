@@ -148,6 +148,21 @@ impl InstanceRoot {
         config.limits.max_http_result_bytes =
             usize::try_from(self.manifest.server.limits.max_http_result_bytes)
                 .context("max_http_result_bytes does not fit this platform")?;
+        config.workspaces.enabled = self.manifest.server.workspaces.enabled;
+        config.workspaces.roots = self
+            .manifest
+            .server
+            .workspaces
+            .roots
+            .iter()
+            .map(|root| crate::config::WorkspaceRootConfig {
+                handle: root.handle.clone(),
+                path: root.path.clone(),
+                read_only: root.read_only,
+            })
+            .collect();
+        config.vcs.enabled = self.manifest.server.vcs.enabled;
+        config.vcs.network_enabled = self.manifest.server.vcs.network_enabled;
         config.tenant_limits.ceilings.connections =
             Some(u64::from(self.manifest.server.limits.max_connections));
         config.tenant_limits.ceilings.concurrent_queries = Some(u64::from(
@@ -645,5 +660,34 @@ mod tests {
         manifest.name = "edited-sift".into();
         std::fs::write(root.join(MANIFEST_FILE), manifest.to_toml_pretty().unwrap()).unwrap();
         assert!(load_current_config(&root, Some(&state)).is_err());
+    }
+
+    #[test]
+    fn runtime_config_realizes_workspace_and_vcs_settings() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("root");
+        let state = directory.path().join("state");
+        let workspace = directory.path().join("workspace");
+        copy_demo(&root);
+        std::fs::create_dir(&workspace).unwrap();
+        let mut instance = InstanceRoot::open(&root).unwrap();
+        instance.manifest.server.workspaces.enabled = true;
+        instance.manifest.server.workspaces.roots =
+            vec![sift_instance_config::WorkspaceRootConfig {
+                handle: "demo-postgres".into(),
+                path: workspace.display().to_string(),
+                read_only: false,
+            }];
+        instance.manifest.server.vcs.enabled = true;
+
+        let config = instance.runtime_config(&state).unwrap();
+        assert!(config.workspaces.enabled);
+        assert_eq!(config.workspaces.roots[0].handle, "demo-postgres");
+        assert_eq!(
+            config.workspaces.roots[0].path,
+            workspace.display().to_string()
+        );
+        assert!(config.vcs.enabled);
+        assert!(!config.vcs.network_enabled);
     }
 }

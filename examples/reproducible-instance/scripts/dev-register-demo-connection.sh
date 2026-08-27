@@ -34,10 +34,8 @@ profile_payload="$(
       port: $port,
       database: "sifttest",
       user: "sift",
-      password: null,
       ssl_mode: "disable",
       engine_specific: {
-        engine: "postgres",
         search_path: ["lab"],
         application_name: "sift-demo"
       }

@@ -77,6 +77,45 @@ pub struct ServerConfig {
     pub metadata: MetadataConfig,
     #[serde(default)]
     pub limits: LimitsConfig,
+    #[serde(default, skip_serializing_if = "WorkspaceConfig::is_default")]
+    pub workspaces: WorkspaceConfig,
+    #[serde(default, skip_serializing_if = "VcsConfig::is_default")]
+    pub vcs: VcsConfig,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(default, deny_unknown_fields)]
+pub struct WorkspaceConfig {
+    pub enabled: bool,
+    pub roots: Vec<WorkspaceRootConfig>,
+}
+
+impl WorkspaceConfig {
+    fn is_default(&self) -> bool {
+        self == &Self::default()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkspaceRootConfig {
+    pub handle: String,
+    pub path: String,
+    #[serde(default)]
+    pub read_only: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(default, deny_unknown_fields)]
+pub struct VcsConfig {
+    pub enabled: bool,
+    pub network_enabled: bool,
+}
+
+impl VcsConfig {
+    fn is_default(&self) -> bool {
+        self == &Self::default()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -456,6 +495,14 @@ impl Manifest {
             .client_id
             .take()
             .map(|value| value.trim().to_owned());
+        for root in &mut self.server.workspaces.roots {
+            root.handle = root.handle.trim().to_owned();
+            root.path = root.path.trim().to_owned();
+        }
+        self.server
+            .workspaces
+            .roots
+            .sort_by(|left, right| left.handle.cmp(&right.handle));
         self.auth.github.client_secret = self
             .auth
             .github
@@ -838,6 +885,39 @@ impl ServerConfig {
             || self.limits.max_concurrent_queries > self.limits.max_connections
         {
             return validation("server.limits", "contains an unsafe or invalid limit");
+        }
+        if self.workspaces.enabled && self.workspaces.roots.is_empty() {
+            return validation(
+                "server.workspaces.roots",
+                "requires at least one root when workspace projections are enabled",
+            );
+        }
+        if self.vcs.enabled && !self.workspaces.enabled {
+            return validation(
+                "server.vcs.enabled",
+                "requires workspace projections to be enabled",
+            );
+        }
+        if self.vcs.network_enabled && !self.vcs.enabled {
+            return validation(
+                "server.vcs.network_enabled",
+                "requires VCS integration to be enabled",
+            );
+        }
+        let mut root_handles = BTreeSet::new();
+        let mut root_paths = BTreeSet::new();
+        for (index, root) in self.workspaces.roots.iter().enumerate() {
+            let base = format!("server.workspaces.roots[{index}]");
+            validate_logical_name(&format!("{base}.handle"), &root.handle)?;
+            if !root_handles.insert(root.handle.as_str()) {
+                return validation(format!("{base}.handle"), "duplicate workspace root handle");
+            }
+            if !std::path::Path::new(&root.path).is_absolute() {
+                return validation(format!("{base}.path"), "must be an absolute path");
+            }
+            if !root_paths.insert(root.path.as_str()) {
+                return validation(format!("{base}.path"), "duplicate workspace root path");
+            }
         }
         Ok(())
     }
@@ -1536,6 +1616,47 @@ prevent_destroy = true
             manifest.configuration_digest().unwrap(),
             reparsed.configuration_digest().unwrap()
         );
+    }
+
+    #[test]
+    fn workspace_and_vcs_configuration_is_validated_and_locked() {
+        let input = VALID.replace(
+            "[automation]",
+            r#"[server.workspaces]
+enabled = true
+
+[[server.workspaces.roots]]
+handle = " demo "
+path = " /tmp/sift-demo "
+read_only = false
+
+[server.vcs]
+enabled = true
+network_enabled = false
+
+[automation]"#,
+        );
+        let manifest = Manifest::parse(&input).unwrap();
+        assert_eq!(manifest.server.workspaces.roots[0].handle, "demo");
+        assert_eq!(manifest.server.workspaces.roots[0].path, "/tmp/sift-demo");
+        assert!(manifest.server.vcs.enabled);
+
+        let lock = LockFile::generate(&manifest, "0.1.0", 1).unwrap();
+        lock.verify(&manifest).unwrap();
+    }
+
+    #[test]
+    fn vcs_requires_an_enabled_workspace_root() {
+        let input = VALID.replace(
+            "[automation]",
+            r#"[server.vcs]
+enabled = true
+
+[automation]"#,
+        );
+        let error = Manifest::parse(&input).unwrap_err().to_string();
+        assert!(error.contains("server.vcs.enabled"));
+        assert!(error.contains("requires workspace projections"));
     }
 
     #[test]
