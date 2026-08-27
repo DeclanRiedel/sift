@@ -911,6 +911,8 @@ async fn run_query_executor(
                 provider_id,
                 configuration,
                 credentials,
+                credential_mode,
+                tags,
             } => {
                 if let Some(previous) = context.take() {
                     let _ = previous.client.close_session(previous.session).await;
@@ -918,11 +920,15 @@ async fn run_query_executor(
                 let server = targets.borrow().clone();
                 let result = create_connection_profile(
                     &server,
-                    tenant_id,
-                    name,
-                    provider_id,
-                    configuration,
-                    credentials,
+                    UpsertConnectionProfileRequest {
+                        tenant_id,
+                        name,
+                        provider_id,
+                        configuration,
+                        credentials,
+                        credential_mode,
+                        tags,
+                    },
                 )
                 .await;
                 match result {
@@ -2084,23 +2090,13 @@ async fn load_table_definition(
 
 async fn create_connection_profile(
     server: &DesktopServer,
-    tenant_id: i64,
-    name: String,
-    provider_id: sift_protocol::ProviderId,
-    configuration: serde_json::Value,
-    credentials: Option<serde_json::Value>,
+    request: UpsertConnectionProfileRequest,
 ) -> Result<sift_workspace_ui::ConnectionNavEntry, String> {
     let client = server.client().await?;
+    let tenant_id = request.tenant_id;
+    let name = request.name.clone();
     let profile = client
-        .upsert_connection_profile(UpsertConnectionProfileRequest {
-            tenant_id,
-            name: name.clone(),
-            provider_id,
-            configuration,
-            credentials,
-            credential_mode: CredentialMode::Shared,
-            tags: Vec::new(),
-        })
+        .upsert_connection_profile(request)
         .await
         .map_err(|error| format!("saving connection profile failed: {error}"))?;
     Ok(sift_workspace_ui::ConnectionNavEntry {

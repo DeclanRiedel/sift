@@ -1511,6 +1511,8 @@ pub enum ExecutorCommand {
         provider_id: sift_protocol::ProviderId,
         configuration: serde_json::Value,
         credentials: Option<serde_json::Value>,
+        credential_mode: sift_api_types::CredentialMode,
+        tags: Vec<String>,
     },
     LoadConnectionProfile {
         tenant_id: i64,
@@ -4378,6 +4380,8 @@ pub struct WorkspaceShell {
     database_wizard_step: DatabaseWizardStep,
     database_connection_pending: bool,
     editing_connection_profile: Option<i64>,
+    editing_connection_credential_mode: sift_api_types::CredentialMode,
+    editing_connection_tags: Vec<String>,
     database_connection_tested: bool,
     database_connection_error: Option<String>,
     store: Option<Arc<PresentationStore>>,
@@ -4855,6 +4859,8 @@ impl WorkspaceShell {
             database_wizard_step: DatabaseWizardStep::Provider,
             database_connection_pending: false,
             editing_connection_profile: None,
+            editing_connection_credential_mode: sift_api_types::CredentialMode::Shared,
+            editing_connection_tags: Vec::new(),
             database_connection_tested: false,
             database_connection_error: None,
             store,
@@ -10083,6 +10089,8 @@ impl WorkspaceShell {
         };
         self.selected_database_tenant = Some(profile.tenant_id.0);
         self.selected_database_provider = Some(profile.provider_id.as_str().to_owned());
+        self.editing_connection_credential_mode = profile.credential_mode;
+        self.editing_connection_tags = profile.tags;
         self.database_wizard_step = DatabaseWizardStep::Details;
         for (input, value) in [
             (&self.database_name_input, profile.name),
@@ -10178,6 +10186,8 @@ impl WorkspaceShell {
 
     fn open_database_connection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.editing_connection_profile = None;
+        self.editing_connection_credential_mode = sift_api_types::CredentialMode::Shared;
+        self.editing_connection_tags.clear();
         self.database_connection_tested = false;
         self.selected_database_tenant = self.lifecycle.tenants.first().map(|tenant| tenant.id.0);
         self.selected_database_provider = None;
@@ -10526,6 +10536,8 @@ impl WorkspaceShell {
                 provider_id,
                 configuration: serde_json::Value::Object(configuration),
                 credentials,
+                credential_mode: self.editing_connection_credential_mode.clone(),
+                tags: self.editing_connection_tags.clone(),
             }
         };
         if sender.send(command).is_err() {
@@ -20948,6 +20960,7 @@ impl WorkspaceShell {
                         .into_any_element()
                 }
                 Modal::DatabaseConnection => {
+                    let editing = self.editing_connection_profile.is_some();
                     let step = self.database_wizard_step;
                     let selected_tenant = self.selected_database_tenant;
                     let selected_provider = self.selected_database_provider.clone();
@@ -21272,7 +21285,11 @@ impl WorkspaceShell {
                                             div()
                                                 .min_w_0()
                                                 .truncate()
-                                                .child("Add Database Connection"),
+                                                .child(if editing {
+                                                    "Edit Database Connection"
+                                                } else {
+                                                    "Add Database Connection"
+                                                }),
                                         ),
                                 )
                                 .child(
@@ -21410,7 +21427,11 @@ impl WorkspaceShell {
                                         .child(review_row(
                                             "Password",
                                             if self.database_password_input.read(cx).text().is_empty() {
-                                                "Not provided".into()
+                                                if editing {
+                                                    "Keep existing credential".into()
+                                                } else {
+                                                    "Not provided".into()
+                                                }
                                             } else {
                                                 "Stored securely".into()
                                             },
@@ -21478,7 +21499,11 @@ impl WorkspaceShell {
                                                 if pending {
                                                     "Saving & Testing…"
                                                 } else if step == DatabaseWizardStep::Review {
-                                                    "Save & Connect"
+                                                    if editing {
+                                                        "Update & Connect"
+                                                    } else {
+                                                        "Save & Connect"
+                                                    }
                                                 } else {
                                                     "Continue"
                                                 },
@@ -27429,6 +27454,8 @@ mod tests {
                 provider_id,
                 configuration,
                 credentials,
+                credential_mode,
+                tags,
             } => {
                 assert_eq!(tenant_id, 7);
                 assert_eq!(name, "Reporting");
@@ -27448,6 +27475,8 @@ mod tests {
                 assert_eq!(configuration["engine_specific"]["pool_max_size"], 12);
                 serde_json::from_value::<sift_protocol::ConnectionSpec>(configuration).unwrap();
                 assert_eq!(credentials.unwrap()["password"], "top-secret");
+                assert_eq!(credential_mode, sift_api_types::CredentialMode::Shared);
+                assert!(tags.is_empty());
             }
             _ => panic!("expected profile creation command"),
         }
