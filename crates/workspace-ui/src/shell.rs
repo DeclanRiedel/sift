@@ -1114,6 +1114,7 @@ pub struct Toast {
     pub id: u64,
     pub message: String,
     pub tone: ToastTone,
+    pub created_at_ms: u64,
 }
 
 /// Events a pane emits upward to the workspace. A pane never mutates sibling
@@ -1122,6 +1123,10 @@ pub struct Toast {
 pub enum PaneEvent {
     /// The pane was interacted with and should become the active pane.
     FocusRequested,
+    SetNotificationFilter {
+        tone: Option<ToastTone>,
+    },
+    ClearNotifications,
     /// This pane owns the currently visible drop ghost. The workspace tracks
     /// one owner so pointer-leave cleanup stays O(1) with many splits.
     DragPreviewActivated,
@@ -1872,6 +1877,7 @@ pub struct Pane {
     /// The live result entity is mounted in the workspace modal while this is
     /// set, so it never renders twice with one scroll handle.
     expanded_result_item: Option<u64>,
+    notification_filter: Option<ToastTone>,
 }
 
 impl Pane {
@@ -1994,6 +2000,7 @@ impl Pane {
             tab_bar_drag_bounds: None,
             pending_close_item: None,
             expanded_result_item: None,
+            notification_filter: None,
         }
     }
 
@@ -3301,7 +3308,64 @@ impl gpui::Render for Pane {
                     {
                         match self.editors.get(&item.id) {
                             Some(editor) => {
-                                body.child(div().flex_1().min_h_0().child(editor.clone()))
+                                let notification_controls = (item.kind == ItemKind::Notifications)
+                                    .then(|| {
+                                        let selected = self.notification_filter;
+                                        div()
+                                            .debug_selector(|| "notification-controls".into())
+                                            .h(px(30.))
+                                            .flex_none()
+                                            .px_2()
+                                            .flex()
+                                            .items_center()
+                                            .gap_1()
+                                            .border_b_1()
+                                            .border_color(colors.subtle_border)
+                                            .bg(colors.toolbar)
+                                            .children(
+                                                [
+                                                    ("All", None),
+                                                    ("Info", Some(ToastTone::Info)),
+                                                    ("Success", Some(ToastTone::Success)),
+                                                    ("Error", Some(ToastTone::Error)),
+                                                ]
+                                                .into_iter()
+                                                .enumerate()
+                                                .map(|(index, (label, tone))| {
+                                                    Button::new(
+                                                        ("notification-filter", index),
+                                                        label,
+                                                    )
+                                                    .debug_selector(format!(
+                                                        "notification-filter-{}",
+                                                        label.to_lowercase()
+                                                    ))
+                                                    .tone(if selected == tone {
+                                                        ButtonTone::Neutral
+                                                    } else {
+                                                        ButtonTone::Ghost
+                                                    })
+                                                    .on_click(cx.listener(move |pane, _, _, cx| {
+                                                        pane.notification_filter = tone;
+                                                        cx.emit(PaneEvent::SetNotificationFilter {
+                                                            tone,
+                                                        });
+                                                        cx.notify();
+                                                    }))
+                                                }),
+                                            )
+                                            .child(div().flex_1())
+                                            .child(
+                                                Button::new("clear-notifications", "Clear")
+                                                    .debug_selector("clear-notifications")
+                                                    .tone(ButtonTone::DangerGhost)
+                                                    .on_click(cx.listener(|_, _, _, cx| {
+                                                        cx.emit(PaneEvent::ClearNotifications);
+                                                    })),
+                                            )
+                                    });
+                                body.children(notification_controls)
+                                    .child(div().flex_1().min_h_0().child(editor.clone()))
                             }
                             None => body.child(
                                 div()
@@ -6384,7 +6448,12 @@ impl WorkspaceShell {
     fn push_toast(&mut self, message: String, tone: ToastTone, cx: &mut Context<Self>) {
         let id = self.next_toast_id;
         self.next_toast_id = self.next_toast_id.saturating_add(1);
-        let notification = Toast { id, message, tone };
+        let notification = Toast {
+            id,
+            message,
+            tone,
+            created_at_ms: epoch_millis(),
+        };
         if self.toasts.len() >= 3 {
             self.toasts.remove(0);
         }
@@ -6420,27 +6489,38 @@ impl WorkspaceShell {
         })
     }
 
-    fn notifications_text(&self) -> String {
-        if self.notification_history.is_empty() {
+    fn notifications_text(&self, filter: Option<ToastTone>) -> String {
+        if !self
+            .notification_history
+            .iter()
+            .any(|notification| filter.is_none_or(|tone| notification.tone == tone))
+        {
             return "No notifications.".into();
         }
         self.notification_history
             .iter()
             .rev()
+            .filter(|notification| filter.is_none_or(|tone| notification.tone == tone))
             .map(|notification| {
                 let tone = match notification.tone {
                     ToastTone::Info => "INFO",
                     ToastTone::Success => "SUCCESS",
                     ToastTone::Error => "ERROR",
                 };
-                format!("[{tone}] {}", notification.message)
+                let seconds = (notification.created_at_ms / 1_000) % 86_400;
+                let hour = seconds / 3_600;
+                let minute = (seconds % 3_600) / 60;
+                let second = seconds % 60;
+                format!(
+                    "[{hour:02}:{minute:02}:{second:02}Z] [{tone}] {}",
+                    notification.message
+                )
             })
             .collect::<Vec<_>>()
             .join("\n\n")
     }
 
     fn sync_notifications_editor(&mut self, cx: &mut Context<Self>) {
-        let text = self.notifications_text();
         for pane in &self.panes {
             pane.update(cx, |pane, cx| {
                 let Some(item) = pane
@@ -6450,6 +6530,7 @@ impl WorkspaceShell {
                 else {
                     return;
                 };
+                let text = self.notifications_text(pane.notification_filter);
                 if let Some(editor) = pane.editors.get(&item.id) {
                     editor.update(cx, |editor, cx| editor.replace_text_from_owner(&text, cx));
                 }
@@ -6482,7 +6563,7 @@ impl WorkspaceShell {
 
         let item_id = self.next_id;
         self.next_id = self.next_id.saturating_add(1);
-        let text = self.notifications_text();
+        let text = self.notifications_text(None);
         let editor = cx.new(|cx| {
             QueryEditor::new(QueryDocument::with_random_peer(&text), cx)
                 .with_language(EditorLanguage::PlainText)
@@ -11465,6 +11546,17 @@ impl WorkspaceShell {
             return;
         };
         match event {
+            PaneEvent::SetNotificationFilter { tone } => {
+                emitter.update(cx, |pane, _| pane.notification_filter = *tone);
+                self.sync_notifications_editor(cx);
+                cx.notify();
+            }
+            PaneEvent::ClearNotifications => {
+                self.notification_history.clear();
+                self.unread_notifications = 0;
+                self.sync_notifications_editor(cx);
+                cx.notify();
+            }
             PaneEvent::FocusRequested => {
                 self.active_pane = index;
                 // A child control may already have claimed focus while this
@@ -27577,6 +27669,9 @@ mod tests {
             shell.dismiss_toast(cx);
             assert!(shell.toasts.is_empty());
             assert_eq!(shell.notification_history.len(), 3);
+            for notification in &mut shell.notification_history {
+                notification.created_at_ms = 0;
+            }
         });
         cx.run_until_parked();
 
@@ -27601,18 +27696,46 @@ mod tests {
             assert_eq!(item.title, "Notifications");
             assert_eq!(
                 pane.editor(item.id).unwrap().read(cx).document().text(),
-                "[ERROR] Connection lost\n\n[SUCCESS] Saved query\n\n[INFO] Started export"
+                "[00:00:00Z] [ERROR] Connection lost\n\n[00:00:00Z] [SUCCESS] Saved query\n\n[00:00:00Z] [INFO] Started export"
             );
         });
 
         workspace.update(&mut cx, |shell, cx| {
             shell.show_toast("Still working".into(), cx);
+            shell.notification_history.last_mut().unwrap().created_at_ms = 0;
+            shell.sync_notifications_editor(cx);
             assert_eq!(shell.unread_notifications, 0);
             let pane = shell.panes[shell.active_pane].read(cx);
             let item = pane.active_item().unwrap();
             assert_eq!(
                 pane.editor(item.id).unwrap().read(cx).document().text(),
-                "[INFO] Still working\n\n[ERROR] Connection lost\n\n[SUCCESS] Saved query\n\n[INFO] Started export"
+                "[00:00:00Z] [INFO] Still working\n\n[00:00:00Z] [ERROR] Connection lost\n\n[00:00:00Z] [SUCCESS] Saved query\n\n[00:00:00Z] [INFO] Started export"
+            );
+        });
+
+        assert!(cx.debug_bounds("notification-controls").is_some());
+        let errors = cx.debug_bounds("notification-filter-error").unwrap();
+        cx.simulate_click(errors.center(), Modifiers::default());
+        cx.run_until_parked();
+        workspace.read_with(&cx, |shell, cx| {
+            let pane = shell.panes[shell.active_pane].read(cx);
+            let item = pane.active_item().unwrap();
+            assert_eq!(
+                pane.editor(item.id).unwrap().read(cx).document().text(),
+                "[00:00:00Z] [ERROR] Connection lost"
+            );
+        });
+
+        let clear = cx.debug_bounds("clear-notifications").unwrap();
+        cx.simulate_click(clear.center(), Modifiers::default());
+        cx.run_until_parked();
+        workspace.read_with(&cx, |shell, cx| {
+            assert!(shell.notification_history.is_empty());
+            let pane = shell.panes[shell.active_pane].read(cx);
+            let item = pane.active_item().unwrap();
+            assert_eq!(
+                pane.editor(item.id).unwrap().read(cx).document().text(),
+                "No notifications."
             );
         });
 
