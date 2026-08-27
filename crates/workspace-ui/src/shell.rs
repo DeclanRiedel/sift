@@ -25468,14 +25468,19 @@ mod tests {
                 1,
                 "select * from events",
                 sift_protocol::ResultTransform {
-                    filters: vec![sift_protocol::ResultFilter {
-                        column: "status".into(),
-                        contains: "open".into(),
+                    logic: sift_protocol::ResultFilterLogic::All,
+                    groups: vec![sift_protocol::ResultFilterGroup {
+                        logic: sift_protocol::ResultFilterLogic::All,
+                        filters: vec![sift_protocol::ResultFilter {
+                            column: "status".into(),
+                            operator: sift_protocol::ResultFilterOperator::Equals,
+                            value: Some("open".into()),
+                        }],
                     }],
-                    sort: Some(sift_protocol::ResultSort {
+                    sorts: vec![sift_protocol::ResultSort {
                         column: "created_at".into(),
                         direction: sift_protocol::ResultSortDirection::Descending,
-                    }),
+                    }],
                 },
                 cx,
             );
@@ -25483,9 +25488,9 @@ mod tests {
         assert!(matches!(
             receiver.try_recv(),
             Ok(ExecutorCommand::Execute {
-                transform: Some(sift_protocol::ResultTransform { filters, sort: Some(sort) }),
+                transform: Some(sift_protocol::ResultTransform { groups, sorts, .. }),
                 ..
-            }) if filters[0].column == "status" && sort.column == "created_at"
+            }) if groups[0].filters[0].column == "status" && sorts[0].column == "created_at"
         ));
     }
 

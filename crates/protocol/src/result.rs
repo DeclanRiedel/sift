@@ -24,11 +24,59 @@ pub enum ResultSortDirection {
     Descending,
 }
 
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum ResultFilterOperator {
+    #[default]
+    Contains,
+    NotContains,
+    Equals,
+    NotEquals,
+    GreaterThan,
+    GreaterThanOrEqual,
+    LessThan,
+    LessThanOrEqual,
+    StartsWith,
+    EndsWith,
+    IsNull,
+    IsNotNull,
+}
+
+impl ResultFilterOperator {
+    pub fn requires_value(self) -> bool {
+        !matches!(self, Self::IsNull | Self::IsNotNull)
+    }
+}
+
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum ResultFilterLogic {
+    #[default]
+    All,
+    Any,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ResultFilter {
     pub column: String,
-    pub contains: String,
+    #[serde(default)]
+    pub operator: ResultFilterOperator,
+    #[serde(default)]
+    pub value: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ResultFilterGroup {
+    #[serde(default)]
+    pub logic: ResultFilterLogic,
+    #[serde(default)]
+    pub filters: Vec<ResultFilter>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
@@ -43,9 +91,11 @@ pub struct ResultSort {
 #[serde(deny_unknown_fields)]
 pub struct ResultTransform {
     #[serde(default)]
-    pub filters: Vec<ResultFilter>,
+    pub logic: ResultFilterLogic,
     #[serde(default)]
-    pub sort: Option<ResultSort>,
+    pub groups: Vec<ResultFilterGroup>,
+    #[serde(default)]
+    pub sorts: Vec<ResultSort>,
 }
 
 impl std::fmt::Display for CursorId {

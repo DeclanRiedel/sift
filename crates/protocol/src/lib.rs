@@ -110,8 +110,8 @@ pub use remote::{
     RemoteReady,
 };
 pub use result::{
-    CursorId, ExecuteRequest, Page, ResultFilter, ResultSort, ResultSortDirection, ResultTransform,
-    Row,
+    CursorId, ExecuteRequest, Page, ResultFilter, ResultFilterGroup, ResultFilterLogic,
+    ResultFilterOperator, ResultSort, ResultSortDirection, ResultTransform, Row,
 };
 pub use room::{
     DocumentErrorCode, DocumentTransferKind, RoomClientMessage, RoomPresence, RoomQueryResult,

@@ -18,7 +18,7 @@ use gpui::{
 use sift_api_types::QueryHistory;
 use sift_protocol::{
     ColumnMetadata, DriverWarning, ExecuteResponse, ExplainResponse, Nullability, Page, PlanNode,
-    Row, TypeRef, Value,
+    ResultFilterLogic, ResultFilterOperator, Row, TypeRef, Value,
 };
 use sift_ui::{
     icon, ActiveTheme, Badge, Button, ButtonTone, Clickable, Disableable, ErrorBanner, IconButton,
@@ -281,6 +281,23 @@ enum SortDirection {
 enum GridTransformTab {
     Filter,
     Sort,
+}
+
+fn filter_operator_label(operator: ResultFilterOperator) -> &'static str {
+    match operator {
+        ResultFilterOperator::Contains => "contains",
+        ResultFilterOperator::NotContains => "does not contain",
+        ResultFilterOperator::Equals => "equals",
+        ResultFilterOperator::NotEquals => "does not equal",
+        ResultFilterOperator::GreaterThan => ">",
+        ResultFilterOperator::GreaterThanOrEqual => ">=",
+        ResultFilterOperator::LessThan => "<",
+        ResultFilterOperator::LessThanOrEqual => "<=",
+        ResultFilterOperator::StartsWith => "starts with",
+        ResultFilterOperator::EndsWith => "ends with",
+        ResultFilterOperator::IsNull => "is NULL",
+        ResultFilterOperator::IsNotNull => "is not NULL",
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -764,8 +781,12 @@ pub struct ResultsView {
     /// Display-order projection into source rows. Selection and edits remain
     /// source-indexed when loaded-row transforms reorder the grid.
     display_rows: Arc<Vec<usize>>,
-    sort: Option<(usize, SortDirection)>,
+    sorts: Vec<(usize, SortDirection)>,
     column_filters: Vec<String>,
+    column_filter_operators: Vec<sift_protocol::ResultFilterOperator>,
+    column_filter_groups: Vec<usize>,
+    filter_group_logics: Vec<sift_protocol::ResultFilterLogic>,
+    filter_logic: sift_protocol::ResultFilterLogic,
     grid_transform_column: Option<usize>,
     grid_transform_tab: GridTransformTab,
     column_filter_input: Entity<TextInput>,
@@ -864,8 +885,12 @@ impl ResultsView {
             rendered_columns: Vec::new(),
             rendered_rows: Vec::new(),
             display_rows: Arc::new(Vec::new()),
-            sort: None,
+            sorts: Vec::new(),
             column_filters: Vec::new(),
+            column_filter_operators: Vec::new(),
+            column_filter_groups: Vec::new(),
+            filter_group_logics: vec![sift_protocol::ResultFilterLogic::All],
+            filter_logic: sift_protocol::ResultFilterLogic::All,
             grid_transform_column: None,
             grid_transform_tab: GridTransformTab::Filter,
             column_filter_input,
@@ -1487,8 +1512,13 @@ impl ResultsView {
             _ => Vec::new(),
         };
         self.display_rows = Arc::new((0..self.rendered_rows.len()).collect());
-        self.sort = None;
+        self.sorts.clear();
         self.column_filters = vec![String::new(); self.rendered_columns.len()];
+        self.column_filter_operators =
+            vec![sift_protocol::ResultFilterOperator::Contains; self.rendered_columns.len()];
+        self.column_filter_groups = vec![0; self.rendered_columns.len()];
+        self.filter_group_logics = vec![ResultFilterLogic::All];
+        self.filter_logic = ResultFilterLogic::All;
         self.grid_transform_column = None;
         self.column_filter_input
             .update(cx, |input, cx| input.set_text("", cx));
@@ -1641,18 +1671,26 @@ impl ResultsView {
                     self.column_order = (0..self.rendered_columns.len()).collect();
                     self.included_columns = vec![true; self.rendered_columns.len()];
                     self.column_filters = vec![String::new(); self.rendered_columns.len()];
+                    self.column_filter_operators = vec![
+                        sift_protocol::ResultFilterOperator::Contains;
+                        self.rendered_columns.len()
+                    ];
+                    self.column_filter_groups = vec![0; self.rendered_columns.len()];
+                    self.filter_group_logics = vec![ResultFilterLogic::All];
+                    self.filter_logic = ResultFilterLogic::All;
                     self.grid_transform_column = None;
                 }
                 cx.notify();
                 StreamProgress::Consumed
             }
             Page::Rows { rows } => {
-                let transforms_active = self.sort.is_some()
+                let transforms_active = !self.sorts.is_empty()
                     || !self.grid_filter_input.read(cx).text().trim().is_empty()
                     || self
                         .column_filters
                         .iter()
-                        .any(|filter| !filter.trim().is_empty());
+                        .enumerate()
+                        .any(|(column, _)| self.filter_is_active(column));
                 let ResultState::Streaming(data) = &mut self.state else {
                     unreachable!("stream initialized above")
                 };
@@ -2008,6 +2046,60 @@ impl ResultsView {
         }
     }
 
+    fn cell_matches_filter(
+        cell: Option<&CachedCellRender>,
+        operator: ResultFilterOperator,
+        value: &str,
+    ) -> bool {
+        let Some(cell) = cell else {
+            return operator == ResultFilterOperator::IsNull;
+        };
+        if operator == ResultFilterOperator::IsNull {
+            return cell.class == CellClass::Null;
+        }
+        if operator == ResultFilterOperator::IsNotNull {
+            return cell.class != CellClass::Null;
+        }
+        if cell.class == CellClass::Null {
+            return false;
+        }
+        let value = value.trim().to_lowercase();
+        let ordering = if cell.class == CellClass::Number {
+            match (cell.text.parse::<f64>(), value.parse::<f64>()) {
+                (Ok(left), Ok(right)) => left.partial_cmp(&right).unwrap_or(Ordering::Equal),
+                _ => cell.filter_text.cmp(&value),
+            }
+        } else {
+            cell.filter_text.cmp(&value)
+        };
+        match operator {
+            ResultFilterOperator::Contains => cell.filter_text.contains(&value),
+            ResultFilterOperator::NotContains => !cell.filter_text.contains(&value),
+            ResultFilterOperator::Equals => ordering == Ordering::Equal,
+            ResultFilterOperator::NotEquals => ordering != Ordering::Equal,
+            ResultFilterOperator::GreaterThan => ordering == Ordering::Greater,
+            ResultFilterOperator::GreaterThanOrEqual => ordering != Ordering::Less,
+            ResultFilterOperator::LessThan => ordering == Ordering::Less,
+            ResultFilterOperator::LessThanOrEqual => ordering != Ordering::Greater,
+            ResultFilterOperator::StartsWith => cell.filter_text.starts_with(&value),
+            ResultFilterOperator::EndsWith => cell.filter_text.ends_with(&value),
+            ResultFilterOperator::IsNull | ResultFilterOperator::IsNotNull => unreachable!(),
+        }
+    }
+
+    fn filter_is_active(&self, column: usize) -> bool {
+        let operator = self
+            .column_filter_operators
+            .get(column)
+            .copied()
+            .unwrap_or_default();
+        !operator.requires_value()
+            || self
+                .column_filters
+                .get(column)
+                .is_some_and(|filter| !filter.trim().is_empty())
+    }
+
     fn rebuild_display_rows(&mut self, cx: &mut Context<Self>) {
         let filter = self.grid_filter_input.read(cx).text().trim().to_lowercase();
         let column_filters = self
@@ -2015,31 +2107,86 @@ impl ResultsView {
             .iter()
             .enumerate()
             .filter_map(|(column, filter)| {
-                let filter = filter.trim().to_lowercase();
-                (!filter.is_empty()).then_some((column, filter))
+                let operator = self
+                    .column_filter_operators
+                    .get(column)
+                    .copied()
+                    .unwrap_or_default();
+                let group = self.column_filter_groups.get(column).copied().unwrap_or(0);
+                (self.filter_is_active(column)).then_some((
+                    group,
+                    column,
+                    operator,
+                    filter.as_str(),
+                ))
             })
             .collect::<Vec<_>>();
         let mut rows = (0..self.rendered_rows.len())
             .filter(|row| {
                 let cells = &self.rendered_rows[*row];
                 (filter.is_empty() || cells.iter().any(|cell| cell.filter_text.contains(&filter)))
-                    && column_filters.iter().all(|(column, filter)| {
-                        cells
-                            .get(*column)
-                            .is_some_and(|cell| cell.filter_text.contains(filter))
-                    })
+                    && {
+                        let group_results = self
+                            .filter_group_logics
+                            .iter()
+                            .enumerate()
+                            .filter_map(|(group, logic)| {
+                                let filters = column_filters
+                                    .iter()
+                                    .filter(|(assigned, ..)| *assigned == group)
+                                    .collect::<Vec<_>>();
+                                if filters.is_empty() {
+                                    return None;
+                                }
+                                Some(match logic {
+                                    ResultFilterLogic::All => {
+                                        filters.iter().all(|(_, column, operator, value)| {
+                                            Self::cell_matches_filter(
+                                                cells.get(*column),
+                                                *operator,
+                                                value,
+                                            )
+                                        })
+                                    }
+                                    ResultFilterLogic::Any => {
+                                        filters.iter().any(|(_, column, operator, value)| {
+                                            Self::cell_matches_filter(
+                                                cells.get(*column),
+                                                *operator,
+                                                value,
+                                            )
+                                        })
+                                    }
+                                })
+                            })
+                            .collect::<Vec<_>>();
+                        group_results.is_empty()
+                            || match self.filter_logic {
+                                ResultFilterLogic::All => {
+                                    group_results.into_iter().all(|value| value)
+                                }
+                                ResultFilterLogic::Any => {
+                                    group_results.into_iter().any(|value| value)
+                                }
+                            }
+                    }
             })
             .collect::<Vec<_>>();
-        if let Some((column, direction)) = self.sort {
+        if !self.sorts.is_empty() {
             rows.sort_by(|left_row, right_row| {
-                let left = self.rendered_rows[*left_row].get(column);
-                let right = self.rendered_rows[*right_row].get(column);
-                let ordering =
-                    Self::compare_cells(left, right).then_with(|| left_row.cmp(right_row));
-                match direction {
-                    SortDirection::Ascending => ordering,
-                    SortDirection::Descending => ordering.reverse(),
+                for (column, direction) in &self.sorts {
+                    let left = self.rendered_rows[*left_row].get(*column);
+                    let right = self.rendered_rows[*right_row].get(*column);
+                    let ordering = Self::compare_cells(left, right);
+                    let ordering = match direction {
+                        SortDirection::Ascending => ordering,
+                        SortDirection::Descending => ordering.reverse(),
+                    };
+                    if ordering != Ordering::Equal {
+                        return ordering;
+                    }
                 }
+                left_row.cmp(right_row)
             });
         }
         self.display_rows = Arc::new(rows);
@@ -2131,7 +2278,91 @@ impl ResultsView {
         direction: Option<SortDirection>,
         cx: &mut Context<Self>,
     ) {
-        self.sort = direction.map(|direction| (column, direction));
+        self.sorts.retain(|(sorted, _)| *sorted != column);
+        if let Some(direction) = direction {
+            self.sorts.push((column, direction));
+        }
+        self.rebuild_display_rows(cx);
+    }
+
+    fn cycle_active_filter_operator(&mut self, cx: &mut Context<Self>) {
+        const OPERATORS: [ResultFilterOperator; 12] = [
+            ResultFilterOperator::Contains,
+            ResultFilterOperator::NotContains,
+            ResultFilterOperator::Equals,
+            ResultFilterOperator::NotEquals,
+            ResultFilterOperator::GreaterThan,
+            ResultFilterOperator::GreaterThanOrEqual,
+            ResultFilterOperator::LessThan,
+            ResultFilterOperator::LessThanOrEqual,
+            ResultFilterOperator::StartsWith,
+            ResultFilterOperator::EndsWith,
+            ResultFilterOperator::IsNull,
+            ResultFilterOperator::IsNotNull,
+        ];
+        let Some(column) = self.grid_transform_column else {
+            return;
+        };
+        let Some(operator) = self.column_filter_operators.get_mut(column) else {
+            return;
+        };
+        let index = OPERATORS
+            .iter()
+            .position(|item| item == operator)
+            .unwrap_or(0);
+        *operator = OPERATORS[(index + 1) % OPERATORS.len()];
+        self.rebuild_display_rows(cx);
+    }
+
+    fn toggle_filter_logic(&mut self, cx: &mut Context<Self>) {
+        self.filter_logic = match self.filter_logic {
+            ResultFilterLogic::All => ResultFilterLogic::Any,
+            ResultFilterLogic::Any => ResultFilterLogic::All,
+        };
+        self.rebuild_display_rows(cx);
+    }
+
+    fn active_filter_group(&self) -> usize {
+        self.grid_transform_column
+            .and_then(|column| self.column_filter_groups.get(column).copied())
+            .unwrap_or(0)
+            .min(self.filter_group_logics.len().saturating_sub(1))
+    }
+
+    fn toggle_active_filter_group_logic(&mut self, cx: &mut Context<Self>) {
+        let group = self.active_filter_group();
+        let Some(logic) = self.filter_group_logics.get_mut(group) else {
+            return;
+        };
+        *logic = match logic {
+            ResultFilterLogic::All => ResultFilterLogic::Any,
+            ResultFilterLogic::Any => ResultFilterLogic::All,
+        };
+        self.rebuild_display_rows(cx);
+    }
+
+    fn cycle_active_filter_group(&mut self, cx: &mut Context<Self>) {
+        let Some(column) = self.grid_transform_column else {
+            return;
+        };
+        let count = self.filter_group_logics.len().max(1);
+        let Some(group) = self.column_filter_groups.get_mut(column) else {
+            return;
+        };
+        *group = (*group + 1) % count;
+        self.rebuild_display_rows(cx);
+    }
+
+    fn add_filter_group(&mut self, cx: &mut Context<Self>) {
+        if self.filter_group_logics.len() >= 16 {
+            return;
+        }
+        self.filter_group_logics.push(ResultFilterLogic::All);
+        if let Some(column) = self.grid_transform_column {
+            if let Some(group) = self.column_filter_groups.get_mut(column) {
+                *group = self.filter_group_logics.len() - 1;
+            }
+        }
         self.rebuild_display_rows(cx);
     }
 
@@ -3277,37 +3508,69 @@ impl ResultsView {
         let column_index = self.grid_transform_column?;
         let column = self.rendered_columns.get(column_index)?;
         let colors = cx.theme().colors;
-        let active_filter = self
-            .column_filters
+        let active_filter = self.filter_is_active(column_index);
+        let active_operator = self
+            .column_filter_operators
             .get(column_index)
-            .is_some_and(|filter| !filter.trim().is_empty());
+            .copied()
+            .unwrap_or_default();
         let server_transform = sift_protocol::ResultTransform {
-            filters: self
-                .column_filters
+            logic: self.filter_logic,
+            groups: self
+                .filter_group_logics
                 .iter()
+                .copied()
                 .enumerate()
-                .filter_map(|(index, filter)| {
-                    if filter.trim().is_empty() {
-                        return None;
-                    }
-                    Some(sift_protocol::ResultFilter {
-                        column: self.rendered_columns.get(index)?.name.to_string(),
-                        contains: filter.trim().to_owned(),
+                .map(|(group, logic)| sift_protocol::ResultFilterGroup {
+                    logic,
+                    filters: self
+                        .column_filters
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(index, filter)| {
+                            if !self.filter_is_active(index)
+                                || self.column_filter_groups.get(index).copied().unwrap_or(0)
+                                    != group
+                            {
+                                return None;
+                            }
+                            let operator = self
+                                .column_filter_operators
+                                .get(index)
+                                .copied()
+                                .unwrap_or_default();
+                            Some(sift_protocol::ResultFilter {
+                                column: self.rendered_columns.get(index)?.name.to_string(),
+                                operator,
+                                value: operator.requires_value().then(|| filter.trim().to_owned()),
+                            })
+                        })
+                        .collect(),
+                })
+                .collect(),
+            sorts: self
+                .sorts
+                .iter()
+                .filter_map(|(index, direction)| {
+                    Some(sift_protocol::ResultSort {
+                        column: self.rendered_columns.get(*index)?.name.to_string(),
+                        direction: match direction {
+                            SortDirection::Ascending => {
+                                sift_protocol::ResultSortDirection::Ascending
+                            }
+                            SortDirection::Descending => {
+                                sift_protocol::ResultSortDirection::Descending
+                            }
+                        },
                     })
                 })
                 .collect(),
-            sort: self.sort.and_then(|(index, direction)| {
-                Some(sift_protocol::ResultSort {
-                    column: self.rendered_columns.get(index)?.name.to_string(),
-                    direction: match direction {
-                        SortDirection::Ascending => sift_protocol::ResultSortDirection::Ascending,
-                        SortDirection::Descending => sift_protocol::ResultSortDirection::Descending,
-                    },
-                })
-            }),
         };
-        let can_apply_server =
-            !server_transform.filters.is_empty() || server_transform.sort.is_some();
+        let can_apply_server = server_transform
+            .groups
+            .iter()
+            .any(|group| !group.filters.is_empty())
+            || !server_transform.sorts.is_empty();
         let visible_columns = self.visible_column_indices();
         let column_position = visible_columns
             .iter()
@@ -3318,8 +3581,15 @@ impl ResultsView {
         let active_filter_count = self
             .column_filters
             .iter()
-            .filter(|filter| !filter.trim().is_empty())
+            .enumerate()
+            .filter(|(index, _)| self.filter_is_active(*index))
             .count();
+        let active_group = self.active_filter_group();
+        let active_group_logic = self
+            .filter_group_logics
+            .get(active_group)
+            .copied()
+            .unwrap_or_default();
         let tab = |label: &'static str, target: GridTransformTab| {
             let selected = self.grid_transform_tab == target;
             let tab_index: usize = match target {
@@ -3366,6 +3636,18 @@ impl ResultsView {
                 .items_center()
                 .gap_2()
                 .child(
+                    Button::new(
+                        "cycle-active-column-filter-operator",
+                        filter_operator_label(active_operator),
+                    )
+                    .debug_selector("cycle-active-column-filter-operator")
+                    .tone(ButtonTone::Neutral)
+                    .on_click(cx.listener(|view, _, _, cx| {
+                        cx.stop_propagation();
+                        view.cycle_active_filter_operator(cx);
+                    })),
+                )
+                .child(
                     div()
                         .w(px(280.))
                         .h(px(26.))
@@ -3388,7 +3670,11 @@ impl ResultsView {
                 )))
                 .into_any_element(),
             GridTransformTab::Sort => {
-                let current = self.sort.filter(|(column, _)| *column == column_index);
+                let current = self
+                    .sorts
+                    .iter()
+                    .copied()
+                    .find(|(column, _)| *column == column_index);
                 div()
                     .flex()
                     .flex_1()
@@ -3465,6 +3751,62 @@ impl ResultsView {
                                 .font_weight(gpui::FontWeight::SEMIBOLD)
                                 .text_color(colors.muted_text)
                                 .child("FILTER BUILDER"),
+                        )
+                        .child(
+                            Button::new(
+                                "toggle-result-filter-logic",
+                                match self.filter_logic {
+                                    ResultFilterLogic::All => "Match ALL",
+                                    ResultFilterLogic::Any => "Match ANY",
+                                },
+                            )
+                            .debug_selector("toggle-result-filter-logic")
+                            .tone(ButtonTone::Ghost)
+                            .on_click(cx.listener(|view, _, _, cx| {
+                                cx.stop_propagation();
+                                view.toggle_filter_logic(cx);
+                            })),
+                        )
+                        .child(
+                            Button::new(
+                                "cycle-active-result-filter-group",
+                                format!(
+                                    "Group {}/{}",
+                                    active_group + 1,
+                                    self.filter_group_logics.len()
+                                ),
+                            )
+                            .debug_selector("cycle-active-result-filter-group")
+                            .tone(ButtonTone::Ghost)
+                            .on_click(cx.listener(|view, _, _, cx| {
+                                cx.stop_propagation();
+                                view.cycle_active_filter_group(cx);
+                            })),
+                        )
+                        .child(
+                            Button::new(
+                                "toggle-active-result-filter-group-logic",
+                                match active_group_logic {
+                                    ResultFilterLogic::All => "Group ALL",
+                                    ResultFilterLogic::Any => "Group ANY",
+                                },
+                            )
+                            .debug_selector("toggle-active-result-filter-group-logic")
+                            .tone(ButtonTone::Ghost)
+                            .on_click(cx.listener(|view, _, _, cx| {
+                                cx.stop_propagation();
+                                view.toggle_active_filter_group_logic(cx);
+                            })),
+                        )
+                        .child(
+                            Button::new("add-result-filter-group", "+ Group")
+                                .debug_selector("add-result-filter-group")
+                                .tone(ButtonTone::Ghost)
+                                .disabled(self.filter_group_logics.len() >= 16)
+                                .on_click(cx.listener(|view, _, _, cx| {
+                                    cx.stop_propagation();
+                                    view.add_filter_group(cx);
+                                })),
                         )
                         .child(
                             div()
@@ -3782,16 +4124,22 @@ impl ResultsView {
                                             .truncate()
                                             .child(column.name.clone()),
                                     )
-                                    .children(self.sort.and_then(|(sorted, direction)| {
-                                        (sorted == source_column).then(|| {
-                                            div().text_xs().text_color(colors.accent).child(
-                                                match direction {
-                                                    SortDirection::Ascending => "↑",
-                                                    SortDirection::Descending => "↓",
-                                                },
-                                            )
-                                        })
-                                    }))
+                                    .children(self.sorts.iter().enumerate().find_map(
+                                        |(priority, (sorted, direction))| {
+                                            (*sorted == source_column).then(|| {
+                                                div().text_xs().text_color(colors.accent).child(
+                                                    format!(
+                                                        "{}{}",
+                                                        match direction {
+                                                            SortDirection::Ascending => "↑",
+                                                            SortDirection::Descending => "↓",
+                                                        },
+                                                        priority + 1
+                                                    ),
+                                                )
+                                            })
+                                        },
+                                    ))
                                     .child(
                                         div()
                                             .debug_selector(move || {
@@ -3805,13 +4153,7 @@ impl ResultsView {
                                                 )
                                                 .square(px(20.))
                                                 .icon_size(11.)
-                                                .toggle_state(
-                                                    self.column_filters
-                                                        .get(source_column)
-                                                        .is_some_and(|filter| {
-                                                            !filter.trim().is_empty()
-                                                        }),
-                                                )
+                                                .toggle_state(self.filter_is_active(source_column))
                                                 .tooltip(format!("Filter {}", column.name))
                                                 .on_click(cx.listener(
                                                     move |view, _, window, cx| {
@@ -3839,9 +4181,11 @@ impl ResultsView {
                                                 )
                                                 .square(px(20.))
                                                 .icon_size(11.)
-                                                .toggle_state(self.sort.is_some_and(
-                                                    |(column, _)| column == source_column,
-                                                ))
+                                                .toggle_state(
+                                                    self.sorts.iter().any(|(column, _)| {
+                                                        *column == source_column
+                                                    }),
+                                                )
                                                 .tooltip(format!("Sort {}", column.name))
                                                 .on_click(cx.listener(
                                                     move |view, _, window, cx| {
@@ -5469,6 +5813,58 @@ mod tests {
     }
 
     #[gpui::test]
+    fn typed_filter_logic_and_ordered_multi_sort_match_server_semantics(cx: &mut TestAppContext) {
+        let view = cx.update(|cx| cx.new(ResultsView::new));
+        view.update(cx, |view, cx| {
+            view.set_state(
+                ResultState::from_execute(ExecuteResponse {
+                    cursor_id: sift_protocol::CursorId(1),
+                    columns: vec![
+                        column("name", PrimitiveType::Text, Nullability::NotNullable),
+                        column("amount", PrimitiveType::Int64, Nullability::NotNullable),
+                        column("group", PrimitiveType::Text, Nullability::NotNullable),
+                    ],
+                    schema_digest: "d".into(),
+                    rows: [("Alice", 20, "A"), ("Bob", 10, "B"), ("Carol", 20, "B")]
+                        .into_iter()
+                        .map(|(name, amount, group)| {
+                            Row::new(vec![
+                                Value::Text(name.into()),
+                                Value::Int64(amount),
+                                Value::Text(group.into()),
+                            ])
+                        })
+                        .collect(),
+                    affected_rows: None,
+                    warnings: Vec::new(),
+                    has_more: false,
+                }),
+                cx,
+            );
+            view.column_filter_operators[1] = ResultFilterOperator::GreaterThan;
+            view.set_column_filter(1, "10", cx);
+            view.column_filter_operators[2] = ResultFilterOperator::Equals;
+            view.set_column_filter(2, "b", cx);
+            assert_eq!(&*view.display_rows, &[2]);
+
+            view.filter_group_logics[0] = ResultFilterLogic::Any;
+            view.rebuild_display_rows(cx);
+            assert_eq!(&*view.display_rows, &[0, 1, 2]);
+
+            view.filter_group_logics = vec![ResultFilterLogic::All, ResultFilterLogic::All];
+            view.column_filter_groups[2] = 1;
+            view.filter_logic = ResultFilterLogic::All;
+            view.rebuild_display_rows(cx);
+            assert_eq!(&*view.display_rows, &[2]);
+            view.filter_logic = ResultFilterLogic::Any;
+            view.rebuild_display_rows(cx);
+            view.set_sort(2, Some(SortDirection::Ascending), cx);
+            view.set_sort(1, Some(SortDirection::Descending), cx);
+            assert_eq!(&*view.display_rows, &[0, 2, 1]);
+        });
+    }
+
+    #[gpui::test]
     fn search_wraps_matches_and_numeric_selection_has_aggregate(cx: &mut TestAppContext) {
         let view = cx.update(|cx| cx.new(ResultsView::new));
         view.update(cx, |view, cx| {
@@ -6317,7 +6713,7 @@ mod tests {
         cx.simulate_click(descending.center(), Modifiers::default());
         cx.run_until_parked();
         assert!(view.read_with(&cx, |view, _| {
-            view.sort == Some((0, SortDirection::Descending)) && *view.display_rows == [1, 0]
+            view.sorts == [(0, SortDirection::Descending)] && *view.display_rows == [1, 0]
         }));
         assert!(cx.debug_bounds("apply-full-result-transform").is_some());
 
