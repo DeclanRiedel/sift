@@ -732,6 +732,8 @@ pub struct ResultsView {
     sort: Option<(usize, SortDirection)>,
     grid_filter_input: Entity<TextInput>,
     _grid_filter_subscription: Subscription,
+    grid_search_input: Entity<TextInput>,
+    _grid_search_subscription: Subscription,
     column_widths: Vec<f32>,
     /// Stable source-column indices in current display order. Visibility is a
     /// separate projection so excluded fields can return in the same position.
@@ -794,6 +796,15 @@ impl ResultsView {
                     view.rebuild_display_rows(cx);
                 }
             });
+        let grid_search_input = cx.new(|cx| {
+            TextInput::new("", "Find in rows", cx).aria_label("Find in loaded result rows")
+        });
+        let grid_search_subscription =
+            cx.subscribe(&grid_search_input, |view, _, event: &TextInputEvent, cx| {
+                if *event == TextInputEvent::Submitted {
+                    view.select_next_search_match(cx);
+                }
+            });
         Self {
             focus_handle: cx.focus_handle(),
             state: ResultState::Idle,
@@ -803,6 +814,8 @@ impl ResultsView {
             sort: None,
             grid_filter_input,
             _grid_filter_subscription: grid_filter_subscription,
+            grid_search_input,
+            _grid_search_subscription: grid_search_subscription,
             column_widths: Vec::new(),
             column_order: Vec::new(),
             included_columns: Vec::new(),
@@ -1871,6 +1884,86 @@ impl ResultsView {
         self.rebuild_display_rows(cx);
     }
 
+    fn select_next_search_match(&mut self, cx: &mut Context<Self>) -> bool {
+        let query = self.grid_search_input.read(cx).text().trim().to_lowercase();
+        if query.is_empty() {
+            return false;
+        }
+        let columns = self.visible_column_indices();
+        let matches = self
+            .display_rows
+            .iter()
+            .flat_map(|row| columns.iter().map(move |column| (*row, *column)))
+            .filter(|(row, column)| {
+                self.rendered_rows[*row][*column]
+                    .text
+                    .to_lowercase()
+                    .contains(&query)
+            })
+            .collect::<Vec<_>>();
+        if matches.is_empty() {
+            return false;
+        }
+        let current = match self.selected {
+            Some(GridSelection::Cell { row, column }) => Some((row, column)),
+            Some(GridSelection::Range {
+                focus_row,
+                focus_column,
+                ..
+            }) => Some((focus_row, focus_column)),
+            _ => None,
+        };
+        let next = current
+            .and_then(|current| matches.iter().position(|candidate| *candidate == current))
+            .map_or(0, |index| (index + 1) % matches.len());
+        let (row, column) = matches[next];
+        self.set_selection(GridSelection::Cell { row, column }, cx);
+        if let Some(display_row) = self.display_position(row) {
+            self.row_scroll_handle
+                .scroll_to_item(display_row, ScrollStrategy::Center);
+        }
+        true
+    }
+
+    fn selection_summary(&self) -> Option<String> {
+        let selection = self.selected?;
+        let visible_columns = self.visible_column_indices();
+        let (rows, columns) = match selection {
+            GridSelection::Cell { row, column } => (vec![row], vec![column]),
+            GridSelection::Range {
+                anchor_row,
+                anchor_column,
+                focus_row,
+                focus_column,
+            } => self.range_coordinates(anchor_row, anchor_column, focus_row, focus_column),
+            GridSelection::Row(row) => (vec![row], visible_columns),
+            GridSelection::Column(column) => (self.display_rows.to_vec(), vec![column]),
+            GridSelection::All => (self.display_rows.to_vec(), visible_columns),
+        };
+        let cells = rows
+            .iter()
+            .flat_map(|row| columns.iter().map(move |column| (*row, *column)))
+            .filter_map(|(row, column)| self.rendered_rows.get(row)?.get(column))
+            .collect::<Vec<_>>();
+        if cells.is_empty() {
+            return None;
+        }
+        let numbers = cells
+            .iter()
+            .filter(|cell| cell.class == CellClass::Number)
+            .filter_map(|cell| cell.text.parse::<f64>().ok())
+            .collect::<Vec<_>>();
+        if numbers.is_empty() {
+            return Some(format!("{} cell(s)", cells.len()));
+        }
+        let sum = numbers.iter().sum::<f64>();
+        Some(format!(
+            "{} cell(s) · sum {sum:.4} · avg {:.4}",
+            cells.len(),
+            sum / numbers.len() as f64
+        ))
+    }
+
     #[cfg(test)]
     fn set_display_rows(&mut self, rows: Vec<usize>, cx: &mut Context<Self>) {
         debug_assert!(rows.iter().all(|row| *row < self.rendered_rows.len()));
@@ -1886,6 +1979,12 @@ impl ResultsView {
         self.grid_filter_input
             .update(cx, |input, cx| input.set_text(filter, cx));
         self.rebuild_display_rows(cx);
+    }
+
+    #[cfg(test)]
+    fn set_grid_search(&mut self, query: &str, cx: &mut Context<Self>) {
+        self.grid_search_input
+            .update(cx, |input, cx| input.set_text(query, cx));
     }
 
     pub(crate) fn set_column_included(
@@ -2633,7 +2732,7 @@ impl ResultsView {
                 div()
                     .flex()
                     .flex_shrink_0()
-                    .max_w(px(460.))
+                    .max_w(px(760.))
                     .min_w_0()
                     .overflow_hidden()
                     .items_center()
@@ -2652,9 +2751,19 @@ impl ResultsView {
                             .gap_1()
                             .child(
                                 div()
-                                    .w(px(180.))
+                                    .w(px(150.))
                                     .h(px(24.))
                                     .child(self.grid_filter_input.clone()),
+                            )
+                            .child(
+                                div()
+                                    .w(px(150.))
+                                    .h(px(24.))
+                                    .child(self.grid_search_input.clone()),
+                            )
+                            .children(
+                                self.selection_summary()
+                                    .map(|summary| div().max_w(px(240.)).truncate().child(summary)),
                             )
                             .children((!self.staged_cells.is_empty()).then(|| {
                                 Button::new(
@@ -2776,6 +2885,16 @@ impl ResultsView {
                             .flex()
                             .flex_col()
                             .gap_1()
+                            .child(
+                                div()
+                                    .w_full()
+                                    .h(px(24.))
+                                    .child(self.grid_search_input.clone()),
+                            )
+                            .children(
+                                self.selection_summary()
+                                    .map(|summary| div().w_full().truncate().child(summary)),
+                            )
                             .children((!self.staged_cells.is_empty()).then(|| {
                                 Button::new(
                                     "review-staged-result-edits-vertical",
@@ -4545,6 +4664,48 @@ mod tests {
             view.cycle_sort(0, cx);
             assert_eq!(&*view.display_rows, &[2, 1]);
             assert_eq!(view.rendered_rows[0][0].text, "zebra");
+        });
+    }
+
+    #[gpui::test]
+    fn search_wraps_matches_and_numeric_selection_has_aggregate(cx: &mut TestAppContext) {
+        let view = cx.update(|cx| cx.new(ResultsView::new));
+        view.update(cx, |view, cx| {
+            view.set_state(
+                ResultState::from_execute(ExecuteResponse {
+                    cursor_id: sift_protocol::CursorId(1),
+                    columns: vec![column(
+                        "amount",
+                        PrimitiveType::Int64,
+                        Nullability::NotNullable,
+                    )],
+                    schema_digest: "d".into(),
+                    rows: [10, 20, 12]
+                        .into_iter()
+                        .map(|value| Row::new(vec![Value::Int64(value)]))
+                        .collect(),
+                    affected_rows: None,
+                    warnings: Vec::new(),
+                    has_more: false,
+                }),
+                cx,
+            );
+            view.set_grid_search("1", cx);
+            assert!(view.select_next_search_match(cx));
+            assert_eq!(
+                view.selected,
+                Some(GridSelection::Cell { row: 0, column: 0 })
+            );
+            assert!(view.select_next_search_match(cx));
+            assert_eq!(
+                view.selected,
+                Some(GridSelection::Cell { row: 2, column: 0 })
+            );
+            view.set_selection(GridSelection::All, cx);
+            assert_eq!(
+                view.selection_summary().as_deref(),
+                Some("3 cell(s) · sum 42.0000 · avg 14.0000")
+            );
         });
     }
 
