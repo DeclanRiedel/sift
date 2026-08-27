@@ -1073,6 +1073,7 @@ pub enum InstanceCommand {
         password: String,
     },
     SignInWithGithub,
+    RefreshSession,
     SignOut {
         everywhere: bool,
     },
@@ -13712,6 +13713,24 @@ impl WorkspaceShell {
         cx.notify();
     }
 
+    fn refresh_account_session(&mut self, cx: &mut Context<Self>) {
+        if self.account_pending {
+            return;
+        }
+        let Some(sender) = &self.instance_sender else {
+            self.account_error = Some("Desktop account manager is unavailable".into());
+            cx.notify();
+            return;
+        };
+        if sender.send(InstanceCommand::RefreshSession).is_err() {
+            self.account_error = Some("Desktop account manager stopped".into());
+        } else {
+            self.account_pending = true;
+            self.account_error = None;
+        }
+        cx.notify();
+    }
+
     fn connect_saved_server(&mut self, profile: &SavedServerProfile, cx: &mut Context<Self>) {
         if self.server_connection_pending {
             return;
@@ -19784,9 +19803,18 @@ impl WorkspaceShell {
                                     .px_3()
                                     .py_2()
                                     .flex()
+                                    .flex_wrap()
                                     .items_center()
                                     .justify_between()
                                     .gap_2()
+                                    .child(
+                                        Button::new("account-refresh-session", "Refresh session")
+                                            .tone(ButtonTone::Ghost)
+                                            .loading(pending)
+                                            .on_click(cx.listener(|shell, _, _, cx| {
+                                                shell.refresh_account_session(cx)
+                                            })),
+                                    )
                                     .child(
                                         Button::new(
                                             "account-sign-out-all",
@@ -25648,6 +25676,15 @@ mod tests {
         assert!(matches!(
             receiver.try_recv().unwrap(),
             InstanceCommand::SignInWithGithub
+        ));
+
+        workspace.update(&mut cx, |shell, cx| {
+            shell.account_pending = false;
+            shell.refresh_account_session(cx);
+        });
+        assert!(matches!(
+            receiver.try_recv().unwrap(),
+            InstanceCommand::RefreshSession
         ));
 
         workspace.update(&mut cx, |shell, cx| {

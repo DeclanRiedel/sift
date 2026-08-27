@@ -46,9 +46,10 @@ surfaces, then admin/platform. Within P0, the connection experience comes first.
 ### Sign-in enough to connect — sign-in modal, account state
 
 - [~] `whoami` — read by executor; surface the signed-in identity (M2)
-- [ ] `password_login`, `refresh_session` — sign-in modal + refresh (M2)
-- [ ] `logout`, `logout_all` — account menu (M2)
-- [ ] `github_authorization_url`, `github_native_start`, `github_native_exchange`, `github_callback` — GitHub sign-in (M2)
+- [x] `password_login`, `refresh_session` — hosted sign-in modal and explicit
+      session refresh (M2)
+- [x] `logout`, `logout_all` — account menu (M2)
+- [x] `github_authorization_url`, `github_native_start`, `github_native_exchange`, `github_callback` — GitHub native sign-in (M2)
 - [ ] `exchange_ssh_proxy_capability` — SSH remote connect (M2/H)
 
 ### Execute — finish the run path

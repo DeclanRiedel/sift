@@ -488,6 +488,12 @@ pub async fn run_instance_manager(
                     sign_in_with_github(&channels.targets, &channels.events, &credentials).await,
                 )
             }
+            InstanceCommand::RefreshSession => {
+                let _ = channels
+                    .events
+                    .send(InstanceManagerEvent::AuthenticationPending);
+                (true, refresh_session(&channels.targets).await)
+            }
             InstanceCommand::SignOut { everywhere } => {
                 let _ = channels
                     .events
@@ -1034,6 +1040,24 @@ async fn sign_out(
         .send(server.without_authentication()?)
         .map_err(|_| "desktop server supervisor stopped".to_string())?;
     Ok(ManagerOutcome::SignedOut)
+}
+
+async fn refresh_session(
+    targets: &tokio::sync::watch::Sender<DesktopServer>,
+) -> Result<ManagerOutcome, String> {
+    let server = targets.borrow().clone();
+    let client = server.client().await?;
+    client
+        .refresh_session()
+        .await
+        .map_err(|error| format!("refreshing the account session failed: {error}"))?;
+    let identity = client
+        .whoami()
+        .await
+        .map_err(|error| format!("loading the refreshed account failed: {error}"))?;
+    Ok(ManagerOutcome::Authenticated(
+        identity.principal.display_name,
+    ))
 }
 
 fn auth_profile_id(server: &DesktopServer) -> Result<String, String> {
