@@ -899,6 +899,7 @@ pub enum Modal {
     SemanticRename,
     CatalogDiagram,
     CatalogMigration,
+    CatalogSnapshots,
     CsvImport,
 }
 
@@ -1546,7 +1547,10 @@ pub enum ExecutorCommand {
         request: sift_protocol::CsvImportRequest,
     },
     CaptureCatalogSnapshot,
-    PrepareCatalogMigration,
+    LoadCatalogSnapshots,
+    PrepareCatalogMigration {
+        baseline: Option<sift_protocol::CatalogSnapshotId>,
+    },
     ApplyCatalogMigration {
         request: sift_protocol::ApplyMigrationRequest,
     },
@@ -1724,6 +1728,7 @@ pub enum ExecutorEvent {
     },
     CsvImported(Result<sift_protocol::CsvImportResponse, String>),
     CatalogSnapshotCaptured(Result<sift_protocol::CatalogSnapshot, String>),
+    CatalogSnapshotsLoaded(Result<Vec<sift_protocol::CatalogSnapshotSummary>, String>),
     CatalogMigrationPrepared(
         Result<
             (
@@ -4314,6 +4319,10 @@ pub struct WorkspaceShell {
     catalog_migration_pending: bool,
     catalog_migration_error: Option<String>,
     last_catalog_drift_digest: Option<String>,
+    catalog_snapshots: Vec<sift_protocol::CatalogSnapshotSummary>,
+    selected_catalog_snapshot: Option<sift_protocol::CatalogSnapshotId>,
+    catalog_snapshots_loading: bool,
+    catalog_snapshots_error: Option<String>,
     csv_import_preview: Option<CsvImportPreviewState>,
     instance_sender: Option<tokio::sync::mpsc::UnboundedSender<InstanceCommand>>,
     saved_servers: Vec<SavedServerProfile>,
@@ -4787,6 +4796,10 @@ impl WorkspaceShell {
             catalog_migration_pending: false,
             catalog_migration_error: None,
             last_catalog_drift_digest: None,
+            catalog_snapshots: Vec::new(),
+            selected_catalog_snapshot: None,
+            catalog_snapshots_loading: false,
+            catalog_snapshots_error: None,
             csv_import_preview: None,
             instance_sender: None,
             saved_servers: Vec::new(),
@@ -6287,10 +6300,28 @@ impl WorkspaceShell {
             },
             ExecutorEvent::CatalogSnapshotCaptured(result) => match result {
                 Ok(snapshot) => {
-                    self.show_toast(format!("Captured schema baseline {}", snapshot.id), cx)
+                    self.show_toast(format!("Captured schema baseline {}", snapshot.id), cx);
+                    if self.modal == Some(Modal::CatalogSnapshots) {
+                        self.load_catalog_snapshots(cx);
+                    }
                 }
                 Err(message) => self.show_error_toast(message, cx),
             },
+            ExecutorEvent::CatalogSnapshotsLoaded(result) => {
+                self.catalog_snapshots_loading = false;
+                match result {
+                    Ok(snapshots) => {
+                        self.selected_catalog_snapshot = self
+                            .selected_catalog_snapshot
+                            .filter(|selected| snapshots.iter().any(|item| item.id == *selected))
+                            .or_else(|| snapshots.first().map(|item| item.id));
+                        self.catalog_snapshots = snapshots;
+                        self.catalog_snapshots_error = None;
+                    }
+                    Err(message) => self.catalog_snapshots_error = Some(message),
+                }
+                cx.notify();
+            }
             ExecutorEvent::CatalogMigrationPrepared(result) => {
                 self.catalog_migration_pending = false;
                 match result {
@@ -12991,6 +13022,31 @@ impl WorkspaceShell {
         }
     }
 
+    fn load_catalog_snapshots(&mut self, cx: &mut Context<Self>) {
+        let Some(sender) = &self.executor_sender else {
+            return;
+        };
+        if sender.send(ExecutorCommand::LoadCatalogSnapshots).is_ok() {
+            self.catalog_snapshots_loading = true;
+            self.catalog_snapshots_error = None;
+            cx.notify();
+        }
+    }
+
+    fn open_catalog_snapshots(&mut self, cx: &mut Context<Self>) {
+        self.modal = Some(Modal::CatalogSnapshots);
+        self.load_catalog_snapshots(cx);
+    }
+
+    fn select_catalog_snapshot(
+        &mut self,
+        snapshot: sift_protocol::CatalogSnapshotId,
+        cx: &mut Context<Self>,
+    ) {
+        self.selected_catalog_snapshot = Some(snapshot);
+        cx.notify();
+    }
+
     fn open_catalog_diagram(&mut self, cx: &mut Context<Self>) {
         if !self.require_operation(
             sift_protocol::OperationKind::ProjectCatalogDiagram,
@@ -13016,7 +13072,9 @@ impl WorkspaceShell {
             return;
         };
         if sender
-            .send(ExecutorCommand::PrepareCatalogMigration)
+            .send(ExecutorCommand::PrepareCatalogMigration {
+                baseline: self.selected_catalog_snapshot,
+            })
             .is_ok()
         {
             self.catalog_diff = None;
@@ -14787,7 +14845,7 @@ impl WorkspaceShell {
             CommandId::ImportCsv => self.prompt_csv_import(cx),
             CommandId::OpenCatalogDiagram => self.open_catalog_diagram(cx),
             CommandId::CaptureCatalogSnapshot => self.capture_catalog_snapshot(cx),
-            CommandId::CompareCatalogSnapshot => self.prepare_catalog_migration(cx),
+            CommandId::CompareCatalogSnapshot => self.open_catalog_snapshots(cx),
             CommandId::ExportCsv => self.export_active_result(sift_protocol::ExportFormat::Csv, cx),
             CommandId::ExportTsv => self.export_active_result(sift_protocol::ExportFormat::Tsv, cx),
             CommandId::ExportJsonLines => {
@@ -18123,6 +18181,7 @@ impl WorkspaceShell {
             let result_cell_edit = matches!(modal, Modal::EditResultCell);
             let plan_captures = matches!(modal, Modal::PlanCaptures);
             let catalog_diagram = matches!(modal, Modal::CatalogDiagram);
+            let catalog_snapshots = matches!(modal, Modal::CatalogSnapshots);
             let csv_import = matches!(modal, Modal::CsvImport);
             let instance_setup = matches!(modal, Modal::InstanceSetup);
             let card_width = if data_results {
@@ -18134,6 +18193,7 @@ impl WorkspaceShell {
                 || query_parameters
                 || result_cell_edit
                 || plan_captures
+                || catalog_snapshots
             {
                 720.0
             } else if catalog_diagram {
@@ -21620,6 +21680,100 @@ impl WorkspaceShell {
                         )
                         .into_any_element()
                 }
+                Modal::CatalogSnapshots => {
+                    let rows = self
+                        .catalog_snapshots
+                        .iter()
+                        .enumerate()
+                        .map(|(index, snapshot)| {
+                            let snapshot_id = snapshot.id;
+                            let selected = self.selected_catalog_snapshot == Some(snapshot_id);
+                            Button::new(
+                                ("catalog-snapshot", index),
+                                snapshot
+                                    .description
+                                    .clone()
+                                    .unwrap_or_else(|| format!("Baseline {}", snapshot.id)),
+                            )
+                            .debug_selector(format!("catalog-snapshot-{index}"))
+                            .tone(if selected {
+                                ButtonTone::Accent
+                            } else {
+                                ButtonTone::Neutral
+                            })
+                            .wide(true)
+                            .on_click(cx.listener(move |shell, _, _, cx| {
+                                shell.select_catalog_snapshot(snapshot_id, cx)
+                            }))
+                            .into_any_element()
+                        })
+                        .collect::<Vec<_>>();
+                    let selected = self.selected_catalog_snapshot.and_then(|selected| {
+                        self.catalog_snapshots
+                            .iter()
+                            .find(|snapshot| snapshot.id == selected)
+                    });
+                    div()
+                        .debug_selector(|| "catalog-snapshot-manager".into())
+                        .w(px(680.))
+                        .max_h(px(620.))
+                        .flex()
+                        .flex_col()
+                        .gap_3()
+                        .child(div().font_weight(gpui::FontWeight::SEMIBOLD).child("Schema baselines"))
+                        .child(div().text_sm().text_color(colors.muted_text).child("Choose an immutable baseline to compare against the current live catalog."))
+                        .children(self.catalog_snapshots_error.clone().map(ErrorBanner::new))
+                        .when(self.catalog_snapshots_loading, |manager| manager.child(div().p_3().text_center().text_color(colors.muted_text).child("Loading baselines…")))
+                        .when(self.catalog_snapshots.is_empty() && !self.catalog_snapshots_loading, |manager| manager.child(div().p_3().text_center().text_color(colors.muted_text).child("No baselines for this connection.")))
+                        .child(div().id("catalog-snapshot-list").flex_1().min_h_0().overflow_y_scroll().flex().flex_col().gap_1().children(rows))
+                        .children(selected.map(|snapshot| div().p_2().rounded_sm().bg(colors.active_surface).text_xs().child(format!(
+                            "Created {} · revision {:?} · {} bytes · {}",
+                            snapshot.created_at.to_rfc3339(), snapshot.catalog_revision, snapshot.retained_bytes, snapshot.content_digest
+                        ))))
+                        .child(
+                            div()
+                                .flex()
+                                .justify_between()
+                                .child(
+                                    Button::new(
+                                        "capture-new-catalog-snapshot",
+                                        "Capture current baseline",
+                                    )
+                                    .tone(ButtonTone::Ghost)
+                                    .on_click(cx.listener(|shell, _, _, cx| {
+                                        shell.capture_catalog_snapshot(cx)
+                                    })),
+                                )
+                                .child(
+                                    div()
+                                        .flex()
+                                        .gap_2()
+                                        .child(
+                                            Button::new("refresh-catalog-snapshots", "Refresh")
+                                                .tone(ButtonTone::Neutral)
+                                                .loading(self.catalog_snapshots_loading)
+                                                .on_click(cx.listener(|shell, _, _, cx| {
+                                                    shell.load_catalog_snapshots(cx)
+                                                })),
+                                        )
+                                        .child(
+                                            Button::new(
+                                                "compare-selected-catalog-snapshot",
+                                                "Compare selected",
+                                            )
+                                            .debug_selector(
+                                                "compare-selected-catalog-snapshot",
+                                            )
+                                            .tone(ButtonTone::Accent)
+                                            .disabled(self.selected_catalog_snapshot.is_none())
+                                            .on_click(cx.listener(|shell, _, _, cx| {
+                                                shell.prepare_catalog_migration(cx)
+                                            })),
+                                        ),
+                                ),
+                        )
+                        .into_any_element()
+                }
                 Modal::CatalogMigration => {
                     let change_count = self.catalog_diff.as_ref().map_or(0, |diff| diff.changes.len());
                     let statement_count = self.catalog_migration_plan.as_ref().map_or(0, |plan| {
@@ -21836,6 +21990,7 @@ impl WorkspaceShell {
                     | Modal::SemanticRename
                     | Modal::CatalogDiagram
                     | Modal::CatalogMigration
+                    | Modal::CatalogSnapshots
                     | Modal::CsvImport
             );
             div()
@@ -24465,7 +24620,24 @@ mod tests {
         });
         assert!(matches!(
             receiver.try_recv(),
-            Ok(ExecutorCommand::PrepareCatalogMigration)
+            Ok(ExecutorCommand::PrepareCatalogMigration { baseline: None })
+        ));
+    }
+
+    #[gpui::test]
+    fn catalog_snapshot_manager_loads_before_comparison(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let workspace = window.root(cx).unwrap();
+        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        workspace.update(cx, |shell, cx| {
+            shell.executor_sender = Some(sender);
+            shell.open_catalog_snapshots(cx);
+            assert_eq!(shell.modal, Some(Modal::CatalogSnapshots));
+            assert!(shell.catalog_snapshots_loading);
+        });
+        assert!(matches!(
+            receiver.try_recv(),
+            Ok(ExecutorCommand::LoadCatalogSnapshots)
         ));
     }
 

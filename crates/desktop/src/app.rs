@@ -1229,7 +1229,31 @@ async fn run_query_executor(
                     return;
                 }
             }
-            ExecutorCommand::PrepareCatalogMigration => {
+            ExecutorCommand::LoadCatalogSnapshots => {
+                let result = match context.as_ref() {
+                    Some(opened) => opened
+                        .client
+                        .catalog_snapshots(sift_api_types::TenantId(opened.tenant_id), 100)
+                        .await
+                        .map(|snapshots| {
+                            snapshots
+                                .into_iter()
+                                .filter(|snapshot| {
+                                    snapshot.connection_profile_id == Some(opened.profile_id)
+                                })
+                                .collect()
+                        })
+                        .map_err(|error| format!("loading schema baselines failed: {error}")),
+                    None => Err("Connect before loading schema baselines".into()),
+                };
+                if events
+                    .send(ExecutorEvent::CatalogSnapshotsLoaded(result))
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            ExecutorCommand::PrepareCatalogMigration { baseline } => {
                 let result = match context.as_ref() {
                     Some(opened) => async {
                         let live = opened
@@ -1246,9 +1270,10 @@ async fn run_query_executor(
                             .await?;
                         let baseline = snapshots
                             .into_iter()
-                            .find(|snapshot| {
+                            .filter(|snapshot| {
                                 snapshot.connection_profile_id == Some(opened.profile_id)
                             })
+                            .find(|snapshot| baseline.is_none_or(|id| snapshot.id == id))
                             .ok_or_else(|| {
                                 sift_client_sdk::Error::Protocol(
                                     "Capture a schema baseline for this connection first".into(),
