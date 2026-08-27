@@ -71,6 +71,7 @@ pub struct CellRender {
 struct CachedCellRender {
     text: SharedString,
     paint_text: SharedString,
+    filter_text: String,
     class: CellClass,
     shaped: Option<CachedShapedCell>,
 }
@@ -79,6 +80,7 @@ struct CachedCellRender {
 pub struct PreparedCellRender {
     text: SharedString,
     paint_text: SharedString,
+    filter_text: String,
     class: CellClass,
 }
 
@@ -87,6 +89,7 @@ impl From<PreparedCellRender> for CachedCellRender {
         Self {
             text: cell.text,
             paint_text: cell.paint_text,
+            filter_text: cell.filter_text,
             class: cell.class,
             shaped: None,
         }
@@ -113,6 +116,7 @@ impl PreparedResultPage {
                                 let text: SharedString = rendered.text.into();
                                 PreparedCellRender {
                                     paint_text: single_line_text(&text),
+                                    filter_text: text.to_lowercase(),
                                     text,
                                     class: rendered.class,
                                 }
@@ -1222,6 +1226,7 @@ impl ResultsView {
         let text: SharedString = rendered.text.into();
         *cell = CachedCellRender {
             paint_text: single_line_text(&text),
+            filter_text: text.to_lowercase(),
             text,
             class: rendered.class,
             shaped: None,
@@ -1434,6 +1439,7 @@ impl ResultsView {
                             let text: SharedString = rendered.text.into();
                             CachedCellRender {
                                 paint_text: single_line_text(&text),
+                                filter_text: text.to_lowercase(),
                                 text,
                                 class: rendered.class,
                                 shaped: None,
@@ -1980,14 +1986,11 @@ impl ResultsView {
         let mut rows = (0..self.rendered_rows.len())
             .filter(|row| {
                 let cells = &self.rendered_rows[*row];
-                (filter.is_empty()
-                    || cells
-                        .iter()
-                        .any(|cell| cell.text.to_lowercase().contains(&filter)))
+                (filter.is_empty() || cells.iter().any(|cell| cell.filter_text.contains(&filter)))
                     && column_filters.iter().all(|(column, filter)| {
                         cells
                             .get(*column)
-                            .is_some_and(|cell| cell.text.to_lowercase().contains(filter))
+                            .is_some_and(|cell| cell.filter_text.contains(filter))
                     })
             })
             .collect::<Vec<_>>();
@@ -2810,13 +2813,16 @@ impl ResultsView {
         match selection {
             GridSelection::Range {
                 anchor_row,
-                anchor_column,
                 focus_row,
-                focus_column,
-            } => self
-                .range_coordinates(anchor_row, anchor_column, focus_row, focus_column)
-                .0
-                .contains(&row),
+                ..
+            } => {
+                let Some(row_position) = self.display_position(row) else {
+                    return false;
+                };
+                let anchor = self.display_position(anchor_row).unwrap_or(0);
+                let focus = self.display_position(focus_row).unwrap_or(anchor);
+                (anchor.min(focus)..=anchor.max(focus)).contains(&row_position)
+            }
             _ => selection.highlights_row(row),
         }
     }
@@ -3715,6 +3721,32 @@ impl ResultsView {
                 }
                 let column_count = row_columns.len();
                 let selected = view.selected;
+                let selected_range = match selected {
+                    Some(GridSelection::Range {
+                        anchor_row,
+                        anchor_column,
+                        focus_row,
+                        focus_column,
+                    }) => {
+                        let anchor_row = view.display_position(anchor_row).unwrap_or(0);
+                        let focus_row = view.display_position(focus_row).unwrap_or(anchor_row);
+                        let anchor_column = row_columns
+                            .iter()
+                            .position(|column| *column == anchor_column)
+                            .unwrap_or(0);
+                        let focus_column = row_columns
+                            .iter()
+                            .position(|column| *column == focus_column)
+                            .unwrap_or(anchor_column);
+                        Some((
+                            anchor_row.min(focus_row),
+                            anchor_row.max(focus_row),
+                            anchor_column.min(focus_column),
+                            anchor_column.max(focus_column),
+                        ))
+                    }
+                    _ => None,
+                };
                 range
                     .filter_map(|display_row| {
                         let row_index = *view.display_rows.get(display_row)?;
@@ -3727,21 +3759,14 @@ impl ResultsView {
                                     Some(GridSelection::Cell { row, column }) => {
                                         row == row_index && column == source_column
                                     }
-                                    Some(GridSelection::Range {
-                                        anchor_row,
-                                        anchor_column,
-                                        focus_row,
-                                        focus_column,
-                                    }) => {
-                                        let (rows, columns) = view.range_coordinates(
-                                            anchor_row,
-                                            anchor_column,
-                                            focus_row,
-                                            focus_column,
-                                        );
-                                        rows.contains(&row_index)
-                                            && columns.contains(&source_column)
-                                    }
+                                    Some(GridSelection::Range { .. }) => selected_range
+                                        .is_some_and(
+                                            |(row_start, row_end, column_start, column_end)| {
+                                                (row_start..=row_end).contains(&display_row)
+                                                    && (column_start..=column_end)
+                                                        .contains(&display_column)
+                                            },
+                                        ),
                                     Some(GridSelection::Row(row)) => row == row_index,
                                     Some(GridSelection::Column(column)) => column == source_column,
                                     Some(GridSelection::All) => true,
