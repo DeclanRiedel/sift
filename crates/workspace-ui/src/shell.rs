@@ -1554,6 +1554,12 @@ pub enum ExecutorCommand {
     ApplyCatalogMigration {
         request: sift_protocol::ApplyMigrationRequest,
     },
+    RefreshCatalogMigrationRun {
+        run: sift_protocol::MigrationRunId,
+    },
+    CancelCatalogMigrationRun {
+        run: sift_protocol::MigrationRunId,
+    },
     LoadHistory {
         item_id: u64,
         cursor: Option<String>,
@@ -1739,6 +1745,8 @@ pub enum ExecutorEvent {
         >,
     ),
     CatalogMigrationApplied(Result<Box<sift_protocol::MigrationRun>, String>),
+    CatalogMigrationRunLoaded(Result<Box<sift_protocol::MigrationRun>, String>),
+    CatalogMigrationCanceled(Result<sift_protocol::MigrationRunId, String>),
     HistoryLoaded {
         item_id: u64,
         append: bool,
@@ -4318,6 +4326,7 @@ pub struct WorkspaceShell {
     catalog_migration_plan: Option<Box<sift_protocol::MigrationPlan>>,
     catalog_migration_pending: bool,
     catalog_migration_error: Option<String>,
+    catalog_migration_run: Option<Box<sift_protocol::MigrationRun>>,
     last_catalog_drift_digest: Option<String>,
     catalog_snapshots: Vec<sift_protocol::CatalogSnapshotSummary>,
     selected_catalog_snapshot: Option<sift_protocol::CatalogSnapshotId>,
@@ -4795,6 +4804,7 @@ impl WorkspaceShell {
             catalog_migration_plan: None,
             catalog_migration_pending: false,
             catalog_migration_error: None,
+            catalog_migration_run: None,
             last_catalog_drift_digest: None,
             catalog_snapshots: Vec::new(),
             selected_catalog_snapshot: None,
@@ -6350,10 +6360,45 @@ impl WorkspaceShell {
                 self.catalog_migration_pending = false;
                 match result {
                     Ok(run) => {
-                        self.modal = None;
-                        self.show_toast(format!("Migration {} completed", run.id), cx);
+                        let applied = run.state == sift_protocol::MigrationRunState::Applied;
+                        self.show_toast(format!("Migration {} is {:?}", run.id, run.state), cx);
+                        self.catalog_migration_run = Some(run);
+                        if applied {
+                            if let Some(sender) = &self.executor_sender {
+                                let _ = sender.send(ExecutorCommand::RefreshSchema);
+                            }
+                        }
+                    }
+                    Err(message) => self.catalog_migration_error = Some(message),
+                }
+                cx.notify();
+            }
+            ExecutorEvent::CatalogMigrationRunLoaded(result) => {
+                self.catalog_migration_pending = false;
+                match result {
+                    Ok(run) => {
+                        let applied = run.state == sift_protocol::MigrationRunState::Applied;
+                        self.catalog_migration_run = Some(run);
+                        self.catalog_migration_error = None;
+                        if applied {
+                            if let Some(sender) = &self.executor_sender {
+                                let _ = sender.send(ExecutorCommand::RefreshSchema);
+                            }
+                        }
+                    }
+                    Err(message) => self.catalog_migration_error = Some(message),
+                }
+                cx.notify();
+            }
+            ExecutorEvent::CatalogMigrationCanceled(result) => {
+                self.catalog_migration_pending = false;
+                match result {
+                    Ok(run) => {
+                        self.show_toast(format!("Cancellation requested for migration {run}"), cx);
                         if let Some(sender) = &self.executor_sender {
                             let _ = sender.send(ExecutorCommand::RefreshSchema);
+                            let _ =
+                                sender.send(ExecutorCommand::RefreshCatalogMigrationRun { run });
                         }
                     }
                     Err(message) => self.catalog_migration_error = Some(message),
@@ -13081,6 +13126,7 @@ impl WorkspaceShell {
             self.catalog_migration_plan = None;
             self.catalog_migration_error = None;
             self.catalog_migration_pending = true;
+            self.catalog_migration_run = None;
             self.modal = Some(Modal::CatalogMigration);
             cx.notify();
         }
@@ -13186,6 +13232,40 @@ impl WorkspaceShell {
         };
         if sender
             .send(ExecutorCommand::ApplyCatalogMigration { request })
+            .is_ok()
+        {
+            self.catalog_migration_pending = true;
+            cx.notify();
+        }
+    }
+
+    fn refresh_catalog_migration_run(&mut self, cx: &mut Context<Self>) {
+        let Some(run) = self.catalog_migration_run.as_ref().map(|run| run.id) else {
+            return;
+        };
+        let Some(sender) = &self.executor_sender else {
+            return;
+        };
+        if sender
+            .send(ExecutorCommand::RefreshCatalogMigrationRun { run })
+            .is_ok()
+        {
+            self.catalog_migration_pending = true;
+            cx.notify();
+        }
+    }
+
+    fn cancel_catalog_migration_run(&mut self, cx: &mut Context<Self>) {
+        let Some(run) = self.catalog_migration_run.as_ref().and_then(|run| {
+            (run.state == sift_protocol::MigrationRunState::Running).then_some(run.id)
+        }) else {
+            return;
+        };
+        let Some(sender) = &self.executor_sender else {
+            return;
+        };
+        if sender
+            .send(ExecutorCommand::CancelCatalogMigrationRun { run })
             .is_ok()
         {
             self.catalog_migration_pending = true;
@@ -14785,6 +14865,7 @@ impl WorkspaceShell {
             self.catalog_migration_plan = None;
             self.catalog_migration_error = None;
             self.catalog_migration_pending = false;
+            self.catalog_migration_run = None;
         }
         if self.modal == Some(Modal::CsvImport) {
             self.csv_import_preview = None;
@@ -21802,6 +21883,50 @@ impl WorkspaceShell {
                                 .child(div().text_sm().whitespace_normal().child(statement.sql.clone()))
                         })
                         .collect::<Vec<_>>();
+                    let run_running = self.catalog_migration_run.as_ref().is_some_and(|run| {
+                        run.state == sift_protocol::MigrationRunState::Running
+                    });
+                    let run_summary = self.catalog_migration_run.as_ref().map(|run| {
+                        div()
+                            .debug_selector(|| "catalog-migration-run-status".into())
+                            .p_2()
+                            .rounded_sm()
+                            .bg(colors.active_surface)
+                            .child(format!(
+                                "Run {} · {:?} · {}/{} statement outcome(s)",
+                                run.id,
+                                run.state,
+                                run.outcomes.len(),
+                                statement_count
+                            ))
+                    });
+                    let outcomes = self
+                        .catalog_migration_run
+                        .iter()
+                        .flat_map(|run| &run.outcomes)
+                        .enumerate()
+                        .map(|(index, outcome)| {
+                            div()
+                                .debug_selector(move || format!("migration-outcome-{index}"))
+                                .grid()
+                                .grid_cols(4)
+                                .gap_2()
+                                .px_2()
+                                .py_1()
+                                .text_xs()
+                                .child(format!(
+                                    "{}.{}",
+                                    outcome.group_ordinal, outcome.statement_ordinal
+                                ))
+                                .child(format!("{:?}", outcome.status))
+                                .child(
+                                    outcome
+                                        .affected_rows
+                                        .map_or_else(|| "—".into(), |rows| format!("{rows} rows")),
+                                )
+                                .child(outcome.result_code.clone().unwrap_or_else(|| "—".into()))
+                        })
+                        .collect::<Vec<_>>();
                     div()
                         .flex()
                         .flex_col()
@@ -21811,12 +21936,16 @@ impl WorkspaceShell {
                         .child(div().font_weight(gpui::FontWeight::SEMIBOLD).child("Schema baseline migration"))
                         .child(div().text_sm().text_color(colors.muted_text).child(format!("{change_count} change(s) · {statement_count} statement(s)")))
                         .children(self.catalog_migration_error.clone().map(ErrorBanner::new))
+                        .children(run_summary)
+                        .children((!outcomes.is_empty()).then(|| div().id("catalog-migration-outcomes").max_h(px(160.)).overflow_y_scroll().children(outcomes)))
                         .child(div().id("catalog-migration-statements").flex_1().min_h_0().overflow_y_scroll().children(statements))
                         .children((statement_count > 20).then(|| div().text_xs().text_color(colors.muted_text).child(format!("{} more statement(s) not shown", statement_count - 20))))
                         .child(div().flex().justify_end().gap_2()
                             .child(Button::new("copy-catalog-rollback", "Copy rollback SQL").debug_selector("copy-catalog-rollback").tone(ButtonTone::Ghost).disabled(self.catalog_rollback_sql().is_none()).on_click(cx.listener(|shell, _, _, cx| shell.copy_catalog_rollback_sql(cx))))
+                            .child(Button::new("refresh-catalog-migration-run", "Refresh run").debug_selector("refresh-catalog-migration-run").tone(ButtonTone::Ghost).disabled(self.catalog_migration_run.is_none() || self.catalog_migration_pending).on_click(cx.listener(|shell, _, _, cx| shell.refresh_catalog_migration_run(cx))))
+                            .child(Button::new("cancel-catalog-migration-run", "Stop run").debug_selector("cancel-catalog-migration-run").tone(ButtonTone::DangerGhost).disabled(!run_running || self.catalog_migration_pending).on_click(cx.listener(|shell, _, _, cx| shell.cancel_catalog_migration_run(cx))))
                             .child(Button::new("cancel-catalog-migration", "Cancel").tone(ButtonTone::Neutral).on_click(cx.listener(|shell, _, window, cx| shell.dismiss_modal(&DismissModal, window, cx))))
-                            .child(Button::new("apply-catalog-migration", if self.catalog_migration_pending { "Working…" } else { "Apply migration" }).tone(ButtonTone::DangerMuted).disabled(self.catalog_migration_pending || self.catalog_migration_plan.is_none()).on_click(cx.listener(|shell, _, _, cx| shell.apply_catalog_migration(cx)))))
+                            .child(Button::new("apply-catalog-migration", if self.catalog_migration_pending { "Working…" } else { "Apply migration" }).tone(ButtonTone::DangerMuted).disabled(self.catalog_migration_pending || self.catalog_migration_plan.is_none() || self.catalog_migration_run.is_some()).on_click(cx.listener(|shell, _, _, cx| shell.apply_catalog_migration(cx)))))
                         .into_any_element()
                 }
                 Modal::CsvImport => {
@@ -24638,6 +24767,41 @@ mod tests {
         assert!(matches!(
             receiver.try_recv(),
             Ok(ExecutorCommand::LoadCatalogSnapshots)
+        ));
+    }
+
+    #[gpui::test]
+    fn running_catalog_migration_can_refresh_and_cancel(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let workspace = window.root(cx).unwrap();
+        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let run: sift_protocol::MigrationRun = serde_json::from_value(serde_json::json!({
+            "id": "00000000-0000-0000-0000-000000000001",
+            "plan_id": "00000000-0000-0000-0000-000000000002",
+            "session": 1,
+            "connection": 1,
+            "plan_digest": "digest",
+            "state": "running",
+            "started_at": "2026-08-27T10:00:00Z"
+        }))
+        .unwrap();
+        let run_id = run.id;
+        workspace.update(cx, |shell, cx| {
+            shell.executor_sender = Some(sender);
+            shell.catalog_migration_run = Some(Box::new(run));
+            shell.refresh_catalog_migration_run(cx);
+        });
+        assert!(matches!(
+            receiver.try_recv(),
+            Ok(ExecutorCommand::RefreshCatalogMigrationRun { run }) if run == run_id
+        ));
+        workspace.update(cx, |shell, cx| {
+            shell.catalog_migration_pending = false;
+            shell.cancel_catalog_migration_run(cx);
+        });
+        assert!(matches!(
+            receiver.try_recv(),
+            Ok(ExecutorCommand::CancelCatalogMigrationRun { run }) if run == run_id
         ));
     }
 

@@ -1346,6 +1346,40 @@ async fn run_query_executor(
                     return;
                 }
             }
+            ExecutorCommand::RefreshCatalogMigrationRun { run } => {
+                let result = match context.as_ref() {
+                    Some(opened) => opened
+                        .client
+                        .migration_run(opened.session, opened.metadata_connection, run)
+                        .await
+                        .map(Box::new)
+                        .map_err(|error| format!("loading migration run failed: {error}")),
+                    None => Err("Connect before loading a migration run".into()),
+                };
+                if events
+                    .send(ExecutorEvent::CatalogMigrationRunLoaded(result))
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            ExecutorCommand::CancelCatalogMigrationRun { run } => {
+                let result = match context.as_ref() {
+                    Some(opened) => opened
+                        .client
+                        .cancel_migration(opened.session, opened.metadata_connection, run)
+                        .await
+                        .map(|()| run)
+                        .map_err(|error| format!("canceling migration failed: {error}")),
+                    None => Err("Connect before canceling a migration".into()),
+                };
+                if events
+                    .send(ExecutorEvent::CatalogMigrationCanceled(result))
+                    .is_err()
+                {
+                    return;
+                }
+            }
             ExecutorCommand::LoadHistory { item_id, cursor } => {
                 let append = cursor.is_some();
                 let connected_client = context.as_ref().map(|opened| opened.client.clone());
