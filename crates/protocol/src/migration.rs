@@ -90,6 +90,9 @@ pub struct MigrationPlan {
     pub diff_digest: String,
     pub expected_live_revision: CatalogRevision,
     pub groups: Vec<MigrationGroup>,
+    /// Reverse-order statements generated from exact reversible changes.
+    #[serde(default)]
+    pub rollback_groups: Vec<MigrationGroup>,
     #[serde(default)]
     pub required_acknowledgements: Vec<SchemaChangeRisk>,
     #[serde(default)]

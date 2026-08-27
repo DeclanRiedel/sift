@@ -98,7 +98,7 @@ pub fn render_plan(
             "online index rendering is not enabled without server/edition capability proof".into(),
         );
     }
-    for change in selected_changes {
+    for change in &selected_changes {
         if implicitly_covered(change, &created, &dropped) {
             continue;
         }
@@ -137,6 +137,40 @@ pub fn render_plan(
         transactional: options.prefer_transactional,
         statements,
     }];
+    let mut rollback_statements = Vec::new();
+    for change in selected_changes.iter().rev() {
+        if change.reversibility != sift_protocol::SchemaChangeReversibility::Exact {
+            warnings.push(format!(
+                "rollback omitted for {} because it is {:?}",
+                change.id, change.reversibility
+            ));
+            continue;
+        }
+        let inverse = invert_change(change);
+        match render_change(engine, &inverse, &to_nodes, &from_nodes, from) {
+            Ok(Some(sql)) => rollback_statements.push(MigrationStatement {
+                ordinal: u32::try_from(rollback_statements.len() + 1).unwrap_or(u32::MAX),
+                fingerprint: crate::fingerprint::sql(&sql),
+                sql,
+                change_ids: vec![change.id.clone()],
+                risk: change.risk,
+            }),
+            Ok(None) => {}
+            Err(error) => warnings.push(format!(
+                "rollback could not be rendered for {}: {error}",
+                change.id
+            )),
+        }
+    }
+    let rollback_groups = (!rollback_statements.is_empty())
+        .then(|| {
+            vec![MigrationGroup {
+                ordinal: 1,
+                transactional: options.prefer_transactional,
+                statements: rollback_statements,
+            }]
+        })
+        .unwrap_or_default();
     let id = MigrationPlanId(uuid::Uuid::new_v4());
     let run_id = sift_protocol::MigrationRunId(uuid::Uuid::new_v4());
     let expires_at = chrono::Utc::now() + chrono::Duration::minutes(10);
@@ -146,6 +180,7 @@ pub fn render_plan(
         &diff.digest,
         expected_live_revision,
         &groups,
+        &rollback_groups,
         &required_acknowledgements,
         &warnings,
         expires_at,
@@ -158,10 +193,27 @@ pub fn render_plan(
         diff_digest: diff.digest.clone(),
         expected_live_revision,
         groups,
+        rollback_groups,
         required_acknowledgements,
         warnings,
         expires_at,
     })
+}
+
+fn invert_change(change: &SchemaChange) -> SchemaChange {
+    let mut inverse = change.clone();
+    inverse.kind = match change.kind {
+        SchemaChangeKind::Create => SchemaChangeKind::Drop,
+        SchemaChangeKind::Drop => SchemaChangeKind::Create,
+        kind => kind,
+    };
+    inverse.object_before = change.object_after.clone();
+    inverse.object_after = change.object_before.clone();
+    for field in &mut inverse.field_changes {
+        std::mem::swap(&mut field.before, &mut field.after);
+    }
+    inverse.prerequisites.clear();
+    inverse
 }
 
 fn nodes(graph: &CatalogGraph) -> HashMap<sift_protocol::CatalogObjectId, &CatalogNode> {
@@ -857,6 +909,11 @@ mod tests {
             .statements
             .iter()
             .any(|statement| statement.sql.contains("ADD CONSTRAINT")));
+        assert!(plan
+            .rollback_groups
+            .iter()
+            .flat_map(|group| &group.statements)
+            .any(|statement| statement.sql.starts_with("DROP TABLE")));
     }
 
     #[test]

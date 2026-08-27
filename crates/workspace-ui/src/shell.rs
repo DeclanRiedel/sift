@@ -4171,6 +4171,7 @@ pub struct WorkspaceShell {
     catalog_migration_plan: Option<Box<sift_protocol::MigrationPlan>>,
     catalog_migration_pending: bool,
     catalog_migration_error: Option<String>,
+    last_catalog_drift_digest: Option<String>,
     instance_sender: Option<tokio::sync::mpsc::UnboundedSender<InstanceCommand>>,
     saved_servers: Vec<SavedServerProfile>,
     instance_roots: Vec<SavedInstanceRoot>,
@@ -4642,6 +4643,7 @@ impl WorkspaceShell {
             catalog_migration_plan: None,
             catalog_migration_pending: false,
             catalog_migration_error: None,
+            last_catalog_drift_digest: None,
             instance_sender: None,
             saved_servers: Vec::new(),
             instance_roots: Vec::new(),
@@ -6149,9 +6151,21 @@ impl WorkspaceShell {
                 self.catalog_migration_pending = false;
                 match result {
                     Ok((diff, plan)) => {
+                        let change_count = diff.changes.len();
+                        let drift_digest = diff.digest.clone();
+                        let notify_drift = change_count > 0
+                            && self.last_catalog_drift_digest.as_deref()
+                                != Some(drift_digest.as_str());
                         self.catalog_diff = Some(diff);
                         self.catalog_migration_plan = Some(plan);
                         self.catalog_migration_error = None;
+                        if notify_drift {
+                            self.last_catalog_drift_digest = Some(drift_digest);
+                            self.show_toast(
+                                format!("Schema drift detected · {change_count} change(s)"),
+                                cx,
+                            );
+                        }
                     }
                     Err(message) => self.catalog_migration_error = Some(message),
                 }
@@ -12843,6 +12857,85 @@ impl WorkspaceShell {
             self.catalog_migration_pending = true;
             self.modal = Some(Modal::CatalogMigration);
             cx.notify();
+        }
+    }
+
+    fn catalog_diagram_mermaid(&self) -> Option<String> {
+        let diagram = self.catalog_diagram.as_ref()?;
+        let node_ids = diagram
+            .nodes
+            .iter()
+            .enumerate()
+            .map(|(index, node)| (node.id.clone(), format!("n{index}")))
+            .collect::<HashMap<_, _>>();
+        let mut output = String::from("flowchart LR\n");
+        for (index, node) in diagram.nodes.iter().enumerate() {
+            let label = node
+                .qualified_name
+                .replace('\\', "\\\\")
+                .replace('"', "\\\"")
+                .replace(['\r', '\n'], " ");
+            output.push_str(&format!("  n{index}[\"{label}\"]\n"));
+        }
+        for (index, edge) in diagram.edges.iter().enumerate() {
+            let Some(from) = node_ids.get(&edge.from) else {
+                continue;
+            };
+            let to = edge
+                .to
+                .as_ref()
+                .and_then(|id| node_ids.get(id))
+                .cloned()
+                .unwrap_or_else(|| format!("external{index}"));
+            if edge.to.as_ref().is_none_or(|id| !node_ids.contains_key(id)) {
+                let label = edge
+                    .referenced_path
+                    .clone()
+                    .unwrap_or_else(|| "unresolved target".into())
+                    .replace('"', "\\\"")
+                    .replace(['\r', '\n'], " ");
+                output.push_str(&format!("  {to}[\"{label}\"]\n"));
+            }
+            output.push_str(&format!("  {from} -->|{:?}| {to}\n", edge.kind));
+        }
+        Some(output)
+    }
+
+    fn copy_catalog_diagram_mermaid(&mut self, cx: &mut Context<Self>) {
+        if let Some(diagram) = self.catalog_diagram_mermaid() {
+            cx.write_to_clipboard(gpui::ClipboardItem::new_string(diagram));
+            self.show_success_toast("Copied Mermaid catalog diagram".into(), cx);
+        }
+    }
+
+    fn catalog_rollback_sql(&self) -> Option<String> {
+        let plan = self.catalog_migration_plan.as_ref()?;
+        let statements = plan
+            .rollback_groups
+            .iter()
+            .flat_map(|group| &group.statements)
+            .collect::<Vec<_>>();
+        if statements.is_empty() {
+            return None;
+        }
+        let mut output = format!(
+            "-- Sift rollback plan for migration {}\n-- Generated only from changes marked exactly reversible. Review before executing.\n\n",
+            plan.id
+        );
+        for statement in statements {
+            output.push_str(&statement.sql);
+            if !statement.sql.trim_end().ends_with(';') {
+                output.push(';');
+            }
+            output.push_str("\n\n");
+        }
+        Some(output)
+    }
+
+    fn copy_catalog_rollback_sql(&mut self, cx: &mut Context<Self>) {
+        if let Some(sql) = self.catalog_rollback_sql() {
+            cx.write_to_clipboard(gpui::ClipboardItem::new_string(sql));
+            self.show_success_toast("Copied migration rollback SQL".into(), cx);
         }
     }
 
@@ -21320,6 +21413,7 @@ impl WorkspaceShell {
                                 .flex()
                                 .justify_end()
                                 .gap_2()
+                                .child(Button::new("copy-catalog-mermaid", "Copy Mermaid").debug_selector("copy-catalog-mermaid").tone(ButtonTone::Ghost).disabled(self.catalog_diagram.is_none()).on_click(cx.listener(|shell, _, _, cx| shell.copy_catalog_diagram_mermaid(cx))))
                                 .child(Button::new("refresh-catalog-diagram", "Refresh").debug_selector("refresh-catalog-diagram").tone(ButtonTone::Neutral).loading(self.catalog_diagram_loading).on_click(cx.listener(|shell, _, _, cx| shell.open_catalog_diagram(cx))))
                                 .child(Button::new("compare-catalog-diagram", "Compare to baseline…").debug_selector("compare-catalog-diagram").tone(ButtonTone::Accent).disabled(self.catalog_diagram_loading).on_click(cx.listener(|shell, _, _, cx| shell.prepare_catalog_migration(cx))))
                         )
@@ -21365,6 +21459,7 @@ impl WorkspaceShell {
                         .child(div().id("catalog-migration-statements").flex_1().min_h_0().overflow_y_scroll().children(statements))
                         .children((statement_count > 20).then(|| div().text_xs().text_color(colors.muted_text).child(format!("{} more statement(s) not shown", statement_count - 20))))
                         .child(div().flex().justify_end().gap_2()
+                            .child(Button::new("copy-catalog-rollback", "Copy rollback SQL").debug_selector("copy-catalog-rollback").tone(ButtonTone::Ghost).disabled(self.catalog_rollback_sql().is_none()).on_click(cx.listener(|shell, _, _, cx| shell.copy_catalog_rollback_sql(cx))))
                             .child(Button::new("cancel-catalog-migration", "Cancel").tone(ButtonTone::Neutral).on_click(cx.listener(|shell, _, window, cx| shell.dismiss_modal(&DismissModal, window, cx))))
                             .child(Button::new("apply-catalog-migration", if self.catalog_migration_pending { "Working…" } else { "Apply migration" }).tone(ButtonTone::DangerMuted).disabled(self.catalog_migration_pending || self.catalog_migration_plan.is_none()).on_click(cx.listener(|shell, _, _, cx| shell.apply_catalog_migration(cx)))))
                         .into_any_element()
@@ -24105,6 +24200,15 @@ mod tests {
         assert!(cx.debug_bounds("catalog-diagram-modal").is_some());
         assert!(cx.debug_bounds("catalog-diagram-card-0").is_some());
         assert!(cx.debug_bounds("compare-catalog-diagram").is_some());
+        let copy = cx.debug_bounds("copy-catalog-mermaid").unwrap();
+        cx.simulate_click(copy.center(), Modifiers::default());
+        cx.run_until_parked();
+        let mermaid = cx
+            .read_from_clipboard()
+            .and_then(|item| item.text())
+            .unwrap();
+        assert!(mermaid.starts_with("flowchart LR\n"));
+        assert!(mermaid.contains("-->|DependsOn|"));
     }
 
     #[test]
