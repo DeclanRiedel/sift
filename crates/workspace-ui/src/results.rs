@@ -6,6 +6,7 @@
 
 use std::collections::HashMap;
 use std::ops::Range;
+use std::sync::Arc;
 
 use gpui::{
     actions, anchored, canvas, deferred, div, prelude::*, px, uniform_list, App, ClipboardItem,
@@ -714,6 +715,9 @@ pub struct ResultsView {
     /// for every visible row during scroll and selection paints.
     rendered_columns: Vec<CachedColumnRender>,
     rendered_rows: Vec<Vec<CachedCellRender>>,
+    /// Display-order projection into source rows. Selection and edits remain
+    /// source-indexed when loaded-row transforms reorder the grid.
+    display_rows: Arc<Vec<usize>>,
     column_widths: Vec<f32>,
     /// Stable source-column indices in current display order. Visibility is a
     /// separate projection so excluded fields can return in the same position.
@@ -772,6 +776,7 @@ impl ResultsView {
             state: ResultState::Idle,
             rendered_columns: Vec::new(),
             rendered_rows: Vec::new(),
+            display_rows: Arc::new(Vec::new()),
             column_widths: Vec::new(),
             column_order: Vec::new(),
             included_columns: Vec::new(),
@@ -910,13 +915,24 @@ impl ResultsView {
         if records.is_empty() {
             return Err("Clipboard has no cells to paste".into());
         }
+        let start_display_row = self
+            .display_rows
+            .iter()
+            .position(|source| *source == row)
+            .ok_or("Selected row is not displayed")?;
         let mut edits = Vec::new();
         for (row_offset, record) in records.into_iter().enumerate() {
-            let target_row = row.saturating_add(row_offset);
+            let display_row = start_display_row.saturating_add(row_offset);
+            let target_row = self.display_rows.get(display_row).copied().ok_or_else(|| {
+                format!(
+                    "Paste exceeds the displayed result at row {}",
+                    display_row + 1
+                )
+            })?;
             let source_row = data
                 .rows
                 .get(target_row)
-                .ok_or_else(|| format!("Paste exceeds the result at row {}", target_row + 1))?;
+                .ok_or_else(|| format!("Result is missing source row {}", target_row + 1))?;
             let original_row = data
                 .columns
                 .iter()
@@ -1089,7 +1105,7 @@ impl ResultsView {
         let row_index = match self.selected? {
             GridSelection::Cell { row, .. } | GridSelection::Row(row) => row,
             GridSelection::Range { focus_row, .. } => focus_row,
-            GridSelection::Column(_) | GridSelection::All => 0,
+            GridSelection::Column(_) | GridSelection::All => *self.display_rows.first()?,
         };
         let data = self.state.ready()?;
         let row = data.rows.get(row_index)?;
@@ -1301,6 +1317,7 @@ impl ResultsView {
                 .collect(),
             _ => Vec::new(),
         };
+        self.display_rows = Arc::new((0..self.rendered_rows.len()).collect());
         self.column_widths = vec![DEFAULT_COLUMN_WIDTH; self.rendered_columns.len()];
         self.column_order = (0..self.rendered_columns.len()).collect();
         self.included_columns = vec![true; self.rendered_columns.len()];
@@ -1469,6 +1486,7 @@ impl ResultsView {
                     .expect("row pages are prepared before they enter the results surface");
                 debug_assert_eq!(rows.len(), prepared_rows.len());
                 for (row, rendered) in rows.into_iter().zip(prepared_rows) {
+                    Arc::make_mut(&mut self.display_rows).push(data.rows.len());
                     self.rendered_rows
                         .push(rendered.into_iter().map(Into::into).collect());
                     data.rows.push(row);
@@ -1537,6 +1555,7 @@ impl ResultsView {
         self.window_start += data.rows.len();
         data.rows.clear();
         self.rendered_rows.clear();
+        self.display_rows = Arc::new(Vec::new());
         self.window_held = false;
         self.selected = None;
         self.row_scroll_handle
@@ -1775,6 +1794,22 @@ impl ResultsView {
             .collect()
     }
 
+    fn display_position(&self, source_row: usize) -> Option<usize> {
+        self.display_rows
+            .iter()
+            .position(|candidate| *candidate == source_row)
+    }
+
+    #[cfg(test)]
+    fn set_display_rows(&mut self, rows: Vec<usize>, cx: &mut Context<Self>) {
+        debug_assert!(rows.iter().all(|row| *row < self.rendered_rows.len()));
+        self.display_rows = Arc::new(rows);
+        self.selected = None;
+        self.row_scroll_handle
+            .scroll_to_item(0, ScrollStrategy::Top);
+        cx.notify();
+    }
+
     pub(crate) fn set_column_included(
         &mut self,
         column: usize,
@@ -1862,11 +1897,11 @@ impl ResultsView {
     }
 
     fn move_selection(&mut self, row_delta: isize, column_delta: isize, cx: &mut Context<Self>) {
-        let Some(data) = self.state.ready() else {
+        let Some(_) = self.state.ready() else {
             return;
         };
         let visible_columns = self.visible_column_indices();
-        if data.rows.is_empty() || visible_columns.is_empty() {
+        if self.display_rows.is_empty() || visible_columns.is_empty() {
             return;
         }
         let (row, column) = match self.selected {
@@ -1877,14 +1912,17 @@ impl ResultsView {
                 ..
             }) => (focus_row, focus_column),
             Some(GridSelection::Row(row)) => (row, visible_columns[0]),
-            Some(GridSelection::Column(column)) => (0, column),
-            Some(GridSelection::All) | None => (0, visible_columns[0]),
+            Some(GridSelection::Column(column)) => (self.display_rows[0], column),
+            Some(GridSelection::All) | None => (self.display_rows[0], visible_columns[0]),
         };
         let previous_row = row;
         let previous_column = column;
-        let row = row
+        let display_row = self
+            .display_position(row)
+            .unwrap_or(0)
             .saturating_add_signed(row_delta)
-            .min(data.rows.len() - 1);
+            .min(self.display_rows.len() - 1);
+        let row = self.display_rows[display_row];
         let display_column = visible_columns
             .iter()
             .position(|visible| *visible == column)
@@ -1916,9 +1954,9 @@ impl ResultsView {
         // Most repeated arrow events stay inside the viewport. Do not make the
         // uniform list resolve a deferred scroll request and relayout its rows
         // until selection actually crosses a visible edge.
-        if row != previous_row && self.row_needs_reveal(row) {
+        if row != previous_row && self.row_needs_reveal(display_row) {
             self.row_scroll_handle
-                .scroll_to_item(row, ScrollStrategy::Nearest);
+                .scroll_to_item(display_row, ScrollStrategy::Nearest);
         }
         if column != previous_column {
             self.reveal_column(column, cx);
@@ -2163,7 +2201,7 @@ impl ResultsView {
         anchor_column: usize,
         focus_row: usize,
         focus_column: usize,
-    ) -> (std::ops::RangeInclusive<usize>, Vec<usize>) {
+    ) -> (Vec<usize>, Vec<usize>) {
         let visible = self.visible_column_indices();
         let anchor = visible
             .iter()
@@ -2173,10 +2211,27 @@ impl ResultsView {
             .iter()
             .position(|column| *column == focus_column)
             .unwrap_or(anchor);
+        let anchor_row = self.display_position(anchor_row).unwrap_or(0);
+        let focus_row = self.display_position(focus_row).unwrap_or(anchor_row);
         (
-            anchor_row.min(focus_row)..=anchor_row.max(focus_row),
+            self.display_rows[anchor_row.min(focus_row)..=anchor_row.max(focus_row)].to_vec(),
             visible[anchor.min(focus)..=anchor.max(focus)].to_vec(),
         )
+    }
+
+    fn selection_highlights_row(&self, selection: GridSelection, row: usize) -> bool {
+        match selection {
+            GridSelection::Range {
+                anchor_row,
+                anchor_column,
+                focus_row,
+                focus_column,
+            } => self
+                .range_coordinates(anchor_row, anchor_column, focus_row, focus_column)
+                .0
+                .contains(&row),
+            _ => selection.highlights_row(row),
+        }
     }
 
     fn selected_text(&self) -> Option<String> {
@@ -2204,7 +2259,8 @@ impl ResultsView {
                 let (rows, columns) =
                     self.range_coordinates(anchor_row, anchor_column, focus_row, focus_column);
                 Some(
-                    rows.filter_map(|row| self.rendered_rows.get(row))
+                    rows.into_iter()
+                        .filter_map(|row| self.rendered_rows.get(row))
                         .map(|row| {
                             columns
                                 .iter()
@@ -2223,16 +2279,17 @@ impl ResultsView {
             GridSelection::Row(_) => None,
             GridSelection::Column(column) => {
                 let values = self
-                    .rendered_rows
+                    .display_rows
                     .iter()
-                    .filter_map(|row| row.get(column))
+                    .filter_map(|row| self.rendered_rows.get(*row)?.get(column))
                     .map(|cell| cell.text.to_string())
                     .collect::<Vec<_>>();
                 (!values.is_empty()).then(|| values.join("\n"))
             }
             GridSelection::All => (!visible_columns.is_empty()).then(|| {
-                self.rendered_rows
+                self.display_rows
                     .iter()
+                    .filter_map(|row| self.rendered_rows.get(*row))
                     .map(|row| row_text(row))
                     .collect::<Vec<_>>()
                     .join("\n")
@@ -2585,7 +2642,7 @@ impl ResultsView {
 
     fn render_grid(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let colors = cx.theme().colors;
-        let Some(data) = self.state.ready() else {
+        let Some(_) = self.state.ready() else {
             return div()
                 .size_full()
                 .flex()
@@ -2792,7 +2849,7 @@ impl ResultsView {
                     .child(scrollable_header),
             );
 
-        let row_count = data.rows.len();
+        let row_count = self.display_rows.len();
         let grid_scroll_handle = self.grid_scroll_handle.clone();
         let row_scroll_handle = self.row_scroll_handle.clone();
         let row_columns = visible_columns.clone();
@@ -2809,7 +2866,8 @@ impl ResultsView {
                 let column_count = row_columns.len();
                 let selected = view.selected;
                 range
-                    .map(|row_index| {
+                    .filter_map(|display_row| {
+                        let row_index = *view.display_rows.get(display_row)?;
                         let cells = row_columns
                             .iter()
                             .copied()
@@ -2868,7 +2926,7 @@ impl ResultsView {
                                     .map(|edit| (edit.input.clone(), edit.error));
                                 let is_inline_edit = inline_edit.is_some();
                                 let cell = div()
-                                    .id(("cell", row_index * column_count + display_column))
+                                    .id(("cell", display_row * column_count + display_column))
                                     .flex_none()
                                     .w(px(row_widths[display_column]))
                                     .h(px(ROW_HEIGHT))
@@ -2979,8 +3037,8 @@ impl ResultsView {
                             .collect::<Vec<_>>();
                         let row_number = view.window_start + row_index + 1;
                         let pinned_row = div()
-                            .id(("result-row-number", row_index))
-                            .debug_selector(move || format!("result-row-number-{row_index}"))
+                            .id(("result-row-number", display_row))
+                            .debug_selector(move || format!("result-row-number-{display_row}"))
                             .role(gpui::Role::Button)
                             .aria_label(format!("Select row {row_number}"))
                             .flex_none()
@@ -2994,10 +3052,11 @@ impl ResultsView {
                             .border_color(colors.subtle_border)
                             .text_xs()
                             .text_color(colors.disabled_text)
-                            .when(row_index % 2 == 1, |el| el.bg(colors.grid_stripe))
+                            .when(display_row % 2 == 1, |el| el.bg(colors.grid_stripe))
                             .when(
-                                view.selected
-                                    .is_some_and(|selection| selection.highlights_row(row_index)),
+                                view.selected.is_some_and(|selection| {
+                                    view.selection_highlights_row(selection, row_index)
+                                }),
                                 |header| header.bg(colors.selected_surface).text_color(colors.text),
                             )
                             .on_mouse_down(
@@ -3008,37 +3067,42 @@ impl ResultsView {
                                 }),
                             )
                             .child(row_number.to_string());
-                        div()
-                            .debug_selector(move || format!("result-row-container-{row_index}"))
-                            .flex()
-                            .w_full()
-                            .min_w_0()
-                            .h(px(ROW_HEIGHT))
-                            .child(pinned_row)
-                            .child(
-                                div()
-                                    .id(("result-row-scrollable", row_index))
-                                    .flex_1()
-                                    .min_w_0()
-                                    .h_full()
-                                    .overflow_x_scroll()
-                                    .restrict_scroll_to_axis()
-                                    .track_scroll(&view.grid_scroll_handle)
-                                    .child(
-                                        div()
-                                            .debug_selector(move || {
-                                                format!("result-row-fields-{row_index}")
-                                            })
-                                            .flex()
-                                            .flex_none()
-                                            .h_full()
-                                            .w(scrollable_min_width)
-                                            .when(row_index % 2 == 1, |el| {
-                                                el.bg(colors.grid_stripe)
-                                            })
-                                            .children(cells),
-                                    ),
-                            )
+                        Some(
+                            div()
+                                .debug_selector(move || {
+                                    format!("result-row-container-{display_row}")
+                                })
+                                .flex()
+                                .w_full()
+                                .min_w_0()
+                                .h(px(ROW_HEIGHT))
+                                .child(pinned_row)
+                                .child(
+                                    div()
+                                        .id(("result-row-scrollable", display_row))
+                                        .flex_1()
+                                        .min_w_0()
+                                        .h_full()
+                                        .overflow_x_scroll()
+                                        .restrict_scroll_to_axis()
+                                        .track_scroll(&view.grid_scroll_handle)
+                                        .child(
+                                            div()
+                                                .debug_selector(move || {
+                                                    format!("result-row-fields-{display_row}")
+                                                })
+                                                .flex()
+                                                .flex_none()
+                                                .h_full()
+                                                .w(scrollable_min_width)
+                                                .when(display_row % 2 == 1, |el| {
+                                                    el.bg(colors.grid_stripe)
+                                                })
+                                                .children(cells),
+                                        ),
+                                )
+                                .into_any_element(),
+                        )
                     })
                     .collect()
             }),
@@ -4201,6 +4265,52 @@ mod tests {
         view.read_with(cx, |view, _| {
             assert!(matches!(view.state(), ResultState::Ready(_)));
             assert_eq!(view.rendered_rows.len(), 1);
+        });
+    }
+
+    #[gpui::test]
+    fn display_row_projection_preserves_source_selection_copy_and_paste(cx: &mut TestAppContext) {
+        let view = cx.update(|cx| cx.new(ResultsView::new));
+        view.update(cx, |view, cx| {
+            view.set_state(
+                ResultState::from_execute(ExecuteResponse {
+                    cursor_id: sift_protocol::CursorId(1),
+                    columns: vec![column(
+                        "name",
+                        PrimitiveType::Text,
+                        Nullability::NotNullable,
+                    )],
+                    schema_digest: "d".into(),
+                    rows: ["first", "second", "third"]
+                        .into_iter()
+                        .map(|value| Row::new(vec![Value::Text(value.into())]))
+                        .collect(),
+                    affected_rows: None,
+                    warnings: Vec::new(),
+                    has_more: false,
+                }),
+                cx,
+            );
+            view.set_display_rows(vec![2, 0], cx);
+            view.move_selection(0, 0, cx);
+            assert_eq!(
+                view.selected,
+                Some(GridSelection::Cell { row: 2, column: 0 })
+            );
+            assert_eq!(view.selected_text().as_deref(), Some("third"));
+
+            view.visual_selection = true;
+            view.move_selection(1, 0, cx);
+            assert_eq!(view.selected_text().as_deref(), Some("third\nfirst"));
+
+            view.visual_selection = false;
+            view.set_selection(GridSelection::Cell { row: 2, column: 0 }, cx);
+            let edits = view
+                .pasted_cell_edits("replacement-third\nreplacement-first")
+                .unwrap();
+            assert_eq!(edits.len(), 2);
+            assert_eq!(edits[0].selected.original, Value::Text("third".into()));
+            assert_eq!(edits[1].selected.original, Value::Text("first".into()));
         });
     }
 
