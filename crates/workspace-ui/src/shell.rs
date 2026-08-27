@@ -1448,6 +1448,9 @@ pub enum ExecutorCommand {
         generation: u64,
         request: sift_protocol::DataSearchRequest,
     },
+    ImportCsv {
+        request: sift_protocol::CsvImportRequest,
+    },
     LoadHistory {
         item_id: u64,
         cursor: Option<String>,
@@ -1619,6 +1622,7 @@ pub enum ExecutorEvent {
         generation: u64,
         message: String,
     },
+    CsvImported(Result<sift_protocol::CsvImportResponse, String>),
     HistoryLoaded {
         item_id: u64,
         append: bool,
@@ -3771,6 +3775,30 @@ fn safe_export_stem(title: &str) -> String {
     }
 }
 
+fn csv_table_name(path: &std::path::Path) -> String {
+    let raw = path
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .unwrap_or("imported_data");
+    let mut table = raw
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || character == '_' {
+                character.to_ascii_lowercase()
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+    if table.is_empty() {
+        table.push_str("imported_data");
+    }
+    if table.starts_with(|character: char| character.is_ascii_digit()) {
+        table.insert_str(0, "csv_");
+    }
+    table
+}
+
 fn parse_parameter_value(text: &str) -> Result<sift_protocol::Value, String> {
     let trimmed = text.trim();
     if trimmed.eq_ignore_ascii_case("null") {
@@ -5834,6 +5862,24 @@ impl WorkspaceShell {
                     cx.notify();
                 }
             }
+            ExecutorEvent::CsvImported(result) => match result {
+                Ok(response) => {
+                    self.show_toast(
+                        format!(
+                            "Imported {} row(s) into {}",
+                            response.rows_inserted, response.table
+                        ),
+                        cx,
+                    );
+                    if let Some(sender) = &self.executor_sender {
+                        let _ = sender.send(ExecutorCommand::RefreshSchema);
+                    }
+                }
+                Err(message) => {
+                    self.record_runtime_error(None, "CSV import", message.clone(), cx);
+                    self.show_error_toast(message, cx);
+                }
+            },
             ExecutorEvent::HistoryLoaded {
                 item_id,
                 append,
@@ -12145,6 +12191,55 @@ impl WorkspaceShell {
         .detach();
     }
 
+    fn prompt_csv_import(&mut self, cx: &mut Context<Self>) {
+        let Some(sender) = self.executor_sender.clone() else {
+            self.show_error_toast("Connect before importing CSV data".into(), cx);
+            return;
+        };
+        let prompt = cx.prompt_for_paths(PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: false,
+            prompt: Some("Import CSV as a new table".into()),
+        });
+        let background = cx.background_executor().clone();
+        cx.spawn(async move |shell, cx| {
+            let Ok(Ok(Some(paths))) = prompt.await else {
+                return;
+            };
+            let Some(path) = paths.into_iter().next() else {
+                return;
+            };
+            let table = csv_table_name(&path);
+            let read_path = path.clone();
+            let data = background
+                .spawn(async move { std::fs::read(read_path) })
+                .await;
+            let _ = shell.update(cx, |shell, cx| match data {
+                Ok(data) if data.len() <= 64 * 1024 * 1024 => {
+                    let request = sift_protocol::CsvImportRequest {
+                        table: table.clone(),
+                        data,
+                        header: true,
+                        delimiter: ',',
+                        null_value: Some("NULL".into()),
+                        create_table: true,
+                        conflict_policy: sift_protocol::CsvConflictPolicy::Abort,
+                    };
+                    if sender.send(ExecutorCommand::ImportCsv { request }).is_ok() {
+                        shell.show_toast(format!("Importing CSV into {table}…"), cx);
+                    }
+                }
+                Ok(_) => {
+                    shell.show_error_toast("CSV import exceeds the 64 MiB payload limit".into(), cx)
+                }
+                Err(error) => shell
+                    .show_error_toast(format!("reading CSV file {}: {error}", path.display()), cx),
+            });
+        })
+        .detach();
+    }
+
     #[cfg(test)]
     fn queue_result_export(
         &mut self,
@@ -13565,6 +13660,7 @@ impl WorkspaceShell {
             CommandId::RenameSqlSymbol => self.open_semantic_rename(window, cx),
             CommandId::SearchSchema => self.open_schema_search(window, cx),
             CommandId::SearchData => self.open_data_search(window, cx),
+            CommandId::ImportCsv => self.prompt_csv_import(cx),
             CommandId::ExportCsv => self.export_active_result(sift_protocol::ExportFormat::Csv, cx),
             CommandId::ExportTsv => self.export_active_result(sift_protocol::ExportFormat::Tsv, cx),
             CommandId::ExportJsonLines => {
@@ -22432,6 +22528,15 @@ mod tests {
                 Some(&ResultInspectorView::RowJson)
             );
         });
+    }
+
+    #[test]
+    fn csv_import_derives_a_safe_table_name_from_the_file() {
+        assert_eq!(
+            csv_table_name(std::path::Path::new("Sales Report.csv")),
+            "sales_report"
+        );
+        assert_eq!(csv_table_name(std::path::Path::new("2026.csv")), "csv_2026");
     }
 
     #[test]

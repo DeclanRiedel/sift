@@ -1137,6 +1137,19 @@ async fn run_query_executor(
                     return;
                 }
             }
+            ExecutorCommand::ImportCsv { request } => {
+                let result = match context.as_ref() {
+                    Some(opened) => opened
+                        .client
+                        .import_csv(opened.session, opened.connection, request)
+                        .await
+                        .map_err(|error| format!("importing CSV failed: {error}")),
+                    None => Err("Connect to a database before importing CSV data".into()),
+                };
+                if events.send(ExecutorEvent::CsvImported(result)).is_err() {
+                    return;
+                }
+            }
             ExecutorCommand::LoadHistory { item_id, cursor } => {
                 let append = cursor.is_some();
                 let connected_client = context.as_ref().map(|opened| opened.client.clone());
