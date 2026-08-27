@@ -10,8 +10,8 @@ use std::ops::Range;
 use gpui::{
     actions, anchored, canvas, deferred, div, prelude::*, px, uniform_list, App, ClipboardItem,
     Context, CursorStyle, Div, DragMoveEvent, Entity, FocusHandle, Focusable, IntoElement,
-    MouseButton, Pixels, Point, ScrollStrategy, ShapedLine, SharedString, Stateful, Subscription,
-    TextAlign, TextRun, UniformListScrollHandle, Window,
+    ListHorizontalSizingBehavior, MouseButton, Pixels, Point, ScrollStrategy, ShapedLine,
+    SharedString, Stateful, Subscription, TextAlign, TextRun, UniformListScrollHandle, Window,
 };
 use sift_api_types::QueryHistory;
 use sift_protocol::{
@@ -1753,18 +1753,17 @@ impl ResultsView {
     ) {
         let column = event.drag(cx).column;
         let pointer_x: f32 = (event.event.position.x - event.bounds.left()).into();
-        let left_edge = ROW_NUMBER_WIDTH
-            + self
-                .visible_column_indices()
-                .into_iter()
-                .take_while(|visible| *visible != column)
-                .map(|visible| {
-                    self.column_widths
-                        .get(visible)
-                        .copied()
-                        .unwrap_or(DEFAULT_COLUMN_WIDTH)
-                })
-                .sum::<f32>();
+        let left_edge = self
+            .visible_column_indices()
+            .into_iter()
+            .take_while(|visible| *visible != column)
+            .map(|visible| {
+                self.column_widths
+                    .get(visible)
+                    .copied()
+                    .unwrap_or(DEFAULT_COLUMN_WIDTH)
+            })
+            .sum::<f32>();
         self.set_column_width(column, pointer_x - left_edge, cx);
     }
 
@@ -1938,17 +1937,16 @@ impl ResultsView {
         if viewport_width <= px(0.) {
             return;
         }
-        let column_left = px(ROW_NUMBER_WIDTH
-            + visible_columns
-                .iter()
-                .take(display_column)
-                .map(|column| {
-                    self.column_widths
-                        .get(*column)
-                        .copied()
-                        .unwrap_or(DEFAULT_COLUMN_WIDTH)
-                })
-                .sum::<f32>());
+        let column_left = px(visible_columns
+            .iter()
+            .take(display_column)
+            .map(|column| {
+                self.column_widths
+                    .get(*column)
+                    .copied()
+                    .unwrap_or(DEFAULT_COLUMN_WIDTH)
+            })
+            .sum::<f32>());
         let column_right = column_left
             + px(self
                 .column_widths
@@ -2633,8 +2631,8 @@ impl ResultsView {
                     .unwrap_or(DEFAULT_COLUMN_WIDTH)
             })
             .collect::<Vec<_>>();
-        let grid_min_width = px(ROW_NUMBER_WIDTH + visible_widths.iter().sum::<f32>());
-        let mut resize_right = ROW_NUMBER_WIDTH;
+        let scrollable_min_width = px(visible_widths.iter().sum::<f32>());
+        let mut resize_right = 0.0;
         let resize_handles = visible_columns
             .iter()
             .copied()
@@ -2660,46 +2658,41 @@ impl ResultsView {
                     )
             })
             .collect::<Vec<_>>();
-        let header = div()
+        let pinned_header = div()
+            .id("result-select-all")
+            .role(gpui::Role::Button)
+            .aria_label("Select all result cells")
+            .flex_none()
+            .w(px(ROW_NUMBER_WIDTH))
+            .h_full()
+            .flex()
+            .items_center()
+            .justify_end()
+            .pr_2()
+            .border_r_1()
+            .border_color(colors.subtle_border)
+            .text_xs()
+            .text_color(colors.disabled_text)
+            .when(self.selected == Some(GridSelection::All), |header| {
+                header.bg(colors.selected_surface)
+            })
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|view, _, window, cx| {
+                    view.focus_handle.focus(window, cx);
+                    view.select_all(cx);
+                }),
+            )
+            .child("#");
+        let scrollable_header = div()
             .debug_selector(|| "result-header".into())
             .on_drag_move::<ColumnResizeDrag>(cx.listener(Self::resize_column))
             .relative()
             .flex()
             .h(px(HEADER_HEIGHT))
             .flex_none()
-            .w_full()
-            .min_w(grid_min_width)
-            .border_b_1()
-            .border_color(colors.subtle_border)
-            .bg(colors.toolbar)
-            .child(
-                div()
-                    .id("result-select-all")
-                    .role(gpui::Role::Button)
-                    .aria_label("Select all result cells")
-                    .flex_none()
-                    .w(px(ROW_NUMBER_WIDTH))
-                    .h_full()
-                    .flex()
-                    .items_center()
-                    .justify_end()
-                    .pr_2()
-                    .border_r_1()
-                    .border_color(colors.subtle_border)
-                    .text_xs()
-                    .text_color(colors.disabled_text)
-                    .when(self.selected == Some(GridSelection::All), |header| {
-                        header.bg(colors.selected_surface)
-                    })
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(|view, _, window, cx| {
-                            view.focus_handle.focus(window, cx);
-                            view.select_all(cx);
-                        }),
-                    )
-                    .child("#"),
-            )
+            .flex_none()
+            .w(scrollable_min_width)
             .children(visible_columns.iter().enumerate().filter_map(
                 |(display_column, source_column)| {
                     let source_column = *source_column;
@@ -2779,6 +2772,25 @@ impl ResultsView {
                 },
             ))
             .children(resize_handles);
+        let header = div()
+            .flex()
+            .h(px(HEADER_HEIGHT))
+            .flex_none()
+            .w_full()
+            .border_b_1()
+            .border_color(colors.subtle_border)
+            .bg(colors.toolbar)
+            .child(pinned_header)
+            .child(
+                div()
+                    .id("result-header-scrollable")
+                    .flex_1()
+                    .min_w_0()
+                    .overflow_x_scroll()
+                    .restrict_scroll_to_axis()
+                    .track_scroll(&self.grid_scroll_handle)
+                    .child(scrollable_header),
+            );
 
         let row_count = data.rows.len();
         let grid_scroll_handle = self.grid_scroll_handle.clone();
@@ -2966,55 +2978,73 @@ impl ResultsView {
                             })
                             .collect::<Vec<_>>();
                         let row_number = view.window_start + row_index + 1;
-                        div()
-                            .debug_selector(move || format!("result-row-{row_index}"))
-                            .flex()
-                            .w(grid_min_width)
+                        let pinned_row = div()
+                            .id(("result-row-number", row_index))
+                            .debug_selector(move || format!("result-row-number-{row_index}"))
+                            .role(gpui::Role::Button)
+                            .aria_label(format!("Select row {row_number}"))
                             .flex_none()
-                            .h(px(ROW_HEIGHT))
+                            .w(px(ROW_NUMBER_WIDTH))
+                            .h_full()
+                            .flex()
+                            .items_center()
+                            .justify_end()
+                            .pr_2()
+                            .border_r_1()
+                            .border_color(colors.subtle_border)
+                            .text_xs()
+                            .text_color(colors.disabled_text)
                             .when(row_index % 2 == 1, |el| el.bg(colors.grid_stripe))
+                            .when(
+                                view.selected
+                                    .is_some_and(|selection| selection.highlights_row(row_index)),
+                                |header| header.bg(colors.selected_surface).text_color(colors.text),
+                            )
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(move |view, _, window, cx| {
+                                    view.focus_handle.focus(window, cx);
+                                    view.select_row(row_index, cx);
+                                }),
+                            )
+                            .child(row_number.to_string());
+                        div()
+                            .debug_selector(move || format!("result-row-container-{row_index}"))
+                            .flex()
+                            .w_full()
+                            .min_w_0()
+                            .h(px(ROW_HEIGHT))
+                            .child(pinned_row)
                             .child(
                                 div()
-                                    .id(("result-row-number", row_index))
-                                    .role(gpui::Role::Button)
-                                    .aria_label(format!("Select row {row_number}"))
-                                    .flex_none()
-                                    .w(px(ROW_NUMBER_WIDTH))
+                                    .id(("result-row-scrollable", row_index))
+                                    .flex_1()
+                                    .min_w_0()
                                     .h_full()
-                                    .flex()
-                                    .items_center()
-                                    .justify_end()
-                                    .pr_2()
-                                    .border_r_1()
-                                    .border_color(colors.subtle_border)
-                                    .text_xs()
-                                    .text_color(colors.disabled_text)
-                                    .when(
-                                        view.selected.is_some_and(|selection| {
-                                            selection.highlights_row(row_index)
-                                        }),
-                                        |header| {
-                                            header
-                                                .bg(colors.selected_surface)
-                                                .text_color(colors.text)
-                                        },
-                                    )
-                                    .on_mouse_down(
-                                        MouseButton::Left,
-                                        cx.listener(move |view, _, window, cx| {
-                                            view.focus_handle.focus(window, cx);
-                                            view.select_row(row_index, cx);
-                                        }),
-                                    )
-                                    .child(row_number.to_string()),
+                                    .overflow_x_scroll()
+                                    .restrict_scroll_to_axis()
+                                    .track_scroll(&view.grid_scroll_handle)
+                                    .child(
+                                        div()
+                                            .debug_selector(move || {
+                                                format!("result-row-fields-{row_index}")
+                                            })
+                                            .flex()
+                                            .flex_none()
+                                            .h_full()
+                                            .w(scrollable_min_width)
+                                            .when(row_index % 2 == 1, |el| {
+                                                el.bg(colors.grid_stripe)
+                                            })
+                                            .children(cells),
+                                    ),
                             )
-                            .children(cells)
                     })
                     .collect()
             }),
         )
         .size_full()
-        .min_w(grid_min_width)
+        .with_horizontal_sizing_behavior(ListHorizontalSizingBehavior::FitList)
         // Wheel input is routed below so the nested vertical and horizontal
         // scrollers cannot both consume the same event.
         .overflow_hidden()
@@ -3047,30 +3077,24 @@ impl ResultsView {
         });
 
         div()
-            .id("result-hscroll")
+            .id("result-grid")
             .flex_1()
+            .w_full()
+            .min_w_0()
             .min_h_0()
-            .overflow_x_scroll()
-            .track_scroll(&self.grid_scroll_handle)
+            .flex()
+            .flex_col()
+            .child(header)
             .child(
                 div()
-                    .size_full()
-                    .min_w(grid_min_width)
-                    .flex()
-                    .flex_col()
+                    .debug_selector(|| "result-row-viewport".into())
+                    .relative()
+                    .flex_1()
+                    .w_full()
+                    .min_w_0()
                     .min_h_0()
-                    .child(header)
-                    // A uniform list needs a definite, clipped viewport. Keep
-                    // that viewport as the flex child and let the list fill it.
-                    .child(
-                        div()
-                            .debug_selector(|| "result-row-viewport".into())
-                            .relative()
-                            .flex_1()
-                            .min_h_0()
-                            .overflow_hidden()
-                            .child(list),
-                    ),
+                    .overflow_hidden()
+                    .child(list),
             )
             .into_any_element()
     }
@@ -4696,14 +4720,14 @@ mod tests {
             assert!(!cache_miss, "unchanged cell layout should be reused");
         });
         assert!(
-            cx.debug_bounds("result-row-0")
+            cx.debug_bounds("result-row-container-0")
                 .is_some_and(|bounds| bounds.size.height > px(0.)),
             "ready result rows should receive a visible layout"
         );
         assert_eq!(
-            cx.debug_bounds("result-row-0")
+            cx.debug_bounds("result-row-fields-0")
                 .map(|bounds| bounds.size.width),
-            Some(px(ROW_NUMBER_WIDTH + DEFAULT_COLUMN_WIDTH * 2.0)),
+            Some(px(DEFAULT_COLUMN_WIDTH * 2.0)),
             "row striping should stop after the final visible field"
         );
         assert_eq!(
@@ -4745,7 +4769,7 @@ mod tests {
             px(DEFAULT_COLUMN_WIDTH),
             "resizing one column must not resize its neighbor"
         );
-        let first_row = cx.debug_bounds("result-row-0").unwrap();
+        let first_row = cx.debug_bounds("result-row-container-0").unwrap();
         cx.simulate_mouse_down(
             gpui::point(
                 first_row.left() + px(ROW_NUMBER_WIDTH + 12.),
@@ -5049,6 +5073,7 @@ mod tests {
             initially_shaped < 100 * 8,
             "offscreen rows must remain unshaped"
         );
+        let row_number_left = cx.debug_bounds("result-row-number-0").unwrap().left();
 
         view.update(&mut cx, |view, cx| {
             view.select_cell(0, 0, cx);
@@ -5057,10 +5082,17 @@ mod tests {
             }
         });
         cx.run_until_parked();
+        assert_eq!(
+            cx.debug_bounds("result-row-number-0").unwrap().left(),
+            row_number_left,
+            "row identifiers must remain pinned during horizontal scrolling"
+        );
         view.read_with(&cx, |view, _| {
             assert!(
                 view.grid_scroll_handle.offset().x < px(0.),
-                "moving the selected cell sideways should reveal its column"
+                "moving the selected cell sideways should reveal its column; bounds={:?}, max={:?}",
+                view.grid_scroll_handle.bounds(),
+                view.grid_scroll_handle.max_offset(),
             );
             view.grid_scroll_handle
                 .set_offset(gpui::point(px(0.), px(0.)));
