@@ -1070,7 +1070,7 @@ fn parse_connection_url(input: &str) -> Result<ParsedConnectionUrl, String> {
     };
     let port = parsed.port().unwrap_or(5432);
     let mut ssl_mode = "prefer".to_owned();
-    let mut engine = serde_json::Map::from_iter([("engine".into(), serde_json::json!("postgres"))]);
+    let mut engine = serde_json::Map::new();
     for (key, value) in parsed.query_pairs() {
         match key.as_ref() {
             "sslmode" => {
@@ -1106,10 +1106,11 @@ fn parse_connection_url(input: &str) -> Result<ParsedConnectionUrl, String> {
         ("host".into(), serde_json::json!(host)),
         ("port".into(), serde_json::json!(port)),
         ("user".into(), serde_json::json!(username)),
-        ("password".into(), serde_json::Value::Null),
         ("ssl_mode".into(), serde_json::json!(ssl_mode)),
-        ("engine_specific".into(), engine.into()),
     ]);
+    if !engine.is_empty() {
+        configuration.insert("engine_specific".into(), engine.into());
+    }
     if let Some(database) = &database {
         configuration.insert("database".into(), serde_json::json!(database));
     }
@@ -11844,7 +11845,6 @@ impl WorkspaceShell {
         let mut configuration = serde_json::Map::from_iter([
             ("host".into(), serde_json::Value::String(host)),
             ("user".into(), serde_json::Value::String(user)),
-            ("password".into(), serde_json::Value::Null),
         ]);
         if let Some(port) = port {
             configuration.insert("port".into(), serde_json::json!(port));
@@ -11860,7 +11860,6 @@ impl WorkspaceShell {
                     _ => (true, false),
                 };
                 let mut engine = serde_json::Map::from_iter([
-                    ("engine".into(), serde_json::json!("sql_server")),
                     ("mars".into(), serde_json::json!(false)),
                     ("encrypt".into(), serde_json::json!(encrypt)),
                     (
@@ -11885,8 +11884,7 @@ impl WorkspaceShell {
                     "ssl_mode".into(),
                     serde_json::Value::String(security_mode.clone()),
                 );
-                let mut engine =
-                    serde_json::Map::from_iter([("engine".into(), serde_json::json!("postgres"))]);
+                let mut engine = serde_json::Map::new();
                 let search_path = self.database_search_path_input.read(cx).text().trim();
                 if !search_path.is_empty() {
                     engine.insert(
@@ -11931,7 +11929,9 @@ impl WorkspaceShell {
                 {
                     engine.insert("pool_min_size".into(), serde_json::json!(pool_min));
                 }
-                configuration.insert("engine_specific".into(), engine.into());
+                if !engine.is_empty() {
+                    configuration.insert("engine_specific".into(), engine.into());
+                }
             }
         }
         let credentials = (!password.is_empty()).then(|| serde_json::json!({"password": password}));
@@ -29576,10 +29576,29 @@ mod tests {
         assert_eq!(configuration["database"], "anywherewms");
         assert_eq!(configuration["user"], "anywherewms");
         assert_eq!(configuration["ssl_mode"], "disable");
-        assert!(configuration["password"].is_null());
+        assert!(configuration.get("password").is_none());
+        assert!(configuration.get("engine_specific").is_none());
         assert_eq!(credentials.unwrap()["password"], "secret value");
         assert_eq!(credential_mode, sift_api_types::CredentialMode::Shared);
-        serde_json::from_value::<sift_protocol::ConnectionSpec>(configuration).unwrap();
+    }
+
+    #[test]
+    fn connection_url_advanced_options_omit_server_owned_engine_discriminator() {
+        let parsed = parse_connection_url(
+            "postgresql://sift:secret@localhost/app?application_name=sift&connect_timeout=5",
+        )
+        .unwrap();
+        assert_eq!(
+            parsed.configuration["engine_specific"]["application_name"],
+            "sift"
+        );
+        assert_eq!(
+            parsed.configuration["engine_specific"]["connect_timeout_secs"],
+            5
+        );
+        assert!(parsed.configuration["engine_specific"]
+            .get("engine")
+            .is_none());
     }
 
     #[test]
@@ -29653,6 +29672,7 @@ mod tests {
                 assert_eq!(provider_id.as_str(), "sift/postgres");
                 assert_eq!(configuration["port"], 5432);
                 assert_eq!(configuration["ssl_mode"], "prefer");
+                assert!(configuration.get("password").is_none());
                 assert_eq!(
                     configuration["engine_specific"]["search_path"],
                     serde_json::json!(["public", "reporting"])
@@ -29664,7 +29684,7 @@ mod tests {
                 assert_eq!(configuration["engine_specific"]["connect_timeout_secs"], 15);
                 assert_eq!(configuration["engine_specific"]["pool_min_size"], 2);
                 assert_eq!(configuration["engine_specific"]["pool_max_size"], 12);
-                serde_json::from_value::<sift_protocol::ConnectionSpec>(configuration).unwrap();
+                assert!(configuration["engine_specific"].get("engine").is_none());
                 assert_eq!(credentials.unwrap()["password"], "top-secret");
                 assert_eq!(credential_mode, sift_api_types::CredentialMode::Shared);
                 assert!(tags.is_empty());
@@ -29829,13 +29849,13 @@ mod tests {
                 assert_eq!(provider_id.as_str(), "sift/sql-server");
                 assert_eq!(configuration["port"], 1433);
                 assert!(configuration.get("ssl_mode").is_none());
+                assert!(configuration.get("password").is_none());
                 assert_eq!(configuration["engine_specific"]["encrypt"], true);
-                assert_eq!(configuration["engine_specific"]["engine"], "sql_server");
+                assert!(configuration["engine_specific"].get("engine").is_none());
                 assert_eq!(
                     configuration["engine_specific"]["trust_server_certificate"],
                     true
                 );
-                serde_json::from_value::<sift_protocol::ConnectionSpec>(configuration).unwrap();
             }
             _ => panic!("expected profile creation command"),
         }
