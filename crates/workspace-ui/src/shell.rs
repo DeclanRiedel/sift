@@ -5214,6 +5214,7 @@ impl WorkspaceShell {
                         shell.reconcile_room_document_tabs(cx);
                         shell.status.connection = shell.lifecycle.status_label();
                         shell.reconcile_restored_workspace(cx);
+                        shell.select_only_git_workspace_if_needed(cx);
                         if instance_changed {
                             shell.persist(cx);
                         }
@@ -11663,8 +11664,32 @@ impl WorkspaceShell {
     pub fn open_workspace(&mut self, workspace: &WorkspaceNavEntry, cx: &mut Context<Self>) {
         self.selected_workspace_id = Some(workspace.id);
         self.presence.join(RoomId(workspace.room_id));
+        if self.left_dock.presentation.open && self.active_left_panel == LeftPanel::Git {
+            self.request_repository_status(cx);
+        }
         self.persist(cx);
         cx.notify();
+    }
+
+    fn select_only_git_workspace_if_needed(&mut self, cx: &mut Context<Self>) {
+        if self.lifecycle.phase != crate::ConnectionPhase::Ready
+            || self.selected_workspace_id.is_some()
+        {
+            return;
+        }
+        let mut git_workspaces = self
+            .lifecycle
+            .tenants
+            .iter()
+            .flat_map(|tenant| &tenant.rooms)
+            .flat_map(|room| &room.workspaces)
+            .filter(|workspace| workspace.git_enabled);
+        let Some(workspace) = git_workspaces.next().cloned() else {
+            return;
+        };
+        if git_workspaces.next().is_none() {
+            self.open_workspace(&workspace, cx);
+        }
     }
 
     pub fn follow_participant(&mut self, attachment_id: i64, cx: &mut Context<Self>) -> bool {
@@ -28515,6 +28540,48 @@ mod tests {
                 workspace.toasts.last().map(|toast| toast.message.clone())
             }),
             Some("Restored workspace is no longer available".into())
+        );
+    }
+
+    #[gpui::test]
+    fn ready_instance_selects_its_only_git_workspace(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        workspace.update(&mut cx, |shell, cx| {
+            shell
+                .lifecycle
+                .apply(LifecycleEvent::TenantLoaded(crate::TenantNavEntry {
+                    id: sift_api_types::TenantId(1),
+                    name: "Demo".into(),
+                    connections: Vec::new(),
+                    rooms: vec![crate::RoomNavEntry {
+                        id: RoomId(7),
+                        tenant_id: sift_api_types::TenantId(1),
+                        name: "Demo Postgres".into(),
+                        documents: Vec::new(),
+                        workspaces: vec![WorkspaceNavEntry {
+                            id: 12,
+                            room_id: 7,
+                            name: "Postgres Lab".into(),
+                            git_enabled: true,
+                            scheduling_enabled: false,
+                        }],
+                    }],
+                }));
+            shell
+                .lifecycle
+                .apply(LifecycleEvent::Phase(crate::ConnectionPhase::Ready));
+            shell.select_only_git_workspace_if_needed(cx);
+        });
+
+        assert_eq!(
+            workspace.read_with(&cx, |shell, cx| shell.snapshot(cx).workspace.workspace_id),
+            Some(12)
+        );
+        assert_eq!(
+            workspace.read_with(&cx, |shell, _| shell.presence.room_id),
+            Some(RoomId(7))
         );
     }
 
