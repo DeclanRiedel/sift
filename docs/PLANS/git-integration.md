@@ -85,6 +85,11 @@ ways:
 - No force push or automatic merge/rebase in v1.
 - Git data must link to database context without committing result rows or
   secret values.
+- Git records reviewed intent; the Database Change Ledger records who actually
+  executed a mutation, where, when, and with what outcome.
+- Manual cell values, before/after rows, and query results never enter Git
+  automatically. An explicit generated DML artifact is reviewed as data-bearing
+  content before it can be committed.
 
 ## Current foundation
 
@@ -314,6 +319,50 @@ ways:
 - [ ] Evaluate per-user branches/worktrees only after shared workflow graduates.
 
 ## Milestone G9 — Database-aware Git
+
+### Database Change Ledger policy
+
+The Change Ledger, not Git author metadata, is authoritative for "who did
+what." Git identifies who authored a reviewed artifact. The ledger identifies
+the authenticated principal who executed it against a particular database and
+whether the operation committed, failed, conflicted, or rolled back.
+
+Default ledger records contain actor, timestamp, tenant/room, connection and
+database target, operation kind, affected object, row count, SQL fingerprint,
+row-identity fingerprint where safe, transaction/correlation ids, workspace
+revision, checkpoint, Git commit, source workflow, and outcome. They do not
+contain raw cell values, before/after rows, query results, credentials, or
+secret-bearing SQL.
+
+Changes made outside Sift cannot be attributed to a Sift principal. Optional
+Postgres/SQL Server native audit or CDC ingestion may report external changes,
+but must label their identity source and confidence explicitly.
+
+- [x] Every user-visible server action has a typed, audited `Operation`.
+- [ ] Define typed change-ledger projection over relevant audit operations.
+- [ ] Cover manual grid insert, update, and delete.
+- [ ] Cover direct DML execution without storing raw SQL or parameter values.
+- [ ] Cover DDL preview/apply and schema-designer mutations.
+- [ ] Cover migration application and rollback.
+- [ ] Cover CSV/import and bulk mutation workflows.
+- [ ] Record authenticated actor, target, operation, fingerprints, row count,
+      transaction/correlation ids, and terminal outcome.
+- [ ] Attach workspace revision, checkpoint, file path, and Git commit when
+      execution came from a versioned artifact.
+- [ ] Distinguish authored-by, approved-by, and executed-by identities.
+- [ ] Add database/table/user/operation/date filters.
+- [ ] Link Git commit detail to its executions.
+- [ ] Link schema/table/grid surfaces to their relevant ledger entries.
+- [ ] Add exportable audit report with permission and retention enforcement.
+- [ ] Make ledger storage append-only and tamper-evident.
+- [ ] Add configurable retention and optional external audit sink.
+- [ ] Keep raw values excluded by default and verify redaction in tests.
+- [ ] Design optional encrypted before/after capture as a separate compliance
+      mode with explicit enablement, access, retention, and deletion policy.
+- [ ] Label native database audit/CDC events as external and preserve their
+      database-native identity separately from Sift identity.
+
+### Versioned database workflow
 
 - [ ] Link commit to workspace checkpoint and tree revision in UI.
 - [ ] Link query execution to workspace file and commit when available.
