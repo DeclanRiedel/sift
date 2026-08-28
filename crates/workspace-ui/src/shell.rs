@@ -991,6 +991,7 @@ actions!(
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Modal {
     CommandPalette,
+    SavedQuerySwitcher,
     SchemaSearch,
     DataSearch,
     DataResults(u64),
@@ -5411,6 +5412,9 @@ pub struct WorkspaceShell {
     instance_configuration_editor: Entity<QueryEditor>,
     palette_selected: usize,
     palette_scroll_handle: UniformListScrollHandle,
+    saved_query_switcher_input: Entity<TextInput>,
+    saved_query_switcher_selected: usize,
+    saved_query_switcher_scroll_handle: UniformListScrollHandle,
     schema_search_selected: usize,
     schema_search_scroll_handle: UniformListScrollHandle,
     dark_theme: bool,
@@ -5732,6 +5736,8 @@ impl WorkspaceShell {
             })
             .collect();
         let query_input = cx.new(|cx| TextInput::new("", "Search commands…", cx));
+        let saved_query_switcher_input =
+            cx.new(|cx| TextInput::new("", "Open saved query…", cx).aria_label("Open saved query"));
         let semantic_rename_input = cx.new(|cx| TextInput::new("", "New symbol name", cx));
         let saved_query_name_input = cx.new(|cx| TextInput::new("", "Saved query name…", cx));
         let result_cell_edit_input = cx.new(|cx| TextInput::new("", "New value…", cx));
@@ -5823,6 +5829,24 @@ impl WorkspaceShell {
                 .scroll_to_item(0, ScrollStrategy::Top);
             cx.notify();
         })
+        .detach();
+        cx.observe(&saved_query_switcher_input, |shell, _, cx| {
+            shell.saved_query_switcher_selected = 0;
+            shell
+                .saved_query_switcher_scroll_handle
+                .scroll_to_item(0, ScrollStrategy::Top);
+            cx.notify();
+        })
+        .detach();
+        cx.subscribe_in(
+            &saved_query_switcher_input,
+            window,
+            |shell, _, event: &TextInputEvent, window, cx| {
+                if *event == TextInputEvent::Submitted {
+                    shell.open_selected_saved_query(window, cx);
+                }
+            },
+        )
         .detach();
         cx.observe(&connections_find_input, |shell, input, cx| {
             shell.connections_find_query = input.read(cx).text().trim().to_lowercase();
@@ -5956,6 +5980,9 @@ impl WorkspaceShell {
             instance_configuration_editor,
             palette_selected: 0,
             palette_scroll_handle: UniformListScrollHandle::new(),
+            saved_query_switcher_input,
+            saved_query_switcher_selected: 0,
+            saved_query_switcher_scroll_handle: UniformListScrollHandle::new(),
             schema_search_selected: 0,
             schema_search_scroll_handle: UniformListScrollHandle::new(),
             dark_theme: state.dark_theme,
@@ -15109,6 +15136,24 @@ impl WorkspaceShell {
         cx.notify();
     }
 
+    fn open_saved_query_switcher(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.selected_tenant_id().is_none() {
+            self.show_toast("No tenant is available".into(), cx);
+            return;
+        }
+        self.modal = Some(Modal::SavedQuerySwitcher);
+        self.saved_query_switcher_selected = 0;
+        self.saved_query_switcher_scroll_handle
+            .scroll_to_item(0, ScrollStrategy::Top);
+        self.saved_query_switcher_input
+            .update(cx, |input, cx| input.set_text("", cx));
+        self.request_saved_queries(cx);
+        self.saved_query_switcher_input
+            .focus_handle(cx)
+            .focus(window, cx);
+        cx.notify();
+    }
+
     fn open_schema_search_action(
         &mut self,
         _: &OpenSchemaSearch,
@@ -17056,6 +17101,41 @@ impl WorkspaceShell {
             .collect()
     }
 
+    fn filtered_saved_queries(&self, cx: &App) -> Vec<sift_api_types::SavedQuery> {
+        let query = self
+            .saved_query_switcher_input
+            .read(cx)
+            .text()
+            .trim()
+            .to_lowercase();
+        self.saved_queries
+            .iter()
+            .filter(|saved| {
+                query.is_empty()
+                    || saved.name.to_lowercase().contains(&query)
+                    || saved
+                        .tags
+                        .iter()
+                        .any(|tag| tag.to_lowercase().contains(&query))
+            })
+            .cloned()
+            .collect()
+    }
+
+    fn open_selected_saved_query(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.modal != Some(Modal::SavedQuerySwitcher) {
+            return;
+        }
+        let query = self
+            .filtered_saved_queries(cx)
+            .get(self.saved_query_switcher_selected)
+            .cloned();
+        if let Some(query) = query {
+            self.dismiss_modal(&DismissModal, window, cx);
+            self.open_saved_query(query, window, cx);
+        }
+    }
+
     fn schema_palette_hits(&self) -> Vec<sift_protocol::SearchHit> {
         match &self.schema_search_state {
             SchemaSearchState::Ready {
@@ -17126,6 +17206,12 @@ impl WorkspaceShell {
                 self.palette_scroll_handle
                     .scroll_to_item(self.palette_selected, ScrollStrategy::Nearest);
             }
+            Some(Modal::SavedQuerySwitcher) => {
+                self.saved_query_switcher_selected =
+                    self.saved_query_switcher_selected.saturating_sub(1);
+                self.saved_query_switcher_scroll_handle
+                    .scroll_to_item(self.saved_query_switcher_selected, ScrollStrategy::Nearest);
+            }
             Some(Modal::SchemaSearch) => {
                 self.schema_search_selected = self.schema_search_selected.saturating_sub(1);
                 self.schema_search_scroll_handle
@@ -17143,6 +17229,13 @@ impl WorkspaceShell {
                 self.palette_selected = (self.palette_selected + 1).min(last);
                 self.palette_scroll_handle
                     .scroll_to_item(self.palette_selected, ScrollStrategy::Nearest);
+            }
+            Some(Modal::SavedQuerySwitcher) => {
+                let last = self.filtered_saved_queries(cx).len().saturating_sub(1);
+                self.saved_query_switcher_selected =
+                    (self.saved_query_switcher_selected + 1).min(last);
+                self.saved_query_switcher_scroll_handle
+                    .scroll_to_item(self.saved_query_switcher_selected, ScrollStrategy::Nearest);
             }
             Some(Modal::SchemaSearch) => {
                 let last = self.schema_palette_hits().len().saturating_sub(1);
@@ -17165,6 +17258,7 @@ impl WorkspaceShell {
                     }
                 }
             }
+            Some(Modal::SavedQuerySwitcher) => self.open_selected_saved_query(window, cx),
             Some(Modal::SchemaSearch) => {
                 let hit = self
                     .schema_palette_hits()
@@ -17221,6 +17315,10 @@ impl WorkspaceShell {
             self.schema_search_input
                 .update(cx, |input, cx| input.set_text("", cx));
         }
+        if self.modal == Some(Modal::SavedQuerySwitcher) {
+            self.saved_query_switcher_input
+                .update(cx, |input, cx| input.set_text("", cx));
+        }
         if self.modal == Some(Modal::DataSearch) {
             self.data_search_input
                 .update(cx, |input, cx| input.set_text("", cx));
@@ -17272,6 +17370,7 @@ impl WorkspaceShell {
             }
             CommandId::AddConnectionByUrl => self.open_connection_url(window, cx),
             CommandId::NewQuery => self.new_query(window, cx),
+            CommandId::OpenSavedQuery => self.open_saved_query_switcher(window, cx),
             CommandId::ExecuteStatement => {
                 self.dispatch_active_editor_action(&crate::editor::ExecuteStatement, window, cx)
             }
@@ -20846,6 +20945,7 @@ impl WorkspaceShell {
             );
             let database_connection = matches!(modal, Modal::DatabaseConnection);
             let command_palette = matches!(modal, Modal::CommandPalette);
+            let saved_query_switcher = matches!(modal, Modal::SavedQuerySwitcher);
             let schema_search = matches!(modal, Modal::SchemaSearch);
             let data_search = matches!(modal, Modal::DataSearch);
             let data_results = matches!(modal, Modal::DataResults(_));
@@ -20861,6 +20961,7 @@ impl WorkspaceShell {
             } else if settings
                 || keymaps
                 || command_palette
+                || saved_query_switcher
                 || schema_search
                 || query_parameters
                 || result_cell_edit
@@ -21048,6 +21149,173 @@ impl WorkspaceShell {
                                 .text_xs()
                                 .text_color(colors.muted_text)
                                 .child("↑/↓ navigate  ·  Enter run")
+                                .child("Esc close"),
+                        )
+                        .into_any_element()
+                }
+                Modal::SavedQuerySwitcher => {
+                    let queries = self.filtered_saved_queries(cx);
+                    let query_count = queries.len();
+                    let list_height =
+                        query_count.min(PALETTE_VISIBLE_ROWS) as f32 * PALETTE_ROW_HEIGHT;
+                    let loading = self.saved_queries_loading;
+                    let error = self.saved_queries_error.clone();
+                    div()
+                        .flex()
+                        .flex_col()
+                        .child(
+                            div()
+                                .h(px(42.))
+                                .px_2()
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .border_b_1()
+                                .border_color(colors.subtle_border)
+                                .bg(colors.toolbar)
+                                .child(icon(IconName::Search, colors.muted_text, 15.))
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .overflow_hidden()
+                                        .child(self.saved_query_switcher_input.clone()),
+                                )
+                                .child(
+                                    div()
+                                        .debug_selector(|| "close-saved-query-switcher".into())
+                                        .child(
+                                            IconButton::new(
+                                                "close-saved-query-switcher",
+                                                IconName::Close,
+                                                "Close saved query switcher",
+                                            )
+                                            .square(px(26.))
+                                            .icon_size(13.)
+                                            .on_click(cx.listener(|shell, _, window, cx| {
+                                                shell.dismiss_modal(&DismissModal, window, cx)
+                                            })),
+                                        ),
+                                ),
+                        )
+                        .when(query_count > 0, |palette| {
+                            palette.child(
+                                uniform_list(
+                                    "saved-query-switcher-list",
+                                    query_count,
+                                    cx.processor(move |shell, range: Range<usize>, _, cx| {
+                                        let queries = shell.filtered_saved_queries(cx);
+                                        let selected = shell
+                                            .saved_query_switcher_selected
+                                            .min(queries.len().saturating_sub(1));
+                                        range
+                                            .filter_map(|index| {
+                                                queries
+                                                    .get(index)
+                                                    .cloned()
+                                                    .map(|query| (index, query))
+                                            })
+                                            .map(|(index, query)| {
+                                                let open_query = query.clone();
+                                                let scope = if query.owner_principal_id.is_some() {
+                                                    "Personal"
+                                                } else {
+                                                    "Shared"
+                                                };
+                                                let detail = if query.tags.is_empty() {
+                                                    scope.to_owned()
+                                                } else {
+                                                    format!("{scope} · {}", query.tags.join(" · "))
+                                                };
+                                                div()
+                                                    .id(("saved-query-switcher-row", index))
+                                                    .debug_selector(move || {
+                                                        format!("saved-query-switcher-row-{index}")
+                                                    })
+                                                    .w_full()
+                                                    .h(px(PALETTE_ROW_HEIGHT))
+                                                    .px_2()
+                                                    .flex()
+                                                    .items_center()
+                                                    .justify_between()
+                                                    .gap_3()
+                                                    .rounded_sm()
+                                                    .when(index == selected, |row| {
+                                                        row.bg(colors.active_surface)
+                                                    })
+                                                    .hover(|row| row.bg(colors.hovered_surface))
+                                                    .on_click(cx.listener(
+                                                        move |shell, _, window, cx| {
+                                                            shell.dismiss_modal(
+                                                                &DismissModal,
+                                                                window,
+                                                                cx,
+                                                            );
+                                                            shell.open_saved_query(
+                                                                open_query.clone(),
+                                                                window,
+                                                                cx,
+                                                            );
+                                                        },
+                                                    ))
+                                                    .child(
+                                                        div()
+                                                            .flex_1()
+                                                            .min_w_0()
+                                                            .truncate()
+                                                            .child(query.name),
+                                                    )
+                                                    .child(
+                                                        div()
+                                                            .flex_none()
+                                                            .max_w(px(280.))
+                                                            .truncate()
+                                                            .text_xs()
+                                                            .text_color(colors.muted_text)
+                                                            .child(detail),
+                                                    )
+                                            })
+                                            .collect()
+                                    }),
+                                )
+                                .h(px(list_height))
+                                .w_full()
+                                .track_scroll(&self.saved_query_switcher_scroll_handle),
+                            )
+                        })
+                        .when(query_count == 0, |palette| {
+                            let (message, color) = if loading {
+                                ("Loading saved queries…".to_owned(), colors.muted_text)
+                            } else if let Some(error) = error {
+                                (error, colors.danger)
+                            } else if self.saved_queries.is_empty() {
+                                ("No saved queries yet".to_owned(), colors.muted_text)
+                            } else {
+                                ("No matching saved queries".to_owned(), colors.muted_text)
+                            };
+                            palette.child(
+                                div()
+                                    .h(px(PALETTE_ROW_HEIGHT * 2.0))
+                                    .px_3()
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .text_color(color)
+                                    .child(message),
+                            )
+                        })
+                        .child(
+                            div()
+                                .h(px(28.))
+                                .px_2()
+                                .flex()
+                                .items_center()
+                                .justify_between()
+                                .border_t_1()
+                                .border_color(colors.subtle_border)
+                                .text_xs()
+                                .text_color(colors.muted_text)
+                                .child("↑/↓ or Ctrl-J/K navigate  ·  Enter open")
                                 .child("Esc close"),
                         )
                         .into_any_element()
@@ -24823,6 +25091,7 @@ impl WorkspaceShell {
                     | Modal::Keymaps
                     | Modal::Account
                     | Modal::CommandPalette
+                    | Modal::SavedQuerySwitcher
                     | Modal::SchemaSearch
                     | Modal::DataSearch
                     | Modal::DataResults(_)
@@ -24918,6 +25187,7 @@ impl WorkspaceShell {
                         .when(
                             !database_connection
                                 && !command_palette
+                                && !saved_query_switcher
                                 && !schema_search
                                 && !data_results
                                 && !account
@@ -31633,6 +31903,103 @@ mod tests {
         assert_eq!(
             CommandRegistry::definition(CommandId::NewQuery).language,
             "<leader> q n"
+        );
+    }
+
+    #[gpui::test]
+    fn saved_query_switcher_filters_metadata_and_opens_without_duplication(
+        cx: &mut TestAppContext,
+    ) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        let (sender, mut commands) = tokio::sync::mpsc::unbounded_channel();
+
+        workspace.update_in(&mut cx, |shell, window, cx| {
+            shell.executor_sender = Some(sender);
+            shell.lifecycle.tenants = vec![crate::TenantNavEntry {
+                id: sift_api_types::TenantId(1),
+                name: "demo".into(),
+                rooms: Vec::new(),
+                connections: Vec::new(),
+            }];
+            shell.run_command(CommandId::OpenSavedQuery, window, cx);
+            assert_eq!(shell.modal, Some(Modal::SavedQuerySwitcher));
+        });
+        assert!(matches!(
+            commands.try_recv(),
+            Ok(ExecutorCommand::LoadSavedQueries { tenant_id: 1 })
+        ));
+
+        let timestamp = "2026-08-28T10:00:00Z".parse().unwrap();
+        let personal = sift_api_types::SavedQuery {
+            id: sift_api_types::SavedQueryId(9),
+            tenant_id: sift_api_types::TenantId(1),
+            owner_principal_id: Some(sift_api_types::PrincipalId(7)),
+            name: "Recent orders".into(),
+            sql_text: "select * from orders".into(),
+            connection_profile_id: None,
+            tags: vec!["finance".into()],
+            created_at: timestamp,
+            updated_at: timestamp,
+            revision: 3,
+        };
+        let shared = sift_api_types::SavedQuery {
+            id: sift_api_types::SavedQueryId(10),
+            tenant_id: sift_api_types::TenantId(1),
+            owner_principal_id: None,
+            name: "Failed jobs".into(),
+            sql_text: "select * from jobs where failed".into(),
+            connection_profile_id: None,
+            tags: vec!["operations".into()],
+            created_at: timestamp,
+            updated_at: timestamp,
+            revision: 5,
+        };
+        workspace.update(&mut cx, |shell, cx| {
+            shell.on_executor_event(
+                ExecutorEvent::SavedQueriesLoaded {
+                    tenant_id: 1,
+                    result: Ok(vec![personal, shared.clone()]),
+                },
+                cx,
+            );
+            shell
+                .saved_query_switcher_input
+                .update(cx, |input, cx| input.set_text("operations", cx));
+            assert_eq!(
+                shell
+                    .filtered_saved_queries(cx)
+                    .iter()
+                    .map(|query| query.id)
+                    .collect::<Vec<_>>(),
+                vec![shared.id]
+            );
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("saved-query-switcher-row-0").is_some());
+        assert!(cx.debug_bounds("close-saved-query-switcher").is_some());
+
+        workspace.update_in(&mut cx, |shell, window, cx| {
+            shell.open_selected_saved_query(window, cx);
+            assert!(shell.modal.is_none());
+            let pane = shell.panes[shell.active_pane].read(cx);
+            assert!(matches!(
+                pane.active_item().and_then(|item| item.source.as_ref()),
+                Some(ItemSource::SavedQuery(source)) if source.saved_query_id == shared.id.0
+            ));
+            assert_eq!(pane.items.len(), 2);
+
+            shell.open_saved_query_switcher(window, cx);
+            shell
+                .saved_query_switcher_input
+                .update(cx, |input, cx| input.set_text("Failed jobs", cx));
+            shell.open_selected_saved_query(window, cx);
+            assert_eq!(shell.panes[shell.active_pane].read(cx).items.len(), 2);
+        });
+        assert_eq!(
+            CommandRegistry::definition(CommandId::OpenSavedQuery).language,
+            "<leader> q o"
         );
     }
 
