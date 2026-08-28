@@ -1003,6 +1003,7 @@ actions!(
 pub enum Modal {
     CommandPalette,
     SavedQuerySwitcher,
+    QueryHistorySwitcher,
     SchemaSearch,
     DataSearch,
     DataResults(u64),
@@ -1850,6 +1851,11 @@ pub enum ExecutorCommand {
         item_id: u64,
         cursor: Option<String>,
     },
+    LoadGlobalHistory {
+        instance_id: String,
+        generation: u64,
+        cursor: Option<String>,
+    },
     LoadObjectDdl {
         item_id: u64,
         source: DatabaseObjectSource,
@@ -2079,6 +2085,12 @@ pub enum ExecutorEvent {
     CatalogMigrationCanceled(Result<sift_protocol::MigrationRunId, String>),
     HistoryLoaded {
         item_id: u64,
+        append: bool,
+        page: Result<sift_protocol::CursorPage<sift_api_types::QueryHistory>, String>,
+    },
+    GlobalHistoryLoaded {
+        instance_id: String,
+        generation: u64,
         append: bool,
         page: Result<sift_protocol::CursorPage<sift_api_types::QueryHistory>, String>,
     },
@@ -5538,6 +5550,9 @@ pub struct WorkspaceShell {
     saved_query_tags_input: Entity<TextInput>,
     saved_query_switcher_selected: usize,
     saved_query_switcher_scroll_handle: UniformListScrollHandle,
+    query_history_input: Entity<TextInput>,
+    query_history_selected: usize,
+    query_history_scroll_handle: UniformListScrollHandle,
     schema_search_selected: usize,
     schema_search_scroll_handle: UniformListScrollHandle,
     dark_theme: bool,
@@ -5642,6 +5657,12 @@ pub struct WorkspaceShell {
     pending_saved_query_tag_update: Option<(String, sift_api_types::SavedQueryId, Option<u64>)>,
     saved_query_delete_confirmation: Option<sift_api_types::SavedQueryId>,
     pending_saved_query_deletion: Option<(String, sift_api_types::SavedQueryId)>,
+    query_history_rows: Vec<sift_api_types::QueryHistory>,
+    query_history_instance: Option<String>,
+    query_history_generation: u64,
+    query_history_loading: bool,
+    query_history_error: Option<String>,
+    query_history_next_cursor: Option<String>,
     result_cell_edit_target: Option<ResultCellEditTarget>,
     staged_result_edits: Vec<StagedResultEdit>,
     result_edit_conflicts: HashMap<usize, String>,
@@ -5868,6 +5889,9 @@ impl WorkspaceShell {
             cx.new(|cx| TextInput::new("", "Open saved query…", cx).aria_label("Open saved query"));
         let saved_query_tags_input = cx
             .new(|cx| TextInput::new("", "finance, reporting", cx).aria_label("Saved query tags"));
+        let query_history_input = cx.new(|cx| {
+            TextInput::new("", "Search query history…", cx).aria_label("Search query history")
+        });
         let semantic_rename_input = cx.new(|cx| TextInput::new("", "New symbol name", cx));
         let saved_query_name_input = cx.new(|cx| TextInput::new("", "Saved query name…", cx));
         let result_cell_edit_input = cx.new(|cx| TextInput::new("", "New value…", cx));
@@ -5903,6 +5927,24 @@ impl WorkspaceShell {
                 } else {
                     shell.database_connection_error = None;
                     cx.notify();
+                }
+            },
+        )
+        .detach();
+        cx.observe(&query_history_input, |shell, _, cx| {
+            shell.query_history_selected = 0;
+            shell
+                .query_history_scroll_handle
+                .scroll_to_item(0, ScrollStrategy::Top);
+            cx.notify();
+        })
+        .detach();
+        cx.subscribe_in(
+            &query_history_input,
+            window,
+            |shell, _, event: &TextInputEvent, window, cx| {
+                if *event == TextInputEvent::Submitted {
+                    shell.open_selected_query_history(window, cx);
                 }
             },
         )
@@ -6126,6 +6168,9 @@ impl WorkspaceShell {
             saved_query_tags_input,
             saved_query_switcher_selected: 0,
             saved_query_switcher_scroll_handle: UniformListScrollHandle::new(),
+            query_history_input,
+            query_history_selected: 0,
+            query_history_scroll_handle: UniformListScrollHandle::new(),
             schema_search_selected: 0,
             schema_search_scroll_handle: UniformListScrollHandle::new(),
             dark_theme: state.dark_theme,
@@ -6224,6 +6269,12 @@ impl WorkspaceShell {
             pending_saved_query_tag_update: None,
             saved_query_delete_confirmation: None,
             pending_saved_query_deletion: None,
+            query_history_rows: Vec::new(),
+            query_history_instance: None,
+            query_history_generation: 0,
+            query_history_loading: false,
+            query_history_error: None,
+            query_history_next_cursor: None,
             result_cell_edit_target: None,
             staged_result_edits: Vec::new(),
             result_edit_conflicts: HashMap::new(),
@@ -7889,6 +7940,44 @@ impl WorkspaceShell {
                         break;
                     }
                 }
+            }
+            ExecutorEvent::GlobalHistoryLoaded {
+                instance_id,
+                generation,
+                append,
+                page,
+            } => {
+                if self.query_history_instance.as_deref() != Some(instance_id.as_str())
+                    || self.query_history_generation != generation
+                {
+                    return;
+                }
+                self.query_history_loading = false;
+                match page {
+                    Ok(page) => {
+                        if append {
+                            let known = self
+                                .query_history_rows
+                                .iter()
+                                .map(|entry| entry.id)
+                                .collect::<HashSet<_>>();
+                            self.query_history_rows.extend(
+                                page.items
+                                    .into_iter()
+                                    .filter(|entry| !known.contains(&entry.id)),
+                            );
+                        } else {
+                            self.query_history_rows = page.items;
+                        }
+                        self.query_history_next_cursor = page.next_cursor;
+                        self.query_history_error = None;
+                    }
+                    Err(message) => {
+                        self.query_history_error = Some(message.clone());
+                        self.record_runtime_error(None, "Load query history", message, cx);
+                    }
+                }
+                cx.notify();
             }
             ExecutorEvent::ObjectDdlFailed { item_id, message } => {
                 if !self.pending_object_ddl.remove(&item_id) {
@@ -13012,6 +13101,14 @@ impl WorkspaceShell {
     }
 
     fn save_active_query(&mut self, cx: &mut Context<Self>) {
+        self.save_active_query_with_profile(None, cx);
+    }
+
+    fn save_active_query_with_profile(
+        &mut self,
+        new_query_profile_id: Option<i64>,
+        cx: &mut Context<Self>,
+    ) {
         let Some(snapshot) = self.active_query_snapshot(cx) else {
             self.show_toast("Focus a query tab before saving".into(), cx);
             return;
@@ -13068,7 +13165,7 @@ impl WorkspaceShell {
                     owner_principal_id: Some(owner_principal_id),
                     name: snapshot.name,
                     sql_text: snapshot.sql_text,
-                    connection_profile_id: snapshot.connection_profile_id,
+                    connection_profile_id: new_query_profile_id.or(snapshot.connection_profile_id),
                     tags: Vec::new(),
                 },
             }
@@ -15785,6 +15882,28 @@ impl WorkspaceShell {
                 return;
             }
         }
+        if self.modal == Some(Modal::QueryHistorySwitcher) {
+            match key.as_str() {
+                "ctrl-r" => {
+                    self.activate_selected_query_history(true, false, window, cx);
+                    cx.stop_propagation();
+                    return;
+                }
+                "ctrl-s" => {
+                    self.activate_selected_query_history(false, true, window, cx);
+                    cx.stop_propagation();
+                    return;
+                }
+                "ctrl-l" => {
+                    if let Some(cursor) = self.query_history_next_cursor.clone() {
+                        self.request_global_query_history(Some(cursor), cx);
+                    }
+                    cx.stop_propagation();
+                    return;
+                }
+                _ => {}
+            }
+        }
         if self.modal == Some(Modal::CommandPalette)
             && key == "enter"
             && !event.keystroke.modifiers.modified()
@@ -17736,6 +17855,183 @@ impl WorkspaceShell {
             .collect()
     }
 
+    fn query_history_connection_name(&self, profile_id: Option<i64>) -> String {
+        let Some(profile_id) = profile_id else {
+            return "No connection".into();
+        };
+        self.lifecycle
+            .tenants
+            .iter()
+            .flat_map(|tenant| &tenant.connections)
+            .find(|connection| connection.id == profile_id)
+            .map(|connection| connection.name.clone())
+            .unwrap_or_else(|| format!("Connection {profile_id}"))
+    }
+
+    fn filtered_query_history(&self, cx: &App) -> Vec<sift_api_types::QueryHistory> {
+        let query = self
+            .query_history_input
+            .read(cx)
+            .text()
+            .trim()
+            .to_lowercase();
+        self.query_history_rows
+            .iter()
+            .filter(|entry| {
+                if query.is_empty() {
+                    return true;
+                }
+                let status = match entry.status {
+                    sift_api_types::QueryStatus::Ok => "ok success",
+                    sift_api_types::QueryStatus::Error => "error failed",
+                    sift_api_types::QueryStatus::Canceled => "canceled cancelled",
+                };
+                entry.sql_text.to_lowercase().contains(&query)
+                    || entry
+                        .error_message
+                        .as_deref()
+                        .is_some_and(|message| message.to_lowercase().contains(&query))
+                    || self
+                        .query_history_connection_name(
+                            entry.connection_profile_id.map(|profile| profile.0),
+                        )
+                        .to_lowercase()
+                        .contains(&query)
+                    || status.contains(&query)
+                    || entry
+                        .started_at
+                        .format("%Y-%m-%d %H:%M:%S")
+                        .to_string()
+                        .contains(&query)
+            })
+            .cloned()
+            .collect()
+    }
+
+    fn request_global_query_history(&mut self, cursor: Option<String>, cx: &mut Context<Self>) {
+        if self.query_history_loading {
+            return;
+        }
+        let instance_id = self
+            .selected_instance_id
+            .clone()
+            .unwrap_or_else(|| "local".into());
+        let Some(sender) = &self.executor_sender else {
+            let message = "Query history executor is unavailable".to_owned();
+            self.query_history_error = Some(message.clone());
+            self.record_runtime_error(None, "Load query history", message, cx);
+            return;
+        };
+        let sent = sender
+            .send(ExecutorCommand::LoadGlobalHistory {
+                instance_id: instance_id.clone(),
+                generation: self.query_history_generation.wrapping_add(1),
+                cursor,
+            })
+            .is_ok();
+        if sent {
+            self.query_history_instance = Some(instance_id);
+            self.query_history_generation = self.query_history_generation.wrapping_add(1);
+            self.query_history_loading = true;
+            self.query_history_error = None;
+        } else {
+            let message = "Query history executor stopped".to_owned();
+            self.query_history_error = Some(message.clone());
+            self.record_runtime_error(None, "Load query history", message, cx);
+        }
+        cx.notify();
+    }
+
+    fn open_query_history_switcher(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.modal = Some(Modal::QueryHistorySwitcher);
+        self.query_history_rows.clear();
+        self.query_history_loading = false;
+        self.query_history_next_cursor = None;
+        self.query_history_error = None;
+        self.query_history_selected = 0;
+        self.query_history_scroll_handle
+            .scroll_to_item(0, ScrollStrategy::Top);
+        self.query_history_input
+            .update(cx, |input, cx| input.set_text("", cx));
+        self.request_global_query_history(None, cx);
+        self.query_history_input.focus_handle(cx).focus(window, cx);
+        cx.notify();
+    }
+
+    fn activate_selected_query_history(
+        &mut self,
+        run: bool,
+        save: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.modal != Some(Modal::QueryHistorySwitcher) {
+            return;
+        }
+        let entry = self
+            .filtered_query_history(cx)
+            .get(self.query_history_selected)
+            .cloned();
+        let Some(entry) = entry else {
+            return;
+        };
+        if entry.sql_text.starts_with("sqlfp:") {
+            self.show_toast(
+                "This history entry stores only a query fingerprint".into(),
+                cx,
+            );
+            return;
+        }
+        if run {
+            let historical_profile = entry.connection_profile_id.map(|profile| profile.0);
+            let active_profile = match self.connection_status {
+                ConnectionStatus::Connected { profile_id, .. } => Some(profile_id),
+                _ => None,
+            };
+            if historical_profile.is_some() && historical_profile != active_profile {
+                let connection = self.query_history_connection_name(historical_profile);
+                let message =
+                    format!("Connect to {connection} before rerunning this history entry");
+                self.query_history_error = Some(message.clone());
+                self.record_runtime_error(None, "Rerun query history", message, cx);
+                cx.notify();
+                return;
+            }
+        }
+        self.dismiss_modal(&DismissModal, window, cx);
+        self.new_query(window, cx);
+        let Some(pane) = self.panes.get(self.active_pane).cloned() else {
+            return;
+        };
+        let Some(item_id) = pane.read(cx).active_item().map(|item| item.id) else {
+            return;
+        };
+        pane.update(cx, |pane, cx| {
+            if let Some(editor) = pane.editor(item_id) {
+                editor.update(cx, |editor, cx| {
+                    editor.replace_text_from_owner(&entry.sql_text, cx)
+                });
+            }
+            if let Some(item) = pane.items.iter_mut().find(|item| item.id == item_id) {
+                item.dirty = true;
+            }
+            cx.notify();
+        });
+        self.persist(cx);
+        if save {
+            self.save_active_query_with_profile(
+                entry.connection_profile_id.map(|profile| profile.0),
+                cx,
+            );
+        } else if run {
+            self.execute_database_item(item_id, entry.sql_text, cx);
+        }
+    }
+
+    fn open_selected_query_history(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.activate_selected_query_history(false, false, window, cx);
+    }
+
     fn open_selected_saved_query(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.modal != Some(Modal::SavedQuerySwitcher) {
             return;
@@ -17826,6 +18122,11 @@ impl WorkspaceShell {
                 self.saved_query_switcher_scroll_handle
                     .scroll_to_item(self.saved_query_switcher_selected, ScrollStrategy::Nearest);
             }
+            Some(Modal::QueryHistorySwitcher) => {
+                self.query_history_selected = self.query_history_selected.saturating_sub(1);
+                self.query_history_scroll_handle
+                    .scroll_to_item(self.query_history_selected, ScrollStrategy::Nearest);
+            }
             Some(Modal::SchemaSearch) => {
                 self.schema_search_selected = self.schema_search_selected.saturating_sub(1);
                 self.schema_search_scroll_handle
@@ -17851,6 +18152,12 @@ impl WorkspaceShell {
                 self.saved_query_switcher_scroll_handle
                     .scroll_to_item(self.saved_query_switcher_selected, ScrollStrategy::Nearest);
             }
+            Some(Modal::QueryHistorySwitcher) => {
+                let last = self.filtered_query_history(cx).len().saturating_sub(1);
+                self.query_history_selected = (self.query_history_selected + 1).min(last);
+                self.query_history_scroll_handle
+                    .scroll_to_item(self.query_history_selected, ScrollStrategy::Nearest);
+            }
             Some(Modal::SchemaSearch) => {
                 let last = self.schema_palette_hits().len().saturating_sub(1);
                 self.schema_search_selected = (self.schema_search_selected + 1).min(last);
@@ -17873,6 +18180,7 @@ impl WorkspaceShell {
                 }
             }
             Some(Modal::SavedQuerySwitcher) => self.open_selected_saved_query(window, cx),
+            Some(Modal::QueryHistorySwitcher) => self.open_selected_query_history(window, cx),
             Some(Modal::SchemaSearch) => {
                 let hit = self
                     .schema_palette_hits()
@@ -17945,6 +18253,10 @@ impl WorkspaceShell {
             self.saved_query_switcher_input
                 .update(cx, |input, cx| input.set_text("", cx));
         }
+        if self.modal == Some(Modal::QueryHistorySwitcher) {
+            self.query_history_input
+                .update(cx, |input, cx| input.set_text("", cx));
+        }
         if self.modal == Some(Modal::DataSearch) {
             self.data_search_input
                 .update(cx, |input, cx| input.set_text("", cx));
@@ -17997,6 +18309,7 @@ impl WorkspaceShell {
             CommandId::AddConnectionByUrl => self.open_connection_url(window, cx),
             CommandId::NewQuery => self.new_query(window, cx),
             CommandId::OpenSavedQuery => self.open_saved_query_switcher(window, cx),
+            CommandId::OpenQueryHistory => self.open_query_history_switcher(window, cx),
             CommandId::RenameQuery => self.begin_active_query_rename(window, cx),
             CommandId::ExecuteStatement => {
                 self.dispatch_active_editor_action(&crate::editor::ExecuteStatement, window, cx)
@@ -21573,6 +21886,7 @@ impl WorkspaceShell {
             let database_connection = matches!(modal, Modal::DatabaseConnection);
             let command_palette = matches!(modal, Modal::CommandPalette);
             let saved_query_switcher = matches!(modal, Modal::SavedQuerySwitcher);
+            let query_history_switcher = matches!(modal, Modal::QueryHistorySwitcher);
             let schema_search = matches!(modal, Modal::SchemaSearch);
             let data_search = matches!(modal, Modal::DataSearch);
             let data_results = matches!(modal, Modal::DataResults(_));
@@ -21589,6 +21903,7 @@ impl WorkspaceShell {
                 || keymaps
                 || command_palette
                 || saved_query_switcher
+                || query_history_switcher
                 || schema_search
                 || query_parameters
                 || result_cell_edit
@@ -22128,6 +22443,217 @@ impl WorkspaceShell {
                                 } else {
                                     "Ctrl-T tags  ·  Ctrl-D delete  ·  Esc close"
                                 }),
+                        )
+                        .into_any_element()
+                }
+                Modal::QueryHistorySwitcher => {
+                    let entries = self.filtered_query_history(cx);
+                    let entry_count = entries.len();
+                    let list_height = entry_count.min(10) as f32 * 48.0;
+                    let loading = self.query_history_loading;
+                    let error = self.query_history_error.clone();
+                    div()
+                        .flex()
+                        .flex_col()
+                        .child(
+                            div()
+                                .h(px(42.))
+                                .px_2()
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .border_b_1()
+                                .border_color(colors.subtle_border)
+                                .bg(colors.toolbar)
+                                .child(icon(IconName::Search, colors.muted_text, 15.))
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .overflow_hidden()
+                                        .child(self.query_history_input.clone()),
+                                )
+                                .child(
+                                    div()
+                                        .debug_selector(|| {
+                                            "close-query-history-switcher".into()
+                                        })
+                                        .child(
+                                            IconButton::new(
+                                                "close-query-history-switcher",
+                                                IconName::Close,
+                                                "Close query history",
+                                            )
+                                            .square(px(26.))
+                                            .icon_size(13.)
+                                            .on_click(cx.listener(|shell, _, window, cx| {
+                                                shell.dismiss_modal(&DismissModal, window, cx)
+                                            })),
+                                        ),
+                                ),
+                        )
+                        .when(entry_count > 0, |picker| {
+                            picker.child(
+                                uniform_list(
+                                    "query-history-switcher-list",
+                                    entry_count,
+                                    cx.processor(move |shell, range: Range<usize>, _, cx| {
+                                        let entries = shell.filtered_query_history(cx);
+                                        let selected = shell
+                                            .query_history_selected
+                                            .min(entries.len().saturating_sub(1));
+                                        range
+                                            .filter_map(|index| {
+                                                entries
+                                                    .get(index)
+                                                    .cloned()
+                                                    .map(|entry| (index, entry))
+                                            })
+                                            .map(|(index, entry)| {
+                                                let redacted = entry.sql_text.starts_with("sqlfp:");
+                                                let sql = if redacted {
+                                                    "Query text not stored".to_owned()
+                                                } else {
+                                                    entry.sql_text.replace(['\n', '\r'], " ")
+                                                };
+                                                let status = match entry.status {
+                                                    sift_api_types::QueryStatus::Ok => "OK",
+                                                    sift_api_types::QueryStatus::Error => "ERROR",
+                                                    sift_api_types::QueryStatus::Canceled => {
+                                                        "CANCELED"
+                                                    }
+                                                };
+                                                let connection = shell
+                                                    .query_history_connection_name(
+                                                        entry
+                                                            .connection_profile_id
+                                                            .map(|profile| profile.0),
+                                                    );
+                                                let timing = entry.duration_ms.map_or_else(
+                                                    || "No timing".to_owned(),
+                                                    |duration| format!("{duration} ms"),
+                                                );
+                                                div()
+                                                    .id(("query-history-switcher-row", index))
+                                                    .debug_selector(move || {
+                                                        format!(
+                                                            "query-history-switcher-row-{index}"
+                                                        )
+                                                    })
+                                                    .w_full()
+                                                    .h(px(48.))
+                                                    .px_2()
+                                                    .py_1()
+                                                    .flex()
+                                                    .items_center()
+                                                    .gap_3()
+                                                    .when(index == selected, |row| {
+                                                        row.bg(colors.active_surface)
+                                                    })
+                                                    .when(!redacted, |row| {
+                                                        row.hover(|row| {
+                                                            row.bg(colors.hovered_surface)
+                                                        })
+                                                        .on_click(cx.listener(
+                                                            move |shell, _, window, cx| {
+                                                                shell.query_history_selected = index;
+                                                                shell.open_selected_query_history(
+                                                                    window, cx,
+                                                                );
+                                                            },
+                                                        ))
+                                                    })
+                                                    .child(
+                                                        div()
+                                                            .w(px(112.))
+                                                            .flex_none()
+                                                            .text_xs()
+                                                            .text_color(colors.muted_text)
+                                                            .child(
+                                                                entry
+                                                                    .started_at
+                                                                    .format("%Y-%m-%d %H:%M")
+                                                                    .to_string(),
+                                                            ),
+                                                    )
+                                                    .child(
+                                                        div()
+                                                            .flex_1()
+                                                            .min_w_0()
+                                                            .child(div().truncate().child(sql))
+                                                            .child(
+                                                                div()
+                                                                    .truncate()
+                                                                    .text_xs()
+                                                                    .text_color(colors.muted_text)
+                                                                    .child(format!(
+                                                                        "{status} · {connection} · {timing}"
+                                                                    )),
+                                                            ),
+                                                    )
+                                                    .into_any_element()
+                                            })
+                                            .collect()
+                                    }),
+                                )
+                                .h(px(list_height))
+                                .w_full()
+                                .track_scroll(&self.query_history_scroll_handle),
+                            )
+                        })
+                        .when(entry_count == 0, |picker| {
+                            let (message, color) = if loading {
+                                ("Loading query history…".to_owned(), colors.muted_text)
+                            } else if let Some(error) = error.clone() {
+                                (error, colors.danger)
+                            } else if self.query_history_rows.is_empty() {
+                                ("No query history yet".to_owned(), colors.muted_text)
+                            } else {
+                                ("No matching history".to_owned(), colors.muted_text)
+                            };
+                            picker.child(
+                                div()
+                                    .h(px(96.))
+                                    .px_3()
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .text_color(color)
+                                    .child(message),
+                            )
+                        })
+                        .when_some(error.filter(|_| entry_count > 0), |picker, message| {
+                            picker.child(
+                                div()
+                                    .debug_selector(|| "query-history-switcher-error".into())
+                                    .px_3()
+                                    .py_2()
+                                    .border_t_1()
+                                    .border_color(colors.subtle_border)
+                                    .text_xs()
+                                    .text_color(colors.danger)
+                                    .child(message),
+                            )
+                        })
+                        .child(
+                            div()
+                                .h(px(28.))
+                                .px_2()
+                                .flex()
+                                .items_center()
+                                .justify_between()
+                                .border_t_1()
+                                .border_color(colors.subtle_border)
+                                .text_xs()
+                                .text_color(colors.muted_text)
+                                .child(if loading && entry_count > 0 {
+                                    "Loading more…"
+                                } else if self.query_history_next_cursor.is_some() {
+                                    "Ctrl-L load more"
+                                } else {
+                                    "↑/↓ or Ctrl-J/K navigate"
+                                })
+                                .child("Enter open · Ctrl-R run · Ctrl-S save · Esc close"),
                         )
                         .into_any_element()
                 }
@@ -25903,6 +26429,7 @@ impl WorkspaceShell {
                     | Modal::Account
                     | Modal::CommandPalette
                     | Modal::SavedQuerySwitcher
+                    | Modal::QueryHistorySwitcher
                     | Modal::SchemaSearch
                     | Modal::DataSearch
                     | Modal::DataResults(_)
@@ -25999,6 +26526,7 @@ impl WorkspaceShell {
                             !database_connection
                                 && !command_palette
                                 && !saved_query_switcher
+                                && !query_history_switcher
                                 && !schema_search
                                 && !data_results
                                 && !account
@@ -32811,6 +33339,222 @@ mod tests {
         assert_eq!(
             CommandRegistry::definition(CommandId::OpenSavedQuery).language,
             "<leader> q o"
+        );
+    }
+
+    #[gpui::test]
+    fn query_history_switcher_searches_opens_runs_saves_and_reports_failures(
+        cx: &mut TestAppContext,
+    ) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        let (sender, mut commands) = tokio::sync::mpsc::unbounded_channel();
+        let history = sift_api_types::QueryHistory {
+            id: sift_api_types::QueryHistoryId(41),
+            principal_id: sift_api_types::PrincipalId(7),
+            room_id: None,
+            connection_profile_id: Some(sift_api_types::ConnectionProfileId(2)),
+            sql_text: "select * from failed_jobs".into(),
+            started_at: "2026-08-28T10:15:00Z".parse().unwrap(),
+            duration_ms: Some(24),
+            row_count: None,
+            status: sift_api_types::QueryStatus::Error,
+            error_code: Some("XX000".into()),
+            error_message: Some("worker failed".into()),
+        };
+
+        workspace.update_in(&mut cx, |shell, window, cx| {
+            shell.executor_sender = Some(sender);
+            shell.lifecycle.apply(LifecycleEvent::Authenticated(
+                sift_protocol::WhoAmIResponse {
+                    principal: sift_protocol::AuthPrincipal {
+                        id: 7,
+                        display_name: "Analyst".into(),
+                        email: None,
+                        avatar_url: None,
+                        is_instance_admin: false,
+                    },
+                    memberships: Vec::new(),
+                    github_login: None,
+                    auth_session_id: Some("session".into()),
+                },
+            ));
+            shell.lifecycle.tenants = vec![crate::TenantNavEntry {
+                id: sift_api_types::TenantId(1),
+                name: "demo".into(),
+                rooms: Vec::new(),
+                connections: vec![crate::ConnectionNavEntry {
+                    id: 2,
+                    tenant_id: 1,
+                    name: "Warehouse".into(),
+                    provider_id: sift_protocol::ProviderId::new("sift/postgres").unwrap(),
+                }],
+            }];
+            shell.connection_status = ConnectionStatus::Connected {
+                profile_id: 2,
+                name: "Warehouse".into(),
+            };
+            shell.run_command(CommandId::OpenQueryHistory, window, cx);
+            assert_eq!(shell.modal, Some(Modal::QueryHistorySwitcher));
+        });
+        assert!(matches!(
+            commands.try_recv(),
+            Ok(ExecutorCommand::LoadGlobalHistory {
+                instance_id,
+                generation: 1,
+                cursor: None,
+            }) if instance_id == "local"
+        ));
+        workspace.update(&mut cx, |shell, cx| {
+            shell.on_executor_event(
+                ExecutorEvent::GlobalHistoryLoaded {
+                    instance_id: "local".into(),
+                    generation: 1,
+                    append: false,
+                    page: Ok(sift_protocol::CursorPage {
+                        items: vec![history.clone()],
+                        next_cursor: Some("older".into()),
+                    }),
+                },
+                cx,
+            );
+            shell
+                .query_history_input
+                .update(cx, |input, cx| input.set_text("warehouse", cx));
+            assert_eq!(shell.filtered_query_history(cx).len(), 1);
+            shell
+                .query_history_input
+                .update(cx, |input, cx| input.set_text("failed", cx));
+            assert_eq!(shell.filtered_query_history(cx).len(), 1);
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("query-history-switcher-row-0").is_some());
+        assert!(cx.debug_bounds("close-query-history-switcher").is_some());
+
+        cx.simulate_keystrokes("enter");
+        workspace.read_with(&cx, |shell, cx| {
+            assert!(shell.modal.is_none());
+            let pane = shell.panes[shell.active_pane].read(cx);
+            let item = pane.active_item().unwrap();
+            assert!(item.source.is_none());
+            assert!(item.dirty);
+            assert_eq!(
+                pane.editor(item.id).unwrap().read(cx).document().text(),
+                history.sql_text
+            );
+        });
+
+        workspace.update_in(&mut cx, |shell, window, cx| {
+            shell.open_query_history_switcher(window, cx)
+        });
+        let generation = match commands.try_recv().unwrap() {
+            ExecutorCommand::LoadGlobalHistory { generation, .. } => generation,
+            _ => panic!("unexpected command"),
+        };
+        workspace.update(&mut cx, |shell, cx| {
+            shell.on_executor_event(
+                ExecutorEvent::GlobalHistoryLoaded {
+                    instance_id: "local".into(),
+                    generation,
+                    append: false,
+                    page: Ok(sift_protocol::CursorPage {
+                        items: vec![history.clone()],
+                        next_cursor: None,
+                    }),
+                },
+                cx,
+            );
+            shell.connection_status = ConnectionStatus::Connected {
+                profile_id: 3,
+                name: "Other database".into(),
+            };
+        });
+        cx.simulate_keystrokes("ctrl-r");
+        workspace.update(&mut cx, |shell, cx| {
+            assert_eq!(shell.modal, Some(Modal::QueryHistorySwitcher));
+            assert!(shell.global_problems.last().is_some_and(|problem| {
+                problem.title == "Rerun query history"
+                    && problem.message.contains("Connect to Warehouse")
+            }));
+            shell.connection_status = ConnectionStatus::Connected {
+                profile_id: 2,
+                name: "Warehouse".into(),
+            };
+            shell.query_history_error = None;
+            cx.notify();
+        });
+        assert!(commands.try_recv().is_err());
+        cx.simulate_keystrokes("ctrl-r");
+        let executed = std::iter::from_fn(|| commands.try_recv().ok()).any(|command| {
+            matches!(
+                command,
+                ExecutorCommand::Execute { sql, .. } if sql == history.sql_text
+            )
+        });
+        assert!(executed);
+
+        workspace.update_in(&mut cx, |shell, window, cx| {
+            shell.open_query_history_switcher(window, cx)
+        });
+        let generation = match commands.try_recv().unwrap() {
+            ExecutorCommand::LoadGlobalHistory { generation, .. } => generation,
+            _ => panic!("unexpected command"),
+        };
+        workspace.update(&mut cx, |shell, cx| {
+            shell.on_executor_event(
+                ExecutorEvent::GlobalHistoryLoaded {
+                    instance_id: "local".into(),
+                    generation,
+                    append: false,
+                    page: Ok(sift_protocol::CursorPage {
+                        items: vec![history.clone()],
+                        next_cursor: None,
+                    }),
+                },
+                cx,
+            )
+        });
+        cx.simulate_keystrokes("ctrl-s");
+        let saved = std::iter::from_fn(|| commands.try_recv().ok()).any(|command| {
+            matches!(
+                command,
+                ExecutorCommand::CreateSavedQuery { request, .. }
+                    if request.sql_text == history.sql_text
+                        && request.owner_principal_id == Some(7)
+            )
+        });
+        assert!(saved);
+
+        workspace.update_in(&mut cx, |shell, window, cx| {
+            shell.open_query_history_switcher(window, cx)
+        });
+        let generation = match commands.try_recv().unwrap() {
+            ExecutorCommand::LoadGlobalHistory { generation, .. } => generation,
+            _ => panic!("unexpected command"),
+        };
+        workspace.update(&mut cx, |shell, cx| {
+            shell.on_executor_event(
+                ExecutorEvent::GlobalHistoryLoaded {
+                    instance_id: "local".into(),
+                    generation,
+                    append: false,
+                    page: Err("history permission denied".into()),
+                },
+                cx,
+            );
+            assert_eq!(
+                shell.query_history_error.as_deref(),
+                Some("history permission denied")
+            );
+            assert!(shell.global_problems.last().is_some_and(|problem| {
+                problem.title == "Load query history"
+                    && problem.message == "history permission denied"
+            }));
+        });
+        assert_eq!(
+            CommandRegistry::definition(CommandId::OpenQueryHistory).language,
+            "<leader> q h"
         );
     }
 

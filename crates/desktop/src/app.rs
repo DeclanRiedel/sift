@@ -1732,6 +1732,39 @@ async fn run_query_executor(
                     });
                 }));
             }
+            ExecutorCommand::LoadGlobalHistory {
+                instance_id,
+                generation,
+                cursor,
+            } => {
+                let append = cursor.is_some();
+                let connected_client = context.as_ref().map(|opened| opened.client.clone());
+                let server = targets.borrow().clone();
+                let events = events.clone();
+                std::mem::drop(tokio::spawn(async move {
+                    let load = async {
+                        let client = match connected_client {
+                            Some(client) => client,
+                            None => server.client().await?,
+                        };
+                        client
+                            .history_page(None, cursor.as_deref(), Some(100))
+                            .await
+                            .map_err(|error| format!("loading query history failed: {error}"))
+                    };
+                    let page = tokio::time::timeout(HISTORY_LOAD_TIMEOUT, load)
+                        .await
+                        .unwrap_or_else(|_| {
+                            Err("Loading query history timed out after 10 seconds".into())
+                        });
+                    let _ = events.send(ExecutorEvent::GlobalHistoryLoaded {
+                        instance_id,
+                        generation,
+                        append,
+                        page,
+                    });
+                }));
+            }
             ExecutorCommand::LoadSavedQueries { tenant_id } => {
                 let server = targets.borrow().clone();
                 let result = async {
