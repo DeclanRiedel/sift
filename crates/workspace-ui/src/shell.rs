@@ -966,6 +966,7 @@ pub enum Modal {
     Settings,
     Keymaps,
     Account,
+    ConnectionUrl,
     DatabaseConnection,
     ConfirmDeleteConnection(ConnectionNavEntry),
     ConfirmTerminateProcess(i64),
@@ -1029,6 +1030,112 @@ enum DatabaseWizardStep {
     Provider,
     Details,
     Review,
+}
+
+#[derive(Debug, Clone)]
+struct ParsedConnectionUrl {
+    name: String,
+    provider_id: sift_protocol::ProviderId,
+    configuration: serde_json::Value,
+    credentials: Option<serde_json::Value>,
+}
+
+fn parse_connection_url(input: &str) -> Result<ParsedConnectionUrl, String> {
+    let parsed = url::Url::parse(input.trim())
+        .map_err(|_| "Enter a valid PostgreSQL connection URL".to_owned())?;
+    if !matches!(parsed.scheme(), "postgres" | "postgresql") {
+        return Err("URL must start with postgres:// or postgresql://".into());
+    }
+    if parsed.fragment().is_some() {
+        return Err("Connection URLs cannot contain a fragment".into());
+    }
+    let host = parsed
+        .host_str()
+        .filter(|host| !host.is_empty())
+        .ok_or_else(|| "Connection URL must include a host".to_owned())?
+        .to_owned();
+    let username = decode_connection_url_component(parsed.username(), "username")?;
+    if username.is_empty() {
+        return Err("Connection URL must include a username".into());
+    }
+    let password = parsed
+        .password()
+        .map(|value| decode_connection_url_component(value, "password"))
+        .transpose()?;
+    let database = parsed.path().trim_start_matches('/');
+    let database = if database.is_empty() {
+        None
+    } else {
+        Some(decode_connection_url_component(database, "database")?)
+    };
+    let port = parsed.port().unwrap_or(5432);
+    let mut ssl_mode = "prefer".to_owned();
+    let mut engine = serde_json::Map::from_iter([("engine".into(), serde_json::json!("postgres"))]);
+    for (key, value) in parsed.query_pairs() {
+        match key.as_ref() {
+            "sslmode" => {
+                if !matches!(
+                    value.as_ref(),
+                    "disable" | "prefer" | "require" | "verify-ca" | "verify-full"
+                ) {
+                    return Err("PostgreSQL sslmode must be disable, prefer, require, verify-ca, or verify-full".into());
+                }
+                ssl_mode = value.replace('-', "_");
+            }
+            "application_name" => {
+                engine.insert("application_name".into(), serde_json::json!(value));
+            }
+            "connect_timeout" => {
+                let timeout = value
+                    .parse::<u32>()
+                    .ok()
+                    .filter(|timeout| *timeout > 0)
+                    .ok_or_else(|| {
+                        "connect_timeout must be a positive number of seconds".to_owned()
+                    })?;
+                engine.insert("connect_timeout_secs".into(), serde_json::json!(timeout));
+            }
+            unsupported => {
+                return Err(format!(
+                    "URL option '{unsupported}' is not supported yet; use Manual setup"
+                ));
+            }
+        }
+    }
+    let mut configuration = serde_json::Map::from_iter([
+        ("host".into(), serde_json::json!(host)),
+        ("port".into(), serde_json::json!(port)),
+        ("user".into(), serde_json::json!(username)),
+        ("password".into(), serde_json::Value::Null),
+        ("ssl_mode".into(), serde_json::json!(ssl_mode)),
+        ("engine_specific".into(), engine.into()),
+    ]);
+    if let Some(database) = &database {
+        configuration.insert("database".into(), serde_json::json!(database));
+    }
+    let endpoint = if parsed.port().is_some() {
+        format!("{host}:{port}")
+    } else {
+        host.clone()
+    };
+    let name = format!(
+        "{} @ {endpoint}",
+        database.as_deref().unwrap_or(username.as_str())
+    );
+    Ok(ParsedConnectionUrl {
+        name,
+        provider_id: sift_protocol::ProviderId::new("sift/postgres")
+            .expect("built-in PostgreSQL provider id is valid"),
+        configuration: configuration.into(),
+        credentials: password.map(|password| serde_json::json!({ "password": password })),
+    })
+}
+
+fn decode_connection_url_component(value: &str, label: &str) -> Result<String, String> {
+    percent_encoding::percent_decode_str(value)
+        .decode_utf8()
+        .map(|value| value.into_owned())
+        .map_err(|_| format!("Connection URL contains an invalid encoded {label}"))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -5220,6 +5327,7 @@ pub struct WorkspaceShell {
     server_token_input: Entity<TextInput>,
     account_username_input: Entity<TextInput>,
     account_password_input: Entity<TextInput>,
+    connection_url_input: Entity<TextInput>,
     database_name_input: Entity<TextInput>,
     database_host_input: Entity<TextInput>,
     database_port_input: Entity<TextInput>,
@@ -5575,6 +5683,23 @@ impl WorkspaceShell {
                 .aria_label("Account password")
                 .masked()
         });
+        let connection_url_input = cx.new(|cx| {
+            TextInput::new("", "postgresql://user:password@localhost:5432/database", cx)
+                .aria_label("PostgreSQL connection URL")
+                .masked()
+        });
+        cx.subscribe(
+            &connection_url_input,
+            |shell, _, event: &TextInputEvent, cx| {
+                if *event == TextInputEvent::Submitted {
+                    shell.submit_connection_url(cx);
+                } else {
+                    shell.database_connection_error = None;
+                    cx.notify();
+                }
+            },
+        )
+        .detach();
         let database_name_input =
             cx.new(|cx| TextInput::new("", "Display name", cx).aria_label("Connection name"));
         let database_host_input =
@@ -5719,6 +5844,7 @@ impl WorkspaceShell {
             server_token_input,
             account_username_input,
             account_password_input,
+            connection_url_input,
             database_name_input,
             database_host_input,
             database_port_input,
@@ -7553,6 +7679,8 @@ impl WorkspaceShell {
                 self.database_connection_error = None;
                 self.modal = None;
                 self.database_password_input
+                    .update(cx, |input, cx| input.set_text("", cx));
+                self.connection_url_input
                     .update(cx, |input, cx| input.set_text("", cx));
                 match connection_error {
                     Some(error) => {
@@ -11407,6 +11535,61 @@ impl WorkspaceShell {
             self.modal = None;
             cx.notify();
         }
+    }
+
+    fn open_connection_url(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.editing_connection_profile = None;
+        self.selected_database_tenant = self.lifecycle.tenants.first().map(|tenant| tenant.id.0);
+        self.database_connection_error = None;
+        self.database_connection_pending = false;
+        self.connection_url_input
+            .update(cx, |input, cx| input.set_text("", cx));
+        self.modal = Some(Modal::ConnectionUrl);
+        self.connection_url_input.focus_handle(cx).focus(window, cx);
+        cx.notify();
+    }
+
+    fn submit_connection_url(&mut self, cx: &mut Context<Self>) {
+        if self.database_connection_pending {
+            return;
+        }
+        let Some(sender) = &self.executor_sender else {
+            self.database_connection_error =
+                Some("Database connection manager is unavailable".into());
+            cx.notify();
+            return;
+        };
+        let Some(tenant_id) = self.selected_database_tenant else {
+            self.database_connection_error = Some("No workspace is available".into());
+            cx.notify();
+            return;
+        };
+        let parsed = match parse_connection_url(self.connection_url_input.read(cx).text()) {
+            Ok(parsed) => parsed,
+            Err(error) => {
+                self.database_connection_error = Some(error);
+                cx.notify();
+                return;
+            }
+        };
+        if sender
+            .send(ExecutorCommand::CreateConnectionProfile {
+                tenant_id,
+                name: parsed.name,
+                provider_id: parsed.provider_id,
+                configuration: parsed.configuration,
+                credentials: parsed.credentials,
+                credential_mode: sift_api_types::CredentialMode::Shared,
+                tags: Vec::new(),
+            })
+            .is_err()
+        {
+            self.database_connection_error = Some("Database connection manager stopped".into());
+        } else {
+            self.database_connection_pending = true;
+            self.database_connection_error = None;
+        }
+        cx.notify();
     }
 
     fn open_database_connection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -16501,6 +16684,10 @@ impl WorkspaceShell {
             self.database_password_input
                 .update(cx, |input, cx| input.set_text("", cx));
         }
+        if self.modal == Some(Modal::ConnectionUrl) {
+            self.connection_url_input
+                .update(cx, |input, cx| input.set_text("", cx));
+        }
         if matches!(self.modal, Some(Modal::DataResults(_))) {
             for pane in &self.panes {
                 pane.update(cx, |pane, cx| {
@@ -16567,6 +16754,7 @@ impl WorkspaceShell {
             CommandId::ConnectServer => {
                 self.open_server_connection(&OpenServerConnection, window, cx)
             }
+            CommandId::AddConnectionByUrl => self.open_connection_url(window, cx),
             CommandId::ExecuteStatement => {
                 self.dispatch_active_editor_action(&crate::editor::ExecuteStatement, window, cx)
             }
@@ -19520,7 +19708,7 @@ impl WorkspaceShell {
                                 .tone(ButtonTone::Ghost)
                                 .start_icon(IconName::Add)
                                 .on_click(cx.listener(|shell, _, window, cx| {
-                                    shell.open_database_connection(window, cx)
+                                    shell.open_connection_url(window, cx)
                                 })),
                         )
                         .when(
@@ -22757,6 +22945,88 @@ impl WorkspaceShell {
                         }))
                         .into_any_element()
                 }
+                Modal::ConnectionUrl => {
+                    let pending = self.database_connection_pending;
+                    let workspace_name = self
+                        .selected_database_tenant
+                        .and_then(|id| {
+                            self.lifecycle
+                                .tenants
+                                .iter()
+                                .find(|tenant| tenant.id.0 == id)
+                        })
+                        .map(|tenant| tenant.name.as_str())
+                        .unwrap_or("current workspace");
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_3()
+                        .child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .gap_1()
+                                .child(
+                                    div()
+                                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                                        .child("Add PostgreSQL connection"),
+                                )
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(colors.muted_text)
+                                        .child(format!(
+                                            "Paste a URL and press Enter · saves to {workspace_name}"
+                                        )),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .id("connection-url-input")
+                                .w_full()
+                                .child(self.connection_url_input.clone()),
+                        )
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(colors.muted_text)
+                                .whitespace_normal()
+                                .child("Credentials are masked here, removed from the saved connection settings, and stored through the server's secure secret store."),
+                        )
+                        .children(
+                            self.database_connection_error
+                                .as_ref()
+                                .map(|message| ErrorBanner::new(message.clone())),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .justify_between()
+                                .gap_2()
+                                .child(
+                                    Button::new("connection-url-manual", "Manual setup")
+                                        .tone(ButtonTone::Ghost)
+                                        .disabled(pending)
+                                        .on_click(cx.listener(|shell, _, window, cx| {
+                                            shell.open_database_connection(window, cx)
+                                        })),
+                                )
+                                .child(
+                                    Button::new(
+                                        "connection-url-submit",
+                                        if pending { "Connecting…" } else { "Add & connect" },
+                                    )
+                                    .tone(ButtonTone::Accent)
+                                    .loading(pending)
+                                    .disabled(pending)
+                                    .on_click(cx.listener(|shell, _, _, cx| {
+                                        shell.submit_connection_url(cx)
+                                    })),
+                                ),
+                        )
+                        .into_any_element()
+                }
                 Modal::DatabaseConnection => {
                     let editing = self.editing_connection_profile.is_some();
                     let step = self.database_wizard_step;
@@ -23934,6 +24204,7 @@ impl WorkspaceShell {
                     | Modal::QueryParameters
                     | Modal::EditResultCell
                     | Modal::PlanCaptures
+                    | Modal::ConnectionUrl
                     | Modal::DatabaseConnection
                     | Modal::ConfirmTransactionDisconnect
                     | Modal::ConfirmProductionExecution
@@ -29197,6 +29468,62 @@ mod tests {
             workspace.read_with(&cx, |shell, _| shell.account_error.clone()),
             Some("Username and password are required".into())
         );
+    }
+
+    #[gpui::test]
+    fn connection_url_creates_profile_and_keeps_password_out_of_configuration(
+        cx: &mut TestAppContext,
+    ) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        workspace.update(&mut cx, |shell, cx| {
+            shell.executor_sender = Some(sender);
+            shell.selected_database_tenant = Some(7);
+            shell.connection_url_input.update(cx, |input, cx| {
+                input.set_text(
+                    "postgresql://anywherewms:secret%20value@localhost:5433/anywherewms?sslmode=disable",
+                    cx,
+                )
+            });
+            shell.submit_connection_url(cx);
+        });
+
+        let ExecutorCommand::CreateConnectionProfile {
+            tenant_id,
+            name,
+            provider_id,
+            configuration,
+            credentials,
+            credential_mode,
+            ..
+        } = receiver.try_recv().unwrap()
+        else {
+            panic!("expected profile creation command")
+        };
+        assert_eq!(tenant_id, 7);
+        assert_eq!(name, "anywherewms @ localhost:5433");
+        assert_eq!(provider_id.as_str(), "sift/postgres");
+        assert_eq!(configuration["host"], "localhost");
+        assert_eq!(configuration["port"], 5433);
+        assert_eq!(configuration["database"], "anywherewms");
+        assert_eq!(configuration["user"], "anywherewms");
+        assert_eq!(configuration["ssl_mode"], "disable");
+        assert!(configuration["password"].is_null());
+        assert_eq!(credentials.unwrap()["password"], "secret value");
+        assert_eq!(credential_mode, sift_api_types::CredentialMode::Shared);
+        serde_json::from_value::<sift_protocol::ConnectionSpec>(configuration).unwrap();
+    }
+
+    #[test]
+    fn connection_url_rejects_unknown_options_instead_of_silently_dropping_them() {
+        let error = parse_connection_url(
+            "postgresql://sift:secret@localhost/app?target_session_attrs=read-write",
+        )
+        .unwrap_err();
+        assert!(error.contains("target_session_attrs"));
+        assert!(error.contains("Manual setup"));
     }
 
     #[gpui::test]

@@ -8,6 +8,7 @@ use std::collections::BTreeMap;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum CommandId {
     ConnectServer,
+    AddConnectionByUrl,
     ExecuteStatement,
     ExecuteDocument,
     CancelExecution,
@@ -75,6 +76,7 @@ impl CommandId {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::ConnectServer => "instance.connect-server",
+            Self::AddConnectionByUrl => "database.add-connection-url",
             Self::ExecuteStatement => "query.execute-statement",
             Self::ExecuteDocument => "query.execute-document",
             Self::CancelExecution => "query.cancel",
@@ -358,6 +360,14 @@ const DEFINITIONS: &[CommandDefinition] = &[
         "Connect to Server…",
         "",
         "<leader> d c",
+        true,
+        AvailabilityRule::Always,
+    ),
+    command(
+        CommandId::AddConnectionByUrl,
+        "Add Database Connection from URL…",
+        "",
+        "<leader> d u",
         true,
         AvailabilityRule::Always,
     ),
