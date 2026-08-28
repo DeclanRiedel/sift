@@ -57,6 +57,10 @@ pub enum SemanticRequestKind {
         position: u32,
         new_name: String,
     },
+    /// List every statement intersecting the full document range.
+    Outline {
+        end: u32,
+    },
 }
 
 impl SemanticRequestKind {
@@ -90,6 +94,10 @@ pub enum SemanticOutcome {
         usages: Vec<SqlUsage>,
         is_complete: bool,
     },
+    Outline {
+        statements: Vec<sift_protocol::SemanticStatement>,
+    },
+    OutlineFailed(String),
     Failed(String),
 }
 

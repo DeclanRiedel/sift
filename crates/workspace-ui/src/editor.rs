@@ -1095,6 +1095,19 @@ impl QueryEditor {
         self.document.cursor()
     }
 
+    pub fn set_cursor_offset(&mut self, offset: usize, cx: &mut Context<Self>) {
+        let text = self.document.text();
+        let mut target = offset.min(text.len());
+        while !text.is_char_boundary(target) {
+            target -= 1;
+        }
+        self.document.set_selection(target..target, false);
+        if let Some(vim) = self.vim.as_mut() {
+            vim.set_cursor(self.document.text(), target);
+        }
+        self.selection_changed(cx);
+    }
+
     /// Monotonic identity of the current buffer contents. Every semantic
     /// request is tagged with it and every answer is checked against it, so a
     /// slow server reply can never be applied to text the user has since
@@ -1166,6 +1179,7 @@ impl QueryEditor {
                 self.apply_semantic_edits(revision, edits, warnings, cx)
             }
             SemanticOutcome::RenamePreview { .. } => false,
+            SemanticOutcome::Outline { .. } | SemanticOutcome::OutlineFailed(_) => false,
             SemanticOutcome::Failed(message) => {
                 self.semantic.set_notice(Some(message));
                 true

@@ -2138,6 +2138,7 @@ async fn run_query_executor(
                 text,
                 request,
             } => {
+                let outline = matches!(request, SemanticRequestKind::Outline { .. });
                 let job = SemanticJob {
                     item_id,
                     text_revision,
@@ -2152,9 +2153,15 @@ async fn run_query_executor(
                         .send(ExecutorEvent::Semantic {
                             item_id,
                             text_revision,
-                            outcome: Box::new(SemanticOutcome::Failed(
-                                "Not connected — SQL analysis needs a connection.".into(),
-                            )),
+                            outcome: Box::new(if outline {
+                                SemanticOutcome::OutlineFailed(
+                                    "Not connected — query outline needs a connection.".into(),
+                                )
+                            } else {
+                                SemanticOutcome::Failed(
+                                    "Not connected — SQL analysis needs a connection.".into(),
+                                )
+                            }),
                         })
                         .is_err()
                 {
@@ -2952,12 +2959,15 @@ fn admissible_jobs(
             continue;
         }
         if job.request != SemanticRequestKind::Analyze {
+            let outcome = if matches!(job.request, SemanticRequestKind::Outline { .. }) {
+                SemanticOutcome::OutlineFailed("Buffer changed before the request ran.".into())
+            } else {
+                SemanticOutcome::Failed("Buffer changed before the request ran.".into())
+            };
             let _ = events.send(ExecutorEvent::Semantic {
                 item_id: job.item_id,
                 text_revision: job.text_revision,
-                outcome: Box::new(SemanticOutcome::Failed(
-                    "Buffer changed before the request ran.".into(),
-                )),
+                outcome: Box::new(outcome),
             });
         }
     }
@@ -3257,6 +3267,33 @@ async fn semantic_outcome(
                     outcome => outcome,
                 },
                 Err(error) => SemanticOutcome::Failed(format!("preparing rename failed: {error}")),
+            }
+        }
+        SemanticRequestKind::Outline { end } => {
+            if end == 0 {
+                return SemanticOutcome::Outline {
+                    statements: Vec::new(),
+                };
+            }
+            match client
+                .select_semantic_statement(
+                    session,
+                    connection,
+                    document,
+                    sift_protocol::SelectStatementRequest {
+                        revision,
+                        cursor: 0,
+                        selection: Some(sift_protocol::TextRange { start: 0, end }),
+                    },
+                )
+                .await
+            {
+                Ok(selection) => SemanticOutcome::Outline {
+                    statements: selection.statements,
+                },
+                Err(error) => {
+                    SemanticOutcome::OutlineFailed(format!("loading query outline failed: {error}"))
+                }
             }
         }
     }

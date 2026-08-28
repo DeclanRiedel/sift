@@ -486,6 +486,7 @@ enum WorkspaceSurface {
     Connections,
     SavedQueries,
     QueryHistory,
+    QueryOutline,
     Inspector,
     Results,
     Problems,
@@ -5572,6 +5573,11 @@ pub struct WorkspaceShell {
     saved_queries_filter_open: bool,
     saved_queries_selected: usize,
     saved_queries_scroll_handle: UniformListScrollHandle,
+    query_outline_focus_handle: FocusHandle,
+    query_outline_filter_input: Entity<TextInput>,
+    query_outline_filter_open: bool,
+    query_outline_selected: usize,
+    query_outline_scroll_handle: UniformListScrollHandle,
     inspector_focus_handle: FocusHandle,
     connections_scroll_handle: UniformListScrollHandle,
     query_input: Entity<TextInput>,
@@ -5707,6 +5713,11 @@ pub struct WorkspaceShell {
     /// generation is allowed to dispatch, so a burst of keystrokes costs one
     /// server round trip instead of one per character.
     semantic_analyze_generation: HashMap<u64, u64>,
+    query_outline_item_id: Option<u64>,
+    query_outline_revision: Option<u64>,
+    query_outline_statements: Vec<sift_protocol::SemanticStatement>,
+    query_outline_loading: bool,
+    query_outline_error: Option<String>,
     pending_semantic_rename: Option<PendingSemanticRename>,
     next_execution_id: u64,
     running_explains: HashMap<u64, u64>,
@@ -5969,6 +5980,9 @@ impl WorkspaceShell {
         let saved_queries_filter_input = cx.new(|cx| {
             TextInput::new("", "Filter saved queries…", cx).aria_label("Filter saved queries")
         });
+        let query_outline_filter_input = cx.new(|cx| {
+            TextInput::new("", "Filter statements…", cx).aria_label("Filter query outline")
+        });
         let schema_search_input = cx.new(|cx| {
             TextInput::new("", "Search schema…", cx).aria_label("Search database schema")
         });
@@ -6130,6 +6144,24 @@ impl WorkspaceShell {
             cx.notify();
         })
         .detach();
+        cx.observe(&query_outline_filter_input, |shell, _, cx| {
+            shell.query_outline_selected = 0;
+            shell
+                .query_outline_scroll_handle
+                .scroll_to_item(0, ScrollStrategy::Top);
+            cx.notify();
+        })
+        .detach();
+        cx.subscribe_in(
+            &query_outline_filter_input,
+            window,
+            |shell, _, event: &TextInputEvent, window, cx| {
+                if *event == TextInputEvent::Submitted {
+                    shell.jump_to_selected_query_outline(window, cx);
+                }
+            },
+        )
+        .detach();
         cx.subscribe_in(
             &saved_queries_filter_input,
             window,
@@ -6245,6 +6277,11 @@ impl WorkspaceShell {
             saved_queries_filter_open: false,
             saved_queries_selected: 0,
             saved_queries_scroll_handle: UniformListScrollHandle::new(),
+            query_outline_focus_handle: cx.focus_handle(),
+            query_outline_filter_input,
+            query_outline_filter_open: false,
+            query_outline_selected: 0,
+            query_outline_scroll_handle: UniformListScrollHandle::new(),
             inspector_focus_handle: cx.focus_handle(),
             connections_scroll_handle: UniformListScrollHandle::new(),
             query_input,
@@ -6372,6 +6409,11 @@ impl WorkspaceShell {
             pending_connection_change: None,
             held_result_pages: HashMap::new(),
             semantic_analyze_generation: HashMap::new(),
+            query_outline_item_id: None,
+            query_outline_revision: None,
+            query_outline_statements: Vec::new(),
+            query_outline_loading: false,
+            query_outline_error: None,
             pending_semantic_rename: None,
             next_execution_id: 1,
             running_explains: HashMap::new(),
@@ -7799,6 +7841,45 @@ impl WorkspaceShell {
                 text_revision,
                 outcome,
             } => match *outcome {
+                SemanticOutcome::Outline { statements } => {
+                    if self.query_outline_item_id != Some(item_id)
+                        || self.query_outline_revision != Some(text_revision)
+                        || self
+                            .editor_for_item(item_id, cx)
+                            .is_none_or(|editor| editor.read(cx).text_revision() != text_revision)
+                    {
+                        return;
+                    }
+                    let selected_id = self
+                        .filtered_query_outline(cx)
+                        .get(self.query_outline_selected)
+                        .map(|statement| statement.statement_id.clone());
+                    self.query_outline_statements = statements;
+                    self.query_outline_selected = selected_id
+                        .and_then(|id| {
+                            self.filtered_query_outline(cx)
+                                .iter()
+                                .position(|statement| statement.statement_id == id)
+                        })
+                        .unwrap_or_else(|| {
+                            self.query_outline_selected
+                                .min(self.filtered_query_outline(cx).len().saturating_sub(1))
+                        });
+                    self.query_outline_loading = false;
+                    self.query_outline_error = None;
+                    cx.notify();
+                }
+                SemanticOutcome::OutlineFailed(message) => {
+                    if self.query_outline_item_id != Some(item_id)
+                        || self.query_outline_revision != Some(text_revision)
+                    {
+                        return;
+                    }
+                    self.query_outline_loading = false;
+                    self.query_outline_error = Some(message.clone());
+                    self.record_runtime_error(Some(item_id), "Load query outline", message, cx);
+                    cx.notify();
+                }
                 SemanticOutcome::RenamePreview { edits, warnings } => {
                     if let Some(rename) = self.pending_semantic_rename.as_mut().filter(|rename| {
                         rename.item_id == item_id && rename.revision == text_revision
@@ -9485,6 +9566,14 @@ impl WorkspaceShell {
                     SemanticRequestKind::Analyze,
                     cx,
                 );
+                if shell.left_dock.presentation.open
+                    && shell.active_left_panel == LeftPanel::QueryOutline
+                    && shell
+                        .active_query_outline_editor(cx)
+                        .is_some_and(|(active_item, _)| active_item == item_id)
+                {
+                    shell.request_query_outline(cx);
+                }
             });
         })
         .detach();
@@ -12986,6 +13075,11 @@ impl WorkspaceShell {
             self.focused_surface = WorkspaceSurface::QueryHistory;
             self.query_history_focus_handle.focus(window, cx);
         }
+        if panel == LeftPanel::QueryOutline && self.left_dock.presentation.open {
+            self.request_query_outline(cx);
+            self.focused_surface = WorkspaceSurface::QueryOutline;
+            self.query_outline_focus_handle.focus(window, cx);
+        }
         if panel == LeftPanel::Collaboration && self.left_dock.presentation.open {
             self.request_room_members(cx);
         }
@@ -15314,6 +15408,11 @@ impl WorkspaceShell {
                     } else {
                         WorkspaceSurface::Editor
                     };
+                }
+                if self.left_dock.presentation.open
+                    && self.active_left_panel == LeftPanel::QueryOutline
+                {
+                    self.request_query_outline(cx);
                 }
                 cx.notify();
             }
@@ -18235,6 +18334,233 @@ impl WorkspaceShell {
             })
             .cloned()
             .collect()
+    }
+
+    const fn query_outline_kind_label(kind: sift_protocol::StatementKind) -> &'static str {
+        match kind {
+            sift_protocol::StatementKind::Query => "QUERY",
+            sift_protocol::StatementKind::Insert => "INSERT",
+            sift_protocol::StatementKind::Update => "UPDATE",
+            sift_protocol::StatementKind::Delete => "DELETE",
+            sift_protocol::StatementKind::Merge => "MERGE",
+            sift_protocol::StatementKind::Ddl => "DDL",
+            sift_protocol::StatementKind::Transaction => "TRANSACTION",
+            sift_protocol::StatementKind::Procedure => "PROCEDURE",
+            sift_protocol::StatementKind::Unknown => "UNKNOWN",
+        }
+    }
+
+    fn active_query_outline_editor(&self, cx: &App) -> Option<(u64, Entity<QueryEditor>)> {
+        let pane = self.panes.get(self.active_pane)?.read(cx);
+        let item = pane.active_item()?;
+        if item.kind != ItemKind::Query {
+            return None;
+        }
+        pane.editor(item.id).map(|editor| (item.id, editor))
+    }
+
+    fn request_query_outline(&mut self, cx: &mut Context<Self>) {
+        let Some((item_id, editor)) = self.active_query_outline_editor(cx) else {
+            self.query_outline_item_id = None;
+            self.query_outline_revision = None;
+            self.query_outline_statements.clear();
+            self.query_outline_loading = false;
+            self.query_outline_error = None;
+            cx.notify();
+            return;
+        };
+        let (revision, text) = {
+            let editor = editor.read(cx);
+            if !editor.semantic_enabled() {
+                return;
+            }
+            (editor.text_revision(), editor.document().text().to_owned())
+        };
+        let end = u32::try_from(text.len()).unwrap_or(u32::MAX);
+        if self.query_outline_loading
+            && self.query_outline_item_id == Some(item_id)
+            && self.query_outline_revision == Some(revision)
+        {
+            return;
+        }
+        if self.query_outline_item_id != Some(item_id) {
+            self.query_outline_selected = 0;
+            self.query_outline_statements.clear();
+        }
+        self.query_outline_item_id = Some(item_id);
+        self.query_outline_revision = Some(revision);
+        let Some(sender) = &self.executor_sender else {
+            let message = "Query-outline executor is unavailable".to_owned();
+            self.query_outline_loading = false;
+            self.query_outline_error = Some(message.clone());
+            self.record_runtime_error(Some(item_id), "Load query outline", message, cx);
+            return;
+        };
+        if sender
+            .send(ExecutorCommand::Semantic {
+                item_id,
+                text_revision: revision,
+                text,
+                request: SemanticRequestKind::Outline { end },
+            })
+            .is_ok()
+        {
+            self.query_outline_loading = true;
+            self.query_outline_error = None;
+        } else {
+            let message = "Query-outline executor stopped".to_owned();
+            self.query_outline_loading = false;
+            self.query_outline_error = Some(message.clone());
+            self.record_runtime_error(Some(item_id), "Load query outline", message, cx);
+        }
+        cx.notify();
+    }
+
+    fn query_outline_source(
+        &self,
+        statement: &sift_protocol::SemanticStatement,
+        cx: &App,
+    ) -> String {
+        let Some(item_id) = self.query_outline_item_id else {
+            return String::new();
+        };
+        let Some(editor) = self.editor_for_item(item_id, cx) else {
+            return String::new();
+        };
+        let editor = editor.read(cx);
+        let text = editor.document().text();
+        let start = (statement.executable_range.start as usize).min(text.len());
+        let end = (statement.executable_range.end as usize).min(text.len());
+        if start > end || !text.is_char_boundary(start) || !text.is_char_boundary(end) {
+            return String::new();
+        }
+        text[start..end].to_owned()
+    }
+
+    fn query_outline_sql(&self, statement: &sift_protocol::SemanticStatement, cx: &App) -> String {
+        self.query_outline_source(statement, cx)
+            .replace(['\n', '\r'], " ")
+    }
+
+    fn filtered_query_outline(&self, cx: &App) -> Vec<sift_protocol::SemanticStatement> {
+        let query = self
+            .query_outline_filter_input
+            .read(cx)
+            .text()
+            .trim()
+            .to_lowercase();
+        self.query_outline_statements
+            .iter()
+            .filter(|statement| {
+                query.is_empty()
+                    || Self::query_outline_kind_label(statement.kind)
+                        .to_lowercase()
+                        .contains(&query)
+                    || self
+                        .query_outline_sql(statement, cx)
+                        .to_lowercase()
+                        .contains(&query)
+            })
+            .cloned()
+            .collect()
+    }
+
+    fn selected_query_outline(&self, cx: &App) -> Option<sift_protocol::SemanticStatement> {
+        self.filtered_query_outline(cx)
+            .get(self.query_outline_selected)
+            .cloned()
+    }
+
+    fn move_query_outline_selection(&mut self, delta: isize, cx: &mut Context<Self>) {
+        let last = self.filtered_query_outline(cx).len().saturating_sub(1);
+        self.query_outline_selected = self
+            .query_outline_selected
+            .saturating_add_signed(delta)
+            .min(last);
+        self.query_outline_scroll_handle
+            .scroll_to_item(self.query_outline_selected, ScrollStrategy::Nearest);
+        cx.notify();
+    }
+
+    fn jump_to_selected_query_outline(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(statement) = self.selected_query_outline(cx) else {
+            return;
+        };
+        let Some(item_id) = self.query_outline_item_id else {
+            return;
+        };
+        let Some(editor) = self.editor_for_item(item_id, cx) else {
+            return;
+        };
+        if self.query_outline_revision != Some(editor.read(cx).text_revision()) {
+            self.request_query_outline(cx);
+            return;
+        }
+        editor.update(cx, |editor, cx| {
+            editor.set_cursor_offset(statement.executable_range.start as usize, cx)
+        });
+        self.focus_active_pane(window, cx);
+        self.focused_surface = WorkspaceSurface::Editor;
+        cx.notify();
+    }
+
+    fn execute_selected_query_outline(&mut self, cx: &mut Context<Self>) {
+        let Some(statement) = self.selected_query_outline(cx) else {
+            return;
+        };
+        let Some(item_id) = self.query_outline_item_id else {
+            return;
+        };
+        let Some(editor) = self.editor_for_item(item_id, cx) else {
+            return;
+        };
+        if self.query_outline_revision != Some(editor.read(cx).text_revision()) {
+            self.request_query_outline(cx);
+            return;
+        }
+        let sql = self.query_outline_source(&statement, cx);
+        if !sql.trim().is_empty() {
+            self.execute_database_item(item_id, sql, cx);
+        }
+    }
+
+    fn open_query_outline_filter(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.query_outline_filter_open = true;
+        self.query_outline_filter_input
+            .focus_handle(cx)
+            .focus(window, cx);
+        cx.notify();
+    }
+
+    fn close_query_outline_filter(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.query_outline_filter_open = false;
+        self.query_outline_filter_input
+            .update(cx, |input, cx| input.set_text("", cx));
+        self.query_outline_focus_handle.focus(window, cx);
+        cx.notify();
+    }
+
+    fn handle_query_outline_key(
+        &mut self,
+        event: &gpui::KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.query_outline_filter_open || event.keystroke.modifiers.modified() {
+            return;
+        }
+        match event.keystroke.key.as_str() {
+            "j" | "down" => self.move_query_outline_selection(1, cx),
+            "k" | "up" => self.move_query_outline_selection(-1, cx),
+            "enter" => self.jump_to_selected_query_outline(window, cx),
+            "x" => self.execute_selected_query_outline(cx),
+            "/" => self.open_query_outline_filter(window, cx),
+            "r" => self.request_query_outline(cx),
+            "escape" => self.focus_active_pane(window, cx),
+            _ => return,
+        }
+        cx.stop_propagation();
+        cx.notify();
     }
 
     fn query_history_connection_name(&self, profile_id: Option<i64>) -> String {
@@ -21625,6 +21951,7 @@ impl WorkspaceShell {
             (DockId::Left, WorkspaceSurface::Connections)
                 | (DockId::Left, WorkspaceSurface::SavedQueries)
                 | (DockId::Left, WorkspaceSurface::QueryHistory)
+                | (DockId::Left, WorkspaceSurface::QueryOutline)
                 | (DockId::Inspector, WorkspaceSurface::Inspector)
         );
         div()
@@ -21652,6 +21979,14 @@ impl WorkspaceShell {
                     dock.key_context("SiftQueryHistory")
                         .track_focus(&self.query_history_focus_handle)
                         .on_key_down(cx.listener(WorkspaceShell::handle_query_history_key))
+                },
+            )
+            .when(
+                dock.id == DockId::Left && self.active_left_panel == LeftPanel::QueryOutline,
+                |dock| {
+                    dock.key_context("SiftQueryOutline")
+                        .track_focus(&self.query_outline_focus_handle)
+                        .on_key_down(cx.listener(WorkspaceShell::handle_query_outline_key))
                 },
             )
             .when(dock.id == DockId::Inspector, |dock| {
@@ -22121,29 +22456,284 @@ impl WorkspaceShell {
             .when(
                 dock.id == DockId::Left && self.active_left_panel == LeftPanel::QueryOutline,
                 |dock_view| {
-                    let active = self
-                        .panes
-                        .get(self.active_pane)
-                        .and_then(|pane| pane.read(cx).active_item())
-                        .cloned();
-                    dock_view.child(
-                        div()
-                            .p_3()
-                            .flex()
-                            .flex_col()
-                            .gap_2()
-                            .whitespace_normal()
-                            .children(active.map(|item| {
+                    let statements = self.filtered_query_outline(cx);
+                    let statement_count = statements.len();
+                    let active_item = self.active_query_outline_editor(cx);
+                    dock_view
+                        .child(
+                            div()
+                                .px_2()
+                                .h(px(32.))
+                                .flex()
+                                .items_center()
+                                .justify_between()
+                                .child(
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .gap_2()
+                                        .child(SectionLabel::new("QUERY OUTLINE"))
+                                        .child(
+                                            div()
+                                                .text_xs()
+                                                .text_color(colors.disabled_text)
+                                                .child(statement_count.to_string()),
+                                        ),
+                                )
+                                .child(
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .gap_1()
+                                        .child(
+                                            IconButton::new(
+                                                "filter-query-outline",
+                                                IconName::Search,
+                                                "Filter query outline · /",
+                                            )
+                                            .square(px(24.))
+                                            .icon_size(12.)
+                                            .on_click(cx.listener(|shell, _, window, cx| {
+                                                shell.open_query_outline_filter(window, cx)
+                                            })),
+                                        )
+                                        .child(
+                                            IconButton::new(
+                                                "refresh-query-outline",
+                                                IconName::Refresh,
+                                                "Refresh query outline · r",
+                                            )
+                                            .square(px(24.))
+                                            .icon_size(12.)
+                                            .disabled(self.query_outline_loading)
+                                            .on_click(cx.listener(|shell, _, _, cx| {
+                                                shell.request_query_outline(cx)
+                                            })),
+                                        ),
+                                ),
+                        )
+                        .when(self.query_outline_filter_open, |panel| {
+                            panel.child(
                                 div()
-                                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                                    .child(item.title)
-                            }))
-                            .child(
+                                    .debug_selector(|| "query-outline-filter-bar".into())
+                                    .mx_2()
+                                    .h(px(34.))
+                                    .flex_none()
+                                    .flex()
+                                    .items_center()
+                                    .gap_2()
+                                    .border_t_1()
+                                    .border_b_1()
+                                    .border_color(colors.subtle_border)
+                                    .on_key_down(cx.listener(
+                                        |shell, event: &gpui::KeyDownEvent, window, cx| {
+                                            if event.keystroke.key == "escape" {
+                                                shell.close_query_outline_filter(window, cx);
+                                                cx.stop_propagation();
+                                            }
+                                        },
+                                    ))
+                                    .child(icon(IconName::Search, colors.muted_text, 13.))
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .min_w_0()
+                                            .overflow_hidden()
+                                            .child(self.query_outline_filter_input.clone()),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(colors.muted_text)
+                                            .child(format!("{statement_count} match(es)")),
+                                    ),
+                            )
+                        })
+                        .children(self.query_outline_error.as_ref().map(|message| {
+                            div().mx_2().mb_2().child(ErrorBanner::new(message.clone()))
+                        }))
+                        .when(active_item.is_none(), |panel| {
+                            panel.child(
                                 div()
+                                    .p_3()
                                     .text_color(colors.muted_text)
-                                    .child("Statements, CTEs, parameters, and referenced objects appear here when desktop semantic diagnostics land."),
-                            ),
-                    )
+                                    .child("Open a query to see its statement outline."),
+                            )
+                        })
+                        .when(
+                            active_item.is_some()
+                                && self.query_outline_loading
+                                && self.query_outline_statements.is_empty(),
+                            |panel| {
+                                panel.child(
+                                    div()
+                                        .p_3()
+                                        .text_color(colors.muted_text)
+                                        .child("Loading query outline…"),
+                                )
+                            },
+                        )
+                        .when(
+                            active_item.is_some()
+                                && !self.query_outline_loading
+                                && self.query_outline_statements.is_empty()
+                                && self.query_outline_error.is_none(),
+                            |panel| {
+                                panel.child(
+                                    div()
+                                        .p_3()
+                                        .text_color(colors.muted_text)
+                                        .child("No SQL statements found."),
+                                )
+                            },
+                        )
+                        .when(
+                            !self.query_outline_statements.is_empty() && statement_count == 0,
+                            |panel| {
+                                panel.child(
+                                    div()
+                                        .p_3()
+                                        .text_color(colors.muted_text)
+                                        .child("No matching statements."),
+                                )
+                            },
+                        )
+                        .child(
+                            uniform_list(
+                                "query-outline-scroll",
+                                statement_count,
+                                cx.processor(move |shell, range: Range<usize>, _, cx| {
+                                    let statements = shell.filtered_query_outline(cx);
+                                    let cursor = shell
+                                        .active_query_outline_editor(cx)
+                                        .map(|(_, editor)| editor.read(cx).cursor_offset());
+                                    range
+                                        .filter_map(|index| {
+                                            statements
+                                                .get(index)
+                                                .cloned()
+                                                .map(|statement| (index, statement))
+                                        })
+                                        .map(|(index, statement)| {
+                                            let selected = index == shell.query_outline_selected;
+                                            let contains_cursor = cursor.is_some_and(|cursor| {
+                                                statement.executable_range.start as usize <= cursor
+                                                    && cursor
+                                                        < statement.executable_range.end as usize
+                                            });
+                                            let kind =
+                                                Self::query_outline_kind_label(statement.kind);
+                                            let preview = shell.query_outline_sql(&statement, cx);
+                                            let recovered = statement.recovered;
+                                            div()
+                                                .id(("query-outline-row", index))
+                                                .debug_selector(move || {
+                                                    format!("query-outline-row-{index}")
+                                                })
+                                                .h(px(58.))
+                                                .mx_2()
+                                                .px_2()
+                                                .py_1()
+                                                .flex()
+                                                .flex_col()
+                                                .justify_center()
+                                                .gap_1()
+                                                .rounded_sm()
+                                                .border_b_1()
+                                                .border_color(colors.subtle_border)
+                                                .when(contains_cursor, |row| {
+                                                    row.border_l_2().border_color(colors.accent)
+                                                })
+                                                .when(selected, |row| {
+                                                    row.bg(colors.active_surface)
+                                                })
+                                                .hover(|row| row.bg(colors.hovered_surface))
+                                                .on_mouse_down(
+                                                    MouseButton::Left,
+                                                    cx.listener(
+                                                        move |shell,
+                                                              event: &gpui::MouseDownEvent,
+                                                              window,
+                                                              cx| {
+                                                            shell.query_outline_selected = index;
+                                                            shell.focused_surface =
+                                                                WorkspaceSurface::QueryOutline;
+                                                            shell
+                                                                .query_outline_focus_handle
+                                                                .focus(window, cx);
+                                                            if event.click_count >= 2 {
+                                                                shell
+                                                                    .jump_to_selected_query_outline(
+                                                                        window, cx,
+                                                                    );
+                                                            }
+                                                            cx.notify();
+                                                        },
+                                                    ),
+                                                )
+                                                .child(
+                                                    div()
+                                                        .flex()
+                                                        .items_center()
+                                                        .gap_2()
+                                                        .text_xs()
+                                                        .child(
+                                                            div()
+                                                                .text_color(if recovered {
+                                                                    colors.warning
+                                                                } else {
+                                                                    colors.accent
+                                                                })
+                                                                .child(kind),
+                                                        )
+                                                        .child(
+                                                            div()
+                                                                .text_color(colors.disabled_text)
+                                                                .child(format!(
+                                                                    "#{}{}",
+                                                                    statement.ordinal + 1,
+                                                                    if recovered {
+                                                                        " · RECOVERED"
+                                                                    } else {
+                                                                        ""
+                                                                    }
+                                                                )),
+                                                        ),
+                                                )
+                                                .child(
+                                                    div()
+                                                        .min_w_0()
+                                                        .truncate()
+                                                        .font_family("monospace")
+                                                        .text_color(colors.muted_text)
+                                                        .child(preview),
+                                                )
+                                                .into_any_element()
+                                        })
+                                        .collect()
+                                }),
+                            )
+                            .flex_1()
+                            .min_h_0()
+                            .w_full()
+                            .track_scroll(&self.query_outline_scroll_handle),
+                        )
+                        .child(
+                            div()
+                                .h(px(40.))
+                                .px_2()
+                                .flex_none()
+                                .flex()
+                                .flex_col()
+                                .justify_center()
+                                .items_center()
+                                .border_t_1()
+                                .border_color(colors.subtle_border)
+                                .text_xs()
+                                .text_color(colors.muted_text)
+                                .child("j/k navigate · Enter jump · / filter")
+                                .child("x execute · r refresh"),
+                        )
                 },
             )
             .when(
@@ -33865,6 +34455,150 @@ mod tests {
             assert!(!snapshot.workspace.left_dock.open);
             assert!(!snapshot.workspace.bottom_dock.open);
             assert!(!snapshot.workspace.right_dock.open);
+        });
+    }
+
+    #[gpui::test]
+    fn query_outline_is_keyboard_first_stale_safe_and_executes_server_ranges(
+        cx: &mut TestAppContext,
+    ) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        let (sender, mut commands) = tokio::sync::mpsc::unbounded_channel();
+        let sql = "select 1;\nupdate jobs set done = true;";
+        let (item_id, revision) = workspace.update_in(&mut cx, |shell, window, cx| {
+            let pane = shell.panes[shell.active_pane].clone();
+            let item_id = pane.read(cx).active_item().unwrap().id;
+            let editor = pane.read(cx).editor(item_id).unwrap();
+            editor.update(cx, |editor, cx| editor.replace_text_from_owner(sql, cx));
+            let revision = editor.read(cx).text_revision();
+            shell.executor_sender = Some(sender);
+            shell.connection_status = ConnectionStatus::Connected {
+                profile_id: 2,
+                name: "Warehouse".into(),
+            };
+            shell.select_left_panel(LeftPanel::QueryOutline, window, cx);
+            (item_id, revision)
+        });
+        let outline = std::iter::from_fn(|| commands.try_recv().ok())
+            .find_map(|command| match command {
+                ExecutorCommand::Semantic {
+                    item_id: requested_item,
+                    text_revision,
+                    text,
+                    request: SemanticRequestKind::Outline { end },
+                } => Some((requested_item, text_revision, text, end)),
+                _ => None,
+            })
+            .expect("query outline request");
+        assert_eq!(outline.0, item_id);
+        assert_eq!(outline.1, revision);
+        assert_eq!(outline.2, sql);
+        assert_eq!(outline.3, sql.len() as u32);
+
+        let statements = vec![
+            sift_protocol::SemanticStatement {
+                statement_id: "statement-1".into(),
+                ordinal: 0,
+                full_range: sift_protocol::TextRange { start: 0, end: 9 },
+                executable_range: sift_protocol::TextRange { start: 0, end: 9 },
+                kind: sift_protocol::StatementKind::Query,
+                recovered: false,
+            },
+            sift_protocol::SemanticStatement {
+                statement_id: "statement-2".into(),
+                ordinal: 1,
+                full_range: sift_protocol::TextRange {
+                    start: 10,
+                    end: sql.len() as u32,
+                },
+                executable_range: sift_protocol::TextRange {
+                    start: 10,
+                    end: sql.len() as u32,
+                },
+                kind: sift_protocol::StatementKind::Update,
+                recovered: true,
+            },
+        ];
+        workspace.update(&mut cx, |shell, cx| {
+            shell.on_executor_event(
+                ExecutorEvent::Semantic {
+                    item_id,
+                    text_revision: revision.wrapping_add(1),
+                    outcome: Box::new(SemanticOutcome::Outline {
+                        statements: statements.clone(),
+                    }),
+                },
+                cx,
+            );
+            assert!(shell.query_outline_loading);
+            assert!(shell.query_outline_statements.is_empty());
+            shell.on_executor_event(
+                ExecutorEvent::Semantic {
+                    item_id,
+                    text_revision: revision,
+                    outcome: Box::new(SemanticOutcome::Outline {
+                        statements: statements.clone(),
+                    }),
+                },
+                cx,
+            );
+            assert!(!shell.query_outline_loading);
+            assert_eq!(shell.query_outline_statements, statements);
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("query-outline-row-0").is_some());
+        assert!(cx.debug_bounds("query-outline-row-1").is_some());
+
+        cx.simulate_keystrokes("/");
+        workspace.update(&mut cx, |shell, cx| {
+            shell
+                .query_outline_filter_input
+                .update(cx, |input, cx| input.set_text("update", cx));
+            assert_eq!(shell.filtered_query_outline(cx).len(), 1);
+        });
+        cx.simulate_keystrokes("escape");
+        cx.simulate_keystrokes("j enter");
+        workspace.read_with(&cx, |shell, cx| {
+            let editor = shell.editor_for_item(item_id, cx).unwrap();
+            assert_eq!(editor.read(cx).cursor_offset(), 10);
+        });
+
+        workspace.update_in(&mut cx, |shell, window, cx| {
+            shell.focused_surface = WorkspaceSurface::QueryOutline;
+            shell.query_outline_focus_handle.focus(window, cx);
+        });
+        cx.simulate_keystrokes("x");
+        let executed = std::iter::from_fn(|| commands.try_recv().ok()).any(|command| {
+            matches!(
+                command,
+                ExecutorCommand::Execute { sql: executed, .. }
+                    if executed == "update jobs set done = true;"
+            )
+        });
+        assert!(executed);
+
+        workspace.update(&mut cx, |shell, cx| {
+            shell.request_query_outline(cx);
+            shell.on_executor_event(
+                ExecutorEvent::Semantic {
+                    item_id,
+                    text_revision: revision,
+                    outcome: Box::new(SemanticOutcome::OutlineFailed(
+                        "outline permission denied".into(),
+                    )),
+                },
+                cx,
+            );
+            assert_eq!(
+                shell.query_outline_error.as_deref(),
+                Some("outline permission denied")
+            );
+            assert!(shell.global_problems.last().is_some_and(|problem| {
+                problem.title.starts_with("Load query outline")
+                    && problem.message == "outline permission denied"
+            }));
         });
     }
 
