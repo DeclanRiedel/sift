@@ -5394,6 +5394,7 @@ pub struct WorkspaceShell {
     next_toast_id: u64,
     status: StatusBar,
     global_problems: Vec<GlobalProblem>,
+    unread_problems: usize,
     lifecycle: LifecycleProjection,
     presence: RoomPresenceProjection,
     room_members: Vec<sift_api_types::RoomMember>,
@@ -5547,6 +5548,7 @@ struct WorkspaceSession {
     active_left_panel: LeftPanel,
     active_bottom_tool: BottomTool,
     global_problems: Vec<GlobalProblem>,
+    unread_problems: usize,
     expanded_tenants: HashSet<i64>,
     expanded_connections: HashSet<i64>,
     expanded_rooms: HashSet<i64>,
@@ -5911,6 +5913,7 @@ impl WorkspaceShell {
             unread_notifications: 0,
             status: StatusBar::default(),
             global_problems: Vec::new(),
+            unread_problems: 0,
             lifecycle: LifecycleProjection::default(),
             presence: RoomPresenceProjection::default(),
             room_members: Vec::new(),
@@ -6375,6 +6378,7 @@ impl WorkspaceShell {
                 target.active_bottom_tool,
             ),
             global_problems: std::mem::replace(&mut self.global_problems, target.global_problems),
+            unread_problems: std::mem::replace(&mut self.unread_problems, target.unread_problems),
             expanded_tenants: std::mem::replace(
                 &mut self.expanded_tenants,
                 target.expanded_tenants,
@@ -6478,6 +6482,7 @@ impl WorkspaceShell {
             active_left_panel: workspace.left_panel,
             active_bottom_tool: workspace.bottom_tool,
             global_problems: Vec::new(),
+            unread_problems: 0,
             expanded_tenants: HashSet::new(),
             expanded_connections: HashSet::new(),
             expanded_rooms: HashSet::new(),
@@ -12012,6 +12017,7 @@ impl WorkspaceShell {
         self.global_problems
             .retain(|problem| problem.item_id != item_id || !problem.transient);
         let title = self.query_item_title(item_id, cx);
+        let mut added = 0usize;
         let mut push = |severity, message: String| {
             self.global_problems.push(GlobalProblem {
                 item_id,
@@ -12020,6 +12026,7 @@ impl WorkspaceShell {
                 message,
                 transient: true,
             });
+            added = added.saturating_add(1);
         };
         match state {
             ResultState::Unavailable(message) | ResultState::Failed(message) => {
@@ -12039,6 +12046,9 @@ impl WorkspaceShell {
             | ResultState::Pending
             | ResultState::Streaming(_)
             | ResultState::Cancelled => {}
+        }
+        if added > 0 && !self.problems_tab_active(cx) {
+            self.unread_problems = self.unread_problems.saturating_add(added);
         }
         self.sync_global_problems_editor(cx);
     }
@@ -12069,6 +12079,9 @@ impl WorkspaceShell {
             message,
             transient: false,
         });
+        if !self.problems_tab_active(cx) {
+            self.unread_problems = self.unread_problems.saturating_add(1);
+        }
         const MAX_RUNTIME_PROBLEMS: usize = 200;
         if self.global_problems.len() > MAX_RUNTIME_PROBLEMS {
             let overflow = self.global_problems.len() - MAX_RUNTIME_PROBLEMS;
@@ -12109,7 +12122,6 @@ impl WorkspaceShell {
 
     fn sync_global_problems_editor(&mut self, cx: &mut Context<Self>) {
         let text = self.global_problems_text();
-        let count = self.global_problems.len().to_string();
         for pane in &self.panes {
             pane.update(cx, |pane, cx| {
                 let Some(item) = pane
@@ -12119,7 +12131,7 @@ impl WorkspaceShell {
                 else {
                     return;
                 };
-                item.title.clone_from(&count);
+                item.title = "Problems".into();
                 if let Some(editor) = pane.editors.get(&item.id) {
                     editor.update(cx, |editor, cx| editor.replace_text_from_owner(&text, cx));
                 }
@@ -12127,7 +12139,17 @@ impl WorkspaceShell {
         }
     }
 
+    fn problems_tab_active(&self, cx: &App) -> bool {
+        self.panes.get(self.active_pane).is_some_and(|pane| {
+            pane.read(cx)
+                .active_item()
+                .is_some_and(|item| item.kind == ItemKind::Problems)
+        })
+    }
+
     fn show_global_problems(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.unread_problems = 0;
+        self.sync_global_problems_editor(cx);
         if let Some((pane_index, item_index)) =
             self.panes
                 .iter()
@@ -12150,7 +12172,6 @@ impl WorkspaceShell {
         let item_id = self.next_id;
         self.next_id = self.next_id.saturating_add(1);
         let text = self.global_problems_text();
-        let count = self.global_problems.len().to_string();
         let editor = cx.new(|cx| {
             QueryEditor::new(QueryDocument::with_random_peer(&text), cx)
                 .with_language(EditorLanguage::PlainText)
@@ -12163,7 +12184,7 @@ impl WorkspaceShell {
                     ItemPresentation {
                         id: item_id,
                         kind: ItemKind::Problems,
-                        title: count,
+                        title: "Problems".into(),
                         dirty: false,
                         source: None,
                         last_result: None,
@@ -31287,6 +31308,7 @@ mod tests {
         workspace.update_in(&mut cx, |shell, window, cx| {
             shell.route_result(1, ResultState::Failed("bad column".into()), cx);
             assert_eq!(shell.global_problems.len(), 1);
+            assert_eq!(shell.unread_problems, 1);
             shell.copy_all_global_problems(cx);
             assert_eq!(
                 cx.read_from_clipboard()
@@ -31296,6 +31318,7 @@ mod tests {
             );
             shell.show_global_problems(window, cx);
             shell.show_global_problems(window, cx);
+            assert_eq!(shell.unread_problems, 0);
             let pane = shell.panes[shell.active_pane].read(cx);
             assert_eq!(
                 pane.items
@@ -31306,7 +31329,7 @@ mod tests {
             );
             let item = pane.active_item().unwrap();
             assert_eq!(item.kind, ItemKind::Problems);
-            assert_eq!(item.title, "1");
+            assert_eq!(item.title, "Problems");
             assert_eq!(
                 pane.editor(item.id).unwrap().read(cx).document().text(),
                 "[ERROR] query.sql\nbad column"
@@ -31352,7 +31375,7 @@ mod tests {
             assert!(shell.global_problems.is_empty());
             let pane = shell.panes[shell.active_pane].read(cx);
             let item = pane.active_item().unwrap();
-            assert_eq!(item.title, "0");
+            assert_eq!(item.title, "Problems");
             assert_eq!(
                 pane.editor(item.id).unwrap().read(cx).document().text(),
                 "No problems."

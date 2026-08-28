@@ -238,10 +238,14 @@ pub(super) fn render_status_bar(
                     button(
                         "footer-problems",
                         IconName::Warning,
-                        format!("Open problems ({})", shell.global_problems.len()),
+                        if shell.unread_problems == 0 {
+                            "Open problems".into()
+                        } else {
+                            format!("Open problems ({})", shell.unread_problems)
+                        },
                         false,
-                        Some(shell.global_problems.len()),
-                        !shell.global_problems.is_empty(),
+                        Some(shell.unread_problems),
+                        shell.unread_problems > 0,
                     )
                     .on_click(
                         cx.listener(|shell, _, window, cx| shell.show_global_problems(window, cx)),
