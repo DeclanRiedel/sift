@@ -19715,6 +19715,7 @@ impl WorkspaceShell {
                 |dock_view| {
                 dock_view.child(
                     div()
+                        .debug_selector(|| "connections-toolbar".into())
                         .mx_2()
                         .h(cx.theme().metrics.row_height)
                         .flex_none()
@@ -19732,8 +19733,13 @@ impl WorkspaceShell {
                         .when(
                             matches!(self.connection_status, ConnectionStatus::Connected { .. }),
                             |toolbar| {
-                                toolbar
-                                    .child(
+                                toolbar.child(
+                                    div()
+                                        .ml_auto()
+                                        .flex()
+                                        .items_center()
+                                        .gap_1()
+                                        .child(
                                         div()
                                             .debug_selector(|| "open-schema-search".into())
                                             .child(
@@ -19751,8 +19757,8 @@ impl WorkspaceShell {
                                                     },
                                                 )),
                                             ),
-                                    )
-                                    .child(
+                                        )
+                                        .child(
                                         div()
                                             .debug_selector(|| "refresh-connection-schema".into())
                                             .child(
@@ -19768,7 +19774,8 @@ impl WorkspaceShell {
                                                     shell.refresh_connection_schema(cx)
                                                 })),
                                             ),
-                                    )
+                                        ),
+                                )
                             },
                         ),
                 )
@@ -30957,7 +30964,13 @@ mod tests {
         let refresh = cx
             .debug_bounds("refresh-connection-schema")
             .expect("schema refresh button");
+        let toolbar = cx
+            .debug_bounds("connections-toolbar")
+            .expect("connections toolbar");
         assert_eq!(search.size, refresh.size);
+        assert!(search.left() < refresh.left());
+        assert!(refresh.right() <= toolbar.right());
+        assert!(toolbar.right() - refresh.right() <= px(4.));
         assert!(cx.debug_bounds("connections-reconnect").is_some());
         assert!(cx.debug_bounds("connections-check-connection").is_some());
         assert!(cx.debug_bounds("connections-disconnect").is_some());
